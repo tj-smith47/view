@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use view_core::native::geometry;
 use view_core::native::registry;
 
 /// A resolved on/off answer for every feature in the registry.
@@ -19,6 +20,7 @@ use view_core::native::registry;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeConfig {
     disabled: Vec<&'static str>,
+    tree_width: u16,
 }
 
 /// The shape of `view.toml` this crate reads. Unknown top-level tables are
@@ -47,9 +49,41 @@ pub struct NativeConfig {
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct ViewFile {
     #[serde(default)]
-    native: BTreeMap<String, bool>,
+    native: NativeTable,
     #[serde(default)]
     supervision: SupervisionTable,
+}
+
+/// The `[native]` table's wire shape: the feature switches, whose key set is
+/// the registry itself, plus the one key in that table that is not a
+/// feature.
+///
+/// `deny_unknown_fields` is unavailable here (and unnecessary): every key
+/// that is not `tree_width` flattens into `features`, where
+/// [`NativeConfig::from_parsed`]'s registry check refuses a name that spells
+/// no feature -- the same refusal, with an error that can name the ids a
+/// user could have written instead.
+#[derive(Debug, Deserialize, Serialize)]
+struct NativeTable {
+    #[serde(default = "default_tree_width")]
+    tree_width: u16,
+    #[serde(flatten)]
+    features: BTreeMap<String, bool>,
+}
+
+impl Default for NativeTable {
+    fn default() -> Self {
+        Self {
+            tree_width: default_tree_width(),
+            features: BTreeMap::new(),
+        }
+    }
+}
+
+/// `serde`'s `default` for [`NativeTable::tree_width`]: the width every
+/// sidebar opens at, shared with the agent panel's own `[ai] panel_width`.
+fn default_tree_width() -> u16 {
+    geometry::DEFAULT_PANEL_WIDTH_PCT
 }
 
 /// The `[supervision]` table's wire shape. Unknown keys are refused rather
@@ -180,6 +214,7 @@ impl NativeConfig {
     pub fn all_enabled() -> Self {
         Self {
             disabled: Vec::new(),
+            tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
         }
     }
 
@@ -201,7 +236,7 @@ impl NativeConfig {
         // it. Cross-checking the parsed keys against the registry keeps one
         // source of truth and still refuses a typo instead of reading it as
         // "that feature stays on".
-        for key in file.native.keys() {
+        for key in file.native.features.keys() {
             if !registry::is_feature(key) {
                 return Err(NativeConfigError::UnknownFeature {
                     key: key.clone(),
@@ -213,10 +248,13 @@ impl NativeConfig {
         // an enabled feature by construction
         let disabled = registry::features()
             .iter()
-            .filter(|f| !file.native.get(f.id).copied().unwrap_or(true))
+            .filter(|f| !file.native.features.get(f.id).copied().unwrap_or(true))
             .map(|f| f.id)
             .collect();
-        Ok(Self { disabled })
+        Ok(Self {
+            disabled,
+            tree_width: geometry::clamp_panel_width(file.native.tree_width),
+        })
     }
 
     /// Reads `view.toml` from `config_path`, or `all_enabled()` when there
@@ -249,6 +287,15 @@ impl NativeConfig {
     #[must_use]
     pub fn enabled(&self, id: &str) -> bool {
         view_core::native::mappings::is_reachable_feature(id) && !self.disabled.contains(&id)
+    }
+
+    /// The share of the terminal width the tree sidebar opens at, in
+    /// percent, already clamped to the range the resize keys work in
+    /// ([`geometry::clamp_panel_width`]) -- a `view.toml` asking for 5 or 95
+    /// opens at the nearest end rather than refusing to start the editor.
+    #[must_use]
+    pub fn tree_width(&self) -> u16 {
+        self.tree_width
     }
 }
 
@@ -381,7 +428,7 @@ mod tests {
     #[test]
     fn the_example_config_keys_are_exactly_the_registry_ids() {
         let file: ViewFile = toml::from_str(EXAMPLE_TOML).expect("view.toml.example must parse");
-        let in_example: BTreeSet<&str> = file.native.keys().map(String::as_str).collect();
+        let in_example: BTreeSet<&str> = file.native.features.keys().map(String::as_str).collect();
         let in_registry: BTreeSet<&str> = registry::features().iter().map(|f| f.id).collect();
         assert_eq!(
             in_example, in_registry,
@@ -548,6 +595,35 @@ mod tests {
         .expect("[ai]'s array-form agent must not fail the native loader");
         assert!(!cfg.enabled("picker"));
         assert!(cfg.enabled("tree"));
+    }
+
+    #[test]
+    fn tree_width_round_trips_beside_the_feature_switches() {
+        let cfg = NativeConfig::from_toml_str("[native]\npicker = false\ntree_width = 45\n")
+            .expect("a width and a switch must share the table");
+        assert_eq!(cfg.tree_width(), 45);
+        assert!(!cfg.enabled("picker"), "the switch beside it still works");
+        assert!(cfg.enabled("tree"));
+        assert_eq!(
+            NativeConfig::from_toml_str("[native]\ntree = true\n")
+                .expect("a table with no width must parse")
+                .tree_width(),
+            geometry::DEFAULT_PANEL_WIDTH_PCT
+        );
+    }
+
+    #[test]
+    fn a_tree_width_outside_the_range_is_clamped_rather_than_refused() {
+        for (written, resolved) in [
+            (0, geometry::MIN_PANEL_WIDTH_PCT),
+            (5, geometry::MIN_PANEL_WIDTH_PCT),
+            (95, geometry::MAX_PANEL_WIDTH_PCT),
+            (65535, geometry::MAX_PANEL_WIDTH_PCT),
+        ] {
+            let cfg = NativeConfig::from_toml_str(&format!("[native]\ntree_width = {written}\n"))
+                .expect("an out-of-range width must not keep the editor from starting");
+            assert_eq!(cfg.tree_width(), resolved, "tree_width = {written}");
+        }
     }
 
     #[test]

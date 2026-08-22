@@ -48,6 +48,35 @@ The same first-run notice the picker example above gets applies here too: if
 `<leader>ai` was already yours, taking it is reported, and the line above is
 what the notice names to give it back.
 
+## Resizing the sidebars
+
+The file tree and the AI panel are sidebars, and the focused one resizes
+with the same pair, 5% of the terminal per press:
+
+| key | does |
+| --- | --- |
+| `<S-Right>` | one notch wider |
+| `<S-Left>` | one notch narrower |
+
+Direction reads the way `<C-w><` and `<C-w>>` do -- right widens, left
+narrows -- whichever edge the sidebar is pinned to. These are view's own
+keys inside its own surfaces, not nvim mappings, so they take nothing from
+your config and appear in no `:map` listing.
+
+A width holds between 15% and 70% and lasts the session. The width a
+session starts at is `view.toml`'s:
+
+```toml
+[native]
+tree_width = 25            # percent of the terminal; 15..70, default 30
+
+[ai]
+panel_width = 40
+```
+
+Both are optional, and a value outside the range opens at the nearest end
+rather than refusing to start.
+
 ## `:View`
 
 The command is registered whatever you have turned off, so a feature is

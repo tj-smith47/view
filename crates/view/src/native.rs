@@ -128,6 +128,7 @@ impl NativeSession {
         let cfg = resolved.native;
         model.statusline_enabled = cfg.enabled("statusline");
         model.palette_enabled = cfg.enabled("palette");
+        model.tree_width_pct = cfg.tree_width();
         model.supervision.auto_restart = resolved.supervision.auto_restart;
         // `ui_attach` already ran, at the raw terminal height, before this
         // config was even read (see `main.rs`'s call ordering), so nvim's

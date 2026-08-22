@@ -637,7 +637,8 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     cli.config.clone().or_else(view_native::paths::config_path)
 }
 
-/// Resolves `[ai]` from `view.toml` into `model.ai_enabled`, returning
+/// Resolves `[ai]` from `view.toml` into `model.ai_enabled` and the width
+/// the panel opens at (`model.ai_panel_width_pct`), returning
 /// whatever notice a broken config owes the user alongside which agent
 /// `[ai]` names -- the same resolution `ai_worker::AiWorker` is later built
 /// from, read once here rather than a second time at that call site so the
@@ -660,6 +661,7 @@ fn seed_ai_enabled(
     match view_ai::AiConfig::load(config_path) {
         Ok(cfg) => {
             model.ai_enabled = cfg.enabled();
+            model.ai_panel_width_pct = cfg.panel_width();
             let agent = cfg.agent_spec().clone();
             (Vec::new(), agent)
         }

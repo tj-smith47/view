@@ -735,6 +735,7 @@ tree = true
 statusline = true
 notifications = true
 palette = true
+tree_width = 30            # tree sidebar's share of the terminal width, 15..70
 
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for a manual restart
@@ -742,6 +743,7 @@ auto_restart = true        # false: surface a dead engine and wait for a manual 
 [ai]
 enabled = true
 agent = "claude-code"      # ACP agent id or ["cmd", "args…"]
+panel_width = 30           # agent panel's share of the terminal width, 15..70
 ```
 
 CLI flags mirror config (`--tier`, `--nvim-bin`); precedence: flags > env

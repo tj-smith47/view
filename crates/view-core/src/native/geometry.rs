@@ -26,6 +26,54 @@ pub enum Anchor {
     Bottom,
 }
 
+/// The share of the terminal a sidebar takes when nothing says otherwise:
+/// `[ai] panel_width` and `[native] tree_width` both resolve to this with
+/// no key written, so an absent config is the width view has always drawn.
+pub const DEFAULT_PANEL_WIDTH_PCT: u16 = 30;
+
+/// The narrowest a sidebar may be driven, in percent. Below this a
+/// transcript line or a file name has no room left to say anything.
+pub const MIN_PANEL_WIDTH_PCT: u16 = 15;
+
+/// The widest a sidebar may be driven, in percent. Above this the buffer
+/// the sidebar sits beside stops being the thing on screen.
+pub const MAX_PANEL_WIDTH_PCT: u16 = 70;
+
+/// How far one resize keypress moves a sidebar's share.
+pub const PANEL_WIDTH_STEP_PCT: u16 = 5;
+
+/// `pct` brought inside the sidebar width range.
+///
+/// Clamped rather than refused, on the same terms [`OverlayBox::new`]
+/// clamps a share over 100: a width outside the range is a placement
+/// question with an obvious answer, and refusing a `view.toml` over it
+/// would keep an editor from starting over a number it could simply honor
+/// as far as it goes.
+#[must_use]
+pub fn clamp_panel_width(pct: u16) -> u16 {
+    pct.clamp(MIN_PANEL_WIDTH_PCT, MAX_PANEL_WIDTH_PCT)
+}
+
+/// `pct` stepped one notch wider or narrower, clamped to the range.
+///
+/// A step off either end resolves to that end rather than wrapping or
+/// refusing, so holding the key down settles at the limit.
+///
+/// ```
+/// use view_core::native::geometry::{step_panel_width, MAX_PANEL_WIDTH_PCT};
+/// assert_eq!(step_panel_width(30, true), 35);
+/// assert_eq!(step_panel_width(MAX_PANEL_WIDTH_PCT, true), MAX_PANEL_WIDTH_PCT);
+/// ```
+#[must_use]
+pub fn step_panel_width(pct: u16, widen: bool) -> u16 {
+    let stepped = if widen {
+        pct.saturating_add(PANEL_WIDTH_STEP_PCT)
+    } else {
+        pct.saturating_sub(PANEL_WIDTH_STEP_PCT)
+    };
+    clamp_panel_width(stepped)
+}
+
 /// A native overlay's placement: a share of the terminal, pinned to an
 /// [`Anchor`] within it.
 #[non_exhaustive]
@@ -265,6 +313,28 @@ mod tests {
         let capped = OverlayBox::new(60, 40).with_max_width(400);
         let uncapped = OverlayBox::new(60, 40);
         assert_eq!(capped.rect(263, 88), uncapped.rect(263, 88));
+    }
+
+    #[test]
+    fn a_configured_width_outside_the_range_lands_on_the_nearest_end() {
+        assert_eq!(clamp_panel_width(0), MIN_PANEL_WIDTH_PCT);
+        assert_eq!(clamp_panel_width(9), MIN_PANEL_WIDTH_PCT);
+        assert_eq!(clamp_panel_width(95), MAX_PANEL_WIDTH_PCT);
+        assert_eq!(clamp_panel_width(DEFAULT_PANEL_WIDTH_PCT), 30);
+    }
+
+    #[test]
+    fn stepping_settles_at_each_end_instead_of_running_past_it() {
+        assert_eq!(step_panel_width(DEFAULT_PANEL_WIDTH_PCT, false), 25);
+        let mut pct = DEFAULT_PANEL_WIDTH_PCT;
+        for _ in 0..20 {
+            pct = step_panel_width(pct, false);
+        }
+        assert_eq!(pct, MIN_PANEL_WIDTH_PCT);
+        for _ in 0..20 {
+            pct = step_panel_width(pct, true);
+        }
+        assert_eq!(pct, MAX_PANEL_WIDTH_PCT);
     }
 
     #[test]

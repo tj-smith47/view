@@ -138,7 +138,7 @@ pub(super) fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
         model.overlays().last().map(|overlay| &overlay.kind),
         Some(OverlayKind::Prompt(_))
     );
-    let geometry = OverlayBox::new(30, 100).with_anchor(Anchor::Left);
+    let geometry = OverlayBox::new(model.tree_width_pct, 100).with_anchor(Anchor::Left);
     if prompt_is_topmost {
         model.insert_overlay_beneath_top(geometry, OverlayKind::Tree(state));
     } else {
@@ -186,7 +186,7 @@ pub(super) fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
     let insert_beneath = model.overlays().last().is_some_and(|overlay| {
         Model::takes_focus(&overlay.kind) || matches!(overlay.kind, OverlayKind::EngineBusy(_))
     });
-    let geometry = OverlayBox::new(30, 100).with_anchor(Anchor::Right);
+    let geometry = OverlayBox::new(model.ai_panel_width_pct, 100).with_anchor(Anchor::Right);
     if insert_beneath {
         model.insert_overlay_beneath_top(geometry, OverlayKind::Ai);
     } else {

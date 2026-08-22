@@ -13,6 +13,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use view_core::native::geometry;
 
 /// Which agent an `[ai]` table names: a known adapter by id, or an
 /// arbitrary command line for one this build has no adapter for.
@@ -35,6 +36,7 @@ pub enum AgentSpec {
 pub struct AiConfig {
     enabled: bool,
     agent: AgentSpec,
+    panel_width: u16,
 }
 
 impl AiConfig {
@@ -48,6 +50,7 @@ impl AiConfig {
         Self {
             enabled: true,
             agent: AgentSpec::Id("claude-code".to_string()),
+            panel_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
         }
     }
 
@@ -68,6 +71,7 @@ impl AiConfig {
         Ok(Self {
             enabled: file.ai.enabled,
             agent: resolve_agent(file.ai.agent)?,
+            panel_width: geometry::clamp_panel_width(file.ai.panel_width),
         })
     }
 
@@ -117,6 +121,16 @@ impl AiConfig {
     #[must_use]
     pub fn agent_spec(&self) -> &AgentSpec {
         &self.agent
+    }
+
+    /// The share of the terminal width the panel opens at, in percent,
+    /// already clamped to the range the resize keys work in
+    /// ([`view_core::native::geometry::clamp_panel_width`]) -- a `view.toml`
+    /// asking for 5 or 95 opens at the nearest end rather than refusing to
+    /// start the editor.
+    #[must_use]
+    pub fn panel_width(&self) -> u16 {
+        self.panel_width
     }
 }
 
@@ -185,6 +199,8 @@ struct WireAiTable {
     enabled: bool,
     #[serde(default = "wire_agent_default")]
     agent: WireAgentSpec,
+    #[serde(default = "wire_panel_width_default")]
+    panel_width: u16,
 }
 
 impl Default for WireAiTable {
@@ -192,6 +208,7 @@ impl Default for WireAiTable {
         Self {
             enabled: wire_enabled_default(),
             agent: wire_agent_default(),
+            panel_width: wire_panel_width_default(),
         }
     }
 }
@@ -204,6 +221,13 @@ fn wire_enabled_default() -> bool {
 /// `serde`'s `default` for [`WireAiTable::agent`].
 fn wire_agent_default() -> WireAgentSpec {
     WireAgentSpec::Id("claude-code".to_string())
+}
+
+/// `serde`'s `default` for [`WireAiTable::panel_width`]: the width every
+/// sidebar opens at, shared with the tree so the two agree with no key
+/// written for either.
+fn wire_panel_width_default() -> u16 {
+    geometry::DEFAULT_PANEL_WIDTH_PCT
 }
 
 /// The wire form of `agent`. Kept private and separate from the public
@@ -388,6 +412,34 @@ agent = "claude-code"
             AiConfig::load(Some(&missing)).expect("a missing file must resolve"),
             AiConfig::default()
         );
+    }
+
+    #[test]
+    fn panel_width_round_trips_and_defaults_to_the_shared_sidebar_width() {
+        let cfg = AiConfig::from_toml_str("[ai]\npanel_width = 45\n")
+            .expect("a panel_width must parse beside the other keys");
+        assert_eq!(cfg.panel_width(), 45);
+        assert!(cfg.enabled(), "one key written leaves the rest defaulted");
+        assert_eq!(
+            AiConfig::from_toml_str("[ai]\nenabled = true\n")
+                .expect("an [ai] table with no width must parse")
+                .panel_width(),
+            geometry::DEFAULT_PANEL_WIDTH_PCT
+        );
+    }
+
+    #[test]
+    fn a_panel_width_outside_the_range_is_clamped_rather_than_refused() {
+        for (written, resolved) in [
+            (0, geometry::MIN_PANEL_WIDTH_PCT),
+            (5, geometry::MIN_PANEL_WIDTH_PCT),
+            (95, geometry::MAX_PANEL_WIDTH_PCT),
+            (65535, geometry::MAX_PANEL_WIDTH_PCT),
+        ] {
+            let cfg = AiConfig::from_toml_str(&format!("[ai]\npanel_width = {written}\n"))
+                .expect("an out-of-range width must not keep the editor from starting");
+            assert_eq!(cfg.panel_width(), resolved, "panel_width = {written}");
+        }
     }
 
     #[test]

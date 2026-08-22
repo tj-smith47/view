@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
 use crate::grid::{Grid, GridOp};
 use crate::hl::{HlAttr, HlTable, ProbedDefaults};
-use crate::native::geometry::{OverlayBox, OverlayRect};
+use crate::native::geometry::{self, OverlayBox, OverlayRect};
 use crate::native::mappings::MappingClaim;
 use crate::native::views::Span;
 
@@ -115,6 +115,20 @@ pub struct Model {
     /// same "absent config changes nothing" contract every other native
     /// feature's enabled bit holds.
     pub ai_enabled: bool,
+    /// The agent panel's share of the terminal width, in percent: seeded
+    /// once at startup from `[ai] panel_width` and stepped by the panel's
+    /// own resize keys for the rest of the session.
+    ///
+    /// Held here rather than only on the open overlay's own
+    /// [`OverlayBox`] because the panel outlives its overlay: a width
+    /// chosen, then the panel closed and reopened, must come back the width
+    /// the user left it at, the same way [`Model::ai_panel`] keeps the
+    /// session behind a hidden sidebar.
+    pub ai_panel_width_pct: u16,
+    /// The tree sidebar's share of the terminal width, in percent, on the
+    /// same terms as [`Model::ai_panel_width_pct`]: seeded from
+    /// `[native] tree_width` and stepped by the sidebar's resize keys.
+    pub tree_width_pct: u16,
     /// Supervision's memory of the current wedge episode -- which wedge the
     /// user has already been offered a modal for, so a dismissed one stays
     /// dismissed while the banner behind it keeps re-asserting; see
@@ -217,6 +231,8 @@ impl Model {
             cwd: PathBuf::new(),
             ai_trusted: false,
             ai_enabled: true,
+            ai_panel_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            tree_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
             ai_panel: crate::native::ai_panel::AiPanelState::new(),
@@ -773,6 +789,42 @@ impl Model {
     #[must_use]
     pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
         overlay.geometry.rect(self.term_width, self.term_height)
+    }
+
+    /// Steps the agent panel one notch wider or narrower, reporting whether
+    /// the width actually moved (it does not at either end of the range).
+    ///
+    /// Both halves in one call on purpose: the session width and the open
+    /// overlay's own geometry are the same number stored twice, and a
+    /// caller that updated one of them would leave a reopened panel
+    /// disagreeing with the one on screen.
+    pub(crate) fn resize_ai_panel(&mut self, widen: bool) -> bool {
+        let next = geometry::step_panel_width(self.ai_panel_width_pct, widen);
+        let moved = next != self.ai_panel_width_pct;
+        self.ai_panel_width_pct = next;
+        self.rewidth(|kind| matches!(kind, OverlayKind::Ai), next);
+        moved
+    }
+
+    /// Steps the tree sidebar one notch, on the same terms as
+    /// [`Model::resize_ai_panel`].
+    pub(crate) fn resize_tree(&mut self, widen: bool) -> bool {
+        let next = geometry::step_panel_width(self.tree_width_pct, widen);
+        let moved = next != self.tree_width_pct;
+        self.tree_width_pct = next;
+        self.rewidth(|kind| matches!(kind, OverlayKind::Tree(_)), next);
+        moved
+    }
+
+    /// Re-widths every open overlay `is_target` names. A no-op when the
+    /// panel being resized is closed, which is why the session width above
+    /// is written either way.
+    fn rewidth(&mut self, is_target: impl Fn(&OverlayKind) -> bool, width_pct: u16) {
+        for overlay in &mut self.overlays {
+            if is_target(&overlay.kind) {
+                overlay.geometry.width_pct = width_pct;
+            }
+        }
     }
 
     /// Terminal rows reserved for persistent chrome outside the engine

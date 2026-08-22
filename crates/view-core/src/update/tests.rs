@@ -3123,6 +3123,228 @@ fn a_scroll_key_cannot_move_the_transcript_behind_an_unanswered_permission() {
     }
 }
 
+/// The share of the terminal the open agent panel resolves to.
+fn ai_panel_width_pct(m: &Model) -> u16 {
+    m.overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::Ai))
+        .map_or(0, |overlay| overlay.geometry.width_pct)
+}
+
+/// The same for the open tree sidebar.
+fn tree_width_pct(m: &Model) -> u16 {
+    m.overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::Tree(_)))
+        .map_or(0, |overlay| overlay.geometry.width_pct)
+}
+
+/// An open tree sidebar on a terminal big enough for its share to resolve
+/// to real cells.
+fn tree_sidebar_model() -> Model {
+    let mut m = Model::with_term_size(80, 24);
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    m
+}
+
+/// The dogfood question this pair answers: a panel whose width is not what
+/// this terminal wants is resized where it stands, not by restarting with a
+/// different `view.toml`.
+#[test]
+fn the_resize_keys_step_the_agent_panels_share_and_repaint_it() {
+    let mut m = scrollable_ai_panel_model(0);
+    assert_eq!(ai_panel_width_pct(&m), 30, "the config-absent width");
+    m.dirty = false;
+
+    let effects = update(&mut m, key("<S-Right>"));
+
+    assert!(effects.is_empty(), "a resize issues no effect: {effects:?}");
+    assert!(m.dirty, "a re-widthed panel has to repaint");
+    assert_eq!(ai_panel_width_pct(&m), 35, "one notch wider");
+    assert_eq!(m.ai_panel_width_pct, 35, "and the session remembers it");
+
+    let _ = update(&mut m, key("<S-Left>"));
+    let _ = update(&mut m, key("<S-Left>"));
+    assert_eq!(ai_panel_width_pct(&m), 25, "two notches back the other way");
+}
+
+/// Held down at either end the key settles rather than wrapping, and stops
+/// asking for a repaint once there is nothing left to move.
+#[test]
+fn the_agent_panel_settles_at_each_end_of_its_range() {
+    let mut m = scrollable_ai_panel_model(0);
+    for _ in 0..20 {
+        let _ = update(&mut m, key("<S-Right>"));
+    }
+    assert_eq!(ai_panel_width_pct(&m), 70);
+    m.dirty = false;
+    let _ = update(&mut m, key("<S-Right>"));
+    assert!(
+        !m.dirty,
+        "a width that cannot move must not dirty the frame"
+    );
+
+    for _ in 0..20 {
+        let _ = update(&mut m, key("<S-Left>"));
+    }
+    assert_eq!(ai_panel_width_pct(&m), 15);
+}
+
+/// A width decides nothing a review, a permission request or a crash banner
+/// owns, and a state too narrow to read is exactly when a user reaches for
+/// it -- so unlike the scroll keys, these are honored rather than answered
+/// with a notice.
+#[test]
+fn a_resize_key_is_honored_in_every_state_that_owns_the_panels_keys() {
+    let mut review = live_review_model();
+    review.term_width = 80;
+    review.term_height = 24;
+    let effects = update(&mut review, key("<S-Right>"));
+    assert!(rpc_calls(&effects).is_empty(), "nothing reaches the engine");
+    assert_eq!(ai_panel_width_pct(&review), 35);
+    assert!(
+        review.ai_panel().pending_diff.is_some(),
+        "and the review is still the user's to decide"
+    );
+
+    let mut pending = pending_permission_model();
+    pending.term_width = 80;
+    pending.term_height = 24;
+    let effects = update(&mut pending, key("<S-Left>"));
+    assert!(
+        effects.is_empty(),
+        "no answer is sent on the user's behalf: {effects:?}"
+    );
+    assert_eq!(ai_panel_width_pct(&pending), 25);
+    assert!(pending.ai_panel().pending_permission.is_some());
+
+    let mut banner = scrollable_ai_panel_model(0);
+    banner.ai_panel_mut().local_error = Some("the agent exited".to_string());
+    let _ = update(&mut banner, key("<S-Right>"));
+    assert_eq!(ai_panel_width_pct(&banner), 35);
+    assert_eq!(
+        banner.ai_panel().local_error.as_deref(),
+        Some("the agent exited"),
+        "the banner is dismissed by <C-d>, never by a width"
+    );
+}
+
+/// Named notations the composer cannot type, chosen for the same reason the
+/// scroll keys are: a half-written prompt survives a resize.
+#[test]
+fn resizing_leaves_a_half_written_prompt_alone() {
+    let mut m = scrollable_ai_panel_model(0);
+    m.ai_panel_mut().input = "draft".to_string();
+
+    let _ = update(&mut m, key("<S-Right>"));
+    let _ = update(&mut m, key("<S-Left>"));
+
+    assert_eq!(m.ai_panel().input, "draft");
+}
+
+/// The panel outlives its overlay, so the width does too: a session that
+/// chose 45% gets 45% back, not the config's own opening width.
+#[test]
+fn a_reopened_panel_comes_back_the_width_it_was_left_at() {
+    let mut m = scrollable_ai_panel_model(0);
+    for _ in 0..3 {
+        let _ = update(&mut m, key("<S-Right>"));
+    }
+    assert_eq!(ai_panel_width_pct(&m), 45);
+
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "close".to_string(),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+
+    assert_eq!(ai_panel_width_pct(&m), 45);
+}
+
+/// What `[ai] panel_width` buys, at the one place it is read: the width the
+/// panel opens at, without a keystroke.
+#[test]
+fn the_panel_opens_at_the_configured_width() {
+    let mut m = Model::with_term_size(80, 24);
+    m.ai_trusted = true;
+    m.ai_panel_width_pct = 50;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert_eq!(ai_panel_width_pct(&m), 50);
+    let rect = m
+        .overlays()
+        .iter()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::Ai))
+        .map(|overlay| m.overlay_rect(overlay));
+    assert_eq!(
+        rect.map(|r| r.width),
+        Some(40),
+        "half of an 80-cell terminal"
+    );
+}
+
+/// The tree answers the same pair, in the same direction, even though it is
+/// pinned to the opposite edge -- and its own keys are untouched by it.
+#[test]
+fn the_tree_sidebar_resizes_with_the_same_keys() {
+    let mut m = tree_sidebar_model();
+    assert_eq!(tree_width_pct(&m), 30);
+    m.dirty = false;
+
+    let effects = update(&mut m, key("<S-Right>"));
+
+    assert!(effects.is_empty(), "a resize issues no effect: {effects:?}");
+    assert!(m.dirty);
+    assert_eq!(tree_width_pct(&m), 35, "right widens a left-pinned sidebar");
+    assert_eq!(m.tree_width_pct, 35);
+
+    let _ = update(&mut m, key("<S-Left>"));
+    let _ = update(&mut m, key("<S-Left>"));
+    assert_eq!(tree_width_pct(&m), 25);
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Tree(_))
+        ),
+        "and the sidebar is still open"
+    );
+}
+
+/// What `[native] tree_width` buys, at the one place it is read.
+#[test]
+fn the_tree_opens_at_the_configured_width() {
+    let mut m = Model::with_term_size(80, 24);
+    m.tree_width_pct = 20;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert_eq!(tree_width_pct(&m), 20);
+}
+
 /// Entering the panel makes `model.focus()` name it for real, the same way
 /// any other focus-taking overlay works (`Model::takes_focus_now` reads
 /// `AiPanelState::focused` directly) -- unlike `key_in_engine_focus_

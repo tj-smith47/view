@@ -831,7 +831,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 
 /// Whether `notation` may reach past an open review or an unanswered
 /// permission to the panel's own arm beneath them -- un-entering the panel,
-/// interrupting a turn, dismissing a crash banner.
+/// interrupting a turn, dismissing a crash banner, or re-widthing the panel
+/// itself.
+///
+/// The resize pair is here rather than being answered with a notice the way
+/// a scroll key is, because the two are not the same kind of key: a scroll
+/// moves a transcript window the owner is painting over, so it would land
+/// somewhere the reader cannot see, while a width decides nothing either
+/// owner owns and re-lays out whatever is on screen -- a review too narrow
+/// to read its own diff is exactly when a user reaches for it.
 ///
 /// The one gate both owners use, and a closed list rather than "any `<...>`
 /// notation" on purpose. The composer's own named keys are edits like any
@@ -846,6 +854,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 /// Takes the model because one entry is conditional: `<C-d>` is two keys
 /// wearing one notation, and only the banner-dismissing one is a way out.
 fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
+    if panel_resize_widens(notation).is_some() {
+        return true;
+    }
     match notation {
         "<Esc>" | "<C-c>" => true,
         // A way out only while there is a banner to dismiss. With none,
@@ -855,6 +866,29 @@ fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
         // scroll key at the same review is answered with a notice.
         "<C-d>" => model.ai_panel().local_error.is_some(),
         _ => false,
+    }
+}
+
+/// Whether `notation` widens (`Some(true)`) or narrows (`Some(false)`) the
+/// focused sidebar, or is no resize key at all.
+///
+/// Shift plus an arrow rather than the `<` and `>` the vocabulary would
+/// otherwise suggest: the agent panel's composer owns every printable
+/// character, so `<` has to stay a `<` typed into a prompt. Named
+/// notations are what the composer cannot type (the same property the
+/// scroll keys in [`ai_scroll_for`] are chosen for), and this pair is
+/// claimed by no other state -- not the tree's `<Up>`/`<Down>`, not the
+/// review's letters, not the terminal's own chords, and not a window
+/// manager's, which is what rules out `<C-Left>`/`<C-Right>` and `<M-,>`.
+/// Direction reads the way nvim's own `<C-w><` and `<C-w>>` do -- left
+/// narrows and right widens whichever edge the sidebar is pinned to --
+/// rather than following the moving edge, which would invert between the
+/// tree and the panel.
+fn panel_resize_widens(notation: &str) -> Option<bool> {
+    match notation {
+        "<S-Left>" => Some(false),
+        "<S-Right>" => Some(true),
+        _ => None,
     }
 }
 
@@ -1048,6 +1082,17 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
             // instead, since a bound `&mut TreeState` here would
             // keep `model` borrowed across the `model.pop_focused_overlay()`
             // and `model.close_tree()` calls the <CR>/<Esc> arms need
+            Some(OverlayKind::Tree(_)) if panel_resize_widens(&notation).is_some() => {
+                // Ahead of the tree's own keys rather than an arm inside
+                // them, so the notation pair lives in one place for both
+                // sidebars (see [`panel_resize_widens`]).
+                if let Some(widen) = panel_resize_widens(&notation) {
+                    if model.resize_tree(widen) {
+                        model.dirty = true;
+                    }
+                }
+                Vec::new()
+            }
             Some(OverlayKind::Tree(_)) => match notation.as_str() {
                 "<Esc>" => {
                     model.pop_focused_overlay();
@@ -1241,7 +1286,16 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                 // not named below is swallowed rather than leaked to nvim --
                 // the whole point of having deliberately entered the panel
                 // is that the engine does not see these keystrokes.
-                if notation == "<Esc>" {
+                if let Some(widen) = panel_resize_widens(&notation) {
+                    // First in the chain because it is the one key here that
+                    // every other state also honors (see
+                    // `reaches_past_a_panel_owner`): a reader who reaches for
+                    // it mid-review gets the same notch they get with nothing
+                    // pending.
+                    if model.resize_ai_panel(widen) {
+                        model.dirty = true;
+                    }
+                } else if notation == "<Esc>" {
                     // Relinquishes the keyboard (clears `focused`) without
                     // closing the panel itself: it stays visible beside the
                     // buffer, the same non-modal presence it had before

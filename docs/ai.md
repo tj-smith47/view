@@ -60,6 +60,36 @@ the panel's keys while it is up, so none of the four scroll then -- inside
 a review they answer the way every other key a review owns does, with the
 notice naming the ways out.
 
+## Panel width
+
+The focused panel resizes where it stands, 5% of the terminal per press:
+
+| key | does |
+| --- | --- |
+| `<S-Right>` | one notch wider |
+| `<S-Left>` | one notch narrower |
+
+The width holds between 15% and 70% and lasts the session -- close the panel
+and reopen it and it comes back the width you left it at. Both are named
+keys the composer cannot type, so a half-written prompt survives a resize,
+and unlike the scroll keys they work while a review or a permission request
+is up: a width decides nothing either of those owns, and a diff too narrow
+to read is exactly when you want it.
+
+The width a session *starts* at is `view.toml`'s, and the file tree has the
+same key beside it:
+
+```toml
+[ai]
+panel_width = 40           # percent of the terminal; 15..70, default 30
+
+[native]
+tree_width = 25
+```
+
+Both are optional, both clamp: a value outside the range opens at the
+nearest end rather than refusing to start.
+
 ## Reviewing an agent's edits
 
 An edit the agent proposes through ACP does not touch your buffer until
