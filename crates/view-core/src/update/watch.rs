@@ -259,6 +259,7 @@ fn open_conflict_prompt(model: &mut Model, path: PathBuf) {
     let state = PromptState::external_write_conflict_prompt(path.clone(), message);
     if let Some(p) = model.external_write_conflict_prompt_mut(&path) {
         *p = state;
+        model.resize_prompt_overlays();
         model.dirty = true;
         return;
     }

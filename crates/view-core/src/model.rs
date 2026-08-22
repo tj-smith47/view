@@ -488,6 +488,23 @@ impl Model {
             })
     }
 
+    /// Re-sizes every open prompt overlay's box to the question it holds
+    /// right now.
+    ///
+    /// A prompt's content outlives the box it was pushed with: a fresh
+    /// question replaces a standing one in place (both locally-raised
+    /// prompts do this rather than stacking a duplicate), and a box still
+    /// sized to the previous question truncates the new one. Total over the
+    /// stack rather than keyed to one prompt, because a replacement can
+    /// land on an overlay that is not the focused one.
+    pub fn resize_prompt_overlays(&mut self) {
+        for overlay in &mut self.overlays {
+            if let OverlayKind::Prompt(p) = &overlay.kind {
+                overlay.geometry = p.overlay_box();
+            }
+        }
+    }
+
     /// The open AI-trust prompt, wherever it sits in the stack -- not only
     /// when it is topmost, for the same reason [`Model::picker_mut`] looks
     /// past the top: a blocked engine `Prompt` can take focus above it (see

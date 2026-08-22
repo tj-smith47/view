@@ -1412,6 +1412,72 @@ fn a_second_distinct_confirm_replaces_the_first_with_no_intervening_keystroke() 
 }
 
 #[test]
+fn a_confirms_box_grows_when_its_choices_arrive_wider_than_its_question() {
+    // the question and the choices land in two separate wire events, so a
+    // box sized once at msg_show time truncates every confirm whose widest
+    // label outruns its question -- which is most of them
+    let mut m = Model::with_term_size(80, 24);
+    let msg_show = |text: &str| UiEvent::MsgShow {
+        kind: "confirm".into(),
+        content: vec![(0, text.into())],
+        replace_last: false,
+    };
+    let cmdline_show = |prompt: &str| UiEvent::CmdlineShow {
+        content: vec![],
+        pos: 0,
+        firstc: String::new(),
+        prompt: prompt.into(),
+        indent: 0,
+        level: 1,
+    };
+    let width = |m: &Model| {
+        m.overlays()
+            .last()
+            .map(|ov| ov.geometry.rect(80, 24).width)
+            .expect("a prompt overlay must be open")
+    };
+
+    let _ = update(&mut m, Msg::Redraw(vec![msg_show("Save?"), UiEvent::Flush]));
+    let question_only = width(&m);
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            cmdline_show("[R]eload the buffer, (C)ancel: "),
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(
+        width(&m) > question_only,
+        "the box must re-size when the choices arrive, not stay at the \
+         question's {question_only} cells"
+    );
+    // "> Reload the buffer" is 19 cells, plus a border and a pad each side
+    assert!(
+        width(&m) >= 23,
+        "the widest choice row must fit inside the box's interior"
+    );
+
+    // a confirm whose labels outrun the share is capped by it, not allowed
+    // to grow past the fraction of the terminal an overlay may claim
+    let long = "y".repeat(200);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::CmdlineHide,
+            msg_show("Save?"),
+            cmdline_show(&format!("[Y]{long}, (N)o: ")),
+            UiEvent::Flush,
+        ]),
+    );
+    assert_eq!(
+        width(&m),
+        48,
+        "past its content cap the box stops at its 60% share of 80 cells"
+    );
+}
+
+#[test]
 fn cmdline_pos_without_prior_show_is_a_noop() {
     let mut m = model();
     let _ = update(

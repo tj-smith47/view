@@ -154,9 +154,14 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // an unmatched key: the two are wire-identical, so re-learning
             // unconditionally on every CmdlineShow is simpler than trying
             // to tell them apart
-            if let Some(OverlayKind::Prompt(p)) = model.focused_overlay_mut().map(|ov| &mut ov.kind)
-            {
-                p.learn_cmdline(&cmdline);
+            if let Some(ov) = model.focused_overlay_mut() {
+                if let OverlayKind::Prompt(p) = &mut ov.kind {
+                    p.learn_cmdline(&cmdline);
+                    // the choices arrive here, one event after the question
+                    // the box was first sized to, and a confirm() whose
+                    // widest label beats its question needs the extra cells
+                    ov.geometry = p.overlay_box();
+                }
             }
             model.engine.cmdline = Some(cmdline);
             Vec::new()

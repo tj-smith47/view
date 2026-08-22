@@ -477,7 +477,15 @@ makes the core headless-testable and the oracle cheap.
 |---|---|---|
 | `full` | kitty/ghostty/wezterm-class: synchronized output, truecolor, undercurl, kitty keyboard proto | Everything: rounded borders, animations (cell-eased), curly underlines |
 | `standard` | truecolor ANSI, no sync guarantee | Full layout/design, animations off, internal double-buffer against flicker |
-| `basic` | 16-color, ASCII-safe | Correct and complete, plain borders, no color derivation |
+| `basic` | ASCII-safe, no capability replies | Correct and complete, plain borders, no probed refinements |
+
+A tier governs what is *probed and assumed* — synchronized output, the kitty
+keyboard protocol, border charset, animation. It does not gate color: every
+tier emits 24-bit SGR, because the grid nvim hands over is 24-bit and a
+palette approximation applied to chrome alone would leave the two halves of
+the screen disagreeing. Terminals that cannot render truecolor degrade the
+SGR themselves, uniformly, which is the only place the approximation can be
+consistent.
 
 Degradation is a first-class tested surface (golden snapshots per tier, §13),
 not a fallback apology.
@@ -512,7 +520,7 @@ pseudo-transparency does. No other transparency exists in the system.
 **Modal backdrop.** While a native surface holds `Focus::Native` (palette,
 picker, confirm prompt), the grid beneath paints with fg blended 40% toward
 bg. Focus becomes legible at a glance instead of inferred from a cursor.
-Applies on `full` and `standard`; `basic` (no color derivation) skips it.
+Applies on every tier, since color is not tier-gated.
 
 **Borders and spacing.** Rounded corners `╭ ╮ ╰ ╯` on `full` and `standard`
 — corner glyphs are font coverage, not a terminal capability; `basic` falls

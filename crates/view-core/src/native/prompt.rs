@@ -39,6 +39,23 @@ const MARKER_CELLS: u16 = 2;
 /// The cells a title spends on the spaces around it inside the top border.
 const TITLE_MARGIN: u16 = 2;
 
+/// An upper bound on the terminal display columns `s` occupies: one per
+/// character, plus a second for every non-ASCII one.
+///
+/// Deliberately an over-estimate rather than a measurement. This is the cap
+/// a modal's width is held to, and `view_surface::overlay` does the real
+/// display-width fitting when it lays the rows out -- so a box a column too
+/// wide costs a blank cell, while one a column too narrow truncates a
+/// translated nvim question mid-word. Every character two columns wide is
+/// non-ASCII, so the bound never sits below the truth; `view-core` carries
+/// exactly one production dependency by deliberate policy (see its
+/// `Cargo.toml`), and a bound that can only err toward roomy is not what
+/// would buy a second.
+fn cells(s: &str) -> u16 {
+    let n = s.chars().count() + s.chars().filter(|c| !c.is_ascii()).count();
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
 /// One accelerator choice parsed from nvim's own bracket/paren convention,
 /// e.g. `[Y]es, (N)o: ` -> `{ key: 'y', label: "Yes", default: true }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,25 +347,17 @@ impl PromptState {
 
     /// The cells this prompt's own content needs, frame and padding
     /// included.
-    ///
-    /// Counts characters rather than display columns: this is the cap on a
-    /// modal's width, not a layout of cells, and the exact per-cell fitting
-    /// is `view_surface::overlay`'s (which measures display width properly
-    /// and truncates what does not fit). `view-core` carries one production
-    /// dependency by deliberate policy, and a width cap a wide glyph makes
-    /// one cell tight is not what would buy a second.
     fn content_width(&self) -> u16 {
         let view = self.view();
-        let chars = |s: &str| u16::try_from(s.chars().count()).unwrap_or(u16::MAX);
         // the marker widths `view_surface::overlay` prefixes: the prompt
         // mark on the input line, the selection marker on every choice
-        let widest = chars(&view.message)
-            .max(chars(&view.title).saturating_add(TITLE_MARGIN))
-            .max(chars(&view.input).saturating_add(MARKER_CELLS))
+        let widest = cells(&view.message)
+            .max(cells(&view.title).saturating_add(TITLE_MARGIN))
+            .max(cells(&view.input).saturating_add(MARKER_CELLS))
             .max(
                 view.choices
                     .iter()
-                    .map(|c| chars(c).saturating_add(MARKER_CELLS))
+                    .map(|c| cells(c).saturating_add(MARKER_CELLS))
                     .max()
                     .unwrap_or(0),
             );
@@ -575,6 +584,22 @@ mod tests {
         state.learn_cmdline(&cmdline_prompt("[R]eload the buffer, (K)eep local edits: "));
         let rect = state.overlay_box().rect(263, 88);
         assert_eq!(rect.width, "Reload the buffer".len() as u16 + 2 + 4);
+    }
+
+    /// nvim ships translated messages, and a wide glyph occupies two
+    /// terminal columns while counting as one `char` -- a box sized by
+    /// character count truncates such a question at half its length.
+    #[test]
+    fn a_question_in_wide_glyphs_is_sized_by_columns_rather_than_characters() {
+        let question = "文件已被外部修改";
+        let state = PromptState::from_entry(&entry("confirm", question)).unwrap();
+        let rect = state.overlay_box().rect(263, 88);
+        let columns = question.chars().count() as u16 * 2;
+        assert!(
+            rect.width >= columns + 4,
+            "{} cells cannot hold {columns} columns of question plus its frame",
+            rect.width
+        );
     }
 
     #[test]

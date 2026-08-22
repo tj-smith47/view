@@ -4236,9 +4236,20 @@ mod tests {
     }
 
     /// A themed model whose buffer is filled edge to edge with cells
-    /// carrying a background of their own -- the cursorline highlight that
-    /// ran the full window width underneath the toast in the live repro.
-    /// Everything an overlay paints over this must own its cells outright.
+    /// carrying a background *and* a modifier of their own -- the
+    /// cursorline highlight that ran the full window width underneath the
+    /// toast in the live repro. Everything an overlay paints over this must
+    /// own its cells outright.
+    ///
+    /// The italic is what makes the two tests below load-bearing.
+    /// `ratatui::buffer::Cell::set_style` overwrites a background the
+    /// caller does set, so a themed chrome style hides a missing reset from
+    /// any background assertion; modifiers are only ever unioned in, and no
+    /// chrome style clears them. A cell that is not reset therefore keeps
+    /// this italic, and nothing else in the frame can put it there --
+    /// italic rather than bold because an overlay's title is legitimately
+    /// bold, so bold would not distinguish a bleed from the frame's own
+    /// chrome.
     fn model_over_a_highlighted_buffer(width: u16, height: u16) -> Model {
         // the ssh case: no COLORTERM, so nothing about this frame may depend
         // on the color probe having found one
@@ -4259,7 +4270,7 @@ mod tests {
                 fg: None,
                 bg: Some(UNDERLYING_BG),
                 bold: false,
-                italic: false,
+                italic: true,
                 underline: false,
                 reverse: false,
             },
@@ -4304,6 +4315,10 @@ mod tests {
             rgb(UNDERLYING_BG),
             "the fixture's own premise: the layer beneath is painted"
         );
+        assert!(
+            buf[(0, 0)].modifier.contains(Modifier::ITALIC),
+            "the fixture's own premise: the layer beneath carries a modifier"
+        );
         let borders = view_surface::overlay::BorderSet::for_tier(tier);
         let laid = view_surface::overlay::rows(rect.width, rect.height, &native_picker(), borders);
         let selected = laid.selected.expect("the picker has a selection");
@@ -4328,6 +4343,10 @@ mod tests {
                     buf[(col, row)].bg,
                     expected,
                     "({col},{row}) is not the overlay's own background"
+                );
+                assert!(
+                    !buf[(col, row)].modifier.contains(Modifier::ITALIC),
+                    "({col},{row}) kept the modifier of the layer beneath"
                 );
             }
         }
@@ -4359,6 +4378,10 @@ mod tests {
                     buf[(col, row)].bg,
                     expected,
                     "({col},{row}) is not the toast's own background"
+                );
+                assert!(
+                    !buf[(col, row)].modifier.contains(Modifier::ITALIC),
+                    "({col},{row}) kept the modifier of the layer beneath"
                 );
             }
         }

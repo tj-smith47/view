@@ -319,6 +319,7 @@ pub(super) fn open_ai_trust_prompt(model: &mut Model, verb: String) -> Vec<Effec
         crate::native::prompt::PromptState::ai_trust_prompt(model.cwd.clone(), verb, message);
     if let Some(p) = model.ai_trust_prompt_mut() {
         *p = state;
+        model.resize_prompt_overlays();
         model.dirty = true;
         return Vec::new();
     }
