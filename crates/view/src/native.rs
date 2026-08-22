@@ -129,6 +129,13 @@ impl NativeSession {
         model.statusline_enabled = cfg.enabled("statusline");
         model.palette_enabled = cfg.enabled("palette");
         model.tree_width_pct = cfg.tree_width();
+        // a width that could not be read is the one `[native]` mistake that
+        // does not fail the table (see `resolve_tree_width`), so this is the
+        // only place it can be said out loud
+        if let Some(notice) = cfg.tree_width_notice() {
+            model.dirty = true;
+            effects.extend(model.engine.record_native_notice(notice.to_string(), false));
+        }
         model.supervision.auto_restart = resolved.supervision.auto_restart;
         // `ui_attach` already ran, at the raw terminal height, before this
         // config was even read (see `main.rs`'s call ordering), so nvim's

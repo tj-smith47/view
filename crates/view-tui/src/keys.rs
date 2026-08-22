@@ -283,6 +283,22 @@ mod tests {
         );
     }
 
+    /// The producing half of the sidebar resize keys: `update`'s routing
+    /// answers exactly these two spellings, so a change here that stopped
+    /// wrapping shift onto an arrow would leave the whole feature
+    /// unreachable with every one of its own tests still green.
+    #[test]
+    fn shift_arrows_encode_as_the_sidebar_resize_notations() {
+        assert_eq!(
+            encode_key(&key(KeyCode::Left, KeyModifiers::SHIFT)).unwrap(),
+            "<S-Left>"
+        );
+        assert_eq!(
+            encode_key(&key(KeyCode::Right, KeyModifiers::SHIFT)).unwrap(),
+            "<S-Right>"
+        );
+    }
+
     #[test]
     fn ctrl_space_uses_named_token() {
         assert_eq!(

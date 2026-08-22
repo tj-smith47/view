@@ -886,11 +886,19 @@ fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
 /// tree and the panel.
 fn panel_resize_widens(notation: &str) -> Option<bool> {
     match notation {
-        "<S-Left>" => Some(false),
-        "<S-Right>" => Some(true),
+        RESIZE_NARROWER => Some(false),
+        RESIZE_WIDER => Some(true),
         _ => None,
     }
 }
+
+/// The key that narrows the focused sidebar. A constant because the tree's
+/// own key arm matches on it as a pattern, and two spellings of one key
+/// would let one sidebar answer what the other ignores.
+const RESIZE_NARROWER: &str = "<S-Left>";
+
+/// The key that widens the focused sidebar; see [`RESIZE_NARROWER`].
+const RESIZE_WIDER: &str = "<S-Right>";
 
 /// Which way `notation` moves the AI panel's transcript window, or `None`
 /// for a key that does not scroll it.
@@ -1082,18 +1090,17 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
             // instead, since a bound `&mut TreeState` here would
             // keep `model` borrowed across the `model.pop_focused_overlay()`
             // and `model.close_tree()` calls the <CR>/<Esc> arms need
-            Some(OverlayKind::Tree(_)) if panel_resize_widens(&notation).is_some() => {
-                // Ahead of the tree's own keys rather than an arm inside
-                // them, so the notation pair lives in one place for both
-                // sidebars (see [`panel_resize_widens`]).
-                if let Some(widen) = panel_resize_widens(&notation) {
-                    if model.resize_tree(widen) {
+            Some(OverlayKind::Tree(_)) => match notation.as_str() {
+                // The same pair the agent panel resizes with, spelled with
+                // the same two constants so neither sidebar can drift onto a
+                // key the other does not answer (see
+                // [`panel_resize_widens`]).
+                RESIZE_NARROWER | RESIZE_WIDER => {
+                    if model.resize_tree(notation == RESIZE_WIDER) {
                         model.dirty = true;
                     }
+                    Vec::new()
                 }
-                Vec::new()
-            }
-            Some(OverlayKind::Tree(_)) => match notation.as_str() {
                 "<Esc>" => {
                     model.pop_focused_overlay();
                     model.dirty = true;

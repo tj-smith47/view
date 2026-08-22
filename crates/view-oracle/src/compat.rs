@@ -1072,6 +1072,12 @@ fn resolve_key_token(token: &str) -> Result<Option<Vec<u8>>, CompatError> {
         "nl" | "linefeed" => return Ok(Some(b"\n".to_vec())),
         "ff" => return Ok(Some(b"\x0c".to_vec())),
         "s-tab" => return Ok(Some(b"\x1b[Z".to_vec())),
+        // the sidebar resize pair: the CSI-with-modifier-parameter form
+        // (`1;2` is shift) every terminal crossterm decodes shift+arrow
+        // from sends, so a scenario can drive a resize through a real pty
+        // instead of the feature being reachable only by hand
+        "s-left" => return Ok(Some(b"\x1b[1;2D".to_vec())),
+        "s-right" => return Ok(Some(b"\x1b[1;2C".to_vec())),
         _ => {}
     }
     if let Some(bytes) = resolve_named_key(&lower) {
@@ -1088,7 +1094,7 @@ fn resolve_key_token(token: &str) -> Result<Option<Vec<u8>>, CompatError> {
             token: token.to_string(),
             reason: "not one of this translator's recognized tokens (named \
                       keys, <C-x>/<M-x>/<A-x> for a single character, \
-                      <S-Tab>, or <F1>-<F12>)",
+                      <S-Tab>/<S-Left>/<S-Right>, or <F1>-<F12>)",
         });
     }
     Ok(None)
@@ -1429,10 +1435,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_send_keys_hard_errors_on_a_shift_wrapped_non_tab_key() {
-        let err =
-            resolve_send_keys("<S-Left>").expect_err("<S-...> is only implemented for <S-Tab>");
+    fn resolve_send_keys_hard_errors_on_an_unimplemented_shift_wrapped_key() {
+        let err = resolve_send_keys("<S-Up>")
+            .expect_err("<S-...> is implemented for Tab and the two resize arrows only");
         assert!(matches!(err, CompatError::UnsupportedKeyNotation { .. }));
+    }
+
+    /// The sidebar resize keys, so a compat scenario can drive them through
+    /// a real pty. The bytes are the CSI form crossterm decodes back into
+    /// `KeyCode::Left/Right` with `SHIFT`, which `view-tui`'s `encode_key`
+    /// then spells `<S-Left>`/`<S-Right>` -- the notation `update`'s own
+    /// routing answers.
+    #[test]
+    fn resolve_send_keys_translates_the_sidebar_resize_arrows() {
+        assert_eq!(
+            resolve_send_keys("<S-Left>").unwrap(),
+            b"\x1b[1;2D".to_vec()
+        );
+        assert_eq!(
+            resolve_send_keys("<S-Right>").unwrap(),
+            b"\x1b[1;2C".to_vec()
+        );
     }
 
     #[test]

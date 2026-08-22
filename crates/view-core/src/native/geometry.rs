@@ -49,9 +49,26 @@ pub const PANEL_WIDTH_STEP_PCT: u16 = 5;
 /// question with an obvious answer, and refusing a `view.toml` over it
 /// would keep an editor from starting over a number it could simply honor
 /// as far as it goes.
+///
+/// Takes the widest integer a TOML author can write, not a `u16`, so the
+/// promise holds for every one of them: a `-5` or a `1000000` refused by
+/// the deserializer before reaching here would be exactly the refusal this
+/// clamp exists to avoid.
+///
+/// ```
+/// use view_core::native::geometry::{clamp_panel_width, MAX_PANEL_WIDTH_PCT, MIN_PANEL_WIDTH_PCT};
+/// assert_eq!(clamp_panel_width(-5), MIN_PANEL_WIDTH_PCT);
+/// assert_eq!(clamp_panel_width(1_000_000), MAX_PANEL_WIDTH_PCT);
+/// ```
 #[must_use]
-pub fn clamp_panel_width(pct: u16) -> u16 {
-    pct.clamp(MIN_PANEL_WIDTH_PCT, MAX_PANEL_WIDTH_PCT)
+pub fn clamp_panel_width(pct: i64) -> u16 {
+    let clamped = pct.clamp(
+        i64::from(MIN_PANEL_WIDTH_PCT),
+        i64::from(MAX_PANEL_WIDTH_PCT),
+    );
+    // the fallback is unreachable arithmetic insurance rather than live
+    // error handling: a value already inside 15..=70 always converts
+    u16::try_from(clamped).unwrap_or(DEFAULT_PANEL_WIDTH_PCT)
 }
 
 /// `pct` stepped one notch wider or narrower, clamped to the range.
@@ -71,7 +88,7 @@ pub fn step_panel_width(pct: u16, widen: bool) -> u16 {
     } else {
         pct.saturating_sub(PANEL_WIDTH_STEP_PCT)
     };
-    clamp_panel_width(stepped)
+    clamp_panel_width(i64::from(stepped))
 }
 
 /// A native overlay's placement: a share of the terminal, pinned to an
@@ -320,7 +337,12 @@ mod tests {
         assert_eq!(clamp_panel_width(0), MIN_PANEL_WIDTH_PCT);
         assert_eq!(clamp_panel_width(9), MIN_PANEL_WIDTH_PCT);
         assert_eq!(clamp_panel_width(95), MAX_PANEL_WIDTH_PCT);
-        assert_eq!(clamp_panel_width(DEFAULT_PANEL_WIDTH_PCT), 30);
+        assert_eq!(clamp_panel_width(i64::from(DEFAULT_PANEL_WIDTH_PCT)), 30);
+        // the values a `u16` field would have refused outright
+        assert_eq!(clamp_panel_width(-5), MIN_PANEL_WIDTH_PCT);
+        assert_eq!(clamp_panel_width(i64::MIN), MIN_PANEL_WIDTH_PCT);
+        assert_eq!(clamp_panel_width(1_000_000), MAX_PANEL_WIDTH_PCT);
+        assert_eq!(clamp_panel_width(i64::MAX), MAX_PANEL_WIDTH_PCT);
     }
 
     #[test]

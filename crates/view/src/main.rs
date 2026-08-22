@@ -663,7 +663,14 @@ fn seed_ai_enabled(
             model.ai_enabled = cfg.enabled();
             model.ai_panel_width_pct = cfg.panel_width();
             let agent = cfg.agent_spec().clone();
-            (Vec::new(), agent)
+            // a width that could not be read never fails the table (see
+            // `resolve_panel_width`): failing it here would answer a
+            // mistyped percentage by turning the agent off for the run
+            let effects = match cfg.panel_width_notice() {
+                Some(notice) => model.engine.record_native_notice(notice.to_string(), false),
+                None => Vec::new(),
+            };
+            (effects, agent)
         }
         Err(err) => {
             model.ai_enabled = false;

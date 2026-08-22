@@ -87,8 +87,9 @@ panel_width = 40           # percent of the terminal; 15..70, default 30
 tree_width = 25
 ```
 
-Both are optional, both clamp: a value outside the range opens at the
-nearest end rather than refusing to start.
+Both are optional, and neither can fail your config: a whole number
+outside the range opens at the nearest end, and a value that is not a
+whole number at all opens at the default and tells you so.
 
 ## Reviewing an agent's edits
 

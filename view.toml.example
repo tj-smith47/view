@@ -19,8 +19,10 @@ statusline = true
 notifications = true
 palette = true
 tree_width = 30            # default: 30 -- percent of the terminal width,
-                           # clamped to 15..70 (a value outside that range
-                           # opens at the nearest end rather than failing)
+                           # clamped to 15..70: any whole number outside that
+                           # range opens at the nearest end, and anything that
+                           # is not a whole number opens at 30 with a notice.
+                           # A width is never a reason view refuses the file
 
 # [supervision] decides how far view goes on its own when the engine fails.
 # Detection is always on: a wedged or dead engine raises a notice and, past
@@ -50,9 +52,9 @@ agent = "claude-code"      # default: "claude-code" -- the one adapter this
                            # Override with another known adapter id, or an
                            # arbitrary command: agent = ["mycli", "--acp"]
 panel_width = 30           # default: 30 -- percent of the terminal width the
-                           # panel opens at, on the same 15..70 terms as
-                           # [native] tree_width, and resized for the session
-                           # with the same <S-Left> / <S-Right>
+                           # panel opens at, on the same clamp-never-refuse
+                           # terms as [native] tree_width, and resized for the
+                           # session with the same <S-Left> / <S-Right>
 
 # The tables below are commented out because THIS BUILD DOES NOT READ THEM
 # yet. Uncommenting one is harmless -- view ignores tables it has no loader

@@ -37,6 +37,7 @@ pub struct AiConfig {
     enabled: bool,
     agent: AgentSpec,
     panel_width: u16,
+    panel_width_notice: Option<&'static str>,
 }
 
 impl AiConfig {
@@ -51,6 +52,7 @@ impl AiConfig {
             enabled: true,
             agent: AgentSpec::Id("claude-code".to_string()),
             panel_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            panel_width_notice: None,
         }
     }
 
@@ -68,10 +70,12 @@ impl AiConfig {
         // `toml::de::Error` is 128+ bytes on the msvc ABI, which makes an
         // unboxed `Result<_, AiConfigError>` a large-error return there
         let file: ConfigFile = toml::from_str(s).map_err(|e| AiConfigError::Toml(Box::new(e)))?;
+        let (panel_width, panel_width_notice) = resolve_panel_width(file.ai.panel_width);
         Ok(Self {
             enabled: file.ai.enabled,
             agent: resolve_agent(file.ai.agent)?,
-            panel_width: geometry::clamp_panel_width(file.ai.panel_width),
+            panel_width,
+            panel_width_notice,
         })
     }
 
@@ -126,11 +130,20 @@ impl AiConfig {
     /// The share of the terminal width the panel opens at, in percent,
     /// already clamped to the range the resize keys work in
     /// ([`view_core::native::geometry::clamp_panel_width`]) -- a `view.toml`
-    /// asking for 5 or 95 opens at the nearest end rather than refusing to
-    /// start the editor.
+    /// asking for 5, 95 or -5 opens at the nearest end rather than refusing
+    /// to start the editor.
     #[must_use]
     pub fn panel_width(&self) -> u16 {
         self.panel_width
+    }
+
+    /// What a `panel_width` that is not a whole number owes the user, or
+    /// `None` when the key was absent or usable. See
+    /// [`resolve_panel_width`] for why such a value is a notice rather than
+    /// the parse error it looks like.
+    #[must_use]
+    pub fn panel_width_notice(&self) -> Option<&'static str> {
+        self.panel_width_notice
     }
 }
 
@@ -141,6 +154,28 @@ impl Default for AiConfig {
     /// names directly.
     fn default() -> Self {
         Self::default()
+    }
+}
+
+/// What a `panel_width` that is not a whole number is answered with.
+const PANEL_WIDTH_NOTICE: &str = "view: [ai] panel_width must be a whole number of percent -- \
+     the agent panel opens at its default width this run";
+
+/// The width the panel opens at, and the notice a value that is not a
+/// whole number owes the user.
+///
+/// A width never fails the table, whatever is written for it. `[ai]`'s own
+/// error path is fail-closed by design -- a table that cannot be read
+/// turns the agent off for the whole run (see `seed_ai_enabled` in the bin
+/// crate) -- and a mistyped percentage must not be the thing that disables
+/// the panel. An integer resolves clamped however far outside the range it
+/// is written; anything else (a float, a string, `40%`) opens at the
+/// default and says so.
+fn resolve_panel_width(value: Option<toml::Value>) -> (u16, Option<&'static str>) {
+    match value {
+        None => (geometry::DEFAULT_PANEL_WIDTH_PCT, None),
+        Some(toml::Value::Integer(pct)) => (geometry::clamp_panel_width(pct), None),
+        Some(_) => (geometry::DEFAULT_PANEL_WIDTH_PCT, Some(PANEL_WIDTH_NOTICE)),
     }
 }
 
@@ -199,8 +234,11 @@ struct WireAiTable {
     enabled: bool,
     #[serde(default = "wire_agent_default")]
     agent: WireAgentSpec,
-    #[serde(default = "wire_panel_width_default")]
-    panel_width: u16,
+    /// Left as whatever was written, not typed as a number here: see
+    /// [`resolve_panel_width`] for why a width is never allowed to fail
+    /// this table.
+    #[serde(default)]
+    panel_width: Option<toml::Value>,
 }
 
 impl Default for WireAiTable {
@@ -208,7 +246,7 @@ impl Default for WireAiTable {
         Self {
             enabled: wire_enabled_default(),
             agent: wire_agent_default(),
-            panel_width: wire_panel_width_default(),
+            panel_width: None,
         }
     }
 }
@@ -221,13 +259,6 @@ fn wire_enabled_default() -> bool {
 /// `serde`'s `default` for [`WireAiTable::agent`].
 fn wire_agent_default() -> WireAgentSpec {
     WireAgentSpec::Id("claude-code".to_string())
-}
-
-/// `serde`'s `default` for [`WireAiTable::panel_width`]: the width every
-/// sidebar opens at, shared with the tree so the two agree with no key
-/// written for either.
-fn wire_panel_width_default() -> u16 {
-    geometry::DEFAULT_PANEL_WIDTH_PCT
 }
 
 /// The wire form of `agent`. Kept private and separate from the public
@@ -363,7 +394,7 @@ pub enum AiConfigError {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
 
@@ -435,10 +466,39 @@ agent = "claude-code"
             (5, geometry::MIN_PANEL_WIDTH_PCT),
             (95, geometry::MAX_PANEL_WIDTH_PCT),
             (65535, geometry::MAX_PANEL_WIDTH_PCT),
+            // the two a `u16` field refused at the deserializer, before any
+            // clamp could run
+            (-5, geometry::MIN_PANEL_WIDTH_PCT),
+            (-1_000_000, geometry::MIN_PANEL_WIDTH_PCT),
+            (1_000_000, geometry::MAX_PANEL_WIDTH_PCT),
         ] {
             let cfg = AiConfig::from_toml_str(&format!("[ai]\npanel_width = {written}\n"))
                 .expect("an out-of-range width must not keep the editor from starting");
             assert_eq!(cfg.panel_width(), resolved, "panel_width = {written}");
+            assert_eq!(cfg.panel_width_notice(), None, "panel_width = {written}");
+        }
+    }
+
+    /// The failure this exists to prevent: `[ai]`'s error path turns the
+    /// agent off for the whole run, so a width that cannot be read as a
+    /// number must resolve, not fail.
+    #[test]
+    fn a_panel_width_that_is_not_a_number_keeps_the_panel_and_says_so() {
+        for written in ["\"wide\"", "3.5", "true", "[30]", "{ pct = 30 }"] {
+            let cfg = AiConfig::from_toml_str(&format!("[ai]\npanel_width = {written}\n"))
+                .unwrap_or_else(|e| panic!("panel_width = {written} must not fail the table: {e}"));
+            assert!(
+                cfg.enabled(),
+                "panel_width = {written} must never disable the agent panel"
+            );
+            assert_eq!(cfg.panel_width(), geometry::DEFAULT_PANEL_WIDTH_PCT);
+            let notice = cfg
+                .panel_width_notice()
+                .unwrap_or_else(|| panic!("panel_width = {written} owes the user a notice"));
+            assert!(
+                notice.contains("panel_width"),
+                "the notice must name the key: {notice}"
+            );
         }
     }
 

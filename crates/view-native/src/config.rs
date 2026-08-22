@@ -9,6 +9,7 @@
 //! unspellable in config.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ use view_core::native::registry;
 pub struct NativeConfig {
     disabled: Vec<&'static str>,
     tree_width: u16,
+    tree_width_notice: Option<&'static str>,
 }
 
 /// The shape of `view.toml` this crate reads. Unknown top-level tables are
@@ -58,15 +60,27 @@ struct ViewFile {
 /// the registry itself, plus the one key in that table that is not a
 /// feature.
 ///
-/// `deny_unknown_fields` is unavailable here (and unnecessary): every key
-/// that is not `tree_width` flattens into `features`, where
-/// [`NativeConfig::from_parsed`]'s registry check refuses a name that spells
-/// no feature -- the same refusal, with an error that can name the ids a
-/// user could have written instead.
-#[derive(Debug, Deserialize, Serialize)]
+/// [`Deserialize`] is hand-written rather than derived, and the reason is
+/// the error a user reads. A derive would need `#[serde(flatten)]` to hold
+/// a key set the registry owns, and `flatten` buffers the whole table
+/// through serde's `Content` before typing any value -- which costs every
+/// switch in the table its line and column: `notifications = "off"` stops
+/// pointing at the value and starts pointing at the `[native]` header,
+/// leaving a user to bisect their own file. Reading the map key by key
+/// hands each value straight to `toml`'s own deserializer, which spans it.
+///
+/// `deny_unknown_fields` has no equivalent here and needs none: a key that
+/// spells no feature is refused by [`NativeConfig::from_parsed`]'s registry
+/// check (bool-valued) or by the visitor below (anything else), and both
+/// name the key.
+#[derive(Debug, Serialize)]
 struct NativeTable {
-    #[serde(default = "default_tree_width")]
     tree_width: u16,
+    /// Never part of the file's own shape -- a resolution detail this
+    /// struct carries to its reader -- so it stays out of the rendered
+    /// TOML the example's drift guard reads.
+    #[serde(skip_serializing)]
+    tree_width_notice: Option<&'static str>,
     #[serde(flatten)]
     features: BTreeMap<String, bool>,
 }
@@ -74,16 +88,90 @@ struct NativeTable {
 impl Default for NativeTable {
     fn default() -> Self {
         Self {
-            tree_width: default_tree_width(),
+            tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            tree_width_notice: None,
             features: BTreeMap::new(),
         }
     }
 }
 
-/// `serde`'s `default` for [`NativeTable::tree_width`]: the width every
-/// sidebar opens at, shared with the agent panel's own `[ai] panel_width`.
-fn default_tree_width() -> u16 {
-    geometry::DEFAULT_PANEL_WIDTH_PCT
+/// The one `[native]` key that is not a feature switch.
+const TREE_WIDTH_KEY: &str = "tree_width";
+
+/// What a `tree_width` that is not a whole number is answered with.
+const TREE_WIDTH_NOTICE: &str = "view: [native] tree_width must be a whole number of percent -- \
+     the file tree opens at its default width this run";
+
+/// The width the tree opens at, and the notice a value that is not a whole
+/// number owes the user.
+///
+/// A width never fails the table, for the reason `[ai] panel_width`'s own
+/// resolution states: a broken `[native]` reverts every feature switch in
+/// the file to its default for the run, which is far more than a mistyped
+/// percentage asked for. An integer resolves clamped however far outside
+/// the range it is written; anything else opens at the default and says
+/// so.
+fn resolve_tree_width(value: &toml::Value) -> (u16, Option<&'static str>) {
+    match value.as_integer() {
+        Some(pct) => (geometry::clamp_panel_width(pct), None),
+        None => (geometry::DEFAULT_PANEL_WIDTH_PCT, Some(TREE_WIDTH_NOTICE)),
+    }
+}
+
+impl<'de> Deserialize<'de> for NativeTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(NativeTableVisitor)
+    }
+}
+
+struct NativeTableVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NativeTableVisitor {
+    type Value = NativeTable;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a table of feature switches, each a boolean, optionally with tree_width")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut table = NativeTable::default();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == TREE_WIDTH_KEY {
+                let (width, notice) = resolve_tree_width(&map.next_value::<toml::Value>()?);
+                table.tree_width = width;
+                table.tree_width_notice = notice;
+                continue;
+            }
+            match map.next_value::<bool>() {
+                Ok(on) => {
+                    table.features.insert(key, on);
+                }
+                // A registry name given something other than a switch keeps
+                // serde's own error, spanned to the offending value.
+                Err(e) if registry::is_feature(&key) => return Err(e),
+                // A name the registry never heard of is a spelling mistake,
+                // not a type mistake, and its value's span points at the
+                // half the user did not get wrong -- so this one names the
+                // key instead, the way the bool-valued case already does
+                // through `from_parsed`. `tree_widht = 30` is the shape
+                // this exists for.
+                Err(_) => {
+                    return Err(serde::de::Error::custom(format!(
+                        "[native] {key} names no feature and is not {TREE_WIDTH_KEY}; \
+                         expected a boolean for one of: {}",
+                        known_ids()
+                    )))
+                }
+            }
+        }
+        Ok(table)
+    }
 }
 
 /// The `[supervision]` table's wire shape. Unknown keys are refused rather
@@ -215,6 +303,7 @@ impl NativeConfig {
         Self {
             disabled: Vec::new(),
             tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            tree_width_notice: None,
         }
     }
 
@@ -253,7 +342,10 @@ impl NativeConfig {
             .collect();
         Ok(Self {
             disabled,
-            tree_width: geometry::clamp_panel_width(file.native.tree_width),
+            // already resolved and clamped where the value was read, so the
+            // number here is the number the tree opens at
+            tree_width: file.native.tree_width,
+            tree_width_notice: file.native.tree_width_notice,
         })
     }
 
@@ -291,11 +383,21 @@ impl NativeConfig {
 
     /// The share of the terminal width the tree sidebar opens at, in
     /// percent, already clamped to the range the resize keys work in
-    /// ([`geometry::clamp_panel_width`]) -- a `view.toml` asking for 5 or 95
-    /// opens at the nearest end rather than refusing to start the editor.
+    /// ([`geometry::clamp_panel_width`]) -- a `view.toml` asking for 5, 95
+    /// or -5 opens at the nearest end rather than refusing to start the
+    /// editor.
     #[must_use]
     pub fn tree_width(&self) -> u16 {
         self.tree_width
+    }
+
+    /// What a `tree_width` that is not a whole number owes the user, or
+    /// `None` when the key was absent or usable. See [`resolve_tree_width`]
+    /// for why such a value is a notice rather than the parse error it
+    /// looks like.
+    #[must_use]
+    pub fn tree_width_notice(&self) -> Option<&'static str> {
+        self.tree_width_notice
     }
 }
 
@@ -353,7 +455,7 @@ const _: () = assert!(std::mem::size_of::<NativeConfigError>() <= 128);
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::collections::BTreeSet;
 
@@ -619,10 +721,73 @@ mod tests {
             (5, geometry::MIN_PANEL_WIDTH_PCT),
             (95, geometry::MAX_PANEL_WIDTH_PCT),
             (65535, geometry::MAX_PANEL_WIDTH_PCT),
+            // the two a `u16` field refused at the deserializer, before any
+            // clamp could run
+            (-5, geometry::MIN_PANEL_WIDTH_PCT),
+            (-1_000_000, geometry::MIN_PANEL_WIDTH_PCT),
+            (1_000_000, geometry::MAX_PANEL_WIDTH_PCT),
         ] {
             let cfg = NativeConfig::from_toml_str(&format!("[native]\ntree_width = {written}\n"))
                 .expect("an out-of-range width must not keep the editor from starting");
             assert_eq!(cfg.tree_width(), resolved, "tree_width = {written}");
+            assert_eq!(cfg.tree_width_notice(), None, "tree_width = {written}");
+        }
+    }
+
+    /// A width that cannot be read as a number must not revert every
+    /// feature switch in the file to its default for the run, which is what
+    /// failing the table does.
+    #[test]
+    fn a_tree_width_that_is_not_a_number_keeps_the_table_and_says_so() {
+        for written in ["\"wide\"", "3.5", "true", "[30]", "{ pct = 30 }"] {
+            let cfg = NativeConfig::from_toml_str(&format!(
+                "[native]\npicker = false\ntree_width = {written}\n"
+            ))
+            .unwrap_or_else(|e| panic!("tree_width = {written} must not fail the table: {e}"));
+            assert!(
+                !cfg.enabled("picker"),
+                "tree_width = {written} must not revert the switches beside it"
+            );
+            assert_eq!(cfg.tree_width(), geometry::DEFAULT_PANEL_WIDTH_PCT);
+            let notice = cfg
+                .tree_width_notice()
+                .unwrap_or_else(|| panic!("tree_width = {written} owes the user a notice"));
+            assert!(
+                notice.contains("tree_width"),
+                "the notice must name the key: {notice}"
+            );
+        }
+    }
+
+    /// The span a user needs to find the mistake in a forty-line file. The
+    /// switches are read key by key rather than through `#[serde(flatten)]`
+    /// precisely so this points at the value and not at the table header.
+    #[test]
+    fn a_non_bool_switch_is_reported_at_the_line_and_column_it_sits_on() {
+        let err = NativeConfig::from_toml_str("[native]\npicker = true\nnotifications = \"off\"\n")
+            .expect_err("only booleans switch a feature");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("line 3") && msg.contains("column 17"),
+            "the error must point at the value, not at [native]: {msg}"
+        );
+        assert!(msg.contains("expected a boolean"), "{msg}");
+    }
+
+    /// A misspelled `tree_width` reads as a feature switch given a number,
+    /// so the message names the key rather than leaving the reader with a
+    /// type error about a boolean they never mentioned.
+    #[test]
+    fn a_misspelled_width_key_is_refused_by_name() {
+        let err = NativeConfig::from_toml_str("[native]\ntree_widht = 30\n")
+            .expect_err("a key that is neither a feature nor tree_width must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("tree_widht"),
+            "the error must name the key: {msg}"
+        );
+        for f in registry::features() {
+            assert!(msg.contains(f.id), "{} missing from the error: {msg}", f.id);
         }
     }
 
