@@ -12,12 +12,24 @@
 # crates/view-bench/src/scenarios/echo_speculated_rtt.rs; this script is a
 # thin, env-var-overridable wrapper the same shape as supervision.sh's,
 # not a second copy of that logic.
+#
+# Class-scoped: the row it asserts against is armed on controlled-linux, so
+# anywhere else this leg announces a skip and exits 0 rather than inventing
+# a bar an uncontrolled host cannot honestly measure against.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # shellcheck source=scripts/acceptance/artifacts.sh
 . "$SCRIPT_DIR/artifacts.sh"
+
+# the bound this leg asserts against (budgets.toml's echo_speculated /
+# speculated_ratio_p50 row) is armed on controlled-linux alone, so there is
+# nothing for it to measure against on any other host -- and the class it
+# resolves here is the one the binary reads, or a controlled host would hit
+# the same missing-row refusal an uncontrolled one does
+CLASS=$(host_class)
+require_class remote-rtt controlled-linux || exit 0
 
 RTT_ACCEPTANCE_BIN=${RTT_ACCEPTANCE_BIN:-$REPO_ROOT/target/release/rtt-acceptance}
 TAPS_VIEW_BIN=${TAPS_VIEW_BIN:-$REPO_ROOT/target/taps/release/view}
@@ -34,6 +46,14 @@ command -v "$NVIM_BIN" >/dev/null 2>&1 || {
 
 printf 'view acceptance: RTT injection (%s, %s)\n' \
     "${RTT_ACCEPTANCE_BIN#"$REPO_ROOT/"}" "$(nvim --version | head -1)"
+
+# the resolved class is supplied only when the caller named none: clap
+# refuses `--class` twice, so passing it unconditionally would turn an
+# explicit one into a usage error
+case " $* " in
+*" --class "* | *" --class="*) ;;
+*) set -- --class "$CLASS" "$@" ;;
+esac
 
 # the exit code is echoed as this script's own final log line, on every
 # path (pass, budget breach, refusal), matching `task bench`'s wrapper

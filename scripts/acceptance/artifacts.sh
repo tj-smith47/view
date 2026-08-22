@@ -49,6 +49,51 @@ dump_dir() {
     mktemp -d "$parent/$prefix-XXXXXX"
 }
 
+# This host's machine-class name, in `budgets.toml`'s vocabulary.
+#
+# Derived the way the harness's own campaigns derive it
+# (crates/view-harness/tests/heartbeat_cost.rs): the platform is all a
+# machine can tell about itself, so a host is `dev-<platform>` unless an
+# operator says otherwise. A `controlled-` class is a claim about a quiet
+# machine that no probe here can verify, so it is declared through
+# VIEW_HOST_CLASS (`VIEW_HOST_CLASS=controlled-linux task acceptance`) and
+# never guessed -- a guessed one turns an uncontrolled host's noise into a
+# gate everyone downstream trusts.
+host_class() {
+    if [ -n "${VIEW_HOST_CLASS:-}" ]; then
+        printf '%s\n' "$VIEW_HOST_CLASS"
+        return
+    fi
+    case "$(uname -s)" in
+    Darwin) printf 'dev-macos\n' ;;
+    CYGWIN* | MINGW* | MSYS*) printf 'dev-windows\n' ;;
+    *) printf 'dev-linux\n' ;;
+    esac
+}
+
+# Announces the skip, and fails, when this host is outside a leg's classes.
+#
+#   require_class remote-rtt controlled-linux || exit 0
+#
+# A leg whose bound is armed on some classes only (`budgets.toml`'s
+# `classes` field) has no bar to measure against anywhere else, and a bar
+# invented for an uncontrolled host is worse than no measurement at all.
+# Aborting is worse still: `task acceptance` runs its legs in sequence, so
+# one refusal takes every later leg down with it and the drop is silent.
+# Hence the announced skip, in a shape a gate log cannot be read past.
+require_class() {
+    local leg="$1" actual want
+    shift
+    actual=$(host_class)
+    for want in "$@"; do
+        if [ "$actual" = "$want" ]; then
+            return 0
+        fi
+    done
+    printf '%s: SKIPPED (class %s, host is %s)\n' "$leg" "$*" "$actual"
+    return 1
+}
+
 # Makes sure `path` is a binary this tree's source produced.
 #
 #   ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
