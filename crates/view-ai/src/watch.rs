@@ -31,7 +31,7 @@
 //!   a single `Msg`, which becomes a single chunk execution answering all
 //!   of them (`docs/checktime-wire-capture.md` case 8).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -91,6 +91,11 @@ const MAX_PENDING: usize = 65_536;
 /// deliberate: a submodule's or nested worktree's `.git`, and a nested
 /// `node_modules`, produce exactly the storm this list exists to prevent.
 const NEVER_WATCHED: [&str; 4] = [".git", "target", "node_modules", ".venv"];
+
+/// The per-directory ignore files the registration walk reads, and so the
+/// ones the pump has to be able to answer with too (see [`IgnoreRules`]).
+/// Ordered by the precedence the walk gives them, highest first.
+const IGNORE_FILES: [&str; 2] = [".ignore", ".gitignore"];
 
 /// Everything [`spawn`] can fail with.
 ///
@@ -208,6 +213,218 @@ fn is_excluded(path: &Path, root: &Path) -> bool {
         .any(|c| NEVER_WATCHED.iter().any(|name| c.as_os_str() == *name))
 }
 
+/// Standing of a source in the order the walk consults them, ascending, so
+/// that one reverse iteration over the map answers in precedence order.
+///
+/// The order is `ignore::dir::Ignore::matched_ignore`'s own `or` chain --
+/// `.ignore`, then `.gitignore`, then `.git/info/exclude`, then the global
+/// excludes -- and it holds whatever the depths involved are.
+const AUTHORITY_GLOBAL: u8 = 0;
+const AUTHORITY_EXCLUDE: u8 = 1;
+
+/// Standing of one of the [`IGNORE_FILES`] the walk discovers, by name.
+///
+/// The two external sources name their own standing at their single call
+/// site instead of coming through here: `core.excludesFile` may point at a
+/// file called `.gitignore`, and a name lookup would hand it a standing
+/// three ranks above the one git gives it.
+fn authority(file: &Path) -> u8 {
+    match file.file_name().and_then(std::ffi::OsStr::to_str) {
+        Some(".ignore") => 3,
+        _ => 2,
+    }
+}
+
+/// The ignore rules the registration walk resolved, kept in a form the pump
+/// can hold a single event to.
+///
+/// Skipping ignored directories during the walk is enough on inotify -- a
+/// directory that was never registered raises nothing -- but macOS's
+/// FSEvents backend delivers a whole subtree's events to any descriptor
+/// placed above it, whatever `RecursiveMode::NonRecursive` asked for. The
+/// pump therefore sees writes under directories the walk deliberately left
+/// unregistered, which is the build output this watch exists to stay out
+/// of, and needs the same answer the walk had. Matching happens off these
+/// pre-read rules rather than off the filesystem because the pump may not
+/// re-read an ignore file per event.
+///
+/// One matcher per ignore file, each rooted at the directory that file
+/// governs, because `GitignoreBuilder` anchors every line it reads to the
+/// builder's own root: a single builder rooted at the project root turns a
+/// nested `/out` into the root's `out` and a nested `out/` into `**/out/`
+/// across the whole tree, which is both under- and over-ignoring against
+/// what the walk computed.
+struct IgnoreRules {
+    /// The floor of the ancestor walk in [`Self::ignores`]. Rules above the
+    /// project root exist (git reads them, so the walk does too) but a
+    /// verdict on a directory above the root would put the whole project
+    /// inside an ignored tree, which is never what this watch should
+    /// conclude.
+    root: PathBuf,
+    /// Keyed by standing (see [`authority`]), then by the depth of the
+    /// directory the matcher governs, then by the file itself.
+    ///
+    /// Depth is explicit rather than inferred from where the key sorts:
+    /// `Path`'s `Ord` is component-wise, so an ancestor's `.gitignore`
+    /// sorts *after* a child directory whose name starts below `.` (0x2E)
+    /// -- ` `, `!`, `(`, `+`, `-` and the rest -- and a lexical order would
+    /// hand `app/(marketing)/.gitignore` a lower standing than the root's,
+    /// dropping a real write wherever the nested file re-includes what the
+    /// root ignores.
+    files: BTreeMap<(u8, usize, PathBuf), ignore::gitignore::Gitignore>,
+}
+
+impl IgnoreRules {
+    /// Rules for `root` holding nothing yet -- what the walk is about to
+    /// fill in.
+    fn rooted_at(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            files: BTreeMap::new(),
+        }
+    }
+
+    /// [`Self::rooted_at`], plus the three sources git resolves from
+    /// outside the tree: ignore files in the directories above `root`,
+    /// `.git/info/exclude`, and the user's global excludes.
+    ///
+    /// The walk reads all three -- `require_git(false)` is what makes its
+    /// git-owned sources unconditional rather than contingent on a `.git`
+    /// being found -- and none of them can be discovered from inside the
+    /// tree the walk hands back: `.git` is in [`NEVER_WATCHED`], and the
+    /// other two live outside the root entirely.
+    fn for_project(root: &Path) -> Self {
+        let mut rules = Self::rooted_at(root);
+        for dir in root.ancestors().skip(1) {
+            for name in IGNORE_FILES {
+                rules.add(&dir.join(name));
+            }
+        }
+        // both rooted at the project root rather than at the directory
+        // holding them: git anchors `.git/info/exclude` and
+        // `core.excludesFile` patterns at the top of the work tree, so
+        // `/vendor` in either means the project's own `vendor`.
+        //
+        // `Gitignore::global()` is not what reads the second one, because it
+        // roots the file at `std::env::current_dir()` -- the same rooting
+        // the walk uses, and coherent for a search tool answering about the
+        // directory it was invoked in, but for a watch it makes the set of
+        // ignored paths depend on where the editor was launched from: from a
+        // project's parent, a global `/myproject/vendor` would silently
+        // swallow every write under a tracked `vendor/`.
+        rules.add_rooted(
+            root,
+            &root.join(".git").join("info").join("exclude"),
+            AUTHORITY_EXCLUDE,
+        );
+        if let Some(global) = ignore::gitignore::gitconfig_excludes_path() {
+            rules.add_rooted(root, &global, AUTHORITY_GLOBAL);
+        }
+        rules
+    }
+
+    /// Reads one ignore file, rooted at the directory it sits in.
+    fn add(&mut self, file: &Path) {
+        let Some(dir) = file.parent() else {
+            return;
+        };
+        self.add_rooted(dir, file, authority(file));
+    }
+
+    /// Reads one ignore file whose rules govern `dir`, replacing whatever
+    /// that same file contributed before -- so a directory registered a
+    /// second time re-reads it rather than stacking a duplicate, and an
+    /// edited or deleted file is re-read rather than believed.
+    ///
+    /// A file holding nothing that matches is dropped rather than kept, and
+    /// a file that cannot be read holds nothing: every rule left here is
+    /// one the pump consults per event.
+    fn add_rooted(&mut self, dir: &Path, file: &Path, authority: u8) {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
+        // a partial error still yields the lines that did parse, exactly
+        // what the walk itself matched against
+        let _ = builder.add(file);
+        let key = (authority, dir.components().count(), file.to_path_buf());
+        match builder.build() {
+            Ok(matcher) if !matcher.is_empty() => self.files.insert(key, matcher),
+            _ => self.files.remove(&key),
+        };
+    }
+
+    /// Whether the ignore rules cover `path`, itself or through an excluded
+    /// directory above it.
+    ///
+    /// Resolved the way git descends rather than by asking one matcher
+    /// about the whole path: every directory between the root and `path` is
+    /// judged from the top down, and the first excluded one is final.
+    /// `gitignore(5)` is explicit that "it is not possible to re-include a
+    /// file if a parent directory of that file is excluded", and the walk
+    /// agrees with it by construction -- it never descends into an excluded
+    /// directory, so a `!` line further down is never even read.
+    ///
+    /// `is_dir` is not a hint: a directory-only rule (`generated/`) matches
+    /// the directory it names only when the matcher is told the path is
+    /// one, and answering `false` for a directory lets the event that
+    /// created it through -- which is how a whole ignored tree gets
+    /// registered and swept into a batch by the one create event the walk
+    /// had already refused.
+    fn ignores(&self, path: &Path, is_dir: bool) -> bool {
+        // gathered once, in precedence order: a matcher that governs any
+        // directory on this path governs the path too, so the walk below
+        // reuses this list instead of re-scanning every rule file in the
+        // project for each directory it steps through
+        let governing: Vec<&ignore::gitignore::Gitignore> = self
+            .files
+            .values()
+            .rev()
+            .filter(|matcher| path.starts_with(matcher.path()))
+            .collect();
+        let above: Vec<&Path> = path
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| *dir != self.root)
+            .collect();
+        for dir in above.into_iter().rev() {
+            if verdict(&governing, dir, true) == Some(true) {
+                return true;
+            }
+        }
+        verdict(&governing, path, is_dir) == Some(true)
+    }
+}
+
+/// `Some(true)` excluded, `Some(false)` re-included, `None` unmatched by
+/// any rule -- the three answers git distinguishes, since a `!` line has
+/// to stop a lower-standing source from being consulted at all.
+fn verdict(governing: &[&ignore::gitignore::Gitignore], path: &Path, is_dir: bool) -> Option<bool> {
+    for matcher in governing {
+        // re-tested per directory, and not only when the list was
+        // built: the crate's own prefix strip is byte-wise, so a
+        // directory whose name merely extends this matcher's root
+        // would be matched against a mangled tail rather than
+        // rejected. `Path::starts_with` is component-aware.
+        if !path.starts_with(matcher.path()) {
+            continue;
+        }
+        if let Some(verdict) = decide(matcher, path, is_dir) {
+            return Some(verdict);
+        }
+    }
+    None
+}
+
+/// One matcher's answer as the three-way verdict [`verdict`] carries.
+fn decide(matcher: &ignore::gitignore::Gitignore, path: &Path, is_dir: bool) -> Option<bool> {
+    let matched = matcher.matched(path, is_dir);
+    if matched.is_whitelist() {
+        return Some(false);
+    }
+    if matched.is_ignore() {
+        return Some(true);
+    }
+    None
+}
+
 /// The message a degraded watch reports itself with. Never silent: after
 /// either degradation the session goes on running with out-of-band
 /// detection partly or wholly off, and `docs/ai.md` tells the user it is
@@ -234,6 +451,10 @@ fn degraded(reason: String) -> Msg {
 /// created inside it before its own registration landed are still probed
 /// rather than missed.
 ///
+/// Every [`IGNORE_FILES`] entry the walk passes joins `ignores`, so the pump
+/// can hold an event to the same rules this walk held a directory to (see
+/// [`IgnoreRules`]).
+///
 /// Answers how many directories were registered -- the platform descriptors
 /// this walk actually cost, which is the number the filtering above exists
 /// to hold down.
@@ -243,6 +464,7 @@ fn register(
     start: &Path,
     emit: &dyn Fn(Msg),
     mut found_files: Option<&mut BTreeSet<PathBuf>>,
+    ignores: &mut IgnoreRules,
 ) -> usize {
     let root_owned = root.to_path_buf();
     let mut builder = ignore::WalkBuilder::new(start);
@@ -281,6 +503,9 @@ fn register(
         };
         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
         if !is_dir {
+            if IGNORE_FILES.iter().any(|name| entry.file_name() == *name) {
+                ignores.add(entry.path());
+            }
             if let Some(files) = found_files.as_deref_mut() {
                 files.insert(entry.path().to_path_buf());
             }
@@ -330,6 +555,12 @@ fn register(
 /// carries the same never-block requirement, since this thread has nothing
 /// else to do but keep draining `rx`.
 ///
+/// Every path is held to [`is_excluded`] and to `ignores` before it joins a
+/// batch, rather than trusted because the walk chose what to register: a
+/// backend free to report a subtree it was never asked to watch (FSEvents
+/// is) would otherwise put exactly the ignored build output back in front
+/// of nvim.
+///
 /// A directory that appears while the watch runs is registered here rather
 /// than left uncovered, and the files already inside it join the same batch
 /// -- a `git checkout` that recreates a directory holding an open file
@@ -339,6 +570,7 @@ fn pump(
     rx: &std_mpsc::Receiver<notify::Result<Event>>,
     slot: &WatcherSlot,
     root: &Path,
+    ignores: &mut IgnoreRules,
     emit: &dyn Fn(Msg),
 ) {
     let mut pending: BTreeSet<PathBuf> = BTreeSet::new();
@@ -413,8 +645,37 @@ fn pump(
             if is_excluded(&path, root) {
                 continue;
             }
-            if is_create && path.is_dir() {
-                let _ = register(slot, root, &path, emit, Some(&mut pending));
+            // an ignore file that changed on disk re-reads here rather than
+            // waiting for its directory to be registered again: an agent
+            // adding `dist/` to `.gitignore` and then building is a whole
+            // session's worth of churn otherwise, and rebuilding one
+            // matcher is bounded work the walk would repeat anyway
+            if IGNORE_FILES
+                .iter()
+                .any(|name| path.file_name().is_some_and(|got| got == *name))
+            {
+                ignores.add(&path);
+            }
+            if ignores.ignores(&path, false) {
+                continue;
+            }
+            // no event kind every backend raises carries "this is a
+            // directory", and a directory-only rule needs that answer (see
+            // [`IgnoreRules::ignores`]) -- but only about the directory's
+            // own path, since every path under it is already answered by
+            // the ancestor walk above. Only a create can register one, so
+            // that is the only event that pays the stat, exactly as before
+            // the ignore rules existed. The link itself is what is asked
+            // about, never its target: the walk does not follow one either
+            let is_dir = is_create
+                && path
+                    .symlink_metadata()
+                    .is_ok_and(|meta| meta.file_type().is_dir());
+            if is_dir && ignores.ignores(&path, true) {
+                continue;
+            }
+            if is_dir {
+                let _ = register(slot, root, &path, emit, Some(&mut pending), ignores);
                 continue;
             }
             pending.insert(path);
@@ -505,14 +766,22 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
         .name("view-ai-watch".to_string())
         .spawn(move || {
             let emit: &dyn Fn(Msg) = &emit;
-            let _ = register(&thread_slot, &root_owned, &root_owned, emit, None);
+            let mut ignores = IgnoreRules::for_project(&root_owned);
+            let _ = register(
+                &thread_slot,
+                &root_owned,
+                &root_owned,
+                emit,
+                None,
+                &mut ignores,
+            );
             #[cfg(any(test, feature = "test-support"))]
             {
                 let (lock, cv) = &*thread_ready;
                 *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
                 cv.notify_all();
             }
-            pump(&rx, &thread_slot, &root_owned, emit);
+            pump(&rx, &thread_slot, &root_owned, &mut ignores, emit);
         })
         .map_err(WatchError::ThreadSpawn)?;
 
@@ -524,7 +793,12 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::disallowed_methods
+)]
 mod tests {
     use super::*;
     use std::sync::mpsc::{channel, RecvTimeoutError};
@@ -632,7 +906,14 @@ mod tests {
             let _ = msg_tx.send(msg);
         };
 
-        let registered = register(&slot, &root, &root, &emit, None);
+        let registered = register(
+            &slot,
+            &root,
+            &root,
+            &emit,
+            None,
+            &mut IgnoreRules::rooted_at(&root),
+        );
 
         assert_eq!(registered, 3, "the walk stopped at the refusal");
         assert_eq!(
@@ -671,7 +952,14 @@ mod tests {
             let _ = msg_tx.send(msg);
         };
 
-        let registered = register(&slot, &root, &root, &emit, None);
+        let registered = register(
+            &slot,
+            &root,
+            &root,
+            &emit,
+            None,
+            &mut IgnoreRules::rooted_at(&root),
+        );
 
         assert_eq!(registered, 0);
         assert!(watched.lock().unwrap().is_empty());
@@ -699,18 +987,29 @@ mod tests {
     /// normally supply, but that crate is a dev-only leaf with no reach
     /// into `view-ai` (`scripts/audit-deps.sh`'s `check_dev_only` row) --
     /// so a real filesystem event needs a real directory here instead.
+    ///
+    /// The counter is what actually separates two callers: macOS reports
+    /// `SystemTime` at microsecond granularity, so two of this module's
+    /// tests starting in the same microsecond -- which they do, since
+    /// `cargo test` starts them all at once -- built the very same name.
+    /// `create_dir_all` accepts an existing directory, so that collision was
+    /// silent: one test walked another's tree, or read rules a test that
+    /// had already finished had deleted underneath it. Creating the
+    /// directory non-recursively is what keeps any future collision loud.
     fn tempdir() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut dir = std::env::temp_dir();
         let unique = format!(
-            "view-ai-watch-test-{}-{}",
+            "view-ai-watch-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         dir.push(unique);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
     }
 
@@ -743,7 +1042,14 @@ mod tests {
         let slot: WatcherSlot = Arc::new(Mutex::new(Some(Box::new(watcher))));
         let emit = |msg: Msg| panic!("a clean walk must report nothing, got {msg:?}");
 
-        let registered = register(&slot, &root, &root, &emit, None);
+        let registered = register(
+            &slot,
+            &root,
+            &root,
+            &emit,
+            None,
+            &mut IgnoreRules::rooted_at(&root),
+        );
 
         // root, src, src/inner, sub -- and nothing under target,
         // node_modules, .venv, sub/.git, or the gitignored generated/
@@ -1136,7 +1442,14 @@ mod tests {
             let _ = msg_tx.send(msg);
         };
         std::fs::remove_dir_all(&start).unwrap();
-        let _ = register(&slot, &root, &start, &emit, None);
+        let _ = register(
+            &slot,
+            &root,
+            &start,
+            &emit,
+            None,
+            &mut IgnoreRules::rooted_at(&root),
+        );
         drop(rx);
 
         match msg_rx.recv_timeout(Duration::from_millis(500)) {
@@ -1172,7 +1485,7 @@ mod tests {
         let emit = move |msg: Msg| {
             let _ = msg_tx.send(msg);
         };
-        pump(&rx, &slot, &root, &emit);
+        pump(&rx, &slot, &root, &mut IgnoreRules::rooted_at(&root), &emit);
 
         match msg_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Msg::ExternalWatchDegraded { reason }) => {
@@ -1189,6 +1502,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A modify event naming `paths`, the shape a backend reports a write
+    /// to this module with.
+    fn modify_event(paths: &[PathBuf]) -> Event {
+        naming(
+            notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )),
+            paths,
+        )
+    }
+
+    /// A create event naming `paths` -- the only kind that can register a
+    /// directory, so the only one the pump stats for.
+    fn create_event(paths: &[PathBuf]) -> Event {
+        naming(
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            paths,
+        )
+    }
+
+    fn naming(kind: notify::EventKind, paths: &[PathBuf]) -> Event {
+        paths
+            .iter()
+            .fold(Event::new(kind), |event, path| event.add_path(path.clone()))
+    }
+
+    /// A slot holding a backend that accepts every directory, so a walk
+    /// through it registers the whole tree rather than stopping at the
+    /// first one.
+    fn accepting_slot() -> WatcherSlot {
+        let watcher = FakeWatcher {
+            calls: 0,
+            refuse_at: usize::MAX,
+            limit_at: usize::MAX,
+            watched: Arc::new(Mutex::new(Vec::new())),
+        };
+        Arc::new(Mutex::new(Some(Box::new(watcher))))
+    }
+
+    /// A slot the watch has already been stopped on -- for a case whose
+    /// event can never reach the registration arm.
+    fn empty_slot() -> WatcherSlot {
+        Arc::new(Mutex::new(None))
+    }
+
+    /// Seeds `dirs` and `files` under `root`, then registers the tree
+    /// exactly as the watch's own thread would, answering the slot and the
+    /// rules that walk produced.
+    fn walked(root: &Path, files: &[(&str, &str)], dirs: &[&str]) -> (WatcherSlot, IgnoreRules) {
+        for dir in dirs {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for (name, body) in files {
+            std::fs::write(root.join(name), body.as_bytes()).unwrap();
+        }
+        registered(root, IgnoreRules::rooted_at(root))
+    }
+
+    /// What one registration walk of `root` leaves behind, starting from
+    /// rules the caller chose -- [`IgnoreRules::for_project`] for the tests
+    /// that care about the sources resolved from outside the tree.
+    fn registered(root: &Path, mut ignores: IgnoreRules) -> (WatcherSlot, IgnoreRules) {
+        let slot = accepting_slot();
+        let quiet = |msg: Msg| panic!("a clean walk must report nothing, got {msg:?}");
+        let _ = register(&slot, root, root, &quiet, None, &mut ignores);
+        (slot, ignores)
+    }
+
+    /// Every path one pre-sent event survives the pump's own filters with.
+    ///
+    /// The sender is held until the batch has been emitted rather than
+    /// dropped up front: the pump exits on disconnect without flushing, so
+    /// a caller that closed the channel first would read an empty batch and
+    /// see a pump that forwards nothing as one that filtered correctly.
+    fn paths_surviving_the_pump(
+        root: &Path,
+        slot: &WatcherSlot,
+        ignores: &mut IgnoreRules,
+        event: Event,
+    ) -> Vec<PathBuf> {
+        let (tx, rx) = channel::<notify::Result<Event>>();
+        let (msg_tx, msg_rx) = channel::<Msg>();
+        let (emitted_tx, emitted_rx) = channel::<()>();
+        tx.send(Ok(event)).unwrap();
+        // a pump that emits nothing at all still has to end this test, so
+        // the wait is bounded and the empty batch becomes the assertion's
+        // failure rather than a hang
+        let closer = std::thread::spawn(move || {
+            let _ = emitted_rx.recv_timeout(Duration::from_secs(5));
+            drop(tx);
+        });
+
+        let emit = move |msg: Msg| {
+            let _ = msg_tx.send(msg);
+            let _ = emitted_tx.send(());
+        };
+        pump(&rx, slot, root, ignores, &emit);
+        closer.join().unwrap();
+
+        let mut seen: Vec<PathBuf> = Vec::new();
+        while let Ok(msg) = msg_rx.try_recv() {
+            if let Msg::ExternalWritesDetected { paths } = msg {
+                seen.extend(paths);
+            }
+        }
+        seen
+    }
+
     /// The pump filters excluded paths itself, not only through what the
     /// walk registered: driven with a synthetic event naming a path under
     /// a nested `.git`, which is exactly what a backend that reports a
@@ -1196,33 +1617,562 @@ mod tests {
     #[test]
     fn the_pump_drops_an_excluded_path_it_is_handed_directly() {
         let root = PathBuf::from("/proj");
-        let (tx, rx) = channel::<notify::Result<Event>>();
-        let (msg_tx, msg_rx) = channel::<Msg>();
         let slot: WatcherSlot = Arc::new(Mutex::new(None));
-        tx.send(Ok(Event::new(notify::EventKind::Modify(
-            notify::event::ModifyKind::Data(notify::event::DataChange::Any),
-        ))
-        .add_path(root.join("vendor/dep/.git/HEAD"))
-        .add_path(root.join("src/lib.rs"))))
-            .unwrap();
-        drop(tx);
+        let excluded = root.join("vendor/dep/.git/HEAD");
+        let kept = root.join("src/lib.rs");
 
-        let emit = move |msg: Msg| {
-            let _ = msg_tx.send(msg);
-        };
-        pump(&rx, &slot, &root, &emit);
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut IgnoreRules::rooted_at(&root),
+            modify_event(&[excluded, kept.clone()]),
+        );
 
-        // the pump returns on disconnect without flushing, so the batch is
-        // observed by draining whatever it emitted before that
-        let mut seen: Vec<PathBuf> = Vec::new();
-        while let Ok(msg) = msg_rx.try_recv() {
-            if let Msg::ExternalWritesDetected { paths } = msg {
-                seen.extend(paths);
-            }
-        }
         assert!(
             !seen.iter().any(|p| p.to_string_lossy().contains(".git")),
             "an excluded path survived the pump: {seen:?}"
         );
+        assert!(
+            seen.contains(&kept),
+            "the pump dropped a path no rule names: {seen:?}"
+        );
+    }
+
+    /// The pump holds an event to the project's own ignore rules too, not
+    /// only to [`NEVER_WATCHED`]. The leak this kills is macOS's: FSEvents
+    /// hands a descriptor every event under it whatever
+    /// `RecursiveMode::NonRecursive` asked for, so a write inside a
+    /// gitignored directory the walk deliberately never registered still
+    /// reaches the pump -- and a filter that trusted registration probed
+    /// nvim for exactly the build churn this watch promises to skip.
+    ///
+    /// Driven from a nested `.gitignore` and a synthetic event, so the leak
+    /// shape is reproduced on every platform rather than only on the one
+    /// that produces it. The non-ignored sibling is what keeps this from
+    /// passing on a pump that drops everything.
+    ///
+    /// The `.ignore` file beside the `.gitignore` is the walk's other
+    /// per-directory source, and holding both proves neither displaces the
+    /// other -- rules keyed by the directory they govern rather than by the
+    /// file they came from would keep only whichever was read last.
+    ///
+    /// `subsidiary/` is the case the prefix guard in
+    /// [`IgnoreRules::verdict`] exists for: the crate's own strip is a
+    /// byte-prefix strip, so a matcher rooted at `sub` handed
+    /// `subsidiary/out/keep.rs` would match the mangled tail
+    /// `sidiary/out/keep.rs` against `out/` and drop a real write in a
+    /// directory it has no rules for.
+    #[test]
+    fn the_pump_drops_a_gitignored_path_it_is_handed_directly() {
+        let root = tempdir();
+        let (slot, mut ignores) = walked(
+            &root,
+            &[
+                ("sub/.gitignore", "out/\n"),
+                ("sub/.ignore", "scratch/\n"),
+                // a disjoint sibling, so the map holds matchers that do not
+                // govern the paths asserted below
+                ("other/.gitignore", "junk/\n"),
+            ],
+            &["sub/out", "sub/scratch", "other/junk", "subsidiary/out"],
+        );
+
+        let ignored = root.join("sub").join("out").join("built.rs");
+        let by_dot_ignore = root.join("sub").join("scratch").join("note.txt");
+        let by_sibling = root.join("other").join("junk").join("x.o");
+        let past_the_prefix = root.join("subsidiary").join("out").join("keep.rs");
+        let kept = root.join("sub").join("hand-written.rs");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[
+                ignored.clone(),
+                by_dot_ignore.clone(),
+                by_sibling.clone(),
+                past_the_prefix.clone(),
+                kept.clone(),
+            ]),
+        );
+
+        assert!(
+            seen.contains(&past_the_prefix),
+            "a directory whose name merely extends another's was matched \
+             against that other's rules: {seen:?}"
+        );
+
+        assert!(
+            !seen.contains(&ignored),
+            "a gitignored path survived the pump: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&by_dot_ignore),
+            "a path the walk's `.ignore` source names survived the pump: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&by_sibling),
+            "a sibling directory's own rules were not consulted: {seen:?}"
+        );
+        assert!(
+            seen.contains(&kept),
+            "the pump dropped a path no ignore rule names: {seen:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A create event naming an ignored directory registers nothing. This
+    /// is the one place the directory's own path has to be recognised as a
+    /// directory: a directory-only rule (`out/`) does not match it
+    /// otherwise, and the create arm would then walk it and sweep every
+    /// file inside into the same batch -- re-registering, from one leaked
+    /// event, the whole tree the walk refused.
+    #[test]
+    fn a_created_gitignored_directory_is_neither_registered_nor_swept() {
+        let root = tempdir();
+        let (slot, mut ignores) = walked(&root, &[(".gitignore", "out/\n")], &["out"]);
+        std::fs::write(root.join("out").join("built.rs"), b"x").unwrap();
+        let kept = root.join("hand-written.rs");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            create_event(&[root.join("out"), kept.clone()]),
+        );
+
+        assert!(
+            !seen.iter().any(|p| p.starts_with(root.join("out"))),
+            "an ignored directory was registered and swept: {seen:?}"
+        );
+        assert!(seen.contains(&kept), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Precedence between two ignore files is by the depth of the directory
+    /// each governs, taken from the path rather than from where its key
+    /// happens to sort. `Path`'s `Ord` is component-wise, so a child
+    /// directory whose name starts below `.` (0x2E) -- ` `, `!`, `(`, `+`,
+    /// `-` -- sorts *before* its own parent's `.gitignore`, and a lexical
+    /// order consults the parent first.
+    ///
+    /// The consequence is not a spurious probe but a lost write: the nested
+    /// file re-includes what the root ignores, the parent's rule is applied
+    /// instead, and an agent rewriting that file raises nothing at all --
+    /// no batch, no degradation notice, a buffer going stale in silence.
+    /// `(marketing)` is the Next.js and Expo route-group convention, not an
+    /// exotic name.
+    #[test]
+    fn a_nested_re_inclusion_wins_whatever_its_directory_is_named() {
+        let root = tempdir();
+        let groups = ["sub", "(marketing)", "-tmp", "+gen"];
+        let files: Vec<(String, String)> =
+            std::iter::once((".gitignore".to_string(), "*.log\n".to_string()))
+                .chain(
+                    groups
+                        .iter()
+                        .map(|dir| (format!("{dir}/.gitignore"), "!keep.log\n".to_string())),
+                )
+                .collect();
+        let seeded: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, body)| (name.as_str(), body.as_str()))
+            .collect();
+        let (slot, mut ignores) = walked(&root, &seeded, &groups);
+
+        let re_included: Vec<PathBuf> = groups
+            .iter()
+            .map(|dir| root.join(dir).join("keep.log"))
+            .collect();
+        let still_ignored = root.join("noisy.log");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(
+                &re_included
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(still_ignored.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+
+        for path in &re_included {
+            assert!(
+                seen.contains(path),
+                "a nested `!` rule lost to its own parent's: {path:?} missing from {seen:?}"
+            );
+        }
+        assert!(
+            !seen.contains(&still_ignored),
+            "the root's own rule stopped applying: {seen:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Git resolves a path one directory at a time and never descends into
+    /// an excluded one, so a `!` line cannot re-include a file whose parent
+    /// directory is already excluded -- and the walk agrees with git by
+    /// construction, because it never reads the deeper rule at all. Both
+    /// directions, since a matcher asked about the whole path in one call
+    /// answers the first match walking upward and gets this backwards.
+    #[test]
+    fn a_re_inclusion_under_an_excluded_directory_stays_excluded() {
+        let root = tempdir();
+        let (slot, mut ignores) = walked(
+            &root,
+            &[(".gitignore", "out/\n!out/keep.rs\ngen/\n!gen/\n")],
+            &["out", "gen"],
+        );
+
+        let under_excluded = root.join("out").join("keep.rs");
+        // the directory itself re-included, which git does allow, so the
+        // ancestor walk cannot be a blanket "any rule above wins"
+        let under_re_included = root.join("gen").join("made.rs");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[under_excluded.clone(), under_re_included.clone()]),
+        );
+
+        assert!(
+            !seen.contains(&under_excluded),
+            "a `!` rule re-included a file under an excluded directory: {seen:?}"
+        );
+        assert!(
+            seen.contains(&under_re_included),
+            "a re-included directory's contents stayed excluded: {seen:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The ancestor walk resolves top down, not bottom up: the shallowest
+    /// excluded directory settles the whole subtree, and a rule file inside
+    /// it -- one the walk would never have read, because it never descends
+    /// there, but a leaked event can still put in front of the pump --
+    /// cannot overturn that.
+    ///
+    /// Asked of [`IgnoreRules`] directly: getting the nested file into the
+    /// rules at all takes the mid-session re-read path, and what is under
+    /// test here is the resolution order, not how the rules arrived.
+    #[test]
+    fn the_shallowest_excluded_directory_settles_the_subtree() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("a").join("b")).unwrap();
+        std::fs::write(root.join(".gitignore"), b"a/\n").unwrap();
+        std::fs::write(root.join("a").join(".gitignore"), b"!b/\n").unwrap();
+        let mut rules = IgnoreRules::rooted_at(&root);
+        rules.add(&root.join(".gitignore"));
+        rules.add(&root.join("a").join(".gitignore"));
+
+        assert!(
+            rules.ignores(&root.join("a").join("b").join("c.rs"), false),
+            "a `!` rule below an excluded directory resurrected the subtree"
+        );
+        assert!(
+            !rules.ignores(&root.join("kept.rs"), false),
+            "the exclusion escaped the directory it names"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An ignore file edited mid-session is re-read from the event that
+    /// changed it, not left until its directory happens to be registered
+    /// again: an agent that adds `dist/` and then builds would otherwise
+    /// spend the rest of the session probing nvim for every file it
+    /// writes there. Deleting the file gives its rules back, on the same
+    /// event path.
+    #[test]
+    fn an_ignore_file_changed_mid_session_is_re_read() {
+        let root = tempdir();
+        let (slot, mut ignores) = walked(&root, &[], &["dist"]);
+        let built = root.join("dist").join("app.js");
+        let gitignore = root.join(".gitignore");
+
+        let before = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(std::slice::from_ref(&built)),
+        );
+        assert!(before.contains(&built), "got {before:?}");
+
+        std::fs::write(&gitignore, b"dist/\n").unwrap();
+        let after = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[gitignore.clone(), built.clone()]),
+        );
+        assert!(
+            !after.contains(&built),
+            "a rule added mid-session was not honoured: {after:?}"
+        );
+        assert!(
+            after.contains(&gitignore),
+            "the ignore file's own write must still be reported: {after:?}"
+        );
+
+        std::fs::remove_file(&gitignore).unwrap();
+        let removed = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[gitignore.clone(), built.clone()]),
+        );
+        assert!(
+            removed.contains(&built),
+            "a deleted ignore file's rules outlived it: {removed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Ignore files above the project root are the walk's own behaviour
+    /// (`WalkBuilder::parents` defaults on), so a `~/repos/.gitignore`
+    /// naming `build/` covers a project checked out beneath it.
+    #[test]
+    fn an_ignore_file_above_the_root_is_honoured() {
+        let outer = tempdir();
+        std::fs::write(outer.join(".gitignore"), b"build/\n").unwrap();
+        let root = outer.join("project");
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        let (slot, mut ignores) = (empty_slot(), IgnoreRules::for_project(&root));
+
+        let built = root.join("build").join("out.o");
+        let kept = root.join("src.rs");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[built.clone(), kept.clone()]),
+        );
+
+        assert!(
+            !seen.contains(&built),
+            "a rule above the project root was not read: {seen:?}"
+        );
+        assert!(seen.contains(&kept), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&outer);
+    }
+
+    /// `.git/info/exclude` is the repository's own unshared rule file and
+    /// the walk reads it, but `.git` is in [`NEVER_WATCHED`], so no walk of
+    /// the tree can ever discover it -- registration has to add it by name.
+    #[test]
+    fn the_repositorys_own_exclude_file_is_honoured() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+        std::fs::write(
+            root.join(".git").join("info").join("exclude"),
+            b"scratch/\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        let (slot, mut ignores) = (empty_slot(), IgnoreRules::for_project(&root));
+
+        let excluded = root.join("scratch").join("note.txt");
+        let kept = root.join("src.rs");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[excluded.clone(), kept.clone()]),
+        );
+
+        assert!(
+            !seen.contains(&excluded),
+            ".git/info/exclude was not read: {seen:?}"
+        );
+        assert!(seen.contains(&kept), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two sources naming the same file are settled by which source it is,
+    /// never by which one is consulted first: `.gitignore` outranks
+    /// `.git/info/exclude`, so its re-inclusion is the whole answer and the
+    /// write is still probed.
+    #[test]
+    fn a_re_inclusion_in_the_higher_standing_source_wins() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+        std::fs::write(root.join(".git").join("info").join("exclude"), b"*.log\n").unwrap();
+        std::fs::write(root.join(".gitignore"), b"!keep.log\n").unwrap();
+        let (slot, mut ignores) = registered(&root, IgnoreRules::for_project(&root));
+
+        let kept = root.join("keep.log");
+        let dropped = root.join("noise.log");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[kept.clone(), dropped.clone()]),
+        );
+
+        assert!(
+            seen.contains(&kept),
+            ".git/info/exclude outranked .gitignore: {seen:?}"
+        );
+        assert!(!seen.contains(&dropped), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same pair the other way up: a re-inclusion in
+    /// `.git/info/exclude` cannot survive `.gitignore`'s exclusion, because
+    /// the higher-standing source answers first and a lower one is then
+    /// never consulted at all.
+    #[test]
+    fn a_re_inclusion_in_the_lower_standing_source_loses() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+        std::fs::write(
+            root.join(".git").join("info").join("exclude"),
+            b"!keep.log\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".gitignore"), b"*.log\n").unwrap();
+        let (slot, mut ignores) = registered(&root, IgnoreRules::for_project(&root));
+
+        let dropped = root.join("keep.log");
+        let kept = root.join("src.rs");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[dropped.clone(), kept.clone()]),
+        );
+
+        assert!(
+            !seen.contains(&dropped),
+            ".git/info/exclude outranked .gitignore: {seen:?}"
+        );
+        assert!(seen.contains(&kept), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `.ignore` is the top of the same order, above a sibling `.gitignore`
+    /// in the very same directory -- where depth cannot be what separates
+    /// them.
+    #[test]
+    fn a_dot_ignore_outranks_its_sibling_gitignore() {
+        let root = tempdir();
+        std::fs::write(root.join(".gitignore"), b"*.log\n").unwrap();
+        std::fs::write(root.join(".ignore"), b"!keep.log\n").unwrap();
+        let (slot, mut ignores) = registered(&root, IgnoreRules::for_project(&root));
+
+        let kept = root.join("keep.log");
+        let dropped = root.join("noise.log");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[kept.clone(), dropped.clone()]),
+        );
+
+        assert!(
+            seen.contains(&kept),
+            ".gitignore outranked .ignore: {seen:?}"
+        );
+        assert!(!seen.contains(&dropped), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `GIT_CONFIG_GLOBAL` for as long as it is held, restored on the way
+    /// out -- a panicking assertion included, since a leaked plant would
+    /// point every later `IgnoreRules::for_project` in this binary at a
+    /// config file the test has already deleted.
+    ///
+    /// Only one test plants it, so nothing here needs serializing against
+    /// another writer; the tests that read it concurrently are safe because
+    /// the planted rules name paths (`vendor`, `*.swp`) that appear in no
+    /// other test's tree.
+    struct GitConfigGlobal(Option<std::ffi::OsString>);
+
+    impl GitConfigGlobal {
+        fn planted(config: &Path) -> Self {
+            let prev = std::env::var_os("GIT_CONFIG_GLOBAL");
+            std::env::set_var("GIT_CONFIG_GLOBAL", config);
+            Self(prev)
+        }
+    }
+
+    impl Drop for GitConfigGlobal {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(prev) => std::env::set_var("GIT_CONFIG_GLOBAL", prev),
+                None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
+            }
+        }
+    }
+
+    /// The user's global excludes are read as git reads them: anchored at
+    /// the top of the work tree, not at the directory the editor happened to
+    /// be launched from. A pattern naming the project directory itself is
+    /// therefore inert -- it cannot swallow every write under a tracked
+    /// `vendor/` because a session started one level up -- while an
+    /// unanchored pattern still matches at any depth.
+    #[test]
+    fn a_global_exclude_anchors_at_the_project_root() {
+        let outer = tempdir();
+        let root = outer.join("project");
+        std::fs::create_dir_all(root.join("vendor")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let excludes = outer.join("excludes");
+        std::fs::write(&excludes, b"/vendor\n/project/tools\n*.swp\n").unwrap();
+        let config = outer.join("gitconfig");
+        std::fs::write(
+            &config,
+            format!("[core]\nexcludesFile = {}\n", excludes.display()),
+        )
+        .unwrap();
+
+        let planted = GitConfigGlobal::planted(&config);
+        let (slot, mut ignores) = (empty_slot(), IgnoreRules::for_project(&root));
+        drop(planted);
+
+        let vendored = root.join("vendor").join("lib.rs");
+        let swap = root.join("src").join(".main.rs.swp");
+        let kept = root.join("tools").join("build.rs");
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[vendored.clone(), swap.clone(), kept.clone()]),
+        );
+
+        assert!(
+            !seen.contains(&vendored),
+            "an anchored global pattern was not anchored at the root: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&swap),
+            "an unanchored global pattern stopped matching: {seen:?}"
+        );
+        assert!(
+            seen.contains(&kept),
+            "a global pattern naming the project directory dropped a tracked write: {seen:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&outer);
     }
 }
