@@ -248,20 +248,52 @@ impl AiPanelState {
         )
     }
 
-    /// [`Self::transcript_viewport`] for a caller that has already laid the
-    /// composer out, so a paint wraps the input once rather than twice.
-    /// [`CHROME_ROWS`] already counts the composer's first row.
-    fn transcript_rows(&self, panel_height: usize, composer_rows: usize) -> usize {
+    /// The rows a `panel_height`-row panel leaves for its composer and its
+    /// transcript to share: everything past [`CHROME_ROWS`] and whichever
+    /// of the accounting row and the crash banner is currently showing.
+    ///
+    /// The single accounting both [`Self::composer_cap`] and
+    /// [`Self::transcript_rows`] budget from. Two derivations counting
+    /// different sets of rows is how the composer comes to be capped
+    /// against a bigger pool than the transcript is measured out of, and
+    /// the transcript ends up with fewer rows than the composer it was
+    /// supposed to outlast -- which is the defect, not a rounding
+    /// difference. Whatever row a later feature adds to the panel's chrome
+    /// belongs here, once, and both sides stay in step by construction.
+    fn shared_rows(&self, panel_height: usize) -> usize {
         panel_height
             .saturating_sub(CHROME_ROWS)
             .saturating_sub(usize::from(self.usage.is_some()))
             .saturating_sub(usize::from(self.local_error.is_some()))
+    }
+
+    /// [`Self::transcript_viewport`] for a caller that has already laid the
+    /// composer out, so a paint wraps the input once rather than twice.
+    /// [`CHROME_ROWS`] already counts the composer's first row, so only the
+    /// rows it wrapped onto come off the shared pool.
+    fn transcript_rows(&self, panel_height: usize, composer_rows: usize) -> usize {
+        self.shared_rows(panel_height)
             .saturating_sub(composer_rows.saturating_sub(1))
+    }
+
+    /// The most rows the composer may grow to: half the rows it shares with
+    /// the transcript, so a prompt long enough to fill the panel still
+    /// leaves the transcript at least as many rows as it took. A longer
+    /// prompt scrolls inside those rows (see [`Self::composer_rows`])
+    /// rather than taking more.
+    ///
+    /// Never zero, so the composer is painted at every panel height a frame
+    /// can be drawn at. That is also the one case where the transcript ends
+    /// up with fewer rows than the composer: a panel whose chrome and
+    /// banners already fill it has no transcript row to give, and the
+    /// composer keeps its one.
+    fn composer_cap(&self, panel_height: usize) -> usize {
+        (self.shared_rows(panel_height) / 2).max(1)
     }
 
     /// The composer's painted rows: [`Self::input`] wrapped to what one row
     /// of a `panel_width`-wide panel holds, cut to the last
-    /// [`composer_cap`] of them.
+    /// [`Self::composer_cap`] of them.
     ///
     /// The cut keeps the tail, never the head: the composer only appends
     /// and backspaces, so the cursor is at the end of the input, and the
@@ -278,7 +310,7 @@ impl AiPanelState {
         let cap = if width == 0 {
             1
         } else {
-            composer_cap(panel_height)
+            self.composer_cap(panel_height)
         };
         wrap(&self.input, width.max(1), cap)
     }
@@ -530,23 +562,6 @@ pub const PROMPT_COLS: usize = 2;
 pub fn composer_width(panel_width: usize) -> usize {
     let panel = u16::try_from(panel_width).unwrap_or(u16::MAX);
     usize::from(interior_text_width(panel)).saturating_sub(PROMPT_COLS)
-}
-
-/// The most rows the composer may grow to on a `panel_height`-row panel:
-/// half the rows the frame leaves it, so a prompt long enough to fill the
-/// panel still leaves the transcript the other half. A longer prompt
-/// scrolls inside those rows (see [`AiPanelState::composer_rows`]) rather
-/// than taking more.
-///
-/// Halves the interior, not the panel: the composer is drawn out of the
-/// rows left once [`CHROME_ROWS`] have had theirs, so halving the whole
-/// panel would hand the composer more rows than the transcript at every
-/// height and all of them at the shortest.
-///
-/// Never zero, so the composer is painted at every panel height a frame
-/// can be drawn at.
-fn composer_cap(panel_height: usize) -> usize {
-    (panel_height.saturating_sub(CHROME_ROWS) / 2).max(1)
 }
 
 /// One character's width in cells, the ASCII-doubling upper bound the
@@ -1000,25 +1015,57 @@ mod tests {
     /// wrong costs the whole transcript: the composer never takes more rows
     /// than it leaves, so a short panel with a long prompt on it still
     /// shows the agent talking.
+    ///
+    /// Run against every combination of the rows that also come out of the
+    /// transcript's share. A cap budgeting over rows the accounting row and
+    /// the crash banner have already spent hands the composer a share the
+    /// transcript cannot match -- and a session that has finished one turn
+    /// and then lost its agent is showing both of them.
     #[test]
     fn a_maxed_composer_never_leaves_the_transcript_fewer_rows_than_itself() {
         let width = composer_width(WIDE_PANEL);
-        for height in [6_usize, 8, 12, 14, 40] {
-            let mut state = AiPanelState::new();
-            state.input = overlong_prompt(width, height);
+        for height in [6_usize, 8, 10, 12, 14, 40] {
+            for (usage, error) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut state = AiPanelState::new();
+                state.input = overlong_prompt(width, height);
+                if usage {
+                    state.usage = Some(UsageStats {
+                        used: 1,
+                        size: 2,
+                        cost: None,
+                    });
+                }
+                if error {
+                    state.local_error = Some("gone".to_string());
+                }
 
-            let composer = state.view(height, WIDE_PANEL).input.len();
-            let transcript = state.transcript_viewport(height, WIDE_PANEL);
+                let composer = state.view(height, WIDE_PANEL).input.len();
+                let transcript = state.transcript_viewport(height, WIDE_PANEL);
+                let banners = usize::from(usage) + usize::from(error);
+                let banner_note = format!("usage={usage} error={error}");
 
-            assert!(
-                transcript > 0,
-                "a {height}-row panel keeps transcript rows: {composer} composer"
-            );
-            assert!(
-                transcript >= composer,
-                "a {height}-row panel gives the transcript at least the \
-                 composer's share: {transcript} against {composer}"
-            );
+                if height <= CHROME_ROWS + banners {
+                    assert_eq!(
+                        (composer, transcript),
+                        (1, 0),
+                        "a {height}-row panel with no room past its chrome and \
+                         banners ({banner_note}) still paints the prompt row"
+                    );
+                    continue;
+                }
+
+                assert!(
+                    transcript > 0,
+                    "a {height}-row panel ({banner_note}) keeps transcript \
+                     rows: {composer} composer"
+                );
+                assert!(
+                    transcript >= composer,
+                    "a {height}-row panel ({banner_note}) gives the transcript \
+                     at least the composer's share: {transcript} against \
+                     {composer}"
+                );
+            }
         }
     }
 
