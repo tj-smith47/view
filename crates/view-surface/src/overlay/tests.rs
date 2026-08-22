@@ -478,6 +478,72 @@ fn the_painted_ai_panel_keeps_the_newest_transcript_row_at_every_height() {
     }
 }
 
+/// Every transcript line is reachable by paging, at every panel height, in
+/// both directions -- asserted against the rows the overlay actually paints
+/// rather than the rows the panel handed it.
+///
+/// The held state is where this can go wrong and the following state
+/// cannot: a held window spends one of its rows on the "more below" marker,
+/// so a page sized to the panel's room rather than to the rows it drew
+/// steps over exactly one line per page, invisibly.
+#[test]
+fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
+    use view_core::native::ai_panel::{AiPanelState, TranscriptRole, TranscriptScroll};
+    const LINES: usize = 200;
+
+    fn transcript_lines(state: &AiPanelState, height: u16) -> Vec<String> {
+        rows(
+            60,
+            height,
+            &LayerKind::Ai(state.view(usize::from(height))),
+            BorderSet::ASCII,
+        )
+        .lines
+        .iter()
+        .map(|line| line_text(line))
+        .filter(|line| line.contains("Agent: line"))
+        .collect()
+    }
+
+    for height in [6_u16, 9, 12, 24, 40] {
+        let mut state = AiPanelState::new();
+        for i in 0..LINES {
+            state.transcript.append_or_extend(
+                Some(&format!("m{i}")),
+                &format!("line {i}"),
+                TranscriptRole::Agent,
+            );
+        }
+
+        let mut back = transcript_lines(&state, height);
+        while state.scroll_transcript(TranscriptScroll::PageBack, usize::from(height)) {
+            back.extend(transcript_lines(&state, height));
+        }
+        let mut forward = transcript_lines(&state, height);
+        while state.scroll_transcript(TranscriptScroll::PageForward, usize::from(height)) {
+            forward.extend(transcript_lines(&state, height));
+        }
+
+        for i in 0..LINES {
+            let line = format!("Agent: line {i}");
+            assert!(
+                back.iter().any(|painted| painted.contains(&line)),
+                "a {height}-row panel paged up over {line} without painting it"
+            );
+            assert!(
+                forward.iter().any(|painted| painted.contains(&line)),
+                "a {height}-row panel paged down over {line} without painting it"
+            );
+        }
+        assert!(
+            transcript_lines(&state, height)
+                .last()
+                .is_some_and(|line| line.contains("Agent: line 199")),
+            "paging all the way down ends on the newest line, following again"
+        );
+    }
+}
+
 /// The header rows the panel's own window arithmetic deliberately does not
 /// count (see `AiPanelState::transcript_viewport`) come out of the
 /// transcript's oldest rows, never its newest: a permission prompt is

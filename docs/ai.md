@@ -44,12 +44,21 @@ says so:
 -- more below, <PageDown> follows again --
 ```
 
+A page lands on the line directly above or below the one it came from --
+nothing is stepped over and nothing repeats -- so paging up to the start of
+a session and back down shows you every line of it.
+
 Scrolling back down to the newest line resumes following, and so does
 submitting a prompt, so an answer never streams in off screen. These are
 named keys the composer cannot type, so a half-written prompt survives a
-scroll. `<C-d>` is the one key with two jobs: while the crash banner is up
-it dismisses the banner (which is what the banner itself says), and it
-scrolls once the banner is gone.
+scroll.
+
+`<C-d>` is the one key with two jobs: while the crash banner is up it
+dismisses the banner (which is what the banner itself says), and it scrolls
+once the banner is gone. A review or an unanswered permission request owns
+the panel's keys while it is up, so none of the four scroll then -- inside
+a review they answer the way every other key a review owns does, with the
+notice naming the ways out.
 
 ## Reviewing an agent's edits
 

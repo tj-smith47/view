@@ -24,6 +24,17 @@ pub use transcript::{
     Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryKind, TranscriptRole,
 };
 
+/// How far, and which way, one scroll key moves the AI panel's transcript
+/// window. See [`AiPanelState::scroll_transcript`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptScroll {
+    PageBack,
+    PageForward,
+    HalfPageBack,
+    HalfPageForward,
+}
+
 /// The session's context-window and cost accounting, folded from
 /// [`crate::native::ai_event::AiEvent::UsageUpdated`]. A panel stat, not a
 /// transcript row: the wire's own `usage_update` discriminant carries a
@@ -203,14 +214,16 @@ impl AiPanelState {
     /// How many transcript rows a panel `panel_height` terminal rows tall
     /// has room for, once the overlay's own chrome has had its share.
     ///
-    /// The one place that arithmetic lives: [`Self::view`] renders exactly
-    /// this many rows, and the scroll keys page by exactly this many, so a
-    /// page can neither skip a row the panel never showed nor stop short of
-    /// one it did.
+    /// This is the room, not the distance a page moves: a held window
+    /// spends one of these rows on [`MORE_BELOW`], and paging by the room
+    /// rather than by what was drawn would step over the line that row
+    /// displaced. [`Self::scroll_transcript`] takes that off, in the one
+    /// place both it and [`Self::view`] read.
     ///
     /// A pending permission's rows and an open review's summary are
-    /// deliberately not subtracted. Both own the panel's keys while they
-    /// are up, so the transcript beneath them is following the tail, and a
+    /// deliberately not subtracted. Neither state lets a scroll key through
+    /// to the transcript at all (`route_key`'s `reaches_past_a_panel_owner`
+    /// is the gate), so the window under them is following the tail, and a
     /// window a few rows taller than the panel can draw is cut back to its
     /// newest rows by the overlay itself -- the end a follower wants kept.
     /// Counting them here would instead have to be kept in step with
@@ -223,30 +236,36 @@ impl AiPanelState {
             .saturating_sub(usize::from(self.local_error.is_some()))
     }
 
-    /// Scrolls the transcript `rows` rendered rows toward the oldest entry,
-    /// holding the window there rather than following the newest row.
-    /// Returns whether the window moved, which is what the caller marks the
-    /// model dirty on.
+    /// Moves the transcript window for one scroll key, reporting whether it
+    /// moved -- which is what the caller marks the model dirty on.
     ///
-    /// A scroll back that lands on the tail window anyway -- a transcript
-    /// with nothing above what is already shown -- leaves the panel
-    /// following rather than pinning it to a position indistinguishable
-    /// from the one it had.
-    pub fn scroll_transcript_back(&mut self, rows: usize, viewport: usize) -> bool {
-        let tail = self.transcript.tail_anchor(viewport);
-        let from = self.transcript_top.unwrap_or(tail);
-        self.settle(self.transcript.scrolled_back(from, rows), tail)
-    }
-
-    /// Scrolls the transcript `rows` rendered rows toward the newest entry.
-    /// Reaching the tail resumes following, so the next chunk to stream in
-    /// scrolls the panel again. A no-op for a panel already following.
-    pub fn scroll_transcript_forward(&mut self, rows: usize, viewport: usize) -> bool {
-        let Some(from) = self.transcript_top else {
-            return false;
+    /// Takes the panel's own height, the same number [`Self::view`] paints
+    /// from, so the distance a page moves and the rows a page drew are
+    /// derived from one input and cannot disagree: a page lands exactly
+    /// where the last one stopped, in either direction, skipping nothing
+    /// and repeating nothing.
+    pub fn scroll_transcript(&mut self, scroll: TranscriptScroll, panel_height: usize) -> bool {
+        let viewport = self.transcript_viewport(panel_height);
+        let page = viewport.saturating_sub(MARKER_ROWS);
+        let distance = match scroll {
+            TranscriptScroll::PageBack | TranscriptScroll::PageForward => page,
+            TranscriptScroll::HalfPageBack | TranscriptScroll::HalfPageForward => page.div_ceil(2),
         };
-        let tail = self.transcript.tail_anchor(viewport);
-        self.settle(self.transcript.scrolled_forward(from, rows), tail)
+        let (from, tail) = self.window(viewport);
+        let next = match scroll {
+            TranscriptScroll::PageBack | TranscriptScroll::HalfPageBack => {
+                self.transcript.scrolled_back(from, distance)
+            }
+            // Nothing forward of the tail to reach. The assignment is what
+            // retires an anchor the panel has since grown past: nothing
+            // moved on screen, but the state stops claiming to be held.
+            _ if from == tail => {
+                self.transcript_top = None;
+                return false;
+            }
+            _ => self.transcript.scrolled_forward(from, distance),
+        };
+        self.settle(next, tail)
     }
 
     /// Returns the transcript to following the newest row -- what submitting
@@ -254,6 +273,27 @@ impl AiPanelState {
     /// back down to read is an answer the user cannot see arriving.
     pub fn follow_transcript_tail(&mut self) {
         self.transcript_top = None;
+    }
+
+    /// Where the transcript window starts for a `viewport`-row panel, and
+    /// the tail anchor it is measured against; the two are equal exactly
+    /// when the panel is following.
+    ///
+    /// A held anchor is re-checked against the current viewport rather than
+    /// trusted, because the viewport is not the one it was set against: a
+    /// terminal grown taller moves the tail back past a window held on the
+    /// smaller panel, and painting that as held would draw [`MORE_BELOW`]
+    /// over nothing. Every reader of [`Self::transcript_top`] goes through
+    /// here, so paint and scroll cannot disagree about which state the
+    /// panel is in.
+    fn window(&self, viewport: usize) -> (TranscriptAnchor, TranscriptAnchor) {
+        let tail = self.transcript.tail_anchor(viewport);
+        (
+            self.transcript_top
+                .filter(|top| *top < tail)
+                .unwrap_or(tail),
+            tail,
+        )
     }
 
     /// Stores `next` as the window's position, or `None` when it has caught
@@ -307,22 +347,25 @@ impl AiPanelState {
         // (and never the whole buffer -- see `DiffReviewState::hunk_rows`).
         // The transcript is still in state and comes back the moment the
         // review closes.
-        let rows = match (&self.pending_diff, self.transcript_top) {
-            (Some(review), _) => review.hunk_rows(),
-            // The marker spends a row of the window rather than sitting
-            // above it: it is the last row, where a reader looking for the
-            // newest line looks, and it lands in the same tail the overlay
-            // keeps when the panel is shorter than this budget.
-            (None, Some(top)) => {
-                let mut rows = self
-                    .transcript
-                    .rows_from(top, visible_rows.saturating_sub(1));
-                rows.push(vec![Span::plain(MORE_BELOW)]);
-                rows
+        let rows = match &self.pending_diff {
+            Some(review) => review.hunk_rows(),
+            None => {
+                let (start, tail) = self.window(visible_rows);
+                if start == tail {
+                    self.transcript.rows_from(tail, visible_rows)
+                } else {
+                    // The marker spends a row of the window rather than
+                    // sitting above it: it is the last row, where a reader
+                    // looking for the newest line looks, and it lands in
+                    // the same tail the overlay keeps when the panel is
+                    // shorter than this budget.
+                    let mut rows = self
+                        .transcript
+                        .rows_from(start, visible_rows.saturating_sub(MARKER_ROWS));
+                    rows.push(vec![Span::plain(MORE_BELOW)]);
+                    rows
+                }
             }
-            (None, None) => self
-                .transcript
-                .rows_from(self.transcript.tail_anchor(visible_rows), visible_rows),
         };
         let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
             .with_input(self.input.clone())
@@ -390,6 +433,11 @@ const CHROME_ROWS: usize = 4;
 /// reporting the state: a reader who cannot see the newest line needs the
 /// way back to it, not a notification that they are lost.
 const MORE_BELOW: &str = "-- more below, <PageDown> follows again --";
+
+/// Rows [`MORE_BELOW`] costs a held window. Subtracted in both the place
+/// that renders the window and the place that decides how far a page moves
+/// it, which is the whole reason it is named once here.
+const MARKER_ROWS: usize = 1;
 
 /// The entered panel's title: the border is the one surface that shows in
 /// every state, so it carries the fact that keys now belong to the panel
@@ -475,11 +523,10 @@ mod tests {
     #[test]
     fn a_scrolled_back_window_holds_while_the_agent_keeps_talking() {
         let mut state = panel_with_lines(50);
-        let viewport = state.transcript_viewport(TEN_ROW_PANEL);
-        assert!(state.scroll_transcript_back(viewport, viewport));
+        assert!(state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL));
 
         let held = transcript_texts(&state, TEN_ROW_PANEL);
-        assert_eq!(held.first().unwrap(), "Agent: line 30");
+        assert_eq!(held.first().unwrap(), "Agent: line 31");
 
         for i in 50..70 {
             state.transcript.append_or_extend(
@@ -502,7 +549,6 @@ mod tests {
     #[test]
     fn a_held_window_names_the_key_that_follows_the_tail_again() {
         let mut state = panel_with_lines(50);
-        let viewport = state.transcript_viewport(TEN_ROW_PANEL);
 
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
@@ -510,7 +556,7 @@ mod tests {
             "a following panel has nothing below it to point at"
         );
 
-        state.scroll_transcript_back(viewport, viewport);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
 
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
@@ -524,10 +570,9 @@ mod tests {
     #[test]
     fn scrolling_forward_onto_the_tail_starts_following_again() {
         let mut state = panel_with_lines(50);
-        let viewport = state.transcript_viewport(TEN_ROW_PANEL);
-        state.scroll_transcript_back(viewport, viewport);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
 
-        assert!(state.scroll_transcript_forward(viewport, viewport));
+        assert!(state.scroll_transcript(TranscriptScroll::PageForward, TEN_ROW_PANEL));
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
             "Agent: line 49"
@@ -544,15 +589,91 @@ mod tests {
         );
     }
 
+    /// A page lands exactly where the last one stopped. A held window
+    /// spends a row on [`MORE_BELOW`], so paging by the room the panel has
+    /// rather than by the rows it drew steps over the line that row
+    /// displaced -- once per page, invisibly, in both directions.
+    #[test]
+    fn a_page_lands_where_the_last_one_stopped_in_both_directions() {
+        let mut state = panel_with_lines(50);
+        let following = transcript_texts(&state, TEN_ROW_PANEL);
+        assert_eq!(following.first().unwrap(), "Agent: line 40");
+
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        let held = transcript_texts(&state, TEN_ROW_PANEL);
+        assert_eq!(
+            held.last().unwrap(),
+            MORE_BELOW,
+            "the last row is the marker, so nine transcript rows precede it"
+        );
+        assert_eq!(
+            held[..held.len() - 1].last().unwrap(),
+            "Agent: line 39",
+            "the page must stop on the line directly above the one it came from"
+        );
+
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        let further = transcript_texts(&state, TEN_ROW_PANEL);
+        assert_eq!(
+            further[..further.len() - 1].last().unwrap(),
+            "Agent: line 30",
+            "and so must the next one"
+        );
+
+        state.scroll_transcript(TranscriptScroll::PageForward, TEN_ROW_PANEL);
+        assert_eq!(
+            transcript_texts(&state, TEN_ROW_PANEL),
+            held,
+            "paging back the other way returns to the same rows"
+        );
+    }
+
+    /// Half a page is half of what a page moves, so the two keys cannot
+    /// disagree about what a page is either.
+    #[test]
+    fn a_half_page_moves_half_of_what_a_page_moves() {
+        let mut state = panel_with_lines(50);
+        state.scroll_transcript(TranscriptScroll::HalfPageBack, TEN_ROW_PANEL);
+
+        let held = transcript_texts(&state, TEN_ROW_PANEL);
+        assert_eq!(held.first().unwrap(), "Agent: line 35");
+        assert_eq!(held[..held.len() - 1].last().unwrap(), "Agent: line 43");
+    }
+
+    /// A window held on a short panel can sit at or past the tail once the
+    /// terminal grows. Painting it as held would put a "more below" marker
+    /// over nothing, so the anchor is re-checked against the viewport of
+    /// the frame being painted rather than the one it was set against.
+    #[test]
+    fn a_window_the_panel_grew_past_stops_claiming_there_is_more_below() {
+        let mut state = panel_with_lines(20);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        assert_eq!(
+            transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
+            MORE_BELOW
+        );
+
+        let grown = 20 + CHROME_ROWS;
+        let texts = transcript_texts(&state, grown);
+        assert_eq!(texts.last().unwrap(), "Agent: line 19");
+        assert!(
+            !texts.iter().any(|row| row == MORE_BELOW),
+            "the whole transcript fits now, so nothing is below it: {texts:?}"
+        );
+        assert!(
+            !state.scroll_transcript(TranscriptScroll::PageForward, grown),
+            "and the key that follows the tail again finds it already there"
+        );
+    }
+
     /// A transcript with nothing above what is already on screen has no
     /// scroll to hold: pinning it would stop the panel following for a
     /// window indistinguishable from the one it already had.
     #[test]
     fn a_transcript_shorter_than_the_panel_keeps_following() {
         let mut state = panel_with_lines(3);
-        let viewport = state.transcript_viewport(TEN_ROW_PANEL);
 
-        assert!(!state.scroll_transcript_back(viewport, viewport));
+        assert!(!state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL));
 
         state
             .transcript

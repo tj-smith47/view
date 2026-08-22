@@ -5,6 +5,7 @@ use crate::msg::{
     DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
 };
 use crate::native::ai_event::{AiCommand, PermissionOutcome};
+use crate::native::ai_panel::TranscriptScroll;
 use crate::native::diff::BufTextChangedEvent;
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
@@ -828,11 +829,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     }
 }
 
-/// Whether `notation` is one of the AI panel's ways out -- un-entering it,
+/// Whether `notation` may reach past an open review or an unanswered
+/// permission to the panel's own arm beneath them -- un-entering the panel,
 /// interrupting a turn, dismissing a crash banner.
 ///
-/// The one gate a review and an unanswered permission both use to decide
-/// what may reach past them, and a closed list rather than "any `<...>`
+/// The one gate both owners use, and a closed list rather than "any `<...>`
 /// notation" on purpose. The composer's own named keys are edits like any
 /// other keystroke: `<CR>` starts a turn, `<BS>` and `<lt>` (nvim's escape
 /// for a literal `<`, see `keys::encode_key`) type into the prompt. Letting
@@ -841,54 +842,64 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 /// with `<CR>` able to start a second turn on top of the one whose
 /// permission request is still on screen -- while the plain characters
 /// beside them are swallowed.
-fn is_panel_exit_key(notation: &str) -> bool {
-    matches!(notation, "<Esc>" | "<C-c>" | "<C-d>")
+///
+/// Takes the model because one entry is conditional: `<C-d>` is two keys
+/// wearing one notation, and only the banner-dismissing one is a way out.
+fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
+    match notation {
+        "<Esc>" | "<C-c>" => true,
+        // A way out only while there is a banner to dismiss. With none,
+        // this is the half-page scroll key (see [`ai_scroll_for`]), which
+        // is not a way out of anything: letting it through would scroll a
+        // transcript neither owner is painting, silently, while every other
+        // scroll key at the same review is answered with a notice.
+        "<C-d>" => model.ai_panel().local_error.is_some(),
+        _ => false,
+    }
 }
 
-/// Whether `notation` scrolls the AI panel's transcript.
+/// Which way `notation` moves the AI panel's transcript window, or `None`
+/// for a key that does not scroll it.
 ///
-/// `<C-d>` is absent on purpose: it is an AI panel key already (see
-/// [`is_panel_exit_key`]), so its own arm decides between dismissing a
-/// crash banner and scrolling. Every key here is a named notation the
-/// composer cannot type, which is what lets the transcript scroll while a
-/// half-written prompt sits on the composer line.
-fn is_ai_scroll_key(notation: &str) -> bool {
-    matches!(notation, "<PageUp>" | "<PageDown>" | "<C-u>")
+/// Every one of them is a named notation the composer cannot type, which is
+/// what lets the transcript scroll while a half-written prompt sits on the
+/// composer line. `<C-d>` is here too, but its own arm in `route_key`
+/// reaches it first and gives a crash banner the key while one is up.
+fn ai_scroll_for(notation: &str) -> Option<TranscriptScroll> {
+    match notation {
+        "<PageUp>" => Some(TranscriptScroll::PageBack),
+        "<PageDown>" => Some(TranscriptScroll::PageForward),
+        "<C-u>" => Some(TranscriptScroll::HalfPageBack),
+        "<C-d>" => Some(TranscriptScroll::HalfPageForward),
+        _ => None,
+    }
 }
 
 /// Scrolls the AI panel's transcript for one scroll key, reporting whether
 /// the window moved.
 ///
-/// A no-op while a review is open: the panel is painting that review's
-/// hunks, not the transcript, so a scroll here would move a window nobody
-/// can see and hand it back changed when the review ends.
+/// Carries no guard of its own against a review or a permission prompt
+/// owning the keys: [`reaches_past_a_panel_owner`] is the single place that
+/// decides what gets this far, so a second opinion here could only ever
+/// disagree with it.
 fn scroll_ai_transcript(model: &mut Model, notation: &str) -> bool {
-    if model.ai_panel().pending_diff.is_some() {
+    let Some(scroll) = ai_scroll_for(notation) else {
         return false;
-    }
-    let viewport = ai_transcript_viewport(model);
-    let half = viewport.div_ceil(2);
-    let panel = model.ai_panel_mut();
-    match notation {
-        "<PageUp>" => panel.scroll_transcript_back(viewport, viewport),
-        "<PageDown>" => panel.scroll_transcript_forward(viewport, viewport),
-        "<C-u>" => panel.scroll_transcript_back(half, viewport),
-        "<C-d>" => panel.scroll_transcript_forward(half, viewport),
-        _ => false,
-    }
+    };
+    let height = ai_panel_height(model);
+    model.ai_panel_mut().scroll_transcript(scroll, height)
 }
 
-/// How many transcript rows the open AI panel shows, from its own resolved
-/// geometry -- the same number `view-surface` paints with, so a page moves
-/// the window by exactly what the panel last drew.
-fn ai_transcript_viewport(model: &Model) -> usize {
-    let height = model
+/// The open AI panel's own resolved height in terminal rows -- the same
+/// number `view-surface` paints it at, so a page moves the window by
+/// exactly what the panel last drew.
+fn ai_panel_height(model: &Model) -> usize {
+    model
         .overlays()
         .iter()
         .rev()
         .find(|overlay| matches!(overlay.kind, OverlayKind::Ai))
-        .map_or(0, |overlay| model.overlay_rect(overlay).height);
-    model.ai_panel().transcript_viewport(usize::from(height))
+        .map_or(0, |overlay| usize::from(model.overlay_rect(overlay).height))
 }
 
 /// Routes one keypress to whatever currently owns the keyboard, after
@@ -1209,7 +1220,7 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     // session/request_permission requests with Cancelled");
                     // swallowing `<C-c>` here would leave that contract with
                     // no key that reaches it.
-                    if !is_panel_exit_key(&notation) {
+                    if !reaches_past_a_panel_owner(model, &notation) {
                         return Vec::new();
                     }
                 }
@@ -1218,10 +1229,12 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                 // the composer: `a` cannot mean both "accept this hunk" and
                 // "type an a", and a review is a decision the user opened
                 // the panel to make. Only the ways out (`<Esc>` to
-                // un-enter, `<C-c>`, `<C-d>`) fall through to the arm
-                // below, so every way out of the panel still works from
-                // inside a review.
-                if model.ai_panel().pending_diff.is_some() && !is_panel_exit_key(&notation) {
+                // un-enter, `<C-c>`, and `<C-d>` while a crash banner is
+                // up) fall through to the arm below, so every way out of
+                // the panel still works from inside a review.
+                if model.ai_panel().pending_diff.is_some()
+                    && !reaches_past_a_panel_owner(model, &notation)
+                {
                     return review_key(model, &notation);
                 }
                 // Nothing pending: the panel's own composer keys. Every key
@@ -1268,7 +1281,7 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     if dismissed || scroll_ai_transcript(model, &notation) {
                         model.dirty = true;
                     }
-                } else if is_ai_scroll_key(&notation) {
+                } else if ai_scroll_for(&notation).is_some() {
                     if scroll_ai_transcript(model, &notation) {
                         model.dirty = true;
                     }

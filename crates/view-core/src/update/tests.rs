@@ -2976,10 +2976,17 @@ fn paging_the_transcript_holds_the_window_and_paging_back_follows_it_again() {
     );
     assert!(m.dirty, "a moved window has to repaint");
     assert_eq!(m.ai_panel().input, "draft");
+    let held = panel_transcript_texts(&m);
     assert_eq!(
-        panel_transcript_texts(&m).first().unwrap(),
-        "Agent: line 60",
-        "one page up from the tail of a twenty-row window"
+        held.first().unwrap(),
+        "Agent: line 61",
+        "one page up from the tail of a twenty-row window, nineteen of which \
+         a held window draws"
+    );
+    assert_eq!(
+        held[..held.len() - 1].last().unwrap(),
+        "Agent: line 79",
+        "the page stops on the line directly above the one it came from"
     );
 
     let _ = update(&mut m, key("<PageDown>"));
@@ -3041,26 +3048,79 @@ fn submitting_a_prompt_returns_the_panel_to_the_newest_line() {
 
 /// A review paints its own hunks in place of the transcript, so a scroll
 /// key inside one would move a window nobody can see and hand it back
-/// changed when the review ends.
+/// changed when the review ends. All four are answered the same way any
+/// other key a review owns is -- `<C-d>` included, which reaches past the
+/// review only while a crash banner is there for it to dismiss.
 #[test]
-fn a_scroll_key_inside_an_open_review_leaves_the_transcript_where_it_was() {
-    let mut m = live_review_model();
-    for i in 0..100 {
-        m.ai_panel_mut().transcript.append_or_extend(
-            Some(&format!("m{i}")),
-            &format!("line {i}"),
-            crate::native::ai_panel::TranscriptRole::Agent,
+fn every_scroll_key_inside_an_open_review_is_answered_and_moves_nothing() {
+    for notation in ["<PageUp>", "<PageDown>", "<C-u>", "<C-d>"] {
+        let mut m = live_review_model();
+        for i in 0..100 {
+            m.ai_panel_mut().transcript.append_or_extend(
+                Some(&format!("m{i}")),
+                &format!("line {i}"),
+                crate::native::ai_panel::TranscriptRole::Agent,
+            );
+        }
+
+        let effects = update(&mut m, key(notation));
+
+        assert!(
+            rpc_calls(&effects).is_empty(),
+            "{notation} must not reach the engine: {effects:?}"
+        );
+        assert!(
+            m.ai_panel().pending_diff.is_some(),
+            "{notation} decides nothing"
+        );
+        let texts = visible_texts(&m);
+        assert!(
+            texts.iter().any(|line| line.contains("A review is open")),
+            "{notation} must be answered rather than swallowed in silence: {texts:?}"
+        );
+
+        m.ai_panel_mut().pending_diff = None;
+        assert_eq!(
+            panel_transcript_texts(&m).last().unwrap(),
+            "Agent: line 99",
+            "{notation} left the transcript following the tail, as the review \
+             found it"
         );
     }
+}
 
-    let _ = update(&mut m, key("<C-d>"));
+/// The same closed gate from the other owner. `<C-d>` is the one notation
+/// that reaches past an unanswered permission, and only as the banner
+/// dismissal it was added for: as a scroll key it must not put the window
+/// somewhere the header above it will then cut away.
+#[test]
+fn a_scroll_key_cannot_move_the_transcript_behind_an_unanswered_permission() {
+    for notation in ["<PageUp>", "<PageDown>", "<C-u>", "<C-d>"] {
+        let mut m = pending_permission_model();
+        for i in 0..100 {
+            m.ai_panel_mut().transcript.append_or_extend(
+                Some(&format!("m{i}")),
+                &format!("line {i}"),
+                crate::native::ai_panel::TranscriptRole::Agent,
+            );
+        }
 
-    m.ai_panel_mut().pending_diff = None;
-    assert_eq!(
-        panel_transcript_texts(&m).last().unwrap(),
-        "Agent: line 99",
-        "the transcript comes back following the tail, as the review found it"
-    );
+        let effects = update(&mut m, key(notation));
+
+        assert!(
+            effects.is_empty(),
+            "{notation} must not forward past the prompt: {effects:?}"
+        );
+        assert!(
+            m.ai_panel().pending_permission.is_some(),
+            "{notation} answers nothing"
+        );
+        assert_eq!(
+            panel_transcript_texts(&m).last().unwrap(),
+            "Agent: line 99",
+            "{notation} left the transcript following the tail"
+        );
+    }
 }
 
 /// Entering the panel makes `model.focus()` name it for real, the same way
