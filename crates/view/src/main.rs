@@ -15,6 +15,7 @@ mod recovery;
 mod remote_guard;
 mod runtime;
 mod speculate;
+mod spinner;
 mod startup;
 mod theme_cache;
 mod vlog;

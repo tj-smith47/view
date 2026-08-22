@@ -434,15 +434,6 @@ pub enum Msg {
     ToastExpired {
         id: MessageId,
     },
-    /// One frame of the agent panel's tool-call spinner is due. Carries
-    /// nothing: which calls are still running, and which frame they are on,
-    /// is the transcript's own state -- this says only that time has
-    /// passed, which is the one thing `update()` cannot know for itself.
-    ///
-    /// A no-op once every call has resolved, and the arm that folds it
-    /// re-arms `Effect::ScheduleAiSpinnerTick` only while one is still
-    /// running, so a quiet panel schedules nothing and repaints nothing.
-    AiSpinnerTick,
     /// The matcher worker's answer to one `Effect::PickerQuery`, streamed:
     /// the worker sends this as many times as its nucleo tick loop produces
     /// a new ranked prefix for a still-running Files scan, not once at the
@@ -1031,19 +1022,6 @@ pub enum Effect {
     /// expire.
     ScheduleToastExpiry {
         id: MessageId,
-        after: Duration,
-    },
-    /// Arms the next agent-panel spinner frame: after `after` elapses the
-    /// same one-shot timer thread [`Effect::ScheduleToastExpiry`] uses sends
-    /// [`Msg::AiSpinnerTick`] back into the loop.
-    ///
-    /// One-shot and re-armed per frame, rather than a repeating timer, for
-    /// the same reason the toast's is one-shot: nothing here can cancel a
-    /// thread already sleeping, so a spinner that stopped would otherwise
-    /// keep a timer alive for the rest of the session. Re-arming from the
-    /// arm that folds the tick means the last frame of a resolved call is
-    /// also the last timer it ever costs.
-    ScheduleAiSpinnerTick {
         after: Duration,
     },
     /// Re-nominates `path` after a grace period, so an answer of

@@ -42,6 +42,13 @@ runs, `✓` done, `✗` failed:
 ⠹ Run tests
 ```
 
+A call the agent never finished -- a session that crashes mid-call leaves
+one -- settles back to `·`: the panel never invents an outcome the agent
+did not report, and never animates a marker for work nobody is doing.
+
+The agent's plan reads the same way, one row per task: `·` not started,
+`▸` under way, `✓` done.
+
 When the panel is open but not focused, it says so and names the way in
 (`:View ai focus`).
 

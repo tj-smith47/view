@@ -168,20 +168,24 @@ mark_str() {
     printf '%b' "$(printf '%s' "$value" | sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')"
 }
 
-# The marker one `ToolCallStatus` arm renders as, joined from the match arm
-# that names a constant and the constant that holds the glyph -- so a
-# reworded arm or a changed glyph both fail here rather than quietly
-# matching nothing.
-status_mark() {
-    local variant="$1" name
-    name=$(grep -oE "ToolCallStatus::$variant => \(?[A-Z_]+" "$TRANSCRIPT_RS" |
+# The marker one status arm renders as, joined from the match arm that
+# names a constant and the constant that holds the glyph -- so a reworded
+# arm or a changed glyph both fail here rather than quietly matching
+# nothing.
+arm_mark() {
+    local arm="$1" name
+    name=$(grep -oE "$arm => \(?[A-Z_]+" "$TRANSCRIPT_RS" |
         sed -E 's/.*[( ]([A-Z_]+)$/\1/')
     if [ -z "$name" ]; then
-        printf 'FAIL: ToolCallStatus::%s renders no marker in %s any more\n' \
-            "$variant" "$TRANSCRIPT_RS" >&2
+        printf 'FAIL: %s renders no marker in %s any more\n' \
+            "$arm" "$TRANSCRIPT_RS" >&2
         return 1
     fi
     mark_str "$name"
+}
+
+status_mark() {
+    arm_mark "ToolCallStatus::$1"
 }
 
 # The literal `text` in `file`, as a check that a string this script builds
@@ -480,6 +484,15 @@ leg_streaming_and_tool_status() {
         "the first half of the streamed message" >/dev/null
     wait_for_re "($SPINNER_ALTERNATION) Probe the file" "$WAIT_SECS" \
         "the tool call's non-terminal status" >/dev/null
+    # The marker moves with nothing typed and nothing arriving from the
+    # agent: the turn is held here, so a second frame on screen is the
+    # editor's own loop deadline coming due and nothing else.
+    held=$(pane | grep -oE "($SPINNER_ALTERNATION) Probe the file" | head -1 | awk '{print $1}')
+    [ -n "$held" ] || fail "the spinner frame left the screen before it could be read"
+    others=$(printf '%s' "$SPINNER_ALTERNATION" |
+        awk -v skip="$held" 'BEGIN { RS = "|" } $0 != skip { printf "%s%s", (n++ ? "|" : ""), $0 }')
+    wait_for_re "($others) Probe the file" "$WAIT_SECS" \
+        "the spinner advancing while the turn is held" >/dev/null
     refute "${AGENT_PREFIX}streaming and done" \
         "the turn's second half rendered before it was sent"
 
@@ -498,7 +511,8 @@ leg_streaming_and_tool_status() {
     submit 'stream'
     wait_for "${DONE_MARK}Read a.rs" "$WAIT_SECS" "the streamed tool call" >/dev/null
     wait_for "$TERMINAL_CONTENT" "$WAIT_SECS" "the streamed terminal content" >/dev/null
-    wait_for "$PLAN_PREFIX" "$WAIT_SECS" "the streamed plan" >/dev/null
+    wait_for "${PLAN_ACTIVE_MARK}Read the file" "$WAIT_SECS" \
+        "the streamed plan" >/dev/null
     # Reasoning reaches the loop, reaches the screen, and reaches it in its
     # own voice. The refute is the actual contract: the wire carries
     # reasoning apart from the answer precisely so that no consumer renders
@@ -790,13 +804,16 @@ SPINNER_ALTERNATION=$(awk '
 }
 SPINNER_ALTERNATION=$(printf '%b' "$(printf '%s' "$SPINNER_ALTERNATION" |
     sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')")
-# A plan row's own opening, and a placeholder for a content kind the panel
-# shows a label for rather than the content itself. Both are built from the
-# wire's pinned vocabulary (`docs/acp-v1-wire-capture.md`'s `Plan` and
-# `Terminal` pins) slotted into a template that lives in the source, so the
-# template is what is checked and the wire word is what is substituted.
-require_template "$TRANSCRIPT_RS" '"plan [{status}, {priority}]: {}"' || exit 1
-PLAN_PREFIX='plan ['
+# The marker the plan's current task opens with -- the task the stub's own
+# plan update sends as `in_progress` (`docs/acp-v1-wire-capture.md`'s `Plan`
+# pin), read from the arm that renders that state rather than from a word
+# the row no longer carries.
+PLAN_ACTIVE_MARK=$(arm_mark "PlanEntryStatus::InProgress") || exit 1
+# A placeholder for a content kind the panel shows a label for rather than
+# the content itself, built from the wire's pinned vocabulary
+# (`docs/acp-v1-wire-capture.md`'s `Terminal` pin) slotted into a template
+# that lives in the source, so the template is what is checked and the wire
+# word is what is substituted.
 require_template "$REPO_ROOT/crates/view-ai/src/acp/driver.rs" '"[{kind} content]"' || exit 1
 TERMINAL_CONTENT='[terminal content]'
 # The crash banner's own opening, and the trust prompt's -- both `format!`
@@ -836,8 +853,7 @@ TERMINAL_STATUSES='Completed|Failed'
 # whichever `SPINNER_FRAMES` entry the tick has reached, already read into
 # `SPINNER_ALTERNATION` above, so the arm is proved to still animate rather
 # than to name a glyph.
-grep -qE 'ToolCallStatus::InProgress => \(\s*$|ToolCallStatus::InProgress => \(SPINNER_FRAMES' \
-    "$TRANSCRIPT_RS" || {
+grep -A 3 -E 'ToolCallStatus::InProgress =>' "$TRANSCRIPT_RS" | grep -q SPINNER_FRAMES || {
     printf 'FAIL: ToolCallStatus::InProgress no longer renders a spinner frame in %s\n' \
         "$TRANSCRIPT_RS" >&2
     exit 1

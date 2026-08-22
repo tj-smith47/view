@@ -34,6 +34,7 @@ use crate::speculate::{
     expire_speculation, note_engine_call, reconcile_speculation, SpeculationClock,
 };
 use std::sync::mpsc;
+use std::time::Instant;
 use view_core::model::Model;
 use view_core::msg::{Effect, ExitInfo, Msg, RegisterType, ReplyValue, RpcCall};
 use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
@@ -619,21 +620,6 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
-            // the same one-shot thread and the same channel the toast's
-            // expiry rides, for the same reason: `update()` has no clock,
-            // and the panel's spinner is one more thing that has to move
-            // while the engine sends nothing. Bounded by the tool call it
-            // animates -- the fold re-arms only while one is unresolved
-            Effect::ScheduleAiSpinnerTick { after } => {
-                if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("ai-spinner", move || {
-                        std::thread::sleep(after);
-                        let _ = tx.send(Msg::AiSpinnerTick);
-                    });
-                }
-                Flow::Continue
-            }
             // the same one-shot thread `ScheduleToastExpiry` uses, and the
             // same reason for it: `update()` has no clock, and a reply that
             // said a path could not be read has to be re-asked later rather
@@ -1190,7 +1176,8 @@ fn note_supervision(
 fn watch_deadline(wakeups: Wakeups<'_>) -> Option<std::time::Duration> {
     let watches = sooner(wakeups.write.poll_deadline(), wakeups.read.poll_deadline());
     let supervised = sooner(watches, wakeups.supervision.readout_deadline());
-    sooner(sooner(supervised, wakeups.speculation), wakeups.reconnect)
+    let scheduled = sooner(sooner(supervised, wakeups.speculation), wakeups.reconnect);
+    sooner(scheduled, wakeups.spinner)
 }
 
 /// The nearer of two deadlines, where `None` is "as long as you like" and
@@ -1206,9 +1193,9 @@ fn sooner(
 }
 
 /// Everything that can ask the loop to wake itself up rather than be woken
-/// by traffic. All four are read together on every pass, so they travel
-/// together: a caller holding three of them and forgetting the fourth gets a
-/// loop that sleeps through the one condition it was arming for.
+/// by traffic. All of them are read together on every pass, so they travel
+/// together: a caller holding all but one gets a loop that sleeps through
+/// the one condition it was arming for.
 ///
 /// The three watches are borrowed and asked for their own deadlines here;
 /// speculation's arrives already resolved because it is the one deadline
@@ -1225,6 +1212,10 @@ struct Wakeups<'a> {
     /// rather than off a watch, and a dead connection sends nothing that
     /// would otherwise wake the loop to take the attempt.
     reconnect: Option<std::time::Duration>,
+    /// When the agent panel's spinner owes its next frame
+    /// ([`expire_ai_spinner`]) -- the one wakeup here that exists to move
+    /// something on screen rather than to re-read something off the wire.
+    spinner: Option<std::time::Duration>,
 }
 
 /// Waits for the loop's next message, bounded by whichever watch has a
@@ -1618,6 +1609,7 @@ pub fn run(
     let mut supervision = SupervisionFold::default();
     let mut state = LoopState::default();
     let mut reconnect = ReconnectSchedule::default();
+    let mut spinner_due: Option<Instant> = None;
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -1713,6 +1705,9 @@ pub fn run(
         // reachable only when a redraw arrives could never fire during the
         // total redraw stall it exists to bound
         expire_speculation(&mut model, follow_ups.speculate);
+        // before the paint below rather than after it, so the frame this
+        // pass draws is the one the deadline came due for
+        crate::spinner::expire(&mut model, &mut spinner_due, Instant::now());
         drain_pass_handoffs(&osc52_rx, term, &executor);
         // a resize the input reader has already seen describes the terminal
         // as it is now, whatever traffic is still queued ahead of its
@@ -1781,6 +1776,7 @@ pub fn run(
             .armed()
             .then(|| reconnect.poll_deadline(std::time::Instant::now()))
             .flatten();
+        let spinner = crate::spinner::next_frame(spinner_due, Instant::now());
         #[cfg(unix)]
         let received = wait_for_msg_unified(
             &msg_rx,
@@ -1789,6 +1785,7 @@ pub fn run(
                 read: &engine.heartbeat,
                 supervision: &supervision,
                 speculation,
+                spinner,
                 reconnect: due,
             },
             input,
@@ -1804,6 +1801,7 @@ pub fn run(
                 read: &engine.heartbeat,
                 supervision: &supervision,
                 speculation,
+                spinner,
                 reconnect: due,
             },
         );
@@ -4716,6 +4714,7 @@ mod tests {
                         read: &heartbeat,
                         supervision: &fold,
                         speculation: None,
+                        spinner: None,
                         reconnect: None,
                     },
                 )
@@ -4776,6 +4775,7 @@ mod tests {
             read: &heartbeat,
             supervision: &fold,
             speculation: None,
+            spinner: None,
             reconnect: None,
         })
         .expect("an idle session must still arm the wakeup a silent engine needs");
@@ -4800,6 +4800,7 @@ mod tests {
                 read: &heartbeat,
                 supervision: &fold,
                 speculation: None,
+                spinner: None,
                 reconnect: None,
             },
         );
@@ -4847,6 +4848,7 @@ mod tests {
                 read: &heartbeat,
                 supervision: &fold,
                 speculation: None,
+                spinner: None,
                 reconnect: None,
             }),
             None,
@@ -4878,6 +4880,7 @@ mod tests {
             read: &heartbeat,
             supervision: &fold,
             speculation,
+            spinner: None,
             reconnect: None,
         })
         .expect("a pending prediction must bound a wait nothing else bounds");
@@ -4901,6 +4904,7 @@ mod tests {
                     read: &heartbeat,
                     supervision: &fold,
                     speculation,
+                    spinner: None,
                     reconnect: None,
                 },
             )
@@ -4978,6 +4982,7 @@ mod tests {
                     read: &heartbeat,
                     supervision: &fold,
                     speculation: None,
+                    spinner: None,
                     reconnect: None,
                 },
             )

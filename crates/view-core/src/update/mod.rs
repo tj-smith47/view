@@ -496,20 +496,6 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 resolved: Some(items),
             }]
         }
-        Msg::AiSpinnerTick => {
-            if !model.ai_panel_mut().transcript.advance_spinner() {
-                return Vec::new();
-            }
-            // The frame moves whether or not anyone is looking, so a panel
-            // reopened mid-call finds its spinner where it should be -- but
-            // only a panel on screen is worth a repaint, and a tool call
-            // running behind a closed sidebar must not cost one every
-            // eightieth of a second.
-            model.dirty |= model.ai_panel_overlay_open();
-            vec![Effect::ScheduleAiSpinnerTick {
-                after: crate::native::ai_panel::SPINNER_INTERVAL,
-            }]
-        }
         Msg::ToastExpired { id } => {
             // races the same entry being cleared, replaced (which stamps a
             // fresh id, so this id simply no longer matches anything), or

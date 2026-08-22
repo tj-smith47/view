@@ -3086,11 +3086,12 @@ fn submitting_a_prompt_puts_it_in_the_transcript_and_still_sends_it() {
     );
 }
 
-/// The spinner's clock: a call going in flight is what asks for one, a
-/// tick moves the frame and asks for the next, and the call resolving is
-/// what ends the sequence. Nothing here is armed by an idle panel.
+/// What the fold owes the spinner: a call going in flight is what makes
+/// the panel something to animate, a resolved one is what makes it stop,
+/// and neither costs an effect -- the loop reads the transcript for the
+/// deadline rather than being handed one.
 #[test]
-fn a_running_tool_call_arms_one_spinner_tick_at_a_time_and_stops_when_it_resolves() {
+fn a_tool_call_in_flight_is_what_makes_the_panel_spin() {
     use crate::native::ai_event::{AiEvent, ToolCallStatus};
 
     let mut m = scrollable_ai_panel_model(0);
@@ -3105,36 +3106,24 @@ fn a_running_tool_call_arms_one_spinner_tick_at_a_time_and_stops_when_it_resolve
 
     assert!(
         update(&mut m, tool_call(ToolCallStatus::Pending)).is_empty(),
-        "a call that has not started asks for no clock"
+        "a call that has not started asks for nothing"
+    );
+    assert!(
+        !m.ai_panel().transcript.is_spinning(),
+        "and nothing on the panel is moving yet"
     );
 
-    let armed = update(&mut m, tool_call(ToolCallStatus::InProgress));
     assert!(
-        matches!(armed.as_slice(), [Effect::ScheduleAiSpinnerTick { .. }]),
-        "the call in flight arms the tick: {armed:?}"
+        update(&mut m, tool_call(ToolCallStatus::InProgress)).is_empty(),
+        "the call in flight schedules nothing of its own"
     );
-    assert!(
-        update(&mut m, tool_call(ToolCallStatus::InProgress))
-            .iter()
-            .all(|e| !matches!(e, Effect::ScheduleAiSpinnerTick { .. })),
-        "a further update must not arm a second timer"
-    );
-
-    m.dirty = false;
-    let ticked = update(&mut m, Msg::AiSpinnerTick);
-    assert!(
-        matches!(ticked.as_slice(), [Effect::ScheduleAiSpinnerTick { .. }]),
-        "a tick re-arms itself while the call runs: {ticked:?}"
-    );
-    assert!(m.dirty, "and the frame it moved has to be painted");
+    assert!(m.ai_panel().transcript.is_spinning());
 
     let _ = update(&mut m, tool_call(ToolCallStatus::Completed));
-    m.dirty = false;
     assert!(
-        update(&mut m, Msg::AiSpinnerTick).is_empty(),
-        "the resolved call stops the sequence"
+        !m.ai_panel().transcript.is_spinning(),
+        "the resolved call stops the animation"
     );
-    assert!(!m.dirty, "and costs no repaint after it has stopped");
 }
 
 /// A review paints its own hunks in place of the transcript, so a scroll

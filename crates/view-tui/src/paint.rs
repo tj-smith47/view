@@ -2188,14 +2188,23 @@ mod tests {
         panic!("the composer never wrapped");
     }
 
-    /// Sends one key through `update()`, which routes it to whatever holds
-    /// focus -- the agent panel's composer, when the panel is open.
     /// Folds one agent event through `update()`, the way the runtime's own
     /// `Msg::Ai` dispatch does.
     fn ai_event(model: &mut Model, event: AiEvent) {
         let _ = view_core::update::update(model, view_core::msg::Msg::Ai(event));
     }
 
+    /// One spinner frame, both halves of what `runtime::expire_ai_spinner`
+    /// does when the panel's own deadline comes due: `view-tui` has no loop
+    /// to run and no clock to run it on, so the frame is moved here and the
+    /// repaint it owes is asked for here.
+    fn spinner_tick(model: &mut Model) {
+        model.ai_panel_mut().transcript.advance_spinner();
+        model.dirty = true;
+    }
+
+    /// Sends one key through `update()`, which routes it to whatever holds
+    /// focus -- the agent panel's composer, when the panel is open.
     fn type_key(model: &mut Model, notation: &str) {
         let _ = view_core::update::update(
             model,
@@ -2647,7 +2656,7 @@ mod tests {
         shadow.compose(&model, &surface, &Damage::full());
         shadow.commit();
 
-        let _ = view_core::update::update(&mut model, view_core::msg::Msg::AiSpinnerTick);
+        spinner_tick(&mut model);
         let surface = view_surface::render(&model);
         let ticked = shadow.overlay_damage(&surface);
         assert_eq!(
@@ -3617,9 +3626,7 @@ mod tests {
             (
                 "spinner tick",
                 Box::new(|m: &mut Model| {
-                    m.dirty = false;
-                    let _ = view_core::update::update(m, view_core::msg::Msg::AiSpinnerTick);
-                    assert!(m.dirty, "the tick moved a frame the panel has to paint");
+                    spinner_tick(m);
                 }),
             ),
             (

@@ -1459,16 +1459,12 @@ mod tests {
             None,
         );
         assert!(
-            state.transcript.arm_spinner(),
+            state.transcript.is_spinning(),
             "a call in flight is what buys the panel a clock"
-        );
-        assert!(
-            !state.transcript.arm_spinner(),
-            "a second call must not arm a second timer"
         );
 
         let first = state.view(ROOM, WIDE_PANEL).rows;
-        assert!(state.transcript.advance_spinner());
+        state.transcript.advance_spinner();
         let second = state.view(ROOM, WIDE_PANEL).rows;
 
         assert_eq!(
@@ -1489,7 +1485,7 @@ mod tests {
             None,
         );
         assert!(
-            !state.transcript.advance_spinner(),
+            !state.transcript.is_spinning(),
             "a resolved call leaves nothing to animate"
         );
         assert_eq!(

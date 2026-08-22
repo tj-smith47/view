@@ -4,10 +4,10 @@
 //! keeps a paint proportional to what changed since the last one.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::native::ai_event::{PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCallStatus};
+use crate::native::ai_event::{PlanEntry, PlanEntryStatus, ToolCallStatus};
 use crate::native::views::{Span, StyleRole};
 
 /// The glyph opening a transcript entry the user composed.
@@ -27,6 +27,12 @@ const TOOL_PENDING_MARK: &str = "\u{b7} ";
 const TOOL_DONE_MARK: &str = "\u{2713} ";
 /// The glyph a failed tool call opens with.
 const TOOL_FAILED_MARK: &str = "\u{2717} ";
+/// The glyph the plan's current task opens with. A plan task is a tool
+/// call's twin -- something the agent has not done, is doing, or has done
+/// -- so the two share the marker vocabulary at either end, and this is
+/// the one state a task can be in that a tool call cannot: under way, but
+/// not a call this panel is animating a spinner for.
+const PLAN_ACTIVE_MARK: &str = "\u{25b8} ";
 
 /// The braille cycle a running tool call's marker animates through.
 const SPINNER_FRAMES: [&str; 8] = [
@@ -185,15 +191,16 @@ pub struct Transcript {
     /// second prompt in one session never reuses the first one's id and
     /// folds into the entry it already wrote.
     local_seq: u64,
-    /// How many tool calls are mid-flight. Counted as statuses move rather
-    /// than scanned per tick: it is what decides whether the spinner is
-    /// running at all, and a scan would put the length of the session into
-    /// a question asked on a timer.
-    running_calls: usize,
-    /// Whether a spinner tick is already scheduled, so a burst of tool-call
-    /// updates arms one timer rather than one per update.
-    spinner_armed: bool,
-    /// Which [`SPINNER_FRAMES`] entry an unresolved tool call currently
+    /// Which entries are animating: the one authority on that, held rather
+    /// than derived from entry status, so that the renderer and the tick
+    /// agree by construction. A call the wire left unresolved when its turn
+    /// ended stays `InProgress` -- the panel invents no result the agent
+    /// never reported -- but it leaves this set, so it neither animates nor
+    /// resumes animating behind a later call. Membership rather than a
+    /// count, so the tick's work is the number of markers moving instead of
+    /// the length of the session.
+    animating: HashSet<usize>,
+    /// Which [`SPINNER_FRAMES`] entry an animating tool call currently
     /// paints.
     spinner_frame: usize,
 }
@@ -227,10 +234,11 @@ struct LocalEcho {
 /// same events must compare equal whether or not either has ever been
 /// painted; deriving `PartialEq` across every field would make painting a
 /// transcript change what it compares equal to, which is not an identity
-/// any caller should be able to observe. The spinner's frame and its armed
-/// flag are excluded on the same terms -- which eighth of a second a
-/// running call's glyph is on says nothing about what the transcript holds
-/// -- while the pending local echo is included, because whether a replay
+/// any caller should be able to observe. The spinner's frame and the set
+/// of markers it is moving are excluded on the same terms -- which eighth
+/// of a second a running call's glyph is on says nothing about what the
+/// transcript holds -- while the pending local echo is included, because
+/// whether a replay
 /// would be absorbed or appended is a real difference between two
 /// transcripts.
 impl PartialEq for Transcript {
@@ -295,7 +303,7 @@ impl Transcript {
                 break;
             }
             let entry_rows =
-                cache[i].get_or_insert_with(|| render_entry(&self.entries[i], self.spinner_frame));
+                cache[i].get_or_insert_with(|| render_entry(&self.entries[i], self.frame_at(i)));
             rows.extend(entry_rows.iter().skip(skip).cloned());
             skip = 0;
         }
@@ -343,7 +351,7 @@ impl Transcript {
             }
             entry -= 1;
             row = cache[entry]
-                .get_or_insert_with(|| render_entry(&self.entries[entry], self.spinner_frame))
+                .get_or_insert_with(|| render_entry(&self.entries[entry], self.frame_at(entry)))
                 .len();
         }
         TranscriptAnchor { entry, row }
@@ -361,7 +369,7 @@ impl Transcript {
         let mut row = anchor.row;
         while left > 0 && entry < self.entries.len() {
             let below = cache[entry]
-                .get_or_insert_with(|| render_entry(&self.entries[entry], self.spinner_frame))
+                .get_or_insert_with(|| render_entry(&self.entries[entry], self.frame_at(entry)))
                 .len()
                 .saturating_sub(row);
             if below > left {
@@ -460,14 +468,7 @@ impl Transcript {
                     _ => Vec::new(),
                 },
             };
-            let was_running = matches!(
-                self.entries[i].kind,
-                TranscriptEntryKind::ToolCall {
-                    status: ToolCallStatus::InProgress,
-                    ..
-                }
-            );
-            self.note_running(was_running, status == ToolCallStatus::InProgress);
+            self.note_running(i, status == ToolCallStatus::InProgress);
             self.entries[i].kind = TranscriptEntryKind::ToolCall {
                 tool_call_id,
                 status,
@@ -477,7 +478,6 @@ impl Transcript {
             self.row_cache.get_mut()[i] = None;
             return;
         }
-        self.note_running(false, status == ToolCallStatus::InProgress);
         self.entries.push(TranscriptEntry {
             kind: TranscriptEntryKind::ToolCall {
                 tool_call_id: tool_call_id.clone(),
@@ -487,58 +487,52 @@ impl Transcript {
             text: title,
         });
         self.row_cache.get_mut().push(None);
-        self.tool_call_index
-            .insert(tool_call_id, self.entries.len() - 1);
+        let at = self.entries.len() - 1;
+        self.note_running(at, status == ToolCallStatus::InProgress);
+        self.tool_call_index.insert(tool_call_id, at);
     }
 
-    /// Moves the in-flight tool-call count for one status transition.
-    fn note_running(&mut self, was: bool, now: bool) {
-        match (was, now) {
-            (false, true) => self.running_calls += 1,
-            (true, false) => self.running_calls = self.running_calls.saturating_sub(1),
-            _ => {}
+    /// Enrols entry `at` in the animating set, or takes it out.
+    ///
+    /// Idempotent in both directions rather than a delta on a counter: a
+    /// recovered session is free to restate `in_progress` on a call it
+    /// already announced, and a set that only moved on transitions would
+    /// read that restatement as "no change" and leave the marker frozen.
+    fn note_running(&mut self, at: usize, running: bool) {
+        if running {
+            self.animating.insert(at);
+        } else {
+            self.animating.remove(&at);
         }
     }
 
-    /// Whether a spinner tick has to be scheduled now: a call is running and
-    /// nothing is already timing the next frame. Claims the slot as it
-    /// answers, so a turn announcing six tool calls arms one timer.
+    /// Whether any marker is currently animating -- what the caller arms
+    /// its next frame's wakeup on, and stops arming when it goes false.
     ///
-    /// The caller owns the clock (`view-core` has none) and turns a `true`
-    /// here into `Effect::ScheduleAiSpinnerTick`.
-    pub fn arm_spinner(&mut self) -> bool {
-        let arm = self.running_calls > 0 && !self.spinner_armed;
-        self.spinner_armed |= arm;
-        arm
+    /// The caller owns the clock; `view-core` has none.
+    #[must_use]
+    pub fn is_spinning(&self) -> bool {
+        !self.animating.is_empty()
     }
 
-    /// Advances every unresolved tool call's marker to the next spinner
-    /// frame, reporting whether the spinner is still running -- which is
-    /// both what the caller repaints on and what it re-arms the tick on.
+    /// Moves every animating marker on to the next spinner frame.
     ///
-    /// Only the entries actually spinning drop their cached rows, so the
-    /// frame a tick repaints is the marker's own row and nothing else on
-    /// the panel; a transcript with no call in flight clears the armed flag
-    /// and does no work at all.
-    pub fn advance_spinner(&mut self) -> bool {
-        if self.running_calls == 0 {
-            self.spinner_armed = false;
-            return false;
-        }
+    /// Only those entries drop their cached rows, so the frame a tick
+    /// repaints is the markers' own rows and nothing else on the panel --
+    /// and the work is the number of calls in flight, never the length of
+    /// the session.
+    pub fn advance_spinner(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
         let cache = self.row_cache.get_mut();
-        for (i, entry) in self.entries.iter().enumerate() {
-            if matches!(
-                entry.kind,
-                TranscriptEntryKind::ToolCall {
-                    status: ToolCallStatus::InProgress,
-                    ..
-                }
-            ) {
-                cache[i] = None;
-            }
+        for &i in &self.animating {
+            cache[i] = None;
         }
-        true
+    }
+
+    /// Which spinner frame entry `at` paints, or `None` when it is not one
+    /// of the markers moving.
+    fn frame_at(&self, at: usize) -> Option<usize> {
+        self.animating.contains(&at).then_some(self.spinner_frame)
     }
 
     /// Appends the prompt the user just submitted, under an id minted here.
@@ -572,6 +566,15 @@ impl Transcript {
 
     /// Whether `text` continues the echoed prompt, consuming that much of it
     /// when it does.
+    ///
+    /// A replay already under way that is interrupted by something else
+    /// ends the window: once a chunk of the prompt has been restated, the
+    /// next chunk either continues it or the adapter is saying something
+    /// of its own, and treating a later chunk as the prompt's remainder
+    /// would swallow part of that other message. Nothing matched yet is
+    /// not an interruption -- an adapter free to inject its own context
+    /// ahead of the prompt is still owed the dedupe when the prompt
+    /// arrives.
     fn absorbs_replay(&mut self, text: &str) -> bool {
         let Some(echo) = self.echo else {
             return false;
@@ -590,6 +593,8 @@ impl Transcript {
                 matched: echo.matched + text.len(),
                 ..echo
             });
+        } else if echo.matched > 0 {
+            self.echo = None;
         }
         absorbed
     }
@@ -604,13 +609,17 @@ impl Transcript {
     /// The spinner stops too, whatever the wire last said about the calls
     /// still on screen. A turn that ended with a call unresolved -- which
     /// is every crashed session, since a dead agent sends no final status
-    /// -- would otherwise keep a marker animating, and a timer re-arming
+    /// -- would otherwise keep a marker animating, and a wakeup armed
     /// behind it, for the rest of the run. Their last status stands: the
     /// panel does not invent a result the agent never reported, it stops
-    /// pretending the call is still moving.
+    /// pretending the call is still moving, and the marker it settles on is
+    /// the static one an unstarted call wears.
     pub fn end_turn(&mut self) {
         self.echo = None;
-        self.running_calls = 0;
+        let cache = self.row_cache.get_mut();
+        for i in self.animating.drain() {
+            cache[i] = None;
+        }
     }
 
     /// Replaces the transcript's plan wholesale, per the wire's own
@@ -650,15 +659,17 @@ thread_local! {
 
 /// One transcript entry's rendered rows: a single line for a message, a
 /// title line plus one line per result item for a tool call, or one line
-/// per task for a plan. `spinner` is the frame an unresolved tool call's
-/// marker is currently on ([`Transcript::advance_spinner`]).
+/// per task for a plan. `spinner` is the frame this entry's marker is
+/// currently on ([`Transcript::advance_spinner`]), or `None` for an entry
+/// that is not animating -- including a call the wire left unresolved,
+/// whose marker holds still rather than claiming work nobody is doing.
 ///
 /// Every row opens with a marker glyph in its own span, and the row's
 /// meaning is carried by color and that glyph rather than by a word: a
 /// panel that spells out who is speaking spends the start of every line
 /// restating what a reader learns once, and the transcript is the one
 /// surface here where the content is the point.
-fn render_entry(entry: &TranscriptEntry, spinner: usize) -> Vec<Vec<Span>> {
+fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span>> {
     #[cfg(test)]
     RENDER_ENTRY_CALLS.with(|calls| calls.set(calls.get() + 1));
     match &entry.kind {
@@ -677,7 +688,9 @@ fn render_entry(entry: &TranscriptEntry, spinner: usize) -> Vec<Vec<Span>> {
             let (mark, style) = match status {
                 ToolCallStatus::Pending => (TOOL_PENDING_MARK, StyleRole::AiToolRunning),
                 ToolCallStatus::InProgress => (
-                    SPINNER_FRAMES[spinner % SPINNER_FRAMES.len()],
+                    spinner.map_or(TOOL_PENDING_MARK, |frame| {
+                        SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
+                    }),
                     StyleRole::AiToolRunning,
                 ),
                 ToolCallStatus::Completed => (TOOL_DONE_MARK, StyleRole::AiToolDone),
@@ -697,20 +710,12 @@ fn render_entry(entry: &TranscriptEntry, spinner: usize) -> Vec<Vec<Span>> {
         TranscriptEntryKind::Plan { entries } => entries
             .iter()
             .map(|e| {
-                let priority = match e.priority {
-                    PlanEntryPriority::High => "high",
-                    PlanEntryPriority::Medium => "medium",
-                    PlanEntryPriority::Low => "low",
+                let (mark, style) = match e.status {
+                    PlanEntryStatus::Pending => (TOOL_PENDING_MARK, StyleRole::AiToolRunning),
+                    PlanEntryStatus::InProgress => (PLAN_ACTIVE_MARK, StyleRole::AiAgent),
+                    PlanEntryStatus::Completed => (TOOL_DONE_MARK, StyleRole::AiToolDone),
                 };
-                let status = match e.status {
-                    PlanEntryStatus::Pending => "pending",
-                    PlanEntryStatus::InProgress => "in_progress",
-                    PlanEntryStatus::Completed => "completed",
-                };
-                vec![Span::plain(format!(
-                    "plan [{status}, {priority}]: {}",
-                    e.content
-                ))]
+                vec![Span::new(mark, style), Span::plain(e.content.clone())]
             })
             .collect(),
     }
@@ -721,6 +726,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::native::ai_event::PlanEntryPriority;
 
     /// A row budget larger than any transcript a test builds, for the tests
     /// whose subject is what renders rather than how much of it does.
@@ -1006,7 +1012,7 @@ mod tests {
         assert_eq!(transcript.iter().next().unwrap().text, "before after");
     }
 
-    /// A transcript of `lines` one-row agent messages, `Agent: line 0`
+    /// A transcript of `lines` one-row agent messages, `line 0`
     /// upward -- long enough that no window shows all of it.
     fn long_transcript(lines: usize) -> Transcript {
         let mut transcript = Transcript::new();
@@ -1250,6 +1256,99 @@ mod tests {
         );
     }
 
+    /// A replay interrupted part way through stops being one: the chunk
+    /// that broke it is the adapter's own, and so is everything after it
+    /// until the next prompt -- matching a later chunk against what is
+    /// left of the echo would swallow half of a message the user has never
+    /// been shown.
+    #[test]
+    fn a_replay_broken_off_part_way_stops_absorbing_what_follows() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+
+        transcript.append_user_chunk(Some("wire-1"), "fix the ");
+        transcript.append_user_chunk(Some("wire-2"), "<ctx>");
+        transcript.append_user_chunk(Some("wire-2"), "retry policy");
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            vec![
+                "\u{276f} fix the retry policy",
+                "\u{276f} <ctx>retry policy"
+            ],
+            "the injected message must arrive whole, not with its tail eaten"
+        );
+    }
+
+    /// An adapter free to put its own context in front of the prompt has
+    /// still said nothing of the prompt yet, so the window it would be
+    /// deduplicated in is still open when it finally replays.
+    #[test]
+    fn context_injected_ahead_of_the_replay_does_not_close_the_window() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+
+        transcript.append_user_chunk(Some("wire-1"), "<ctx>");
+        transcript.append_user_chunk(Some("wire-2"), "fix the retry policy");
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            vec!["\u{276f} fix the retry policy", "\u{276f} <ctx>"],
+            "the replay is still recognised as the prompt already on screen"
+        );
+    }
+
+    /// A plan task is a task: it opens with the glyph its state has earned
+    /// and carries its state in colour, exactly as every other row on the
+    /// panel does, rather than spelling its state out in words.
+    #[test]
+    fn a_plan_task_opens_with_the_glyph_for_its_state() {
+        let mut transcript = Transcript::new();
+        transcript.upsert_plan(vec![
+            PlanEntry {
+                content: "Read the file".to_string(),
+                priority: PlanEntryPriority::High,
+                status: PlanEntryStatus::Completed,
+            },
+            PlanEntry {
+                content: "Write the fix".to_string(),
+                priority: PlanEntryPriority::Medium,
+                status: PlanEntryStatus::InProgress,
+            },
+            PlanEntry {
+                content: "Run the tests".to_string(),
+                priority: PlanEntryPriority::Low,
+                status: PlanEntryStatus::Pending,
+            },
+        ]);
+
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Span::new(TOOL_DONE_MARK, StyleRole::AiToolDone),
+                    Span::plain("Read the file".to_string()),
+                ],
+                vec![
+                    Span::new(PLAN_ACTIVE_MARK, StyleRole::AiAgent),
+                    Span::plain("Write the fix".to_string()),
+                ],
+                vec![
+                    Span::new(TOOL_PENDING_MARK, StyleRole::AiToolRunning),
+                    Span::plain("Run the tests".to_string()),
+                ],
+            ]
+        );
+        let painted = texts(&rows).join("\n");
+        for word in ["plan", "pending", "in_progress", "completed", "high", "low"] {
+            assert!(
+                !painted.contains(word),
+                "a plan row must not spell out `{word}`: {painted}"
+            );
+        }
+    }
+
     /// A turn's echo dies with the turn: the next turn's chunks are matched
     /// against that turn's echo or against nothing at all, never against a
     /// prompt two turns old that happens to start the same way.
@@ -1299,7 +1398,7 @@ mod tests {
         let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM);
 
         reset_render_entry_calls();
-        assert!(transcript.advance_spinner());
+        transcript.advance_spinner();
         let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM);
 
         assert_eq!(
@@ -1311,7 +1410,7 @@ mod tests {
 
     /// A call the agent never resolved -- a crashed session leaves one on
     /// every turn it was mid-way through -- must not leave a marker
-    /// animating and a timer re-arming behind it for the rest of the run.
+    /// animating and a wakeup armed behind it for the rest of the run.
     #[test]
     fn a_turn_that_ends_mid_call_stops_the_spinner() {
         let mut transcript = Transcript::new();
@@ -1321,22 +1420,94 @@ mod tests {
             ToolCallStatus::InProgress,
             None,
         );
-        assert!(transcript.arm_spinner());
+        assert!(transcript.is_spinning());
 
         transcript.end_turn();
 
-        assert!(!transcript.advance_spinner());
-        assert!(!transcript.arm_spinner());
+        assert!(!transcript.is_spinning());
+    }
+
+    /// The call the crashed turn abandoned is not the panel's to resolve,
+    /// but it is the panel's not to animate: a later turn starting a call
+    /// of its own must leave the abandoned one exactly as the turn left it,
+    /// tick after tick, rather than picking it back up because it still
+    /// says `in_progress` on the wire.
+    #[test]
+    fn an_abandoned_call_never_animates_again_behind_a_later_one() {
+        let mut transcript = Transcript::new();
+        transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Run tests".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+        transcript.end_turn();
+        let settled = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        assert_eq!(
+            texts(&settled),
+            vec!["\u{b7} Run tests"],
+            "an abandoned call wears the marker of a call that is not moving"
+        );
+
+        transcript.upsert_tool_call(
+            "call_2".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+        transcript.advance_spinner();
+        transcript.advance_spinner();
+
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        assert_eq!(
+            rows[0], settled[0],
+            "the abandoned call's row must not have moved"
+        );
+        assert_ne!(
+            texts(&rows)[1],
+            "\u{b7} Read file",
+            "the new call is the one that spins"
+        );
+    }
+
+    /// A recovered session is free to restate `in_progress` on a call it
+    /// already announced, and the panel has to read that as "still
+    /// working" -- a transcript that only moved on transitions would leave
+    /// the marker frozen for the whole turn.
+    #[test]
+    fn a_call_restated_in_progress_after_a_turn_ended_spins_again() {
+        let mut transcript = Transcript::new();
+        transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Run tests".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+        transcript.end_turn();
+
+        transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Run tests".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+
+        assert!(transcript.is_spinning());
+        let before = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        transcript.advance_spinner();
+        assert_ne!(
+            transcript.rows_from(TranscriptAnchor::default(), ROOM),
+            before
+        );
     }
 
     /// Nothing running means nothing to animate, and the caller reads that
-    /// answer to stop re-arming the timer.
+    /// answer to stop arming the next frame's wakeup.
     #[test]
-    fn a_transcript_with_no_call_in_flight_neither_arms_nor_advances() {
+    fn a_transcript_with_no_call_in_flight_never_spins() {
         let mut transcript = Transcript::new();
         transcript.append_or_extend(Some("m1"), "hello", TranscriptRole::Agent);
-        assert!(!transcript.arm_spinner());
-        assert!(!transcript.advance_spinner());
+        assert!(!transcript.is_spinning());
 
         transcript.upsert_tool_call(
             "call_1".to_string(),
@@ -1345,14 +1516,14 @@ mod tests {
             None,
         );
         assert!(
-            !transcript.arm_spinner(),
+            !transcript.is_spinning(),
             "a call that arrived already finished never spins"
         );
     }
 
-    /// Two calls in flight share one timer, and it keeps running until the
-    /// last of them resolves -- an arm-per-call would leave a second timer
-    /// ticking against a panel with nothing moving on it.
+    /// Two calls in flight animate together and the spinner keeps running
+    /// until the last of them resolves -- a panel that stopped on the
+    /// first result would freeze the marker of a call still working.
     #[test]
     fn the_spinner_stops_only_once_every_call_has_resolved() {
         let mut transcript = Transcript::new();
@@ -1364,8 +1535,7 @@ mod tests {
                 None,
             );
         }
-        assert!(transcript.arm_spinner());
-        assert!(!transcript.arm_spinner());
+        assert!(transcript.is_spinning());
 
         transcript.upsert_tool_call(
             "call_1".to_string(),
@@ -1373,10 +1543,7 @@ mod tests {
             ToolCallStatus::Completed,
             None,
         );
-        assert!(
-            transcript.advance_spinner(),
-            "the second call is still running"
-        );
+        assert!(transcript.is_spinning(), "the second call is still running");
 
         transcript.upsert_tool_call(
             "call_2".to_string(),
@@ -1384,7 +1551,7 @@ mod tests {
             ToolCallStatus::Failed,
             None,
         );
-        assert!(!transcript.advance_spinner());
+        assert!(!transcript.is_spinning());
 
         transcript.upsert_tool_call(
             "call_3".to_string(),
@@ -1393,8 +1560,8 @@ mod tests {
             None,
         );
         assert!(
-            transcript.arm_spinner(),
-            "the armed slot is handed back, so a later call gets its own timer"
+            transcript.is_spinning(),
+            "a later call starts the spinner back up"
         );
     }
 }

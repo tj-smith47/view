@@ -104,16 +104,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         } => {
             let transcript = &mut model.ai_panel_mut().transcript;
             transcript.upsert_tool_call(tool_call_id, title, status, content);
-            let arm = transcript.arm_spinner();
             model.dirty = true;
-            if arm {
-                // The panel has no clock of its own; the first call to go
-                // in flight is what buys one, and it is handed back at the
-                // frame the last call resolves.
-                return vec![Effect::ScheduleAiSpinnerTick {
-                    after: crate::native::ai_panel::SPINNER_INTERVAL,
-                }];
-            }
         }
         AiEvent::PlanUpdated { entries } => {
             model.ai_panel_mut().transcript.upsert_plan(entries);
