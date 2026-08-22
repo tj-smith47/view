@@ -194,6 +194,29 @@ event-level test stays as-is and must pass on macOS. macOS verification
 owed via an mbp run of the view-ai suite (script file, provenance line,
 caffeinate) before the next push is called green-capable.
 
+## T9 — User messages appear in the transcript
+
+Second-dogfood report (2026-08-22): the panel shows agent responses but
+never the user's own messages. Root cause: the `<CR>` submit path takes
+the composer text and emits `Effect::AiPromptSubmit` without appending a
+transcript entry; the only writer of `TranscriptRole::User` is
+`AiEvent::MessageChunk { from_agent: false }`, which requires the agent
+to replay the user's message over the wire — the Claude Code ACP adapter
+does not. The `You:` role, styling, and rendering already exist and are
+reachable only from tests.
+
+Fix: on submit, append the prompt text locally as a `User` entry (instant
+echo, terminal-chat convention) with a locally minted message id, and
+reconcile incoming `from_agent: false` chunks so an adapter that does
+replay the message produces no duplicate (drop a replay that matches the
+newest local `User` entry for the in-flight turn; a genuinely new user
+chunk — e.g. adapter-side context injection — still appends).
+
+Tests: submit appends a `User` entry and the follow-tail keeps it
+visible; a replayed user chunk after a local echo does not duplicate; a
+user chunk with no matching local echo still appends; the echoed entry
+wraps through the same transcript width path T6 fixed.
+
 ## Exit
 
 - All seven fixed, `task ci` green, budgets hold, docs current.
