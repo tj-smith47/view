@@ -16,11 +16,16 @@
 -- Every semantic group below is therefore foreground-only -- which is also
 -- the case that proves a span role with no background of its own keeps the
 -- overlay's rather than punching a hole in it.
+--
+-- CursorLine is also the one underlined group here, and no chrome group may
+-- take an attribute: an overlay cell that comes back underlined can only
+-- have inherited it from the row beneath, which is the same defect as a
+-- background bleed in the half of it a color cannot show.
 vim.cmd('highlight clear')
 vim.g.colors_name = 'view-dracula'
 local hl = vim.api.nvim_set_hl
 hl(0, 'Normal', { fg = '#f8f8f2', bg = '#282a36' })
-hl(0, 'CursorLine', { bg = '#44475a' })
+hl(0, 'CursorLine', { bg = '#44475a', underline = true })
 hl(0, 'NormalFloat', { fg = '#f8f8f2', bg = '#21222c' })
 hl(0, 'MsgArea', { fg = '#f8f8f2', bg = '#21222c' })
 hl(0, 'Pmenu', { fg = '#f8f8f2', bg = '#21222c' })

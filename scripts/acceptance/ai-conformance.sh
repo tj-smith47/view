@@ -93,7 +93,7 @@ ROOT=""
 # exit trap can clear it even for a run that never got that far.
 RESUME_FILE=""
 CURRENT_LEG=startup
-DUMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/view-ai-conformance-XXXXXX")
+DUMP_DIR=$(dump_dir view-ai-conformance)
 
 cleanup() {
     local code=$?
@@ -122,7 +122,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-now() { date +%s.%N; }
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
 under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }
 

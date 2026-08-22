@@ -19,6 +19,36 @@
 #
 # Callers must define `REPO_ROOT` before sourcing.
 
+# A fractional-seconds clock every leg's wait loops time out against.
+#
+# BSD `date` (macOS, an established validation host for this repo) has no
+# `%N` and answers `<epoch>.N`, which awk reads as the integer seconds --
+# so every `elapsed` returns 0.00 and no wait loop ever expires. A sweep
+# that hangs on a defect instead of failing on it is worse than one with
+# whole-second resolution, which is what the fallback here gives.
+now() {
+    local t
+    t=$(date +%s.%N)
+    case "$t" in
+    *N*) date +%s ;;
+    *) printf '%s\n' "$t" ;;
+    esac
+}
+
+# A directory for the pane dumps a failing run keeps, with the ones earlier
+# failures kept reaped first.
+#
+# Nothing removes a kept dump afterwards -- deliberately, since it is the
+# evidence -- so on a host whose TMPDIR is a small tmpfs a run of failures
+# fills it and the next run has nowhere to write. A day is long enough for
+# whoever the dump was kept for to have read it.
+dump_dir() {
+    local prefix="$1" parent="${TMPDIR:-/tmp}"
+    find "$parent" -maxdepth 1 -name "$prefix-*" -type d -mtime +1 \
+        -exec rm -rf {} + 2>/dev/null || true
+    mktemp -d "$parent/$prefix-XXXXXX"
+}
+
 # Makes sure `path` is a binary this tree's source produced.
 #
 #   ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \

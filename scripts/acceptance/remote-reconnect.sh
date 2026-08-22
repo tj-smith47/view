@@ -81,7 +81,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-now() { date +%s.%N; }
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
 in_range() { awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'; }
 plus() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a + b }'; }

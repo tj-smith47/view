@@ -169,6 +169,56 @@ jobs:
           VIEW_CLIPBOARD_TEST_REQUIRE_DISPLAY: "1"
         run: cargo test -p view-oracle --test clipboard_roundtrip -- --nocapture
 
+  # The one leg that reads the bytes crossterm writes rather than the
+  # resolved styles a `ratatui::Buffer` holds. Every overlay-chrome defect
+  # the first dogfood session reported was invisible to the paint tests and
+  # plain in one `capture-pane -e`, so a suite that is green on all of them
+  # is not evidence the screen was right.
+  #
+  # Only the visual leg of `task acceptance`, not the target: the other legs
+  # want agent credentials or a controlled host for their thresholds, and
+  # this one wants tmux and about a minute. Linux only -- what it asserts is
+  # the escape sequences view emits, which are the terminal's dialect and
+  # not the platform's.
+  visual:
+    runs-on: ubuntu-latest
+    # a cold cargo build on a cache miss dominates; the sweep itself is ~1 min
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install neovim (linux)
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      - name: Run overlay-chrome visual sweep
+        run: task acceptance:visual
+
   # The differential oracle corpus is merge-blocking on both tier-1
   # platforms (spec section 14: linux + macos tier-1; Windows is tier-2,
   # deferral 4). Its own job so the pty-driven corpus never extends the

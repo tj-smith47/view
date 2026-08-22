@@ -89,7 +89,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-now() { date +%s.%N; }
 # two decimals, not one: a recovery this fast rounds to a flat zero at one,
 # and "recovers in 0.0s" reads as a measurement that did not happen
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }

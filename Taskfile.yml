@@ -152,6 +152,14 @@ tasks:
       # repo's reading of one
       - bash scripts/acceptance/ai-conformance.sh
 
+  acceptance:visual:
+    desc: The overlay-chrome visual sweep alone (~1 min; needs tmux and the pinned nvim, no network and no agent credentials -- task acceptance:visual -- 2 runs leg 2 only)
+    # its own target because it is the one leg of `acceptance` a phase's exit
+    # checklist can afford to run on its own: no credentials, no controlled
+    # host, and it does not wait out any threshold. The full target's other
+    # legs want all three, which is how a standing gate comes to be skipped.
+    cmd: bash scripts/acceptance/visual-sweep.sh {{.CLI_ARGS}}
+
   bench:
     desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
     # the ship guard on the no-speculate arm refuses an optimized build that
