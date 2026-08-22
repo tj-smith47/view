@@ -217,9 +217,55 @@ visible; a replayed user chunk after a local echo does not duplicate; a
 user chunk with no matching local echo still appends; the echoed entry
 wraps through the same transcript width path T6 fixed.
 
+Rendering (user-ruled 2026-08-22): NO literal word prefixes — the
+current `You:`/`Agent:`/`Thinking:`/`done:` strings go away.
+Differentiation is color alone: user prompt bodies in one theme color,
+agent responses in another, thought text dimmed — new AI `StyleRole`
+variants on the spans, mapped to theme colors in the painter (the same
+role→color path `Title` and the `Git*` glyph roles already use). Each
+entry opens with a marker glyph so consecutive messages read as discrete
+items. Tool-call status renders as glyphs, not words: done ✓, failed ✗,
+pending ·, and running an animated braille spinner (⠋⠙⠹⠸⠼⠴⠦⠧)
+advancing off the existing tick source so only the marker cell is
+damaged per frame; the spinner stops when the call resolves.
+
+Tests: role spans carry the intended style roles; no word prefix
+appears in rendered rows; the spinner frame advances on tick and
+damages only its cell; a resolved call paints its final glyph.
+
+## T10 — A sticky toast can be dismissed
+
+T7's sweep measured it: a sticky `emsg` toast survives Escape, motions,
+insert entry, `:echo ""`, and indefinite idle — `toast::route` gives
+`Sticky` no timeout and no dismissal path, so the only exit is another
+error replacing it. Fix: an explicit dismissal (the natural key while
+no overlay owns input; the message-history overlay stays the archive),
+documented, with the sweep gaining a dismiss assert. Stickiness stays —
+an error must still survive incidental keypresses (the T2-era
+contract); dismissal is deliberate, not incidental.
+
+## T11 — The panel title survives narrow widths
+
+T7's sweep measured it: below ~136 total columns the AI panel top edge
+drops the title entirely (`FOCUSED_TITLE` needs 35 cells; a 30% panel
+of a 112-col terminal has a 34-cell edge, and `top_edge` falls back to
+a bare border). Render a truncated or abbreviated title instead of
+none — the box must never be anonymous. Test at the exact boundary
+widths; sweep gains a title-present assert at a narrow geometry.
+
+## T12 — `task acceptance` skips class-scoped legs it cannot run
+
+T7 surfaced it: on dev-linux, `remote-rtt.sh` refuses (its budget row
+is `classes = ["controlled-linux"]`) and ABORTS the whole target, so
+legs after it never run — a silent mid-target drop. Class-scoped legs
+must detect an out-of-class host and print an explicit `SKIPPED
+(class …)` line, exiting 0, so every runnable leg always runs and the
+skip is visible. Refusing to invent baselines for uncontrolled hosts
+stays — the fix is skip-with-announcement, not measurement.
+
 ## Exit
 
-- All seven fixed, `task ci` green, budgets hold, docs current.
+- All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
 - T7's sweep passes against the rebuilt release binary — the same sweep
   that would have caught T1/T2/T5/T6 before the user did.
 - Dogfood journal appended with the findings + fix commits.
