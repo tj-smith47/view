@@ -2925,6 +2925,144 @@ fn a_second_prompt_cannot_be_submitted_into_a_turn_already_in_flight() {
     );
 }
 
+/// An entered panel on a 24-row terminal, holding `lines` one-row agent
+/// messages. The panel takes the terminal's full height, so its transcript
+/// window is twenty rows and a page moves by exactly that.
+fn scrollable_ai_panel_model(lines: usize) -> Model {
+    let mut m = Model::with_term_size(80, 24);
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    for i in 0..lines {
+        m.ai_panel_mut().transcript.append_or_extend(
+            Some(&format!("m{i}")),
+            &format!("line {i}"),
+            crate::native::ai_panel::TranscriptRole::Agent,
+        );
+    }
+    m
+}
+
+/// The panel's transcript rows as a reader would see them, painted at the
+/// panel's own resolved height.
+fn panel_transcript_texts(m: &Model) -> Vec<String> {
+    m.ai_panel()
+        .view(24)
+        .rows
+        .into_iter()
+        .map(|row| row.into_iter().map(|span| span.text).collect())
+        .collect()
+}
+
+/// The scroll keys are named notations the composer cannot type, so a
+/// half-written prompt survives a page up and a page down -- the two are
+/// not competing for the same keystroke.
+#[test]
+fn paging_the_transcript_holds_the_window_and_paging_back_follows_it_again() {
+    let mut m = scrollable_ai_panel_model(100);
+    m.ai_panel_mut().input = "draft".to_string();
+    m.dirty = false;
+
+    let effects = update(&mut m, key("<PageUp>"));
+
+    assert!(
+        effects.is_empty(),
+        "scrolling issues no effect: {effects:?}"
+    );
+    assert!(m.dirty, "a moved window has to repaint");
+    assert_eq!(m.ai_panel().input, "draft");
+    assert_eq!(
+        panel_transcript_texts(&m).first().unwrap(),
+        "Agent: line 60",
+        "one page up from the tail of a twenty-row window"
+    );
+
+    let _ = update(&mut m, key("<PageDown>"));
+
+    assert_eq!(
+        panel_transcript_texts(&m).last().unwrap(),
+        "Agent: line 99",
+        "paging back onto the tail resumes following it"
+    );
+    assert_eq!(m.ai_panel().input, "draft");
+}
+
+/// The half-page pair, and the one collision in it: `<C-d>` already
+/// dismisses the crash banner, and says so on screen while one is up, so
+/// the banner keeps the key for as long as it is showing.
+#[test]
+fn ctrl_u_and_ctrl_d_move_the_window_by_half_a_page() {
+    let mut m = scrollable_ai_panel_model(100);
+
+    let _ = update(&mut m, key("<C-u>"));
+    assert_eq!(
+        panel_transcript_texts(&m).first().unwrap(),
+        "Agent: line 70"
+    );
+
+    m.ai_panel_mut().local_error = Some("the agent exited".to_string());
+    let _ = update(&mut m, key("<C-d>"));
+    assert_eq!(
+        m.ai_panel().local_error,
+        None,
+        "the banner answers the key first"
+    );
+    assert_eq!(
+        panel_transcript_texts(&m).first().unwrap(),
+        "Agent: line 70",
+        "and the window it was covering stays exactly where it was"
+    );
+
+    let _ = update(&mut m, key("<C-d>"));
+    assert_eq!(
+        panel_transcript_texts(&m).last().unwrap(),
+        "Agent: line 99",
+        "with no banner left, the same key moves the window down half a page"
+    );
+}
+
+/// An answer that streams in below a window the user scrolled away from is
+/// an answer they never see arrive.
+#[test]
+fn submitting_a_prompt_returns_the_panel_to_the_newest_line() {
+    let mut m = scrollable_ai_panel_model(100);
+    let _ = update(&mut m, key("<PageUp>"));
+    m.ai_panel_mut().input = "and another thing".to_string();
+
+    let _ = update(&mut m, key("<CR>"));
+
+    assert_eq!(panel_transcript_texts(&m).last().unwrap(), "Agent: line 99");
+}
+
+/// A review paints its own hunks in place of the transcript, so a scroll
+/// key inside one would move a window nobody can see and hand it back
+/// changed when the review ends.
+#[test]
+fn a_scroll_key_inside_an_open_review_leaves_the_transcript_where_it_was() {
+    let mut m = live_review_model();
+    for i in 0..100 {
+        m.ai_panel_mut().transcript.append_or_extend(
+            Some(&format!("m{i}")),
+            &format!("line {i}"),
+            crate::native::ai_panel::TranscriptRole::Agent,
+        );
+    }
+
+    let _ = update(&mut m, key("<C-d>"));
+
+    m.ai_panel_mut().pending_diff = None;
+    assert_eq!(
+        panel_transcript_texts(&m).last().unwrap(),
+        "Agent: line 99",
+        "the transcript comes back following the tail, as the review found it"
+    );
+}
+
 /// Entering the panel makes `model.focus()` name it for real, the same way
 /// any other focus-taking overlay works (`Model::takes_focus_now` reads
 /// `AiPanelState::focused` directly) -- unlike `key_in_engine_focus_

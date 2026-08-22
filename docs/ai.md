@@ -27,6 +27,30 @@ Tool calls appear as they start and update in place as they finish. When
 the panel is open but not focused, it says so and names the way in
 (`:View ai focus`).
 
+The transcript follows its newest line, the way a terminal does, so a
+session hours long still shows you what just happened. To read back over
+it, the focused panel scrolls:
+
+| key | moves |
+| --- | --- |
+| `<PageUp>` / `<PageDown>` | a full window |
+| `<C-u>` / `<C-d>` | half a window |
+
+Scrolling up holds the window where you left it -- an agent that keeps
+talking no longer drags the text out from under you -- and the last row
+says so:
+
+```
+-- more below, <PageDown> follows again --
+```
+
+Scrolling back down to the newest line resumes following, and so does
+submitting a prompt, so an answer never streams in off screen. These are
+named keys the composer cannot type, so a half-written prompt survives a
+scroll. `<C-d>` is the one key with two jobs: while the crash banner is up
+it dismisses the banner (which is what the banner itself says), and it
+scrolls once the banner is gone.
+
 ## Reviewing an agent's edits
 
 An edit the agent proposes through ACP does not touch your buffer until

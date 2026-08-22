@@ -446,6 +446,83 @@ fn an_ai_panel_with_an_open_review_paints_its_hunks_and_follows_the_cursor() {
     );
 }
 
+/// The whole path the dogfood complaint travelled: state derives a window,
+/// the overlay frames it, and what a reader ends up looking at is the
+/// newest line. Painted across a range of heights because the panel's own
+/// window arithmetic and this module's framing have to agree at every one
+/// of them -- a window a row out at some sizes is exactly how the newest
+/// line goes missing again.
+#[test]
+fn the_painted_ai_panel_keeps_the_newest_transcript_row_at_every_height() {
+    use view_core::native::ai_panel::{AiPanelState, TranscriptRole};
+    let mut state = AiPanelState::new();
+    for i in 0..200 {
+        state.transcript.append_or_extend(
+            Some(&format!("m{i}")),
+            &format!("line {i}"),
+            TranscriptRole::Agent,
+        );
+    }
+
+    for height in [6_u16, 9, 12, 24, 40] {
+        let kind = LayerKind::Ai(state.view(usize::from(height)));
+        let text: Vec<String> = rows(60, height, &kind, BorderSet::ASCII)
+            .lines
+            .iter()
+            .map(|line| line_text(line))
+            .collect();
+        assert!(
+            text.iter().any(|line| line.contains("Agent: line 199")),
+            "a {height}-row panel must still show the newest line: {text:?}"
+        );
+    }
+}
+
+/// The header rows the panel's own window arithmetic deliberately does not
+/// count (see `AiPanelState::transcript_viewport`) come out of the
+/// transcript's oldest rows, never its newest: a permission prompt is
+/// exactly when a reader needs to see what the agent just did.
+#[test]
+fn a_permission_prompt_costs_the_transcripts_oldest_rows_not_its_newest() {
+    use view_core::native::ai_event::{PermissionOption, PermissionOptionKind};
+    use view_core::native::ai_panel::{AiPanelState, PermissionPrompt, TranscriptRole};
+    let mut state = AiPanelState::new();
+    state.focused = true;
+    for i in 0..200 {
+        state.transcript.append_or_extend(
+            Some(&format!("m{i}")),
+            &format!("line {i}"),
+            TranscriptRole::Agent,
+        );
+    }
+    state.pending_permission = Some(PermissionPrompt::new(
+        1,
+        "call_1",
+        Some("Delete config.yaml".to_string()),
+        vec![PermissionOption {
+            option_id: "allow-once".to_string(),
+            name: "Allow once".to_string(),
+            kind: PermissionOptionKind::AllowOnce,
+        }],
+    ));
+
+    let kind = LayerKind::Ai(state.view(24));
+    let text: Vec<String> = rows(60, 24, &kind, BorderSet::ASCII)
+        .lines
+        .iter()
+        .map(|line| line_text(line))
+        .collect();
+
+    assert!(
+        text.iter().any(|line| line.contains("Allow once")),
+        "the answerable option is still on screen: {text:?}"
+    );
+    assert!(
+        text.iter().any(|line| line.contains("Agent: line 199")),
+        "and so is the newest transcript line: {text:?}"
+    );
+}
+
 /// The three-way protection order, pinned end to end. A panel too short
 /// for all of it keeps the crash banner first, then the permission's
 /// options, and sacrifices the review summary before either: a dead

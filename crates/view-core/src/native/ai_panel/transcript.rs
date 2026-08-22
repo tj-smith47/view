@@ -82,6 +82,29 @@ pub struct TranscriptEntry {
     pub text: String,
 }
 
+/// Where a transcript window starts: an entry, and how many of that entry's
+/// own rendered rows sit above the window's first visible row.
+///
+/// An entry-and-offset pair rather than a row index counted from either
+/// end, because both of those move under the transcript's own growth: a
+/// row index counted from the newest end slides the held window backwards
+/// every time a chunk streams in, and one counted from the oldest end can
+/// only be resolved by rendering every entry before it. An entry index is
+/// stable against both -- an append touches neither the entry the window
+/// starts at nor how many of its rows precede the window.
+///
+/// Ordered, so a held window can be compared against the one that follows
+/// the tail (see [`Transcript::tail_anchor`]) to decide whether following
+/// has resumed. The ordering is only meaningful between normalized
+/// anchors, which is every anchor this module hands out: `row` is always
+/// inside its entry, except for the one anchor past the last entry.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct TranscriptAnchor {
+    entry: usize,
+    row: usize,
+}
+
 /// The panel's transcript: an ordered log of folded entries, oldest first.
 ///
 /// A newtype over `Vec<TranscriptEntry>` rather than the bare `Vec` the
@@ -98,11 +121,11 @@ pub struct TranscriptEntry {
 ///
 /// `row_cache` holds each entry's already-rendered rows, recomputed lazily:
 /// a fold only clears the touched entry's slot (an `Option` write, no
-/// allocation), and [`Transcript::rendered_rows`] fills a cleared slot back
+/// allocation), and [`Transcript::rows_from`] fills a cleared slot back
 /// in on the next read. A paint that follows ten folded chunks touching one
 /// entry re-renders that one entry once, not the whole transcript once per
 /// chunk. `RefCell` rather than requiring `&mut self` on
-/// [`Transcript::rendered_rows`]: the panel's `view()` is read through a
+/// [`Transcript::rows_from`]: the panel's `view()` is read through a
 /// `&Model` all the way from `view-surface::render`, which never holds a
 /// `&mut Model`, so a lazily-populated cache needs interior mutability to
 /// exist at all.
@@ -118,7 +141,7 @@ pub struct Transcript {
 /// Hand-written rather than derived: `row_cache` is a lazily-populated
 /// rendering cache, not part of the transcript's identity, and whether a
 /// given entry's slot has been computed yet depends only on paint history
-/// (has `rendered_rows` been called since the last fold touched it), never
+/// (has `rows_from` been called since the last fold touched it), never
 /// on what the transcript logically holds. Two transcripts folded from the
 /// same events must compare equal whether or not either has ever been
 /// painted; deriving `PartialEq` across every field would make painting a
@@ -165,9 +188,9 @@ impl Transcript {
         self.entries.iter()
     }
 
-    /// The first `budget` rendered rows, oldest first, flattened across
-    /// entries (an entry may render more than one row -- see
-    /// [`TranscriptEntryKind::ToolCall`]'s `result` and
+    /// At most `budget` rendered rows starting at `anchor`, oldest first,
+    /// flattened across entries (an entry may render more than one row --
+    /// see [`TranscriptEntryKind::ToolCall`]'s `result` and
     /// [`TranscriptEntryKind::Plan`]). Recomputes only the entries whose
     /// cache slot a fold cleared since the last call; every other entry's
     /// rows are cloned from the cache as-is.
@@ -178,23 +201,98 @@ impl Transcript {
     /// held, on every frame, to hand the overlay rows it will cut back to
     /// the panel's height anyway. `budget` is the overlay's own window, so
     /// the per-frame cost is the panel's height rather than the session's
-    /// length. Rows are taken from the oldest end because that is the end
-    /// the panel's window keeps (see `overlay::lay_out`); an entry whose
-    /// rows straddle the budget renders once and is cut mid-entry, exactly
-    /// where the overlay would have cut it.
+    /// length -- and starting at an anchor rather than at row zero is what
+    /// keeps that true for a panel showing the newest rows, which is every
+    /// panel that has not been scrolled.
     #[must_use]
-    pub fn rendered_rows(&self, budget: usize) -> Vec<Vec<Span>> {
+    pub fn rows_from(&self, anchor: TranscriptAnchor, budget: usize) -> Vec<Vec<Span>> {
         let mut cache = self.row_cache.borrow_mut();
         let mut rows = Vec::new();
-        for (i, entry) in self.entries.iter().enumerate() {
+        let mut skip = anchor.row;
+        for i in anchor.entry..self.entries.len() {
             if rows.len() >= budget {
                 break;
             }
-            let entry_rows = cache[i].get_or_insert_with(|| render_entry(entry));
-            rows.extend(entry_rows.iter().cloned());
+            let entry_rows = cache[i].get_or_insert_with(|| render_entry(&self.entries[i]));
+            rows.extend(entry_rows.iter().skip(skip).cloned());
+            skip = 0;
         }
         rows.truncate(budget);
         rows
+    }
+
+    /// The anchor a window `viewport` rows tall starts at when its last row
+    /// is the transcript's newest -- what a panel following the tail paints
+    /// from, recomputed per frame so that a chunk streaming in moves the
+    /// window rather than scrolling out from under it.
+    #[must_use]
+    pub fn tail_anchor(&self, viewport: usize) -> TranscriptAnchor {
+        self.scrolled_back(
+            TranscriptAnchor {
+                entry: self.entries.len(),
+                row: 0,
+            },
+            viewport,
+        )
+    }
+
+    /// `anchor` moved `rows` rendered rows toward the oldest entry, stopping
+    /// at the transcript's first row.
+    ///
+    /// Walks entries backwards rather than measuring the whole transcript:
+    /// the cost is the distance asked for, not the session's length, so a
+    /// keypress in an hours-long session costs a screenful of work.
+    #[must_use]
+    pub fn scrolled_back(&self, anchor: TranscriptAnchor, rows: usize) -> TranscriptAnchor {
+        let mut cache = self.row_cache.borrow_mut();
+        let mut left = rows;
+        let mut entry = anchor.entry.min(self.entries.len());
+        let mut row = anchor.row;
+        while left > 0 {
+            if row >= left {
+                return TranscriptAnchor {
+                    entry,
+                    row: row - left,
+                };
+            }
+            left -= row;
+            if entry == 0 {
+                return TranscriptAnchor::default();
+            }
+            entry -= 1;
+            row = cache[entry]
+                .get_or_insert_with(|| render_entry(&self.entries[entry]))
+                .len();
+        }
+        TranscriptAnchor { entry, row }
+    }
+
+    /// `anchor` moved `rows` rendered rows toward the newest entry, stopping
+    /// one past the last entry -- the position [`Self::tail_anchor`] is
+    /// compared against to tell a window that has caught up with the tail
+    /// from one still held behind it.
+    #[must_use]
+    pub fn scrolled_forward(&self, anchor: TranscriptAnchor, rows: usize) -> TranscriptAnchor {
+        let mut cache = self.row_cache.borrow_mut();
+        let mut left = rows;
+        let mut entry = anchor.entry;
+        let mut row = anchor.row;
+        while left > 0 && entry < self.entries.len() {
+            let below = cache[entry]
+                .get_or_insert_with(|| render_entry(&self.entries[entry]))
+                .len()
+                .saturating_sub(row);
+            if below > left {
+                return TranscriptAnchor {
+                    entry,
+                    row: row + left,
+                };
+            }
+            left -= below;
+            entry += 1;
+            row = 0;
+        }
+        TranscriptAnchor { entry, row }
     }
 
     /// Folds one streamed message chunk in place.
@@ -325,7 +423,7 @@ impl Transcript {
 #[cfg(test)]
 thread_local! {
     /// Test-only tally of [`render_entry`] calls, so a test can assert the
-    /// work [`Transcript::rendered_rows`]'s cache exists to avoid, not just
+    /// work [`Transcript::rows_from`]'s cache exists to avoid, not just
     /// the bytes it produces: recomputing an unchanged entry reproduces the
     /// same rendered bytes a cache hit would, so a byte-equality assertion
     /// alone cannot tell a cache hit from a cache silently bypassed.
@@ -406,7 +504,7 @@ mod tests {
         transcript.append_or_extend(Some("m1"), "the answer", TranscriptRole::Agent);
 
         assert_eq!(
-            transcript.rendered_rows(ROOM),
+            transcript.rows_from(TranscriptAnchor::default(), ROOM),
             vec![
                 vec![Span::plain("Thinking: weighing it")],
                 vec![Span::plain("Agent: the answer")],
@@ -609,7 +707,9 @@ mod tests {
             "the result row must survive a contentless update, not empty out"
         );
         assert_eq!(
-            transcript.rendered_rows(ROOM).len(),
+            transcript
+                .rows_from(TranscriptAnchor::default(), ROOM)
+                .len(),
             2,
             "the title/status row plus the one result row must both still \
              render"
@@ -663,6 +763,122 @@ mod tests {
         assert_eq!(transcript.iter().next().unwrap().text, "before after");
     }
 
+    /// A transcript of `lines` one-row agent messages, `Agent: line 0`
+    /// upward -- long enough that no window shows all of it.
+    fn long_transcript(lines: usize) -> Transcript {
+        let mut transcript = Transcript::new();
+        for i in 0..lines {
+            transcript.append_or_extend(
+                Some(&format!("m{i}")),
+                &format!("line {i}"),
+                TranscriptRole::Agent,
+            );
+        }
+        transcript
+    }
+
+    fn texts(rows: &[Vec<Span>]) -> Vec<String> {
+        rows.iter()
+            .map(|row| row.iter().map(|span| span.text.clone()).collect())
+            .collect()
+    }
+
+    /// The window a panel paints by default ends on the newest row. A
+    /// transcript taller than the panel otherwise shows its opening
+    /// screenful and nothing else for the rest of the session.
+    #[test]
+    fn the_tail_window_ends_on_the_newest_row() {
+        let transcript = long_transcript(50);
+        let rows = transcript.rows_from(transcript.tail_anchor(5), 5);
+
+        assert_eq!(
+            texts(&rows),
+            vec![
+                "Agent: line 45",
+                "Agent: line 46",
+                "Agent: line 47",
+                "Agent: line 48",
+                "Agent: line 49",
+            ]
+        );
+    }
+
+    /// An anchor is an entry plus an offset into it, so a window can start
+    /// part way down a single entry -- the one shape that can be taller
+    /// than the panel on its own, and so the one that a per-entry anchor
+    /// would make impossible to scroll through.
+    #[test]
+    fn a_window_can_start_part_way_down_one_tall_entry() {
+        let mut transcript = Transcript::new();
+        transcript.upsert_tool_call(
+            "t1".to_string(),
+            "grep".to_string(),
+            ToolCallStatus::Completed,
+            Some((0..9).map(|i| format!("hit {i}")).collect()),
+        );
+
+        let rows = transcript.rows_from(transcript.tail_anchor(3), 3);
+
+        assert_eq!(texts(&rows), vec!["  hit 6", "  hit 7", "  hit 8"]);
+    }
+
+    /// Scrolling back and forward again by the same distance lands on the
+    /// row it started from: the two walks must agree about what a row is,
+    /// or a page down after a page up leaves the reader somewhere they
+    /// never chose.
+    #[test]
+    fn scrolling_back_then_forward_returns_to_the_same_row() {
+        let transcript = long_transcript(50);
+        let tail = transcript.tail_anchor(10);
+
+        let back = transcript.scrolled_back(tail, 17);
+        assert_eq!(
+            texts(&transcript.rows_from(back, 1)),
+            vec!["Agent: line 23"]
+        );
+        assert_eq!(transcript.scrolled_forward(back, 17), tail);
+    }
+
+    /// Neither walk runs off its end: a page up from the first row and a
+    /// page down from the last both stop rather than naming an entry that
+    /// does not exist.
+    #[test]
+    fn the_walks_stop_at_the_transcripts_own_ends() {
+        let transcript = long_transcript(4);
+        let start = TranscriptAnchor::default();
+
+        assert_eq!(transcript.scrolled_back(start, 1_000), start);
+        assert_eq!(
+            transcript.scrolled_forward(start, 1_000),
+            TranscriptAnchor { entry: 4, row: 0 }
+        );
+        assert_eq!(
+            transcript.tail_anchor(1_000),
+            start,
+            "a transcript shorter than the window starts at its first row"
+        );
+    }
+
+    /// The same "a frame costs the window, not the session" bar the
+    /// oldest-first window already holds, from the end a panel actually
+    /// paints: following the tail must not render the history behind it.
+    #[test]
+    fn following_the_tail_costs_a_frame_no_more_than_a_short_session() {
+        let transcript = long_transcript(2_000);
+
+        reset_render_entry_calls();
+        let window = 20;
+        let rows = transcript.rows_from(transcript.tail_anchor(window), window);
+
+        assert_eq!(rows.len(), window);
+        assert!(
+            render_entry_calls() <= window + 1,
+            "a frame must not render entries no window can show: {} entries \
+             rendered for a {window}-row window",
+            render_entry_calls()
+        );
+    }
+
     fn render_entry_calls() -> usize {
         RENDER_ENTRY_CALLS.with(std::cell::Cell::get)
     }
@@ -674,17 +890,17 @@ mod tests {
     /// Asserts the work the cache exists to avoid, not just the bytes it
     /// happens to reproduce: recomputing an unchanged entry from scratch
     /// yields byte-identical rows to a cache hit, so a bytes-only assertion
-    /// cannot tell a real cache from `rendered_rows` bypassing it and
+    /// cannot tell a real cache from `rows_from` bypassing it and
     /// calling `render_entry` unconditionally. `render_entry_calls()` is
     /// the observable that distinguishes them.
     #[test]
-    fn rendered_rows_only_recomputes_the_entry_that_changed() {
+    fn a_render_only_recomputes_the_entry_that_changed() {
         let mut transcript = Transcript::new();
         transcript.append_or_extend(Some("m1"), "one", TranscriptRole::Agent);
         transcript.append_or_extend(Some("m2"), "two", TranscriptRole::Agent);
 
         reset_render_entry_calls();
-        let first_pass = transcript.rendered_rows(ROOM);
+        let first_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM);
         assert_eq!(first_pass.len(), 2);
         assert_eq!(
             render_entry_calls(),
@@ -693,7 +909,7 @@ mod tests {
         );
 
         reset_render_entry_calls();
-        let repeat_pass = transcript.rendered_rows(ROOM);
+        let repeat_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM);
         assert_eq!(repeat_pass, first_pass);
         assert_eq!(
             render_entry_calls(),
@@ -704,7 +920,7 @@ mod tests {
 
         transcript.append_or_extend(Some("m2"), " more", TranscriptRole::Agent);
         reset_render_entry_calls();
-        let second_pass = transcript.rendered_rows(ROOM);
+        let second_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM);
         assert_eq!(
             second_pass[0], first_pass[0],
             "the untouched entry's cached row must be reused byte for byte"
@@ -734,7 +950,7 @@ mod tests {
 
         reset_render_entry_calls();
         let window = 20;
-        let rows = transcript.rendered_rows(window);
+        let rows = transcript.rows_from(TranscriptAnchor::default(), window);
 
         assert_eq!(
             rows.len(),

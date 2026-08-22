@@ -297,6 +297,7 @@ fn picker_split_rows(
             .collect(),
         selected: None,
         header_keep_tail: false,
+        items_keep_tail: false,
         rule: false,
     };
     let preview = lay_out(&preview_body, preview_width, height, borders);
@@ -431,6 +432,19 @@ struct Body {
     /// request blocking the agent's own turn cannot be shown without those,
     /// while the question is context that can be sacrificed first.
     header_keep_tail: bool,
+    /// Which end of `items` [`lay_out`] keeps when there are more of them
+    /// than rows, for a body with no `selected` row to anchor the window
+    /// on: `false` (every kind but [`ai_body`]) keeps the first rows, the
+    /// only end a list of matches or a file tree has an order for. `true`
+    /// keeps the last -- a transcript's newest rows, which is where a
+    /// reader is, and the end whose loss reads as a dead panel.
+    ///
+    /// The panel derives its own window before the rows ever reach here
+    /// (see `AiPanelState::view`), so this normally has nothing to cut. It
+    /// is what keeps a header taller than that window's arithmetic
+    /// expected -- a permission prompt's options, a review summary -- from
+    /// costing the newest rows instead of the oldest.
+    items_keep_tail: bool,
     /// Whether this body draws the rule that separates its header from its
     /// scrolling items.
     ///
@@ -509,6 +523,7 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     let selected = body.selected.filter(|i| *i < body.items.len());
     let first = match selected {
         Some(i) if item_rows > 0 && i >= item_rows => i + 1 - item_rows,
+        None if body.items_keep_tail => body.items.len().saturating_sub(item_rows),
         _ => 0,
     };
     for (offset, item) in body.items.iter().skip(first).take(item_rows).enumerate() {
@@ -567,6 +582,7 @@ fn picker_body(view: &PickerView) -> Body {
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
         header_keep_tail: false,
+        items_keep_tail: false,
         rule: true,
     }
 }
@@ -583,6 +599,7 @@ fn tree_body(view: &TreeView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
+        items_keep_tail: false,
         rule: false,
     }
 }
@@ -628,6 +645,7 @@ fn statusline_body(view: &StatuslineView) -> Body {
         items: Vec::new(),
         selected: None,
         header_keep_tail: false,
+        items_keep_tail: false,
         rule: false,
     }
 }
@@ -653,6 +671,7 @@ fn prompt_body(view: &PromptView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
+        items_keep_tail: false,
         rule: true,
     }
 }
@@ -667,6 +686,7 @@ fn palette_body(view: &PaletteView) -> Body {
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
         header_keep_tail: false,
+        items_keep_tail: false,
         rule: true,
     }
 }
@@ -717,6 +737,7 @@ fn ai_body(view: &AiPanelView) -> Body {
         // `Body::header_keep_tail`'s own doc for why they must outlive the
         // question and composer line under truncation
         header_keep_tail: true,
+        items_keep_tail: true,
         rule: true,
     }
 }

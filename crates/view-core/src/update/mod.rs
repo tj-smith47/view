@@ -845,6 +845,52 @@ fn is_panel_exit_key(notation: &str) -> bool {
     matches!(notation, "<Esc>" | "<C-c>" | "<C-d>")
 }
 
+/// Whether `notation` scrolls the AI panel's transcript.
+///
+/// `<C-d>` is absent on purpose: it is an AI panel key already (see
+/// [`is_panel_exit_key`]), so its own arm decides between dismissing a
+/// crash banner and scrolling. Every key here is a named notation the
+/// composer cannot type, which is what lets the transcript scroll while a
+/// half-written prompt sits on the composer line.
+fn is_ai_scroll_key(notation: &str) -> bool {
+    matches!(notation, "<PageUp>" | "<PageDown>" | "<C-u>")
+}
+
+/// Scrolls the AI panel's transcript for one scroll key, reporting whether
+/// the window moved.
+///
+/// A no-op while a review is open: the panel is painting that review's
+/// hunks, not the transcript, so a scroll here would move a window nobody
+/// can see and hand it back changed when the review ends.
+fn scroll_ai_transcript(model: &mut Model, notation: &str) -> bool {
+    if model.ai_panel().pending_diff.is_some() {
+        return false;
+    }
+    let viewport = ai_transcript_viewport(model);
+    let half = viewport.div_ceil(2);
+    let panel = model.ai_panel_mut();
+    match notation {
+        "<PageUp>" => panel.scroll_transcript_back(viewport, viewport),
+        "<PageDown>" => panel.scroll_transcript_forward(viewport, viewport),
+        "<C-u>" => panel.scroll_transcript_back(half, viewport),
+        "<C-d>" => panel.scroll_transcript_forward(half, viewport),
+        _ => false,
+    }
+}
+
+/// How many transcript rows the open AI panel shows, from its own resolved
+/// geometry -- the same number `view-surface` paints with, so a page moves
+/// the window by exactly what the panel last drew.
+fn ai_transcript_viewport(model: &Model) -> usize {
+    let height = model
+        .overlays()
+        .iter()
+        .rev()
+        .find(|overlay| matches!(overlay.kind, OverlayKind::Ai))
+        .map_or(0, |overlay| model.overlay_rect(overlay).height);
+    model.ai_panel().transcript_viewport(usize::from(height))
+}
+
 /// Routes one keypress to whatever currently owns the keyboard, after
 /// [`note_supervision_choice`] has had its look at it.
 ///
@@ -1210,7 +1256,20 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     // composer excludes, beside `<C-c>` above. The `:View ai
                     // dismiss` verb remains the from-outside route to the
                     // same slot.
-                    if model.ai_panel_mut().local_error.take().is_some() {
+                    //
+                    // The banner outranks the half-page scroll this key
+                    // otherwise performs, and says so on screen while it is
+                    // up (`DISMISS_KEY_HINT`): the one state where `<C-d>`
+                    // means something else is the one state that names what
+                    // it means.
+                    // Short-circuiting is the priority: a taken banner never
+                    // reaches the scroll behind it.
+                    let dismissed = model.ai_panel_mut().local_error.take().is_some();
+                    if dismissed || scroll_ai_transcript(model, &notation) {
+                        model.dirty = true;
+                    }
+                } else if is_ai_scroll_key(&notation) {
+                    if scroll_ai_transcript(model, &notation) {
                         model.dirty = true;
                     }
                 } else if notation == "<CR>" {
@@ -1224,6 +1283,9 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     if !panel.turn_in_flight && !panel.input.trim().is_empty() {
                         let text = std::mem::take(&mut panel.input);
                         panel.turn_in_flight = true;
+                        // A prompt sent from a scrolled-back panel would
+                        // otherwise stream its answer somewhere off screen.
+                        panel.follow_transcript_tail();
                         model.dirty = true;
                         // `view-core` cannot assemble this prompt's context
                         // itself: every block `view_ai::context::assemble`

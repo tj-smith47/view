@@ -742,8 +742,8 @@ fn speculated_layer(model: &Model, grid: (u16, u16), offset: u16) -> Option<Laye
 /// cannot disagree about where an overlay is. The border charset comes from
 /// the terminal's own tier, resolved once here rather than per painter.
 fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
-    let kind = layer_kind(model, &open.kind)?;
     let cells = model.overlay_rect(open);
+    let kind = layer_kind(model, &open.kind, cells.height)?;
     Some(Layer::new(
         Rect::new(cells.row, cells.col, cells.width, cells.height),
         kind,
@@ -764,7 +764,7 @@ fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
 /// a unit marker, not a payload: the session state it renders lives in
 /// [`Model::ai_panel`] instead, so that arm is the one place this function
 /// reaches past the overlay stack for what to paint.
-fn layer_kind(model: &Model, kind: &OverlayKind) -> Option<LayerKind> {
+fn layer_kind(model: &Model, kind: &OverlayKind, height: u16) -> Option<LayerKind> {
     match kind {
         OverlayKind::Prompt(state) => Some(LayerKind::Prompt(state.view())),
         OverlayKind::Picker(state) => Some(LayerKind::Picker(state.view())),
@@ -777,12 +777,10 @@ fn layer_kind(model: &Model, kind: &OverlayKind) -> Option<LayerKind> {
         // the confirm prompt's own layer already draws; the busy modal
         // carries no field that shape does not
         OverlayKind::EngineBusy(state) => Some(LayerKind::Prompt(state.view())),
-        // The terminal's height is an upper bound on the panel's: no row
-        // past it can be painted whatever geometry the panel is given, and
-        // the transcript is unbounded without one.
-        OverlayKind::Ai => Some(LayerKind::Ai(
-            model.ai_panel().view(usize::from(model.term_height)),
-        )),
+        // The panel's own resolved height, not the terminal's: the panel
+        // derives its transcript window from it, and a window sized to the
+        // whole terminal would page past rows the panel never showed.
+        OverlayKind::Ai => Some(LayerKind::Ai(model.ai_panel().view(usize::from(height)))),
         _ => None,
     }
 }
