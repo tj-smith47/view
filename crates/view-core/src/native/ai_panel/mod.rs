@@ -269,11 +269,37 @@ impl AiPanelState {
     /// the reported defect -- a prompt past the panel's width kept typing
     /// into a row nothing painted.
     fn composer_rows(&self, panel_height: usize, panel_width: usize) -> Vec<String> {
-        wrap(
-            &self.input,
-            composer_width(panel_width),
-            composer_cap(panel_height),
-        )
+        let width = composer_width(panel_width);
+        // A frame with no room for a prompt character clips every composer
+        // row to the bare mark, so a composer that grew there would spend
+        // the transcript's rows and paint nothing for them. The floor on
+        // the width itself keeps the wrap from opening a row per character
+        // in that same corner.
+        let cap = if width == 0 {
+            1
+        } else {
+            composer_cap(panel_height)
+        };
+        wrap(&self.input, width.max(1), cap)
+    }
+
+    /// Where the next character typed will land: an index into the rows
+    /// [`Self::view`] paints as the composer, and a column across that row
+    /// in cells.
+    ///
+    /// The one definition of the composer's insertion point. The panel
+    /// places no terminal caret of its own, so this is what "the cursor is
+    /// on screen" means here: the row is always the last composer row --
+    /// the one the wrap's tail-keeping cut can never drop -- and the column
+    /// is always inside the width that row was wrapped to.
+    #[must_use]
+    pub fn composer_cursor(&self, panel_height: usize, panel_width: usize) -> (usize, usize) {
+        let rows = self.composer_rows(panel_height, panel_width);
+        let column = rows
+            .last()
+            .map(|row| row.chars().map(char_cells).sum())
+            .unwrap_or_default();
+        (rows.len().saturating_sub(1), column)
     }
 
     /// Moves the transcript window for one scroll key, reporting whether it
@@ -491,9 +517,14 @@ pub const PROMPT_COLS: usize = 2;
 /// terminal columns wide: the framed interior (see
 /// [`interior_text_width`]) less the prompt mark's own columns.
 ///
+/// Zero at a panel too narrow to paint a prompt character at all -- the
+/// honest answer, and the one [`AiPanelState::composer_rows`] reads to stop
+/// the composer growing where nothing of it could show.
+///
 /// ```
 /// use view_core::native::ai_panel::composer_width;
 /// assert_eq!(composer_width(60), 54);
+/// assert_eq!(composer_width(6), 0);
 /// ```
 #[must_use]
 pub fn composer_width(panel_width: usize) -> usize {
@@ -502,14 +533,27 @@ pub fn composer_width(panel_width: usize) -> usize {
 }
 
 /// The most rows the composer may grow to on a `panel_height`-row panel:
-/// half of it, so a prompt long enough to fill the panel still leaves the
-/// transcript the other half. A longer prompt scrolls inside those rows
-/// (see [`AiPanelState::composer_rows`]) rather than taking more.
+/// half the rows the frame leaves it, so a prompt long enough to fill the
+/// panel still leaves the transcript the other half. A longer prompt
+/// scrolls inside those rows (see [`AiPanelState::composer_rows`]) rather
+/// than taking more.
+///
+/// Halves the interior, not the panel: the composer is drawn out of the
+/// rows left once [`CHROME_ROWS`] have had theirs, so halving the whole
+/// panel would hand the composer more rows than the transcript at every
+/// height and all of them at the shortest.
 ///
 /// Never zero, so the composer is painted at every panel height a frame
 /// can be drawn at.
 fn composer_cap(panel_height: usize) -> usize {
-    (panel_height / 2).max(1)
+    (panel_height.saturating_sub(CHROME_ROWS) / 2).max(1)
+}
+
+/// One character's width in cells, the ASCII-doubling upper bound the
+/// composer both wraps and places its cursor with -- see [`wrap`] for why
+/// over-wide is the safe direction.
+fn char_cells(ch: char) -> usize {
+    1 + usize::from(!ch.is_ascii())
 }
 
 /// The last `keep` of the rows `input` breaks into at `width` cells each,
@@ -537,7 +581,7 @@ fn wrap(input: &str, width: usize, keep: usize) -> Vec<String> {
     rows.push_back(String::new());
     let mut used = 0_usize;
     for ch in input.chars() {
-        let cells = 1 + usize::from(!ch.is_ascii());
+        let cells = char_cells(ch);
         // `used > 0` keeps a glyph wider than the whole row on a row of its
         // own instead of opening an empty one ahead of it
         if used > 0 && used + cells > width {
@@ -837,16 +881,6 @@ mod tests {
         assert_eq!(state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL), 8);
     }
 
-    /// Where the next character lands, as the composer's own rows say it:
-    /// the last row (the tail is never cut) and its width in cells.
-    fn cursor(rows: &[String]) -> (usize, usize) {
-        let last = rows.last().map(String::as_str).unwrap_or_default();
-        (
-            rows.len().saturating_sub(1),
-            last.chars().map(|ch| 1 + usize::from(!ch.is_ascii())).sum(),
-        )
-    }
-
     /// The reported complaint, as an assertion: past the panel's width the
     /// prompt stopped showing, so the user was typing into a row nothing
     /// painted. Every character typed is now on a row, and the tail is on
@@ -873,7 +907,11 @@ mod tests {
                 .is_some_and(|last| typed.ends_with(last.as_str())),
             "the last row holds the tail: {rows:?}"
         );
-        assert_eq!(cursor(&rows), (3, 7), "the cursor is past the tail");
+        assert_eq!(
+            state.composer_cursor(ROOM, WIDE_PANEL),
+            (3, 7),
+            "the cursor is past the tail"
+        );
     }
 
     /// The wrap boundary itself, where an off-by-one puts the cursor on a
@@ -885,18 +923,18 @@ mod tests {
         let mut state = AiPanelState::new();
 
         state.input = "x".repeat(width - 1);
-        assert_eq!(cursor(&state.view(ROOM, WIDE_PANEL).input), (0, width - 1));
+        assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (0, width - 1));
 
         state.input = "x".repeat(width);
         assert_eq!(
-            cursor(&state.view(ROOM, WIDE_PANEL).input),
+            state.composer_cursor(ROOM, WIDE_PANEL),
             (0, width),
             "a row exactly full is still one row"
         );
 
         state.input = "x".repeat(width + 1);
         assert_eq!(
-            cursor(&state.view(ROOM, WIDE_PANEL).input),
+            state.composer_cursor(ROOM, WIDE_PANEL),
             (1, 1),
             "the character past it opens the next row"
         );
@@ -916,28 +954,38 @@ mod tests {
 
         assert_eq!(rows.concat(), state.input, "no glyph is dropped");
         for row in &rows {
-            let cells: usize = row.chars().map(|ch| 1 + usize::from(!ch.is_ascii())).sum();
+            let cells: usize = row.chars().map(char_cells).sum();
             assert!(cells <= width, "a row measured {cells} cells over {width}");
         }
     }
 
+    /// A prompt longer than the panel can hold, for a test that cares only
+    /// that the composer is over its ceiling.
+    fn overlong_prompt(width: usize, height: usize) -> String {
+        // a repeating pattern rather than one character, so a row carrying
+        // anything but its own share of the input is visible in the joined
+        // text rather than hidden by every character matching
+        (0..width.max(1) * height.max(1) * 4)
+            .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
+            .collect()
+    }
+
     /// The composer's own ceiling: a prompt long enough to fill the panel
-    /// takes at most half of it and scrolls inside those rows, so the
-    /// transcript is never squeezed to nothing and the tail stays last.
+    /// takes at most half the rows the frame leaves it and scrolls inside
+    /// those, so the tail stays last.
     #[test]
     fn a_very_long_prompt_stops_at_half_the_panel_and_scrolls_inside_it() {
         let width = composer_width(WIDE_PANEL);
         let mut state = AiPanelState::new();
-        // a repeating pattern rather than one character, so a row carrying
-        // anything but its own share of the input is visible in the joined
-        // text rather than hidden by every character matching
-        state.input = (0..width * TEN_ROW_PANEL * 2)
-            .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
-            .collect();
+        state.input = overlong_prompt(width, TEN_ROW_PANEL);
 
         let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
 
-        assert_eq!(rows.len(), TEN_ROW_PANEL / 2, "capped at half the panel");
+        assert_eq!(
+            rows.len(),
+            (TEN_ROW_PANEL - CHROME_ROWS) / 2,
+            "capped at half the rows the frame leaves the panel"
+        );
         assert!(
             state.input.ends_with(&rows.concat()),
             "the rows kept are the last ones, so the cursor is still on screen"
@@ -946,10 +994,61 @@ mod tests {
             rows.iter().all(|row| row.chars().count() == width),
             "and each of them is a full row of the wrap: {rows:?}"
         );
-        assert!(
-            state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL) > 0,
-            "and the transcript still has room"
-        );
+    }
+
+    /// The other half of that ceiling, at the heights where getting it
+    /// wrong costs the whole transcript: the composer never takes more rows
+    /// than it leaves, so a short panel with a long prompt on it still
+    /// shows the agent talking.
+    #[test]
+    fn a_maxed_composer_never_leaves_the_transcript_fewer_rows_than_itself() {
+        let width = composer_width(WIDE_PANEL);
+        for height in [6_usize, 8, 12, 14, 40] {
+            let mut state = AiPanelState::new();
+            state.input = overlong_prompt(width, height);
+
+            let composer = state.view(height, WIDE_PANEL).input.len();
+            let transcript = state.transcript_viewport(height, WIDE_PANEL);
+
+            assert!(
+                transcript > 0,
+                "a {height}-row panel keeps transcript rows: {composer} composer"
+            );
+            assert!(
+                transcript >= composer,
+                "a {height}-row panel gives the transcript at least the \
+                 composer's share: {transcript} against {composer}"
+            );
+        }
+    }
+
+    /// A panel narrowed past the frame's own chrome can paint no prompt
+    /// character at all, so the composer stays one row instead of growing
+    /// to its cap and spending the transcript's rows on rows that all clip
+    /// to the bare prompt mark.
+    #[test]
+    fn a_panel_too_narrow_to_paint_a_prompt_character_never_grows_its_composer() {
+        for panel_width in [0_usize, 1, 2, 3, 4, 6] {
+            assert_eq!(
+                composer_width(panel_width),
+                0,
+                "a {panel_width}-wide panel has no room for prompt text"
+            );
+
+            let mut state = AiPanelState::new();
+            state.input = "z".repeat(200);
+
+            assert_eq!(
+                state.view(TEN_ROW_PANEL, panel_width).input.len(),
+                1,
+                "a {panel_width}-wide panel keeps its composer to one row"
+            );
+            assert_eq!(
+                state.transcript_viewport(TEN_ROW_PANEL, panel_width),
+                TEN_ROW_PANEL - CHROME_ROWS,
+                "so the transcript keeps every row it had"
+            );
+        }
     }
 
     /// A composer that grew takes its rows from the transcript's window,

@@ -10,7 +10,10 @@
 /// The cells a framed overlay `width` terminal columns wide leaves for its
 /// own text, once its border and the one-column pad inside each edge have
 /// had theirs. A rect too narrow to hold a frame at all keeps every column
-/// for content, matching what the framing itself does at that size.
+/// for content, matching what the framing itself does at that size -- and
+/// the framing takes that same unframed path for a rect under two rows,
+/// where it hands content the full width and this function's answer goes
+/// unused.
 ///
 /// Lives here rather than in `view-surface`'s framing because two crates
 /// need the same answer and a second copy of the arithmetic would disagree

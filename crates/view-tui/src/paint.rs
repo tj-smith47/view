@@ -2163,6 +2163,16 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// The agent panel layer's own width in cells, or 0 when no panel is
+    /// open.
+    fn agent_panel_width(model: &Model) -> u16 {
+        view_surface::render(model)
+            .layers
+            .iter()
+            .find(|layer| matches!(layer.kind, LayerKind::Ai(_)))
+            .map_or(0, |layer| layer.rect.width)
+    }
+
     /// Types into the composer until its first row is exactly full: one
     /// character short of wrapping, so the keystroke after this one moves
     /// the transcript boundary and nothing else does.
@@ -3454,6 +3464,25 @@ mod tests {
             (
                 "one more character wraps the composer",
                 Box::new(|m: &mut Model| type_key(m, "e")),
+            ),
+            // a resize re-wraps the composer and vacates the columns the
+            // panel gave up in the same frame; `push_changed_rows` takes
+            // the whole-rect fallback on any rect change, and this is what
+            // proves that fallback covers both
+            (
+                "panel narrows with a wrapped composer",
+                Box::new(|m: &mut Model| {
+                    let before = agent_panel_width(m);
+                    type_key(m, "<S-Left>");
+                    assert!(
+                        agent_panel_width(m) < before,
+                        "the resize key moved the panel's own rect"
+                    );
+                }),
+            ),
+            (
+                "panel widens again",
+                Box::new(|m: &mut Model| type_key(m, "<S-Right>")),
             ),
             (
                 "one backspace unwraps it",

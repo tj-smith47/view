@@ -38,9 +38,10 @@ up the rows:
   existing tests passing
 ```
 
-The composer stops growing at half the panel and scrolls inside those rows
-after that, so the end of what you are typing is always the last row on
-screen and the transcript always keeps half the panel.
+The composer never takes more than half the rows the panel has for content,
+and scrolls inside them after that -- so the end of what you are typing is
+always the last row on screen, and the transcript is never left with fewer
+rows than the composer, however long the prompt gets.
 
 The transcript follows its newest line, the way a terminal does, so a
 session hours long still shows you what just happened. To read back over
