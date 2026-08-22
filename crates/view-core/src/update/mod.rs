@@ -72,12 +72,16 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let answers_anywhere = model
                 .engine_busy()
                 .is_some_and(|open| open.kind == WedgeKind::Dead);
+            // read before the fold below, which closes the modal on a
+            // dismissal: asked afterwards, every key that answered a modal
+            // reads as one that arrived with none open
+            let modal_was_open = model.engine_busy().is_some();
             let mut effects = if answers_anywhere || model.focus() == Focus::Engine {
                 note_supervision_choice(model, &notation)
             } else {
                 Vec::new()
             };
-            effects.extend(route_key(model, notation));
+            effects.extend(route_key(model, notation, modal_was_open));
             effects
         }
         Msg::Paste(text) => match model.focus() {
@@ -964,7 +968,11 @@ fn ai_panel_size(model: &Model) -> (usize, usize) {
 /// bookkeeping can run first without consuming the key: this is the routing
 /// a keypress gets whether or not that modal is on screen, which is the
 /// whole of what makes that modal free to answer.
-fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
+///
+/// `modal_was_open` is that modal's state as the key *arrived*, which the
+/// caller has to carry in because the bookkeeping above may already have
+/// closed it.
+fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<Effect> {
     // any keypress is "the user is reading again": gives a
     // transient (info-kind) toast a readable duration bounded by
     // real activity instead of a wall-clock timer the runtime
@@ -1047,8 +1055,28 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
             // The key still reaches nvim either way, so nothing an `<Esc>`
             // does in the engine is shadowed and a session with no toast up
             // pays one string compare for this.
+            //
+            // The mode reading is advisory, not exact: `mode.current` is
+            // only ever written from nvim's own `mode_change`, so between
+            // view forwarding an `i` and that event arriving it still says
+            // `normal` while nvim is already inserting. An `<Esc>` inside
+            // that window dismisses, which is the one way the exclusions
+            // above leak. Closing it would mean predicting the mode locally
+            // -- state nvim owns -- so the window is named rather than
+            // guarded, and nothing is lost when it is hit: the key is
+            // forwarded, so insert is still left, and the text is still in
+            // the history.
+            //
+            // The busy modal is excluded outright. It offers `<Esc>` as its
+            // own dismissal (`SupervisionChoice::Dismiss`), and the error
+            // standing behind it is usually the account of why the engine
+            // wedged in the first place -- taking both with one keystroke
+            // spends an answer the user made on a dismissal they did not
+            // (the same reasoning `note_supervision_choice` already applies
+            // to a focused overlay under the modal).
             if notation == "<Esc>"
                 && model.engine.mode.current == NORMAL_MODE
+                && !modal_was_open
                 && model.engine.messages.dismiss_sticky()
             {
                 model.dirty = true;

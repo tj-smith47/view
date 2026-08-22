@@ -1674,6 +1674,38 @@ fn a_raised_condition_survives_the_escape_that_clears_an_error_beside_it() {
 }
 
 #[test]
+fn the_escape_that_answers_the_busy_modal_leaves_the_error_behind_it_standing() {
+    // the modal offers <Esc> as its own dismissal, and the standing error is
+    // usually the account of why the engine wedged: one keystroke must not
+    // spend an answer the user made on a dismissal they did not
+    let mut m = model_showing_a_sticky_error("normal");
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+        },
+    );
+    assert!(m.engine_busy().is_some(), "the modal opens past the bound");
+
+    let _ = press(&mut m, "<Esc>");
+
+    assert!(m.engine_busy().is_none(), "the modal takes the key");
+    assert!(
+        visible_texts(&m).iter().any(|line| line.contains("E492")),
+        "the error explaining the wedge must survive its modal: {:?}",
+        visible_texts(&m)
+    );
+    // and the next one, with nothing left to answer, is the dismissal
+    let _ = press(&mut m, "<Esc>");
+    assert!(
+        !visible_texts(&m).iter().any(|line| line.contains("E492")),
+        "a second <Esc> with no modal up dismisses as usual: {:?}",
+        visible_texts(&m)
+    );
+}
+
+#[test]
 fn tabline_update_sets_current_and_tabs() {
     use crate::events::{TabEntry, TabHandle};
     let mut m = model();

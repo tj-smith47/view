@@ -384,6 +384,14 @@ wait_no_box() {
     start=$(now)
     while :; do
         capture
+        # ahead of the frame check, not after it: a session that died
+        # captures an empty screen, which holds no frame character, and
+        # "nothing is framed any more" would report a crash as the very
+        # dismissal under test having worked
+        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+            fail "the view session exited while waiting for $what"
+            return 1
+        fi
         grep -q '┌' "$SCREEN" || return 0
         el=$(elapsed "$start" "$(now)")
         if ! under "$el" "$budget"; then
@@ -832,7 +840,6 @@ leg_toast_and_history() {
     # and the next one, now that the engine owns the keyboard again, is the
     # deliberate dismissal. `wait_no_box` is the whole assertion: the toast is
     # the only framed thing left on screen.
-    mark
     send_key Escape
     wait_no_box "$WAIT_SECS" "the dismissed error toast" >/dev/null
     if grep -qF 'Not an editor command' "$SCREEN"; then

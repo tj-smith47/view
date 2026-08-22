@@ -2658,8 +2658,9 @@ mod tests {
         let mut shadow = Shadow::new();
         assert!(shadow.resize(area));
         let surface = view_surface::render(&model);
-        let toast = message_box_rows(&surface);
+        let mut toast = message_box_rows(&surface);
         assert!(!toast.is_empty(), "the error toast is on screen");
+        toast.sort_unstable();
         let _ = shadow.overlay_damage(&surface);
         let _ = model.take_paint_damage();
         shadow.compose(&model, &surface, &Damage::full());
@@ -2671,14 +2672,16 @@ mod tests {
             message_box_rows(&surface).is_empty(),
             "the dismissed toast leaves the surface"
         );
-        let dismissed = shadow.overlay_damage(&surface);
+        let mut dismissed = shadow.overlay_damage(&surface);
+        dismissed.sort_unstable();
 
-        for row in &toast {
-            assert!(
-                dismissed.contains(row),
-                "row {row} held the toast and must be repainted: {dismissed:?}"
-            );
-        }
+        // exact, not containment: over-damage repaints correctly and so
+        // survives the full-recomposite check below, while costing rows
+        // the row-granular damage model exists to save
+        assert_eq!(
+            dismissed, toast,
+            "the toast's own rows are the whole cost of taking it down"
+        );
         let grid_damage = model.take_paint_damage();
         let damage = Damage::from_frame(&grid_damage, model.chrome_rows(), &dismissed, false);
         shadow.compose(&model, &surface, &damage);
