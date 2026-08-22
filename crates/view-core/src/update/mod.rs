@@ -69,13 +69,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // all, so there is no offer to spend by accident -- while a
             // modal painting keys it would refuse is an editor telling its
             // user the way out is a key that does nothing.
-            let answers_anywhere = model
-                .engine_busy()
-                .is_some_and(|open| open.kind == WedgeKind::Dead);
             // read before the fold below, which closes the modal on a
             // dismissal: asked afterwards, every key that answered a modal
             // reads as one that arrived with none open
-            let modal_was_open = model.engine_busy().is_some();
+            let busy = model.engine_busy();
+            let answers_anywhere = busy.is_some_and(|open| open.kind == WedgeKind::Dead);
+            let modal_was_open = busy.is_some();
             let mut effects = if answers_anywhere || model.focus() == Focus::Engine {
                 note_supervision_choice(model, &notation)
             } else {
