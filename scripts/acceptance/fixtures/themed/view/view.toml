@@ -1,0 +1,6 @@
+# Deliberately empty of a `[native]` table, which is the opposite of every
+# fixture under compat/fixtures/: those switch the native takeovers off so a
+# comparison run measures one contract at a time, and this one leaves every
+# feature at its shipped default because the takeovers are precisely what it
+# drives. The sweep appends an `[ai] agent` line naming the stub agent, so
+# the panel opens without an agent to talk to.
