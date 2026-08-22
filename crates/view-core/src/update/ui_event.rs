@@ -9,7 +9,6 @@ use crate::grid::GridOp;
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, Model, OverlayKind, PopupmenuState, TablineState};
 use crate::msg::{Effect, RpcCall};
-use crate::native::geometry::OverlayBox;
 use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
 
@@ -202,10 +201,16 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 .last()
                 .and_then(PromptState::from_entry);
             if let Some(state) = prompt_state {
-                match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
-                    Some(OverlayKind::Prompt(p)) => *p = state,
+                match model.focused_overlay_mut() {
+                    // the geometry travels with the state: a box sized to
+                    // the question it replaced would leave the new one
+                    // truncated or floating in empty cells
+                    Some(ov) if matches!(ov.kind, OverlayKind::Prompt(_)) => {
+                        ov.geometry = state.overlay_box();
+                        ov.kind = OverlayKind::Prompt(state);
+                    }
                     _ => {
-                        model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+                        model.push_overlay(state.overlay_box(), OverlayKind::Prompt(state));
                     }
                 }
             }

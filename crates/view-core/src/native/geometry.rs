@@ -37,6 +37,10 @@ pub struct OverlayBox {
     pub height_pct: u16,
     /// The edge this overlay is pinned to.
     pub anchor: Anchor,
+    /// The widest this overlay is ever drawn, in cells, or `None` to take
+    /// its whole share. A cap narrower than the share wins; a cap wider
+    /// than it is ignored, so the share stays the ceiling it always was.
+    pub max_width: Option<u16>,
 }
 
 impl OverlayBox {
@@ -52,6 +56,26 @@ impl OverlayBox {
             width_pct: width_pct.min(100),
             height_pct: height_pct.min(100),
             anchor: Anchor::Center,
+            max_width: None,
+        }
+    }
+
+    /// The same box drawn no wider than `cells`, whatever its share works
+    /// out to: what a modal sized to its own text asks for, so a two-word
+    /// question is not stretched across a 263-column terminal while a long
+    /// one still stops at the share.
+    ///
+    /// ```
+    /// use view_core::native::geometry::OverlayBox;
+    /// let modal = OverlayBox::new(60, 40).with_max_width(24);
+    /// assert_eq!(modal.rect(200, 24).width, 24);
+    /// assert_eq!(modal.rect(20, 24).width, 12);
+    /// ```
+    #[must_use]
+    pub fn with_max_width(self, cells: u16) -> Self {
+        Self {
+            max_width: Some(cells),
+            ..self
         }
     }
 
@@ -68,13 +92,17 @@ impl OverlayBox {
     }
 
     /// The absolute cell rect this box covers on a `term_w` by `term_h`
-    /// terminal, rounded down and placed by its [`Anchor`].
+    /// terminal, rounded down, capped by [`OverlayBox::with_max_width`] and
+    /// placed by its [`Anchor`].
     ///
     /// A terminal too small to spare a whole cell yields a zero-sized rect,
     /// which contains no point and therefore claims no input.
     #[must_use]
     pub fn rect(&self, term_w: u16, term_h: u16) -> OverlayRect {
-        let width = share(term_w, self.width_pct);
+        let width = match self.max_width {
+            Some(cap) => share(term_w, self.width_pct).min(cap),
+            None => share(term_w, self.width_pct),
+        };
         let height = share(term_h, self.height_pct);
         let centered_row = term_h.saturating_sub(height) / 2;
         let centered_col = term_w.saturating_sub(width) / 2;
@@ -219,6 +247,24 @@ mod tests {
             .with_anchor(Anchor::Bottom)
             .rect(80, 24);
         assert_eq!(bottom.row + bottom.height, 24);
+    }
+
+    #[test]
+    fn a_content_cap_narrower_than_the_share_wins_and_stays_centered() {
+        let capped = OverlayBox::new(60, 40).with_max_width(30);
+        let r = capped.rect(263, 88);
+        assert_eq!(r.width, 30, "the content cap, not 60% of 263");
+        assert_eq!(r.col, (263 - 30) / 2, "a narrower box re-centers");
+        assert_eq!(r.height, 35, "the cap is width-only");
+        assert!(r.contains(r.row, r.col));
+        assert!(!r.contains(r.row, r.col + 30));
+    }
+
+    #[test]
+    fn a_content_cap_wider_than_the_share_leaves_the_share_as_the_ceiling() {
+        let capped = OverlayBox::new(60, 40).with_max_width(400);
+        let uncapped = OverlayBox::new(60, 40);
+        assert_eq!(capped.rect(263, 88), uncapped.rect(263, 88));
     }
 
     #[test]

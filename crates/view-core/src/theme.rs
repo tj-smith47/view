@@ -205,6 +205,15 @@ chrome_groups! {
     /// nvim's builtin deleted-diff-line group (`:h hl-DiffDelete`), the
     /// deleted counterpart of [`ChromeGroup::DiffAdd`].
     DiffDelete => "DiffDelete", Emphasis;
+    /// nvim's builtin floating-window body group (`:h hl-NormalFloat`).
+    /// Every native overlay is a float in nvim's own vocabulary -- a box
+    /// drawn over the buffer with a frame around it -- so its interior fill
+    /// resolves through the group a colorscheme already themes floats with,
+    /// rather than through the popup-menu group a completion list owns. The
+    /// `Normal` fallback is the correct degrade rather than a placeholder: a
+    /// colorscheme that never defines `NormalFloat` wants its floats on the
+    /// buffer's own background.
+    NormalFloat => "NormalFloat", Normal;
     /// nvim's builtin floating-window title group (`:h hl-FloatTitle`). A
     /// native overlay's title is set into its top border, and this is the
     /// group nvim already uses for exactly that -- the title of a float,

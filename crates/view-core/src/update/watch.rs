@@ -30,7 +30,6 @@ use std::path::PathBuf;
 
 use crate::model::{Model, OverlayKind};
 use crate::msg::{CheckTimeOutcome, Effect, RpcCall};
-use crate::native::geometry::OverlayBox;
 use crate::native::prompt::PromptState;
 
 /// Starts the round trip for one batch of detections: mints a fresh
@@ -265,10 +264,10 @@ fn open_conflict_prompt(model: &mut Model, path: PathBuf) {
     }
     match model.focused_overlay_mut().map(|ov| &ov.kind) {
         Some(OverlayKind::Prompt(_)) => {
-            model.insert_overlay_beneath_top(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+            model.insert_overlay_beneath_top(state.overlay_box(), OverlayKind::Prompt(state));
         }
         _ => {
-            model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+            model.push_overlay(state.overlay_box(), OverlayKind::Prompt(state));
         }
     }
     model.dirty = true;

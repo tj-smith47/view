@@ -310,7 +310,6 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
 /// fall to the focus-based insert-beneath/push-new choice.
 pub(super) fn open_ai_trust_prompt(model: &mut Model, verb: String) -> Vec<Effect> {
     use crate::model::OverlayKind;
-    use crate::native::geometry::OverlayBox;
 
     let message = format!(
         "Trust {} to launch an AI agent? Agents can read and write files in this project.",
@@ -325,10 +324,10 @@ pub(super) fn open_ai_trust_prompt(model: &mut Model, verb: String) -> Vec<Effec
     }
     match model.focused_overlay_mut().map(|ov| &ov.kind) {
         Some(OverlayKind::Prompt(_)) => {
-            model.insert_overlay_beneath_top(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+            model.insert_overlay_beneath_top(state.overlay_box(), OverlayKind::Prompt(state));
         }
         _ => {
-            model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+            model.push_overlay(state.overlay_box(), OverlayKind::Prompt(state));
         }
     }
     model.dirty = true;

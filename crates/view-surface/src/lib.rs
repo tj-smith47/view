@@ -1812,10 +1812,12 @@ mod tests {
             "a Prompt on top must suppress the palette layer -- the Prompt already shows the input line itself"
         );
 
-        // OverlayBox::new(60, 40), centered, on an 80x24 terminal with no
-        // chrome offset: width = 80*60/100 = 48, height = 24*40/100 = 9,
-        // row = (24 - 9) / 2 = 7, col = (80 - 48) / 2 = 16.
-        // interior_origin for a 48x9 rect is (1, 2). The input line is the
+        // The prompt's box is sized to its own content and capped at its
+        // 60% share, centered, on an 80x24 terminal with no chrome offset:
+        // "Save changes?" (13) plus frame and padding (4) is 17, under the
+        // 48-cell share, so width = 17, height = 24*40/100 = 9,
+        // row = (24 - 9) / 2 = 7, col = (80 - 17) / 2 = 31.
+        // interior_origin for a 17x9 rect is (1, 2). The input line is the
         // *second* header row (message first, then "> " + input), so one
         // more row past interior_origin; the confirm prompt's typed answer
         // is empty, so the "> " prefix (2 cells) is the whole offset.
@@ -1827,7 +1829,7 @@ mod tests {
             7 + 1 + 1,
             "the cursor must target the prompt's own input row, not the grid's stale bottom row"
         );
-        assert_eq!(cursor.col, 16 + 2 + 2);
+        assert_eq!(cursor.col, 31 + 2 + 2);
     }
 
     /// Per the wire capture, a cmdline-sourced popupmenu's `row`/`col` are

@@ -566,7 +566,7 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
             | LayerKind::Prompt(_)
             | LayerKind::Palette(_)
             | LayerKind::Ai(_) => {
-                paint_native_overlay(layer, &theme, model.caps.truecolor, area, buf);
+                paint_native_overlay(layer, &theme, area, buf);
             }
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
@@ -704,6 +704,13 @@ fn paint_char_cell(
     let symbol = fitted_symbol(ch.encode_utf8(&mut encode_buf), room);
     let width = if symbol.len() == 1 { 1 } else { width };
     let cell = &mut buf[(area.x + col, area.y + row_offset)];
+    // reset before styling, never merge: `ratatui::buffer::Cell::set_style`
+    // patches (a `None` field leaves the cell's current value), so a chrome
+    // cell painted over the grid keeps whatever background and modifiers the
+    // layer beneath left in it wherever this style carries none -- which is
+    // how a single cursorline cell survived mid-row inside an overlay in the
+    // live repro. A chrome layer owns every cell it covers, opaquely.
+    cell.reset();
     cell.set_symbol(symbol);
     cell.set_style(style);
     if width == 2 && col + 1 < area.width {
@@ -918,9 +925,15 @@ fn paint_message_border(area: ratatui::layout::Rect, style: Style, buf: &mut Buf
 /// its column-advance-by-display-width logic exists for laying out a whole
 /// string of arbitrary (possibly wide/control) characters across a row,
 /// which a single fixed-width box-drawing character never needs.
+///
+/// Resets the cell first for the reason [`paint_char_cell`] does, plus one
+/// of its own: a frame glyph restyled over an already-painted interior cell
+/// must carry the frame's style alone, not the interior text's bold or
+/// italic as well, and `set_style` merges modifiers.
 fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, style: Style) {
     let mut encode_buf = [0_u8; 4];
     let cell = &mut buf[(x, y)];
+    cell.reset();
     cell.set_symbol(ch.encode_utf8(&mut encode_buf));
     cell.set_style(style);
 }
@@ -951,6 +964,38 @@ fn message_border_color(theme: &Theme) -> u32 {
 /// is a fixed color rather than a dimmed background.
 fn border_color(interior: ResolvedStyle) -> u32 {
     interior.fg.map_or(0x0080_8080, dim)
+}
+
+/// The style a selected row takes over an interior styled `base`:
+/// `PmenuSel` -- the group a colorscheme already uses for "this row is the
+/// one you are on" -- with its background made concrete.
+///
+/// Reverse video is resolved into colors here rather than sent as an SGR
+/// attribute. A colorscheme that never defines `PmenuSel` leaves it on
+/// `Theme::emphasis`, which is the reverse flag over the theme's own
+/// colors; emitting that as `ESC[7m` gave the user a full-width inverted
+/// bar whose color no colorscheme chose, and inverting an *unset*
+/// foreground/background inverts whatever the terminal's ambient default
+/// happens to be. Swapping the two resolved colors instead paints the same
+/// intent in the theme's palette. With neither color known there is nothing
+/// to swap, and the flag stays as the one selection signal any terminal can
+/// still carry.
+fn selection_style(theme: &Theme, base: ResolvedStyle) -> ResolvedStyle {
+    let sel = theme.chrome(ChromeGroup::PmenuSel);
+    let fg = sel.fg.or(base.fg);
+    let bg = sel.bg.or(base.bg);
+    if !sel.reverse {
+        return ResolvedStyle { fg, bg, ..sel };
+    }
+    if fg.is_none() && bg.is_none() {
+        return sel;
+    }
+    ResolvedStyle {
+        fg: bg,
+        bg: fg,
+        reverse: false,
+        ..sel
+    }
 }
 
 /// Scales each RGB channel of `c` to 60% of its original value, the muted
@@ -1013,14 +1058,21 @@ fn paint_tabline(
 }
 
 /// Renders the popup menu: one item per row via [`PmItem::display_text`],
-/// the `selected` index reverse-styled. `render()` already anchored and
-/// sized `area` to the event's `(row, col)` and the widest item.
+/// the `selected` index in the selection style. `render()` already anchored
+/// and sized `area` to the event's `(row, col)` and the widest item.
+///
+/// Each row is blanked to the menu's full width before its item text: a
+/// completion candidate shorter than the widest one leaves columns the menu
+/// still covers, and an unpainted column shows the buffer straight through
+/// the middle of the popup.
 fn paint_popupmenu(
     state: &PopupmenuState,
     theme: &Theme,
     area: ratatui::layout::Rect,
     buf: &mut Buffer,
 ) {
+    let base = theme.chrome(ChromeGroup::Pmenu);
+    let blank = " ".repeat(usize::from(area.width));
     for (i, item) in state.items.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
@@ -1030,10 +1082,11 @@ fn paint_popupmenu(
         }
         let is_selected = i64::try_from(i).is_ok_and(|idx| idx == state.selected);
         let style = if is_selected {
-            ratatui_style(theme.chrome(ChromeGroup::PmenuSel))
+            ratatui_style(selection_style(theme, base))
         } else {
-            ratatui_style(theme.chrome(ChromeGroup::Pmenu))
+            ratatui_style(base)
         };
+        paint_text_row(&blank, style, area, row, buf);
         paint_text_row(&item.display_text(), style, area, row, buf);
     }
 }
@@ -1049,22 +1102,22 @@ fn paint_popupmenu(
 /// actually receives instead of a parallel reimplementation of it. This
 /// function adds only the part that needs a terminal to decide: style.
 ///
-/// Color derivation is gated on the probed `truecolor` bit, never on the
+/// Color is not gated on the probed `truecolor` bit, and never was on the
 /// capability tier. The tier's whole contribution was choosing the border
-/// charset, back at render time; here the question is whether this
-/// terminal proved it renders 24-bit color, and a terminal that did not
-/// gets attributes alone -- the selected row reverses, which every
-/// terminal honours, and the frame keeps the interior's own colors rather
-/// than being sent an SGR sequence for a color that was never established.
+/// charset, back at render time. The gate that used to stand here sent an
+/// overlay no color at all when `COLORTERM` was unset -- routine over SSH,
+/// which forwards `TERM` and not `COLORTERM` -- while [`paint_grid`] went on
+/// resolving every buffer cell to a 24-bit color regardless. The result was
+/// a default-background box sitting on a themed buffer, on the very
+/// terminals that demonstrably render the buffer's colors. One rule for
+/// both layers is the coherent one, and it is the grid's.
 ///
-/// The overlay's colors come from the popup-menu groups the user's
+/// The overlay's colors come from the floating-window groups the user's
 /// colorscheme already defines, so a native overlay reads as part of their
-/// theme rather than as a second, unrelated palette, and `Theme::from_hl`'s
-/// own emphasis fallback keeps the selected row distinct under a
-/// colorscheme that never defines `PmenuSel`. The statusline is the one
-/// exception: it derives its interior and frame from `ChromeGroup::StatusLine`
-/// instead, because a status line is a distinct piece of chrome a
-/// colorscheme styles on its own, not a popup.
+/// theme rather than as a second, unrelated palette. The statusline is the
+/// one exception: it derives its interior and frame from
+/// `ChromeGroup::StatusLine` instead, because a status line is a distinct
+/// piece of chrome a colorscheme styles on its own, not a float.
 ///
 /// The title set into the top edge is the one piece of frame chrome with a
 /// style of its own (`ChromeGroup::FloatTitle`, bold): it is the label
@@ -1073,7 +1126,6 @@ fn paint_popupmenu(
 fn paint_native_overlay(
     layer: &Layer,
     theme: &Theme,
-    truecolor: bool,
     area: ratatui::layout::Rect,
     buf: &mut Buffer,
 ) {
@@ -1082,52 +1134,43 @@ fn paint_native_overlay(
     };
     let laid =
         view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders);
-    // every overlay reads its colors from the popup-menu groups except the
-    // statusline, which is its own chrome group (a status line is not a
-    // popup and a colorscheme that restyles one must not restyle the other)
+    // every overlay reads its colors from the floating-window group except
+    // the statusline, which is its own chrome group (a status line is not a
+    // float and a colorscheme that restyles one must not restyle the other)
     let group = if matches!(layer.kind, LayerKind::Statusline(_)) {
         ChromeGroup::StatusLine
     } else {
-        ChromeGroup::Pmenu
+        ChromeGroup::NormalFloat
     };
     let base = theme.chrome(group);
-    let interior = if truecolor {
-        ratatui_style(base)
-    } else {
-        Style::default()
-    };
-    let selected = if truecolor {
-        ratatui_style(theme.chrome(ChromeGroup::PmenuSel))
-    } else {
-        Style::default().add_modifier(Modifier::REVERSED)
-    };
-    let frame = if truecolor {
-        ratatui_style(ResolvedStyle {
-            fg: Some(border_color(base)),
-            bg: base.bg,
-            ..ResolvedStyle::default()
-        })
-    } else {
-        Style::default()
-    };
+    let interior = ratatui_style(base);
+    let selected = ratatui_style(selection_style(theme, base));
+    let frame = ratatui_style(ResolvedStyle {
+        fg: Some(border_color(base)),
+        bg: base.bg,
+        ..ResolvedStyle::default()
+    });
     // the title takes its group's whole resolved style -- italic, underline
     // and reverse included, the same way a content row's roles do at the
     // per-span resolve below -- with two deliberate overrides. The bg stays
     // the overlay's, so the top edge reads as one continuous run rather
     // than a differently-lit patch mid-border. Bold is OR-ed in rather than
-    // read, because it is what separates the title from the frame on the
-    // no-truecolor path, where an attribute is the only distinction a
-    // terminal can carry at all.
-    let title = if truecolor {
+    // read, because it is what still separates the title from the frame
+    // under a colorscheme that gives the two the same foreground.
+    // The reverse flag is dropped for the same reason the bg is pinned: a
+    // colorscheme that leaves `FloatTitle` on the emphasis fallback carries
+    // it, and an inverted patch of border mid-title is the differently-lit
+    // run this pins the background to avoid. Bold already carries the
+    // distinction.
+    let title = {
         let group = theme.chrome(ChromeGroup::FloatTitle);
         ratatui_style(ResolvedStyle {
             fg: group.fg.or(base.fg),
             bg: base.bg,
             bold: true,
+            reverse: false,
             ..group
         })
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
     };
 
     let last = laid.lines.len().saturating_sub(1);
@@ -1171,13 +1214,19 @@ fn paint_native_overlay(
             // branch, etc. read in distinct colors instead of collapsing to
             // one flat style; every other overlay's rows carry only
             // `StyleRole::Plain` spans, so `resolve` falling back to
-            // `interior` for those keeps their appearance unchanged
+            // `interior` for those keeps their appearance unchanged. A
+            // role's own background is honoured, but a role that names none
+            // (most of them: a colorscheme colors a diagnostic glyph, not
+            // the box behind it) keeps the overlay's, so a styled span never
+            // punches a hole in the surface it sits on.
             let resolve = |role: StyleRole| -> Style {
-                if !truecolor {
-                    return interior;
-                }
-                role.chrome_group()
-                    .map_or(interior, |group| ratatui_style(theme.chrome(group)))
+                role.chrome_group().map_or(interior, |group| {
+                    let style = theme.chrome(group);
+                    ratatui_style(ResolvedStyle {
+                        bg: style.bg.or(base.bg),
+                        ..style
+                    })
+                })
             };
             paint_span_row(line, resolve, area, row, buf);
         }
@@ -1215,26 +1264,14 @@ fn paint_frame_cells(
 ) {
     let mut chars = line.chars();
     if let Some(left) = chars.next() {
-        reset_cell(buf, area.x, area.y + row);
         set_border_cell(buf, area.x, area.y + row, left, style);
     }
     let right = width.saturating_sub(1);
     if right < area.width {
         if let Some(glyph) = line.chars().next_back() {
-            reset_cell(buf, area.x + right, area.y + row);
             set_border_cell(buf, area.x + right, area.y + row, glyph, style);
         }
     }
-}
-
-/// Clears one cell back to the terminal's defaults.
-///
-/// `ratatui::buffer::Cell::set_style` merges attributes rather than
-/// replacing them, so a cell repainted in a second style keeps every
-/// modifier the first one set. A frame glyph must carry the frame's style
-/// alone, not the interior text's bold or italic as well.
-fn reset_cell(buf: &mut Buffer, x: u16, y: u16) {
-    buf[(x, y)].reset();
 }
 
 /// Renders the pre-content startup shell: a themed statusline placeholder
@@ -4041,40 +4078,149 @@ mod tests {
         }
     }
 
-    /// The probed color bit, not the tier, is what decides whether any
-    /// color is derived: a terminal that never proved 24-bit color must be
-    /// sent attributes only.
+    /// An overlay takes the colorscheme whatever the color probe found,
+    /// because the grid layer beneath it already does: `COLORTERM` is not
+    /// forwarded over ssh, and the gate that used to stand here painted a
+    /// default-background box on top of a fully themed buffer on every
+    /// remote session. Every cell of the rect -- frame, padding, text --
+    /// carries the theme's background, so nothing underneath shows through
+    /// and no cell resets to the terminal default.
     #[test]
-    fn a_terminal_without_truecolor_gets_no_derived_color() {
-        let mut model = caps_model(false, false, false);
-        model.engine.apply_grid(GridOp::Resize {
-            width: 30,
-            height: 10,
-        });
-        // a live highlight table with real colors: the gate must hold
-        // because of the probe, not because the theme happened to be empty
-        apply(
-            &mut model,
-            view_core::events::UiEvent::DefaultColorsSet {
-                fg: Some(0x00FF_FFFF),
-                bg: Some(0x0011_2233),
-                sp: None,
-            },
-        );
-        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
-        let buf = paint_layer_alone(&model, layer, 30, 10);
-        for row in 1..8_u16 {
-            for col in 2..26_u16 {
-                let cell = &buf[(col, row)];
-                assert_eq!(cell.fg, Color::Reset, "({col},{row}) fg");
-                assert_eq!(cell.bg, Color::Reset, "({col},{row}) bg");
+    fn an_overlay_takes_the_theme_whatever_the_color_probe_found() {
+        for (sync, truecolor, kitty) in [(true, true, true), (false, false, false)] {
+            let mut model = caps_model(sync, truecolor, kitty);
+            model.engine.apply_grid(GridOp::Resize {
+                width: 30,
+                height: 10,
+            });
+            apply(
+                &mut model,
+                view_core::events::UiEvent::DefaultColorsSet {
+                    fg: Some(0x00FF_FFFF),
+                    bg: Some(0x0011_2233),
+                    sp: None,
+                },
+            );
+            let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+            let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
+            let selected = laid.selected.expect("the picker has a selection");
+            let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+            let buf = paint_layer_alone(&model, layer, 30, 10);
+            for row in 1..8_u16 {
+                for col in 2..26_u16 {
+                    // the selected row's interior carries the selection's own
+                    // background, themed just as explicitly (see
+                    // `an_unthemed_selection_swaps_the_themes_colors_instead_of_inverting`);
+                    // its two frame cells stay the frame's, since a
+                    // highlighted row does not highlight the box around it
+                    let on_frame = col == 2 || col == 25;
+                    let expected = if row - 1 == selected && !on_frame {
+                        rgb(0x00FF_FFFF)
+                    } else {
+                        rgb(0x0011_2233)
+                    };
+                    let cell = &buf[(col, row)];
+                    assert_eq!(
+                        cell.bg, expected,
+                        "({col},{row}) bg at truecolor={truecolor}"
+                    );
+                    assert_ne!(
+                        cell.fg,
+                        Color::Reset,
+                        "({col},{row}) fg at truecolor={truecolor}"
+                    );
+                }
             }
         }
     }
 
+    /// A selected row takes the colorscheme's own selection background, not
+    /// the reverse-video attribute: `ESC[7m` inverts whatever the terminal's
+    /// ambient colors happen to be, which is how a full-width bar in a color
+    /// no colorscheme chose ended up across the Confirm prompt.
+    #[test]
+    fn the_selected_row_takes_a_themed_background_rather_than_reverse_video() {
+        let mut model = caps_model(true, true, true);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00C8_C8C8),
+                bg: Some(0x0028_2A36),
+                sp: None,
+            },
+        );
+        // a colorscheme that defines PmenuSel the way dracula does: its own
+        // background, no reverse flag
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 7,
+                fg: Some(0x00F8_F8F2),
+                bg: Some(0x0044_475A),
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlGroupSet {
+                name: ChromeGroup::PmenuSel.hl_name().to_string(),
+                hl_id: 7,
+            },
+        );
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+        let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
+        let selected = laid.selected.expect("the picker has a selection");
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+        for row in 0..u16::try_from(laid.lines.len()).unwrap() {
+            let cell = &buf[(4, 1 + row)];
+            assert!(
+                !cell.modifier.contains(Modifier::REVERSED),
+                "row {row} was sent reverse video"
+            );
+            let expected = if row == selected {
+                rgb(0x0044_475A)
+            } else {
+                rgb(0x0028_2A36)
+            };
+            assert_eq!(cell.bg, expected, "row {row} background");
+        }
+    }
+
+    /// A colorscheme that never defines `PmenuSel` leaves it on the theme's
+    /// reverse-flagged emphasis fallback. That flag is resolved into the
+    /// theme's own two colors, swapped, rather than sent as an attribute --
+    /// so the selection still stands out and the row still carries a
+    /// concrete background no layer beneath can show through.
+    #[test]
+    fn an_unthemed_selection_swaps_the_themes_colors_instead_of_inverting() {
+        let mut model = caps_model(true, true, true);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00C8_C8C8),
+                bg: Some(0x0011_2233),
+                sp: None,
+            },
+        );
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+        let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
+        let selected = laid.selected.expect("the picker has a selection");
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+        let cell = &buf[(4, 1 + selected)];
+        assert!(!cell.modifier.contains(Modifier::REVERSED));
+        assert_eq!(cell.bg, rgb(0x00C8_C8C8), "the theme's foreground, swapped");
+        assert_eq!(cell.fg, rgb(0x0011_2233), "the theme's background, swapped");
+    }
+
     /// Reverse video is the one selection signal every terminal honours,
-    /// so it must survive the no-color path rather than being dropped
-    /// along with the derived colors.
+    /// so it must survive when there is no color at all to swap -- a
+    /// pre-attach frame, where the theme carries neither foreground nor
+    /// background yet.
     #[test]
     fn the_selected_row_reverses_even_with_no_color_available() {
         let model = caps_model(false, false, false);
@@ -4089,11 +4235,140 @@ mod tests {
         }
     }
 
-    /// A truecolor terminal gets the popup-menu groups the colorscheme
-    /// already defines, with the frame dimmed off the interior's own
-    /// foreground rather than sharing it.
+    /// A themed model whose buffer is filled edge to edge with cells
+    /// carrying a background of their own -- the cursorline highlight that
+    /// ran the full window width underneath the toast in the live repro.
+    /// Everything an overlay paints over this must own its cells outright.
+    fn model_over_a_highlighted_buffer(width: u16, height: u16) -> Model {
+        // the ssh case: no COLORTERM, so nothing about this frame may depend
+        // on the color probe having found one
+        let mut model = caps_model(false, false, false);
+        model.engine.apply_grid(GridOp::Resize { width, height });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00F8_F8F2),
+                bg: Some(0x0028_2A36),
+                sp: None,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 5,
+                fg: None,
+                bg: Some(UNDERLYING_BG),
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        for row in 0..height {
+            model.engine.apply_grid(GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: vec![("x".into(), 5, u64::from(width))],
+            });
+        }
+        model
+    }
+
+    /// The background every cell of [`model_over_a_highlighted_buffer`]'s
+    /// buffer carries, and therefore the one no overlay cell may show.
+    const UNDERLYING_BG: u32 = 0x0044_475A;
+
+    /// The bleed the first dogfood session caught: one character mid-row
+    /// inside an overlay carried the background of the layer beneath it
+    /// while its neighbours ran default. `ratatui::buffer::Cell::set_style`
+    /// merges rather than replaces, so any style field a chrome layer left
+    /// unset kept whatever the grid painted into that cell in the same
+    /// frame -- visible only on the cells whose underlying background was
+    /// not the default one.
     #[test]
-    fn a_truecolor_terminal_frames_a_native_overlay_in_a_dimmed_interior_color() {
+    fn no_background_from_the_layer_beneath_survives_into_an_overlay_row() {
+        let model = model_over_a_highlighted_buffer(40, 12);
+        let tier = model.caps.tier;
+        let rect = Rect::new(2, 3, 24, 7);
+        let surface = Surface::from_layers(vec![
+            Layer::new(Rect::new(0, 0, 40, 12), LayerKind::EngineGrid, tier),
+            Layer::new(rect, native_picker(), tier),
+        ]);
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        assert_eq!(
+            buf[(0, 0)].bg,
+            rgb(UNDERLYING_BG),
+            "the fixture's own premise: the layer beneath is painted"
+        );
+        let borders = view_surface::overlay::BorderSet::for_tier(tier);
+        let laid = view_surface::overlay::rows(rect.width, rect.height, &native_picker(), borders);
+        let selected = laid.selected.expect("the picker has a selection");
+        let last_col = rect.col + rect.width - 1;
+        for row in rect.row..rect.row + rect.height {
+            for col in rect.col..rect.col + rect.width {
+                // the selected row's interior takes the selection background;
+                // its frame cells, like every other frame cell, take the
+                // overlay's own
+                let on_frame = col == rect.col || col == last_col;
+                let expected = if row - rect.row == selected && !on_frame {
+                    rgb(0x00F8_F8F2)
+                } else {
+                    rgb(0x0028_2A36)
+                };
+                assert_ne!(
+                    buf[(col, row)].bg,
+                    rgb(UNDERLYING_BG),
+                    "({col},{row}) shows the layer beneath through the overlay"
+                );
+                assert_eq!(
+                    buf[(col, row)].bg,
+                    expected,
+                    "({col},{row}) is not the overlay's own background"
+                );
+            }
+        }
+    }
+
+    /// The same opacity contract for the message toast, which is where the
+    /// user actually met it: a default-background box sitting inside a
+    /// selection-colored bar that ran on past both its edges.
+    #[test]
+    fn a_toast_owns_every_cell_of_its_box_including_the_border() {
+        let model = model_over_a_highlighted_buffer(40, 12);
+        let tier = model.caps.tier;
+        let rect = Rect::new(0, 27, 13, 3);
+        let lines = vec![vec![Span::plain("saved".to_string())]];
+        let surface = Surface::from_layers(vec![
+            Layer::new(Rect::new(0, 0, 40, 12), LayerKind::EngineGrid, tier),
+            Layer::new(rect, LayerKind::Messages(lines), tier),
+        ]);
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let theme = Theme::from_hl(model.engine.hl());
+        let expected = rgb(theme.chrome(ChromeGroup::MsgArea).bg.unwrap());
+        for row in rect.row..rect.row + rect.height {
+            for col in rect.col..rect.col + rect.width {
+                assert_eq!(
+                    buf[(col, row)].bg,
+                    expected,
+                    "({col},{row}) is not the toast's own background"
+                );
+            }
+        }
+    }
+
+    /// An overlay gets the floating-window group the colorscheme already
+    /// defines, with the frame dimmed off the interior's own foreground
+    /// rather than sharing it.
+    #[test]
+    fn a_native_overlay_is_framed_in_a_dimmed_shade_of_its_interior_color() {
         let mut model = caps_model(true, true, true);
         apply(
             &mut model,
@@ -4108,12 +4383,12 @@ mod tests {
         let theme = Theme::from_hl(model.engine.hl());
         assert_eq!(
             buf[(2, 1)].fg,
-            rgb(border_color(theme.chrome(ChromeGroup::Pmenu))),
+            rgb(border_color(theme.chrome(ChromeGroup::NormalFloat))),
             "corner glyph"
         );
         assert_eq!(
             buf[(4, 2)].fg,
-            rgb(theme.chrome(ChromeGroup::Pmenu).fg.unwrap()),
+            rgb(theme.chrome(ChromeGroup::NormalFloat).fg.unwrap()),
             "interior text"
         );
         assert_ne!(
@@ -4128,12 +4403,11 @@ mod tests {
     #[test]
     fn a_native_overlay_larger_than_the_terminal_is_clipped_not_panicked() {
         // `caps_model` alone establishes no theme, so every cell's derived
-        // background is `Color::Reset` by construction (see
-        // `a_terminal_without_truecolor_gets_no_derived_color`) regardless
+        // background is `Color::Reset` by construction regardless
         // of whether the paint walk actually reached it -- that would make
         // this test's clip-boundary proof below vacuous. A real
         // `DefaultColorsSet`, the same setup
-        // `a_truecolor_terminal_frames_a_native_overlay_in_a_dimmed_interior_color`
+        // `a_native_overlay_is_framed_in_a_dimmed_shade_of_its_interior_color`
         // uses, gives the interior a non-`Reset` color the walk can
         // actually be caught failing to reach.
         let mut model = caps_model(true, true, true);
@@ -4188,7 +4462,6 @@ mod tests {
         paint_native_overlay(
             &layer,
             &theme,
-            model.caps.truecolor,
             ratatui::layout::Rect::new(2, 1, 24, 7),
             &mut buf,
         );
@@ -4358,10 +4631,10 @@ mod tests {
     /// made the one word naming the overlay its least legible text.
     /// Run over the same capability permutations as
     /// `a_native_overlay_paints_exactly_the_rows_the_layout_pass_produced`,
-    /// because the bold is not decoration on the no-truecolor path: it is
-    /// the whole distinction. That branch sends no color at all, so a
-    /// terminal that never proved 24-bit color would show a title
-    /// indistinguishable from the border without it.
+    /// which now expect the identical painted style from all three: the
+    /// probed color bit stopped deciding an overlay's colors when it was
+    /// found to strip them from every ssh session, where `COLORTERM` never
+    /// arrives.
     #[test]
     fn an_overlay_title_paints_brighter_and_bolder_than_the_frame_around_it() {
         for (sync, truecolor, kitty) in [
@@ -4408,6 +4681,26 @@ mod tests {
                 "F",
                 "the assertion must be reading the title's own cells ({at})"
             );
+            assert_eq!(
+                title_cell.fg,
+                rgb(theme.chrome(ChromeGroup::FloatTitle).fg.unwrap()),
+                "the title resolves through FloatTitle, not the border color ({at})"
+            );
+            assert_ne!(
+                edge_cell.fg, title_cell.fg,
+                "the corner keeps the frame's dimmed color; a shared style is the \
+                 defect ({at})"
+            );
+            assert!(
+                title_cell.modifier.contains(Modifier::ITALIC)
+                    && title_cell.modifier.contains(Modifier::UNDERLINED),
+                "the group's own attributes reach the title, not only its fg ({at})"
+            );
+            assert!(
+                !edge_cell.modifier.contains(Modifier::ITALIC),
+                "the frame keeps its own style; the title's attributes are the \
+                 title's ({at})"
+            );
             assert!(
                 title_cell.modifier.contains(Modifier::BOLD),
                 "the title is bold on every tier: with no color established it is \
@@ -4417,40 +4710,6 @@ mod tests {
                 !edge_cell.modifier.contains(Modifier::BOLD),
                 "only the title is bold, not the run of border it sits in ({at})"
             );
-
-            if truecolor {
-                assert_eq!(
-                    title_cell.fg,
-                    rgb(theme.chrome(ChromeGroup::FloatTitle).fg.unwrap()),
-                    "the title resolves through FloatTitle, not the border color"
-                );
-                assert_ne!(
-                    edge_cell.fg, title_cell.fg,
-                    "the corner keeps the frame's dimmed color; a shared style is \
-                     the defect"
-                );
-                assert!(
-                    title_cell.modifier.contains(Modifier::ITALIC)
-                        && title_cell.modifier.contains(Modifier::UNDERLINED),
-                    "the group's own attributes reach the title, not only its fg"
-                );
-                assert!(
-                    !edge_cell.modifier.contains(Modifier::ITALIC),
-                    "the frame keeps its own style; the title's attributes are the \
-                     title's"
-                );
-            } else {
-                assert_eq!(
-                    title_cell.fg,
-                    Color::Reset,
-                    "no color capability was proved, so none is sent for the title"
-                );
-                assert_eq!(
-                    edge_cell.fg,
-                    Color::Reset,
-                    "nor for the frame it has to stand out from"
-                );
-            }
         }
     }
 }

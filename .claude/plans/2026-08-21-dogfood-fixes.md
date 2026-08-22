@@ -116,8 +116,88 @@ Tests: config round-trip for both keys including out-of-range clamping;
 update-level test that resize keys change the overlay geometry and mark
 the model dirty.
 
+## T5 — Panel prompt input echo is fast
+
+User report (Termius/SSH, real session): keystroke delay inside the
+agent panel's prompt is "unbearable" — noticeably worse than typing in
+the buffer, which is backwards: buffer echo round-trips nvim RPC under a
+CI-gated budget, while panel input is native and should be strictly
+faster. Root-cause with measurement before any fix (systematic
+debugging): instrument or bench the panel-focused key → paint path;
+suspects include whole-overlay/transcript repaint per keystroke, damage
+tracking not covering the prompt row, or paint scheduling waiting on an
+unrelated tick. Fix at the source; add a bench or test that pins the
+panel-input echo path to the same class of budget the buffer echo has.
+Latency consequence stated in the commit (this IS the latency).
+
+## T6 — Long prompt input stays visible
+
+User report: past a certain number of words, typed prompt text stopped
+showing (input still accepted, echo gone). The prompt row renders only
+what fits the panel width — no wrap, no horizontal scroll. Fix: the
+prompt input area grows (wraps to multiple rows, transcript yielding
+space) or horizontally scrolls to keep the cursor and tail of the input
+visible at all times; cursor position always on screen. Tests: an input
+longer than the panel width keeps its tail visible in the derived rows;
+cursor tracking asserted at the boundary.
+
+## T7 — Visual acceptance sweep (the standing gate)
+
+The mechanism that makes this class of defect machine-caught instead of
+user-caught: a scripted tmux acceptance leg (extending the existing
+acceptance harness) that launches the release binary with a real theme
+(dracula cache in the fixture HOME), drives the real entry points
+(`:View` bare forms, `<leader>` keys, toasts, history, trust prompt,
+panel typing), captures panes with escapes, and ASSERTS:
+
+- no `[49m`/default-background cell inside any overlay interior;
+- no `[7m` reverse-video anywhere view paints;
+- no underlying-layer attr survives into an overlay row (the T2 bleed);
+- every registered entry point changes the screen within a bounded time
+  (silent no-op = failure);
+- panel prompt echo appears in the capture after each simulated
+  keystroke burst (T5's invariant, held at the acceptance level);
+- prompt input longer than the panel width keeps its tail visible (T6).
+
+Wired as a `task` target and into `task acceptance`; added to the exit
+checklist of this plan and every future phase plan's template. Runs
+headless in tmux on the dev host; no human in the loop.
+
+## T8 — The pump's event filter reaches gitignore parity with the walk
+
+CI evidence (run 32537625267, ci macos-latest):
+`watch::tests::a_gitignored_directory_is_never_watched` failed with the
+gitignored `generated/out.rs` present in the delivered batch. Root
+cause: gitignore rules are honored only at registration time (the
+`ignore::WalkBuilder` walk skips ignored directories, so they get no
+descriptor), which suffices on inotify — but macOS's FSEvents backend
+delivers events recursively regardless of `RecursiveMode::NonRecursive`,
+and the pump's second filter (`is_excluded`) checks only the static
+exclusion list. A leaked event under a gitignored directory therefore
+reaches the batch on macOS, and a real session probes nvim for
+gitignored churn (build output) the design promises to skip.
+
+Fix at the filter, not the test: the pump's per-event filter gains
+gitignore parity with the walk. Registration already walks every
+directory; collect the `.gitignore` files the walk passes into a shared
+matcher (`ignore::gitignore::GitignoreBuilder` rooted at the project
+root, one add per discovered `.gitignore`, rebuilt the same way when a
+later-created directory registers) and drop any event whose path the
+matcher ignores, alongside the existing `is_excluded` check. The
+files-created-before-registration path (found_files) must keep working:
+non-ignored files still pass.
+
+Tests: a unit test that the pump filter drops a path matched by a
+nested `.gitignore` even when the event arrives without a registered
+parent (the FSEvents leak shape, simulated directly); the existing
+event-level test stays as-is and must pass on macOS. macOS verification
+owed via an mbp run of the view-ai suite (script file, provenance line,
+caffeinate) before the next push is called green-capable.
+
 ## Exit
 
-- All four fixed, `task ci` green, budgets hold, docs current.
+- All seven fixed, `task ci` green, budgets hold, docs current.
+- T7's sweep passes against the rebuilt release binary — the same sweep
+  that would have caught T1/T2/T5/T6 before the user did.
 - Dogfood journal appended with the findings + fix commits.
 - Verified live in the same tmux repro flow that reproduced each defect.

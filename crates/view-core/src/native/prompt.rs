@@ -17,6 +17,27 @@
 use std::path::{Path, PathBuf};
 
 use crate::model::{CmdlineState, MessageEntry};
+use crate::native::geometry::OverlayBox;
+
+/// The share of the terminal a prompt may take at its widest, and the share
+/// it always takes vertically. The width is a ceiling now rather than a
+/// fixed size (see [`PromptState::overlay_box`]): a modal stretched across
+/// a 263-column terminal to hold "Overwrite?" was the complaint.
+const PROMPT_WIDTH_PCT: u16 = 60;
+const PROMPT_HEIGHT_PCT: u16 = 40;
+
+/// The cells a framed overlay spends on chrome before any text: one border
+/// column and one pad column on each side, per `view_surface::overlay`'s own
+/// framing.
+const FRAME_CELLS: u16 = 4;
+
+/// The cells `view_surface::overlay` prefixes to an interior row that
+/// carries a marker: the prompt mark on the input line, the selection
+/// marker on a choice.
+const MARKER_CELLS: u16 = 2;
+
+/// The cells a title spends on the spaces around it inside the top border.
+const TITLE_MARGIN: u16 = 2;
 
 /// One accelerator choice parsed from nvim's own bracket/paren convention,
 /// e.g. `[Y]es, (N)o: ` -> `{ key: 'y', label: "Yes", default: true }`.
@@ -294,6 +315,46 @@ impl PromptState {
         }
     }
 
+    /// Where this prompt sits on the terminal: a centered modal no wider
+    /// than the text it actually holds, and never more than
+    /// [`PROMPT_WIDTH_PCT`] of the terminal however long the question runs.
+    ///
+    /// The one place a prompt's placement is decided, so every raiser
+    /// (nvim's own `confirm`, the AI trust gate, the external-write
+    /// conflict) gets the same box instead of three copies of a share that
+    /// could drift apart.
+    #[must_use]
+    pub fn overlay_box(&self) -> OverlayBox {
+        OverlayBox::new(PROMPT_WIDTH_PCT, PROMPT_HEIGHT_PCT).with_max_width(self.content_width())
+    }
+
+    /// The cells this prompt's own content needs, frame and padding
+    /// included.
+    ///
+    /// Counts characters rather than display columns: this is the cap on a
+    /// modal's width, not a layout of cells, and the exact per-cell fitting
+    /// is `view_surface::overlay`'s (which measures display width properly
+    /// and truncates what does not fit). `view-core` carries one production
+    /// dependency by deliberate policy, and a width cap a wide glyph makes
+    /// one cell tight is not what would buy a second.
+    fn content_width(&self) -> u16 {
+        let view = self.view();
+        let chars = |s: &str| u16::try_from(s.chars().count()).unwrap_or(u16::MAX);
+        // the marker widths `view_surface::overlay` prefixes: the prompt
+        // mark on the input line, the selection marker on every choice
+        let widest = chars(&view.message)
+            .max(chars(&view.title).saturating_add(TITLE_MARGIN))
+            .max(chars(&view.input).saturating_add(MARKER_CELLS))
+            .max(
+                view.choices
+                    .iter()
+                    .map(|c| chars(c).saturating_add(MARKER_CELLS))
+                    .max()
+                    .unwrap_or(0),
+            );
+        widest.saturating_add(FRAME_CELLS)
+    }
+
     /// This prompt's paint-facing projection.
     ///
     /// Single-style rows are enough: nvim's own accelerator convention
@@ -489,6 +550,38 @@ mod tests {
         assert_eq!(view.message, "Save changes?");
         assert_eq!(view.choices, vec!["Yes".to_string(), "No".to_string()]);
         assert_eq!(view.selected, Some(0));
+    }
+
+    /// The modal the user met was 60% of a 263-column terminal wide to ask
+    /// a three-word question, with the selected choice reverse-videoed
+    /// across all of it. The box follows the widest row it actually holds.
+    #[test]
+    fn a_confirm_is_sized_to_its_own_content_rather_than_to_its_share() {
+        let mut state = PromptState::from_entry(&entry("confirm", "Save changes?")).unwrap();
+        state.learn_cmdline(&cmdline_prompt("[Y]es, (N)o: "));
+        let rect = state.overlay_box().rect(263, 88);
+        // "Save changes?" is the widest row at 13 cells; the frame and its
+        // padding add the other four
+        assert_eq!(rect.width, 17);
+        assert_eq!(rect.col, (263 - 17) / 2, "and it is still centered");
+    }
+
+    /// The choices, not the question, can be the widest row -- the box has
+    /// to fit whichever wins, plus the selection marker they are painted
+    /// with.
+    #[test]
+    fn a_confirm_whose_choices_outrun_its_question_is_sized_to_the_choices() {
+        let mut state = PromptState::from_entry(&entry("confirm", "Overwrite?")).unwrap();
+        state.learn_cmdline(&cmdline_prompt("[R]eload the buffer, (K)eep local edits: "));
+        let rect = state.overlay_box().rect(263, 88);
+        assert_eq!(rect.width, "Reload the buffer".len() as u16 + 2 + 4);
+    }
+
+    #[test]
+    fn a_question_longer_than_the_share_still_stops_at_the_share() {
+        let state = PromptState::from_entry(&entry("confirm", &"q".repeat(400))).unwrap();
+        let rect = state.overlay_box().rect(263, 88);
+        assert_eq!(rect.width, 263 * 60 / 100, "the share stays the ceiling");
     }
 
     #[test]
