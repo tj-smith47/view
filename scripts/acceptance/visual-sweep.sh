@@ -621,9 +621,10 @@ PICKER_MARKERS=$(awk -v surfaces="$SURFACES_RS" -v picker="$PICKER_RS" '
 marker_for() {
     local feature="$1" verb="$2" marker=""
     # matched on the pair rather than on the feature with a `[ "$verb" = … ]`
-    # guard inside the arm: a guard that fails is the arm's last command, so
-    # the case exits nonzero and `set -e` takes the run down before the
-    # diagnostic below can name what went unrecognized
+    # guard inside the arm: the pair form keeps "which pairs are known" in
+    # one column of patterns instead of split between patterns and guards,
+    # so an unknown verb on a known feature reaches the diagnostic below
+    # by the same path as an unknown feature
     case "$feature/$verb" in
     # the picker's verbs are a table of their own, so the arm is the feature
     picker/*) marker=$(printf '%s\n' "$PICKER_MARKERS" | awk -F'\t' -v v="$verb" '$1 == v { print $2 }') ;;
