@@ -59,7 +59,7 @@ ROOT=""
 VIEW_PID=""
 NVIM_PID=""
 CURRENT_LEG=startup
-DUMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/view-acceptance-XXXXXX")
+DUMP_DIR=$(dump_dir view-acceptance)
 
 cleanup() {
     local code=$?

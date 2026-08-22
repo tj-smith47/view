@@ -620,13 +620,18 @@ PICKER_MARKERS=$(awk -v surfaces="$SURFACES_RS" -v picker="$PICKER_RS" '
 # quiet over a newly registered key is the hole it exists to close.
 marker_for() {
     local feature="$1" verb="$2" marker=""
-    case "$feature" in
-    picker) marker=$(printf '%s\n' "$PICKER_MARKERS" | awk -F'\t' -v v="$verb" '$1 == v { print $2 }') ;;
+    # matched on the pair rather than on the feature with a `[ "$verb" = … ]`
+    # guard inside the arm: a guard that fails is the arm's last command, so
+    # the case exits nonzero and `set -e` takes the run down before the
+    # diagnostic below can name what went unrecognized
+    case "$feature/$verb" in
+    # the picker's verbs are a table of their own, so the arm is the feature
+    picker/*) marker=$(printf '%s\n' "$PICKER_MARKERS" | awk -F'\t' -v v="$verb" '$1 == v { print $2 }') ;;
     # the tree titles itself with the name of the directory it opened on,
     # which is this leg's own working tree
-    tree) [ "$verb" = toggle ] && marker=$(basename -- "$ROOT") ;;
-    notifications) [ "$verb" = history ] && marker=$HISTORY_TITLE ;;
-    ai) marker=$PANEL_TITLE ;;
+    tree/toggle) marker=$(basename -- "$ROOT") ;;
+    notifications/history) marker=$HISTORY_TITLE ;;
+    ai/toggle) marker=$PANEL_TITLE ;;
     esac
     [ -n "$marker" ] || {
         printf 'FAIL: nothing here knows what the %s %s surface paints, so driving it would prove nothing; give it a marker\n' \

@@ -56,7 +56,7 @@ ROOT=""
 VIEW_PID=""
 CLIENT_PID=""
 CURRENT_LEG=startup
-DUMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/view-reconnect-XXXXXX")
+DUMP_DIR=$(dump_dir view-reconnect)
 
 cleanup() {
     local code=$? session root
