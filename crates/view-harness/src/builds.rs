@@ -53,6 +53,8 @@ pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
     // the same two boundaries, with an agent turn streaming underneath
     ("ai_session_active", Some(TAPS_VIEW_BIN)),
     ("ai_streaming", Some(TAPS_VIEW_BIN)),
+    // the panel's own composer, with no turn under it
+    ("ai_composer", Some(TAPS_VIEW_BIN)),
     ("first_paint", Some(VIEW_BIN)),
     ("scroll", Some(VIEW_BIN)),
     ("memory", Some(VIEW_BIN)),
@@ -142,7 +144,8 @@ mod tests {
                 "input_path",
                 "output_path",
                 "ai_session_active",
-                "ai_streaming"
+                "ai_streaming",
+                "ai_composer"
             ]
         );
         assert!(scenarios_reading(VIEW_BIN).contains(&"picker"));

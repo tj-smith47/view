@@ -33,6 +33,14 @@ const TRUST_YES: &[u8] = b"y";
 const SUSTAINED_PROMPT: &[u8] = b"stream-forever\r";
 const STREAM_MARKER: &str = "chunk";
 
+/// A character typed into the open panel, and how the composer draws it.
+///
+/// The preamble probes with a keystroke rather than by looking for the
+/// panel's chrome: chrome only says a panel is on screen, while this says
+/// keys are reaching its composer, which is the state the row samples.
+const COMPOSER_PROBE: &[u8] = b"z";
+const COMPOSER_PROBE_ECHO: &str = "> z";
+
 /// Where that fixture records how many chunks it has written.
 const PROGRESS_FILE: &str = "view-ai-stub-stream-progress.txt";
 
@@ -113,6 +121,42 @@ pub struct LiveTurn {
 /// [`TURN_DEADLINE`], which is the one failure this preamble has: every
 /// step before it (the panel, the trust answer, the agent spawn, the
 /// prompt) can only fail by leaving that chunk unrendered.
+/// Opens the agent panel and answers the trust prompt, leaving focus in
+/// the composer with no turn in flight.
+///
+/// The composer-echo row's subject is a keystroke that never leaves view,
+/// so it deliberately does not start a turn: a stream repainting the
+/// transcript underneath would put frames in the pipe that the sampled
+/// keystroke did not cause.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] when the panel never reaches the screen,
+/// which is the one way the two keys above can fail.
+pub fn open_panel(session: &mut BenchSession) -> Result<(), BenchError> {
+    session.send(b"\x1b")?;
+    session.send(OPEN_PANEL)?;
+    quiet(session);
+    session.send(TRUST_YES)?;
+    quiet(session);
+    session.send(COMPOSER_PROBE)?;
+    quiet(session);
+    if !session.screen_text().contains(COMPOSER_PROBE_ECHO) {
+        return Err(BenchError::Desync {
+            context: format!(
+                "a character typed after opening the agent panel did not echo in its composer, \
+                 so this row would have measured a keystroke the panel never saw; screen:\n{}",
+                session.screen_text()
+            ),
+        });
+    }
+    // back to an empty composer, which is where the sampling loop's own
+    // type/delete alternation starts
+    session.send(b"\x7f")?;
+    quiet(session);
+    Ok(())
+}
+
 pub fn start(session: &mut BenchSession, cwd: &Path) -> Result<LiveTurn, BenchError> {
     let progress = progress_path(cwd);
     let _ = std::fs::remove_file(&progress);

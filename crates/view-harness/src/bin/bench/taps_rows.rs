@@ -90,6 +90,12 @@ pub(crate) fn run_taps_row(
             report_live_turn(streamed);
             (outcome, "key_to_rpc_p99_us", "us")
         }
+        "ai_composer" => (
+            taps::run_ai_composer(&spec, &pipe, protocol, deadline)
+                .with_context(|| format!("ai_composer/{fixture} run failed"))?,
+            "p99_ms",
+            "ms",
+        ),
         "ai_streaming" => {
             let (outcome, streamed) =
                 taps::run_ai_streaming(&spec, &pipe, protocol, deadline, &cwd)
@@ -275,7 +281,10 @@ pub(crate) fn run_echo_speculated_row(
 /// agent, whether the fixture copy gets an `[ai]` table, and which run
 /// function the row calls.
 pub(crate) fn ai_row(scenario: &str) -> bool {
-    matches!(scenario, "ai_session_active" | "ai_streaming")
+    matches!(
+        scenario,
+        "ai_session_active" | "ai_streaming" | "ai_composer"
+    )
 }
 
 /// The stub agent the AI rows measure against.

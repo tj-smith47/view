@@ -70,6 +70,11 @@ const HEIGHT: u16 = 40;
 /// fast path.
 fn populated_model() -> Model {
     let mut model = Model::new();
+    // a model left at the default 0x0 resolves every native overlay to a
+    // 0x0 rect, which lays out no rows and paints no cells: an arm built on
+    // one times a first paint rather than the overlay it names
+    model.term_width = WIDTH;
+    model.term_height = HEIGHT;
     model.engine.apply_grid(GridOp::Resize {
         width: WIDTH,
         height: HEIGHT,
@@ -349,8 +354,6 @@ fn bench_paint_frame_cold(c: &mut Criterion) {
 /// long enough that a naive repaint would scale with it.
 fn agent_panel_model() -> Model {
     let mut model = populated_model();
-    model.term_width = WIDTH;
-    model.term_height = HEIGHT;
     model.ai_trusted = true;
     let _ = update(
         &mut model,
@@ -371,8 +374,9 @@ fn agent_panel_model() -> Model {
     assert!(model.ai_panel().focused, "the composer holds focus");
     let surface = view_surface::render(&model);
     let rows = view_tui::paint::agent_panel_rows(&surface);
-    assert!(
-        rows.len() > 8,
+    assert_eq!(
+        rows.len(),
+        usize::from(HEIGHT),
         "the panel is on screen and full height: {rows:?}"
     );
     model

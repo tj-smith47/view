@@ -228,6 +228,10 @@ pub struct Shadow {
     /// frame a divergence appeared on.
     #[cfg(debug_assertions)]
     frames: u64,
+    /// Whether [`Shadow::overlay_damage`] has run since the last
+    /// [`Shadow::compose`], which is the once-per-frame contract it pins.
+    #[cfg(debug_assertions)]
+    overlay_advanced: bool,
 }
 
 /// One repainted row run lifted out of the shadow's buffers, so the diff
@@ -328,6 +332,10 @@ impl Shadow {
         self.carried = Damage::full();
         self.painted = Damage::full();
         self.staged.clear();
+        // both buffers are blank now, so nothing the overlay shadow holds is
+        // on screen any more: keeping it would let an unchanged layer report
+        // no rows for a terminal that is showing none of it
+        self.overlays = OverlayShadow::default();
         true
     }
 
@@ -338,6 +346,18 @@ impl Shadow {
     /// Call it once per frame, before [`Shadow::compose`]: it is what leaves
     /// the layouts behind for that compose to paint from.
     pub fn overlay_damage(&mut self, surface: &Surface) -> Vec<u16> {
+        // `advance` folds the surface in as what the terminal shows, so a
+        // second call for the same frame reports no rows at all -- a caller
+        // that recomputes damage (to feed a second consumer, say) would
+        // silently under-damage the whole frame
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                !self.overlay_advanced,
+                "overlay_damage called twice without an intervening compose"
+            );
+            self.overlay_advanced = true;
+        }
         self.overlays.advance(surface)
     }
 
@@ -345,6 +365,10 @@ impl Shadow {
     /// plus the rows the previous frame repainted (see the type docs for why
     /// the previous frame's rows are needed).
     pub fn compose(&mut self, model: &Model, surface: &Surface, damage: &Damage) {
+        #[cfg(debug_assertions)]
+        {
+            self.overlay_advanced = false;
+        }
         let repaint = damage.union(&self.carried);
         composite_layers(
             &mut self.back,
@@ -604,6 +628,14 @@ fn push_rect_rows(layer: &Layer, out: &mut Vec<u16>) {
 /// rows, and a kind with no framed layout (a toast, the cmdline, the
 /// speculated cells) has no rows to compare -- its content lives in the
 /// layer, which already compared unequal to get here.
+///
+/// The [`LayerKind`] discriminant is deliberately not compared, which is
+/// sound only because `view_surface::render` never pushes two different
+/// framed kinds at the same stack position: a pair that matched on rect,
+/// `framed` and every laid line but differed in kind would keep the old
+/// kind's chrome group (a statusline's, say, instead of a float's) on every
+/// row judged unchanged. A reorder in `render`'s push order is what would
+/// make that reachable.
 fn push_changed_rows(
     was: &PaintedOverlay,
     now: &Layer,
@@ -2075,6 +2107,48 @@ mod tests {
         );
     }
 
+    /// Opens the tree sidebar already holding a scan, so its selection is a
+    /// real row that a later keystroke can move.
+    fn open_tree_with_entries(model: &mut Model) {
+        let _ = view_core::update::update(
+            model,
+            view_core::msg::Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let Some(tree) = model.tree_mut() else {
+            panic!("the tree sidebar is open");
+        };
+        let generation = tree.generation();
+        tree.apply_scan(
+            generation,
+            ["src", "src/main.rs", "Cargo.toml"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    view_core::native::tree::TreeEntry::new(
+                        std::path::PathBuf::from(path),
+                        i == 0,
+                        u16::from(i == 1),
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    /// The tree sidebar's selected index, or `None` when no tree is open.
+    fn selected_row(model: &Model) -> Option<usize> {
+        view_surface::render(model)
+            .layers
+            .iter()
+            .find_map(|layer| match &layer.kind {
+                LayerKind::Tree(view) => Some(view.selected),
+                _ => None,
+            })
+            .flatten()
+    }
+
     /// Sends one key through `update()`, which routes it to whatever holds
     /// focus -- the agent panel's composer, when the panel is open.
     fn type_key(model: &mut Model, notation: &str) {
@@ -2433,13 +2507,15 @@ mod tests {
         ai_verb(&mut model, "open");
         assert!(model.ai_panel().focused, "the composer holds focus");
 
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
         let mut shadow = Shadow::new();
-        assert!(shadow.resize(ratatui::layout::Rect::new(0, 0, 120, 40)));
+        assert!(shadow.resize(area));
         let surface = view_surface::render(&model);
         let opened = shadow.overlay_damage(&surface);
         let panel = agent_panel_rows(&surface);
-        assert!(
-            panel.len() > 8,
+        assert_eq!(
+            panel.len(),
+            usize::from(area.height),
             "the panel spans the terminal's height: {panel:?}"
         );
         assert_eq!(
@@ -2447,8 +2523,10 @@ mod tests {
             panel.len(),
             "the panel's own first frame draws every row it covers"
         );
-
         let _ = model.take_paint_damage();
+        shadow.compose(&model, &surface, &Damage::full());
+        shadow.commit();
+
         type_key(&mut model, "x");
         let surface = view_surface::render(&model);
         let typed = shadow.overlay_damage(&surface);
@@ -2461,9 +2539,22 @@ mod tests {
             panel.contains(&typed[0]),
             "the damaged row is inside the panel"
         );
+        let grid_damage = model.take_paint_damage();
         assert!(
-            model.take_paint_damage().rows.is_empty(),
+            grid_damage.rows.is_empty(),
             "a composer keystroke never reaches the engine grid"
+        );
+        // the damage shape above is only worth pinning if the frame it
+        // produces is the whole truth: composing it runs the debug guard
+        // against a from-scratch recomposite, and the front buffer is
+        // checked against one here so release builds prove it too
+        let damage = Damage::from_frame(&grid_damage, model.chrome_rows(), &typed, false);
+        shadow.compose(&model, &surface, &damage);
+        shadow.commit();
+        assert_eq!(
+            shadow.front(),
+            &full_paint(&model, area),
+            "the one damaged row carried every cell the keystroke changed"
         );
     }
 
@@ -3342,14 +3433,47 @@ mod tests {
                     ai_verb(m, "close");
                 }),
             ),
+            // the selection is a whole-row style the spans do not carry, so
+            // it is the one row-wise input the line comparison cannot see
+            ("tree sidebar opens", Box::new(open_tree_with_entries)),
+            (
+                "tree selection moves",
+                Box::new(|m: &mut Model| {
+                    let before = selected_row(m);
+                    type_key(m, "<Down>");
+                    assert_ne!(before, selected_row(m), "the selection moved");
+                }),
+            ),
         ];
 
         let mut first = true;
+        let mut row_wise_frames = 0_u32;
         for (label, mutate) in steps {
             mutate(&mut model);
             let grid_damage = model.take_paint_damage();
             let surface = view_surface::render(&model);
+            // a framed overlay resolved to a 0x0 rect lays out no rows, takes
+            // the whole-rect fallback on every comparison and paints nothing,
+            // which leaves this moat passing while proving nothing about the
+            // layer it names
+            for layer in &surface.layers {
+                if layer.borders.is_some() {
+                    assert!(
+                        !lay_out(layer).lines.is_empty(),
+                        "a framed layer with no laid rows after {label}: {:?}",
+                        layer.rect
+                    );
+                }
+            }
             let overlay_damage = shadow.overlay_damage(&surface);
+            if matches!(label, "composer keystroke" | "tree selection moves") {
+                assert!(
+                    !overlay_damage.is_empty() && overlay_damage.len() < 4,
+                    "{label} took the row-wise branch, not the whole-rect \
+                     fallback: {overlay_damage:?}"
+                );
+                row_wise_frames += 1;
+            }
             let damage =
                 Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
@@ -3361,6 +3485,7 @@ mod tests {
                 "shadow diverged from a full recomposite after: {label}"
             );
         }
+        assert_eq!(row_wise_frames, 2, "both row-wise frames were composited");
     }
 
     /// A double-width symbol occupies the cell to its right, so that cell
@@ -3528,6 +3653,7 @@ mod tests {
     /// glyph in the row's final column. Each wide glyph is followed by the
     /// blank cells nvim itself sends for the columns the glyph covers.
     fn seed_wide_grid(model: &mut Model, width: u16, height: u16) {
+        set_term_size(model, width, height);
         model.engine.apply_grid(GridOp::Resize { width, height });
         let row_cells = [
             "a",
@@ -3824,10 +3950,23 @@ mod tests {
         assert_eq!(runs, vec![(0, 8)], "full damage is one run over every row");
     }
 
+    /// Points the model's terminal at the same size as the grid being
+    /// seeded.
+    ///
+    /// A model left at the default 0x0 resolves every native overlay's
+    /// geometry to a 0x0 rect, which lays out no rows and paints no cells:
+    /// a moat built on one still passes, but it compares two blank overlays
+    /// and proves nothing about the layer it named.
+    fn set_term_size(model: &mut Model, width: u16, height: u16) {
+        model.term_width = width;
+        model.term_height = height;
+    }
+
     /// Seeds every row of `model`'s grid with distinct full-width text, so a
     /// stranded stale cell from an under-clip is a visible mismatch rather
     /// than two default spaces comparing equal by accident.
     fn seed_grid(model: &mut Model, width: u16, height: u16) {
+        set_term_size(model, width, height);
         model.engine.apply_grid(GridOp::Resize { width, height });
         for row in 0..height {
             let cells = (0..width)

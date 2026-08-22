@@ -26,6 +26,9 @@ use crate::session::{
 };
 use crate::BenchError;
 
+mod ai;
+pub use ai::{run_ai_composer, run_ai_session_active, run_ai_streaming};
+
 /// One parsed tap record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TapRecord {
@@ -873,92 +876,6 @@ fn sample_output_path(
     })
 }
 
-/// The sampling one AI row drives, so both rows reach it through one
-/// function pointer rather than one copy each.
-type Sampler = fn(&mut BenchSession, &TapPipe, &Protocol) -> Result<TapsOutcome, BenchError>;
-
-/// The input row's boundary, measured with an agent turn streaming into an
-/// open panel: the "AI presence never degrades editor responsiveness"
-/// mandate held to the same number the session-absent row records, rather
-/// than asserted.
-///
-/// Everything but the session state is shared with [`run_input_path`] --
-/// the same preparation, the same [`sample_input_path`] -- so a difference
-/// between the two rows is a difference in what the session was doing,
-/// which is the only thing this row exists to price.
-///
-/// # Errors
-///
-/// Returns [`BenchError::Desync`] for everything [`run_input_path`] does,
-/// plus a turn that never started or stopped streaming partway.
-pub fn run_ai_session_active(
-    spec: &SpawnSpec,
-    pipe: &TapPipe,
-    protocol: &Protocol,
-    settle_deadline: Duration,
-    cwd: &Path,
-) -> Result<(TapsOutcome, u64), BenchError> {
-    ai_row(
-        spec,
-        pipe,
-        protocol,
-        settle_deadline,
-        cwd,
-        sample_input_path,
-    )
-}
-
-/// The output row's boundary under the same live turn, for the same reason
-/// and with the same evidence -- see [`run_ai_session_active`].
-///
-/// # Errors
-///
-/// Returns [`BenchError::Desync`] for everything [`run_output_path`] does,
-/// plus a turn that never started or stopped streaming partway.
-pub fn run_ai_streaming(
-    spec: &SpawnSpec,
-    pipe: &TapPipe,
-    protocol: &Protocol,
-    settle_deadline: Duration,
-    cwd: &Path,
-) -> Result<(TapsOutcome, u64), BenchError> {
-    ai_row(
-        spec,
-        pipe,
-        protocol,
-        settle_deadline,
-        cwd,
-        sample_output_path,
-    )
-}
-
-/// One AI row: prepare the session, put a turn in flight, sample the
-/// boundary `sample` measures, and confirm the turn is still streaming
-/// while the session is still up.
-///
-/// The liveness check sits here, between the last sample and the teardown,
-/// because after teardown every signal a dead agent leaves reads exactly
-/// like a live one's. Both rows run this one body, so neither can drift
-/// into checking less than the other.
-fn ai_row(
-    spec: &SpawnSpec,
-    pipe: &TapPipe,
-    protocol: &Protocol,
-    settle_deadline: Duration,
-    cwd: &Path,
-    sample: Sampler,
-) -> Result<(TapsOutcome, u64), BenchError> {
-    let mut session = prepare(spec, pipe, settle_deadline)?;
-    let turn = ai_session::start(&mut session, cwd)?;
-    // the panel's own opening frames are not this row's subject, and
-    // `prepare` drained on the same reasoning
-    let _ = pipe.drain();
-    let outcome = sample(&mut session, pipe, protocol);
-    let streamed = turn.still_streaming();
-    session.shutdown();
-    Ok((outcome?, streamed?))
-}
-
 /// The tags one keystroke walks, in order, across view's whole echo round
 /// trip: key decoded off the host terminal, runtime loop woken, RPC
 /// encoded and handed off, RPC bytes written to the engine, then the
@@ -1552,12 +1469,15 @@ mod tests {
     /// so a structural claim about a caller cannot be satisfied by the
     /// definition of the very function it is supposed to reach.
     fn body_of(name: &str) -> &'static str {
-        let source = include_str!("taps.rs");
         let marker = format!("fn {name}(");
-        assert!(source.contains(&marker), "{name} is gone from this module");
-        source
-            .split(&marker)
-            .nth(1)
+        // both halves of the module: the AI rows live in the child file,
+        // and a structural claim about them must not go quiet because the
+        // function moved between the two
+        let found = [include_str!("mod.rs"), include_str!("ai.rs")]
+            .into_iter()
+            .find_map(|source| source.split(&marker).nth(1));
+        assert!(found.is_some(), "{name} is gone from this module");
+        found
             .unwrap_or_default()
             .split("\n}\n")
             .next()

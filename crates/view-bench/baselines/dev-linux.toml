@@ -2,6 +2,9 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "dev-linux"
 
+[ai_composer.minimal]
+p99_ms = 0.169476
+
 [ai_session_active.minimal]
 key_to_rpc_p99_us = 73.295
 

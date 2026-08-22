@@ -92,6 +92,7 @@ const MATRIX: &[(&str, &str)] = &[
     ("supervision", "minimal"),
     ("ai_session_active", "minimal"),
     ("ai_streaming", "minimal"),
+    ("ai_composer", "minimal"),
 ];
 
 /// Cells measured only on the classes named here, and skipped elsewhere.
@@ -114,6 +115,7 @@ const MATRIX: &[(&str, &str)] = &[
 const CLASS_SCOPED: &[(&str, &[&str])] = &[
     ("ai_session_active", &["dev-linux", "controlled-linux"]),
     ("ai_streaming", &["dev-linux", "controlled-linux"]),
+    ("ai_composer", &["dev-linux", "controlled-linux"]),
 ];
 
 /// Cells that decompose a gated row instead of being one. They are
