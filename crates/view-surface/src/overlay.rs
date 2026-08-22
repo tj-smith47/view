@@ -322,11 +322,6 @@ fn picker_split_rows(
 /// for a border, never what a title made of buffer-supplied text holds.
 const TRUNCATION_MARK: char = '…';
 
-/// The cells of the title itself a truncated label keeps beside
-/// [`TRUNCATION_MARK`]. One glyph and a mark names nothing, and at that
-/// width the whole first word says more than the first letter of it does.
-const MIN_TRUNCATED_TITLE_CELLS: u16 = 2;
-
 /// The frame's top row: the two corners with the title, in the longest form
 /// that fits, set into the horizontal run between them.
 ///
@@ -348,13 +343,15 @@ fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
     // into the edge rather than as replacing it, and the blank column
     // [`title_label`] puts inside each of those: four cells of the run are
     // never the title's to spend
-    let label = title_label(&sanitized(title), span.saturating_sub(4));
-    let label_cells = cells(&label);
-    if label_cells > 0 && label_cells.saturating_add(2) <= span {
+    let (label, label_cells) = title_label(&sanitized(title), span.saturating_sub(4));
+    if label_cells > 0 {
         let mut lead = String::new();
         lead.push(borders.top_left);
         lead.push(borders.horizontal);
         let mut tail = String::new();
+        // no wrap: every non-empty label is at most the budget above plus
+        // its own two blank columns, which leaves the glyph on each side of
+        // it and never reaches into them
         push_run(&mut tail, borders.horizontal, span - label_cells - 1);
         tail.push(borders.top_right);
         vec![
@@ -372,12 +369,14 @@ fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
 }
 
 /// The label [`top_edge`] sets into an edge with `budget` cells to spare
-/// for the title's own text, degrading in steps rather than in one drop to
-/// nothing: the whole title while it fits, the longest prefix of it plus
-/// [`TRUNCATION_MARK`] while at least [`MIN_TRUNCATED_TITLE_CELLS`] of the
-/// title survive the cut, then its first word alone -- whole, so it reads
-/// as a name and not as a word broken off mid-syllable. Empty only when no
-/// form of the title fits at all, which is the one case the caller draws an
+/// for the title's own text, and that label's own width in cells.
+///
+/// Degrades in steps rather than in one drop to nothing: the whole title
+/// while it fits, otherwise the longest prefix of it that leaves room for
+/// [`TRUNCATION_MARK`], and where not one glyph of the title survives that
+/// cut, its first word alone -- whole, so it reads as a name rather than as
+/// a word broken off mid-syllable. Empty, and only then, when no form of
+/// the title fits at all, which is the one case the caller draws an
 /// anonymous edge for.
 ///
 /// A box that names itself only above some width is a box a user meets
@@ -387,28 +386,69 @@ fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
 /// The blank column on each side of the label is part of every non-empty
 /// answer, which is why `budget` excludes them: a title abutting the edge
 /// glyphs reads as a run of the border rather than as a name set into it.
-fn title_label(title: &str, budget: u16) -> String {
+/// A non-empty answer is therefore always `budget + 2` cells or fewer, and
+/// always carries at least one cell the reader can see -- a title of
+/// nothing but zero-width marks is no name, and the two blank columns are
+/// not worth spending on it.
+///
+/// One forward pass over the title, whichever tier answers: the cut walks
+/// back off the end of the prefix the first pass already measured rather
+/// than measuring the title again. This is on the layout pass every framed
+/// overlay takes every frame, and the panel's own share of a common
+/// terminal is in the cut tier.
+fn title_label(title: &str, budget: u16) -> (String, u16) {
     let title = title.trim();
-    if title.is_empty() {
-        return String::new();
+    let (mut kept, mut kept_cells) = take_cells(title, budget);
+    // what came back is a prefix, so equal byte lengths mean nothing was
+    // cut -- the whole title fit, and no second measurement of it is owed
+    if kept.len() == title.len() {
+        return if kept_cells == 0 {
+            (String::new(), 0)
+        } else {
+            (format!(" {title} "), kept_cells + 2)
+        };
     }
-    if cells(title) <= budget {
-        return format!(" {title} ");
+    let mark_cells = cell_width(TRUNCATION_MARK);
+    // the mark is paid for out of the prefix's own tail, and a space handed
+    // to it would read as a gap in the title rather than as a cut
+    while kept_cells.saturating_add(mark_cells) > budget || kept.ends_with(char::is_whitespace) {
+        let Some(dropped) = kept.pop() else { break };
+        kept_cells = kept_cells.saturating_sub(cell_width(dropped));
     }
-    let keep = budget.saturating_sub(cell_width(TRUNCATION_MARK));
-    if keep >= MIN_TRUNCATED_TITLE_CELLS {
-        // cut by the same clip the interior rows go through, so a wide
-        // glyph straddling the last cell is dropped there and here alike
-        let kept = line_text(&clip_spans(vec![Span::plain(title.to_string())], keep));
-        let kept = kept.trim_end();
-        if !kept.is_empty() {
-            return format!(" {kept}{TRUNCATION_MARK} ");
+    if kept_cells > 0 {
+        return (
+            format!(" {kept}{TRUNCATION_MARK} "),
+            kept_cells + mark_cells + 2,
+        );
+    }
+    match title.split_whitespace().next().map(|w| (w, cells(w))) {
+        Some((word, word_cells)) if (1..=budget).contains(&word_cells) => {
+            (format!(" {word} "), word_cells + 2)
         }
+        _ => (String::new(), 0),
     }
-    match title.split_whitespace().next() {
-        Some(word) if cells(word) <= budget => format!(" {word} "),
-        _ => String::new(),
+}
+
+/// The longest prefix of `text` that fits in `budget` display cells, and
+/// the cells it occupies.
+///
+/// A glyph that would straddle the last cell is dropped rather than
+/// half-drawn, which is what the terminal painter does with one too. Shared
+/// by [`clip_spans`] and [`title_label`] so a row's content and the title
+/// over it are cut by one rule: a title measured any other way would be the
+/// one text on the frame that could overrun it.
+fn take_cells(text: &str, budget: u16) -> (String, u16) {
+    let mut out = String::new();
+    let mut used = 0_u16;
+    for ch in text.chars() {
+        let w = cell_width(ch);
+        if used.saturating_add(w) > budget {
+            break;
+        }
+        out.push(ch);
+        used = used.saturating_add(w);
     }
+    (out, used)
 }
 
 /// Appends `n` cells of `glyph` to `out`.
@@ -948,19 +988,11 @@ fn clip_spans(spans: Vec<Span>, width: u16) -> Vec<Span> {
         if used >= width {
             break;
         }
-        let mut text = String::new();
-        for ch in span.text.chars() {
-            let w = cell_width(ch);
-            if used.saturating_add(w) > width {
-                // this span's own room is exhausted, but a span carries no
-                // meaning that would make a later one unreachable, so the
-                // outer loop still gets a chance to add nothing rather than
-                // stopping the walk early
-                break;
-            }
-            text.push(ch);
-            used = used.saturating_add(w);
-        }
+        // a span whose own room is exhausted adds nothing, but carries no
+        // meaning that would make a later one unreachable, so the walk goes
+        // on rather than stopping at the first span that does not fit
+        let (text, took) = take_cells(&span.text, width - used);
+        used = used.saturating_add(took);
         if !text.is_empty() {
             out.push(Span::new(text, span.role));
         }

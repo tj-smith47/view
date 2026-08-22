@@ -131,32 +131,29 @@ fn a_title_that_fits_is_set_into_the_top_edge_whole() {
 
     // the narrowest edge "Files" fits whole in: two corners, one horizontal
     // glyph and one blank column on each side, and the five cells between
-    assert_eq!(
-        line_text(&rows(11, 5, &picker(), BorderSet::ASCII).lines[0]),
-        "+- Files -+"
-    );
-    assert_eq!(
-        title_span(&rows(11, 5, &picker(), BorderSet::ASCII)).as_deref(),
-        Some(" Files ")
-    );
+    let exact = rows(11, 5, &picker(), BorderSet::ASCII);
+    assert_eq!(line_text(&exact.lines[0]), "+- Files -+");
+    assert_eq!(title_span(&exact).as_deref(), Some(" Files "));
 }
 
 #[test]
 fn a_top_edge_one_cell_short_of_the_title_carries_a_marked_cut_of_it() {
-    // one below the width the whole title fits in, and one below that: the
-    // box names itself at both, and says it was cut at both
-    assert_eq!(
-        line_text(&rows(10, 5, &picker(), BorderSet::ASCII).lines[0]),
-        "+- Fil… -+"
-    );
-    assert_eq!(
-        title_span(&rows(10, 5, &picker(), BorderSet::ASCII)).as_deref(),
-        Some(" Fil… ")
-    );
+    // one below the width the whole title fits in, and down to the last
+    // width a glyph of it survives at: the box names itself at every one of
+    // them, and says it was cut at every one of them
+    let cut = rows(10, 5, &picker(), BorderSet::ASCII);
+    assert_eq!(line_text(&cut.lines[0]), "+- Fil… -+");
+    assert_eq!(title_span(&cut).as_deref(), Some(" Fil… "));
     assert_eq!(
         line_text(&rows(9, 5, &picker(), BorderSet::ASCII).lines[0]),
         "+- Fi… -+"
     );
+    // the floor: one cell of title beside the mark. Anonymity is what this
+    // whole degradation exists to avoid, so a name is cut to its first
+    // glyph before the edge is left blank
+    let floor = rows(8, 5, &picker(), BorderSet::ASCII);
+    assert_eq!(line_text(&floor.lines[0]), "+- F… -+");
+    assert_eq!(title_span(&floor).as_deref(), Some(" F… "));
 }
 
 #[test]
@@ -172,37 +169,58 @@ fn a_wide_glyph_that_would_straddle_the_cut_is_dropped_rather_than_halved() {
         "{:?}",
         line_text(&cut.lines[0])
     );
+
+    // the same drop at the floor: three cells for the title, and the wide
+    // glyph after the first will not fit beside the mark. What is left is
+    // one cell of title, which is a name, and the row is still exact
+    let narrow = rows(9, 5, &titled("a日本語"), BorderSet::ASCII);
+    assert_eq!(line_text(&narrow.lines[0]), "+- a… --+");
+    assert_eq!(title_span(&narrow).as_deref(), Some(" a… "));
 }
 
 #[test]
 fn an_edge_too_short_to_mark_a_cut_still_carries_the_titles_first_word() {
-    let panel = titled("AI Agent -- focused, Esc returns");
-    // two cells for the title: a single letter and a mark would name
-    // nothing, while the first word is a whole word
-    assert_eq!(
-        line_text(&rows(8, 5, &panel, BorderSet::ROUNDED).lines[0]),
-        "╭─ AI ─╮"
-    );
-    assert_eq!(
-        title_span(&rows(8, 5, &panel, BorderSet::ROUNDED)).as_deref(),
-        Some(" AI ")
-    );
+    // two cells for the title and a wide first glyph: nothing survives the
+    // cut once the mark is paid for, and half a glyph is not a name -- but
+    // the first word is whole and fits exactly
+    let edge = rows(8, 5, &titled("日 本語版"), BorderSet::ROUNDED);
+    assert_eq!(line_text(&edge.lines[0]), "╭─ 日 ─╮");
+    assert_eq!(title_span(&edge).as_deref(), Some(" 日 "));
 }
 
 #[test]
 fn only_an_edge_too_small_for_any_form_of_the_title_goes_bare() {
-    let panel = titled("AI Agent -- focused, Esc returns");
-    // one cell for the title, which not even "AI" fits in
-    assert_eq!(
-        line_text(&rows(7, 5, &panel, BorderSet::ROUNDED).lines[0]),
-        "╭─────╮"
+    // one cell for the title: too little for a glyph and the mark both, and
+    // no first word that short
+    let panel = rows(
+        7,
+        5,
+        &titled("AI Agent -- focused, Esc returns"),
+        BorderSet::ROUNDED,
     );
-    assert!(title_span(&rows(7, 5, &panel, BorderSet::ROUNDED)).is_none());
+    assert_eq!(line_text(&panel.lines[0]), "╭─────╮");
+    assert!(title_span(&panel).is_none());
     assert_eq!(
-        line_text(&rows(8, 5, &picker(), BorderSet::ASCII).lines[0]),
-        "+------+",
+        line_text(&rows(7, 5, &picker(), BorderSet::ASCII).lines[0]),
+        "+-----+",
         "a first word as long as the whole title has no shorter form to fall to"
     );
+}
+
+#[test]
+fn a_title_of_nothing_a_reader_can_see_never_reaches_an_edge_that_has_no_room() {
+    // a combining mark on its own occupies no cell, so a label built from
+    // it would be two blank columns naming nothing -- and two columns is
+    // more than the smallest framed rects have to give
+    for width in [2_u16, 3, 4, 5, 6, 7, 12] {
+        let edge = rows(width, 4, &titled("\u{0301}"), BorderSet::ROUNDED);
+        assert!(
+            title_span(&edge).is_none(),
+            "{width}: {:?}",
+            line_text(&edge.lines[0])
+        );
+        assert_eq!(cells(&line_text(&edge.lines[0])), width);
+    }
 }
 
 /// The geometry the acceptance sweep found the title vanishing at: the AI

@@ -598,10 +598,16 @@ PANEL_TITLE=$(panel_const TITLE) || exit 1
 # framing that appends it.
 TRUNCATION_MARK=$(grep -oE "const TRUNCATION_MARK: char = '.*'" "$OVERLAY_RS" |
     sed -E "s/.*= '(.*)'/\1/")
-[ -n "$TRUNCATION_MARK" ] || {
-    printf 'FAIL: TRUNCATION_MARK is not a char constant in %s any more\n' "$OVERLAY_RS" >&2
+# A mark that is blank, or that a frame is already drawn with, would be on
+# screen whether a title was cut or not, and the leg below would report a
+# surviving title over an edge that had lost one.
+case "$TRUNCATION_MARK" in
+'' | ' ' | '-' | '|' | '+' | '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘')
+    printf 'FAIL: the truncation mark in %s is %s, which a framed box is full of already, so finding it on screen would prove nothing about a cut title\n' \
+        "$OVERLAY_RS" "${TRUNCATION_MARK:-nothing this can read}" >&2
     exit 1
-}
+    ;;
+esac
 # What a narrow top edge keeps of the focused title: its head, which is the
 # unfocused title itself. Derived rather than written out, so a retitled
 # panel moves this with it -- and checked, because a focused title that
