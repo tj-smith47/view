@@ -5,9 +5,51 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::native::ai_event::{PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCallStatus};
-use crate::native::views::Span;
+use crate::native::views::{Span, StyleRole};
+
+/// The glyph opening a transcript entry the user composed.
+///
+/// Every entry opens with one of these rather than with a spelled-out
+/// speaker: the marker is what makes two consecutive messages read as two
+/// items instead of one paragraph, and the colors the roles carry
+/// (`StyleRole::Ai*`) are what say which voice each one is in.
+const USER_MARK: &str = "\u{276f} ";
+/// The glyph opening one of the agent's replies.
+const AGENT_MARK: &str = "\u{25cf} ";
+/// The glyph opening the agent's reasoning.
+const THOUGHT_MARK: &str = "\u{25e6} ";
+/// The glyph a tool call that has not started yet opens with.
+const TOOL_PENDING_MARK: &str = "\u{b7} ";
+/// The glyph a completed tool call opens with.
+const TOOL_DONE_MARK: &str = "\u{2713} ";
+/// The glyph a failed tool call opens with.
+const TOOL_FAILED_MARK: &str = "\u{2717} ";
+
+/// The braille cycle a running tool call's marker animates through.
+const SPINNER_FRAMES: [&str; 8] = [
+    "\u{280b} ",
+    "\u{2819} ",
+    "\u{2839} ",
+    "\u{2838} ",
+    "\u{283c} ",
+    "\u{2834} ",
+    "\u{2826} ",
+    "\u{2827} ",
+];
+
+/// How long one spinner frame stands before [`Transcript::advance_spinner`]
+/// replaces it. The whole cycle is eight frames, so this is a shade under
+/// two thirds of a second per revolution -- fast enough to read as motion,
+/// slow enough that a wedged agent is not asking for a repaint every frame
+/// the terminal could draw.
+pub const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+
+/// The prefix every locally minted message id carries, so an id this panel
+/// invented for its own echo can never collide with one an agent chose.
+const LOCAL_ID_PREFIX: &str = "view-local-";
 
 /// Who spoke one transcript entry, and in which voice. Closed rather than
 /// a free-form string: every renderer that ever styles a row by speaker
@@ -136,6 +178,45 @@ pub struct Transcript {
     message_index: HashMap<String, usize>,
     plan_index: Option<usize>,
     row_cache: RefCell<Vec<Option<Vec<Vec<Span>>>>>,
+    /// The prompt this panel echoed locally that a replaying adapter may
+    /// still restate over the wire (see [`Transcript::echo_user_prompt`]).
+    echo: Option<LocalEcho>,
+    /// How many locally minted message ids have been handed out, so a
+    /// second prompt in one session never reuses the first one's id and
+    /// folds into the entry it already wrote.
+    local_seq: u64,
+    /// How many tool calls are mid-flight. Counted as statuses move rather
+    /// than scanned per tick: it is what decides whether the spinner is
+    /// running at all, and a scan would put the length of the session into
+    /// a question asked on a timer.
+    running_calls: usize,
+    /// Whether a spinner tick is already scheduled, so a burst of tool-call
+    /// updates arms one timer rather than one per update.
+    spinner_armed: bool,
+    /// Which [`SPINNER_FRAMES`] entry an unresolved tool call currently
+    /// paints.
+    spinner_frame: usize,
+}
+
+/// The user's own prompt as this panel echoed it, and how much of it an
+/// adapter's replay has restated so far.
+///
+/// The panel writes the prompt into the transcript itself the moment it is
+/// submitted, because the one adapter view ships against never replays it
+/// and a user who cannot see what they asked is reading half a
+/// conversation. An adapter that *does* replay would then say it twice, so
+/// the replay is matched off against this: a `from_agent: false` chunk that
+/// continues what was echoed is the echo arriving over the wire and is
+/// dropped, and anything else is something the user has not been shown yet
+/// and appends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalEcho {
+    /// Which entry holds the echoed prompt.
+    entry: usize,
+    /// How many bytes of that entry's text a replay has already matched, so
+    /// a replay streamed in several chunks is recognised chunk by chunk
+    /// rather than only when one chunk happens to carry the whole prompt.
+    matched: usize,
 }
 
 /// Hand-written rather than derived: `row_cache` is a lazily-populated
@@ -146,13 +227,19 @@ pub struct Transcript {
 /// same events must compare equal whether or not either has ever been
 /// painted; deriving `PartialEq` across every field would make painting a
 /// transcript change what it compares equal to, which is not an identity
-/// any caller should be able to observe.
+/// any caller should be able to observe. The spinner's frame and its armed
+/// flag are excluded on the same terms -- which eighth of a second a
+/// running call's glyph is on says nothing about what the transcript holds
+/// -- while the pending local echo is included, because whether a replay
+/// would be absorbed or appended is a real difference between two
+/// transcripts.
 impl PartialEq for Transcript {
     fn eq(&self, other: &Self) -> bool {
         self.entries == other.entries
             && self.tool_call_index == other.tool_call_index
             && self.message_index == other.message_index
             && self.plan_index == other.plan_index
+            && self.echo == other.echo
     }
 }
 
@@ -162,13 +249,7 @@ impl Transcript {
     /// An empty transcript.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            tool_call_index: HashMap::new(),
-            message_index: HashMap::new(),
-            plan_index: None,
-            row_cache: RefCell::new(Vec::new()),
-        }
+        Self::default()
     }
 
     /// Whether no entry has folded in yet.
@@ -213,7 +294,8 @@ impl Transcript {
             if rows.len() >= budget {
                 break;
             }
-            let entry_rows = cache[i].get_or_insert_with(|| render_entry(&self.entries[i]));
+            let entry_rows =
+                cache[i].get_or_insert_with(|| render_entry(&self.entries[i], self.spinner_frame));
             rows.extend(entry_rows.iter().skip(skip).cloned());
             skip = 0;
         }
@@ -261,7 +343,7 @@ impl Transcript {
             }
             entry -= 1;
             row = cache[entry]
-                .get_or_insert_with(|| render_entry(&self.entries[entry]))
+                .get_or_insert_with(|| render_entry(&self.entries[entry], self.spinner_frame))
                 .len();
         }
         TranscriptAnchor { entry, row }
@@ -279,7 +361,7 @@ impl Transcript {
         let mut row = anchor.row;
         while left > 0 && entry < self.entries.len() {
             let below = cache[entry]
-                .get_or_insert_with(|| render_entry(&self.entries[entry]))
+                .get_or_insert_with(|| render_entry(&self.entries[entry], self.spinner_frame))
                 .len()
                 .saturating_sub(row);
             if below > left {
@@ -378,6 +460,14 @@ impl Transcript {
                     _ => Vec::new(),
                 },
             };
+            let was_running = matches!(
+                self.entries[i].kind,
+                TranscriptEntryKind::ToolCall {
+                    status: ToolCallStatus::InProgress,
+                    ..
+                }
+            );
+            self.note_running(was_running, status == ToolCallStatus::InProgress);
             self.entries[i].kind = TranscriptEntryKind::ToolCall {
                 tool_call_id,
                 status,
@@ -387,6 +477,7 @@ impl Transcript {
             self.row_cache.get_mut()[i] = None;
             return;
         }
+        self.note_running(false, status == ToolCallStatus::InProgress);
         self.entries.push(TranscriptEntry {
             kind: TranscriptEntryKind::ToolCall {
                 tool_call_id: tool_call_id.clone(),
@@ -398,6 +489,128 @@ impl Transcript {
         self.row_cache.get_mut().push(None);
         self.tool_call_index
             .insert(tool_call_id, self.entries.len() - 1);
+    }
+
+    /// Moves the in-flight tool-call count for one status transition.
+    fn note_running(&mut self, was: bool, now: bool) {
+        match (was, now) {
+            (false, true) => self.running_calls += 1,
+            (true, false) => self.running_calls = self.running_calls.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    /// Whether a spinner tick has to be scheduled now: a call is running and
+    /// nothing is already timing the next frame. Claims the slot as it
+    /// answers, so a turn announcing six tool calls arms one timer.
+    ///
+    /// The caller owns the clock (`view-core` has none) and turns a `true`
+    /// here into `Effect::ScheduleAiSpinnerTick`.
+    pub fn arm_spinner(&mut self) -> bool {
+        let arm = self.running_calls > 0 && !self.spinner_armed;
+        self.spinner_armed |= arm;
+        arm
+    }
+
+    /// Advances every unresolved tool call's marker to the next spinner
+    /// frame, reporting whether the spinner is still running -- which is
+    /// both what the caller repaints on and what it re-arms the tick on.
+    ///
+    /// Only the entries actually spinning drop their cached rows, so the
+    /// frame a tick repaints is the marker's own row and nothing else on
+    /// the panel; a transcript with no call in flight clears the armed flag
+    /// and does no work at all.
+    pub fn advance_spinner(&mut self) -> bool {
+        if self.running_calls == 0 {
+            self.spinner_armed = false;
+            return false;
+        }
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        let cache = self.row_cache.get_mut();
+        for (i, entry) in self.entries.iter().enumerate() {
+            if matches!(
+                entry.kind,
+                TranscriptEntryKind::ToolCall {
+                    status: ToolCallStatus::InProgress,
+                    ..
+                }
+            ) {
+                cache[i] = None;
+            }
+        }
+        true
+    }
+
+    /// Appends the prompt the user just submitted, under an id minted here.
+    ///
+    /// The panel says what the user said, itself, at the moment they said
+    /// it: the wire is under no obligation to replay a prompt back (the ACP
+    /// adapter view ships against never does), and a transcript that shows
+    /// only the answers is a conversation with one side missing.
+    pub fn echo_user_prompt(&mut self, text: &str) {
+        self.local_seq += 1;
+        let id = format!("{LOCAL_ID_PREFIX}{}", self.local_seq);
+        self.append_or_extend(Some(&id), text, TranscriptRole::User);
+        self.echo = Some(LocalEcho {
+            entry: self.entries.len() - 1,
+            matched: 0,
+        });
+    }
+
+    /// Folds one `from_agent: false` chunk, dropping it when it is the
+    /// adapter restating the prompt this panel already echoed (see
+    /// [`LocalEcho`]) and appending it when it is something else -- an
+    /// adapter that injects context of its own into the user's turn has
+    /// said something the user has not seen, and dropping that would hide
+    /// it.
+    pub fn append_user_chunk(&mut self, message_id: Option<&str>, text: &str) {
+        if self.absorbs_replay(text) {
+            return;
+        }
+        self.append_or_extend(message_id, text, TranscriptRole::User);
+    }
+
+    /// Whether `text` continues the echoed prompt, consuming that much of it
+    /// when it does.
+    fn absorbs_replay(&mut self, text: &str) -> bool {
+        let Some(echo) = self.echo else {
+            return false;
+        };
+        // `get` rather than an index and a slice: a replay that has matched
+        // part way into a multi-byte character leaves `matched` off a char
+        // boundary, and asking for the rest of the text is how that answers
+        // "not a match" instead of panicking on the paint path's own state.
+        let absorbed = self
+            .entries
+            .get(echo.entry)
+            .and_then(|entry| entry.text.get(echo.matched..))
+            .is_some_and(|rest| rest.starts_with(text));
+        if absorbed {
+            self.echo = Some(LocalEcho {
+                matched: echo.matched + text.len(),
+                ..echo
+            });
+        }
+        absorbed
+    }
+
+    /// Settles what the turn leaves behind, at the point nothing is still
+    /// answering it.
+    ///
+    /// The prompt awaiting a replay is forgotten: a chunk arriving after
+    /// this is a new turn's, and matching it against the last turn's echo
+    /// would drop a message the user never saw.
+    ///
+    /// The spinner stops too, whatever the wire last said about the calls
+    /// still on screen. A turn that ended with a call unresolved -- which
+    /// is every crashed session, since a dead agent sends no final status
+    /// -- would otherwise keep a marker animating, and a timer re-arming
+    /// behind it, for the rest of the run. Their last status stands: the
+    /// panel does not invent a result the agent never reported, it stops
+    /// pretending the call is still moving.
+    pub fn end_turn(&mut self) {
+        self.echo = None;
+        self.running_calls = 0;
     }
 
     /// Replaces the transcript's plan wholesale, per the wire's own
@@ -437,27 +650,43 @@ thread_local! {
 
 /// One transcript entry's rendered rows: a single line for a message, a
 /// title line plus one line per result item for a tool call, or one line
-/// per task for a plan.
-fn render_entry(entry: &TranscriptEntry) -> Vec<Vec<Span>> {
+/// per task for a plan. `spinner` is the frame an unresolved tool call's
+/// marker is currently on ([`Transcript::advance_spinner`]).
+///
+/// Every row opens with a marker glyph in its own span, and the row's
+/// meaning is carried by color and that glyph rather than by a word: a
+/// panel that spells out who is speaking spends the start of every line
+/// restating what a reader learns once, and the transcript is the one
+/// surface here where the content is the point.
+fn render_entry(entry: &TranscriptEntry, spinner: usize) -> Vec<Vec<Span>> {
     #[cfg(test)]
     RENDER_ENTRY_CALLS.with(|calls| calls.set(calls.get() + 1));
     match &entry.kind {
         TranscriptEntryKind::Message { role, .. } => {
-            let prefix = match role {
-                TranscriptRole::User => "You",
-                TranscriptRole::Agent => "Agent",
-                TranscriptRole::Thought => "Thinking",
+            let (mark, style) = match role {
+                TranscriptRole::User => (USER_MARK, StyleRole::AiUser),
+                TranscriptRole::Agent => (AGENT_MARK, StyleRole::AiAgent),
+                TranscriptRole::Thought => (THOUGHT_MARK, StyleRole::AiThought),
             };
-            vec![vec![Span::plain(format!("{prefix}: {}", entry.text))]]
+            vec![vec![
+                Span::new(mark, style),
+                Span::new(entry.text.clone(), style),
+            ]]
         }
         TranscriptEntryKind::ToolCall { status, result, .. } => {
-            let prefix = match status {
-                ToolCallStatus::Pending => "pending",
-                ToolCallStatus::InProgress => "running",
-                ToolCallStatus::Completed => "done",
-                ToolCallStatus::Failed => "failed",
+            let (mark, style) = match status {
+                ToolCallStatus::Pending => (TOOL_PENDING_MARK, StyleRole::AiToolRunning),
+                ToolCallStatus::InProgress => (
+                    SPINNER_FRAMES[spinner % SPINNER_FRAMES.len()],
+                    StyleRole::AiToolRunning,
+                ),
+                ToolCallStatus::Completed => (TOOL_DONE_MARK, StyleRole::AiToolDone),
+                ToolCallStatus::Failed => (TOOL_FAILED_MARK, StyleRole::AiToolFailed),
             };
-            let mut rows = vec![vec![Span::plain(format!("{prefix}: {}", entry.text))]];
+            let mut rows = vec![vec![
+                Span::new(mark, style),
+                Span::plain(entry.text.clone()),
+            ]];
             rows.extend(
                 result
                     .iter()
@@ -497,6 +726,14 @@ mod tests {
     /// whose subject is what renders rather than how much of it does.
     const ROOM: usize = 1_000;
 
+    /// One agent reply's rendered row, marker span and all.
+    fn agent_row(text: &str) -> Vec<Span> {
+        vec![
+            Span::new(AGENT_MARK, StyleRole::AiAgent),
+            Span::new(text, StyleRole::AiAgent),
+        ]
+    }
+
     #[test]
     fn reasoning_renders_apart_from_the_reply_it_shares_an_id_with() {
         let mut transcript = Transcript::new();
@@ -506,8 +743,14 @@ mod tests {
         assert_eq!(
             transcript.rows_from(TranscriptAnchor::default(), ROOM),
             vec![
-                vec![Span::plain("Thinking: weighing it")],
-                vec![Span::plain("Agent: the answer")],
+                vec![
+                    Span::new(THOUGHT_MARK, StyleRole::AiThought),
+                    Span::new("weighing it", StyleRole::AiThought),
+                ],
+                vec![
+                    Span::new(AGENT_MARK, StyleRole::AiAgent),
+                    Span::new("the answer", StyleRole::AiAgent),
+                ],
             ],
             "reasoning must be readable as reasoning, not as what the agent said"
         );
@@ -794,11 +1037,11 @@ mod tests {
         assert_eq!(
             texts(&rows),
             vec![
-                "Agent: line 45",
-                "Agent: line 46",
-                "Agent: line 47",
-                "Agent: line 48",
-                "Agent: line 49",
+                "● line 45",
+                "● line 46",
+                "● line 47",
+                "● line 48",
+                "● line 49",
             ]
         );
     }
@@ -832,10 +1075,7 @@ mod tests {
         let tail = transcript.tail_anchor(10);
 
         let back = transcript.scrolled_back(tail, 17);
-        assert_eq!(
-            texts(&transcript.rows_from(back, 1)),
-            vec!["Agent: line 23"]
-        );
+        assert_eq!(texts(&transcript.rows_from(back, 1)), vec!["● line 23"]);
         assert_eq!(transcript.scrolled_forward(back, 17), tail);
     }
 
@@ -927,7 +1167,7 @@ mod tests {
         );
         assert_eq!(
             second_pass[1],
-            vec![Span::plain("Agent: two more")],
+            agent_row("two more"),
             "the touched entry's row must reflect the fold"
         );
         assert_eq!(
@@ -959,7 +1199,7 @@ mod tests {
         );
         assert_eq!(
             rows[0],
-            vec![Span::plain("Agent: hello")],
+            agent_row("hello"),
             "the window starts where the panel's own window starts"
         );
         assert!(
@@ -967,6 +1207,194 @@ mod tests {
             "a frame must not render entries no window can show: {} entries \
              rendered for a {window}-row window",
             render_entry_calls()
+        );
+    }
+
+    /// The echo is the panel's own copy of the prompt, so an adapter that
+    /// also replays it must not put a second copy of the same sentence on
+    /// screen -- however many chunks it takes to say it.
+    #[test]
+    fn a_replayed_prompt_folds_into_the_echo_rather_than_repeating_it() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+
+        transcript.append_user_chunk(Some("wire-1"), "fix the ");
+        transcript.append_user_chunk(Some("wire-1"), "retry policy");
+
+        assert_eq!(transcript.len(), 1, "one prompt, said once");
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            vec!["\u{276f} fix the retry policy"]
+        );
+    }
+
+    /// The other direction, and the reason the match is a prefix check
+    /// rather than an unconditional drop: an adapter that injects context
+    /// of its own into the user's turn has said something the user has
+    /// never seen, and a panel that swallowed it would be hiding what the
+    /// agent was actually asked.
+    #[test]
+    fn a_user_chunk_that_is_not_the_echo_still_appends() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+
+        transcript.append_user_chunk(Some("wire-1"), "<context: 3 files>");
+
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            vec![
+                "\u{276f} fix the retry policy",
+                "\u{276f} <context: 3 files>"
+            ]
+        );
+    }
+
+    /// A turn's echo dies with the turn: the next turn's chunks are matched
+    /// against that turn's echo or against nothing at all, never against a
+    /// prompt two turns old that happens to start the same way.
+    #[test]
+    fn a_replay_arriving_after_the_turn_ended_is_shown_rather_than_absorbed() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("run the tests");
+        transcript.end_turn();
+
+        transcript.append_user_chunk(Some("wire-1"), "run the tests");
+
+        assert_eq!(transcript.len(), 2);
+    }
+
+    /// Two prompts in one session are two entries, not one folded pair: a
+    /// reused id would extend the first prompt with the second one's text.
+    #[test]
+    fn a_second_prompt_gets_its_own_entry() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("first");
+        transcript.end_turn();
+        transcript.echo_user_prompt("second");
+
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            vec!["\u{276f} first", "\u{276f} second"]
+        );
+    }
+
+    /// The spinner is the one thing on the panel that repaints on a timer,
+    /// so it must cost exactly the entries that are spinning: a tick that
+    /// dropped every cached row would turn a running tool call into a
+    /// whole-transcript re-render eight times a second.
+    #[test]
+    fn a_spinner_tick_re_renders_only_the_calls_still_running() {
+        let mut transcript = Transcript::new();
+        for i in 0..20 {
+            transcript.append_or_extend(Some(&format!("m{i}")), "chatter", TranscriptRole::Agent);
+        }
+        transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+
+        reset_render_entry_calls();
+        assert!(transcript.advance_spinner());
+        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+
+        assert_eq!(
+            render_entry_calls(),
+            1,
+            "a tick must re-render the running call and nothing else"
+        );
+    }
+
+    /// A call the agent never resolved -- a crashed session leaves one on
+    /// every turn it was mid-way through -- must not leave a marker
+    /// animating and a timer re-arming behind it for the rest of the run.
+    #[test]
+    fn a_turn_that_ends_mid_call_stops_the_spinner() {
+        let mut transcript = Transcript::new();
+        transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+        assert!(transcript.arm_spinner());
+
+        transcript.end_turn();
+
+        assert!(!transcript.advance_spinner());
+        assert!(!transcript.arm_spinner());
+    }
+
+    /// Nothing running means nothing to animate, and the caller reads that
+    /// answer to stop re-arming the timer.
+    #[test]
+    fn a_transcript_with_no_call_in_flight_neither_arms_nor_advances() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(Some("m1"), "hello", TranscriptRole::Agent);
+        assert!(!transcript.arm_spinner());
+        assert!(!transcript.advance_spinner());
+
+        transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::Completed,
+            None,
+        );
+        assert!(
+            !transcript.arm_spinner(),
+            "a call that arrived already finished never spins"
+        );
+    }
+
+    /// Two calls in flight share one timer, and it keeps running until the
+    /// last of them resolves -- an arm-per-call would leave a second timer
+    /// ticking against a panel with nothing moving on it.
+    #[test]
+    fn the_spinner_stops_only_once_every_call_has_resolved() {
+        let mut transcript = Transcript::new();
+        for id in ["call_1", "call_2"] {
+            transcript.upsert_tool_call(
+                id.to_string(),
+                "Read file".to_string(),
+                ToolCallStatus::InProgress,
+                None,
+            );
+        }
+        assert!(transcript.arm_spinner());
+        assert!(!transcript.arm_spinner());
+
+        transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::Completed,
+            None,
+        );
+        assert!(
+            transcript.advance_spinner(),
+            "the second call is still running"
+        );
+
+        transcript.upsert_tool_call(
+            "call_2".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::Failed,
+            None,
+        );
+        assert!(!transcript.advance_spinner());
+
+        transcript.upsert_tool_call(
+            "call_3".to_string(),
+            "Write file".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+        assert!(
+            transcript.arm_spinner(),
+            "the armed slot is handed back, so a later call gets its own timer"
         );
     }
 }

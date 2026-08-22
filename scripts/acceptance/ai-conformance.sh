@@ -152,19 +152,36 @@ const_str() {
     printf '%s' "$value"
 }
 
-# The label one `ToolCallStatus` arm renders as, read from the match that
-# owns it: the status vocabulary is the wire's, and the words on screen are
-# this file's translation of it.
-status_label() {
-    local variant="$1" value
-    value=$(grep -oE "ToolCallStatus::$variant => \"[a-z_]+\"" "$TRANSCRIPT_RS" |
+# The glyph one transcript marker renders as, read from the `const` that
+# owns it and decoded out of Rust's `\u{...}` escape: the panel says who
+# spoke and how a call went in a marker rather than a word, so the marker is
+# what this script has to look for on screen.
+mark_str() {
+    local name="$1" value
+    value=$(grep -oE "^const $name: &str = \"[^\"]+\"" "$TRANSCRIPT_RS" |
         sed -E 's/.*"(.*)"/\1/')
     if [ -z "$value" ]; then
-        printf 'FAIL: ToolCallStatus::%s has no rendered label in %s any more\n' \
+        printf 'FAIL: %s is not a marker constant in %s any more\n' \
+            "$name" "$TRANSCRIPT_RS" >&2
+        return 1
+    fi
+    printf '%b' "$(printf '%s' "$value" | sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')"
+}
+
+# The marker one `ToolCallStatus` arm renders as, joined from the match arm
+# that names a constant and the constant that holds the glyph -- so a
+# reworded arm or a changed glyph both fail here rather than quietly
+# matching nothing.
+status_mark() {
+    local variant="$1" name
+    name=$(grep -oE "ToolCallStatus::$variant => \(?[A-Z_]+" "$TRANSCRIPT_RS" |
+        sed -E 's/.*[( ]([A-Z_]+)$/\1/')
+    if [ -z "$name" ]; then
+        printf 'FAIL: ToolCallStatus::%s renders no marker in %s any more\n' \
             "$variant" "$TRANSCRIPT_RS" >&2
         return 1
     fi
-    printf '%s' "$value"
+    mark_str "$name"
 }
 
 # The literal `text` in `file`, as a check that a string this script builds
@@ -210,6 +227,26 @@ wait_for_log() {
         el=$(elapsed "$start" "$(now)")
         if ! under "$el" "$budget"; then
             fail "$what was never logged within ${budget}s (looked for /$pattern/)"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+
+# `wait_for` against a pattern rather than a literal, for the one row whose
+# text depends on when it was read: an unresolved tool call's marker is
+# whichever spinner frame the tick has reached.
+wait_for_re() {
+    local pattern="$1" budget="$2" what="$3" start el
+    start=$(now)
+    while :; do
+        if pane | grep -qE -- "$pattern"; then
+            elapsed "$start" "$(now)"
+            return 0
+        fi
+        el=$(elapsed "$start" "$(now)")
+        if ! under "$el" "$budget"; then
+            fail "$what did not appear within ${budget}s (looked for /$pattern/)"
             return 1
         fi
         sleep "$POLL"
@@ -441,7 +478,7 @@ leg_streaming_and_tool_status() {
     # for a panel -- a turn rendered only at its end shows neither.
     wait_for "${AGENT_PREFIX}streaming" "$WAIT_SECS" \
         "the first half of the streamed message" >/dev/null
-    wait_for "$RUNNING_LABEL: Probe the file" "$WAIT_SECS" \
+    wait_for_re "($SPINNER_ALTERNATION) Probe the file" "$WAIT_SECS" \
         "the tool call's non-terminal status" >/dev/null
     refute "${AGENT_PREFIX}streaming and done" \
         "the turn's second half rendered before it was sent"
@@ -449,7 +486,7 @@ leg_streaming_and_tool_status() {
     touch "$resume"
     wait_for "${AGENT_PREFIX}streaming and done" "$WAIT_SECS" \
         "the streamed message growing in place" >/dev/null
-    wait_for "$DONE_LABEL: Probe the file" "$WAIT_SECS" \
+    wait_for "${DONE_MARK}Probe the file" "$WAIT_SECS" \
         "the tool call's terminal status" >/dev/null
     pass 'a turn rendered incrementally, its tool call non-terminal then terminal'
 
@@ -459,7 +496,7 @@ leg_streaming_and_tool_status() {
     # wire's own "a change in messageId indicates a new message"), so the
     # later ones are inside a row the panel's width has already truncated.
     submit 'stream'
-    wait_for "$DONE_LABEL: Read a.rs" "$WAIT_SECS" "the streamed tool call" >/dev/null
+    wait_for "${DONE_MARK}Read a.rs" "$WAIT_SECS" "the streamed tool call" >/dev/null
     wait_for "$TERMINAL_CONTENT" "$WAIT_SECS" "the streamed terminal content" >/dev/null
     wait_for "$PLAN_PREFIX" "$WAIT_SECS" "the streamed plan" >/dev/null
     # Reasoning reaches the loop, reaches the screen, and reaches it in its
@@ -706,8 +743,7 @@ FOCUSED_TITLE=$(const_str "$PANEL_RS" FOCUSED_TITLE)
 # leading run of it still fails loudly if the keys are reworded.
 REVIEW_KEY_HINT=$(const_str "$REVIEW_RS" KEY_HINT)
 REVIEW_KEY_HINT=${REVIEW_KEY_HINT:0:20}
-RUNNING_LABEL=$(status_label InProgress)
-DONE_LABEL=$(status_label Completed)
+DONE_MARK=$(status_mark Completed) || exit 1
 PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_RS" |
     sed -E 's/.*"(.*)/\1/')
 [ -n "$PERMISSION_PROMPT" ] || {
@@ -715,29 +751,45 @@ PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_R
         "$PERMISSION_RS" >&2
     exit 1
 }
-# How the transcript labels the agent's own side of the conversation, and
-# the separator it joins to -- one row's whole prefix, from the two places
-# that own its halves.
-AGENT_PREFIX=$(grep -oE 'TranscriptRole::Agent => "[A-Za-z]+"' "$TRANSCRIPT_RS" |
-    sed -E 's/.*"(.*)"/\1/')
+# The marker the transcript opens the agent's own side of the conversation
+# with, and the one reasoning wears instead. Read from the two arms
+# separately rather than one derived from the other, since the whole
+# assertion downstream is that they are not the same glyph.
+AGENT_PREFIX=$(grep -oE 'TranscriptRole::Agent => \(?[A-Z_]+' "$TRANSCRIPT_RS" |
+    sed -E 's/.*[( ]([A-Z_]+)$/\1/')
 [ -n "$AGENT_PREFIX" ] || {
-    printf 'FAIL: TranscriptRole::Agent has no rendered label in %s any more\n' \
+    printf 'FAIL: TranscriptRole::Agent renders no marker in %s any more\n' \
         "$TRANSCRIPT_RS" >&2
     exit 1
 }
-require_template "$TRANSCRIPT_RS" '"{prefix}: {}"' || exit 1
-AGENT_PREFIX="$AGENT_PREFIX: "
-# The label reasoning wears instead, from the same match. Read separately
-# rather than derived, since the whole assertion is that the two are not
-# the same word.
-THOUGHT_PREFIX=$(grep -oE 'TranscriptRole::Thought => "[A-Za-z]+"' "$TRANSCRIPT_RS" |
-    sed -E 's/.*"(.*)"/\1/')
+AGENT_PREFIX=$(mark_str "$AGENT_PREFIX") || exit 1
+THOUGHT_PREFIX=$(grep -oE 'TranscriptRole::Thought => \(?[A-Z_]+' "$TRANSCRIPT_RS" |
+    sed -E 's/.*[( ]([A-Z_]+)$/\1/')
 [ -n "$THOUGHT_PREFIX" ] || {
-    printf 'FAIL: TranscriptRole::Thought has no rendered label in %s any more\n' \
+    printf 'FAIL: TranscriptRole::Thought renders no marker in %s any more\n' \
         "$TRANSCRIPT_RS" >&2
     exit 1
 }
-THOUGHT_PREFIX="$THOUGHT_PREFIX: "
+THOUGHT_PREFIX=$(mark_str "$THOUGHT_PREFIX") || exit 1
+# Every frame an unresolved call's marker cycles through, as one alternation:
+# the frame on screen depends on when the screen was read, so the assertion
+# that a call is running has to accept any of them.
+SPINNER_ALTERNATION=$(awk '
+    /^const SPINNER_FRAMES/ { inside = 1; next }
+    inside && /^\];/ { exit }
+    inside && match($0, /"[^"]+"/) {
+        frame = substr($0, RSTART + 1, RLENGTH - 2)
+        sub(/ $/, "", frame)
+        printf "%s%s", (n++ ? "|" : ""), frame
+    }
+' "$TRANSCRIPT_RS")
+[ -n "$SPINNER_ALTERNATION" ] || {
+    printf 'FAIL: SPINNER_FRAMES no longer lists the running marker frames in %s\n' \
+        "$TRANSCRIPT_RS" >&2
+    exit 1
+}
+SPINNER_ALTERNATION=$(printf '%b' "$(printf '%s' "$SPINNER_ALTERNATION" |
+    sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')")
 # A plan row's own opening, and a placeholder for a content kind the panel
 # shows a label for rather than the content itself. Both are built from the
 # wire's pinned vocabulary (`docs/acp-v1-wire-capture.md`'s `Plan` and
@@ -780,8 +832,18 @@ require_template "$VLOG_RS" \
 require_template "$VLOG_RS" 'ThoughtChunk {{ message_id: {message_id:?}, text: {} }}' || exit 1
 NON_TERMINAL_STATUSES='Pending|InProgress'
 TERMINAL_STATUSES='Completed|Failed'
-for status in ${NON_TERMINAL_STATUSES//|/ } ${TERMINAL_STATUSES//|/ }; do
-    status_label "$status" >/dev/null || exit 1
+# `InProgress` is the one arm with no constant of its own: it renders
+# whichever `SPINNER_FRAMES` entry the tick has reached, already read into
+# `SPINNER_ALTERNATION` above, so the arm is proved to still animate rather
+# than to name a glyph.
+grep -qE 'ToolCallStatus::InProgress => \(\s*$|ToolCallStatus::InProgress => \(SPINNER_FRAMES' \
+    "$TRANSCRIPT_RS" || {
+    printf 'FAIL: ToolCallStatus::InProgress no longer renders a spinner frame in %s\n' \
+        "$TRANSCRIPT_RS" >&2
+    exit 1
+}
+for status in Pending Completed Failed; do
+    status_mark "$status" >/dev/null || exit 1
 done
 
 # The stub agent's first argument is the file whose appearance releases a

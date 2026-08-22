@@ -496,6 +496,20 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 resolved: Some(items),
             }]
         }
+        Msg::AiSpinnerTick => {
+            if !model.ai_panel_mut().transcript.advance_spinner() {
+                return Vec::new();
+            }
+            // The frame moves whether or not anyone is looking, so a panel
+            // reopened mid-call finds its spinner where it should be -- but
+            // only a panel on screen is worth a repaint, and a tool call
+            // running behind a closed sidebar must not cost one every
+            // eightieth of a second.
+            model.dirty |= model.ai_panel_overlay_open();
+            vec![Effect::ScheduleAiSpinnerTick {
+                after: crate::native::ai_panel::SPINNER_INTERVAL,
+            }]
+        }
         Msg::ToastExpired { id } => {
             // races the same entry being cleared, replaced (which stamps a
             // fresh id, so this id simply no longer matches anything), or
@@ -1363,6 +1377,10 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     if !panel.turn_in_flight && !panel.input.trim().is_empty() {
                         let text = std::mem::take(&mut panel.input);
                         panel.turn_in_flight = true;
+                        // The transcript's own copy of what was just asked,
+                        // written here rather than waited for over the wire:
+                        // see `Transcript::echo_user_prompt`.
+                        panel.transcript.echo_user_prompt(&text);
                         // A prompt sent from a scrolled-back panel would
                         // otherwise stream its answer somewhere off screen.
                         panel.follow_transcript_tail();

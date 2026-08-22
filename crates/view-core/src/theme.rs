@@ -222,6 +222,30 @@ chrome_groups! {
     /// group of its own the title inherited the frame's dimmed border
     /// color, which is the one part of the frame a user reads as text.
     FloatTitle => "FloatTitle", Emphasis;
+    /// nvim's builtin prompt group (`:h hl-Question`), what it colors the
+    /// questions it puts to the user. The agent panel's own
+    /// [`crate::native::views::StyleRole::AiUser`] resolves through it: a
+    /// prompt the user composed for the agent is the same kind of text, and
+    /// a colorscheme that themes nvim's own prompts themes it for free.
+    Question => "Question", Emphasis;
+    /// nvim's builtin informational-message group (`:h hl-MoreMsg`), the
+    /// closest builtin to "the editor talking back". The agent's replies
+    /// ([`crate::native::views::StyleRole::AiAgent`]) resolve through it, so
+    /// a reply reads in a different color from the prompt above it without
+    /// either being spelled out in words.
+    MoreMsg => "MoreMsg", Emphasis;
+    /// nvim's builtin group for cells that are not buffer text (`:h
+    /// hl-NonText`) -- the one builtin every colorscheme themes as
+    /// deliberately recessive. The agent's reasoning and an unresolved tool
+    /// call's status glyph both resolve through it, which is what makes
+    /// them read as beside the conversation rather than part of it.
+    NonText => "NonText", Normal;
+    /// nvim's builtin success-message group (`:h hl-OkMsg`), the positive
+    /// counterpart of [`ChromeGroup::ErrorMsg`]. A completed tool call's
+    /// check glyph resolves through it, so the two outcomes take the
+    /// colorscheme's own answers to "this went well" and "this did not"
+    /// rather than a pair chosen here.
+    OkMsg => "OkMsg", Emphasis;
 }
 
 /// The active colorscheme's resolved design system: the default/"Normal"

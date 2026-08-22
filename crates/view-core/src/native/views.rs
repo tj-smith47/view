@@ -81,6 +81,30 @@ pub enum StyleRole {
     /// color makes the one label naming what the overlay IS the least
     /// legible thing on it.
     Title,
+    /// An agent transcript entry the user composed: its marker glyph and
+    /// the prompt body behind it.
+    ///
+    /// The three message roles here are what tells one speaker from another
+    /// in the panel. There is no word prefix on those rows any more, so a
+    /// reader who cannot see the difference between these colors is reading
+    /// their own prompt as though the agent had said it.
+    AiUser,
+    /// An agent transcript entry the agent replied with, the counterpart of
+    /// [`Self::AiUser`].
+    AiAgent,
+    /// An agent transcript entry carrying the agent's reasoning rather than
+    /// its answer, deliberately the dimmest of the three: it is the one
+    /// voice on the panel that is not an assertion.
+    AiThought,
+    /// A transcript tool call's status glyph once the call has completed.
+    AiToolDone,
+    /// A transcript tool call's status glyph once the call has failed.
+    AiToolFailed,
+    /// A transcript tool call's status glyph while the call is unresolved --
+    /// the pending dot and every spinner frame that follows it. One role for
+    /// both, because they are one state to a reader: the call has not
+    /// answered yet.
+    AiToolRunning,
 }
 
 impl StyleRole {
@@ -105,6 +129,11 @@ impl StyleRole {
             Self::GitDeleted => Some(ChromeGroup::DiffDelete),
             Self::GitUntracked => Some(ChromeGroup::Directory),
             Self::Title => Some(ChromeGroup::FloatTitle),
+            Self::AiUser => Some(ChromeGroup::Question),
+            Self::AiAgent => Some(ChromeGroup::MoreMsg),
+            Self::AiThought | Self::AiToolRunning => Some(ChromeGroup::NonText),
+            Self::AiToolDone => Some(ChromeGroup::OkMsg),
+            Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
         }
     }
 }

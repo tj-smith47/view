@@ -472,7 +472,7 @@ fn the_painted_ai_panel_keeps_the_newest_transcript_row_at_every_height() {
             .map(|line| line_text(line))
             .collect();
         assert!(
-            text.iter().any(|line| line.contains("Agent: line 199")),
+            text.iter().any(|line| line.contains("● line 199")),
             "a {height}-row panel must still show the newest line: {text:?}"
         );
     }
@@ -501,7 +501,7 @@ fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
         .lines
         .iter()
         .map(|line| line_text(line))
-        .filter(|line| line.contains("Agent: line"))
+        .filter(|line| line.contains("● line"))
         .collect()
     }
 
@@ -525,7 +525,7 @@ fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
         }
 
         for i in 0..LINES {
-            let line = format!("Agent: line {i}");
+            let line = format!("● line {i}");
             assert!(
                 back.iter().any(|painted| painted.contains(&line)),
                 "a {height}-row panel paged up over {line} without painting it"
@@ -538,7 +538,7 @@ fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
         assert!(
             transcript_lines(&state, height)
                 .last()
-                .is_some_and(|line| line.contains("Agent: line 199")),
+                .is_some_and(|line| line.contains("● line 199")),
             "paging all the way down ends on the newest line, following again"
         );
     }
@@ -642,7 +642,7 @@ fn a_permission_prompt_costs_the_transcripts_oldest_rows_not_its_newest() {
         "the answerable option is still on screen: {text:?}"
     );
     assert!(
-        text.iter().any(|line| line.contains("Agent: line 199")),
+        text.iter().any(|line| line.contains("● line 199")),
         "and so is the newest transcript line: {text:?}"
     );
 }

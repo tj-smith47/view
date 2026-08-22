@@ -80,15 +80,20 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             text,
             from_agent,
         } => {
-            let role = if from_agent {
-                crate::native::ai_panel::TranscriptRole::Agent
+            let transcript = &mut model.ai_panel_mut().transcript;
+            if from_agent {
+                transcript.append_or_extend(
+                    message_id.as_deref(),
+                    &text,
+                    crate::native::ai_panel::TranscriptRole::Agent,
+                );
             } else {
-                crate::native::ai_panel::TranscriptRole::User
-            };
-            model
-                .ai_panel_mut()
-                .transcript
-                .append_or_extend(message_id.as_deref(), &text, role);
+                // An adapter that replays the user's prompt is restating
+                // what the panel already put on screen at submit time, so
+                // this is the one fold that can decline a chunk (see
+                // `Transcript::append_user_chunk`).
+                transcript.append_user_chunk(message_id.as_deref(), &text);
+            }
             model.dirty = true;
         }
         AiEvent::ToolCallUpdate {
@@ -97,11 +102,18 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             status,
             content,
         } => {
-            model
-                .ai_panel_mut()
-                .transcript
-                .upsert_tool_call(tool_call_id, title, status, content);
+            let transcript = &mut model.ai_panel_mut().transcript;
+            transcript.upsert_tool_call(tool_call_id, title, status, content);
+            let arm = transcript.arm_spinner();
             model.dirty = true;
+            if arm {
+                // The panel has no clock of its own; the first call to go
+                // in flight is what buys one, and it is handed back at the
+                // frame the last call resolves.
+                return vec![Effect::ScheduleAiSpinnerTick {
+                    after: crate::native::ai_panel::SPINNER_INTERVAL,
+                }];
+            }
         }
         AiEvent::PlanUpdated { entries } => {
             model.ai_panel_mut().transcript.upsert_plan(entries);
@@ -120,6 +132,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         // no longer waiting on an answer to
         AiEvent::TurnEnded { .. } => {
             let panel = model.ai_panel_mut();
+            panel.transcript.end_turn();
             let had_pending = panel.pending_permission.take().is_some();
             let was_in_flight = std::mem::take(&mut panel.turn_in_flight);
             if had_pending || was_in_flight {
@@ -139,6 +152,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         // "nothing happened" rather than "it broke."
         AiEvent::SessionCrashed { message } => {
             let panel = model.ai_panel_mut();
+            panel.transcript.end_turn();
             panel.pending_permission = None;
             panel.turn_in_flight = false;
             let never_became_ready = panel.session_id.is_none();
@@ -385,9 +399,16 @@ mod tests {
         assert!(model.dirty);
         assert_eq!(
             model.ai_panel().view(64, 60).rows,
-            vec![vec![crate::native::views::Span::plain(
-                "Thinking: weighing it"
-            )]]
+            vec![vec![
+                crate::native::views::Span::new(
+                    "\u{25e6} ",
+                    crate::native::views::StyleRole::AiThought
+                ),
+                crate::native::views::Span::new(
+                    "weighing it",
+                    crate::native::views::StyleRole::AiThought
+                ),
+            ]]
         );
     }
 

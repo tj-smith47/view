@@ -1759,6 +1759,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use view_core::grid::GridOp;
+    use view_core::native::ai_event::{AiEvent, ToolCallStatus};
 
     /// A whole-frame composite into a fresh `ratatui::Frame`. Lives here
     /// rather than beside [`composite_into`] because nothing in production
@@ -2189,6 +2190,12 @@ mod tests {
 
     /// Sends one key through `update()`, which routes it to whatever holds
     /// focus -- the agent panel's composer, when the panel is open.
+    /// Folds one agent event through `update()`, the way the runtime's own
+    /// `Msg::Ai` dispatch does.
+    fn ai_event(model: &mut Model, event: AiEvent) {
+        let _ = view_core::update::update(model, view_core::msg::Msg::Ai(event));
+    }
+
     fn type_key(model: &mut Model, notation: &str) {
         let _ = view_core::update::update(
             model,
@@ -2593,6 +2600,77 @@ mod tests {
             shadow.front(),
             &full_paint(&model, area),
             "the one damaged row carried every cell the keystroke changed"
+        );
+    }
+
+    /// The spinner is the one thing on this panel that repaints without
+    /// anybody touching a key, eight times a second for as long as a tool
+    /// call runs. A frame of it costs the marker's row and nothing else --
+    /// damage is row-granular here (see [`Damage`]), so the row is the
+    /// floor, and a spinner that dirtied the panel would spend the whole
+    /// sidebar on one animated glyph on a timer.
+    #[test]
+    fn a_spinner_frame_damages_only_the_row_its_marker_sits_on() {
+        let mut model = Model::with_term_size(120, 40);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 120,
+            height: 40,
+        });
+        model.ai_trusted = true;
+        ai_verb(&mut model, "open");
+        for i in 0..5 {
+            ai_event(
+                &mut model,
+                AiEvent::MessageChunk {
+                    message_id: Some(format!("m{i}")),
+                    text: "the agent talking".to_string(),
+                    from_agent: true,
+                },
+            );
+        }
+        ai_event(
+            &mut model,
+            AiEvent::ToolCallUpdate {
+                tool_call_id: "call_1".to_string(),
+                title: "Read file".to_string(),
+                status: ToolCallStatus::InProgress,
+                content: None,
+            },
+        );
+
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area));
+        let surface = view_surface::render(&model);
+        let _ = shadow.overlay_damage(&surface);
+        let _ = model.take_paint_damage();
+        shadow.compose(&model, &surface, &Damage::full());
+        shadow.commit();
+
+        let _ = view_core::update::update(&mut model, view_core::msg::Msg::AiSpinnerTick);
+        let surface = view_surface::render(&model);
+        let ticked = shadow.overlay_damage(&surface);
+        assert_eq!(
+            ticked.len(),
+            1,
+            "one marker moved, but these rows were damaged: {ticked:?}"
+        );
+        assert!(
+            agent_panel_rows(&surface).contains(&ticked[0]),
+            "the damaged row is inside the panel"
+        );
+        let grid_damage = model.take_paint_damage();
+        assert!(
+            grid_damage.rows.is_empty(),
+            "a spinner frame never reaches the engine grid"
+        );
+        let damage = Damage::from_frame(&grid_damage, model.chrome_rows(), &ticked, false);
+        shadow.compose(&model, &surface, &damage);
+        shadow.commit();
+        assert_eq!(
+            shadow.front(),
+            &full_paint(&model, area),
+            "the one damaged row carried every cell the frame changed"
         );
     }
 
@@ -3494,6 +3572,68 @@ mod tests {
                     while !m.ai_panel().input.is_empty() {
                         type_key(m, "<BS>");
                     }
+                }),
+            ),
+            // submitting empties the composer and appends to the transcript
+            // in one frame, so the rows that change are at both ends of the
+            // panel at once -- and the transcript's own newest row is one
+            // the panel has never painted before
+            (
+                "a submitted prompt echoes into the transcript",
+                Box::new(|m: &mut Model| {
+                    for ch in ["a", "s", "k"] {
+                        type_key(m, ch);
+                    }
+                    let before = m.ai_panel().transcript.len();
+                    type_key(m, "<CR>");
+                    assert!(
+                        m.ai_panel().input.is_empty(),
+                        "the submit emptied the composer"
+                    );
+                    assert_eq!(
+                        m.ai_panel().transcript.len(),
+                        before + 1,
+                        "and put the prompt on screen"
+                    );
+                }),
+            ),
+            (
+                "a tool call starts running",
+                Box::new(|m: &mut Model| {
+                    ai_event(
+                        m,
+                        AiEvent::ToolCallUpdate {
+                            tool_call_id: "call_1".to_string(),
+                            title: "Read file".to_string(),
+                            status: ToolCallStatus::InProgress,
+                            content: None,
+                        },
+                    );
+                }),
+            ),
+            // the one frame in this sequence nobody asked for: a timer, not
+            // a keystroke, and it must still compose to the same bytes a
+            // full recomposite would
+            (
+                "spinner tick",
+                Box::new(|m: &mut Model| {
+                    m.dirty = false;
+                    let _ = view_core::update::update(m, view_core::msg::Msg::AiSpinnerTick);
+                    assert!(m.dirty, "the tick moved a frame the panel has to paint");
+                }),
+            ),
+            (
+                "the tool call resolves",
+                Box::new(|m: &mut Model| {
+                    ai_event(
+                        m,
+                        AiEvent::ToolCallUpdate {
+                            tool_call_id: "call_1".to_string(),
+                            title: "Read file".to_string(),
+                            status: ToolCallStatus::Completed,
+                            content: None,
+                        },
+                    );
                 }),
             ),
             (

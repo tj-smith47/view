@@ -23,6 +23,7 @@ pub use permission::PermissionPrompt;
 pub use review::{AcceptRefusal, DiffReviewState, ReviewSync};
 pub use transcript::{
     Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryKind, TranscriptRole,
+    SPINNER_INTERVAL,
 };
 
 /// How far, and which way, one scroll key moves the AI panel's transcript
@@ -657,7 +658,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::super::ai_event::ToolCallStatus;
-    use super::super::views::Span;
+    use super::super::views::{Span, StyleRole};
     use super::*;
 
     /// A row budget larger than any transcript these tests build; what the
@@ -706,8 +707,8 @@ mod tests {
         let texts = transcript_texts(&state, TEN_ROW_PANEL);
 
         assert_eq!(texts.len(), 10, "the window is the panel's own height");
-        assert_eq!(texts.last().unwrap(), "Agent: line 49");
-        assert_eq!(texts.first().unwrap(), "Agent: line 40");
+        assert_eq!(texts.last().unwrap(), "● line 49");
+        assert_eq!(texts.first().unwrap(), "● line 40");
     }
 
     /// Scrolling back stops the panel following, and an agent that keeps
@@ -719,7 +720,7 @@ mod tests {
         assert!(state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL));
 
         let held = transcript_texts(&state, TEN_ROW_PANEL);
-        assert_eq!(held.first().unwrap(), "Agent: line 31");
+        assert_eq!(held.first().unwrap(), "● line 31");
 
         for i in 50..70 {
             state.transcript.append_or_extend(
@@ -745,7 +746,7 @@ mod tests {
 
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
-            "Agent: line 49",
+            "● line 49",
             "a following panel has nothing below it to point at"
         );
 
@@ -768,7 +769,7 @@ mod tests {
         assert!(state.scroll_transcript(TranscriptScroll::PageForward, TEN_ROW_PANEL, WIDE_PANEL));
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
-            "Agent: line 49"
+            "● line 49"
         );
 
         state
@@ -776,7 +777,7 @@ mod tests {
             .append_or_extend(Some("m50"), "line 50", TranscriptRole::Agent);
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
-            "Agent: line 50",
+            "● line 50",
             "following means the newest line, not the one that was newest when \
              the scroll ended"
         );
@@ -790,7 +791,7 @@ mod tests {
     fn a_page_lands_where_the_last_one_stopped_in_both_directions() {
         let mut state = panel_with_lines(50);
         let following = transcript_texts(&state, TEN_ROW_PANEL);
-        assert_eq!(following.first().unwrap(), "Agent: line 40");
+        assert_eq!(following.first().unwrap(), "● line 40");
 
         state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL);
         let held = transcript_texts(&state, TEN_ROW_PANEL);
@@ -801,7 +802,7 @@ mod tests {
         );
         assert_eq!(
             held[..held.len() - 1].last().unwrap(),
-            "Agent: line 39",
+            "● line 39",
             "the page must stop on the line directly above the one it came from"
         );
 
@@ -809,7 +810,7 @@ mod tests {
         let further = transcript_texts(&state, TEN_ROW_PANEL);
         assert_eq!(
             further[..further.len() - 1].last().unwrap(),
-            "Agent: line 30",
+            "● line 30",
             "and so must the next one"
         );
 
@@ -829,8 +830,8 @@ mod tests {
         state.scroll_transcript(TranscriptScroll::HalfPageBack, TEN_ROW_PANEL, WIDE_PANEL);
 
         let held = transcript_texts(&state, TEN_ROW_PANEL);
-        assert_eq!(held.first().unwrap(), "Agent: line 35");
-        assert_eq!(held[..held.len() - 1].last().unwrap(), "Agent: line 43");
+        assert_eq!(held.first().unwrap(), "● line 35");
+        assert_eq!(held[..held.len() - 1].last().unwrap(), "● line 43");
     }
 
     /// A window held on a short panel can sit at or past the tail once the
@@ -848,7 +849,7 @@ mod tests {
 
         let grown = 20 + CHROME_ROWS;
         let texts = transcript_texts(&state, grown);
-        assert_eq!(texts.last().unwrap(), "Agent: line 19");
+        assert_eq!(texts.last().unwrap(), "● line 19");
         assert!(
             !texts.iter().any(|row| row == MORE_BELOW),
             "the whole transcript fits now, so nothing is below it: {texts:?}"
@@ -873,7 +874,7 @@ mod tests {
             .append_or_extend(Some("m3"), "line 3", TranscriptRole::Agent);
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
-            "Agent: line 3"
+            "● line 3"
         );
     }
 
@@ -1119,7 +1120,7 @@ mod tests {
         assert_eq!(texts.len(), 8);
         assert_eq!(
             texts.last().unwrap(),
-            "Agent: line 49",
+            "● line 49",
             "a following panel still ends on its newest line"
         );
     }
@@ -1364,8 +1365,14 @@ mod tests {
         );
     }
 
+    /// Who spoke is carried by the marker glyph and the row's style role,
+    /// and by nothing else: a word prefix on every line spends the start of
+    /// the row restating what a reader learns from the color once. The
+    /// roles are the assertion, not decoration -- two voices painted in one
+    /// role is the same panel the prefixes were removed from, minus the
+    /// only thing that told them apart.
     #[test]
-    fn a_transcript_entry_renders_with_its_speaker_prefix() {
+    fn each_voice_opens_with_its_own_marker_and_style_role() {
         let mut state = AiPanelState::new();
         state
             .transcript
@@ -1373,22 +1380,151 @@ mod tests {
         state
             .transcript
             .append_or_extend(Some("2"), "hello", TranscriptRole::Agent);
+        state
+            .transcript
+            .append_or_extend(Some("3"), "weighing it", TranscriptRole::Thought);
         let view = state.view(ROOM, WIDE_PANEL);
-        assert_eq!(view.rows.len(), 2);
-        assert_eq!(view.rows[0], vec![Span::plain("You: hi")]);
-        assert_eq!(view.rows[1], vec![Span::plain("Agent: hello")]);
+
+        assert_eq!(view.rows.len(), 3);
+        let roles: Vec<Vec<StyleRole>> = view
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|span| span.role).collect())
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                vec![StyleRole::AiUser, StyleRole::AiUser],
+                vec![StyleRole::AiAgent, StyleRole::AiAgent],
+                vec![StyleRole::AiThought, StyleRole::AiThought],
+            ]
+        );
+        let texts: Vec<String> = view
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|span| span.text.as_str()).collect())
+            .collect();
+        assert_eq!(texts, vec!["❯ hi", "● hello", "◦ weighing it"]);
+        for text in &texts {
+            for word in ["You", "Agent", "Thinking"] {
+                assert!(
+                    !text.contains(word),
+                    "no speaker word belongs on a transcript row: {text:?}"
+                );
+            }
+        }
     }
 
+    /// A tool call says how it went in a glyph and its color, on the same
+    /// terms the message rows do.
     #[test]
-    fn a_tool_call_entry_renders_with_its_status_prefix() {
+    fn a_tool_call_marks_its_status_with_a_glyph_rather_than_a_word() {
+        for (status, mark, role) in [
+            (ToolCallStatus::Pending, "· ", StyleRole::AiToolRunning),
+            (ToolCallStatus::Completed, "✓ ", StyleRole::AiToolDone),
+            (ToolCallStatus::Failed, "✗ ", StyleRole::AiToolFailed),
+        ] {
+            let mut state = AiPanelState::new();
+            state.transcript.upsert_tool_call(
+                "call_1".to_string(),
+                "Read file".to_string(),
+                status,
+                None,
+            );
+            let view = state.view(ROOM, WIDE_PANEL);
+            assert_eq!(
+                view.rows,
+                vec![vec![
+                    Span::new(mark, role),
+                    Span::plain("Read file".to_string()),
+                ]],
+                "{status:?} must render as its glyph, in its own role"
+            );
+        }
+    }
+
+    /// The running state is the one that moves: the marker cycles through
+    /// the braille frames while the call is unresolved, and the row it sits
+    /// on is the only row a tick changes.
+    #[test]
+    fn a_running_tool_calls_marker_advances_on_a_tick_and_stops_when_it_resolves() {
         let mut state = AiPanelState::new();
+        state
+            .transcript
+            .append_or_extend(Some("m1"), "before", TranscriptRole::Agent);
         state.transcript.upsert_tool_call(
             "call_1".to_string(),
             "Read file".to_string(),
             ToolCallStatus::InProgress,
             None,
         );
-        let view = state.view(ROOM, WIDE_PANEL);
-        assert_eq!(view.rows, vec![vec![Span::plain("running: Read file")]]);
+        assert!(
+            state.transcript.arm_spinner(),
+            "a call in flight is what buys the panel a clock"
+        );
+        assert!(
+            !state.transcript.arm_spinner(),
+            "a second call must not arm a second timer"
+        );
+
+        let first = state.view(ROOM, WIDE_PANEL).rows;
+        assert!(state.transcript.advance_spinner());
+        let second = state.view(ROOM, WIDE_PANEL).rows;
+
+        assert_eq!(
+            first[0], second[0],
+            "a spinner frame must not repaint the message above it"
+        );
+        assert_ne!(first[1][0], second[1][0], "the marker moved");
+        assert_eq!(
+            first[1][1], second[1][1],
+            "and nothing but the marker moved on its own row"
+        );
+        assert_eq!(second[1][0].role, StyleRole::AiToolRunning);
+
+        state.transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::Completed,
+            None,
+        );
+        assert!(
+            !state.transcript.advance_spinner(),
+            "a resolved call leaves nothing to animate"
+        );
+        assert_eq!(
+            state.view(ROOM, WIDE_PANEL).rows[1][0],
+            Span::new("✓ ", StyleRole::AiToolDone),
+            "the last frame painted is the call's own outcome"
+        );
+    }
+
+    /// The reported defect: the panel showed the agent's half of the
+    /// conversation and never the user's, because nothing wrote a prompt
+    /// into the transcript until an adapter replayed it, and the adapter
+    /// view ships against does not.
+    #[test]
+    fn a_submitted_prompt_is_echoed_into_the_transcript_at_the_tail() {
+        let mut state = panel_with_lines(50);
+        state.transcript.echo_user_prompt("what changed here?");
+
+        let texts = transcript_texts(&state, TEN_ROW_PANEL);
+        assert_eq!(
+            texts.last().unwrap(),
+            "❯ what changed here?",
+            "a followed panel shows the prompt the moment it is submitted"
+        );
+    }
+
+    /// The echo goes through the transcript's own width path, so a prompt
+    /// longer than the panel is clipped to the panel the way every other
+    /// row is rather than dragging the frame open.
+    #[test]
+    fn a_long_echoed_prompt_is_cut_to_the_panels_width_like_any_other_row() {
+        let mut state = AiPanelState::new();
+        state.transcript.echo_user_prompt(&"word ".repeat(60));
+
+        let rows = crate::native::ai_panel::AiPanelState::view(&state, ROOM, 24).rows;
+        assert_eq!(rows.len(), 1, "one entry is one row, however long it is");
     }
 }

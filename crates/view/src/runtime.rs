@@ -619,6 +619,21 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // the same one-shot thread and the same channel the toast's
+            // expiry rides, for the same reason: `update()` has no clock,
+            // and the panel's spinner is one more thing that has to move
+            // while the engine sends nothing. Bounded by the tool call it
+            // animates -- the fold re-arms only while one is unresolved
+            Effect::ScheduleAiSpinnerTick { after } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("ai-spinner", move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::AiSpinnerTick);
+                    });
+                }
+                Flow::Continue
+            }
             // the same one-shot thread `ScheduleToastExpiry` uses, and the
             // same reason for it: `update()` has no clock, and a reply that
             // said a path could not be read has to be re-asked later rather

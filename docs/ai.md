@@ -15,16 +15,34 @@ confined to that root for as long as the session runs.
 ## The panel
 
 The panel is a transcript. Your prompts, the agent's replies, and the
-agent's reasoning each speak in their own voice -- reasoning renders under
-a `Thinking:` prefix, never folded into the reply around it -- and the
-header's first row keeps the session's accounting as the agent reports it:
+agent's reasoning each speak in their own voice -- each entry opens with
+its own marker and paints in its own color from your colorscheme, and
+reasoning is never folded into the reply around it:
+
+```
+❯ summarize the retry policy
+● The client retries five times with a fixed 200ms delay.
+◦ checking whether the cap is configurable
+```
+
+A prompt appears the moment you send it, not when the agent gets around to
+mentioning it. The header's first row keeps the session's accounting as the
+agent reports it:
 
 ```
 context 8153/200000, cost 0.14 USD
 ```
 
-Tool calls appear as they start and update in place as they finish. When
-the panel is open but not focused, it says so and names the way in
+Tool calls appear as they start and update in place as they finish, and
+their marker says where each one stands -- `·` waiting, a spinner while it
+runs, `✓` done, `✗` failed:
+
+```
+✓ Read src/client.rs
+⠹ Run tests
+```
+
+When the panel is open but not focused, it says so and names the way in
 (`:View ai focus`).
 
 The prompt you are composing sits under the header, and it wraps rather

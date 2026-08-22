@@ -2979,13 +2979,13 @@ fn paging_the_transcript_holds_the_window_and_paging_back_follows_it_again() {
     let held = panel_transcript_texts(&m);
     assert_eq!(
         held.first().unwrap(),
-        "Agent: line 61",
+        "● line 61",
         "one page up from the tail of a twenty-row window, nineteen of which \
          a held window draws"
     );
     assert_eq!(
         held[..held.len() - 1].last().unwrap(),
-        "Agent: line 79",
+        "● line 79",
         "the page stops on the line directly above the one it came from"
     );
 
@@ -2993,7 +2993,7 @@ fn paging_the_transcript_holds_the_window_and_paging_back_follows_it_again() {
 
     assert_eq!(
         panel_transcript_texts(&m).last().unwrap(),
-        "Agent: line 99",
+        "● line 99",
         "paging back onto the tail resumes following it"
     );
     assert_eq!(m.ai_panel().input, "draft");
@@ -3007,10 +3007,7 @@ fn ctrl_u_and_ctrl_d_move_the_window_by_half_a_page() {
     let mut m = scrollable_ai_panel_model(100);
 
     let _ = update(&mut m, key("<C-u>"));
-    assert_eq!(
-        panel_transcript_texts(&m).first().unwrap(),
-        "Agent: line 70"
-    );
+    assert_eq!(panel_transcript_texts(&m).first().unwrap(), "● line 70");
 
     m.ai_panel_mut().local_error = Some("the agent exited".to_string());
     let _ = update(&mut m, key("<C-d>"));
@@ -3021,14 +3018,14 @@ fn ctrl_u_and_ctrl_d_move_the_window_by_half_a_page() {
     );
     assert_eq!(
         panel_transcript_texts(&m).first().unwrap(),
-        "Agent: line 70",
+        "● line 70",
         "and the window it was covering stays exactly where it was"
     );
 
     let _ = update(&mut m, key("<C-d>"));
     assert_eq!(
         panel_transcript_texts(&m).last().unwrap(),
-        "Agent: line 99",
+        "● line 99",
         "with no banner left, the same key moves the window down half a page"
     );
 }
@@ -3043,7 +3040,101 @@ fn submitting_a_prompt_returns_the_panel_to_the_newest_line() {
 
     let _ = update(&mut m, key("<CR>"));
 
-    assert_eq!(panel_transcript_texts(&m).last().unwrap(), "Agent: line 99");
+    assert_eq!(
+        panel_transcript_texts(&m).last().unwrap(),
+        "❯ and another thing",
+        "the prompt itself is now the newest line, and the panel follows it"
+    );
+}
+
+/// The second dogfood's report: the panel showed the agent's replies and
+/// never the user's own messages. Driven through `update()` rather than
+/// the transcript directly, because the defect was in the submit path --
+/// the transcript could always hold a user entry; nothing ever wrote one.
+#[test]
+fn submitting_a_prompt_puts_it_in_the_transcript_and_still_sends_it() {
+    let mut m = scrollable_ai_panel_model(0);
+    m.ai_panel_mut().input = "what changed here?".to_string();
+
+    let effects = update(&mut m, key("<CR>"));
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::AiPromptSubmit { text }] if text == "what changed here?"
+        ),
+        "the prompt still goes to the agent: {effects:?}"
+    );
+    assert_eq!(
+        panel_transcript_texts(&m),
+        vec!["❯ what changed here?"],
+        "and the user can see what they asked"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Ai(crate::native::ai_event::AiEvent::MessageChunk {
+            message_id: Some("wire-1".to_string()),
+            text: "what changed here?".to_string(),
+            from_agent: false,
+        }),
+    );
+    assert_eq!(
+        panel_transcript_texts(&m),
+        vec!["❯ what changed here?"],
+        "an adapter replaying the prompt must not say it twice"
+    );
+}
+
+/// The spinner's clock: a call going in flight is what asks for one, a
+/// tick moves the frame and asks for the next, and the call resolving is
+/// what ends the sequence. Nothing here is armed by an idle panel.
+#[test]
+fn a_running_tool_call_arms_one_spinner_tick_at_a_time_and_stops_when_it_resolves() {
+    use crate::native::ai_event::{AiEvent, ToolCallStatus};
+
+    let mut m = scrollable_ai_panel_model(0);
+    let tool_call = |status| {
+        Msg::Ai(AiEvent::ToolCallUpdate {
+            tool_call_id: "call_1".to_string(),
+            title: "Read file".to_string(),
+            status,
+            content: None,
+        })
+    };
+
+    assert!(
+        update(&mut m, tool_call(ToolCallStatus::Pending)).is_empty(),
+        "a call that has not started asks for no clock"
+    );
+
+    let armed = update(&mut m, tool_call(ToolCallStatus::InProgress));
+    assert!(
+        matches!(armed.as_slice(), [Effect::ScheduleAiSpinnerTick { .. }]),
+        "the call in flight arms the tick: {armed:?}"
+    );
+    assert!(
+        update(&mut m, tool_call(ToolCallStatus::InProgress))
+            .iter()
+            .all(|e| !matches!(e, Effect::ScheduleAiSpinnerTick { .. })),
+        "a further update must not arm a second timer"
+    );
+
+    m.dirty = false;
+    let ticked = update(&mut m, Msg::AiSpinnerTick);
+    assert!(
+        matches!(ticked.as_slice(), [Effect::ScheduleAiSpinnerTick { .. }]),
+        "a tick re-arms itself while the call runs: {ticked:?}"
+    );
+    assert!(m.dirty, "and the frame it moved has to be painted");
+
+    let _ = update(&mut m, tool_call(ToolCallStatus::Completed));
+    m.dirty = false;
+    assert!(
+        update(&mut m, Msg::AiSpinnerTick).is_empty(),
+        "the resolved call stops the sequence"
+    );
+    assert!(!m.dirty, "and costs no repaint after it has stopped");
 }
 
 /// A review paints its own hunks in place of the transcript, so a scroll
@@ -3082,7 +3173,7 @@ fn every_scroll_key_inside_an_open_review_is_answered_and_moves_nothing() {
         m.ai_panel_mut().pending_diff = None;
         assert_eq!(
             panel_transcript_texts(&m).last().unwrap(),
-            "Agent: line 99",
+            "● line 99",
             "{notation} left the transcript following the tail, as the review \
              found it"
         );
@@ -3117,7 +3208,7 @@ fn a_scroll_key_cannot_move_the_transcript_behind_an_unanswered_permission() {
         );
         assert_eq!(
             panel_transcript_texts(&m).last().unwrap(),
-            "Agent: line 99",
+            "● line 99",
             "{notation} left the transcript following the tail"
         );
     }
