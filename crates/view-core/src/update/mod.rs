@@ -900,6 +900,13 @@ const RESIZE_NARROWER: &str = "<S-Left>";
 /// The key that widens the focused sidebar; see [`RESIZE_NARROWER`].
 const RESIZE_WIDER: &str = "<S-Right>";
 
+/// nvim's own name for normal mode in the `mode_change` event.
+///
+/// Matched exactly rather than by prefix: `cmdline_normal` is a command line
+/// being typed, where `<Esc>` abandons the line the user is writing, and
+/// that is not the idle reading state a toast dismissal belongs to.
+const NORMAL_MODE: &str = "normal";
+
 /// Which way `notation` moves the AI panel's transcript window, or `None`
 /// for a key that does not scroll it.
 ///
@@ -1025,7 +1032,29 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
         return vec![Effect::PickerClose];
     }
     match model.focus() {
-        Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
+        Focus::Engine => {
+            // A sticky error outlives every incidental keypress by design
+            // (`MessageEntry::is_persistent`), which without a way out is a
+            // box that occludes the buffer until some later error happens to
+            // replace it. Normal-mode `<Esc>` is the way out: it is the key a
+            // reader already reaches for to cancel, it edits nothing in
+            // normal mode, and the same reflex clears highlights and the
+            // message line in the configs nvim users arrive from. Insert,
+            // visual and operator-pending are excluded because `<Esc>` is
+            // load-bearing there -- leaving the mode is the gesture, not
+            // dismissing a toast -- which keeps the dismissal deliberate.
+            //
+            // The key still reaches nvim either way, so nothing an `<Esc>`
+            // does in the engine is shadowed and a session with no toast up
+            // pays one string compare for this.
+            if notation == "<Esc>"
+                && model.engine.mode.current == NORMAL_MODE
+                && model.engine.messages.dismiss_sticky()
+            {
+                model.dirty = true;
+            }
+            vec![Effect::Rpc(RpcCall::Input { notation })]
+        }
         Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
             // an nvim-relayed prompt answers by feeding the engine a
             // keystroke -- the engine is blocked in its own input

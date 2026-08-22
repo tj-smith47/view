@@ -820,6 +820,34 @@ leg_toast_and_history() {
     assert_chrome 'the message history over a standing toast'
     pass 'the message history opens over that toast, both opaque'
 
+    # Escape closes the history and nothing else: the toast beneath it is an
+    # error, and an error that a dismissal aimed at some other overlay takes
+    # with it is an error the user never got to read.
+    mark
+    send_key Escape
+    wait_change "$REACTION_SECS" "closing the message history" >/dev/null
+    wait_in_box 'Not an editor command' "$WAIT_SECS" "the error toast under the closed history" >/dev/null
+    pass 'the error survives the Escape that closes the history over it'
+
+    # and the next one, now that the engine owns the keyboard again, is the
+    # deliberate dismissal. `wait_no_box` is the whole assertion: the toast is
+    # the only framed thing left on screen.
+    mark
+    send_key Escape
+    wait_no_box "$WAIT_SECS" "the dismissed error toast" >/dev/null
+    if grep -qF 'Not an editor command' "$SCREEN"; then
+        fail 'the dismissed error is still painted on the buffer'
+        return 1
+    fi
+    pass 'a normal-mode Escape takes the sticky error off the screen'
+
+    # dismissed from the screen, not from the log
+    mark
+    command_line ':View notifications'
+    wait_change "$REACTION_SECS" "the message history after the dismissal" >/dev/null
+    wait_in_box 'Not an editor command' "$WAIT_SECS" "the dismissed error in the history" >/dev/null
+    pass 'the dismissed error is still in the message history'
+
     end_session
 }
 

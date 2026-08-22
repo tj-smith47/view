@@ -2612,6 +2612,84 @@ mod tests {
         );
     }
 
+    /// The terminal-space rows the toast box covers in `surface`.
+    fn message_box_rows(surface: &Surface) -> Vec<u16> {
+        let mut rows = Vec::new();
+        for layer in &surface.layers {
+            if !matches!(layer.kind, LayerKind::Messages(_)) {
+                continue;
+            }
+            let first = layer.rect.row;
+            rows.extend(first..first.saturating_add(layer.rect.height));
+        }
+        rows
+    }
+
+    /// Dismissing a toast produces no engine redraw at all -- nvim never
+    /// hears about it -- so the rows the box was occupying are the only
+    /// thing that can restore the buffer text underneath. A frame that
+    /// damaged nothing would leave the error painted on a screen whose model
+    /// no longer holds it, which reads as a dismissal key that did nothing.
+    #[test]
+    fn dismissing_a_sticky_toast_damages_the_rows_it_was_covering() {
+        let mut model = Model::with_term_size(80, 24);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 80,
+            height: 24,
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::ModeChange {
+                mode: "normal".to_string(),
+                mode_idx: 0,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::MsgShow {
+                kind: "emsg".to_string(),
+                content: vec![(0, "E492: Not an editor command: bogus".to_string())],
+                replace_last: false,
+            },
+        );
+        apply(&mut model, view_core::events::UiEvent::Flush);
+
+        let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area));
+        let surface = view_surface::render(&model);
+        let toast = message_box_rows(&surface);
+        assert!(!toast.is_empty(), "the error toast is on screen");
+        let _ = shadow.overlay_damage(&surface);
+        let _ = model.take_paint_damage();
+        shadow.compose(&model, &surface, &Damage::full());
+        shadow.commit();
+
+        type_key(&mut model, "<Esc>");
+        let surface = view_surface::render(&model);
+        assert!(
+            message_box_rows(&surface).is_empty(),
+            "the dismissed toast leaves the surface"
+        );
+        let dismissed = shadow.overlay_damage(&surface);
+
+        for row in &toast {
+            assert!(
+                dismissed.contains(row),
+                "row {row} held the toast and must be repainted: {dismissed:?}"
+            );
+        }
+        let grid_damage = model.take_paint_damage();
+        let damage = Damage::from_frame(&grid_damage, model.chrome_rows(), &dismissed, false);
+        shadow.compose(&model, &surface, &damage);
+        shadow.commit();
+        assert_eq!(
+            shadow.front(),
+            &full_paint(&model, area),
+            "the damaged rows carried every cell the dismissal changed"
+        );
+    }
+
     /// The spinner is the one thing on this panel that repaints without
     /// anybody touching a key, eight times a second for as long as a tool
     /// call runs. A frame of it costs the marker's row and nothing else --

@@ -19,8 +19,9 @@ pub enum Route {
     /// overlay elsewhere, not a toast at all.
     Prompt,
     /// One of nvim's error/warning kinds (`MessageEntry::is_persistent_kind`)
-    /// or a locally-raised condition. Stays until explicitly cleared or
-    /// replaced -- never expires on its own.
+    /// or a locally-raised condition. Never expires on its own: it stays
+    /// until replaced, cleared by nvim, or deliberately dismissed
+    /// ([`crate::model::Messages::dismiss_sticky`]).
     Sticky,
     /// A statusline-owned kind (mode/pending-count/ruler/search-count
     /// indicators), meant for the statusline surface rather than the toast
@@ -58,7 +59,8 @@ pub const TRANSIENT_TOAST_TIMEOUT: Duration = Duration::from_secs(4);
 /// The idle-expiry timeout owed to a route, or `None` when the route never
 /// expires on its own. Only `Route::Transient` schedules
 /// `Effect::ScheduleToastExpiry`; a prompt is dismissed by an accepted key,
-/// a sticky entry by an explicit clear/replace, and a statusline entry by
+/// a sticky entry by an explicit clear/replace or a deliberate dismissal
+/// ([`crate::model::Messages::dismiss_sticky`]), and a statusline entry by
 /// nvim's own next update to the same slot.
 #[must_use]
 pub fn timeout_for(route: Route) -> Option<Duration> {

@@ -1292,11 +1292,14 @@ impl MessageEntry {
     /// table) names this an error or a warning: `"emsg"`, `"echoerr"`,
     /// `"wmsg"`, `"lua_error"`, `"rpc_error"`, `"shell_err"`. These must be
     /// read, not silently lost, so they persist until explicitly cleared or
-    /// replaced -- never auto-dismissed by user activity and never evicted
-    /// from the visible toast stack merely because other messages arrived
-    /// after them (`Messages::visible_lines`) -- matching real nvim's own
-    /// hit-enter-prompt convention that an error blocks until acknowledged.
-    /// Every other kind is transient.
+    /// replaced -- never auto-dismissed by incidental user activity and
+    /// never evicted from the visible toast stack merely because other
+    /// messages arrived after them (`Messages::visible_lines`) -- matching
+    /// real nvim's own hit-enter-prompt convention that an error blocks
+    /// until acknowledged. The acknowledgement itself is
+    /// [`Messages::dismiss_sticky`], which is a deliberate gesture rather
+    /// than the ambient activity a transient entry dies of. Every other kind
+    /// is transient.
     ///
     /// `"shell_err"` is a `:!cmd`'s stderr: the one channel a failing
     /// external command has to explain itself, and the only reason to look
@@ -1556,6 +1559,27 @@ impl Messages {
         self.entries.retain(|e| {
             e.is_persistent() || (cmdline_open && e.is_prompt()) || e.shown_at_flush == current
         });
+        self.entries.len() != before
+    }
+
+    /// Drops every standing error/warning entry -- the deliberate way out of
+    /// a sticky toast. Returns whether anything was actually dropped, so the
+    /// caller knows whether to mark the model dirty for a repaint.
+    ///
+    /// The counterpart to [`Self::dismiss_transient_on_keypress`], and
+    /// deliberately not folded into it: that one fires on *any* keypress,
+    /// and an error dismissed by the next motion is an error the user never
+    /// read. Stickiness is what makes an error legible; a way out is what
+    /// keeps it from occluding the buffer forever once it has been.
+    ///
+    /// A raised condition (see [`Self::set_native_condition`]) survives: it
+    /// asserts that something *is currently true*, so clearing it would
+    /// state a falsehood until whoever raised it noticed and re-raised it.
+    /// It is retracted by that raiser, when the condition ends.
+    #[must_use]
+    pub fn dismiss_sticky(&mut self) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| !e.is_persistent() || e.condition);
         self.entries.len() != before
     }
 

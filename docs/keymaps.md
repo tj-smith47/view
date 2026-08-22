@@ -78,6 +78,36 @@ Both are optional, and neither can fail your config: a whole number
 outside the range opens at the nearest end, and a value that is not a
 whole number at all opens at the default and tells you so.
 
+## Dismissing an error
+
+An error or warning is sticky: it stays on screen until you have read it,
+where an ordinary message fades on its own. Motions, insert mode and idle
+time all leave it standing, on purpose -- an error a `j` could wipe is an
+error you never got to read.
+
+`<Esc>` in normal mode takes it down:
+
+```vim
+:bogus
+" E492: Not an editor command: bogus   -- the toast, still there after 10j
+" <Esc>                                -- gone
+```
+
+Nothing else changes: the key still reaches nvim exactly as it always did,
+so a pending count or operator is cancelled the same way, and `<Esc>` with
+no error showing does nothing new at all. In insert, visual or
+operator-pending mode `<Esc>` only leaves the mode -- press it again from
+normal mode to clear the error.
+
+Dismissing is not deleting. Every message view has shown, errors included,
+stays in the history:
+
+```vim
+:View notifications
+```
+
+which `<leader>fm` also opens.
+
 ## `:View`
 
 The command is registered whatever you have turned off, so a feature is

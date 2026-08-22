@@ -1526,6 +1526,153 @@ fn msg_show_appends_and_replace_last_overwrites() {
     assert!(m.engine.messages.entries.is_empty());
 }
 
+/// A model showing one sticky `emsg` toast, in whichever nvim mode
+/// `mode` names, with the flush that painted it already recorded so the
+/// transient-dismissal pass has a real generation to compare against.
+fn model_showing_a_sticky_error(mode: &str) -> Model {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::ModeChange {
+                mode: mode.to_string(),
+                mode_idx: 0,
+            },
+            UiEvent::MsgShow {
+                kind: "emsg".into(),
+                content: vec![(0, "E492: Not an editor command: bogus".into())],
+                replace_last: false,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    m.dirty = false;
+    m
+}
+
+fn press(m: &mut Model, notation: &str) -> Vec<Effect> {
+    update(
+        m,
+        Msg::Key(Key {
+            notation: notation.to_string(),
+        }),
+    )
+}
+
+#[test]
+fn a_sticky_error_outlives_every_incidental_key() {
+    // an error a motion could wipe is an error the user never got to read;
+    // only a deliberate gesture may take it away
+    for notation in ["j", "i", "x", "<CR>", "<C-w>"] {
+        let mut m = model_showing_a_sticky_error("normal");
+        let _ = press(&mut m, notation);
+        assert_eq!(
+            visible_texts(&m).len(),
+            1,
+            "{notation} must leave the standing error alone: {:?}",
+            visible_texts(&m)
+        );
+    }
+    // <Esc> outside normal mode is leaving that mode, not asking for the
+    // toast to go: dismissing there would make the contract above depend on
+    // where the cursor happened to be
+    for mode in ["insert", "visual", "cmdline_normal", "operator"] {
+        let mut m = model_showing_a_sticky_error(mode);
+        let _ = press(&mut m, "<Esc>");
+        assert_eq!(
+            visible_texts(&m).len(),
+            1,
+            "<Esc> in {mode} mode must leave the standing error alone: {:?}",
+            visible_texts(&m)
+        );
+    }
+}
+
+#[test]
+fn a_normal_mode_escape_dismisses_a_sticky_error_and_still_reaches_nvim() {
+    let mut m = model_showing_a_sticky_error("normal");
+
+    let effects = press(&mut m, "<Esc>");
+
+    assert!(
+        visible_texts(&m).is_empty(),
+        "a deliberate <Esc> is the way out of a sticky toast: {:?}",
+        visible_texts(&m)
+    );
+    assert!(
+        m.dirty,
+        "popping the toast produces no engine redraw, so nothing else would repaint it away"
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"
+        ),
+        "the key must still reach nvim -- a swallowed <Esc> would drop a pending \
+             count or operator the user was cancelling: {effects:?}"
+    );
+    // the toast box is the transient view of the log; the archive behind
+    // :View notifications keeps what was dismissed
+    let archived: Vec<String> = m
+        .engine
+        .toast_history
+        .entries()
+        .map(|e| e.lines().join(""))
+        .collect();
+    assert_eq!(
+        archived,
+        vec!["E492: Not an editor command: bogus".to_string()],
+        "a dismissed error must stay readable in the message history"
+    );
+}
+
+#[test]
+fn an_escape_with_no_toast_up_is_the_bare_keystroke_it_always_was() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::ModeChange {
+            mode: "normal".to_string(),
+            mode_idx: 0,
+        }]),
+    );
+    m.dirty = false;
+
+    let effects = press(&mut m, "<Esc>");
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"
+        ),
+        "the dismissal costs a session with no toast nothing at all: {effects:?}"
+    );
+    assert!(
+        !m.dirty,
+        "nothing left the screen, so nothing may ask for a repaint"
+    );
+}
+
+#[test]
+fn a_raised_condition_survives_the_escape_that_clears_an_error_beside_it() {
+    // a condition asserts something is *currently true* -- dismissing it
+    // would state a falsehood until its raiser noticed and re-raised it
+    let mut m = model_showing_a_sticky_error("normal");
+    assert!(m
+        .engine
+        .messages
+        .set_native_condition(Some("the engine is not answering")));
+    m.dirty = false;
+
+    let _ = press(&mut m, "<Esc>");
+
+    assert_eq!(
+        visible_texts(&m),
+        vec!["the engine is not answering".to_string()],
+        "the error goes, the standing condition stays"
+    );
+}
+
 #[test]
 fn tabline_update_sets_current_and_tabs() {
     use crate::events::{TabEntry, TabHandle};
