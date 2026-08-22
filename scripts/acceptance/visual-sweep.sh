@@ -42,14 +42,17 @@ PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
 PICKER_RS=$REPO_ROOT/crates/view-core/src/native/picker.rs
 PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
+OVERLAY_RS=$REPO_ROOT/crates/view-surface/src/overlay.rs
 
-# The pane every leg reads. The width is what the agent panel's own title
-# needs: the panel takes a fixed share of the terminal, its focused title is
-# the longest label any overlay here sets into a border, and a narrower pane
-# drops that title rather than truncating it -- which would leave the one
-# wait that proves the panel entered matching nothing.
+# The pane most legs read. The width is what the agent panel's own title
+# needs whole: the panel takes a fixed share of the terminal, and its
+# focused title is the longest label any overlay here sets into a border.
 COLS=140
 ROWS=44
+# The pane `leg_narrow_title` reads instead: the agent panel's share of it
+# is a shorter top edge than that same title, so the panel is named there by
+# what survives the cut. A laptop-width terminal, not a contrived one.
+NARROW_COLS=100
 # How often the screen is read.
 POLL=0.25
 # How long any single observation is given. Generous: nothing here is a
@@ -591,6 +594,28 @@ panel_const() {
 FOCUSED_TITLE=$(panel_const FOCUSED_TITLE) || exit 1
 PANEL_TITLE=$(panel_const TITLE) || exit 1
 
+# The glyph a title too long for its top edge is cut with, read out of the
+# framing that appends it.
+TRUNCATION_MARK=$(grep -oE "const TRUNCATION_MARK: char = '.*'" "$OVERLAY_RS" |
+    sed -E "s/.*= '(.*)'/\1/")
+[ -n "$TRUNCATION_MARK" ] || {
+    printf 'FAIL: TRUNCATION_MARK is not a char constant in %s any more\n' "$OVERLAY_RS" >&2
+    exit 1
+}
+# What a narrow top edge keeps of the focused title: its head, which is the
+# unfocused title itself. Derived rather than written out, so a retitled
+# panel moves this with it -- and checked, because a focused title that
+# stopped opening with the panel's name would leave the narrow leg proving
+# only that some box is on screen.
+case "$FOCUSED_TITLE" in
+"$PANEL_TITLE"*) NARROW_FOCUSED_TITLE=$PANEL_TITLE ;;
+*)
+    printf 'FAIL: the focused title (%s) no longer opens with the panel name (%s), so the head a narrow edge keeps names no panel; give leg_narrow_title its own marker\n' \
+        "$FOCUSED_TITLE" "$PANEL_TITLE" >&2
+    exit 1
+    ;;
+esac
+
 # What each surface writes into its own frame when it is the one that
 # opened, read out of the code that writes it.
 #
@@ -641,6 +666,10 @@ marker_for() {
     tree/toggle) marker=$(basename -- "$ROOT") ;;
     notifications/history) marker=$HISTORY_TITLE ;;
     ai/toggle) marker=$PANEL_TITLE ;;
+    # not an entry point of its own: the pair form is how every marker in
+    # this script is asked for, and a narrow pane's panel is a different
+    # thing on screen from the same panel on a wide one
+    ai/focus-narrow) marker=$NARROW_FOCUSED_TITLE ;;
     esac
     [ -n "$marker" ] || {
         printf 'FAIL: nothing here knows what the %s %s surface paints, so driving it would prove nothing; give it a marker\n' \
@@ -892,7 +921,46 @@ leg_panel_typing() {
     end_session
 }
 
-LEGS=(leg_entry_points leg_toast_and_history leg_panel_typing)
+# The agent panel on a pane too narrow for its own title.
+#
+# The defect this leg exists for painted a frame with nothing on its top
+# edge: the title was set into the edge only while it fit whole, and the
+# panel's share of anything under ~127 columns is a shorter edge than the
+# focused title is long. A box that names itself only on a wide terminal is
+# a box a laptop user meets anonymous, with no way to tell it from the
+# picker or the tree.
+leg_narrow_title() {
+    CURRENT_LEG=narrow-title
+    # scoped to this leg, and read by `start_session` as it starts the pane
+    local COLS=$NARROW_COLS marker
+    start_session narrow 'visual sweep seed line'
+
+    command_line ':View ai'
+    wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt on a $COLS-column pane" >/dev/null
+    send_text 'y'
+    marker=$(marker_for ai focus-narrow) || return 1
+    wait_in_box "$marker" "$WAIT_SECS" "the narrow agent panel's own title" >/dev/null
+
+    # the cut itself, both ways round. Without the first check a pane that
+    # turned out wide enough would pass on the whole title and prove nothing
+    # about a narrow edge; without the second, a title that had lost its
+    # tail silently would read as a whole one.
+    if box_text | grep -qF -- "$FOCUSED_TITLE"; then
+        fail "the $COLS-column pane fits the whole focused title after all, so this leg is not reading a narrow top edge"
+        return 1
+    fi
+    if ! box_text | grep -qF -- "$TRUNCATION_MARK"; then
+        fail 'the narrow panel names itself with no mark of the cut, so its shortened title reads as the whole one'
+        return 1
+    fi
+    assert_chrome 'the narrow agent panel'
+    pass "a $COLS-column pane's panel names itself ('$marker', cut and marked '$TRUNCATION_MARK')"
+
+    dismiss ai
+    end_session
+}
+
+LEGS=(leg_entry_points leg_toast_and_history leg_panel_typing leg_narrow_title)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

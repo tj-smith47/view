@@ -102,8 +102,26 @@ fn a_tier_swaps_the_border_glyphs_without_moving_any_content() {
     }
 }
 
+/// The text of the one span the top edge gives [`StyleRole::Title`], or
+/// `None` on an edge that carries no title at all. Read through the role
+/// rather than off the joined row, so an assertion cannot pass on a border
+/// run that happens to spell the same characters.
+fn title_span(rows: &Rows) -> Option<String> {
+    rows.lines
+        .first()?
+        .iter()
+        .find(|s| s.role == StyleRole::Title)
+        .map(|s| s.text.clone())
+}
+
+/// A view titled `title`, for the width boundaries a title's own length
+/// decides.
+fn titled(title: &str) -> LayerKind {
+    LayerKind::Picker(PickerView::new(title).with_rows(vec!["row".to_string()]))
+}
+
 #[test]
-fn the_title_is_set_into_the_top_edge_only_while_it_fits() {
+fn a_title_that_fits_is_set_into_the_top_edge_whole() {
     let wide = rows(28, 5, &picker(), BorderSet::ASCII);
     assert!(
         line_text(&wide.lines[0]).contains(" Files "),
@@ -111,12 +129,100 @@ fn the_title_is_set_into_the_top_edge_only_while_it_fits() {
         wide.lines[0]
     );
 
-    let narrow = rows(8, 5, &picker(), BorderSet::ASCII);
+    // the narrowest edge "Files" fits whole in: two corners, one horizontal
+    // glyph and one blank column on each side, and the five cells between
     assert_eq!(
-        line_text(&narrow.lines[0]),
-        "+------+",
-        "a top edge too short for the title keeps an unbroken run"
+        line_text(&rows(11, 5, &picker(), BorderSet::ASCII).lines[0]),
+        "+- Files -+"
     );
+    assert_eq!(
+        title_span(&rows(11, 5, &picker(), BorderSet::ASCII)).as_deref(),
+        Some(" Files ")
+    );
+}
+
+#[test]
+fn a_top_edge_one_cell_short_of_the_title_carries_a_marked_cut_of_it() {
+    // one below the width the whole title fits in, and one below that: the
+    // box names itself at both, and says it was cut at both
+    assert_eq!(
+        line_text(&rows(10, 5, &picker(), BorderSet::ASCII).lines[0]),
+        "+- Fil… -+"
+    );
+    assert_eq!(
+        title_span(&rows(10, 5, &picker(), BorderSet::ASCII)).as_deref(),
+        Some(" Fil… ")
+    );
+    assert_eq!(
+        line_text(&rows(9, 5, &picker(), BorderSet::ASCII).lines[0]),
+        "+- Fi… -+"
+    );
+}
+
+#[test]
+fn a_wide_glyph_that_would_straddle_the_cut_is_dropped_rather_than_halved() {
+    // four double-width glyphs against the five cells left beside the
+    // mark: the third would straddle the last of them, and half a glyph is
+    // not a character
+    let cut = rows(12, 5, &titled("日本語版"), BorderSet::ROUNDED);
+    assert_eq!(title_span(&cut).as_deref(), Some(" 日本… "));
+    assert_eq!(
+        cells(&line_text(&cut.lines[0])),
+        12,
+        "{:?}",
+        line_text(&cut.lines[0])
+    );
+}
+
+#[test]
+fn an_edge_too_short_to_mark_a_cut_still_carries_the_titles_first_word() {
+    let panel = titled("AI Agent -- focused, Esc returns");
+    // two cells for the title: a single letter and a mark would name
+    // nothing, while the first word is a whole word
+    assert_eq!(
+        line_text(&rows(8, 5, &panel, BorderSet::ROUNDED).lines[0]),
+        "╭─ AI ─╮"
+    );
+    assert_eq!(
+        title_span(&rows(8, 5, &panel, BorderSet::ROUNDED)).as_deref(),
+        Some(" AI ")
+    );
+}
+
+#[test]
+fn only_an_edge_too_small_for_any_form_of_the_title_goes_bare() {
+    let panel = titled("AI Agent -- focused, Esc returns");
+    // one cell for the title, which not even "AI" fits in
+    assert_eq!(
+        line_text(&rows(7, 5, &panel, BorderSet::ROUNDED).lines[0]),
+        "╭─────╮"
+    );
+    assert!(title_span(&rows(7, 5, &panel, BorderSet::ROUNDED)).is_none());
+    assert_eq!(
+        line_text(&rows(8, 5, &picker(), BorderSet::ASCII).lines[0]),
+        "+------+",
+        "a first word as long as the whole title has no shorter form to fall to"
+    );
+}
+
+/// The geometry the acceptance sweep found the title vanishing at: the AI
+/// panel's default 30% share of a 112-column terminal, which is a narrower
+/// top edge than its focused title is long.
+#[test]
+fn the_ai_panels_share_of_a_laptop_width_terminal_still_names_the_panel() {
+    let title = "AI Agent -- focused, Esc returns";
+    let edge = rows(33, 8, &titled(title), BorderSet::ROUNDED);
+    let label = title_span(&edge).expect("a 33-cell edge names the panel");
+    assert!(
+        label.starts_with(" AI Agent -- "),
+        "the panel is named by what survives the cut: {label:?}"
+    );
+    assert!(label.ends_with("… "), "the cut is marked: {label:?}");
+    assert!(
+        !label.contains(title),
+        "the whole title does not fit, so this width proves nothing if it did: {label:?}"
+    );
+    assert_eq!(cells(&line_text(&edge.lines[0])), 33);
 }
 
 #[test]

@@ -315,8 +315,20 @@ fn picker_split_rows(
     }
 }
 
-/// The frame's top row: the two corners with the title, if it fits, set
-/// into the horizontal run between them.
+/// The glyph a title cut to fit its edge ends with, so a shortened name
+/// reads as cut rather than as the whole of a shorter one. One cell at
+/// every tier, matching the mark a picker's own truncated rows already
+/// carry: the charset a frame is drawn from says what the terminal renders
+/// for a border, never what a title made of buffer-supplied text holds.
+const TRUNCATION_MARK: char = '…';
+
+/// The cells of the title itself a truncated label keeps beside
+/// [`TRUNCATION_MARK`]. One glyph and a mark names nothing, and at that
+/// width the whole first word says more than the first letter of it does.
+const MIN_TRUNCATED_TITLE_CELLS: u16 = 2;
+
+/// The frame's top row: the two corners with the title, in the longest form
+/// that fits, set into the horizontal run between them.
 ///
 /// The title is blanked here rather than where a [`Body`] is built, for the
 /// same reason [`fit`] blanks a column: this is the one place a title
@@ -324,23 +336,20 @@ fn picker_split_rows(
 /// reach a row no matter which builder produced it or what a later feature
 /// puts in a view's title.
 ///
-/// Three spans when a title fits, one when it does not: the label carries
-/// [`StyleRole::Title`] so a painter can give it the colorscheme's own
-/// float-title style, while the border runs on either side stay plain and
-/// take the frame's. One span for the whole row would force the title to
-/// inherit the frame's deliberately dimmed border color -- the row's only
-/// readable text, painted in the row's least readable style.
+/// Three spans when some form of the title fits, one when none does: the
+/// label carries [`StyleRole::Title`] so a painter can give it the
+/// colorscheme's own float-title style, while the runs on either side of it
+/// stay plain and take the frame's. One span for the whole row would force
+/// the title to inherit the frame's deliberately dimmed border color --
+/// the row's only readable text, painted in the row's least readable style.
 fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
     let span = width - 2;
-    let clean = sanitized(title);
-    let label = if clean.trim().is_empty() {
-        String::new()
-    } else {
-        format!(" {clean} ")
-    };
-    let label_cells = cells(&label);
     // the title needs a horizontal glyph on each side of it to read as set
-    // into the edge rather than as replacing it
+    // into the edge rather than as replacing it, and the blank column
+    // [`title_label`] puts inside each of those: four cells of the run are
+    // never the title's to spend
+    let label = title_label(&sanitized(title), span.saturating_sub(4));
+    let label_cells = cells(&label);
     if label_cells > 0 && label_cells.saturating_add(2) <= span {
         let mut lead = String::new();
         lead.push(borders.top_left);
@@ -359,6 +368,46 @@ fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
         push_run(&mut edge, borders.horizontal, span);
         edge.push(borders.top_right);
         vec![Span::plain(edge)]
+    }
+}
+
+/// The label [`top_edge`] sets into an edge with `budget` cells to spare
+/// for the title's own text, degrading in steps rather than in one drop to
+/// nothing: the whole title while it fits, the longest prefix of it plus
+/// [`TRUNCATION_MARK`] while at least [`MIN_TRUNCATED_TITLE_CELLS`] of the
+/// title survive the cut, then its first word alone -- whole, so it reads
+/// as a name and not as a word broken off mid-syllable. Empty only when no
+/// form of the title fits at all, which is the one case the caller draws an
+/// anonymous edge for.
+///
+/// A box that names itself only above some width is a box a user meets
+/// unnamed on the terminal they actually have: the panel's own share of a
+/// laptop-width terminal is a narrower edge than its title is long.
+///
+/// The blank column on each side of the label is part of every non-empty
+/// answer, which is why `budget` excludes them: a title abutting the edge
+/// glyphs reads as a run of the border rather than as a name set into it.
+fn title_label(title: &str, budget: u16) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return String::new();
+    }
+    if cells(title) <= budget {
+        return format!(" {title} ");
+    }
+    let keep = budget.saturating_sub(cell_width(TRUNCATION_MARK));
+    if keep >= MIN_TRUNCATED_TITLE_CELLS {
+        // cut by the same clip the interior rows go through, so a wide
+        // glyph straddling the last cell is dropped there and here alike
+        let kept = line_text(&clip_spans(vec![Span::plain(title.to_string())], keep));
+        let kept = kept.trim_end();
+        if !kept.is_empty() {
+            return format!(" {kept}{TRUNCATION_MARK} ");
+        }
+    }
+    match title.split_whitespace().next() {
+        Some(word) if cells(word) <= budget => format!(" {word} "),
+        _ => String::new(),
     }
 }
 
