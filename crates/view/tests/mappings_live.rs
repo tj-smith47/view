@@ -280,6 +280,20 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
         "picker",
         "the command must complete the features it can invoke"
     );
+    // the review's keys are buffer-local mappings on the file under
+    // review, so no default key reaches it and the command line is the
+    // whole of its discoverability -- a verb a user would have to already
+    // know to type is not a way out of anything
+    assert_eq!(
+        session.eval("join(getcompletion('View rev', 'cmdline'), ',')"),
+        "review",
+        "the command must complete a feature no key reaches"
+    );
+    assert_eq!(
+        session.eval("join(getcompletion('View review ', 'cmdline'), ',')"),
+        "accept,accept_all,leave,next,prev,rediff,reject,reject_all",
+        "and every verb it answers"
+    );
 
     session.engine.handle.input(":View picker grep\r").unwrap();
     session.eval("1");

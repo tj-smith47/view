@@ -1,4 +1,5 @@
-//! The compile-time table of default keys that reach a native feature.
+//! The compile-time tables of what `:View` answers: the default keys that
+//! reach a native feature, and the forms that no key reaches at all.
 //!
 //! Pure data, like [`super::registry`]: nothing here does I/O or
 //! serialization. The crate that reads `view.toml` decides which of these
@@ -100,6 +101,74 @@ pub fn default_maps() -> &'static [MappingSpec] {
     &DEFAULT_MAPS
 }
 
+/// One `:View feature verb` form that no default key reaches, so the
+/// command line is the whole of its discoverability.
+///
+/// Not a [`MappingSpec`] with an empty `lhs`: such a spec is not
+/// [`is_spellable`], and a table the registration path has to filter rows
+/// out of is a table that will one day register a key nobody asked for.
+/// The two facts a completion entry needs are the only two here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandForm {
+    /// The feature id the form invokes, spelled the way the dispatch that
+    /// answers it matches on.
+    pub feature: &'static str,
+    /// The entry point, i.e. the second word of `:View <feature> <verb>`.
+    pub verb: &'static str,
+}
+
+/// The diff review's verbs. Its keys are buffer-local nvim mappings on the
+/// file under review, installed and removed with the review itself, so they
+/// can never be [`DEFAULT_MAPS`] rows -- and without these rows `:View`
+/// would complete neither `review` nor a verb of it, leaving the command
+/// form the design names as the always-available way out of a review
+/// something a user would have to already know to type.
+///
+/// The feature deliberately has no registry row and no
+/// [`REGISTRY_EXEMPT_FEATURES`] entry: both exist to report a key claim and
+/// to carry the off switch that gives the key back, and a form that claims
+/// no key has neither to answer for.
+static COMMAND_ONLY_FORMS: [CommandForm; 8] = [
+    CommandForm {
+        feature: "review",
+        verb: "accept",
+    },
+    CommandForm {
+        feature: "review",
+        verb: "accept_all",
+    },
+    CommandForm {
+        feature: "review",
+        verb: "reject",
+    },
+    CommandForm {
+        feature: "review",
+        verb: "reject_all",
+    },
+    CommandForm {
+        feature: "review",
+        verb: "rediff",
+    },
+    CommandForm {
+        feature: "review",
+        verb: "next",
+    },
+    CommandForm {
+        feature: "review",
+        verb: "prev",
+    },
+    CommandForm {
+        feature: "review",
+        verb: "leave",
+    },
+];
+
+/// Every `:View` form this build answers that no default key reaches.
+#[must_use]
+pub fn command_only_forms() -> &'static [CommandForm] {
+    &COMMAND_ONLY_FORMS
+}
+
 /// Whether `spec`'s tokens can be spelled verbatim inside the mapping the
 /// registration chunk generates for it.
 ///
@@ -125,16 +194,24 @@ fn is_token(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// Every `feature verb` form `:View` answers, in registration order.
+/// Every `feature verb` form `:View` answers, the keyed ones in
+/// registration order and the command-only ones after them.
 ///
-/// Read from [`default_maps`] like the docs table and the command's own
-/// completion, so a build cannot offer a form in one place and refuse it in
-/// another.
+/// Read from [`default_maps`] and [`command_only_forms`], the same two
+/// tables the command's own completion is built from, so a build cannot
+/// offer a form in one place and refuse it in another. The docs table is
+/// the one surface that reads `default_maps` alone -- it is a table of
+/// keys, and a form with no key has no row to occupy there.
 #[must_use]
 pub fn invocations() -> Vec<String> {
     default_maps()
         .iter()
         .map(|spec| format!("{} {}", spec.feature, spec.verb))
+        .chain(
+            command_only_forms()
+                .iter()
+                .map(|form| format!("{} {}", form.feature, form.verb)),
+        )
         .collect()
 }
 
@@ -354,7 +431,57 @@ mod tests {
                 spec.verb
             );
         }
-        assert_eq!(invocations().len(), default_maps().len());
+        assert_eq!(
+            invocations().len(),
+            default_maps().len() + command_only_forms().len()
+        );
+    }
+
+    /// The review is driven from the command line alone -- its keys live
+    /// on the reviewed buffer, not in this table -- so the usage line is
+    /// the only place a user who has not read the docs can learn the verbs
+    /// exist at all.
+    #[test]
+    fn the_usage_line_offers_the_verbs_no_default_key_reaches() {
+        let usage = render_usage();
+        for form in command_only_forms() {
+            assert!(
+                usage.contains(&format!("{} {}", form.feature, form.verb)),
+                "{} {} is answered but the usage line omits it: {usage}",
+                form.feature,
+                form.verb
+            );
+        }
+        assert!(
+            command_only_forms().iter().any(|f| f.feature == "review"),
+            "the review's verbs are the reason this table exists"
+        );
+    }
+
+    /// A form with no key is not a row in a table of keys: putting one
+    /// there would document a key the user does not have.
+    #[test]
+    fn a_form_with_no_key_stays_out_of_the_rendered_key_table() {
+        let table = render_table();
+        for form in command_only_forms() {
+            assert!(
+                !table.contains(&format!("{} {}", form.feature, form.verb)),
+                "{} {} has no key to document: {table}",
+                form.feature,
+                form.verb
+            );
+        }
+    }
+
+    /// The completion offers these words and the dispatch matches on them,
+    /// so a token neither side can spell verbatim is a form nothing
+    /// answers.
+    #[test]
+    fn a_command_only_form_is_spelled_the_way_a_feature_and_a_verb_are() {
+        for form in command_only_forms() {
+            assert!(is_token(form.feature), "{form:?}");
+            assert!(is_token(form.verb), "{form:?}");
+        }
     }
 
     #[test]

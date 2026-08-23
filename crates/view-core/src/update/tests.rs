@@ -8838,6 +8838,153 @@ fn accepting_a_stale_hunk_through_the_key_path_is_refused_and_says_why() {
     );
 }
 
+/// Stales the review's first hunk with an edit inside its anchor, then
+/// takes the anchor itself with a second edit that swallows the context row
+/// above it. The state the repaint gate has to notice without a status
+/// changing: `Stale` before and `Stale` after, but the re-diff the header
+/// was offering is gone for good.
+fn stale_then_unanchor_the_first_hunk(m: &mut Model) -> Vec<Effect> {
+    let change = buf_text_changed(m, 1, 2, &["beta typed over"]);
+    let _ = update(m, change);
+    let review = m.ai_panel().pending_diff.as_ref().unwrap();
+    assert_eq!(
+        review.hunks[0].status,
+        crate::native::diff::HunkStatus::Stale
+    );
+    assert!(
+        review.hunks[0].anchor_intact,
+        "the first edit leaves the hunk re-diffable, which is the whole premise"
+    );
+    let change = buf_text_changed(m, 0, 2, &["merged"]);
+    update(m, change)
+}
+
+/// The gate must not swallow the fold that takes a stale hunk's anchor: the
+/// header on screen is still offering `<leader>hR`, and `re_diff` refuses
+/// that hunk from here on. A key the code offers and nothing answers is
+/// worse than no key at all.
+#[test]
+fn a_second_edit_that_takes_a_stale_hunks_anchor_repaints_without_the_re_diff_key() {
+    let mut m = live_review_model();
+
+    let effects = stale_then_unanchor_the_first_hunk(&mut m);
+
+    assert!(
+        !m.ai_panel().pending_diff.as_ref().unwrap().hunks[0].anchor_intact,
+        "the second edit took the context a re-diff would narrow against"
+    );
+    let header = match rpc_calls(&effects).as_slice() {
+        [RpcCall::ReviewShow { marks, focus, .. }] => {
+            assert!(
+                !focus,
+                "a fold repaints under the reader, it does not move them"
+            );
+            marks[0]
+                .header
+                .clone()
+                .expect("the cursor's hunk carries the header")
+        }
+        other => panic!("the fold that unanchors a hunk must redraw it, got {other:?}"),
+    };
+    assert!(
+        !header.contains("<leader>hR"),
+        "the header cannot go on offering a re-diff the review refuses: {header}"
+    );
+    assert!(
+        header.contains("<leader>hx reject"),
+        "what is still on offer has to stay on offer: {header}"
+    );
+}
+
+/// The refusal is the answer. A verb reached for through a key that was on
+/// screen, answered with an identical repaint and nothing else, reads as a
+/// dropped keystroke.
+#[test]
+fn a_re_diff_the_review_refuses_says_why_rather_than_repainting_in_silence() {
+    let mut m = live_review_model();
+    let _ = stale_then_unanchor_the_first_hunk(&mut m);
+
+    let _ = update(&mut m, review_msg("rediff"));
+
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("anchor")),
+        "a refused re-diff names what took the hunk's anchor: {texts:?}"
+    );
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().hunks[0].status,
+        crate::native::diff::HunkStatus::Stale,
+        "the refused re-diff left the hunk exactly as it was"
+    );
+}
+
+/// An accept-all over a review with nothing fresh left writes nothing, and
+/// nothing is exactly what the screen would show without a notice.
+#[test]
+fn an_accept_all_with_no_fresh_hunk_left_says_why_it_wrote_nothing() {
+    let mut m = live_review_model();
+    let change = buf_text_changed(&m, 1, 2, &["beta typed over"]);
+    let _ = update(&mut m, change);
+    let change = buf_text_changed(&m, 6, 7, &["eta typed over"]);
+    let _ = update(&mut m, change);
+    assert!(
+        m.ai_panel()
+            .pending_diff
+            .as_ref()
+            .unwrap()
+            .hunks
+            .iter()
+            .all(|hunk| hunk.status == crate::native::diff::HunkStatus::Stale),
+        "the premise: both hunks moved under the review"
+    );
+
+    let effects = update(&mut m, review_msg("accept_all"));
+
+    assert!(!wrote_anything(&effects), "{effects:?}");
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("fresh")),
+        "an accept-all that wrote nothing says why: {texts:?}"
+    );
+}
+
+/// `:View review <Tab>` offers these verbs, so every one of them has to be
+/// a verb the dispatch answers -- a completed word that does nothing is a
+/// worse answer than no completion at all. The two lists are compared in
+/// both directions: an unlisted verb is undiscoverable, a listed one that
+/// nothing answers is a lie.
+#[test]
+fn every_review_verb_the_command_completes_is_one_the_review_answers() {
+    let listed: Vec<&str> = crate::native::mappings::command_only_forms()
+        .iter()
+        .filter(|form| form.feature == "review")
+        .map(|form| form.verb)
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            super::review::ACCEPT,
+            super::review::ACCEPT_ALL,
+            super::review::REJECT,
+            super::review::REJECT_ALL,
+            super::review::REDIFF,
+            super::review::NEXT,
+            super::review::PREV,
+            super::review::LEAVE,
+        ],
+        "the completion table and the dispatch name the same verbs"
+    );
+    for verb in listed {
+        let mut m = live_review_model();
+        m.dirty = false;
+        let _ = update(&mut m, review_msg(verb));
+        assert!(
+            m.dirty,
+            ":View review {verb} completes but the review does not answer it"
+        );
+    }
+}
+
 /// A desynced event means events were dropped before it, so no incremental
 /// state survives it: every open hunk goes stale, and the review itself is
 /// no longer writable -- a re-diff would narrow against a guess.

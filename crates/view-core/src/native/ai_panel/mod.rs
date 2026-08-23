@@ -23,7 +23,7 @@ mod transcript;
 
 pub use permission::PermissionPrompt;
 pub(crate) use permission::StandingAnswer;
-pub use review::{AcceptRefusal, DiffReviewState, ReviewSync};
+pub use review::{DiffReviewState, Refusal, ReviewSync};
 pub use transcript::{
     Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryKind, TranscriptRole,
     SPINNER_INTERVAL,
@@ -307,13 +307,12 @@ impl AiPanelState {
     /// reading.
     ///
     /// A pending permission's rows and an open review's summary are
-    /// deliberately not subtracted. Neither state lets a scroll key through
-    /// to the transcript at all (`route_key`'s `reaches_past_a_panel_owner`
-    /// is the gate), so the window under them is following the tail, and a
-    /// window a few rows taller than the panel can draw is cut back to its
-    /// newest rows by the overlay itself -- the end a follower wants kept.
-    /// Counting them here would instead have to be kept in step with
-    /// `view-surface`'s own header assembly, which this crate cannot see.
+    /// deliberately not subtracted. A window a few rows taller than the
+    /// panel can draw is cut back to its newest rows by the overlay itself
+    /// (`Body::items_keep_tail`) -- the end a reader is at, and the end a
+    /// follower wants kept. Counting those rows here would instead have to
+    /// be kept in step with `view-surface`'s own header assembly, which
+    /// this crate cannot see.
     #[must_use]
     pub fn transcript_viewport(&self, panel_height: usize, panel_width: usize) -> usize {
         self.transcript_rows(

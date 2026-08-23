@@ -1,10 +1,10 @@
 crates/view-core/src/native/ai_panel/review.rs	anchor: if end_row > row { end_row - 1 } else { row },	anchor: end_row,	-p view-core --lib review::tests::marks_name_the_replaced_rows_and_header_only_the_current_hunk
 crates/view-core/src/native/ai_panel/review.rs	header: (index == self.cursor).then(|| self.header(index)),	header: Some(self.header(index)),	-p view-core --lib review::tests::marks_name_the_replaced_rows_and_header_only_the_current_hunk
 crates/view-core/src/native/ai_panel/review.rs	.filter(|(_, hunk)| hunk.status.is_open())	.filter(|(_, hunk)| hunk.status != HunkStatus::Accepted)	-p view-core --lib review::tests::a_decided_hunk_leaves_no_mark_behind
-crates/view-core/src/native/ai_panel/review.rs	if stale { STALE_KEY_HINT } else { KEY_HINT }	KEY_HINT	-p view-core --lib review::tests::a_stale_current_hunk_carries_the_stale_flag_and_the_re_diff_key
+crates/view-core/src/native/ai_panel/review.rs	            (true, true) => STALE_KEY_HINT,	            (true, true) => KEY_HINT,	-p view-core --lib review::tests::a_stale_current_hunk_carries_the_stale_flag_and_the_re_diff_key
 crates/view-core/src/native/ai_panel/review.rs	return format!("{position} -- {notice} -- {LEAVE_HINT}");	return format!("{position} -- {notice}");	-p view-core --lib review::tests::a_broken_review_replaces_the_keys_with_the_reason_and_the_way_out
 crates/view-core/src/native/ai_panel/review.rs	effects.push(Effect::Rpc(RpcCall::ReviewClear { buf }));	let _ = buf;	-p view-core --lib review::tests::closing_a_live_review_undecorates_detaches_and_releases_the_hidden_hold
-crates/view-core/src/native/ai_panel/review.rs	.filter(|hunk| hunk.status == HunkStatus::Stale)	.filter(|hunk| hunk.status == HunkStatus::Rejected)	-p view-core --lib review::tests::the_presentation_stamp_moves_only_when_a_hunk_or_the_sync_changes
+crates/view-core/src/native/ai_panel/review.rs	                stale += 1;	                stale += 0;	-p view-core --lib review::tests::the_presentation_stamp_moves_only_when_a_hunk_or_the_sync_changes
 crates/view-core/src/native/ai_panel/review.rs	.map_or(0, |hunk| hunk.old_range.0)	.map_or(0, |hunk| hunk.old_range.1)	-p view-core --lib review::tests::show_effect_carries_the_marks_the_cursor_row_and_the_focus
 crates/view-core/src/native/ai_panel/review.rs	let buf = self.buffer?;	let buf = self.buffer.unwrap_or(BufferHandle(0));	-p view-core --lib review::tests::an_unbound_review_has_nothing_to_draw_in
 crates/view-core/src/native/ai_panel/review.rs	if hunk.status.is_open() {	if hunk.status == HunkStatus::Fresh {	-p view-core --lib review::tests::reject_all_declines_every_open_hunk_including_the_stale_ones
@@ -15,3 +15,11 @@ crates/view-core/src/update/review.rs	panel.transcript.record_review(outcome);	l
 crates/view-core/src/update/review.rs	effects.extend(finished.close_effects());	let _ = &finished;	-p view-core --lib update::tests::rejecting_through_the_key_path_writes_nothing_and_closes_the_review
 crates/view-core/src/update/review.rs	_ => return Vec::new(),	_ => review.accept_all(),	-p view-core --lib update::tests::a_verb_the_review_does_not_know_changes_nothing
 crates/view-core/src/update/review.rs	.record_review(format!("now reviewing {}", queued.path.display()));	.record_review(String::new());	-p view-core --lib update::tests::the_promoted_proposal_announces_itself_and_focuses_its_own_buffer
+crates/view-core/src/native/ai_panel/review.rs	                unanchored += 1;	                unanchored += 0;	-p view-core --lib review::tests::the_stamp_moves_when_a_second_edit_takes_an_already_stale_hunks_anchor
+crates/view-core/src/native/ai_panel/review.rs	            (true, false) => UNANCHORED_KEY_HINT,	            (true, false) => STALE_KEY_HINT,	-p view-core --lib review::tests::a_stale_hunk_whose_anchor_is_gone_stops_offering_the_re_diff_key
+crates/view-core/src/native/ai_panel/review.rs	            return Err(Refusal::NothingFresh);	            return Ok(Vec::new());	-p view-core --lib no_fresh_hunk_left
+crates/view-core/src/native/ai_panel/review.rs	            return Err(Refusal::AnchorLost);	            return Err(Refusal::NotStale);	-p view-core --lib a_re_diff
+crates/view-core/src/update/review.rs	        Err(why) => (Vec::new(), Some(why)),	        Err(_) => (Vec::new(), None),	-p view-core --lib update::tests::a_re_diff_the_review_refuses_says_why_rather_than_repainting_in_silence
+crates/view-core/src/native/mappings.rs	                .map(|form| format!("{} {}", form.feature, form.verb)),	                .map(|form| form.feature.to_string()),	-p view-core --lib mappings::tests::the_usage_line_offers_the_verbs_no_default_key_reaches
+crates/view-engine/src/nvim_api.rs	                command_only_forms()	                default_maps()	-p view-engine --lib nvim_api::tests::register_mappings_sends_one_chunk_carrying_its_data_as_arguments
+crates/view-core/src/native/mappings.rs	        verb: "rediff",	        verb: "redif",	-p view --test mappings_live

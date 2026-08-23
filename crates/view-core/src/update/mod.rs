@@ -857,21 +857,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     }
 }
 
-/// Whether `notation` may reach past an open review or an unanswered
-/// permission to the panel's own arm beneath them -- un-entering the panel,
-/// interrupting a turn, dismissing a crash banner, or re-widthing the panel
-/// itself.
+/// Whether `notation` may reach past an unanswered permission request to
+/// the panel's own arm beneath it -- un-entering the panel, interrupting a
+/// turn, dismissing a crash banner, or re-widthing the panel itself.
 ///
-/// The resize pair is here rather than being answered with a notice the way
-/// a scroll key is, because the two are not the same kind of key: a scroll
-/// moves a transcript window the owner is painting over, so it would land
-/// somewhere the reader cannot see, while a width decides nothing either
-/// owner owns and re-lays out whatever is on screen -- a review too narrow
-/// to read its own diff is exactly when a user reaches for it.
+/// The resize pair is here rather than being swallowed the way a scroll key
+/// is, because the two are not the same kind of key: a scroll moves a
+/// transcript window the question is painted over, so it would land
+/// somewhere the reader cannot see, while a width decides nothing the
+/// question owns and re-lays out whatever is on screen -- a panel too
+/// narrow to read the request in is exactly when a user reaches for it.
 ///
-/// The one gate both owners use, and a closed list rather than "any `<...>`
-/// notation" on purpose. The composer's own named keys are edits like any
-/// other keystroke: `<CR>` starts a turn, `<BS>` and `<lt>` (nvim's escape
+/// A closed list rather than "any `<...>` notation" on purpose. The
+/// composer's own named keys are edits like any other keystroke: `<CR>` starts a turn, `<BS>` and `<lt>` (nvim's escape
 /// for a literal `<`, see `keys::encode_key`) type into the prompt. Letting
 /// those through because they are spelled with angle brackets would leave
 /// the composer editable behind a decision the user has not made yet --
@@ -890,8 +888,8 @@ fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
         // A way out only while there is a banner to dismiss. With none,
         // this is the half-page scroll key (see [`ai_scroll_for`]), which
         // is not a way out of anything: letting it through would scroll a
-        // transcript neither owner is painting, silently, while every other
-        // scroll key at the same review is answered with a notice.
+        // transcript the pending question is painted over, while every
+        // other scroll key at the same question is swallowed.
         "<C-d>" => model.ai_panel().local_error.is_some(),
         _ => false,
     }
@@ -906,8 +904,8 @@ fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
 /// notations are what the composer cannot type (the same property the
 /// scroll keys in [`ai_scroll_for`] are chosen for), and this pair is
 /// claimed by no other state -- not the tree's `<Up>`/`<Down>`, not the
-/// review's letters, not the terminal's own chords, and not a window
-/// manager's, which is what rules out `<C-Left>`/`<C-Right>` and `<M-,>`.
+/// terminal's own chords, and not a window manager's, which is what rules
+/// out `<C-Left>`/`<C-Right>` and `<M-,>`.
 /// Direction reads the way nvim's own `<C-w><` and `<C-w>>` do -- left
 /// narrows and right widens whichever edge the sidebar is pinned to --
 /// rather than following the moving edge, which would invert between the
@@ -955,10 +953,10 @@ fn ai_scroll_for(notation: &str) -> Option<TranscriptScroll> {
 /// Scrolls the AI panel's transcript for one scroll key, reporting whether
 /// the window moved.
 ///
-/// Carries no guard of its own against a review or a permission prompt
-/// owning the keys: [`reaches_past_a_panel_owner`] is the single place that
-/// decides what gets this far, so a second opinion here could only ever
-/// disagree with it.
+/// Carries no guard of its own against a permission prompt owning the
+/// keys: [`reaches_past_a_panel_owner`] is the single place that decides
+/// what gets this far, so a second opinion here could only ever disagree
+/// with it.
 fn scroll_ai_transcript(model: &mut Model, notation: &str) -> bool {
     let Some(scroll) = ai_scroll_for(notation) else {
         return false;
@@ -1368,11 +1366,11 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                             },
                         })];
                     }
-                    // Only the ways out fall through, exactly as they do out
-                    // of an open review. A turn holding an unanswered
-                    // permission is a turn in flight, and it is the case the
-                    // wire's cancellation contract is written for ("the
-                    // Client MUST respond to all pending
+                    // Only the ways out fall through, and they fall
+                    // through for every state the panel can be in. A turn
+                    // holding an unanswered permission is a turn in flight,
+                    // and it is the case the wire's cancellation contract is
+                    // written for ("the Client MUST respond to all pending
                     // session/request_permission requests with Cancelled");
                     // swallowing `<C-c>` here would leave that contract with
                     // no key that reaches it.
@@ -1389,8 +1387,8 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     // First in the chain because it is the one key here that
                     // every other state also honors (see
                     // `reaches_past_a_panel_owner`): a reader who reaches for
-                    // it mid-review gets the same notch they get with nothing
-                    // pending.
+                    // it with a question up gets the same notch they get with
+                    // nothing pending.
                     if model.resize_ai_panel(widen) {
                         model.dirty = true;
                     }

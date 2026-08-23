@@ -227,14 +227,18 @@ is open:
 | `<leader>hq` | leave, deciding nothing further |
 
 Each is also a command -- `:View review accept`, `:View review leave` --
-which is what to reach for if `<leader>h` is already yours.
+which `:View <Tab>` completes, feature then verb, and which is what to reach
+for if `<leader>h` is already yours.
 
 Type over a hunk yourself and it goes *stale*: view will not write a
 proposal against text that has moved, so a stale hunk offers `<leader>hR`
 (re-anchor it against what the buffer now holds) or `<leader>hx` in place of
-the accept it would have to refuse. The panel keeps a summary row beside the
-buffer -- which file, which hunk of how many, and the same keys -- so a
-scroll away from every hunk does not lose you the review.
+the accept it would have to refuse. Keep editing the same rows and even that
+goes: once your own edits reach past the context the hunk was anchored on,
+there is no text left to re-anchor it against honestly, so its header drops
+the re-diff and offers the reject alone. The panel keeps a summary row
+beside the buffer -- which file, which hunk of how many, and the same keys
+-- so a scroll away from every hunk does not lose you the review.
 
 An accepted review is one undo entry -- a single `u` retracts the whole
 thing, never joined onto your own preceding edit.

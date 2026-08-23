@@ -232,7 +232,7 @@ fn a_whole_review_undoes_as_one_step_across_a_concurrent_edit_and_a_re_diff() {
         "a stale hunk must refuse to apply before it is re-diffed"
     );
 
-    assert!(review.re_diff(1), "the stale hunk re-diffs");
+    review.re_diff(1).expect("the stale hunk re-diffs");
     let effects = review.accept(1).expect("the re-diffed hunk accepts");
     carry_out(&engine, &mut review, &effects[0]);
     fold_events(&rx, &mut review);

@@ -277,32 +277,23 @@ impl ReviewDriver {
                 Ok(true)
             }
             ReviewStep::AcceptAll => {
-                let effects = self.review_mut()?.accept_all();
-                if effects.is_empty() {
-                    return Err(OracleError::Review(
-                        "accept-all answered no write, so no hunk was still fresh".to_string(),
-                    ));
-                }
+                let effects = self.review_mut()?.accept_all().map_err(|refusal| {
+                    OracleError::Review(format!("accept-all refused: {refusal:?}"))
+                })?;
                 self.carry_out(session, &effects)?;
                 Ok(true)
             }
             ReviewStep::Reject(index) => {
-                if self.review_mut()?.reject(index) {
-                    Ok(false)
-                } else {
-                    Err(OracleError::Review(format!(
-                        "reject({index}) refused: the hunk is not open"
-                    )))
-                }
+                self.review_mut()?.reject(index).map_err(|refusal| {
+                    OracleError::Review(format!("reject({index}) refused: {refusal:?}"))
+                })?;
+                Ok(false)
             }
             ReviewStep::ReDiff(index) => {
-                if self.review_mut()?.re_diff(index) {
-                    Ok(false)
-                } else {
-                    Err(OracleError::Review(format!(
-                        "re-diff({index}) refused: the hunk is not stale with an intact anchor"
-                    )))
-                }
+                self.review_mut()?.re_diff(index).map_err(|refusal| {
+                    OracleError::Review(format!("re-diff({index}) refused: {refusal:?}"))
+                })?;
+                Ok(false)
             }
             ReviewStep::FoldRow(row) => {
                 self.fold_row(session, row)?;

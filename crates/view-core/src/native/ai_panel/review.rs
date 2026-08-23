@@ -74,12 +74,16 @@ impl ReviewSync {
     }
 }
 
-/// Why an accept was refused. Returned rather than silently ignored so the
-/// panel can say which of the two refusals happened, and so a test can
-/// assert the refusal came from the dispatch path rather than from the UI
-/// merely not offering the key.
+/// Why a verb was refused. Returned rather than silently ignored so the
+/// dispatch that ran the verb can say which refusal happened, and so a test
+/// can assert the refusal came from this state -- the one place every path
+/// goes through -- rather than from the UI merely not offering the key.
+///
+/// One enum for every verb, and one formatter for it in
+/// `update::review::refusal_notice`, so two refusals cannot come to be
+/// worded as if they were the same fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptRefusal {
+pub enum Refusal {
     /// The review's buffer is not (or no longer) writable: see
     /// [`ReviewSync::can_apply`].
     NotLive,
@@ -87,6 +91,20 @@ pub enum AcceptRefusal {
     /// name rows that have changed underneath it, and a resolved one has
     /// already been decided.
     NotFresh,
+    /// No hunk of the review is [`HunkStatus::Fresh`], so an accept-all has
+    /// nothing to write. Distinct from [`Self::NotFresh`] because the way
+    /// forward is: one hunk is re-diffed, a whole review is left.
+    NothingFresh,
+    /// The hunk is already decided, so there is nothing left to reject
+    /// there -- or, for a review-wide reject, nowhere at all.
+    NotOpen,
+    /// The hunk is not [`HunkStatus::Stale`], so a re-diff has nothing to
+    /// re-anchor.
+    NotStale,
+    /// The hunk is stale and the user's own edits have taken the anchor a
+    /// re-diff would need with them (see [`Hunk::anchor_intact`]), so it
+    /// can never be made writable again.
+    AnchorLost,
 }
 
 /// One agent proposal under review.
@@ -331,18 +349,23 @@ impl DiffReviewState {
     /// every dispatch path goes through, rather than in whichever keys the
     /// UI happens to offer, so an "accept anyway" affordance added later
     /// would have to change this and its test rather than route around it.
-    pub fn accept(&mut self, index: usize) -> Result<Vec<Effect>, AcceptRefusal> {
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotLive`] for a review that may not write, and
+    /// [`Refusal::NotFresh`] for a hunk that is stale or already decided.
+    pub fn accept(&mut self, index: usize) -> Result<Vec<Effect>, Refusal> {
         if !self.sync.can_apply() {
-            return Err(AcceptRefusal::NotLive);
+            return Err(Refusal::NotLive);
         }
         let Some(buf) = self.buffer else {
-            return Err(AcceptRefusal::NotLive);
+            return Err(Refusal::NotLive);
         };
         let Some(hunk) = self.hunks.get_mut(index) else {
-            return Err(AcceptRefusal::NotFresh);
+            return Err(Refusal::NotFresh);
         };
         if hunk.status != HunkStatus::Fresh {
-            return Err(AcceptRefusal::NotFresh);
+            return Err(Refusal::NotFresh);
         }
         Ok(self.write(buf, &[index]))
     }
@@ -428,40 +451,59 @@ impl DiffReviewState {
     /// each accepted hunk shift the rows of every hunk below it. The
     /// executor sorts a batch descending for exactly this reason; the order
     /// is stated here as well so the batch reads the way it applies.
-    pub fn accept_all(&mut self) -> Vec<Effect> {
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotLive`] for a review that may not write at all, and
+    /// [`Refusal::NothingFresh`] when no hunk is left for the batch to
+    /// carry -- never an empty write, so a caller cannot read "nothing
+    /// happened" as "it worked".
+    pub fn accept_all(&mut self) -> Result<Vec<Effect>, Refusal> {
         if !self.sync.can_apply() {
-            return Vec::new();
+            return Err(Refusal::NotLive);
         }
         let Some(buf) = self.buffer else {
-            return Vec::new();
+            return Err(Refusal::NotLive);
         };
         let mut order: Vec<usize> = (0..self.hunks.len())
             .filter(|i| self.hunks[*i].status == HunkStatus::Fresh)
             .collect();
+        if order.is_empty() {
+            return Err(Refusal::NothingFresh);
+        }
         order.sort_by_key(|i| std::cmp::Reverse(self.hunks[*i].old_range));
-        self.write(buf, &order)
+        Ok(self.write(buf, &order))
     }
 
     /// Declines the hunk at `index`. Terminal: a later re-diff of this
     /// review never re-offers it.
-    pub fn reject(&mut self, index: usize) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotOpen`] for a hunk that is already decided, or an
+    /// index no hunk answers to.
+    pub fn reject(&mut self, index: usize) -> Result<(), Refusal> {
         let Some(hunk) = self.hunks.get_mut(index) else {
-            return false;
+            return Err(Refusal::NotOpen);
         };
         if !hunk.status.is_open() {
-            return false;
+            return Err(Refusal::NotOpen);
         }
         hunk.status = HunkStatus::Rejected;
-        true
+        Ok(())
     }
 
-    /// Declines every hunk still open, answering whether any was.
+    /// Declines every hunk still open.
     ///
     /// [`Self::accept_all`]'s counterpart, and the reason it exists is the
     /// same: a proposal a reader has decided against as a whole is one
     /// decision, not one per hunk. Unlike accept-all it takes stale hunks
     /// too -- rejecting needs nothing anchored, since nothing is written.
-    pub fn reject_all(&mut self) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotOpen`] when no hunk was still open to decline.
+    pub fn reject_all(&mut self) -> Result<(), Refusal> {
         let mut any = false;
         for hunk in &mut self.hunks {
             if hunk.status.is_open() {
@@ -469,25 +511,38 @@ impl DiffReviewState {
                 any = true;
             }
         }
-        any
+        if any {
+            Ok(())
+        } else {
+            Err(Refusal::NotOpen)
+        }
     }
 
     /// Re-anchors the stale hunk at `index` against the text the rebase
-    /// carried forward for it. Refused on a review whose buffer state is no
-    /// longer trustworthy at all, for the reason [`ReviewSync`]'s own doc
-    /// gives.
-    pub fn re_diff(&mut self, index: usize) -> bool {
+    /// carried forward for it.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotLive`] on a review whose buffer state is no longer
+    /// trustworthy at all, for the reason [`ReviewSync`]'s own doc gives;
+    /// [`Refusal::NotStale`] for a hunk with nothing to re-anchor; and
+    /// [`Refusal::AnchorLost`] once the user's own edits have taken the
+    /// context the re-diff would narrow against with them.
+    pub fn re_diff(&mut self, index: usize) -> Result<(), Refusal> {
         if !self.sync.can_apply() {
-            return false;
+            return Err(Refusal::NotLive);
         }
         let Some(hunk) = self.hunks.get_mut(index) else {
-            return false;
+            return Err(Refusal::NotStale);
         };
-        if hunk.status != HunkStatus::Stale || !hunk.anchor_intact {
-            return false;
+        if hunk.status != HunkStatus::Stale {
+            return Err(Refusal::NotStale);
+        }
+        if !hunk.anchor_intact {
+            return Err(Refusal::AnchorLost);
         }
         hunk.re_diff();
-        true
+        Ok(())
     }
 
     /// The review's summary rows in the panel: which file, which hunk of
@@ -556,17 +611,23 @@ impl DiffReviewState {
         if let Some(notice) = self.sync.notice() {
             return format!("{position} -- {notice} -- {LEAVE_HINT}");
         }
-        let stale = self
-            .hunks
-            .get(index)
-            .is_some_and(|hunk| hunk.status == HunkStatus::Stale);
+        let hunk = self.hunks.get(index);
+        let stale = hunk.is_some_and(|hunk| hunk.status == HunkStatus::Stale);
+        let anchored = hunk.is_some_and(|hunk| hunk.anchor_intact);
         // A stale hunk has no accept to offer -- `accept` refuses it -- so
-        // its header names the two keys that do work on it instead of
-        // advertising the one that answers with a refusal notice.
-        format!(
-            "{position} -- {}",
-            if stale { STALE_KEY_HINT } else { KEY_HINT }
-        )
+        // its header names the keys that do work on it instead of
+        // advertising one that answers with a refusal notice. A second
+        // edit inside its anchor narrows the offer again: `re_diff`
+        // refuses a hunk whose context the user has since changed, and the
+        // key it would be pressed with must stop being advertised in the
+        // same fold that takes the anchor (see
+        // [`Self::presentation_stamp`], which is what re-issues this).
+        let keys = match (stale, anchored) {
+            (false, _) => KEY_HINT,
+            (true, true) => STALE_KEY_HINT,
+            (true, false) => UNANCHORED_KEY_HINT,
+        };
+        format!("{position} -- {keys}")
     }
 
     /// The call that draws this review in its buffer, or `None` for a
@@ -589,25 +650,47 @@ impl DiffReviewState {
         }))
     }
 
-    /// What a repaint depends on, cheaply: how many hunks have gone stale
-    /// and whether the review as a whole still trusts its buffer.
+    /// What a repaint depends on, cheaply: how many open hunks have gone
+    /// stale, how many of them have lost the anchor a re-diff needs, and
+    /// whether the review as a whole still trusts its buffer.
     ///
     /// The gate on re-issuing [`Self::show_effect`] after folding an edit
     /// (`update::review::on_buf_text_changed`), so ordinary typing
-    /// somewhere else in the reviewed buffer costs no RPC at all. A count
-    /// rather than the status vector because a fold can only ever stale a
-    /// hunk, never un-stale one, so the count moving is exactly "some
-    /// hunk's presentation changed" -- and it is O(hunks) with no
-    /// allocation, on a path that runs once per keystroke.
+    /// somewhere else in the reviewed buffer costs no RPC at all. Counts
+    /// rather than the vectors themselves because a fold only ever moves
+    /// either flag one way -- it can stale a hunk and it can break an
+    /// anchor, never the reverse -- so a count moving is exactly "some
+    /// hunk's presentation changed", and it stays O(hunks) with no
+    /// allocation on a path that runs once per keystroke.
+    ///
+    /// The anchor term is the one a second edit inside an already-stale
+    /// hunk's anchor moves. The status is `Stale` before and after, but
+    /// [`Self::header`] stops offering the re-diff key that
+    /// [`Self::re_diff`] would now refuse, and a header advertising a key
+    /// nothing answers is the one thing this gate must never leave
+    /// standing on screen.
+    ///
+    /// `old_range` is deliberately absent, and so is [`Self::cursor`]. An
+    /// extmark shifts with the user's own edit natively, so a hunk whose
+    /// rows moved is already drawn where it belongs; stamping those rows
+    /// would re-issue the whole payload for every keystroke that adds or
+    /// removes a line above a hunk, which is precisely the per-keystroke
+    /// traffic this gate exists to prevent. The cursor moves only for a
+    /// verb, and every verb repaints on its own path rather than through
+    /// this gate.
     #[must_use]
-    pub fn presentation_stamp(&self) -> (usize, ReviewSync) {
-        (
-            self.hunks
-                .iter()
-                .filter(|hunk| hunk.status == HunkStatus::Stale)
-                .count(),
-            self.sync,
-        )
+    pub fn presentation_stamp(&self) -> (usize, usize, ReviewSync) {
+        let mut stale = 0;
+        let mut unanchored = 0;
+        for hunk in self.hunks.iter().filter(|hunk| hunk.status.is_open()) {
+            if hunk.status == HunkStatus::Stale {
+                stale += 1;
+            }
+            if !hunk.anchor_intact {
+                unanchored += 1;
+            }
+        }
+        (stale, unanchored, self.sync)
     }
 
     /// What the transcript records when this review ends: what was decided
@@ -650,6 +733,13 @@ const KEY_HINT: &str = "<leader>ha accept  <leader>hA accept all  <leader>hx rej
 /// the accept that would be refused.
 const STALE_KEY_HINT: &str =
     "stale -- <leader>hR re-diff  <leader>hx reject  ]c next  [c prev  <leader>hq leave";
+
+/// [`STALE_KEY_HINT`] for a stale hunk whose anchor the user's own later
+/// edits have taken with them: `re_diff` refuses that hunk for good, so the
+/// header stops naming the key rather than offering one whose only answer
+/// is a refusal notice.
+const UNANCHORED_KEY_HINT: &str =
+    "stale, anchor gone -- <leader>hx reject  ]c next  [c prev  <leader>hq leave";
 
 /// The one key a review whose buffer can no longer be trusted still has,
 /// appended to the sync notice that says why nothing else is on offer.
@@ -751,7 +841,7 @@ mod tests {
     fn accepting_a_stale_hunk_is_refused() {
         let mut state = review();
         state.hunks[0].status = HunkStatus::Stale;
-        assert_eq!(state.accept(0).err(), Some(AcceptRefusal::NotFresh));
+        assert_eq!(state.accept(0).err(), Some(Refusal::NotFresh));
         assert_eq!(state.hunks[0].status, HunkStatus::Stale);
         assert!(!state.written);
     }
@@ -760,7 +850,7 @@ mod tests {
     fn accepting_on_a_desynced_review_is_refused_before_any_hunk_is_looked_at() {
         let mut state = review();
         state.sync = ReviewSync::Desynced;
-        assert_eq!(state.accept(0).err(), Some(AcceptRefusal::NotLive));
+        assert_eq!(state.accept(0).err(), Some(Refusal::NotLive));
         assert_eq!(state.hunks[0].status, HunkStatus::Fresh);
     }
 
@@ -773,7 +863,7 @@ mod tests {
     #[test]
     fn accept_all_issues_one_batched_call_bottom_of_the_buffer_first() {
         let mut state = review();
-        let effects = state.accept_all();
+        let effects = state.accept_all().expect("two fresh hunks accept");
         assert_eq!(effects.len(), 1, "one write, not one per hunk");
         let RpcCall::BufSetText {
             edits,
@@ -864,7 +954,9 @@ mod tests {
     fn accept_all_skips_a_stale_hunk_rather_than_forcing_it() {
         let mut state = review();
         state.hunks[1].status = HunkStatus::Stale;
-        let effects = state.accept_all();
+        let effects = state
+            .accept_all()
+            .expect("the fresh hunk is still accepted");
         let RpcCall::BufSetText { edits, .. } = rpc(&effects[0]) else {
             panic!("accept_all emits only BufSetText")
         };
@@ -903,8 +995,12 @@ mod tests {
         state.apply_change(&change);
         assert_eq!(state.sync, ReviewSync::Desynced);
         assert!(state.hunks.iter().all(|h| h.status == HunkStatus::Stale));
-        assert!(!state.re_diff(0), "a desynced review may not re-diff");
-        assert_eq!(state.accept(0).err(), Some(AcceptRefusal::NotLive));
+        assert_eq!(
+            state.re_diff(0).err(),
+            Some(Refusal::NotLive),
+            "a desynced review may not re-diff"
+        );
+        assert_eq!(state.accept(0).err(), Some(Refusal::NotLive));
     }
 
     #[test]
@@ -913,7 +1009,7 @@ mod tests {
         state.note_detached(BufferHandle(9), 3);
         assert_eq!(state.sync, ReviewSync::Detached);
         assert!(state.hunks.iter().all(|h| h.status == HunkStatus::Stale));
-        assert_eq!(state.accept(0).err(), Some(AcceptRefusal::NotLive));
+        assert_eq!(state.accept(0).err(), Some(Refusal::NotLive));
         let effects = state.close_effects();
         assert!(
             !effects
@@ -999,15 +1095,19 @@ mod tests {
     #[test]
     fn rejecting_a_hunk_is_terminal() {
         let mut state = review();
-        assert!(state.reject(0));
+        assert!(state.reject(0).is_ok());
         assert_eq!(state.hunks[0].status, HunkStatus::Rejected);
-        assert!(!state.reject(0));
+        assert_eq!(
+            state.reject(0).err(),
+            Some(Refusal::NotOpen),
+            "a decided hunk has nothing left to decline"
+        );
     }
 
     #[test]
     fn a_review_with_every_hunk_decided_is_no_longer_open() {
         let mut state = review();
-        state.accept_all();
+        state.accept_all().expect("every hunk is fresh");
         assert!(!state.is_open());
     }
 
@@ -1127,7 +1227,7 @@ mod tests {
     #[test]
     fn a_decided_hunk_leaves_no_mark_behind() {
         let mut state = review();
-        assert!(state.reject(0));
+        assert!(state.reject(0).is_ok());
         let marks = state.marks();
         assert_eq!(marks.len(), 1);
         assert_eq!((marks[0].row, marks[0].end_row), (5, 6));
@@ -1164,6 +1264,74 @@ mod tests {
         assert_ne!(state.presentation_stamp(), before);
     }
 
+    /// The gate's second term. A hunk that is stale already goes on being
+    /// stale when the next edit takes its anchor, so a stamp counting only
+    /// statuses would swallow the repaint -- and leave a header offering
+    /// the re-diff key that `re_diff` now refuses.
+    #[test]
+    fn the_stamp_moves_when_a_second_edit_takes_an_already_stale_hunks_anchor() {
+        let mut state = review();
+        state.hunks[0].status = HunkStatus::Stale;
+        let before = state.presentation_stamp();
+        state.hunks[0].anchor_intact = false;
+        assert_ne!(
+            state.presentation_stamp(),
+            before,
+            "the hunk still offers one key fewer than it did: {:?}",
+            state.hunks[0]
+        );
+    }
+
+    /// The header and the gate move together: a stale hunk whose anchor is
+    /// gone names the keys that still work and none that do not.
+    #[test]
+    fn a_stale_hunk_whose_anchor_is_gone_stops_offering_the_re_diff_key() {
+        let mut state = review();
+        state.hunks[0].status = HunkStatus::Stale;
+        state.hunks[0].anchor_intact = false;
+        let header = state.marks()[0]
+            .header
+            .clone()
+            .expect("the current hunk's header");
+        assert!(!header.contains("<leader>hR"), "{header}");
+        assert!(header.contains("<leader>hx reject"), "{header}");
+        assert!(header.contains("<leader>hq leave"), "{header}");
+    }
+
+    /// Every refusal names itself, so the dispatch that ran the verb can
+    /// say which one happened instead of repainting an identical screen.
+    #[test]
+    fn a_re_diff_says_which_of_its_refusals_happened() {
+        let mut state = review();
+        assert_eq!(
+            state.re_diff(0).err(),
+            Some(Refusal::NotStale),
+            "a fresh hunk has nothing to re-anchor"
+        );
+        state.hunks[0].status = HunkStatus::Stale;
+        assert!(state.re_diff(0).is_ok());
+        state.hunks[0].status = HunkStatus::Stale;
+        state.hunks[0].anchor_intact = false;
+        assert_eq!(state.re_diff(0).err(), Some(Refusal::AnchorLost));
+    }
+
+    /// An accept-all with nothing to write refuses rather than answering
+    /// an empty batch a caller could read as a write that happened.
+    #[test]
+    fn accept_all_refuses_a_review_with_no_fresh_hunk_left() {
+        let mut state = review();
+        for hunk in &mut state.hunks {
+            hunk.status = HunkStatus::Stale;
+        }
+        assert_eq!(state.accept_all().err(), Some(Refusal::NothingFresh));
+        state.sync = ReviewSync::Detached;
+        assert_eq!(
+            state.accept_all().err(),
+            Some(Refusal::NotLive),
+            "a review that may not write says that first"
+        );
+    }
+
     #[test]
     fn show_effect_carries_the_marks_the_cursor_row_and_the_focus() {
         let mut state = review();
@@ -1198,10 +1366,14 @@ mod tests {
     fn reject_all_declines_every_open_hunk_including_the_stale_ones() {
         let mut state = review();
         state.hunks[0].status = HunkStatus::Stale;
-        assert!(state.reject_all());
+        assert!(state.reject_all().is_ok());
         assert!(state.hunks.iter().all(|h| h.status == HunkStatus::Rejected));
         assert!(!state.is_open());
-        assert!(!state.reject_all(), "nothing left to decline");
+        assert_eq!(
+            state.reject_all().err(),
+            Some(Refusal::NotOpen),
+            "nothing left to decline"
+        );
     }
 
     #[test]
@@ -1212,7 +1384,7 @@ mod tests {
             "discarded the proposal for /tmp/a.rs -- 2 hunks left undecided"
         );
         let _ = state.accept(0).unwrap();
-        assert!(state.reject(1));
+        assert!(state.reject(1).is_ok());
         assert_eq!(
             state.outcome(),
             "accepted 1 and rejected 1 hunks in /tmp/a.rs"

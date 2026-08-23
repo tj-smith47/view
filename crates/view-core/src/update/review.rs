@@ -10,7 +10,7 @@
 use crate::model::Model;
 use crate::msg::{BufferHandle, Effect};
 use crate::native::ai_event::AiCommand;
-use crate::native::ai_panel::{AcceptRefusal, ReviewSync};
+use crate::native::ai_panel::{Refusal, ReviewSync};
 use crate::native::diff::BufTextChangedEvent;
 
 /// Folds one reported buffer change into the open review's hunks, and
@@ -174,11 +174,13 @@ pub(super) fn on_buf_write_refused(
 
 /// One `Msg::FeatureInvoke { feature: "review", verb }`.
 ///
-/// The accept refusal is answered here, through the same dispatch every
-/// accept goes through, rather than by the verb simply not being offered:
-/// `DiffReviewState::accept` is what refuses, and a future affordance that
-/// wanted an "accept anyway" would have to change that refusal rather than
-/// route around this arm.
+/// A refusal is answered here, through the same dispatch every verb goes
+/// through, rather than by the verb simply not being offered: the state is
+/// what refuses, and a future affordance that wanted an "accept anyway"
+/// would have to change that refusal rather than route around this arm.
+/// Every verb that can refuse says so out loud -- a verb the user reached
+/// for through a key the header was offering, answered with an identical
+/// screen and nothing else, reads as view having dropped the keystroke.
 ///
 /// A verb naming no review, and an unknown verb, are both inert. Neither
 /// can reach a user by accident -- the mappings that produce these are
@@ -191,41 +193,25 @@ pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
         return Vec::new();
     };
     let index = review.cursor;
-    let mut refusal = None;
     // True for the verbs that move the user rather than change a status:
     // the cursor goes where the review says, so the show that follows has
     // to take the cursor with it.
     let mut navigated = false;
-    let mut effects = match verb {
-        ACCEPT => match review.accept(index) {
-            Ok(effects) => effects,
-            Err(why) => {
-                refusal = Some(why);
-                Vec::new()
-            }
-        },
+    let decided = match verb {
+        ACCEPT => review.accept(index),
         ACCEPT_ALL => review.accept_all(),
-        REJECT => {
-            review.reject(index);
-            Vec::new()
-        }
-        REJECT_ALL => {
-            review.reject_all();
-            Vec::new()
-        }
-        REDIFF => {
-            review.re_diff(index);
-            Vec::new()
-        }
+        REJECT => review.reject(index).map(|()| Vec::new()),
+        REJECT_ALL => review.reject_all().map(|()| Vec::new()),
+        REDIFF => review.re_diff(index).map(|()| Vec::new()),
         NEXT => {
             review.next_hunk();
             navigated = true;
-            Vec::new()
+            Ok(Vec::new())
         }
         PREV => {
             review.prev_hunk();
             navigated = true;
-            Vec::new()
+            Ok(Vec::new())
         }
         LEAVE => {
             let closing = review.close_effects();
@@ -248,6 +234,14 @@ pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
             return effects;
         }
         _ => return Vec::new(),
+    };
+    // Every verb answers, one way or the other: a refusal is carried out
+    // of the match rather than dropped, because the key that produced it
+    // was on screen a moment ago and an identical repaint is not an answer
+    // to it.
+    let (mut effects, refusal) = match decided {
+        Ok(effects) => (effects, None),
+        Err(why) => (Vec::new(), Some(why)),
     };
     model.dirty = true;
     // The cursor follows the work: once the hunk it names is decided,
@@ -346,16 +340,28 @@ fn promote_queued(model: &mut Model) -> Vec<Effect> {
     effects
 }
 
-/// What the user is told when an accept is refused. Names the state that
+/// What the user is told when a verb is refused. Names the state that
 /// refused it and the way forward, never just "cannot".
-fn refusal_notice(why: AcceptRefusal) -> String {
+///
+/// One formatter for every verb's refusal, on the same reasoning
+/// [`crate::native::ai_panel::Refusal`] is one enum: two refusals worded as
+/// if they were the same fact is how a user comes to press a key twice.
+fn refusal_notice(why: Refusal) -> String {
     match why {
-        AcceptRefusal::NotLive => {
-            "This review's buffer can no longer be written -- re-open the review".to_string()
-        }
-        AcceptRefusal::NotFresh => {
+        Refusal::NotLive => "This review's buffer can no longer be written -- re-open the review",
+        Refusal::NotFresh => {
             "That hunk is not fresh -- re-diff it (<leader>hR) or reject it (<leader>hx) first"
-                .to_string()
+        }
+        Refusal::NothingFresh => {
+            "No hunk here is fresh -- re-diff (<leader>hR) or reject (<leader>hx) what the \
+             buffer moved under"
+        }
+        Refusal::NotOpen => "That hunk is decided already -- ]c moves to the next one still open",
+        Refusal::NotStale => "That hunk is not stale, so there is nothing to re-diff",
+        Refusal::AnchorLost => {
+            "Your own edits took this hunk's anchor with them -- reject it (<leader>hx) or \
+             leave the review (<leader>hq)"
         }
     }
+    .to_string()
 }

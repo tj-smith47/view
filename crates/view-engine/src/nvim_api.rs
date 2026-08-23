@@ -16,7 +16,9 @@ use view_core::native::ai_context::{
     SelectionRead,
 };
 use view_core::native::ai_event::FsError;
-use view_core::native::mappings::{default_maps, is_spellable, MappingSpec, COMMAND};
+use view_core::native::mappings::{
+    command_only_forms, default_maps, is_spellable, MappingSpec, COMMAND,
+};
 
 /// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
 /// [`EngineHandle::read_cursor_context`], [`EngineHandle::read_diagnostic_entries`],
@@ -2404,10 +2406,16 @@ impl EngineHandle {
             .collect();
         let entries = default_maps()
             .iter()
-            .map(|spec| {
+            .map(|spec| (spec.feature, spec.verb))
+            .chain(
+                command_only_forms()
+                    .iter()
+                    .map(|form| (form.feature, form.verb)),
+            )
+            .map(|(feature, verb)| {
                 Value::Map(vec![
-                    (Value::from("feature"), Value::from(spec.feature)),
-                    (Value::from("verb"), Value::from(spec.verb)),
+                    (Value::from("feature"), Value::from(feature)),
+                    (Value::from("verb"), Value::from(verb)),
                 ])
             })
             .collect();
@@ -3450,8 +3458,16 @@ mod tests {
         assert_eq!(specs.len(), default_maps().len());
         assert_eq!(
             entries.len(),
-            default_maps().len(),
-            "the command completes every entry point this build has, whatever this session mapped"
+            default_maps().len() + command_only_forms().len(),
+            "the command completes every entry point this build has, whatever this session \
+             mapped -- including the forms no key reaches at all"
+        );
+        assert!(
+            entries.contains(&Value::Map(vec![
+                (Value::from("feature"), Value::from("review")),
+                (Value::from("verb"), Value::from("leave")),
+            ])),
+            "the review's own way out must be one <Tab> away: {entries:?}"
         );
         let set = REGISTER_MAPPINGS_CHUNK
             .find("vim.keymap.set")
