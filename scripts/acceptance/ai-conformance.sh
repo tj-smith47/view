@@ -669,7 +669,9 @@ leg_permission_overlap() {
 
     # The session survives the degrade: answering the first still ends the
     # turn, which is what "tolerates the reply shape" has to mean.
-    send_text 'y'
+    # `1` is the first option the stub offers (allow-once), the digit the
+    # prompt paints against that row.
+    send_text '1'
     # Read from the log, not the screen: chunks sharing a message id fold
     # into one transcript entry, so this answer lands inside the row the
     # overlap report already opened rather than starting one of its own.
@@ -677,6 +679,59 @@ leg_permission_overlap() {
         "the first request's own answer" >/dev/null
     wait_for_log 'ai TurnEnded' "$WAIT_SECS" "the turn ending after the overlap" >/dev/null
     pass 'an overlapping permission request was answered without disturbing the first'
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
+# The prompt the user actually has to answer: its keys on screen, the key
+# they press, and what a standing grant does with the next request. The
+# live defect this covers shipped because no leg ever looked at a
+# permission prompt -- every leg above answers one and asserts what came
+# back, none of them read what the rows offered.
+leg_permission_keys_and_grant() {
+    CURRENT_LEG=8-permission-keys-and-grant
+    start_session grant "$STUB_ARGV" "$(mktemp -d)"
+    open_panel "$WAIT_SECS"
+
+    submit 'ask-always'
+    wait_for "$PERMISSION_PROMPT call_101" "$WAIT_SECS" "the permission request" >/dev/null
+    # Every option, with the digit that answers it and the wire kind it
+    # answers with. A prompt that painted names alone -- which is what the
+    # dogfood session met -- fails here.
+    local row
+    for row in "$PERMISSION_ROW_DENY" "$PERMISSION_ROW_ONCE" "$PERMISSION_ROW_ALWAYS"; do
+        wait_for "$row" "$WAIT_SECS" "the option row '$row'" >/dev/null
+    done
+    wait_for "$PERMISSION_KEY_HINT" "$WAIT_SECS" "the prompt's own key hint" >/dev/null
+    pass 'the prompt paints every option with the key that answers it'
+
+    # The letter that used to mean always-allow, and means accept-hunk in a
+    # review: it must answer nothing at all now.
+    send_text 'a'
+    sleep "$POLL"
+    wait_for "$PERMISSION_PROMPT call_101" "$WAIT_SECS" \
+        "the prompt after a review key" >/dev/null
+    pass 'a review key answers no permission prompt'
+
+    send_text '3'
+    # The outbound breadcrumb, which is what the frozen-session forensics
+    # had no way to read: which option id was actually sent back.
+    wait_for_log 'ai AnswerPermission .* option_id: "allow-always"' "$WAIT_SECS" \
+        "the answer view sent back" >/dev/null
+    wait_for "${AGENT_PREFIX}first allow-always" "$WAIT_SECS" \
+        "the agent's report of the first answer" >/dev/null
+
+    # The second request, of the same tool kind, is answered by the grant
+    # rather than by the user -- visibly, on the transcript, and with the
+    # same option id.
+    wait_for "$AUTO_ALLOW_LINE" "$WAIT_SECS" "the standing grant's own row" >/dev/null
+    # Read from the log: this chunk shares a message id with the one above,
+    # so it folds into that same transcript row and the row is wider than
+    # the panel.
+    wait_for_log 'ai MessageChunk .* text: "second allow-always"' "$WAIT_SECS" \
+        "the agent's report of the auto-answer" >/dev/null
+    refute "$PERMISSION_PROMPT call_102" 'a granted kind asked the user again'
+    wait_for_log 'ai TurnEnded' "$WAIT_SECS" "the turn ending after the grant" >/dev/null
+    pass 'an always-allow answered the next request of that kind without asking'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
@@ -830,6 +885,27 @@ TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$REPO_ROOT/crates/view-core/src/update/ai
     printf 'FAIL: the AI trust prompt is not built from a literal any more\n' >&2
     exit 1
 }
+# The prompt's own rows, built from the template that paints them and the
+# option names the stub offers -- so a reworded row or a dropped digit
+# fails here rather than leaving an assertion matching nothing.
+require_template "$PERMISSION_RS" '"  {key} {} ({})"' || exit 1
+PERMISSION_ROW_DENY='1 Deny (reject_once)'
+PERMISSION_ROW_ONCE='2 Allow Once (allow_once)'
+PERMISSION_ROW_ALWAYS='3 Always Allow (allow_always)'
+for stub_option in \
+    '{ "optionId": "reject-once", "name": "Deny", "kind": "reject_once" }' \
+    '{ "optionId": "allow-once", "name": "Allow Once", "kind": "allow_once" }' \
+    '{ "optionId": "allow-always", "name": "Always Allow", "kind": "allow_always" }'; do
+    require_template "$STUB_RS" "$stub_option" || exit 1
+done
+PERMISSION_KEY_HINT=$(const_str "$PERMISSION_RS" KEY_HINT) || exit 1
+# What the panel says when a standing grant answered for the user. The
+# template lives where the answer is given; `edit` is the kind the stub's
+# own request names.
+require_template "$REPO_ROOT/crates/view-core/src/update/ai.rs" \
+    '"auto-allowed {granted} (standing grant)"' || exit 1
+AUTO_ALLOW_LINE='auto-allowed edit (standing grant)'
+
 # How the first-run provisioning wait announces itself.
 PROVISION_NOTICE=$(const_str "$REPO_ROOT/crates/view/src/ai_worker.rs" PROVISION_NOTICE_PREFIX)
 
@@ -927,7 +1003,8 @@ ROOTS+=("$ADAPTER_CACHE")
 # what makes reverting one task and re-running the one leg that covers it a
 # practical way to check that the leg is really the thing being asserted.
 LEGS=(leg_session_lifecycle leg_streaming_and_tool_status leg_diff_accept_and_reject
-    leg_cancel_mid_turn leg_agent_crash leg_permission_overlap leg_filesystem_round_trip)
+    leg_cancel_mid_turn leg_agent_crash leg_permission_overlap leg_filesystem_round_trip
+    leg_permission_keys_and_grant)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

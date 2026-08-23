@@ -95,6 +95,18 @@ pub enum AiEvent {
         /// is `None` for an agent that omits it; a consumer falls back to
         /// `tool_call_id` rather than showing nothing.
         title: Option<String>,
+        /// The agent's own `toolCall.kind` string, carried verbatim and
+        /// compared verbatim -- this side reads no meaning into it beyond
+        /// identity, since `ToolKind`'s own value list is not pinned in
+        /// `docs/acp-v1-wire-capture.md` and a view-invented enum over it
+        /// would be a vocabulary no agent agreed to.
+        ///
+        /// It is the scope a standing permission grant is keyed on
+        /// (`AiPanelState::grant_permission`), which is why an agent that
+        /// omits it can be answered but never granted: there is nothing to
+        /// scope a later auto-answer to, and widening that to "every tool"
+        /// is not what a user answering one prompt agreed to.
+        tool_kind: Option<String>,
         options: Vec<PermissionOption>,
     },
     /// A file modification the agent proposes, carried as content rather
@@ -417,6 +429,7 @@ mod tests {
                 request_id: 5,
                 tool_call_id: "call_001".to_string(),
                 title: Some("Read file".to_string()),
+                tool_kind: Some("read".to_string()),
                 options: vec![PermissionOption {
                     option_id: "allow-once".to_string(),
                     name: "Allow once".to_string(),

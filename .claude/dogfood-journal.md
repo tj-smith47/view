@@ -249,3 +249,23 @@ legs, the visual sweep 5/5 against the rebuilt release binary — the
 sweep now including the paste, re-enter, and narrow-title legs born
 from this session's findings. Still owed: the recorded long-session
 dogfood itself, now unblocked.
+
+## 2026-08-23 — pinned-adapter defect: `allow_always` does not stick
+
+Found chasing the live session's worst moment: the user answered "Always
+Allow" and was asked again on all five Edit calls. view is exonerated by a
+probe that contains no view code -- a ~130-line Node ACP client
+(`.superpowers/sdd/2026-08-21-dogfood-fixes/task-21-probe.mjs`) speaking to
+`claude-code 0.69.0` and answering every request with the adapter's own
+`allow_always` option id, verbatim: 4 edits, 4 prompts. Driving
+`session/set_mode acceptEdits` first reaches the same place, so it is
+client-driven permission state in general that does not stick in this
+build, not the `updatedPermissions` reply alone. Wire logs beside the
+probe.
+
+What shipped in response is view keeping the promise itself: an always-allow
+answer records a session-scoped grant against the request's own tool kind,
+and a later request naming that kind is answered without asking -- visibly,
+as a transcript row. An adapter that honours the wire's own standing
+permission never sends that later request, and the store never fires. Re-run
+the probe on the next adapter bump; it takes ~40s.

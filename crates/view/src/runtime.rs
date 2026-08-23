@@ -861,6 +861,7 @@ impl<E: EngineOps> Executor<E> {
             // than merely unlikely. See [`crate::ai_context_worker::AiContextJob`]'s
             // own doc.
             Effect::Ai(command) => {
+                crate::vlog::log_with("ai", || crate::vlog::ai_command_payload(&command));
                 self.queue_ai_job(crate::ai_context_worker::AiContextJob::Direct(command));
                 Flow::Continue
             }
@@ -872,6 +873,7 @@ impl<E: EngineOps> Executor<E> {
             // do this assembly itself, and `ai_context_worker`'s module
             // doc for why the reads cannot run on this thread.
             Effect::AiPromptSubmit { text } => {
+                crate::vlog::log_with("ai", || crate::vlog::ai_prompt_submit_payload(&text));
                 self.queue_ai_job(crate::ai_context_worker::AiContextJob::Submit { text });
                 Flow::Continue
             }

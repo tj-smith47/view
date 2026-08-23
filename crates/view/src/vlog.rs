@@ -230,13 +230,18 @@ fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
             request_id,
             tool_call_id,
             title,
+            tool_kind,
             options,
         } => format!(
             "PermissionRequested {{ request_id: {request_id}, tool_call_id: {tool_call_id:?}, \
-             title: {}, options: [{}] }}",
+             title: {}, tool_kind: {}, options: [{}] }}",
             title.as_ref().map_or_else(
                 || "None".to_string(),
                 |title| format!("Some({})", capped(title))
+            ),
+            tool_kind.as_ref().map_or_else(
+                || "None".to_string(),
+                |kind| format!("Some({})", capped(kind))
             ),
             // The count is bounded too: option_id and name arrive from the
             // agent, and so does how many options there are.
@@ -281,6 +286,61 @@ fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
         // vocabulary spells.
         bounded => format!("{bounded:?}"),
     }
+}
+
+/// One outbound `AiCommand` rendered for the log, the answering half of
+/// [`ai_payload`] and capped the same way.
+///
+/// Every `ai …` line used to be inbound, so a log could show five identical
+/// permission requests and say nothing at all about what was answered to
+/// the four before the fifth -- which is exactly the question a session
+/// that kept asking leaves behind
+/// (`.superpowers/sdd/2026-08-21-dogfood-fixes/task-21-rootcause.md`). The
+/// `option_id` is what closes it: read against the `PermissionRequested`
+/// line already in the log, which prints every option's id and kind, it
+/// says which option the answer named without a new field on the wire type.
+pub fn ai_command_payload(command: &view_core::native::ai_event::AiCommand) -> String {
+    use view_core::native::ai_event::{AiCommand, PermissionOutcome};
+    match command {
+        AiCommand::AnswerPermission {
+            request_id,
+            outcome,
+        } => {
+            let outcome = match outcome {
+                PermissionOutcome::Cancelled => "Cancelled".to_string(),
+                PermissionOutcome::Selected { option_id } => {
+                    format!("Selected {{ option_id: {} }}", capped(option_id))
+                }
+            };
+            format!("AnswerPermission {{ request_id: {request_id}, outcome: {outcome} }}")
+        }
+        // The reply's own content is a whole file the agent asked for; its
+        // size is the part a log can carry (see `PAYLOAD_CAP`).
+        AiCommand::FsReadReply { request_id, result } => format!(
+            "FsReadReply {{ request_id: {request_id}, result: {} }}",
+            result.as_ref().map_or_else(
+                |error| format!("Err({error:?})"),
+                |content| format!("Ok({} bytes)", content.len())
+            )
+        ),
+        AiCommand::Prompt { text, context } => format!(
+            "Prompt {{ text: {}, context: {} block(s) }}",
+            capped(text),
+            context.len()
+        ),
+        // Cancel, FsWriteReply and DiscardProposal carry an id and an
+        // outcome word at most.
+        bounded => format!("{bounded:?}"),
+    }
+}
+
+/// The other outbound AI edge: a prompt handed to the context worker, which
+/// assembles the `AiCommand::Prompt` off this thread. Capped like every
+/// other free-text payload here -- what a triage read needs from it is that
+/// a submission happened at all, and roughly what it said.
+#[must_use]
+pub fn ai_prompt_submit_payload(text: &str) -> String {
+    format!("AiPromptSubmit {{ text: {} }}", capped(text))
 }
 
 fn log_ui_event(ev: &view_core::events::UiEvent) {
@@ -407,6 +467,7 @@ mod tests {
             request_id: 3,
             tool_call_id: "call_1".to_string(),
             title: Some(huge.clone()),
+            tool_kind: Some(huge.clone()),
             options: Vec::new(),
         });
         assert!(
@@ -420,6 +481,7 @@ mod tests {
             request_id: 4,
             tool_call_id: "call_2".to_string(),
             title: None,
+            tool_kind: None,
             options: vec![
                 view_core::native::ai_event::PermissionOption {
                     option_id: huge.clone(),
@@ -455,6 +517,68 @@ mod tests {
             stop_reason: view_core::native::ai_event::StopReason::Cancelled,
         });
         assert_eq!(ended, "TurnEnded { stop_reason: Cancelled }");
+    }
+
+    /// The breadcrumb the frozen-session forensics did not have: five
+    /// identical requests in the log and nothing saying what was answered
+    /// to any of them. The `option_id` is what a reader matches against the
+    /// `PermissionRequested` line above it.
+    #[test]
+    fn an_answered_permission_logs_the_request_it_answers_and_the_option_it_named() {
+        use view_core::native::ai_event::{AiCommand, PermissionOutcome};
+
+        let selected = ai_command_payload(&AiCommand::AnswerPermission {
+            request_id: 7,
+            outcome: PermissionOutcome::Selected {
+                option_id: "allow_always".to_string(),
+            },
+        });
+        assert_eq!(
+            selected,
+            "AnswerPermission { request_id: 7, outcome: Selected { option_id: \"allow_always\" } }"
+        );
+        assert_eq!(
+            ai_command_payload(&AiCommand::AnswerPermission {
+                request_id: 8,
+                outcome: PermissionOutcome::Cancelled,
+            }),
+            "AnswerPermission { request_id: 8, outcome: Cancelled }"
+        );
+    }
+
+    /// An outbound command carrying free text or a whole file is bounded
+    /// the same way every inbound payload is -- a read reply is a file the
+    /// agent asked for, and the log is what a user is asked to attach to a
+    /// bug report.
+    #[test]
+    fn an_unbounded_outbound_payload_never_reaches_the_log_at_full_size() {
+        use view_core::native::ai_event::AiCommand;
+
+        let huge = "x".repeat(200_000);
+        let read = ai_command_payload(&AiCommand::FsReadReply {
+            request_id: 1,
+            result: Ok(huge.clone()),
+        });
+        assert_eq!(
+            read,
+            "FsReadReply { request_id: 1, result: Ok(200000 bytes) }"
+        );
+
+        let prompt = ai_command_payload(&AiCommand::Prompt {
+            text: huge.clone(),
+            context: Vec::new(),
+        });
+        assert!(
+            prompt.len() < PAYLOAD_CAP * 4 && prompt.contains("+199880B"),
+            "a submitted prompt must be capped like any other free text: {prompt}"
+        );
+        let submitted = ai_prompt_submit_payload(&huge);
+        assert!(
+            submitted.len() < PAYLOAD_CAP * 4 && submitted.contains("+199880B"),
+            "and so must the prompt handed to the context worker: {submitted}"
+        );
+
+        assert_eq!(ai_command_payload(&AiCommand::Cancel), "Cancel");
     }
 
     #[test]

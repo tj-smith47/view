@@ -12,6 +12,8 @@
 //! state into these types in place, rather than a live session replacing
 //! them with a shape of its own.
 
+use std::collections::BTreeSet;
+
 use super::geometry::interior_text_width;
 use super::views::{AiPanelView, Span};
 
@@ -101,13 +103,13 @@ pub struct AiPanelState {
     /// focus machinery for this overlay: `Model::takes_focus_now` reads it
     /// directly, so `model.focus()` names the AI panel overlay exactly
     /// when this is `true` and nothing else on the stack outranks it, the
-    /// same way any other focus-taking overlay works. `y`/`n`/`a`/`<Esc>`
-    /// reach the pending permission prompt (`route_key`'s
+    /// same way any other focus-taking overlay works. The option digits
+    /// and `<Esc>` reach the pending permission prompt (`route_key`'s
     /// `Focus::Native(OverlayKind::Ai)` arm) only through that real focus,
     /// never through a side channel ahead of it -- with the panel merely
-    /// open and this `false`, every key, including `y`/`n` as ordinary
-    /// engine commands, reaches nvim exactly as if the panel were not
-    /// there at all.
+    /// open and this `false`, every key, including those digits as
+    /// ordinary engine counts, reaches nvim exactly as if the panel were
+    /// not there at all.
     pub focused: bool,
     /// Whether a prompt this panel submitted is still awaiting
     /// `AiEvent::TurnEnded` (or a crash that ends the turn without one).
@@ -166,6 +168,26 @@ pub struct AiPanelState {
     /// [`Self::next_hidden_generation`] the only way to move it, so a
     /// future third holder cannot start its own sequence by accident.
     hidden_generation: u64,
+    /// The tool kinds an always-allow answer has granted standing
+    /// permission to, for this session only -- nothing here is persisted,
+    /// so a grant dies with the session that was asked for it.
+    ///
+    /// view keeps this because the pinned adapter does not: answering with
+    /// the agent's own `allow_always` option id is answered correctly and
+    /// then ignored, and the user is asked again on every later call
+    /// (`.superpowers/sdd/2026-08-21-dogfood-fixes/task-21-rootcause.md`
+    /// proves it with a probe containing no view code). A prompt that
+    /// promises "Always Allow" and asks again is a promise view can keep on
+    /// its own side, so it does: a later request naming a granted kind is
+    /// answered without asking. An adapter that honours the wire's own
+    /// standing permission never sends that later request at all, and this
+    /// simply never fires.
+    ///
+    /// Private, with [`Self::grant_permission`], [`Self::is_granted`] and
+    /// [`Self::clear_permission_grants`] the only ways to it: a grant is
+    /// how a question stops being asked, so what installs one and what
+    /// drops the whole set are worth being able to find.
+    permission_grants: BTreeSet<String>,
     /// Where the transcript window starts while the panel is held away from
     /// the newest row, or `None` while it follows the tail.
     ///
@@ -211,8 +233,32 @@ impl AiPanelState {
             pending_diff: None,
             pending_diff_next: None,
             hidden_generation: 0,
+            permission_grants: BTreeSet::new(),
             transcript_top: None,
         }
+    }
+
+    /// Records standing permission for `tool_kind`, so a later request
+    /// naming it is answered without asking again (see
+    /// [`Self::permission_grants`]).
+    pub fn grant_permission(&mut self, tool_kind: String) {
+        self.permission_grants.insert(tool_kind);
+    }
+
+    /// Whether this session already granted `tool_kind`. Compared verbatim
+    /// against the agent's own kind string: view reads no meaning into it,
+    /// so it cannot decide that two spellings are the same permission.
+    #[must_use]
+    pub fn is_granted(&self, tool_kind: &str) -> bool {
+        self.permission_grants.contains(tool_kind)
+    }
+
+    /// Drops every standing grant. A grant is scoped to the session it was
+    /// given in, and a new session is a new agent with new work in front of
+    /// it -- carrying grants across would answer for a session the user
+    /// never saw a question from.
+    pub fn clear_permission_grants(&mut self) {
+        self.permission_grants.clear();
     }
 
     /// Whether something the panel is showing owns its keys, so the
@@ -693,8 +739,8 @@ const FOCUSED_TITLE: &str = "AI Agent -- focused, Esc returns";
 /// Named after the verb it points at (`update::mod`'s `feature == "ai" &&
 /// (verb == "open" || verb == "focus")` arm) -- shown beneath a pending
 /// permission's own rows exactly when [`AiPanelState::focused`] is `false`,
-/// the one state where the prompt is visible but `y`/`n`/`a`/`<Esc>` all
-/// reach the engine instead of it.
+/// the one state where the prompt is visible but its own keys all reach
+/// the engine instead of it.
 const ENTER_HINT: &str = "Not focused -- run :View ai focus to answer";
 
 /// The banner's own way out, shown beside the error itself: the entered
@@ -1387,13 +1433,14 @@ mod tests {
     /// so the answer is already reachable and no hint row is appended (see
     /// the two tests below for the un-entered/entered hint split itself).
     #[test]
-    fn a_pending_permission_renders_the_question_and_its_options_with_their_kinds() {
+    fn a_pending_permission_renders_the_question_its_keyed_options_and_the_hint() {
         let mut state = AiPanelState::new();
         state.focused = true;
         state.pending_permission = Some(PermissionPrompt::new(
             1,
             "call_1",
             Some("Delete config.yaml".to_string()),
+            Some("edit".to_string()),
             vec![crate::native::ai_event::PermissionOption {
                 option_id: "allow-once".to_string(),
                 name: "Allow once".to_string(),
@@ -1404,8 +1451,15 @@ mod tests {
         assert_eq!(
             view.pending_permission,
             vec![
-                vec![Span::plain("Permission requested for Delete config.yaml")],
-                vec![Span::plain("  Allow once (allow_once)".to_string())],
+                vec![Span::new(
+                    "Permission requested for Delete config.yaml",
+                    StyleRole::AiPermissionAsk
+                )],
+                vec![Span::new(
+                    "  1 Allow once (allow_once)",
+                    StyleRole::AiPermissionAllow
+                )],
+                vec![Span::new(permission::KEY_HINT, StyleRole::AiPermissionAsk)],
             ]
         );
     }
@@ -1422,6 +1476,7 @@ mod tests {
             1,
             "call_1",
             Some("Delete config.yaml".to_string()),
+            Some("edit".to_string()),
             vec![crate::native::ai_event::PermissionOption {
                 option_id: "allow-once".to_string(),
                 name: "Allow once".to_string(),
@@ -1437,8 +1492,8 @@ mod tests {
         );
     }
 
-    /// The mirror case: once the user has entered the panel, `y`/`n`/`a`
-    /// already reach the prompt, so the hint would be stale advice and must
+    /// The mirror case: once the user has entered the panel, the option
+    /// digits already reach the prompt, so the hint would be stale advice and must
     /// not be drawn.
     #[test]
     fn a_pending_permission_on_a_focused_panel_carries_no_enter_hint() {
@@ -1448,6 +1503,7 @@ mod tests {
             1,
             "call_1",
             Some("Delete config.yaml".to_string()),
+            Some("edit".to_string()),
             vec![crate::native::ai_event::PermissionOption {
                 option_id: "allow-once".to_string(),
                 name: "Allow once".to_string(),

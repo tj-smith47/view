@@ -4,7 +4,7 @@ use crate::model::{Focus, Model, MouseCapture, OverlayKind};
 use crate::msg::{
     DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
 };
-use crate::native::ai_event::{AiCommand, PermissionOutcome};
+use crate::native::ai_event::{AiCommand, PermissionOptionKind, PermissionOutcome};
 use crate::native::ai_panel::TranscriptScroll;
 use crate::native::diff::BufTextChangedEvent;
 use crate::native::statusline::SegmentUpdate;
@@ -1294,14 +1294,14 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 _ => Vec::new(),
             },
             // A pending permission request blocks the issuing agent's own
-            // turn until answered; y/n/a/<Esc> reach it here because
-            // `model.focus()` only ever names this overlay once the user
-            // has deliberately entered it (`AiPanelState::focused`,
+            // turn until answered; its digits and <Esc> reach it here
+            // because `model.focus()` only ever names this overlay once
+            // the user has deliberately entered it (`AiPanelState::focused`,
             // consulted by `Model::takes_focus_now`) -- never merely by
             // being open, and never by side effect of whatever mode the
             // engine happens to be in. With the panel not entered,
             // `model.focus()` is `Focus::Engine` instead, so every key --
-            // including `y`/`n` as ordinary engine commands -- reaches
+            // including a digit as an ordinary engine count -- reaches
             // nvim through this same `match`'s `Focus::Engine` arm
             // untouched.
             Some(OverlayKind::Ai) => {
@@ -1327,6 +1327,17 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     let key = chars.next().filter(|_| chars.next().is_none());
                     if let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() {
                         model.ai_panel_mut().pending_permission = None;
+                        // What "always" means on this side of the wire: the
+                        // answer is recorded against the request's own tool
+                        // kind, and the next request naming that kind is
+                        // answered without asking (see
+                        // `AiPanelState::permission_grants` for why view
+                        // keeps this rather than the adapter).
+                        if option.kind == PermissionOptionKind::AllowAlways {
+                            if let Some(kind) = prompt.tool_kind.clone() {
+                                model.ai_panel_mut().grant_permission(kind);
+                            }
+                        }
                         model.dirty = true;
                         return vec![Effect::Ai(AiCommand::AnswerPermission {
                             request_id: prompt.request_id,
@@ -1343,7 +1354,17 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     // session/request_permission requests with Cancelled");
                     // swallowing `<C-c>` here would leave that contract with
                     // no key that reaches it.
-                    if !reaches_past_a_panel_owner(model, &notation) {
+                    //
+                    // A review open behind the prompt is the other thing a
+                    // key can still be meant for, and on an agent edit both
+                    // are up together. The two vocabularies no longer
+                    // overlap -- digits answer the prompt, letters answer
+                    // the review -- so a key this prompt does not answer
+                    // reaches the review rather than being swallowed by a
+                    // question that had no use for it.
+                    if model.ai_panel().pending_diff.is_none()
+                        && !reaches_past_a_panel_owner(model, &notation)
+                    {
                         return Vec::new();
                     }
                 }

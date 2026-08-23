@@ -747,6 +747,7 @@ fn a_permission_prompt_costs_the_transcripts_oldest_rows_not_its_newest() {
         1,
         "call_1",
         Some("Delete config.yaml".to_string()),
+        Some("edit".to_string()),
         vec![PermissionOption {
             option_id: "allow-once".to_string(),
             name: "Allow once".to_string(),

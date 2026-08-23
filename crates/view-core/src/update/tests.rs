@@ -3546,6 +3546,7 @@ fn permission_requested_msg(request_id: u64, options: Vec<PermissionOption>) -> 
         request_id,
         tool_call_id: "call_1".to_string(),
         title: None,
+        tool_kind: Some("edit".to_string()),
         options,
     })
 }
@@ -3591,13 +3592,16 @@ fn auto_opened_permission_model() -> Model {
     m
 }
 
+/// `everyday_options()`'s order is the agent's own, so `1` is allow-once,
+/// `2` is allow-always and `3` is the reject -- the digits the prompt paints
+/// against those rows.
 #[test]
-fn y_on_a_pending_permission_answers_allow_once_and_clears_the_slot() {
+fn the_first_digit_answers_the_first_offered_option_and_clears_the_slot() {
     let mut m = pending_permission_model();
     let effects = update(
         &mut m,
         Msg::Key(Key {
-            notation: "y".to_string(),
+            notation: "1".to_string(),
         }),
     );
     match effects.as_slice() {
@@ -3612,6 +3616,170 @@ fn y_on_a_pending_permission_answers_allow_once_and_clears_the_slot() {
     assert!(
         m.ai_panel().pending_permission.is_none(),
         "the slot must clear once the user has answered"
+    );
+    assert!(
+        !m.ai_panel().is_granted("edit"),
+        "allowing once must grant nothing standing"
+    );
+}
+
+/// The key that used to mean allow-always, on a prompt that offers it:
+/// it must answer nothing at all now, because the same key accepts a hunk
+/// in the review that pends beside it on every agent edit.
+#[test]
+fn the_letter_a_no_longer_answers_a_permission_prompt() {
+    let mut m = pending_permission_model();
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "a".to_string(),
+        }),
+    );
+    assert!(effects.is_empty(), "`a` must answer nothing: {effects:?}");
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "the prompt stays open"
+    );
+}
+
+/// The stacked case the live session met: a diff review and a permission
+/// request are both up (an agent edit raises both), and the two key
+/// vocabularies must not cross. `a` is the review's accept and reaches the
+/// review even though the permission arm runs first; the digit answers the
+/// permission and leaves the review alone.
+#[test]
+fn with_a_review_and_a_permission_both_pending_digits_answer_one_and_letters_the_other() {
+    let mut m = live_review_model();
+    let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+    assert!(
+        m.ai_panel().pending_permission.is_some() && m.ai_panel().pending_diff.is_some(),
+        "both must be pending for this to be the case under test"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "a".to_string(),
+        }),
+    );
+    assert!(
+        !rpc_calls(&effects).is_empty(),
+        "`a` must reach the review's accept, not the invisible prompt: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+        "`a` must never answer a permission request: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "the review's key left the question unanswered"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "2".to_string(),
+        }),
+    );
+    match effects.as_slice() {
+        [Effect::Ai(AiCommand::AnswerPermission {
+            request_id: 7,
+            outcome: PermissionOutcome::Selected { option_id },
+        })] => assert_eq!(option_id, "allow-always"),
+        other => panic!("expected the digit to answer the permission, got {other:?}"),
+    }
+    assert!(
+        m.ai_panel().pending_diff.is_some(),
+        "answering the prompt decides nothing about the review"
+    );
+}
+
+/// The standing grant, end to end from the keyboard: the user answers
+/// always-allow once, and the next request for the same tool kind is
+/// answered with the same option without the prompt ever coming back --
+/// which is what the prompt promises and the pinned adapter does not keep
+/// (`AiPanelState::permission_grants`).
+#[test]
+fn an_always_allow_answer_answers_the_next_request_of_that_kind_by_itself() {
+    let mut m = pending_permission_model();
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "2".to_string(),
+        }),
+    );
+    match effects.as_slice() {
+        [Effect::Ai(AiCommand::AnswerPermission {
+            outcome: PermissionOutcome::Selected { option_id },
+            ..
+        })] => assert_eq!(option_id, "allow-always"),
+        other => panic!("expected the always-allow answer, got {other:?}"),
+    }
+
+    let effects = update(&mut m, permission_requested_msg(8, everyday_options()));
+    match effects.as_slice() {
+        [Effect::Ai(AiCommand::AnswerPermission {
+            request_id: 8,
+            outcome: PermissionOutcome::Selected { option_id },
+        })] => assert_eq!(option_id, "allow-always"),
+        other => panic!("expected the second request to be auto-answered, got {other:?}"),
+    }
+    assert!(
+        m.ai_panel().pending_permission.is_none(),
+        "a granted kind must never put the question back on screen"
+    );
+    let rows: Vec<String> = m
+        .ai_panel()
+        .view(24, 60)
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|span| span.text.clone()).collect())
+        .collect();
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("auto-allowed edit (standing grant)")),
+        "an answer view gave on the user's behalf must be on the transcript: {rows:?}"
+    );
+}
+
+/// The grant is scoped to the kind the user answered for, not to the
+/// session as a whole: a different tool still asks.
+#[test]
+fn a_standing_grant_for_one_tool_kind_leaves_another_kind_asking() {
+    let mut m = pending_permission_model();
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "2".to_string(),
+        }),
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Ai(crate::native::ai_event::AiEvent::PermissionRequested {
+            request_id: 9,
+            tool_call_id: "call_2".to_string(),
+            title: None,
+            tool_kind: Some("execute".to_string()),
+            options: everyday_options(),
+        }),
+    );
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+        "a kind nobody granted must be asked about: {effects:?}"
+    );
+    assert_eq!(
+        m.ai_panel()
+            .pending_permission
+            .as_ref()
+            .map(|prompt| prompt.request_id),
+        Some(9)
     );
 }
 

@@ -669,6 +669,13 @@ impl Driver {
             .and_then(|call| call.get("title"))
             .and_then(Value::as_str)
             .map(ToString::to_string);
+        // Also optional on the wire, and carried verbatim: it is what a
+        // standing grant is scoped to on the panel side, so a normalisation
+        // here would silently widen or split that scope.
+        let tool_kind = tool_call
+            .and_then(|call| call.get("kind"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
         let options: Vec<PermissionOption> = params
             .get("options")
             .and_then(Value::as_array)
@@ -692,6 +699,7 @@ impl Driver {
             request_id,
             tool_call_id,
             title,
+            tool_kind,
             options,
         });
     }
@@ -2609,6 +2617,7 @@ mod tests {
             request_id,
             tool_call_id,
             title,
+            tool_kind,
             options,
         }) = next_emitted(&events_rx, "PermissionRequested was emitted")
         else {
@@ -2616,6 +2625,7 @@ mod tests {
         };
         assert_eq!(tool_call_id, "call_1");
         assert_eq!(title, None, "the wire params carried no title member");
+        assert_eq!(tool_kind, None, "nor a kind member");
         assert_eq!(options.len(), 2);
 
         driver.on_command(AiCommand::AnswerPermission {

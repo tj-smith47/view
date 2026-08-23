@@ -343,6 +343,7 @@ fn a_permission_request_crosses_out_and_its_answer_crosses_back() {
         request_id,
         tool_call_id,
         title: _,
+        tool_kind: _,
         options,
     } = next_event(&rx, "PermissionRequested")
     else {

@@ -66,6 +66,22 @@ The same first-run notice the picker example above gets applies here too: if
 `<leader>ai` was already yours, taking it is reported, and the line above is
 what the notice names to give it back.
 
+## Answering an agent's permission request
+
+While a permission request is up, the entered panel's keys are the digits
+the prompt paints against its own option rows, in the order the agent
+offered them:
+
+| key | answers |
+| --- | --- |
+| `1` … `9` | the option on that row, whatever the agent called it |
+| `<Esc>` | cancels the request |
+
+No letter answers a prompt: the diff review that pends alongside it owns
+letters of its own, and one key cannot mean both "allow always" and "accept
+this hunk". See [ai.md](ai.md) for what each option does and what an
+always-allow grants.
+
 ## Resizing the sidebars
 
 The file tree and the AI panel are sidebars, and the focused one resizes

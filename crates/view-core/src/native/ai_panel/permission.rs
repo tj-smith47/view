@@ -8,7 +8,7 @@
 //! ever reaches here.
 
 use crate::native::ai_event::{PermissionOption, PermissionOptionKind};
-use crate::native::views::Span;
+use crate::native::views::{Span, StyleRole};
 
 /// One outstanding permission request the agent is blocked on: which
 /// boundary id answering it must cite, a display question, and the options
@@ -20,6 +20,12 @@ pub struct PermissionPrompt {
     /// `AiCommand::AnswerPermission`.
     pub request_id: u64,
     pub prompt: String,
+    /// The request's own `toolCall.kind`, verbatim from the wire (see
+    /// [`crate::native::ai_event::AiEvent::PermissionRequested`]'s field
+    /// doc): the scope an always-allow answer records its standing grant
+    /// under, and `None` for an agent that named no kind -- a request that
+    /// can be answered but never granted.
+    pub tool_kind: Option<String>,
     /// The agent's own offered choices, in the order it sent them. Never a
     /// view-side default: an option the agent did not present is
     /// unrepresentable here, the same invariant
@@ -43,55 +49,115 @@ impl PermissionPrompt {
         request_id: u64,
         tool_call_id: &str,
         title: Option<String>,
+        tool_kind: Option<String>,
         options: Vec<PermissionOption>,
     ) -> Self {
         let name = title.unwrap_or_else(|| tool_call_id.to_string());
         Self {
             request_id,
             prompt: format!("Permission requested for {name}"),
+            tool_kind,
             options,
         }
     }
 
-    /// The offered option `key` selects, or `None` if the agent offered no
-    /// option of that kind. `y`/`a`/`n` are the panel's own accelerators for
-    /// the three everyday answers -- allow once, allow always, reject --
-    /// matching `docs/acp-v1-wire-capture.md`'s pinned `PermissionOptionKind`
-    /// spellings: `y` -> `allow_once`, `a` -> `allow_always`, `n` ->
-    /// `reject_once`, falling back to `reject_always` when the agent offered
-    /// no one-time reject. Case-insensitive, the same convention nvim's own
-    /// confirm-class prompts use (see `native::prompt::PromptState::accepts`).
+    /// The offered option `key` selects: the digit keys, one per offered
+    /// option in the order the agent sent them, `1` first.
+    ///
+    /// Digits rather than letters keyed to the option kinds, and
+    /// unconditionally rather than only while a review is also open. A diff
+    /// review owns `a` for "accept this hunk" (`super::review`), a
+    /// permission prompt used to own `a` for "allow always", and both fill
+    /// on the same agent edit with the permission consuming keys first --
+    /// so the one key a user reaches for by muscle memory answered the
+    /// invisible question with the most standing consequence of any answer
+    /// offered. Digits belong to neither of the panel's other key owners, so
+    /// the collision stops existing rather than being arbitrated by which
+    /// state happens to be open; and a vocabulary that changed with
+    /// invisible other state would be the same class of defect.
+    ///
+    /// Only the first nine options are reachable, which is what
+    /// [`Self::render_rows`] paints a digit against -- there is no key
+    /// beyond `9`, and a row labelled with a number nothing answers would
+    /// promise one.
     #[must_use]
     pub fn option_for_key(&self, key: char) -> Option<&PermissionOption> {
-        match key.to_ascii_lowercase() {
-            'y' => self.option_of_kind(PermissionOptionKind::AllowOnce),
-            'a' => self.option_of_kind(PermissionOptionKind::AllowAlways),
-            'n' => self
-                .option_of_kind(PermissionOptionKind::RejectOnce)
-                .or_else(|| self.option_of_kind(PermissionOptionKind::RejectAlways)),
-            _ => None,
-        }
+        let index = usize::try_from(key.to_digit(10)?).ok()?.checked_sub(1)?;
+        self.options.get(index)
     }
 
-    fn option_of_kind(&self, kind: PermissionOptionKind) -> Option<&PermissionOption> {
-        self.options.iter().find(|option| option.kind == kind)
+    /// The offered option a standing grant for this prompt's tool kind
+    /// answers with, preferring the always-allow the user originally chose
+    /// and falling back to allow-once, or `None` from an agent that offered
+    /// no allow at all.
+    ///
+    /// Answering with the always-allow again rather than downgrading to
+    /// allow-once restates the user's own choice to every request: an
+    /// adapter that does honour `allow_always` then installs the rule it
+    /// meant to, and the grant store simply never fires again.
+    pub(crate) fn standing_allow(options: &[PermissionOption]) -> Option<&PermissionOption> {
+        options
+            .iter()
+            .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+            .or_else(|| {
+                options
+                    .iter()
+                    .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+            })
     }
 
-    /// The prompt's own paint rows: the question, then one row per offered
-    /// option naming both its display name and its wire kind, so the panel
-    /// shows what pressing `y`/`a`/`n` will actually answer rather than a
-    /// name alone that leaves the kind to guesswork.
+    /// The prompt's own paint rows: the question, one row per offered option
+    /// carrying the digit that answers it, its display name and its wire
+    /// kind, and the hint row naming the way out.
+    ///
+    /// Every row carries a role of its own ([`StyleRole::AiPermissionAsk`]
+    /// and friends), so an unanswered question does not paint as more
+    /// transcript, and the answer with standing consequence does not paint
+    /// as the answer without one.
     #[must_use]
     pub fn render_rows(&self) -> Vec<Vec<Span>> {
-        let mut rows = vec![vec![Span::plain(self.prompt.clone())]];
-        rows.extend(self.options.iter().map(|option| {
-            vec![Span::plain(format!(
-                "  {} ({})",
-                option.name,
-                kind_label(option.kind)
-            ))]
+        let mut rows = vec![vec![Span::new(
+            self.prompt.clone(),
+            StyleRole::AiPermissionAsk,
+        )]];
+        rows.extend(self.options.iter().enumerate().map(|(index, option)| {
+            // A tenth option and beyond has no digit to be answered with,
+            // so it is not given one to press.
+            let key = match index + 1 {
+                key @ 1..=9 => key.to_string(),
+                _ => UNREACHABLE_OPTION_MARK.to_string(),
+            };
+            vec![Span::new(
+                format!("  {key} {} ({})", option.name, kind_label(option.kind)),
+                option_role(option.kind),
+            )]
         }));
+        rows.push(vec![Span::new(KEY_HINT, StyleRole::AiPermissionAsk)]);
         rows
+    }
+}
+
+/// What the hint row under a prompt's options says. The digits are on the
+/// rows themselves; this names the answer that is on no row, since `<Esc>`
+/// settles the request as cancelled and exists even when every option
+/// offered was an allow.
+pub(crate) const KEY_HINT: &str = "press a number, <Esc> cancels";
+
+/// What stands where a digit would for an option past the ninth, which no
+/// key reaches.
+const UNREACHABLE_OPTION_MARK: char = '-';
+
+/// The role one option row paints in: the answers a user can tell apart at
+/// a glance are allow-once, allow-always and refuse, so those are the three
+/// colors -- an always-allow reading as an ordinary allow is exactly how a
+/// standing grant gets handed out by accident.
+fn option_role(kind: PermissionOptionKind) -> StyleRole {
+    match kind {
+        PermissionOptionKind::AllowOnce => StyleRole::AiPermissionAllow,
+        PermissionOptionKind::AllowAlways => StyleRole::AiPermissionAlways,
+        PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways => {
+            StyleRole::AiPermissionReject
+        }
     }
 }
 
@@ -124,91 +190,157 @@ mod tests {
 
     #[test]
     fn the_prompt_names_the_tool_call_it_answers_for_with_no_title() {
-        let prompt = PermissionPrompt::new(1, "call_1", None, vec![]);
+        let prompt = PermissionPrompt::new(1, "call_1", None, None, vec![]);
         assert_eq!(prompt.request_id, 1);
         assert!(prompt.prompt.contains("call_1"));
     }
 
     #[test]
     fn the_prompt_prefers_the_human_readable_title_when_the_agent_sent_one() {
-        let prompt =
-            PermissionPrompt::new(1, "call_1", Some("Delete config.yaml".to_string()), vec![]);
+        let prompt = PermissionPrompt::new(
+            1,
+            "call_1",
+            Some("Delete config.yaml".to_string()),
+            None,
+            vec![],
+        );
         assert!(prompt.prompt.contains("Delete config.yaml"));
         assert!(!prompt.prompt.contains("call_1"));
     }
 
     #[test]
-    fn y_a_n_map_to_the_pinned_allow_and_one_time_reject_kinds() {
+    fn each_digit_selects_the_option_at_that_position_in_the_agents_own_order() {
         let prompt = PermissionPrompt::new(
             1,
             "call_1",
+            None,
             None,
             vec![
+                option("reject-once", PermissionOptionKind::RejectOnce),
                 option("allow-once", PermissionOptionKind::AllowOnce),
                 option("allow-always", PermissionOptionKind::AllowAlways),
-                option("reject-once", PermissionOptionKind::RejectOnce),
             ],
         );
-        assert_eq!(prompt.option_for_key('y').unwrap().option_id, "allow-once");
-        assert_eq!(prompt.option_for_key('Y').unwrap().option_id, "allow-once");
+        assert_eq!(prompt.option_for_key('1').unwrap().option_id, "reject-once");
+        assert_eq!(prompt.option_for_key('2').unwrap().option_id, "allow-once");
         assert_eq!(
-            prompt.option_for_key('a').unwrap().option_id,
+            prompt.option_for_key('3').unwrap().option_id,
             "allow-always"
         );
-        assert_eq!(prompt.option_for_key('n').unwrap().option_id, "reject-once");
     }
 
+    /// The keys the panel's other owner holds are exactly the ones this
+    /// prompt must not answer: `a` used to mean allow-always here and means
+    /// accept-hunk in a review, and both pend together on one agent edit.
     #[test]
-    fn n_falls_back_to_reject_always_when_no_one_time_reject_is_offered() {
+    fn no_letter_and_no_digit_past_the_offered_options_answers_anything() {
         let prompt = PermissionPrompt::new(
             1,
             "call_1",
             None,
-            vec![option("reject-always", PermissionOptionKind::RejectAlways)],
-        );
-        assert_eq!(
-            prompt.option_for_key('n').unwrap().option_id,
-            "reject-always"
-        );
-    }
-
-    #[test]
-    fn a_key_with_no_matching_offered_kind_answers_none() {
-        let prompt = PermissionPrompt::new(
-            1,
-            "call_1",
             None,
             vec![option("allow-once", PermissionOptionKind::AllowOnce)],
         );
-        assert!(prompt.option_for_key('a').is_none());
-        assert!(prompt.option_for_key('n').is_none());
-        assert!(prompt.option_for_key('z').is_none());
+        for key in ['a', 'A', 'y', 'n', 'x', 'q', '0', '2', '9'] {
+            assert!(
+                prompt.option_for_key(key).is_none(),
+                "{key} must answer nothing"
+            );
+        }
     }
 
     #[test]
-    fn render_rows_names_the_question_and_every_options_kind() {
+    fn a_standing_grant_answers_with_the_always_allow_when_one_is_offered() {
+        let options = vec![
+            option("allow-once", PermissionOptionKind::AllowOnce),
+            option("allow-always", PermissionOptionKind::AllowAlways),
+            option("reject-once", PermissionOptionKind::RejectOnce),
+        ];
+        assert_eq!(
+            PermissionPrompt::standing_allow(&options)
+                .unwrap()
+                .option_id,
+            "allow-always"
+        );
+    }
+
+    #[test]
+    fn a_standing_grant_falls_back_to_allow_once_and_never_to_a_reject() {
+        let allow_once = vec![
+            option("reject-once", PermissionOptionKind::RejectOnce),
+            option("allow-once", PermissionOptionKind::AllowOnce),
+        ];
+        assert_eq!(
+            PermissionPrompt::standing_allow(&allow_once)
+                .unwrap()
+                .option_id,
+            "allow-once"
+        );
+        let no_allow = vec![option("reject-always", PermissionOptionKind::RejectAlways)];
+        assert!(PermissionPrompt::standing_allow(&no_allow).is_none());
+    }
+
+    #[test]
+    fn render_rows_labels_every_option_with_its_digit_its_kind_and_its_own_role() {
         let prompt = PermissionPrompt::new(
             1,
             "call_1",
             Some("Delete config.yaml".to_string()),
+            None,
             vec![
-                option("allow-once", PermissionOptionKind::AllowOnce),
-                option("reject-once", PermissionOptionKind::RejectOnce),
+                option("Allow once", PermissionOptionKind::AllowOnce),
+                option("Always Allow", PermissionOptionKind::AllowAlways),
+                option("Deny", PermissionOptionKind::RejectOnce),
             ],
         );
         let rows = prompt.render_rows();
-        assert_eq!(rows.len(), 3, "the question plus one row per option");
+        assert_eq!(rows.len(), 5, "the question, three options, the hint");
         assert_eq!(
             rows[0],
-            vec![Span::plain("Permission requested for Delete config.yaml")]
+            vec![Span::new(
+                "Permission requested for Delete config.yaml",
+                StyleRole::AiPermissionAsk
+            )]
         );
         assert_eq!(
             rows[1],
-            vec![Span::plain("  allow-once (allow_once)".to_string())]
+            vec![Span::new(
+                "  1 Allow once (allow_once)",
+                StyleRole::AiPermissionAllow
+            )]
         );
         assert_eq!(
             rows[2],
-            vec![Span::plain("  reject-once (reject_once)".to_string())]
+            vec![Span::new(
+                "  2 Always Allow (allow_always)",
+                StyleRole::AiPermissionAlways
+            )],
+            "the answer with standing consequence paints as its own thing"
         );
+        assert_eq!(
+            rows[3],
+            vec![Span::new(
+                "  3 Deny (reject_once)",
+                StyleRole::AiPermissionReject
+            )]
+        );
+        assert_eq!(
+            rows[4],
+            vec![Span::new(KEY_HINT, StyleRole::AiPermissionAsk)]
+        );
+    }
+
+    /// A row promising a key nothing answers is the defect this prompt
+    /// exists to fix, one option further along.
+    #[test]
+    fn an_option_past_the_ninth_is_painted_without_a_digit_it_cannot_be_answered_by() {
+        let options: Vec<PermissionOption> = (1..=10)
+            .map(|n| option(&format!("opt-{n}"), PermissionOptionKind::AllowOnce))
+            .collect();
+        let prompt = PermissionPrompt::new(1, "call_1", None, None, options);
+        let rows = prompt.render_rows();
+        assert_eq!(rows[9][0].text, "  9 opt-9 (allow_once)");
+        assert_eq!(rows[10][0].text, "  - opt-10 (allow_once)");
+        assert!(prompt.option_for_key('9').is_some());
     }
 }

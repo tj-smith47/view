@@ -96,6 +96,25 @@ pub enum StyleRole {
     /// its answer, deliberately the dimmest of the three: it is the one
     /// voice on the panel that is not an assertion.
     AiThought,
+    /// The question row of an outstanding permission request: what the
+    /// agent is blocked on and cannot proceed past unanswered.
+    ///
+    /// The four permission roles are what separate an unanswered question
+    /// from the transcript rows above it, and separate the answers from
+    /// each other -- a prompt whose options all paint like ordinary text is
+    /// the defect they exist to close, because the reader cannot see that
+    /// anything is waiting on them or which key costs what.
+    AiPermissionAsk,
+    /// A permission option that lets this one call through and nothing
+    /// after it.
+    AiPermissionAllow,
+    /// A permission option that grants standing permission for every later
+    /// call of the same tool kind. Deliberately not [`Self::AiPermissionAllow`]:
+    /// it is the one answer whose consequence outlives the question, so it
+    /// must not read as the same act as allowing once.
+    AiPermissionAlways,
+    /// A permission option that refuses the call.
+    AiPermissionReject,
     /// A transcript tool call's status glyph once the call has completed.
     AiToolDone,
     /// A transcript tool call's status glyph once the call has failed.
@@ -132,6 +151,10 @@ impl StyleRole {
             Self::AiUser => Some(ChromeGroup::Question),
             Self::AiAgent => Some(ChromeGroup::MoreMsg),
             Self::AiThought | Self::AiToolRunning => Some(ChromeGroup::NonText),
+            Self::AiPermissionAsk => Some(ChromeGroup::Question),
+            Self::AiPermissionAllow => Some(ChromeGroup::OkMsg),
+            Self::AiPermissionAlways => Some(ChromeGroup::WarningMsg),
+            Self::AiPermissionReject => Some(ChromeGroup::ErrorMsg),
             Self::AiToolDone => Some(ChromeGroup::OkMsg),
             Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
         }

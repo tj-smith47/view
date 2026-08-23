@@ -56,6 +56,12 @@
 //!   wire mandate behind it (`docs/acp-v1-wire-capture.md`), so what
 //!   matters is that a real turn survives it: the first request stays open
 //!   and the turn still ends on its answer.
+//! - `ask-always` -- send a `session/request_permission` naming a
+//!   `toolCall.kind`, offering an always-allow among its options, and then
+//!   -- once it is answered -- a second request of the same kind. Reports
+//!   what came back for each. The pinned adapter re-prompts forever after
+//!   an always-allow, so the client keeps that promise itself; this is how
+//!   a standing grant is driven over a real wire.
 //! - `propose` -- announce a tool call and complete it with a
 //!   `ToolCallContent` `"diff"` item over `view-ai-stub-diff.txt` in this
 //!   process's own working directory. Any suffix after the word (`propose2`)
@@ -186,6 +192,26 @@ fn main() {
                         &mut stdout,
                         "agent_message_chunk",
                         &format!("chose {}", outcome_label(&frame)),
+                    );
+                    end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
+                    cancelled = false;
+                }
+                Some("perm-always-1") => {
+                    chunk(
+                        &mut stdout,
+                        "agent_message_chunk",
+                        &format!("first {}", outcome_label(&frame)),
+                    );
+                    // the second request only leaves once the first is
+                    // answered, so a client that auto-answers this one is
+                    // answering a request it never showed anybody
+                    ask_permission_always(&mut stdout, "perm-always-2", "call_102");
+                }
+                Some("perm-always-2") => {
+                    chunk(
+                        &mut stdout,
+                        "agent_message_chunk",
+                        &format!("second {}", outcome_label(&frame)),
                     );
                     end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
                     cancelled = false;
@@ -326,6 +352,10 @@ fn main() {
                     "ask" => {
                         pending_prompt = Some(id);
                         ask_permission(&mut stdout, "perm-1", "call_001");
+                    }
+                    "ask-always" => {
+                        pending_prompt = Some(id);
+                        ask_permission_always(&mut stdout, "perm-always-1", "call_101");
                     }
                     "ask-twice" => {
                         pending_prompt = Some(id);
@@ -692,6 +722,27 @@ fn ask_permission(stdout: &mut std::io::Stdout, request_id: &str, tool_call_id: 
             "options": [
                 { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
                 { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
+            ]
+        }),
+    );
+}
+
+/// One `session/request_permission` that names its tool kind and offers an
+/// always-allow, which is what a standing grant is given against: the kind
+/// is the scope the client keys the grant on, and without it there is
+/// nothing for a later request to match.
+fn ask_permission_always(stdout: &mut std::io::Stdout, request_id: &str, tool_call_id: &str) {
+    request(
+        stdout,
+        serde_json::json!(request_id),
+        "session/request_permission",
+        serde_json::json!({
+            "sessionId": "sess_stub",
+            "toolCall": { "toolCallId": tool_call_id, "kind": "edit" },
+            "options": [
+                { "optionId": "reject-once", "name": "Deny", "kind": "reject_once" },
+                { "optionId": "allow-once", "name": "Allow Once", "kind": "allow_once" },
+                { "optionId": "allow-always", "name": "Always Allow", "kind": "allow_always" }
             ]
         }),
     );

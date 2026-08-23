@@ -148,6 +148,49 @@ Both are optional, and neither can fail your config: a whole number
 outside the range opens at the nearest end, and a value that is not a
 whole number at all opens at the default and tells you so.
 
+## Answering a permission request
+
+An agent that needs your say-so before a tool call blocks on it, and the
+request opens the panel where it can be seen. Every option the agent
+offered gets a row, numbered in the order the agent sent them, with the
+wire's own word for what it does in brackets:
+
+```
+Permission requested for Edit Taskfile.yml
+  1 Deny (reject_once)
+  2 Allow Once (allow_once)
+  3 Always Allow (allow_always)
+press a number, <Esc> cancels
+```
+
+You answer with the digit. `<Esc>` answers too -- it cancels the request,
+which is the one answer that exists whatever the agent offered. No letter
+answers a prompt, deliberately: a diff review pends alongside the prompt on
+every agent edit and owns letters of its own, so `a` accepts the hunk you
+are looking at and never the question you are not.
+
+The colors carry the same split as the words: the always-allow row is not
+painted as another allow, because it is the one answer whose consequence
+outlives the question.
+
+### What "Always Allow" grants
+
+Answering always-allow records a standing grant for that tool's kind, for
+this session only. A later request of the same kind is answered for you,
+and says so on the transcript rather than passing in silence:
+
+```
+‼ auto-allowed edit (standing grant)
+```
+
+A different kind still asks. The grant is never written to disk, so a new
+session -- including one that came back after a crash -- starts with none.
+
+view keeps this itself because the pinned adapter does not: it accepts the
+always-allow answer and then asks again on every later call. Reporting the
+grant on the transcript is what keeps that answerable -- what view answered
+on your behalf is on the record with everything else the session did.
+
 ## Reviewing an agent's edits
 
 An edit the agent proposes through ACP does not touch your buffer until

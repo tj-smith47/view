@@ -50,8 +50,40 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             request_id,
             tool_call_id,
             title,
+            tool_kind,
             options,
         } => {
+            // A kind this session already granted is answered here rather
+            // than asked again (see
+            // `AiPanelState::permission_grants`). Ahead of the overlap
+            // degrade below because it is not a degrade: this request gets
+            // the answer the user already gave for its kind, whatever else
+            // is on screen.
+            if let Some(granted) = tool_kind
+                .as_deref()
+                .filter(|kind| model.ai_panel().is_granted(kind))
+            {
+                if let Some(option) = PermissionPrompt::standing_allow(&options) {
+                    let outcome = PermissionOutcome::Selected {
+                        option_id: option.option_id.clone(),
+                    };
+                    // The transcript, not a toast: an answer view gave on
+                    // the user's behalf is the one thing about a standing
+                    // grant they cannot otherwise audit, and it belongs in
+                    // the record of the conversation it was part of.
+                    let line = format!("auto-allowed {granted} (standing grant)");
+                    model.ai_panel_mut().transcript.append_or_extend(
+                        None,
+                        &line,
+                        crate::native::ai_panel::TranscriptRole::Notice,
+                    );
+                    model.dirty = true;
+                    return vec![Effect::Ai(AiCommand::AnswerPermission {
+                        request_id,
+                        outcome,
+                    })];
+                }
+            }
             if model.ai_panel().pending_permission.is_some() {
                 return vec![Effect::Ai(AiCommand::AnswerPermission {
                     request_id,
@@ -62,6 +94,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 request_id,
                 &tool_call_id,
                 title,
+                tool_kind,
                 options,
             ));
             model.dirty = true;
@@ -195,6 +228,12 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             let panel = model.ai_panel_mut();
             panel.session_id = Some(session_id);
             panel.local_error = None;
+            // A standing grant answers questions on the user's behalf, so
+            // it lasts exactly as long as the session it was given in --
+            // including across a recovery, where the agent that was asked
+            // is gone and the one that replaced it has never asked
+            // anything.
+            panel.clear_permission_grants();
             model.dirty = true;
         }
         // A proposal opens the panel's own diff review. Its hunks are
@@ -476,6 +515,7 @@ mod tests {
             request_id,
             tool_call_id: tool_call_id.to_string(),
             title: None,
+            tool_kind: Some("edit".to_string()),
             options: vec![allow_once(option_id)],
         })
     }
@@ -541,6 +581,92 @@ mod tests {
             "the first request's slot is untouched"
         );
         assert_eq!(prompt.options, vec![allow_once("allow-once")]);
+    }
+
+    /// A grant answers for the session it was given in and no other. A
+    /// recovered or replaced session is a new agent with new work, and the
+    /// user has answered nothing for it.
+    #[test]
+    fn a_session_becoming_ready_drops_every_standing_grant() {
+        let mut model = Model::new();
+        model.ai_panel_mut().grant_permission("edit".to_string());
+
+        let _ = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionReady {
+                session_id: "sess_2".to_string(),
+            }),
+        );
+
+        assert!(!model.ai_panel().is_granted("edit"));
+        let effects = update(&mut model, permission_requested(1, "call_1", "allow-once"));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+            "a dropped grant must leave the question being asked: {effects:?}"
+        );
+        assert!(model.ai_panel().pending_permission.is_some());
+    }
+
+    /// An agent that named no `toolCall.kind` can be answered but never
+    /// grants anything: there is nothing to scope a later auto-answer to,
+    /// and "every tool" is not what answering one question means.
+    #[test]
+    fn a_request_naming_no_tool_kind_is_never_answered_by_a_grant() {
+        let mut model = Model::new();
+        model.ai_panel_mut().grant_permission("edit".to_string());
+
+        let effects = update(
+            &mut model,
+            Msg::Ai(AiEvent::PermissionRequested {
+                request_id: 1,
+                tool_call_id: "call_1".to_string(),
+                title: None,
+                tool_kind: None,
+                options: vec![allow_once("allow-once")],
+            }),
+        );
+
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+            "an unscoped request must be asked about: {effects:?}"
+        );
+        assert!(model.ai_panel().pending_permission.is_some());
+    }
+
+    /// A granted kind whose request offers no allow at all is asked about
+    /// rather than answered: a grant says "allow this kind", and there is
+    /// nothing here to allow with.
+    #[test]
+    fn a_granted_kind_offering_only_rejects_still_asks() {
+        let mut model = Model::new();
+        model.ai_panel_mut().grant_permission("edit".to_string());
+
+        let effects = update(
+            &mut model,
+            Msg::Ai(AiEvent::PermissionRequested {
+                request_id: 1,
+                tool_call_id: "call_1".to_string(),
+                title: None,
+                tool_kind: Some("edit".to_string()),
+                options: vec![crate::native::ai_event::PermissionOption {
+                    option_id: "reject-once".to_string(),
+                    name: "Reject".to_string(),
+                    kind: crate::native::ai_event::PermissionOptionKind::RejectOnce,
+                }],
+            }),
+        );
+
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+            "nothing here allows anything: {effects:?}"
+        );
+        assert!(model.ai_panel().pending_permission.is_some());
     }
 
     /// The new ruled behavior: a request arriving while the panel is closed
