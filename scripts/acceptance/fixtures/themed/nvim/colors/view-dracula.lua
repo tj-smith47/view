@@ -13,9 +13,15 @@
 --
 -- No other group may take the Normal or CursorLine value: the sweep reads
 -- either of them inside an overlay as the layer beneath bleeding through.
--- Every semantic group below is therefore foreground-only -- which is also
--- the case that proves a span role with no background of its own keeps the
--- overlay's rather than punching a hole in it.
+-- The semantic groups are therefore foreground-only, bar the four diff
+-- ones -- which is the case that proves a span role with no background of
+-- its own keeps the overlay's rather than punching a hole in it.
+--
+-- The diff groups carry a background each because an agent's proposed edit
+-- is drawn in the buffer with nothing but those groups, so a background is
+-- the only thing that tells a decorated row from an ordinary one in a
+-- capture, which reads no foregrounds. Each is distinct from every other
+-- and from the three above, so no leg can confuse them.
 --
 -- CursorLine is also the one underlined group here, and no chrome group may
 -- take an attribute: an overlay cell that comes back underlined can only
@@ -40,6 +46,7 @@ hl(0, 'WarningMsg', { fg = '#ffb86c' })
 hl(0, 'ErrorMsg', { fg = '#ff5555' })
 hl(0, 'Directory', { fg = '#8be9fd' })
 hl(0, 'IncSearch', { fg = '#ffb86c' })
-hl(0, 'DiffAdd', { fg = '#50fa7b' })
-hl(0, 'DiffChange', { fg = '#ffb86c' })
-hl(0, 'DiffDelete', { fg = '#ff5555' })
+hl(0, 'DiffAdd', { fg = '#50fa7b', bg = '#213d24' })
+hl(0, 'DiffChange', { fg = '#ffb86c', bg = '#3d3721' })
+hl(0, 'DiffDelete', { fg = '#ff5555', bg = '#3d2121' })
+hl(0, 'DiffText', { fg = '#8be9fd', bg = '#21313d' })

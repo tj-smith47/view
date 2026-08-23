@@ -465,6 +465,35 @@ box_text() { LC_ALL=C awk "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
 # not on screen at all.
 text_span() { LC_ALL=C awk -v text="$1" "$SPAN_AWK" "$CELLS"; }
 
+# The background the first cell of `text` is painted on, in the buffer's own
+# region of the screen -- nothing at all when it is not on screen, or when
+# some overlay's edge stands to its left.
+#
+# The region matters as much as the color: a decoration in the file is left
+# of every frame on its row, where a panel row is right of one. Both halves
+# are the claim "the proposal is drawn where the code is".
+buffer_bg() {
+    local span row col leftmost
+    span=$(text_span "$1")
+    [ -n "$span" ] || return 0
+    read -r row col leftmost _ <<<"$span"
+    [ "$leftmost" -lt 0 ] || return 0
+    LC_ALL=C awk -F'\t' -v r="$row" -v c="$col" '$1 == r && $2 == c { print $3; exit }' "$CELLS"
+}
+
+# Fails unless `text` is painted in the buffer region on the colorscheme's
+# own `want` background.
+assert_buffer_bg() {
+    local text="$1" want="$2" what="$3" got
+    settle
+    got=$(buffer_bg "$text")
+    if [ "$got" != "$want" ]; then
+        fail "$what reads '${got:-nothing in the buffer region}' where the colorscheme paints $want"
+        return 1
+    fi
+    pass "$what is painted on $want, left of every frame on its row"
+}
+
 # Waits for `text` to be painted inside a framed overlay -- its title bar
 # included -- rather than anywhere on screen.
 wait_in_box() {
@@ -631,13 +660,21 @@ fixture_bg() {
 NORMAL_BG=$(fixture_bg Normal) || exit 1
 CURSORLINE_BG=$(fixture_bg CursorLine) || exit 1
 FLOAT_BG=$(fixture_bg NormalFloat) || exit 1
-for pair in "$NORMAL_BG:$CURSORLINE_BG" "$NORMAL_BG:$FLOAT_BG" "$CURSORLINE_BG:$FLOAT_BG"; do
-    if [ "${pair%%:*}" = "${pair#*:}" ]; then
-        printf 'FAIL: the fixture gives two of Normal/CursorLine/NormalFloat the same background (%s), so a bleed through an overlay is indistinguishable from correct paint\n' \
-            "${pair%%:*}" >&2
-        exit 1
-    fi
-done
+# The groups a review is drawn with, and nothing else about it: view sets no
+# color of its own on a decorated buffer (see `REVIEW_SHOW_CHUNK`), so these
+# are the whole of what a proposal looks like.
+DIFF_ADD_BG=$(fixture_bg DiffAdd) || exit 1
+DIFF_DELETE_BG=$(fixture_bg DiffDelete) || exit 1
+DIFF_TEXT_BG=$(fixture_bg DiffText) || exit 1
+# Every one of them distinct from every other: two that shared a value would
+# leave a bleed through an overlay indistinguishable from correct paint, and
+# a proposed line indistinguishable from the row it replaces.
+printf '%s\n' "Normal $NORMAL_BG" "CursorLine $CURSORLINE_BG" "NormalFloat $FLOAT_BG" \
+    "DiffAdd $DIFF_ADD_BG" "DiffDelete $DIFF_DELETE_BG" "DiffText $DIFF_TEXT_BG" |
+    awk -v scheme="$COLORSCHEME" '
+        { if ($2 in owner) { printf "FAIL: %s gives %s and %s the same background (%s), so this sweep cannot tell them apart\n", scheme, owner[$2], $1, $2 > "/dev/stderr"; bad = 1 }
+          owner[$2] = $1 }
+        END { exit bad }' || exit 1
 
 panel_const() {
     local name="$1" value
@@ -772,6 +809,35 @@ if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
         "$MAPPINGS_RS" "${declared:-no}" "$read_count" >&2
     exit 1
 fi
+# Every key a review installs on the buffer it draws in, read the same way
+# and checked the same way as the defaults above: a table that changed shape
+# under this reader would leave the leg pressing nothing.
+REVIEW_KEYS=$(awk '
+    /^static REVIEW_KEYS/ { inside = 1 }
+    inside && /lhs: "/  { l = $0; sub(/.*lhs: "/, "", l); sub(/".*/, "", l) }
+    inside && /verb: "/ { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v); print l, v }
+    inside && /^\];/ { exit }
+' "$MAPPINGS_RS")
+declared=$(grep -oE '^static REVIEW_KEYS: \[ReviewKey; [0-9]+\]' "$MAPPINGS_RS" |
+    grep -oE '[0-9]+')
+read_count=$(printf '%s\n' "$REVIEW_KEYS" | grep -c . || true)
+if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
+    printf 'FAIL: %s declares %s review keys and this read %s of them; the table has changed shape\n' \
+        "$MAPPINGS_RS" "${declared:-no}" "$read_count" >&2
+    exit 1
+fi
+
+# The key one review verb is pressed with, as tmux must spell it.
+review_key() {
+    local verb="$1" lhs
+    lhs=$(printf '%s\n' "$REVIEW_KEYS" | awk -v v="$verb" '$2 == v { print $1 }')
+    [ -n "$lhs" ] || {
+        printf 'FAIL: no review key invokes %s in %s any more\n' "$verb" "$MAPPINGS_RS" >&2
+        return 1
+    }
+    tmux_key "$lhs"
+}
+
 # The features in registration order with the verb a bare `:View <feature>`
 # resolves to. That form is a separate entry point from the key, and the
 # only one that reaches a feature without naming what to do: the resolution
@@ -1220,7 +1286,77 @@ leg_panel_paste() {
     end_session
 }
 
-LEGS=(leg_entry_points leg_toast_and_history leg_toast_over_panel leg_panel_typing leg_panel_paste leg_narrow_title)
+# An agent's proposed edit, drawn in the file it edits.
+#
+# Nothing else in this tree can see this. The live engine tests read the
+# marks back through nvim's own API -- attributes, not pixels -- and no
+# paint test sees the buffer at all: view composites what the engine sends
+# it as ordinary grid traffic, so a decoration that never reached the grid,
+# or reached it stripped of its highlight, would fail no assertion above
+# this file. The claim here is the user's own: the proposal is visible,
+# where the code is, in the colorscheme's diff colors.
+leg_inline_review() {
+    CURRENT_LEG=inline-review
+    local proposed='+BETA' replaced='beta' header='hunk 1/1' key span leftmost
+    start_session review 'visual sweep seed line'
+    # The file the stub's `propose` offers edits to, seeded with what its own
+    # `oldText` claims it holds. Deliberately not the file the session
+    # opened: this is also the case where the review has to bring up a
+    # buffer no window was showing.
+    printf 'alpha\nbeta\ngamma\n' >"$ROOT/view-ai-stub-diff.txt"
+
+    command_line ':View ai'
+    wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
+    send_text 'y'
+    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
+    command_line 'propose'
+    wait_for "$proposed" "$WAIT_SECS" "the agent's proposed line" >/dev/null
+
+    # The proposed line and the header naming the keys are virtual lines --
+    # nvim's, drawn between the buffer's own rows, which is why the text
+    # beneath them can stay untouched.
+    assert_buffer_bg "$proposed" "$DIFF_ADD_BG" "the proposed line ('$proposed')" || return 1
+    assert_buffer_bg "$header" "$DIFF_TEXT_BG" "the current hunk's header ('$header')" || return 1
+
+    # The row the proposal would replace, read with the cursor moved off it:
+    # `CursorLine` runs the full width of the window and the review puts the
+    # cursor on the hunk, so a row read where the cursor sits would be
+    # answering for whichever of the two won rather than for the decoration.
+    send_text 'G'
+    assert_buffer_bg "$replaced" "$DIFF_DELETE_BG" "the row the hunk replaces ('$replaced')" || return 1
+
+    # The panel beside it is still a panel: a decoration that leaked its own
+    # colors into the overlay stack would be a compositing defect, not a
+    # review.
+    assert_chrome 'the agent panel beside a decorated buffer' || return 1
+
+    # Decided with the key the review installs, and then gone: no cell left
+    # on screen carries any of the three groups the decoration is drawn
+    # with. A namespace that outlived its review would leave a proposal
+    # painted over the text it had already become.
+    key=$(review_key accept) || return 1
+    send_text "$key"
+    wait_change "$REACTION_SECS" "the accepted hunk" >/dev/null
+    settle
+    local stragglers
+    stragglers=$(LC_ALL=C awk -F'\t' -v a="$DIFF_ADD_BG" -v d="$DIFF_DELETE_BG" \
+        -v t="$DIFF_TEXT_BG" '$3 == a || $3 == d || $3 == t { print; n++ }
+        END { exit !n }' "$CELLS") && {
+        printf '%s\n' "$stragglers" | head -6 >&2
+        fail 'the accepted review is still drawn: cells on screen carry the decoration groups'
+        return 1
+    }
+    if ! grep -qF 'BETA' "$SCREEN"; then
+        fail 'the accepted text is not on screen, so the decoration went and the write did not'
+        return 1
+    fi
+    pass 'the accepted review takes its whole decoration off the screen with it'
+
+    dismiss ai
+    end_session
+}
+
+LEGS=(leg_entry_points leg_toast_and_history leg_toast_over_panel leg_panel_typing leg_panel_paste leg_narrow_title leg_inline_review)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

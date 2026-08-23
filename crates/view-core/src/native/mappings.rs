@@ -186,6 +186,11 @@ pub struct ReviewKey {
     /// The verb `Msg::FeatureInvoke { feature: "review", .. }` carries when
     /// this key is pressed, spelled as [`COMMAND_ONLY_FORMS`] spells it.
     pub verb: &'static str,
+    /// What pressing it does, as the docs pages say it. Carried in the table
+    /// rather than written into the pages because the same sentence is on
+    /// two of them ([`render_review_table`]), and two hand-written copies of
+    /// one key's meaning are two copies that drift.
+    pub does: &'static str,
 }
 
 /// The review's own keys, installed on the reviewed buffer while a review
@@ -205,30 +210,37 @@ static REVIEW_KEYS: [ReviewKey; 7] = [
     ReviewKey {
         lhs: "<leader>ha",
         verb: "accept",
+        does: "accept the hunk under the cursor",
     },
     ReviewKey {
         lhs: "<leader>hA",
         verb: "accept_all",
+        does: "accept every hunk still fresh, as one write",
     },
     ReviewKey {
         lhs: "<leader>hx",
         verb: "reject",
+        does: "reject the hunk under the cursor",
     },
     ReviewKey {
         lhs: "<leader>hR",
         verb: "rediff",
+        does: "re-anchor a hunk your own edit moved under",
     },
     ReviewKey {
         lhs: "<leader>hq",
         verb: "leave",
+        does: "leave the review, deciding nothing further",
     },
     ReviewKey {
         lhs: "]c",
         verb: "next",
+        does: "the next hunk still awaiting a decision",
     },
     ReviewKey {
         lhs: "[c",
         verb: "prev",
+        does: "the previous hunk still awaiting a decision",
     },
 ];
 
@@ -303,6 +315,25 @@ pub fn render_table() -> String {
         out.push_str(&format!(
             "| `{}` | `{}` | `:{} {} {}` |\n",
             spec.lhs, spec.feature, COMMAND, spec.feature, spec.verb
+        ));
+    }
+    out
+}
+
+/// The review's buffer-local keys as a markdown table, for the same reason
+/// [`render_table`] exists: a key a page names and the build does not
+/// install is a key a reader presses for nothing.
+///
+/// `reject_all` is absent because it reaches no key -- see [`REVIEW_KEYS`]
+/// for why -- and a docs table of keys is not the place to advertise a form
+/// that has none.
+#[must_use]
+pub fn render_review_table() -> String {
+    let mut out = String::from("| key | does | command |\n| --- | --- | --- |\n");
+    for key in review_keys() {
+        out.push_str(&format!(
+            "| `{}` | {} | `:{COMMAND} review {}` |\n",
+            key.lhs, key.does, key.verb
         ));
     }
     out
@@ -600,6 +631,22 @@ mod tests {
                 !default_maps().iter().any(|spec| spec.lhs == key.lhs),
                 "{} is both a default key and a review key",
                 key.lhs
+            );
+        }
+    }
+
+    /// Both pages a user learns the review from carry the same generated
+    /// table, so a key that changed shape here fails the build rather than
+    /// leaving one page right and the other one lying.
+    #[test]
+    fn both_docs_pages_render_the_review_keys_this_build_installs() {
+        let table = render_review_table();
+        for page in ["../../docs/keymaps.md", "../../docs/ai.md"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(page);
+            let text = std::fs::read_to_string(&path).expect("the docs page must be readable");
+            assert!(
+                text.contains(&table),
+                "{page} is stale, it must carry:\n{table}"
             );
         }
     }

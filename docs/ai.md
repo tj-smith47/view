@@ -212,23 +212,44 @@ you accept it. The proposal opens as a review **in the file itself**: view
 brings the target buffer up, marks what the agent would remove, shows what
 it would put there, and puts your cursor on the first hunk.
 
+```
+  alpha
+▶ beta                                    <- what the agent would remove
+  hunk 1/1 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject …
+  +BETA                                   <- what it would put there
+  gamma
+```
+
+Nothing there is view's own drawing. The rows the agent would remove are
+highlighted with nvim's `DiffDelete`, what it proposes instead is a virtual
+line in `DiffAdd`, the header naming the keys is `DiffText`, and a hunk your
+own typing has moved under turns `DiffChange` -- so a review is painted in
+your colorscheme's own diff colors, in the window the file is already in,
+and it scrolls, folds and wraps the way the rest of the buffer does. The
+buffer's text is untouched by any of it: nothing is written until you accept
+something. The `▶` on the current hunk needs a sign column to land in; with
+`signcolumn=no` it is simply absent, and the header still names every key.
+
 The reviewed buffer stays an ordinary editable buffer -- every nvim key
 still does what it always did -- so the review's own vocabulary is mapped
 out of the single-letter space, buffer-locally, for as long as the review
 is open:
 
-| key | does |
-| --- | --- |
-| `<leader>ha` | accept the hunk under the cursor |
-| `<leader>hA` | accept every hunk still fresh, as one write |
-| `<leader>hx` | reject the hunk under the cursor |
-| `<leader>hR` | re-diff a hunk your own edit moved under |
-| `]c` / `[c` | next / previous hunk still awaiting a decision |
-| `<leader>hq` | leave, deciding nothing further |
+<!-- generated from review_keys() -->
+| key | does | command |
+| --- | --- | --- |
+| `<leader>ha` | accept the hunk under the cursor | `:View review accept` |
+| `<leader>hA` | accept every hunk still fresh, as one write | `:View review accept_all` |
+| `<leader>hx` | reject the hunk under the cursor | `:View review reject` |
+| `<leader>hR` | re-anchor a hunk your own edit moved under | `:View review rediff` |
+| `<leader>hq` | leave the review, deciding nothing further | `:View review leave` |
+| `]c` | the next hunk still awaiting a decision | `:View review next` |
+| `[c` | the previous hunk still awaiting a decision | `:View review prev` |
 
-Each is also a command -- `:View review accept`, `:View review leave` --
-which `:View <Tab>` completes, feature then verb, and which is what to reach
-for if `<leader>h` is already yours.
+`:View <Tab>` completes those command forms, feature then verb, and they are
+what to reach for if `<leader>h` is already yours. One verb is command-only:
+`:View review reject_all` throws the whole proposal away in one go, which is
+too much to hang off a keystroke.
 
 Type over a hunk yourself and it goes *stale*: view will not write a
 proposal against text that has moved, so a stale hunk offers `<leader>hR`
@@ -236,9 +257,12 @@ proposal against text that has moved, so a stale hunk offers `<leader>hR`
 the accept it would have to refuse. Keep editing the same rows and even that
 goes: once your own edits reach past the context the hunk was anchored on,
 there is no text left to re-anchor it against honestly, so its header drops
-the re-diff and offers the reject alone. The panel keeps a summary row
-beside the buffer -- which file, which hunk of how many, and the same keys
--- so a scroll away from every hunk does not lose you the review.
+the re-diff and offers the reject alone. The panel keeps a summary of the
+review beside the buffer -- which file, which hunk of how many, how many
+are still undecided, and the same keys -- so a scroll away from every hunk
+does not lose you the review. Closing the panel loses you nothing either:
+the marks are in the buffer and the keys are on it, so a proposal is read
+and decided with no panel on screen at all.
 
 An accepted review is one undo entry -- a single `u` retracts the whole
 thing, never joined onto your own preceding edit.

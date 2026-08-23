@@ -80,9 +80,46 @@ offered them:
 No letter answers a prompt: the same agent edit that raises the question
 raises a review in the buffer beside it, and that buffer stays an ordinary
 editable one -- a letter that answered the prompt from there would mean two
-things at once. The review's own keys are buffer-local and live under
-`<leader>h`; see [ai.md](ai.md) for those, for what each option does, and
-for what the two "always" answers stand for.
+things at once. See [ai.md](ai.md) for what each option does and for what
+the two "always" answers stand for.
+
+## Deciding an agent's proposed edit
+
+A proposal is drawn in the file itself, and its keys are buffer-local nvim
+mappings on the reviewed buffer -- set when the review opens, deleted when
+it closes. They are not in `:map` before that and not there after, and they
+take nothing from your config in between: the whole set lives under
+`<leader>h` and on `]c`/`[c`, so no bare letter is claimed in a buffer that
+stays editable throughout.
+
+<!-- generated from review_keys() -->
+| key | does | command |
+| --- | --- | --- |
+| `<leader>ha` | accept the hunk under the cursor | `:View review accept` |
+| `<leader>hA` | accept every hunk still fresh, as one write | `:View review accept_all` |
+| `<leader>hx` | reject the hunk under the cursor | `:View review reject` |
+| `<leader>hR` | re-anchor a hunk your own edit moved under | `:View review rediff` |
+| `<leader>hq` | leave the review, deciding nothing further | `:View review leave` |
+| `]c` | the next hunk still awaiting a decision | `:View review next` |
+| `[c` | the previous hunk still awaiting a decision | `:View review prev` |
+
+`:View review reject_all` rejects the whole proposal at once and is the one
+verb with no key: it decides everything in one press and offers no undo of
+its own, so it is asked for by name.
+
+Every verb is also a `:View` form, which is what to map if you want the
+review on keys of your own -- a global mapping of yours is never touched,
+where a buffer-local one on a key the table above claims is replaced for as
+long as the review is open:
+
+```vim
+nnoremap <silent> ga <Cmd>View review accept<CR>
+```
+
+That form is also the way in when `<leader>h` is already yours, and the way
+out of a review whose buffer view can no longer write to at all.
+
+See [ai.md](ai.md) for what a review is and what each decision writes.
 
 ## Resizing the sidebars
 

@@ -60,6 +60,8 @@ REVIEW_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/review.rs
 PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 TRANSCRIPT_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/transcript.rs
 STUB_RS=$REPO_ROOT/crates/view-ai/tests/fixtures/stub_agent.rs
+MAPPINGS_RS=$REPO_ROOT/crates/view-core/src/native/mappings.rs
+NVIM_API_RS=$REPO_ROOT/crates/view-engine/src/nvim_api.rs
 
 # The panel is a fixed-width column beside the buffer, so widening the
 # terminal does not widen it: these are chosen for the buffer and for having
@@ -126,6 +128,30 @@ elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
 under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }
 
 pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
+
+# The pane with the panel column cut away: on every row, everything left of
+# the first vertical border.
+#
+# A review is drawn by nvim as extmarks in the buffer it proposes edits to,
+# so its rows have to be found where the file is and nowhere else. Searching
+# the whole pane would also be answered by a panel that rendered its own copy
+# of the diff -- which is exactly the surface this subsystem deleted, and
+# exactly what a regression would bring back.
+#
+# `|| true` for the same reason `pane` has one: a reader feeding
+# `grep -q` is killed by the pipe the moment the match is found, and under
+# `pipefail` that death would be reported as "no match" by every caller.
+buffer_region() { pane | sed 's/│.*//' || true; }
+
+# Fails unless a framed panel really is on screen, so that `buffer_region`
+# is cutting something off rather than passing the whole pane through and
+# leaving every in-buffer assertion answered from anywhere.
+assert_panel_is_framed() {
+    if ! pane | grep -q '│'; then
+        fail 'no panel border is on screen, so the buffer region is the whole pane and an in-buffer assertion would prove nothing about where the review is drawn'
+        return 1
+    fi
+}
 
 fail() {
     local dump="$DUMP_DIR/$CURRENT_LEG.pane"
@@ -199,23 +225,30 @@ require_template() {
     fi
 }
 
-# Waits for `text` to appear on screen, and reports how long it took.
-wait_for() {
-    local text="$1" budget="$2" what="$3" start el
+# Waits for `text` to appear in what `reader` prints, and reports how long
+# it took. `where` names the region for the failure message.
+wait_in() {
+    local reader="$1" where="$2" text="$3" budget="$4" what="$5" start el
     start=$(now)
     while :; do
-        if pane | grep -qF -- "$text"; then
+        if "$reader" | grep -qF -- "$text"; then
             elapsed "$start" "$(now)"
             return 0
         fi
         el=$(elapsed "$start" "$(now)")
         if ! under "$el" "$budget"; then
-            fail "$what did not appear within ${budget}s (looked for '$text')"
+            fail "$what did not appear $where within ${budget}s (looked for '$text')"
             return 1
         fi
         sleep "$POLL"
     done
 }
+
+# Waits for `text` to appear on screen, and reports how long it took.
+wait_for() { wait_in pane 'on screen' "$@"; }
+
+# The same, restricted to the file's own region of the screen.
+wait_in_buffer() { wait_in buffer_region 'in the buffer region' "$@"; }
 
 # The same, for a line in view's own diagnostic log: the events a message
 # carries past the loop are not all things the screen shows, and a claim
@@ -288,14 +321,46 @@ refute() {
 send_text() { tmux send-keys -t "$SESSION" -l -- "$1"; }
 send_key() { tmux send-keys -t "$SESSION" "$1"; }
 
-# One review verb, raised the way the review's own buffer-local mappings
-# raise it: `Msg::FeatureInvoke { feature: "review", .. }`. Typed as the
-# command rather than as the mapped keys because the mappings are installed
-# on the reviewed buffer by the decoration call, and this leg drives view
-# from the pane -- the command reaches the same dispatch either way.
+# One review verb through its `:View` form -- the way in that exists
+# whatever happened to the keys, and the one a user reaches for when
+# `<leader>h` is already theirs. A separate assertion from the keys below,
+# never a substitute for them: the two reach the same dispatch by different
+# routes, and only the keys prove the mappings the decoration installs are
+# on the buffer and answer.
 review_verb() {
     send_text ":View review $1"
     send_key Enter
+}
+
+# One review verb through the key the review installs on the buffer for it,
+# typed at the buffer as a user types it.
+#
+# The key is read from the table the maps are generated from, and
+# `<leader>` is expanded to nvim's own default, which the no-plugins fixture
+# leaves alone -- so a reworded key fails here rather than being sent to a
+# buffer that no longer answers it.
+review_key() {
+    local verb="$1" lhs typed
+    lhs=$(awk -v want="$verb" '
+        /^static REVIEW_KEYS/ { inside = 1 }
+        inside && /lhs: "/  { l = $0; sub(/.*lhs: "/, "", l); sub(/".*/, "", l) }
+        inside && /verb: "/ { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v)
+                              if (v == want) { print l; exit } }
+        inside && /^\];/ { exit }
+    ' "$MAPPINGS_RS")
+    if [ -z "$lhs" ]; then
+        printf 'FAIL: no review key invokes %s in %s any more\n' "$verb" "$MAPPINGS_RS" >&2
+        return 1
+    fi
+    typed=${lhs/<leader>/\\}
+    case "$typed" in
+    *'<'* | *'>'*)
+        printf 'FAIL: the %s review key (%s) carries a notation this script cannot type\n' \
+            "$verb" "$lhs" >&2
+        return 1
+        ;;
+    esac
+    send_text "$typed"
 }
 
 # One session against `agent`, which is either the literal `default` (the
@@ -555,43 +620,73 @@ leg_diff_accept_and_reject() {
     # the whole of what abandoning means: the user dismissed the proposal
     # unread, and an agent restating it must reach them again rather than be
     # deduplicated against a review nobody looked at.
+    #
+    # Left through the `:View` form, which is the only decision here that
+    # is: everything the user is expected to press is pressed below.
     submit 'propose'
-    wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the abandoned review's keys" >/dev/null
+    wait_in_buffer "$PROPOSED_BETA" "$WAIT_SECS" \
+        "the abandoned proposal's own line, drawn in the file" >/dev/null
+    assert_panel_is_framed || return 1
     review_verb leave
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing unanswered" >/dev/null
+    refute "$PROPOSED_BETA" 'an abandoned review left its proposal drawn in the file'
     wait_for "${REVIEW_MARK}discarded the proposal" "$WAIT_SECS" \
         "the abandoned review's own account of itself" >/dev/null
     assert_file_is 'alpha
 beta
 gamma' 'an abandoned review changed the buffer'
+    pass 'a proposal left through :View review leave took its drawing with it'
 
+    # The review as a user meets it: the line the agent proposes, drawn in
+    # the file at the row it would go to, and the keys that decide it named
+    # on the hunk itself rather than only in the panel column. Both are read
+    # out of the buffer region, so a panel that grew its own copy of the
+    # diff back could not answer either of them.
     submit 'propose'
-    wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the diff review's keys" >/dev/null
-    pass 'a proposal abandoned unread was raised again when the agent restated it'
-    review_verb accept
+    wait_in_buffer "$PROPOSED_BETA" "$WAIT_SECS" \
+        "the agent's proposed line, drawn in the file" >/dev/null
+    wait_in_buffer "$REVIEW_KEY_HINT" "$WAIT_SECS" \
+        "the current hunk's own header, at the hunk rather than in the panel" >/dev/null
+    # The buffer's own text is still the buffer's own text: the proposal is
+    # decoration until it is accepted, and a review that had already written
+    # itself into the file would show `BETA` here with nothing left to
+    # decide.
+    wait_in_buffer 'beta' "$WAIT_SECS" "the row the proposal would replace" >/dev/null
+    pass 'a proposal abandoned unread was raised again, drawn in the file it edits'
+
+    # Pressed, not commanded. The maps are buffer-local and are installed by
+    # the same call that draws the marks, so a key typed at the buffer is
+    # the only assertion that both halves of the decoration arrived: what is
+    # visible, and what answers.
+    review_key accept || return 1
     # The review closing on its last open hunk, and then its own count of
     # what it decided: the file assertion below proves the bytes, and this
     # proves they were written by an accept rather than by anything else
     # that could have touched the buffer.
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing on the accept" >/dev/null
+    # The namespace went with it. A decoration that outlived its review
+    # would leave the user reading a proposal that is already the file's own
+    # text, with no keys left to answer it.
+    refute "$PROPOSED_BETA" 'the accepted proposal is still drawn over the text it became'
     wait_for "${REVIEW_MARK}accepted 1 and rejected 0 hunks" "$WAIT_SECS" \
         "the accepted review's own account of itself" >/dev/null
     assert_file_is 'alpha
 BETA
 gamma' 'the accepted hunk was not written byte for byte'
-    pass 'a proposal accepted through the review reached the buffer byte-exactly'
+    pass 'a proposal accepted with <leader>ha in the buffer reached it byte-exactly'
 
     submit 'propose2'
-    wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the second diff review's keys" >/dev/null
-    review_verb reject
+    wait_in_buffer "$PROPOSED_GAMMA" "$WAIT_SECS" \
+        "the second proposal's own line, drawn in the file" >/dev/null
+    review_key reject || return 1
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing on the reject" >/dev/null
     wait_for "${REVIEW_MARK}accepted 0 and rejected 1 hunks" "$WAIT_SECS" \
         "the rejected review's own account of itself" >/dev/null
     assert_file_is 'alpha
 BETA
 gamma' 'a rejected hunk changed the buffer'
-    refute 'GAMMA' 'a rejected hunk reached the buffer'
-    pass 'a rejected proposal left the buffer untouched'
+    refute 'GAMMA' 'a rejected hunk reached the buffer, or is still drawn over it'
+    pass 'a proposal rejected with <leader>hx left the buffer untouched'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
@@ -854,6 +949,17 @@ REVIEW_KEY_HINT=${REVIEW_KEY_HINT:0:20}
     printf 'FAIL: the review key hint read empty from %s\n' "$REVIEW_RS" >&2
     exit 1
 }
+# What a proposed line looks like where the review draws it: the stub's own
+# `newText` behind the prefix the decoration chunk puts in front of every
+# virtual line. Both halves are guarded rather than derived -- the templates
+# below are what a rewording of either would fail on, and the words
+# themselves are the same ones `assert_file_is` already spells out of the
+# same fixture.
+require_template "$STUB_RS" '("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n")' || exit 1
+require_template "$STUB_RS" '("alpha\nBETA\ngamma\n", "alpha\nBETA\nGAMMA\n")' || exit 1
+require_template "$NVIM_API_RS" "virt[#virt + 1] = { { '+' .. line, 'DiffAdd' } }" || exit 1
+PROPOSED_BETA='+BETA'
+PROPOSED_GAMMA='+GAMMA'
 # The marker the review's own transcript lines carry. Every review ends
 # with one, and what it says is how the review ended -- which is the one
 # reading of a decision that comes from the review itself rather than from
