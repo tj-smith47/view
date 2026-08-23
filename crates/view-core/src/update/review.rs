@@ -219,7 +219,7 @@ const STRAY_KEY_FAMILY: &str = "A review is open";
 /// is in, and both ways out of it. Names the keys rather than pointing at
 /// the hint row, since the reader has just demonstrated they were not
 /// reading it.
-const STRAY_KEY_NOTICE: &str =
+pub(super) const STRAY_KEY_NOTICE: &str =
     "A review is open and owns these keys -- decide it (a accept, x reject, R re-diff) \
      or close it (q) before typing";
 

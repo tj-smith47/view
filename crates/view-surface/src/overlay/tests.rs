@@ -1150,7 +1150,7 @@ fn clip_spans_landing_mid_span_keeps_the_role_on_the_surviving_text() {
         Span::new("AB", StyleRole::Mode),
         Span::new("CD", StyleRole::File),
     ];
-    let out = clip_spans(spans, 3);
+    let out = clip_spans(&spans, 3);
     assert_eq!(
         out,
         vec![
@@ -1169,7 +1169,7 @@ fn clip_spans_drops_a_span_entirely_once_the_width_is_already_used() {
         Span::new("CD", StyleRole::File),
         Span::new("EF", StyleRole::GitBranch),
     ];
-    let out = clip_spans(spans, 2);
+    let out = clip_spans(&spans, 2);
     assert_eq!(out, vec![Span::new("AB", StyleRole::Mode)]);
 }
 
@@ -1182,7 +1182,7 @@ fn clip_spans_preserves_the_role_sequence_when_everything_fits() {
         Span::new("CD", StyleRole::DiagnosticError),
         Span::new("EF", StyleRole::DiagnosticWarning),
     ];
-    let out = clip_spans(spans.clone(), 6);
+    let out = clip_spans(&spans, 6);
     assert_eq!(out, spans);
 }
 
@@ -1192,7 +1192,7 @@ fn clip_spans_preserves_the_role_sequence_when_everything_fits() {
 #[test]
 fn clip_spans_pads_with_a_trailing_plain_span_not_the_last_roles_span() {
     let spans = vec![Span::new("AB", StyleRole::Mode)];
-    let out = clip_spans(spans, 5);
+    let out = clip_spans(&spans, 5);
     assert_eq!(
         out,
         vec![Span::new("AB", StyleRole::Mode), Span::plain("   "),]

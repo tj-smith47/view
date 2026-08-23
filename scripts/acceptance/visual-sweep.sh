@@ -43,6 +43,7 @@ PICKER_RS=$REPO_ROOT/crates/view-core/src/native/picker.rs
 PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
 OVERLAY_RS=$REPO_ROOT/crates/view-surface/src/overlay.rs
+NVIM_API_RS=$REPO_ROOT/crates/view-engine/src/nvim_api.rs
 
 # The pane most legs read. The width is what the agent panel's own title
 # needs whole: the panel takes a fixed share of the terminal, and its
@@ -630,6 +631,15 @@ esac
 # framed box both, so a wait for either passes on a key that reached
 # nothing but the fallback. What separates them is a word only the intended
 # surface paints, so every entry point below waits for its own.
+# What the tree's create prompt asks with, read out of the engine call that
+# primes `vim.fn.input()` with it: the paste leg has to know the prompt is
+# up before it pastes, or it would be pasting at the tree instead.
+CREATE_PROMPT=$(grep -A 6 'pub fn tree_create_prompt' "$NVIM_API_RS" |
+    grep -oE 'Value::from\("[^"]+"\)' | sed -E 's/.*"(.*)".*/\1/' | head -1)
+[ -n "$CREATE_PROMPT" ] || {
+    printf 'FAIL: %s no longer primes the tree create prompt with a literal question\n' "$NVIM_API_RS" >&2
+    exit 1
+}
 HISTORY_TITLE=$(grep -oE 'PaletteView::new\("[^"]+"\)' "$PALETTE_RS" |
     sed -E 's/.*"(.*)".*/\1/' | tail -1)
 [ -n "$HISTORY_TITLE" ] || {
@@ -973,36 +983,65 @@ leg_narrow_title() {
 # text, no notice and nothing on screen -- and no unit test above the
 # routing could see it, because what a real paste even looks like is
 # decided by the terminal, not by the model.
+paste_into_pane() {
+    local text="$1"
+    # the trailing newline is the point: a copied line ends with one, and
+    # not reading it as `<CR>` is what bracketed paste exists for. `-r`
+    # keeps it a newline -- tmux otherwise translates it to a carriage
+    # return, which is a different byte from the one a real paste carries
+    printf '%s\n' "$text" >"$WORK/paste.txt"
+    tmux load-buffer -b view-paste "$WORK/paste.txt"
+    tmux paste-buffer -b view-paste -d -r -p -t "$SESSION"
+}
+
 leg_panel_paste() {
     CURRENT_LEG=panel-paste
-    local mark=PASTEMARK buffer=$WORK/paste.txt echoed copies
+    local mark=PASTEMARK tree_mark=TREEPASTE echoed copies
     start_session paste 'visual sweep seed line'
     command_line ':View ai'
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
     send_text 'y'
     wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
 
-    # the trailing newline is the point of the leg: a copied line ends with
-    # one, and not submitting on it is what bracketed paste exists for.
-    # `-r` keeps it a newline -- tmux otherwise translates it to a carriage
-    # return, which is a different byte from the one a real paste carries
-    printf '%s\n' "$mark" >"$buffer"
-    tmux load-buffer -b view-paste "$buffer"
-    tmux paste-buffer -b view-paste -d -r -p -t "$SESSION"
+    paste_into_pane "$mark"
 
     # on the composer's own line, named by the prompt mark: a submitted
     # prompt leaves that line empty and moves its text into the transcript,
     # so finding it here is the same assertion as "nothing was sent"
     echoed=$(wait_in_box "> $mark" "$REACTION_SECS" "the pasted prompt on the composer line")
+    # after the settle `assert_chrome` runs, never on the capture the wait
+    # above happened to stop on: a mid-frame read is a count of whatever was
+    # painted so far
+    assert_chrome 'the agent panel holding a pasted prompt'
     copies=$(box_text | grep -cF -- "$mark" || true)
     if [ "$copies" != 1 ]; then
         fail "the pasted prompt is on screen $copies times, so something echoed it into the transcript as well as holding it in the composer"
         return 1
     fi
-    assert_chrome 'the agent panel holding a pasted prompt'
     pass "a bracketed paste lands in the composer and sends nothing (${echoed}s)"
 
     dismiss ai
+
+    # The other surface with a text input, and the one that cannot take a
+    # paste locally at all: the tree's create prompt is nvim blocked inside
+    # `vim.fn.input()`, reading its own keys, so pasted text either arrives
+    # as keys or is lost. Driven here because nothing below a real engine
+    # can answer whether nvim typed it.
+    command_line ':View tree'
+    wait_in_box "$(basename -- "$ROOT")" "$WAIT_SECS" "the file tree" >/dev/null
+    send_text 'a'
+    wait_in_box "$CREATE_PROMPT" "$WAIT_SECS" "the tree's create prompt" >/dev/null
+
+    paste_into_pane "$tree_mark"
+
+    echoed=$(wait_in_box "$tree_mark" "$REACTION_SECS" "the pasted name in the create prompt")
+    assert_chrome 'the create prompt holding a pasted name'
+    pass "a paste into a blocked vim.fn.input() prompt is typed into it (${echoed}s)"
+
+    # the prompt first (Escape cancels the input, creating nothing), then
+    # the tree that raised it
+    send_key Escape
+    dismiss
     end_session
 }
 

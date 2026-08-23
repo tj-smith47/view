@@ -25,6 +25,7 @@ use crate::native::supervision::{
     ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION,
     RESTART_NOTATION,
 };
+use crate::update::paste::{NO_TEXT_INPUT_NOTICE, PERMISSION_PASTE_NOTICE};
 use std::time::Duration;
 
 /// Every message line currently on screen, joined per row -- the same
@@ -103,6 +104,40 @@ fn open_overlay(model: &mut Model) -> OverlayId {
     p.learn_cmdline(&cmdline);
     model.engine.cmdline = Some(cmdline);
     model.push_overlay(OverlayBox::new(50, 50), kind)
+}
+
+/// [`open_overlay`]'s free-text counterpart: a prompt whose `cmdline_show`
+/// carries no accelerator list, which is the `vim.fn.input()` shape the
+/// tree's create and rename prompts arrive in. `inputlist()` is the same
+/// wire shape carrying nvim's own fixed instruction, so both are built
+/// here, from the one prompt string that tells them apart.
+fn open_typed_prompt(model: &mut Model, prompt: &str) -> OverlayId {
+    let cmdline = CmdlineState {
+        content: vec![],
+        pos: 0,
+        firstc: String::new(),
+        prompt: prompt.into(),
+        indent: 0,
+        level: 1,
+    };
+    let mut kind = some_overlay_kind();
+    let OverlayKind::Prompt(p) = &mut kind else {
+        unreachable!("some_overlay_kind always returns OverlayKind::Prompt")
+    };
+    p.learn_cmdline(&cmdline);
+    model.engine.cmdline = Some(cmdline);
+    model.push_overlay(OverlayBox::new(50, 50), kind)
+}
+
+fn open_free_text_prompt(model: &mut Model) -> OverlayId {
+    open_typed_prompt(model, "New file: ")
+}
+
+fn open_inputlist_prompt(model: &mut Model) -> OverlayId {
+    open_typed_prompt(
+        model,
+        "Choose: \nType number and <Enter> (q or empty cancels): ",
+    )
 }
 
 /// The ids on the stack, bottom first.
@@ -934,9 +969,9 @@ fn a_paste_past_the_wrap_cap_keeps_every_character_and_paints_its_tail() {
 }
 
 /// A focused native surface that composes no text answers the paste instead
-/// of swallowing it. Three shapes reach this, and all three own every key
-/// while they are up: a confirm prompt, an unanswered permission request,
-/// and an open review.
+/// of swallowing it, and each answer names that surface's own way forward.
+/// The permission's answer must not name `<Esc>`, which there is not a way
+/// out at all but a `Cancelled` reply that kills the agent's tool call.
 #[test]
 fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
     let with_prompt = || {
@@ -944,10 +979,38 @@ fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
         open_overlay(&mut m);
         m
     };
-    for (what, mut m) in [
-        ("a confirm prompt", with_prompt()),
-        ("an unanswered permission", pending_permission_model()),
-        ("an open review", live_review_model()),
+    let with_tree = || {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                m.overlays().last().map(|o| &o.kind),
+                Some(OverlayKind::Tree(_))
+            ),
+            "toggle must have opened the tree: {:?}",
+            m.overlays()
+        );
+        m
+    };
+    for (what, mut m, expected) in [
+        ("a confirm prompt", with_prompt(), NO_TEXT_INPUT_NOTICE),
+        ("the tree", with_tree(), NO_TEXT_INPUT_NOTICE),
+        (
+            "an unanswered permission",
+            pending_permission_model(),
+            PERMISSION_PASTE_NOTICE,
+        ),
+        (
+            "an open review",
+            live_review_model(),
+            review::STRAY_KEY_NOTICE,
+        ),
     ] {
         m.ai_panel_mut().input = "draft".to_string();
 
@@ -963,18 +1026,74 @@ fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
             "{what} owns the keyboard, so nothing lands in the composer behind it"
         );
         assert!(
+            visible_texts(&m).iter().any(|line| line == expected),
+            "{what} must answer with its own notice: {:?}",
             visible_texts(&m)
-                .iter()
-                .any(|line| line == NO_TEXT_INPUT_NOTICE),
-            "{what} left the paste with no answer on screen: {:?}",
+        );
+        assert!(
+            !visible_texts(&m).iter().any(|line| line.contains("<Esc>")),
+            "no notice may advise a key that answers or leaves the surface \
+             the reader was aiming past: {:?}",
             visible_texts(&m)
         );
     }
 }
 
-/// The picker's filter is the other native surface that takes typed text,
-/// and a paste edits it the same way a keystroke does: one insertion, and
-/// the matcher worker re-asked for the query it produced.
+/// The brief's other text input: a `vim.fn.input()` prompt (the tree's
+/// create and rename) echoes typed text back, so a pasted path belongs in
+/// it. Its keys reach nvim as `RpcCall::Input` because the engine is
+/// blocked inside the prompt, and the paste takes the same road -- with the
+/// two characters nvim would otherwise read as keys neutralized: `<` is
+/// spelled `<lt>`, and the trailing newline that would submit half a path
+/// is gone.
+#[test]
+fn a_paste_at_a_free_text_prompt_is_typed_into_it() {
+    let mut m = model();
+    open_free_text_prompt(&mut m);
+
+    let effects = update(&mut m, Msg::Paste("src/a<b>.rs\n".into()));
+
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "src/a<lt>b>.rs"
+        ),
+        "the prompt is blocked reading keys, so the paste arrives as keys: {effects:?}"
+    );
+    assert!(
+        visible_texts(&m).is_empty(),
+        "a prompt that took the text has nothing to notice about: {:?}",
+        visible_texts(&m)
+    );
+}
+
+/// `inputlist()` shares the free-text wire shape and accepts a digit, so it
+/// is the one prompt of that shape with nowhere to put a pasted path.
+#[test]
+fn a_paste_at_an_inputlist_prompt_takes_the_notice_instead() {
+    let mut m = model();
+    open_inputlist_prompt(&mut m);
+
+    let effects = update(&mut m, Msg::Paste("src/main.rs".into()));
+
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "nothing a digit prompt could do with a path: {effects:?}"
+    );
+    assert!(
+        visible_texts(&m)
+            .iter()
+            .any(|line| line == NO_TEXT_INPUT_NOTICE),
+        "{:?}",
+        visible_texts(&m)
+    );
+}
+
+/// The picker's filter is another native surface that takes typed text, and
+/// a paste edits it the same way a keystroke does: one insertion, and the
+/// matcher worker re-asked for the query it produced. The trailing newline
+/// of a copied line comes off: live grep matches the needle literally, so a
+/// query ending in a space finds nothing.
 #[test]
 fn a_paste_at_the_focused_picker_filters_on_what_was_pasted() {
     let mut m = model();
@@ -991,9 +1110,39 @@ fn a_paste_at_the_focused_picker_filters_on_what_was_pasted() {
     assert!(
         matches!(
             &effects[..],
-            [Effect::PickerQuery { needle, .. }] if needle == "src/main "
+            [Effect::PickerQuery { needle, .. }] if needle == "src/main"
         ),
-        "the filter takes the paste, its line break spaced out: {effects:?}"
+        "the filter takes the paste, trailing newline and all removed: {effects:?}"
+    );
+}
+
+/// A paste that carried nothing is not an edit: the picker's selection
+/// stays where the user left it rather than jumping back to the first row,
+/// and no surface raises a notice about text nobody sent.
+#[test]
+fn an_empty_paste_changes_nothing_at_any_surface() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "picker".to_string(),
+            verb: "files".to_string(),
+        },
+    );
+    assert!(update(&mut m, Msg::Paste(String::new())).is_empty());
+
+    let mut m = entered_ai_panel_model();
+    m.dirty = false;
+    assert!(update(&mut m, Msg::Paste(String::new())).is_empty());
+    assert!(!m.dirty, "nothing changed, so nothing has to be repainted");
+
+    let mut m = model();
+    open_overlay(&mut m);
+    assert!(update(&mut m, Msg::Paste(String::new())).is_empty());
+    assert!(
+        visible_texts(&m).is_empty(),
+        "an empty paste is not worth a notice: {:?}",
+        visible_texts(&m)
     );
 }
 

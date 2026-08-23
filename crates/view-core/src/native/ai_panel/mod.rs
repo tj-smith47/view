@@ -215,6 +215,20 @@ impl AiPanelState {
         }
     }
 
+    /// Whether something the panel is showing owns its keys, so the
+    /// composer is not the thing input reaches.
+    ///
+    /// The single list of those states. `update::route_key`'s
+    /// `OverlayKind::Ai` arm reaches its composer section for exactly the
+    /// states this answers `false` for -- plus the ways out of the panel,
+    /// which every state honors -- and the paste path asks this directly. A
+    /// state added to one of the two and not the other is text landing
+    /// under a modal the reader is looking at.
+    #[must_use]
+    pub fn an_owner_holds_the_keys(&self) -> bool {
+        self.pending_permission.is_some() || self.pending_diff.is_some()
+    }
+
     /// How many transcript rows a panel `panel_height` terminal rows tall
     /// and `panel_width` columns wide has room for, once the overlay's own
     /// chrome has had its share.
@@ -313,7 +327,8 @@ impl AiPanelState {
         } else {
             self.composer_cap(panel_height)
         };
-        wrap(&self.input, width.max(1), cap)
+        let width = width.max(1);
+        wrap(wrap_window(&self.input, width, cap), width, cap)
     }
 
     /// Where the next character typed will land: an index into the rows
@@ -571,6 +586,47 @@ pub fn composer_width(panel_width: usize) -> usize {
 fn char_cells(ch: char) -> usize {
     1 + usize::from(!ch.is_ascii())
 }
+
+/// The tail of `input` that the last `keep` rows of its wrap can be read
+/// from, so one paint costs what the panel can paint rather than whatever
+/// the clipboard held.
+///
+/// A paste puts an arbitrary amount of text into the composer in one
+/// gesture, and [`wrap`] walks every character it is given on every frame:
+/// past a few hundred kilobytes that walk alone is over the whole output
+/// budget, spent on rows that were never going to be painted. Only the last
+/// `keep` rows can be, a row holds at most `width` cells, and a cell is at
+/// most four bytes of UTF-8, so `4 * width * (keep + 1)` bytes always hold
+/// more than `keep` rows' worth of text -- one row spare, because the
+/// window may open in the middle of one.
+///
+/// The window opens on a multiple of `width` bytes rather than at a fixed
+/// distance from the end, so that appending does not slide it and reflow
+/// rows the reader has already read. For text of one-byte characters --
+/// where a byte is a cell -- such an offset is a row boundary of the full
+/// wrap, so what this produces is exactly what wrapping the whole input
+/// would have produced. Multi-byte characters in the window's first row can
+/// move a later break a column off from where the full wrap would have put
+/// it; every character of the tail is still on screen in order, and the
+/// alternative is a frame whose cost the user sets with their clipboard.
+fn wrap_window(input: &str, width: usize, keep: usize) -> &str {
+    let span = keep
+        .saturating_add(1)
+        .saturating_mul(width)
+        .saturating_mul(BYTES_PER_CELL);
+    let mut start = input.len().saturating_sub(span);
+    start -= start % width;
+    // forward to a boundary, never back: a start inside a character would
+    // panic the slice, and the row spare above is what pays for the shift
+    while !input.is_char_boundary(start) {
+        start += 1;
+    }
+    &input[start..]
+}
+
+/// The widest UTF-8 encoding of one character, which is also the most bytes
+/// one terminal cell of composer text can cost -- see [`wrap_window`].
+const BYTES_PER_CELL: usize = 4;
 
 /// The last `keep` of the rows `input` breaks into at `width` cells each,
 /// in order, always at least one row.
@@ -959,6 +1015,41 @@ mod tests {
         assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (0, width));
         state.input.push('y');
         assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (1, 1));
+    }
+
+    /// One paint costs what the panel can paint, never what was on the
+    /// clipboard. A megabyte pasted into the composer is a megabyte walked
+    /// on every frame if the wrap is handed all of it -- milliseconds, for
+    /// rows nothing was ever going to draw -- so the wrap is handed the tail
+    /// the visible rows come out of instead.
+    #[test]
+    fn a_paste_larger_than_the_panel_is_wrapped_from_a_window_the_panel_could_paint() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let pasted: String = (0..(1 << 20))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+
+        let window = wrap_window(&pasted, width, cap);
+        assert!(
+            window.len() <= (cap + 2) * width * BYTES_PER_CELL,
+            "the walk is bounded by the rows the panel has, not by the {} \
+             bytes pasted: {} bytes",
+            pasted.len(),
+            window.len()
+        );
+
+        let mut state = AiPanelState::new();
+        state.input = pasted.clone();
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        assert_eq!(
+            rows,
+            wrap(&pasted, width, cap),
+            "and the rows are exactly the ones the whole input would have \
+             produced -- a window opening anywhere but a row boundary \
+             reflows every row the reader has already read"
+        );
+        assert!(pasted.ends_with(&rows.concat()), "the tail is what shows");
     }
 
     /// The wrap boundary itself, where an off-by-one puts the cursor on a

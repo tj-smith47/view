@@ -277,6 +277,24 @@ impl PromptState {
         };
     }
 
+    /// Whether this prompt is one whose answer is typed text -- the
+    /// `vim.fn.input()` shape the tree's create and rename prompts use (see
+    /// [`Answer::FreeText`]).
+    ///
+    /// `inputlist()` is deliberately not one: it accepts a digit and the
+    /// keys its own prompt text documents, so text pasted into it is not an
+    /// answer it has any way to hold.
+    #[must_use]
+    pub fn takes_typed_text(&self) -> bool {
+        matches!(
+            self.answer,
+            Answer::FreeText {
+                digits_only: false,
+                ..
+            }
+        )
+    }
+
     /// Whether `notation` is one of this prompt's captured choice keys.
     ///
     /// A choice prompt accepts its accelerator letters case-insensitively,

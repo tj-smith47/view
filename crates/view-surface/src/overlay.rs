@@ -899,11 +899,18 @@ fn prefixed(spans: &[Span], marker: &str) -> Vec<Span> {
 
 /// Renders `line` as exactly `width` display cells.
 ///
-/// Every column is sanitized before it is measured or placed, so a control
-/// character in feature-supplied text becomes a plain space here rather
-/// than reaching a consumer: the terminal painter replaces one anyway, but
-/// the oracle's rasterizer writes what it is given straight into a screen
-/// dump, and a raw control byte in a golden is not a picture of anything.
+/// Every column is sanitized, so a control character in feature-supplied
+/// text becomes a plain space here rather than reaching a consumer: the
+/// terminal painter replaces one anyway, but the oracle's rasterizer writes
+/// what it is given straight into a screen dump, and a raw control byte in
+/// a golden is not a picture of anything.
+///
+/// A one-line row is clipped first and sanitized after, which is the same
+/// text either way -- [`cell_width`] measures a control character as the
+/// one column the space it becomes will take -- and copies only the columns
+/// that survive. What a row holds is bounded by the frame; what a span
+/// holds is not, since a pasted prompt echoed into the transcript is as
+/// long as the clipboard was.
 ///
 /// Display cells, never characters: a wide (CJK) glyph occupies two
 /// columns, and a row measured in characters would leave the frame's right
@@ -918,7 +925,7 @@ fn prefixed(spans: &[Span], marker: &str) -> Vec<Span> {
 /// gap.
 fn fit(line: &Line, width: u16, borders: BorderSet) -> Vec<Span> {
     match line {
-        Line::Text(spans) => clip_spans(sanitize_spans(spans), width),
+        Line::Text(spans) => sanitize_spans(&clip_spans(spans, width)),
         Line::Split(left, right) => {
             let (left, right) = (sanitize_spans(left), sanitize_spans(right));
             let (left_cells, right_cells) = (span_cells(&left), span_cells(&right));
@@ -926,7 +933,7 @@ fn fit(line: &Line, width: u16, borders: BorderSet) -> Vec<Span> {
             let mut combined = left;
             combined.push(Span::plain(" ".repeat(usize::from(gap))));
             combined.extend(right);
-            clip_spans(combined, width)
+            clip_spans(&combined, width)
         }
         Line::Spread(left, center, right) => {
             let (left, center, right) = (
@@ -945,7 +952,7 @@ fn fit(line: &Line, width: u16, borders: BorderSet) -> Vec<Span> {
             combined.extend(center);
             combined.push(Span::plain(" ".repeat(usize::from(gap))));
             combined.extend(right);
-            clip_spans(combined, width)
+            clip_spans(&combined, width)
         }
         Line::Rule => {
             let mut rule = String::new();
@@ -981,7 +988,7 @@ fn sanitized(text: &str) -> String {
 /// of the cut, and any span past the cut is dropped entirely. Padding past
 /// the last span's content is always a trailing plain span, never merged
 /// into whatever role the row's last real content span carries.
-fn clip_spans(spans: Vec<Span>, width: u16) -> Vec<Span> {
+fn clip_spans(spans: &[Span], width: u16) -> Vec<Span> {
     let mut out: Vec<Span> = Vec::new();
     let mut used = 0_u16;
     for span in spans {
@@ -1048,9 +1055,15 @@ fn cells(text: &str) -> u16 {
 }
 
 /// One character's width in terminal display cells. A combining mark
-/// occupies none (control characters never reach here: [`sanitized`]
-/// replaced each with a space before anything was measured).
+/// occupies none; a control character occupies the one column the space
+/// [`sanitized`] replaces it with will, so a row measures the same before
+/// and after that replacement.
 fn cell_width(ch: char) -> u16 {
+    // measured as the space [`sanitized`] turns it into, so a row clipped
+    // before it is sanitized holds the same text as one sanitized first
+    if ch.is_control() {
+        return 1;
+    }
     u16::try_from(ch.width().unwrap_or(0)).unwrap_or(u16::MAX)
 }
 

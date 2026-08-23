@@ -681,7 +681,7 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span
             };
             vec![vec![
                 Span::new(mark, style),
-                Span::new(entry.text.clone(), style),
+                Span::new(paintable(&entry.text), style),
             ]]
         }
         TranscriptEntryKind::ToolCall { status, result, .. } => {
@@ -698,12 +698,12 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span
             };
             let mut rows = vec![vec![
                 Span::new(mark, style),
-                Span::plain(entry.text.clone()),
+                Span::plain(paintable(&entry.text)),
             ]];
             rows.extend(
                 result
                     .iter()
-                    .map(|line| vec![Span::plain(format!("  {line}"))]),
+                    .map(|line| vec![Span::plain(format!("  {}", paintable(line)))]),
             );
             rows
         }
@@ -715,10 +715,35 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span
                     PlanEntryStatus::InProgress => (PLAN_ACTIVE_MARK, StyleRole::AiAgent),
                     PlanEntryStatus::Completed => (TOOL_DONE_MARK, StyleRole::AiToolDone),
                 };
-                vec![Span::new(mark, style), Span::plain(e.content.clone())]
+                vec![Span::new(mark, style), Span::plain(paintable(&e.content))]
             })
             .collect(),
     }
+}
+
+/// The most of one line a rendered row carries, in bytes, cut at a char
+/// boundary.
+///
+/// A transcript row is never wrapped and never scrolled sideways: the
+/// overlay clips it to the panel's width, so anything past a terminal's
+/// widest row can never be seen. Carrying it anyway is not free -- every
+/// cached row is cloned out of the cache on each frame, so one submitted
+/// megabyte (a paste into the composer is the easy way to make one) costs a
+/// megabyte of memcpy per paint. The ceiling is bytes rather than cells
+/// because it exists to bound copying; at four bytes per char it still
+/// leaves two thousand columns, wider than a terminal is.
+const ROW_PAINT_CEILING: usize = 8 << 10;
+
+/// `text` cut to [`ROW_PAINT_CEILING`] at a char boundary.
+fn paintable(text: &str) -> &str {
+    if text.len() <= ROW_PAINT_CEILING {
+        return text;
+    }
+    let mut end = ROW_PAINT_CEILING;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 #[cfg(test)]
@@ -731,6 +756,23 @@ mod tests {
     /// A row budget larger than any transcript a test builds, for the tests
     /// whose subject is what renders rather than how much of it does.
     const ROOM: usize = 1_000;
+
+    /// A submitted paste puts a line longer than any terminal in the
+    /// transcript, and that row is cloned out of the cache on every frame:
+    /// what it carries stops at what a row could ever paint, on a char
+    /// boundary, and the cut is a suffix rather than a reflow.
+    #[test]
+    fn a_line_longer_than_any_terminal_carries_only_what_a_row_could_paint() {
+        let mut transcript = Transcript::new();
+        let pasted = "\u{2026}".repeat(ROW_PAINT_CEILING);
+        transcript.append_or_extend(None, &pasted, TranscriptRole::User);
+
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let painted = &rows[0][1].text;
+
+        assert_eq!(painted.len(), 8_190, "cut back to the char boundary");
+        assert!(pasted.starts_with(painted.as_str()));
+    }
 
     /// One agent reply's rendered row, marker span and all.
     fn agent_row(text: &str) -> Vec<Span> {

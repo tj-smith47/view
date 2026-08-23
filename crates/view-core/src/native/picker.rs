@@ -211,16 +211,24 @@ impl PickerState {
         self.requery()
     }
 
-    /// Inserts one pasted `text` into the query as a single edit, every
-    /// control character in it standing in as the space it would paint as.
+    /// Inserts one pasted `text` into the query as a single edit: trailing
+    /// whitespace dropped, and every control character left inside it
+    /// standing in as the space it would paint as.
     ///
-    /// A query is one line and the filter matches against one: dropping the
-    /// line breaks out of a pasted list instead would run its last word into
-    /// the next one's first and filter for a needle that was never on the
-    /// clipboard.
+    /// A query is one line and the filter matches against one. Dropping the
+    /// interior line breaks out of a pasted list instead would run its last
+    /// word into the next one's first and filter for a needle that was
+    /// never on the clipboard, while keeping the trailing one would search
+    /// for `"needle "`: a copied line arrives with its newline, and live
+    /// grep matches the needle literally (`view-native`'s
+    /// `escape_literal`), so that trailing space is the difference between
+    /// every match and none.
     pub fn paste_query(&mut self, text: &str) -> u64 {
-        self.query
-            .extend(text.chars().map(|c| if c.is_control() { ' ' } else { c }));
+        self.query.extend(
+            text.trim_end()
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c }),
+        );
         self.requery()
     }
 
@@ -474,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_query_inserts_the_whole_text_with_its_line_breaks_spaced_out() {
+    fn paste_query_spaces_out_the_breaks_inside_the_text_and_drops_the_last() {
         let mut state = PickerState::open(Source::Buffers);
         state.edit_query("s");
         let before = state.generation();
@@ -482,8 +490,10 @@ mod tests {
 
         assert_eq!(
             state.query(),
-            "src/main.rs src/lib.rs ",
-            "the paste lands whole, each break standing in as a space"
+            "src/main.rs src/lib.rs",
+            "the paste lands whole, each interior break standing in as a \
+             space -- and the copied line's own newline is not a needle \
+             live grep would search for literally"
         );
         assert!(after > before, "the matcher worker gets a fresh generation");
     }
