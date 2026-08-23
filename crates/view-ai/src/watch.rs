@@ -2497,7 +2497,9 @@ mod tests {
     /// ignored because a `git` that quietly did nothing leaves an empty
     /// index behind, and an empty index is exactly what the tests below
     /// would read as "the whitelist is working".
-    fn git(root: &Path, args: &[&str]) {
+    /// Answers what it printed, and takes its arguments as `OsStr` rather
+    /// than `str`, so a path git records as raw bytes can be handed to it.
+    fn git<S: AsRef<std::ffi::OsStr>>(root: &Path, args: &[S]) -> Vec<u8> {
         let out = std::process::Command::new("git")
             .args(args)
             .current_dir(root)
@@ -2505,9 +2507,11 @@ mod tests {
             .expect("git must be on PATH for the index-aware watch tests");
         assert!(
             out.status.success(),
-            "git {args:?} failed: {}",
+            "git {:?} failed: {}",
+            args.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             String::from_utf8_lossy(&out.stderr)
         );
+        out.stdout
     }
 
     /// A file force-added inside an ignored directory is tracked, and git
@@ -2772,9 +2776,17 @@ mod tests {
     /// cover nothing while claiming to. The sibling proves the rest of the
     /// listing is still read: one unreadable name must not cost the whole
     /// index.
+    ///
+    /// The name goes into the index without ever being created on disk,
+    /// which is both what the code under test reads (the listing, never the
+    /// file) and the only way the case runs on every unix: ext4 stores any
+    /// byte sequence but a filename APFS refuses is refused at `creat(2)`
+    /// with `EILSEQ`, so a test that planted a real file pinned this
+    /// behaviour on Linux alone and failed the macOS gate outright.
     #[cfg(unix)]
     #[test]
     fn a_non_utf8_index_entry_is_dropped_without_costing_the_rest() {
+        use std::ffi::{OsStr, OsString};
         use std::os::unix::ffi::OsStrExt;
 
         let root = tempdir();
@@ -2782,11 +2794,26 @@ mod tests {
         std::fs::create_dir(root.join("generated")).unwrap();
         let kept = root.join("generated").join("kept.rs");
         std::fs::write(&kept, b"x").unwrap();
-        let raw = root
-            .join("generated")
-            .join(std::ffi::OsStr::from_bytes(b"bad\xffname.rs"));
-        std::fs::write(&raw, b"x").unwrap();
-        git(&root, &["add", "-f", "generated"]);
+        git(&root, &["add", "-f", "generated/kept.rs"]);
+        // an object the index entry below can point at; `--stdin` with no
+        // stdin is the empty blob, and `--cacheinfo` refuses an object the
+        // repository does not have
+        let mut blob = git(&root, &["hash-object", "-w", "--stdin"]);
+        blob.truncate(blob.iter().position(|byte| *byte == b'\n').unwrap_or(0));
+        let mut entry = OsString::from(format!(
+            "100644,{},generated/",
+            String::from_utf8_lossy(&blob)
+        ));
+        entry.push(OsStr::from_bytes(b"bad\xffname.rs"));
+        git(
+            &root,
+            &[
+                OsString::from("update-index"),
+                OsString::from("--add"),
+                OsString::from("--cacheinfo"),
+                entry,
+            ],
+        );
         let (_, mut ignores) = walked(&root, &[(".gitignore", "generated/\n")], &[]);
 
         ignores.refresh_tracked();
