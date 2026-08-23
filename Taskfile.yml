@@ -272,6 +272,35 @@ tasks:
       - task: ci
       - git add -A
       - git commit {{.CLI_ARGS}}
+
+  release:init:
+    desc: Scaffold .anodizer.yaml — run once, then review the generated config
+    cmd: anodizer init
+
+  release:check:
+    desc: Dry-run the release — validate config and would-be artifacts, no tag, no publish
+    # placeholder until release:init lands .anodizer.yaml; its build and
+    # changelog blocks are what the dry-run resolves against
+    cmd: anodizer check
+
+  release:tag:
+    desc: Cut the release tag, changelog generated from commit subjects — never hand-edit CHANGELOG.md
+    cmd: anodizer tag --changelog
+
+  release:publish:
+    desc: The real release — build, sign, publish to GitHub Releases (runs the ci gate first)
+    cmds:
+      - task: ci
+      # placeholder; .anodizer.yaml's target, signing and release blocks
+      # drive what gets built and published
+      - anodizer publish
+
+  release:verify:
+    desc: Verify the published artifacts and signatures against the cut release
+    # placeholder; verifies whatever release .anodizer.yaml describes once
+    # release:init scaffolds it
+    cmd: anodizer verify
+
   mutate:
     desc: "Prove a battery of guards load-bearing: each row is deleted, its tests run, the file restored (task mutate -- .claude/mutations/task-19.tsv)"
     cmd: scripts/mutate.sh {{.CLI_ARGS}}

@@ -357,6 +357,106 @@ reproduce the hang. Coverage: end-to-end paste legs mirroring T17's
 yank test (yank feeds the store, paste lands in the buffer, empty
 clipboard answers fast), red/green under mutation.
 
+## T19 — a dead engine never strands the terminal
+
+Found live 2026-08-23, recording session 2: the embedded nvim exited
+cleanly (code 0) ~7.5 min in — VIEW_LOG's last lines are `engine down
+code=Some(0)` / `engine exit code=0` — and view neither exited nor
+restored the terminal: no process remained, no panic, no core; the
+user sat on a dead raw-mode alt-screen reading it as a total freeze,
+and the tty had to be repaired from another shell. Two questions, both
+this task's: why did the engine exit mid-session at all (the `script`
+recording wrapper stopped writing 9 minutes before the engine exit —
+artifacts preserved in the SDD workspace: live-freeze-viewlog.txt,
+dogfood-typescript, dogfood-timing.log), and why did a clean engine
+exit not tear view down through the existing supervision path that
+already handles crash exits. Fix at the root: any engine exit —
+clean or not — ends in either the restart modal or a clean view exit
+with the terminal restored, never a live view with no engine and no
+paint. Tests pin the clean-exit path end to end (harness leg: engine
+`:quit` under a live panel → view exits 0, terminal restored).
+
+## T20 — nothing paints behind the panel
+
+Found live: toasts and popups rendered behind the open AI panel.
+Root cause is the deliberate layer order in view-surface `render` —
+the native overlay stack is pushed last, so Messages/Popupmenu/
+Cmdline layers paint under a right-pinned panel that overlaps the
+messages box's own top-right pin. Review/permission notices travel
+the same Messages layer, so the panel's own guidance lands beneath
+itself. Fix: engine-side transient surfaces (messages, popupmenu,
+cmdline when overlapping) compose above native overlays, or the
+panel reserves its column so overlapping layers reflow beside it —
+decide from what keeps the §3 paint budget; the sweep gains a leg
+asserting a toast is readable cell-by-cell while the panel is open.
+
+## T21 — permission prompts show their keys and their selection
+
+Found live: the permission prompt paints only the question and option
+names — no keys, no selection highlight, no indication that `y` =
+allow once, `a` = ALLOW ALWAYS, `n` = reject, `<Esc>` = cancel. The
+user pressed `a` believing it meant plain allow and granted standing
+permission, repeatedly, to actions they could not see — the exact
+inversion of what a permission gate is for. Fix: options render as
+selectable items rows (marker + highlight like every other overlay
+list), each labeled with its key and its consequence, always-allow
+visually distinct from allow-once; the hint row is present whether or
+not the panel is focused (the unfocused hint stays too). Tests pin
+the rendered rows; docs/keymaps.md gains the review + permission key
+tables it currently lacks.
+
+## T22 — the review overlay earns the trust gate
+
+Found live ("no trust"): the selected hunk is only highlighted on its
+`@@` header row; the key hints vanish exactly when the review desyncs
+(replaced by the sync notice — and a fully-stale review's only exit
+is the `q` those hints name); resolving a review writes nothing to
+the transcript; and back-to-back proposals promote silently, so the
+user saw "the same task" open a third edit they never got to read.
+Fix: hunk selection highlights the whole hunk body; the key-hint row
+and the sync notice coexist; every resolution writes a transcript
+entry ("accepted 2 hunks in Taskfile.yml", "discarded proposal");
+a promoted next proposal announces itself as a new entry + title
+change. Root-cause the recorded third-edit sequence from the
+preserved typescript + VIEW_LOG and pin whatever it exposes.
+
+## T23 — the composer paints its cursor
+
+Found live: no visible insertion point. `composer_cursor` is computed
+and unit-tested but has no callers outside tests, and `cursor_spec`
+has no AI arm — the hardware caret sits in nvim's grid while typing
+goes to the panel. Fix: an AI arm in `cursor_spec` placing the real
+terminal caret at `composer_cursor` whenever the panel owns input;
+sweep asserts the caret cell.
+
+## T24 — a submitted prompt keeps its shape in the transcript
+
+Found live: a multi-line prompt collapses to one clipped row —
+`render_entry` emits exactly one row per Message, newlines become
+spaces, width clips the rest. Fix: user/agent Message entries wrap to
+the panel's interior width (same measured wrap the composer already
+uses), newlines honored; follow-tail and scroll account for the new
+row counts; ROW_PAINT_CEILING stays the per-entry paint bound.
+
+## T25 — a working agent is visibly working
+
+Found live: after submit, nothing indicates the agent heard until its
+first event arrives. The spinner exists only for tool calls. Fix: the
+turn-in-flight state (already tracked) renders from the moment of
+submit — the existing braille spinner on the newest entry row until
+the first agent event replaces it; no new clock, reuse the deadline
+wakeup the tool spinner already folds into.
+
+## T26 — panel resize keys the terminal doesn't steal
+
+Found live: `<S-Left>`/`<S-Right>` are consumed by macOS/Termius-iPad
+before view sees them. The bindings are hardcoded in two arms and
+documented as not rebindable. Fix: add `[keys]` config for the two
+resize actions (defaults unchanged), plus an alternate default that
+survives common terminals (decide from what nvim itself binds by
+default so the migration contract holds); docs/keymaps.md rows update
+with the config knob.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
