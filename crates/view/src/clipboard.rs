@@ -585,7 +585,8 @@ mod tests {
     /// worker's own `ensure_clip` never gets a backend at all); `reachable`
     /// models a backend that exists but whose read can still fail on its
     /// own terms (e.g. non-text content) independently of reachability --
-    /// the exact distinction finding 2's bug collapsed.
+    /// a distinction the shadow fallback once collapsed, silently losing
+    /// readable-but-failed reads.
     #[derive(Clone)]
     struct FakeClipboard {
         text: Option<String>,
@@ -1134,7 +1135,7 @@ mod tests {
         let _ = worker.join();
     }
 
-    /// The end-to-end version of finding 2's regression test: a write
+    /// The end-to-end version of the shadow-fallback regression test: a write
     /// populates the shadow while the backend is unreachable, and the very
     /// next read on the same register must answer from that shadow -- the
     /// worker's real job-handling loop, not just `read_lines` called

@@ -340,16 +340,22 @@ query as unanswerable because view has no way to capture the
 terminal's reply — it would arrive on stdin and be typed into the
 buffer as garbage.
 
-Fix: an input-side terminal-reply router. Forward the OSC 52 read
-query to the real terminal; recognize the terminal's OSC 52 response
-in view's input path before it reaches key decoding; deliver it to
-nvim through the UI term-event API so the provider's wait resolves.
-A terminal that never answers (common; tmux gates it behind
-set-clipboard) must not turn every paste into a 10s hang — the
-failure policy is part of the task, decided from how nvim's own TUI
-handles the same silence. Coverage: an end-to-end paste leg mirroring
-T17's yank test (query forwarded, reply injected, buffer receives the
-pasted text), red/green under mutation.
+Fix (as shipped — the terminal round trip was investigated and
+rejected): view answers the query itself. The read query is never
+forwarded to the terminal — crossterm decodes an OSC 52 reply into
+destructive normal-mode keystrokes and exposes no raw-byte capture
+point, so an input-side reply router would mean forking the input
+decoder for a reply many terminals refuse anyway (tmux gates it
+behind set-clipboard). Instead the query becomes an effect answered
+by view's clipboard worker — host clipboard when reachable within a
+bounded read budget, else the shadow the passthrough writes now feed
+— delivered back through `nvim_ui_term_event("termresponse", …)`,
+resolving the provider's wait in well under its first 1s window.
+Every query gets exactly one immediate answer; nothing to report
+answers empty rather than silent, so no terminal configuration can
+reproduce the hang. Coverage: end-to-end paste legs mirroring T17's
+yank test (yank feeds the store, paste lands in the buffer, empty
+clipboard answers fast), red/green under mutation.
 
 ## Exit
 
