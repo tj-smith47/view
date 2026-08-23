@@ -55,13 +55,16 @@ dump_dir() {
 # (crates/view-harness/tests/heartbeat_cost.rs): the platform is all a
 # machine can tell about itself, so a host is `dev-<platform>` unless an
 # operator says otherwise. A `controlled-` class is a claim about a quiet
-# machine that no probe here can verify, so it is declared through
-# VIEW_HOST_CLASS (`VIEW_HOST_CLASS=controlled-linux task acceptance`) and
-# never guessed -- a guessed one turns an uncontrolled host's noise into a
-# gate everyone downstream trusts.
+# machine that no probe here can verify, so it is declared and never
+# guessed -- a guessed one turns an uncontrolled host's noise into a gate
+# everyone downstream trusts.
+#
+# The declaration is `CLASS`, the same word `task bench` and `task
+# perf-audit` already take (`CLASS=controlled-linux task acceptance`), so a
+# machine's class is spelled one way across every target that asks.
 host_class() {
-    if [ -n "${VIEW_HOST_CLASS:-}" ]; then
-        printf '%s\n' "$VIEW_HOST_CLASS"
+    if [ -n "${CLASS:-}" ]; then
+        printf '%s\n' "$CLASS"
         return
     fi
     case "$(uname -s)" in
@@ -71,9 +74,9 @@ host_class() {
     esac
 }
 
-# Announces the skip, and fails, when this host is outside a leg's classes.
+# Ends the calling leg, successfully, when this host is outside its classes.
 #
-#   require_class remote-rtt controlled-linux || exit 0
+#   skip_unless_class remote-rtt controlled-linux
 #
 # A leg whose bound is armed on some classes only (`budgets.toml`'s
 # `classes` field) has no bar to measure against anywhere else, and a bar
@@ -81,18 +84,48 @@ host_class() {
 # Aborting is worse still: `task acceptance` runs its legs in sequence, so
 # one refusal takes every later leg down with it and the drop is silent.
 # Hence the announced skip, in a shape a gate log cannot be read past.
-require_class() {
-    local leg="$1" actual want
+#
+# It exits here rather than returning a code the caller acts on: every leg
+# runs under `set -e`, so one written without the `|| exit 0` suffix would
+# abort the sweep exactly the way this exists to stop. Leaves `CLASS`
+# holding the resolved class, for a leg that has to pass it on.
+skip_unless_class() {
+    local leg="$1" want wanted
     shift
-    actual=$(host_class)
+    CLASS=$(host_class)
     for want in "$@"; do
-        if [ "$actual" = "$want" ]; then
+        if [ "$CLASS" = "$want" ]; then
             return 0
         fi
     done
-    printf '%s: SKIPPED (class %s, host is %s)\n' "$leg" "$*" "$actual"
-    return 1
+    # joined first: a pattern applied to `$*` directly rewrites each
+    # parameter and never the spaces bash joins them with
+    wanted="$*"
+    printf '%s: SKIPPED (class %s, host is %s)\n' "$leg" "${wanted// /, }" "$CLASS"
+    exit 0
 }
+
+# The class gate against a known answer, in both directions, on every run.
+#
+# The direction nothing else catches is the gate stuck open: a
+# `skip_unless_class` that skipped unconditionally would leave a declared
+# controlled host printing SKIPPED, exiting 0, and the sweep reading green
+# with the proof it exists for never taken. Two subshells, no processes
+# beyond the `uname` each already pays for.
+check_class_gate() {
+    local out
+    out=$(CLASS=dev-linux skip_unless_class selftest controlled-linux && echo ran)
+    if [ "$out" != "selftest: SKIPPED (class controlled-linux, host is dev-linux)" ]; then
+        printf 'FAIL: the class gate does not skip an out-of-class host (said: %s)\n' "$out" >&2
+        exit 1
+    fi
+    out=$(CLASS=controlled-linux skip_unless_class selftest controlled-linux && echo ran)
+    if [ "$out" != ran ]; then
+        printf 'FAIL: the class gate skips a host inside its own class (said: %s)\n' "$out" >&2
+        exit 1
+    fi
+}
+check_class_gate
 
 # Makes sure `path` is a binary this tree's source produced.
 #

@@ -25,11 +25,11 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 
 # the bound this leg asserts against (budgets.toml's echo_speculated /
 # speculated_ratio_p50 row) is armed on controlled-linux alone, so there is
-# nothing for it to measure against on any other host -- and the class it
-# resolves here is the one the binary reads, or a controlled host would hit
-# the same missing-row refusal an uncontrolled one does
-CLASS=$(host_class)
-require_class remote-rtt controlled-linux || exit 0
+# nothing for it to measure against on any other host; past this the
+# resolved class it leaves in CLASS is the one the binary is handed, or a
+# controlled host would hit the same missing-row refusal an uncontrolled
+# one does
+skip_unless_class remote-rtt controlled-linux
 
 RTT_ACCEPTANCE_BIN=${RTT_ACCEPTANCE_BIN:-$REPO_ROOT/target/release/rtt-acceptance}
 TAPS_VIEW_BIN=${TAPS_VIEW_BIN:-$REPO_ROOT/target/taps/release/view}
@@ -49,11 +49,16 @@ printf 'view acceptance: RTT injection (%s, %s)\n' \
 
 # the resolved class is supplied only when the caller named none: clap
 # refuses `--class` twice, so passing it unconditionally would turn an
-# explicit one into a usage error
-case " $* " in
-*" --class "* | *" --class="*) ;;
-*) set -- --class "$CLASS" "$@" ;;
-esac
+# explicit one into a usage error. Matched argument by argument rather than
+# over the joined list, which cannot tell a flag from a value that contains
+# one.
+named_class=
+for arg in "$@"; do
+    case $arg in
+    --class | --class=*) named_class=1 ;;
+    esac
+done
+[ -n "$named_class" ] || set -- --class "$CLASS" "$@"
 
 # the exit code is echoed as this script's own final log line, on every
 # path (pass, budget breach, refusal), matching `task bench`'s wrapper
