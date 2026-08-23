@@ -335,6 +335,11 @@ and never exercised further).
 - T7's sweep passes against the rebuilt release binary — the same sweep
   that would have caught T1/T2/T5/T6 before the user did.
 - Dogfood journal appended with the findings + fix commits.
+- `task compat` exit 0 at every chain exit, run alongside `task ci` in the
+  final-review dispatch: `task ci` never spawns a real pty, so the whole
+  plugin-supersession surface — and every paint path only a live terminal
+  reaches — is unproven until compat runs (T16 shipped to CI unseen for
+  exactly this reason).
 - Verified live in the same tmux repro flow that reproduced each defect.
 
 ### Exit record — 2026-08-23

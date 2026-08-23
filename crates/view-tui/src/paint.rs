@@ -771,6 +771,14 @@ fn composite_layers(
         if !matches!(layer.kind, LayerKind::EngineGrid) && !damage.covers_any(area) {
             continue;
         }
+        // Past this gate a layer covers at least one damaged row, never
+        // necessarily all of them, so every painter that can write more
+        // than one row clips row by row on its own -- the cmdline and the
+        // tabline are one row tall, which the gate above already names
+        // exactly. A painter repainting its whole rect writes rows this
+        // frame is not repainting, and a clipped layer above it never
+        // paints back over them: a toast border left sitting in the
+        // sidebar's top edge until something else damages that row.
         match &layer.kind {
             LayerKind::EngineGrid => {
                 paint_grid(
@@ -783,12 +791,13 @@ fn composite_layers(
                 );
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
-            LayerKind::Messages(entries) => paint_messages(entries, &theme, area, buf),
+            LayerKind::Messages(entries) => paint_messages(entries, &theme, area, damage, buf),
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
-            LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, buf),
-            LayerKind::Shell => paint_shell(&theme, area, buf),
+            LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
+            LayerKind::Shell => paint_shell(&theme, area, damage, buf),
             LayerKind::Speculated(cells) => {
-                paint_speculated(cells, &theme, model.engine.hl(), model.chrome_rows(), buf)
+                let offset = model.chrome_rows();
+                paint_speculated(cells, &theme, model.engine.hl(), offset, damage, buf);
             }
             LayerKind::Picker(_)
             | LayerKind::Tree(_)
@@ -1062,10 +1071,15 @@ fn paint_cmdline(
 /// when the frontend has no `ext_multigrid` support), which is what a live
 /// repro showed as foreign glyphs bleeding through at a toast row's right
 /// edge.
+///
+/// Every write here is clipped to the rows `damage` names, border cells
+/// included: see [`composite_layers`] for why a row of this rect the frame
+/// is not repainting is not this painter's to touch.
 fn paint_messages(
     lines: &[Vec<Span>],
     theme: &Theme,
     area: ratatui::layout::Rect,
+    damage: &Damage,
     buf: &mut Buffer,
 ) {
     if lines.is_empty() {
@@ -1075,7 +1089,7 @@ fn paint_messages(
     let msg_area = theme.chrome(ChromeGroup::MsgArea);
     let style = ratatui_style(msg_area);
     let blank = " ".repeat(usize::from(area.width));
-    for row in 0..area.height {
+    for row in (0..area.height).filter(|&row| repaints(damage, area, row)) {
         paint_text_row(&blank, style, area, row, buf);
     }
 
@@ -1084,7 +1098,7 @@ fn paint_messages(
         bg: msg_area.bg,
         ..ResolvedStyle::default()
     });
-    paint_message_border(area, border_style, buf);
+    paint_message_border(area, border_style, damage, buf);
 
     let inner = inset_by_one(area);
     // every toast line is a single `StyleRole::Plain` span (see
@@ -1096,6 +1110,9 @@ fn paint_messages(
         let Ok(row) = u16::try_from(i) else {
             break;
         };
+        if !repaints(damage, inner, row) {
+            continue;
+        }
         paint_text_row(
             &view_surface::overlay::line_text(spans),
             style,
@@ -1104,6 +1121,14 @@ fn paint_messages(
             buf,
         );
     }
+}
+
+/// Whether this frame repaints the buffer row `row` rows below `area`'s own
+/// top -- the row-level clip every painter that writes more than one row
+/// applies, so a layer only ever writes inside the rows
+/// [`composite_layers`] cleared for it.
+fn repaints(damage: &Damage, area: ratatui::layout::Rect, row: u16) -> bool {
+    damage.covers(area.y.saturating_add(row))
 }
 
 /// `area` shrunk by one cell on every edge: the interior the border frame
@@ -1126,27 +1151,36 @@ fn inset_by_one(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
 /// 1x1 content rect, but a direct unit-test caller could still construct
 /// one) and paints nothing rather than writing corner glyphs on top of
 /// each other.
-fn paint_message_border(area: ratatui::layout::Rect, style: Style, buf: &mut Buffer) {
+fn paint_message_border(
+    area: ratatui::layout::Rect,
+    style: Style,
+    damage: &Damage,
+    buf: &mut Buffer,
+) {
     if area.width < 2 || area.height < 2 {
         return;
     }
     let last_col = area.width - 1;
     let last_row = area.height - 1;
+    let top_row = repaints(damage, area, 0);
+    let bottom_row = repaints(damage, area, last_row);
     for col in 0..area.width {
-        let top = match col {
-            0 => '┌',
-            c if c == last_col => '┐',
-            _ => '─',
+        let (top, bottom) = match col {
+            0 => ('┌', '└'),
+            c if c == last_col => ('┐', '┘'),
+            _ => ('─', '─'),
         };
-        let bottom = match col {
-            0 => '└',
-            c if c == last_col => '┘',
-            _ => '─',
-        };
-        set_border_cell(buf, area.x + col, area.y, top, style);
-        set_border_cell(buf, area.x + col, area.y + last_row, bottom, style);
+        if top_row {
+            set_border_cell(buf, area.x + col, area.y, top, style);
+        }
+        if bottom_row {
+            set_border_cell(buf, area.x + col, area.y + last_row, bottom, style);
+        }
     }
     for row in 1..last_row {
+        if !repaints(damage, area, row) {
+            continue;
+        }
         set_border_cell(buf, area.x, area.y + row, '│', style);
         set_border_cell(buf, area.x + last_col, area.y + row, '│', style);
     }
@@ -1300,6 +1334,7 @@ fn paint_popupmenu(
     state: &PopupmenuState,
     theme: &Theme,
     area: ratatui::layout::Rect,
+    damage: &Damage,
     buf: &mut Buffer,
 ) {
     let base = theme.chrome(ChromeGroup::Pmenu);
@@ -1310,6 +1345,9 @@ fn paint_popupmenu(
         };
         if row >= area.height {
             break;
+        }
+        if !repaints(damage, area, row) {
+            continue;
         }
         let is_selected = i64::try_from(i).is_ok_and(|idx| idx == state.selected);
         let style = if is_selected {
@@ -1532,26 +1570,25 @@ fn paint_frame_cells(
 /// steady-state body), so this glyph is fixed rather than advancing frames
 /// on its own -- a real spinner would need a tick this architecture
 /// deliberately does not have.
-fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, buf: &mut Buffer) {
+fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, damage: &Damage, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let fill = " ".repeat(usize::from(area.width));
     let bottom_row = area.height - 1;
-    paint_text_row(
-        &fill,
-        ratatui_style(theme.chrome(ChromeGroup::StatusLine)),
-        area,
-        bottom_row,
-        buf,
-    );
+    if repaints(damage, area, bottom_row) {
+        let fill = " ".repeat(usize::from(area.width));
+        let style = ratatui_style(theme.chrome(ChromeGroup::StatusLine));
+        paint_text_row(&fill, style, area, bottom_row, buf);
+    }
 
-    let text: String = view_surface::SHELL_PLACEHOLDER
-        .chars()
-        .take(usize::from(area.width))
-        .collect();
     let mid_row = area.height / 2;
-    paint_text_row(&text, ratatui_style(theme.normal()), area, mid_row, buf);
+    if repaints(damage, area, mid_row) {
+        let text: String = view_surface::SHELL_PLACEHOLDER
+            .chars()
+            .take(usize::from(area.width))
+            .collect();
+        paint_text_row(&text, ratatui_style(theme.normal()), area, mid_row, buf);
+    }
 }
 
 /// Intersects a [`view_surface::Rect`] with the frame's own area: a layer
@@ -1684,11 +1721,15 @@ fn paint_speculated(
     theme: &Theme,
     hl: &HlTable,
     offset: u16,
+    damage: &Damage,
     buf: &mut Buffer,
 ) {
     let style = style_for(theme, DEFAULT_HL_ID, hl);
     for cell in cells {
         let row = cell.row.saturating_add(offset);
+        if !damage.covers(row) {
+            continue;
+        }
         let Some(out) = buf.cell_mut((cell.col, row)) else {
             continue;
         };
@@ -3231,7 +3272,7 @@ mod tests {
                     &Damage::full(),
                     buf,
                 );
-                paint_messages(&[], &theme, area, buf);
+                paint_messages(&[], &theme, area, &Damage::full(), buf);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -4579,6 +4620,44 @@ mod tests {
             // the reply lands after its own frame has painted, which the
             // paint loop's never-await-RPC contract makes the common case
             |m| probe_reply(m, Some(0xF8F8F2), Some(0)),
+        );
+    }
+
+    /// A toast wide enough to reach across the tree sidebar, and a frame
+    /// whose whole damage is one sidebar row.
+    ///
+    /// The toast itself is unchanged, so it names no damaged row of its
+    /// own, yet it still covers one -- which is what puts its painter on
+    /// this frame at all. Laying its whole rect out there writes the top
+    /// border back over the sidebar's own top edge, on a row the sidebar
+    /// (clipped row by row) never paints again, and the stale border sits
+    /// in the sidebar's frame until something else happens to damage that
+    /// row. The compat harness caught this as a native tree that opened
+    /// and then never showed the directory it had just scanned.
+    #[test]
+    fn clip_matches_full_toast_over_the_sidebar_leaves_its_undamaged_rows() {
+        assert_clip_matches_full(
+            60,
+            12,
+            |m| {
+                seed_grid(m, 60, 12);
+                // longer than the grid is wide, so the box spans the
+                // sidebar's own columns instead of sitting clear of them,
+                // and an error kind so an incidental keypress cannot
+                // dismiss it between the two frames
+                apply(
+                    m,
+                    view_core::events::UiEvent::MsgShow {
+                        kind: "echoerr".into(),
+                        content: vec![(0, "e".repeat(80))],
+                        replace_last: false,
+                    },
+                );
+                open_tree_with_entries(m);
+            },
+            60,
+            12,
+            |m| type_key(m, "<Down>"),
         );
     }
 
