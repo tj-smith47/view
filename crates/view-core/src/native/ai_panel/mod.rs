@@ -12,7 +12,7 @@
 //! state into these types in place, rather than a live session replacing
 //! them with a shape of its own.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use super::geometry::interior_text_width;
 use super::views::{AiPanelView, Span};
@@ -22,6 +22,7 @@ mod review;
 mod transcript;
 
 pub use permission::PermissionPrompt;
+pub(crate) use permission::StandingAnswer;
 pub use review::{AcceptRefusal, DiffReviewState, ReviewSync};
 pub use transcript::{
     Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryKind, TranscriptRole,
@@ -168,9 +169,10 @@ pub struct AiPanelState {
     /// [`Self::next_hidden_generation`] the only way to move it, so a
     /// future third holder cannot start its own sequence by accident.
     hidden_generation: u64,
-    /// The tool kinds an always-allow answer has granted standing
-    /// permission to, for this session only -- nothing here is persisted,
-    /// so a grant dies with the session that was asked for it.
+    /// The standing answer each tool kind carries, from an always-allow or
+    /// always-reject the user chose, for this session only -- nothing here
+    /// is persisted, so a standing answer dies with the session it was given
+    /// in.
     ///
     /// view keeps this because the pinned adapter does not: answering with
     /// the agent's own `allow_always` option id is answered correctly and
@@ -178,16 +180,20 @@ pub struct AiPanelState {
     /// (`.superpowers/sdd/2026-08-21-dogfood-fixes/task-21-rootcause.md`
     /// proves it with a probe containing no view code). A prompt that
     /// promises "Always Allow" and asks again is a promise view can keep on
-    /// its own side, so it does: a later request naming a granted kind is
-    /// answered without asking. An adapter that honours the wire's own
-    /// standing permission never sends that later request at all, and this
-    /// simply never fires.
+    /// its own side, so it does: a later request naming a kind with a
+    /// standing answer is answered without asking. An adapter that honours
+    /// the wire's own standing permission never sends that later request at
+    /// all, and this simply never fires. `allow_always` and `reject_always`
+    /// are answered symmetrically because they are the same promise in
+    /// opposite directions, and an "always" that only holds one way is the
+    /// defect this exists to close.
     ///
-    /// Private, with [`Self::grant_permission`], [`Self::is_granted`] and
-    /// [`Self::clear_permission_grants`] the only ways to it: a grant is
-    /// how a question stops being asked, so what installs one and what
-    /// drops the whole set are worth being able to find.
-    permission_grants: BTreeSet<String>,
+    /// Private, with [`Self::record_standing_answer`],
+    /// [`Self::standing_answer`] and [`Self::clear_standing_answers`] the
+    /// only ways to it: a standing answer is how a question stops being
+    /// asked, so what installs one and what drops the whole set are worth
+    /// being able to find.
+    standing_answers: BTreeMap<String, StandingAnswer>,
     /// Where the transcript window starts while the panel is held away from
     /// the newest row, or `None` while it follows the tail.
     ///
@@ -233,32 +239,34 @@ impl AiPanelState {
             pending_diff: None,
             pending_diff_next: None,
             hidden_generation: 0,
-            permission_grants: BTreeSet::new(),
+            standing_answers: BTreeMap::new(),
             transcript_top: None,
         }
     }
 
-    /// Records standing permission for `tool_kind`, so a later request
+    /// Records `answer` as `tool_kind`'s standing answer, so a later request
     /// naming it is answered without asking again (see
-    /// [`Self::permission_grants`]).
-    pub fn grant_permission(&mut self, tool_kind: String) {
-        self.permission_grants.insert(tool_kind);
+    /// [`Self::standing_answers`]). A later opposite answer replaces it:
+    /// the user's most recent standing choice is the one that holds.
+    pub(crate) fn record_standing_answer(&mut self, tool_kind: String, answer: StandingAnswer) {
+        self.standing_answers.insert(tool_kind, answer);
     }
 
-    /// Whether this session already granted `tool_kind`. Compared verbatim
-    /// against the agent's own kind string: view reads no meaning into it,
-    /// so it cannot decide that two spellings are the same permission.
+    /// The standing answer this session carries for `tool_kind`, if any.
+    /// Looked up verbatim against the agent's own kind string: view reads no
+    /// meaning into it, so it cannot decide that two spellings are the same
+    /// permission.
     #[must_use]
-    pub fn is_granted(&self, tool_kind: &str) -> bool {
-        self.permission_grants.contains(tool_kind)
+    pub(crate) fn standing_answer(&self, tool_kind: &str) -> Option<StandingAnswer> {
+        self.standing_answers.get(tool_kind).copied()
     }
 
-    /// Drops every standing grant. A grant is scoped to the session it was
+    /// Drops every standing answer. One is scoped to the session it was
     /// given in, and a new session is a new agent with new work in front of
-    /// it -- carrying grants across would answer for a session the user
-    /// never saw a question from.
-    pub fn clear_permission_grants(&mut self) {
-        self.permission_grants.clear();
+    /// it -- carrying them across would answer for a session the user never
+    /// saw a question from.
+    pub(crate) fn clear_standing_answers(&mut self) {
+        self.standing_answers.clear();
     }
 
     /// Whether something the panel is showing owns its keys, so the

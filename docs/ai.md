@@ -159,9 +159,15 @@ wire's own word for what it does in brackets:
 Permission requested for Edit Taskfile.yml
   1 Deny (reject_once)
   2 Allow Once (allow_once)
-  3 Always Allow (allow_always)
+  3 Always Allow (all edit this session)
 press a number, <Esc> cancels
 ```
+
+The two answers that outlive the question -- always-allow and
+always-reject -- say what they cover instead of their wire word, because
+what they cover is view's own doing (below). A request that named no tool
+kind cannot be scoped to one, so its rows keep the wire word and nothing
+stands after them.
 
 You answer with the digit. `<Esc>` answers too -- it cancels the request,
 which is the one answer that exists whatever the agent offered. No letter
@@ -173,23 +179,31 @@ The colors carry the same split as the words: the always-allow row is not
 painted as another allow, because it is the one answer whose consequence
 outlives the question.
 
-### What "Always Allow" grants
+### What the two "Always" answers do
 
-Answering always-allow records a standing grant for that tool's kind, for
-this session only. A later request of the same kind is answered for you,
-and says so on the transcript rather than passing in silence:
+Answering always-allow or always-reject records a standing answer for that
+tool's kind, for this session only. A later request of the same kind is
+answered for you, and says so rather than passing in silence:
 
 ```
-‼ auto-allowed edit (standing grant)
+‼ auto-allowed edit (standing answer)
+‼ auto-refused execute (standing answer)
 ```
 
-A different kind still asks. The grant is never written to disk, so a new
-session -- including one that came back after a crash -- starts with none.
+The line lands on the transcript, and -- when the panel is closed, which is
+what a standing answer makes comfortable -- as a notice beside your buffer
+too. An answered request never pops the panel open: there is no question
+left on it to see.
+
+A different kind still asks, and answering the other way later replaces the
+standing answer rather than stacking beside it. Nothing here is written to
+disk, so a new session -- including one that came back after a crash --
+starts with none.
 
 view keeps this itself because the pinned adapter does not: it accepts the
-always-allow answer and then asks again on every later call. Reporting the
-grant on the transcript is what keeps that answerable -- what view answered
-on your behalf is on the record with everything else the session did.
+always-allow answer and then asks again on every later call. Saying so on
+both surfaces is what keeps that answerable -- what view answered on your
+behalf is on the record with everything else the session did.
 
 ## Reviewing an agent's edits
 

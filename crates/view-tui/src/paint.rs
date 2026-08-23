@@ -2832,6 +2832,19 @@ mod tests {
         let surface = view_surface::render(&model);
         let panel = agent_panel_rows(&surface);
         assert!(!panel.is_empty(), "the panel is on screen");
+        // The rows are the panel's own and nobody else's: the toast is a
+        // layer too, and counting its rows as the panel's would let a
+        // frame the toast drove read as a frame the agent drove.
+        let ai = surface
+            .layers
+            .iter()
+            .find(|layer| matches!(layer.kind, LayerKind::Ai(_)))
+            .expect("the panel is one of the layers");
+        assert_eq!(
+            panel.len(),
+            usize::from(ai.rect.height),
+            "one row per row of the panel layer, and no layer beside it"
+        );
 
         let quiet = GridDamage::default();
         assert!(

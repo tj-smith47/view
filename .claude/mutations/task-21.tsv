@@ -2,8 +2,8 @@ crates/view-ai/src/provision.rs	Some(root) => !declares_dependencies(&root) || r
 crates/view-ai/src/provision.rs	.is_some_and(|deps| !deps.is_empty())	.is_some()	-p view-ai --lib provision
 crates/view-ai/src/provision.rs	        Some(version) if version == pin.version => Ok(lockfile),	        Some(version) if version != pin.version => Ok(lockfile),	-p view-ai --lib provision
 crates/view-ai/src/provision.rs	        Some(lockfile) => format!("{entry}-{}", sha256_hex(lockfile.as_bytes())),	        Some(_) => entry,	-p view-ai --lib provision
-crates/view-core/src/update/mod.rs	                    if !is_panel_exit_key(&notation) {	                    if true {	-p view-core ctrl_c_cancels
-crates/view-core/src/update/mod.rs	    matches!(notation, "<Esc>" | "<C-c>" | "<C-d>")	    notation.starts_with('<')	-p view-core the_composer_is_not_editable
+crates/view-core/src/update/mod.rs	        "<Esc>" | "<C-c>" => true,	        "<Esc>" => true,	-p view-core ctrl_c_cancels
+crates/view-core/src/update/mod.rs	        "<C-d>" => model.ai_panel().local_error.is_some(),	        "<C-d>" => true,	-p view-core --lib update::tests
 crates/view-core/src/update/mod.rs	                    if !panel.turn_in_flight && !panel.input.trim().is_empty() {	                    if !panel.input.trim().is_empty() {	-p view-core a_second_prompt_cannot_be_submitted
 crates/view-core/src/update/ai.rs	            let had_pending = panel.pending_permission.take().is_some();	            let had_pending = panel.pending_permission.is_some();	-p view-core a_turn_ending_clears
 crates/view/src/vlog.rs	const PAYLOAD_CAP: usize = 120;	const PAYLOAD_CAP: usize = 1_000_000;	-p view --bin view an_unbounded_ai_payload
@@ -13,16 +13,16 @@ crates/view-bench/src/scenarios/ai_session.rs	        if added < SUSTAINED_MINIM
 crates/view-harness/src/bin/bench.rs	    if classes.contains(&class) {	    if true {	-p view-harness --bin bench a_scoped_cell_runs
 crates/view-bench/src/scenarios/ai_session.rs	            Some(idle) if idle <= STREAM_STALE => Ok(added),	            Some(idle) if idle <= Duration::from_secs(86_400) => Ok(added),	-p view-bench --lib a_stream_that_added_plenty_and_then_died
 crates/view-bench/src/scenarios/ai_session.rs	            return refuse("the agent stopped on its own streaming ceiling".to_string());	            return Ok(0);	-p view-bench --lib a_fixture_that_stopped_on_its_own_ceiling
-crates/view-bench/src/scenarios/taps.rs	        if let Some(chain) = tag_chain(&window, tags, t0) {	        if let Some(chain) = tag_chain(&window, tags, t0).or(Some(Vec::new())) {	-p view-bench --lib a_stray_closing_tap_is_walked_past
-crates/view-bench/src/scenarios/taps.rs	            let Some((parsed, paint)) = measured_frame(&all_records, handoff.nanos) else {	            let Some((parsed, paint)) = measured_frame(&all_records, t0) else {	-p view-bench --lib the_output_row_anchors_its_redraw
-crates/view-bench/src/scenarios/taps.rs	    let streamed = turn.still_streaming();	    let streamed: Result<u64, BenchError> = Ok(0);	-p view-bench --lib the_ai_rows_sample_through_the_same_functions
-crates/view-bench/src/scenarios/taps.rs	                Some(_) => split.agent += 1,	                Some(_) => split.unexplained += 1,	-p view-bench --lib an_announced_agent_repaint_is_explained
-crates/view-bench/src/scenarios/taps.rs	        .filter(|r| r.tag == b'T' && r.nanos < t0)	        .filter(|r| r.tag == b'T' && r.nanos < 0)	-p view-bench --lib an_announcement_from_the_frame_in_flight
+crates/view-bench/src/scenarios/taps/mod.rs	        if let Some(chain) = tag_chain(&window, tags, t0) {	        if let Some(chain) = tag_chain(&window, tags, t0).or(Some(Vec::new())) {	-p view-bench --lib a_stray_closing_tap_is_walked_past
+crates/view-bench/src/scenarios/taps/mod.rs	            let Some((parsed, paint)) = measured_frame(&all_records, handoff.nanos) else {	            let Some((parsed, paint)) = measured_frame(&all_records, t0) else {	-p view-bench --lib the_output_row_anchors_its_redraw
+crates/view-bench/src/scenarios/taps/ai.rs	    let streamed = turn.still_streaming();	    let streamed: Result<u64, BenchError> = Ok(0);	-p view-bench --lib the_ai_rows_sample_through_the_same_functions
+crates/view-bench/src/scenarios/taps/mod.rs	                Some(_) => split.agent += 1,	                Some(_) => split.unexplained += 1,	-p view-bench --lib an_announced_agent_repaint_is_explained
+crates/view-bench/src/scenarios/taps/mod.rs	        .filter(|r| r.tag == b'T' && r.nanos < t0)	        .filter(|r| r.tag == b'T' && r.nanos < 0)	-p view-bench --lib an_announcement_from_the_frame_in_flight
 crates/view-tui/src/paint.rs	        if !matches!(layer.kind, LayerKind::Ai(_)) {	        if matches!(layer.kind, LayerKind::EngineGrid) {	-p view-tui --lib only_a_frame_whose_whole_damage
 crates/view-tui/src/paint.rs	            && self.rows.iter().all(|row| rows.contains(row))		-p view-tui --lib only_a_frame_whose_whole_damage
 crates/view-bench/src/scenarios/ai_session.rs	    cwd.parent().unwrap_or(cwd).join(PROGRESS_FILE)	    cwd.join(PROGRESS_FILE)	-p view-bench --lib the_progress_file_lands_beside
 crates/view-ai/tests/fixtures/stub_agent.rs	        .nth(5)	        .nth(4)	-p view-ai --test session a_sustained_stream
-crates/view-core/src/update/mod.rs	                    if model.ai_panel().pending_diff.is_none()	                    if false	-p view-core --lib update::tests
+crates/view-harness/src/bin/bench/cell_world.rs	            "\n[ai]\nenabled = true\nagent = [{:?}, \"\", \"\", \"\", \"\", {:?}]\n",	            "\n[ai]\nenabled = true\nagent = [{:?}, {:?}]\n",	-p view-harness --bin bench the_armed_agent
 crates/view-core/src/update/review.rs	            stray = true;	            stray = false;	-p view-core --lib update::tests
 crates/view-core/src/update/review.rs	or close it (q) before typing";	or close it before typing";	-p view-core --lib update::tests
 crates/view/src/runtime.rs	                    RpcCall::ReleaseHidden { path } => self.ops.release_hidden(&path),	                    RpcCall::ReleaseHidden { path } => self.ops.load_hidden(&path, 0),	-p view --lib runtime::tests
@@ -33,9 +33,15 @@ crates/view-ai/src/acp/wire.rs	                    return Err(WireError::FrameTo
 crates/view-core/src/native/ai_panel/transcript.rs	            if rows.len() >= budget {	            if rows.len() >= usize::MAX {	-p view-core --lib native::ai_panel
 crates/view-ai/src/acp/driver.rs	        currency: currency.chars().take(CURRENCY_CAP).collect(),	        currency: currency.to_string(),	-p view-ai --lib acp::driver
 crates/view-core/src/native/ai_panel/permission.rs	        let index = usize::try_from(key.to_digit(10)?).ok()?.checked_sub(1)?;	        let index = usize::try_from(key.to_digit(10)?).ok()?;	-p view-core --lib native::ai_panel
-crates/view-core/src/native/ai_panel/permission.rs	            .find(|option| option.kind == PermissionOptionKind::AllowAlways)	            .find(|option| option.kind == PermissionOptionKind::AllowOnce)	-p view-core --lib native::ai_panel
+crates/view-core/src/native/ai_panel/permission.rs	            .find(|option| option.kind == always)	            .find(|option| option.kind == once)	-p view-core --lib native::ai_panel
+crates/view-core/src/native/ai_panel/permission.rs	                PermissionOptionKind::RejectAlways,	                PermissionOptionKind::AllowAlways,	-p view-core --lib native::ai_panel
+crates/view-core/src/native/ai_panel/permission.rs	                format!("all {tool} this session")	                format!("{tool}")	-p view-core --lib native::ai_panel
 crates/view-core/src/native/ai_panel/permission.rs	                key @ 1..=9 => key.to_string(),	                key @ 1..=10 => key.to_string(),	-p view-core --lib native::ai_panel
-crates/view-core/src/update/mod.rs	                        if option.kind == PermissionOptionKind::AllowAlways {	                        if true {	-p view-core --lib update::tests
+crates/view-core/src/update/mod.rs	                            PermissionOptionKind::AllowAlways => Some(StandingAnswer::Allow),	                            PermissionOptionKind::AllowAlways => None,	-p view-core --lib update::tests
+crates/view-core/src/update/mod.rs	                            PermissionOptionKind::RejectAlways => Some(StandingAnswer::Reject),	                            PermissionOptionKind::RejectAlways => None,	-p view-core --lib update::tests
+crates/view-core/src/update/mod.rs	                        if let Some((kind, answer)) = prompt.tool_kind.clone().zip(standing) {	                        if let Some((kind, answer)) = prompt.tool_kind.clone().zip(Some(StandingAnswer::Allow)) {	-p view-core --lib update::tests
 crates/view-core/src/update/mod.rs	                    if model.ai_panel().pending_diff.is_none()	                    if false	-p view-core --lib update::tests
-crates/view-core/src/update/ai.rs	                .filter(|kind| model.ai_panel().is_granted(kind))	                .filter(|_| true)	-p view-core --lib update::tests
-crates/view-core/src/update/ai.rs	            panel.clear_permission_grants();		-p view-core --lib update::ai
+crates/view-core/src/update/ai.rs	                .and_then(|kind| Some((kind, model.ai_panel().standing_answer(kind)?)))	                .map(|kind| (kind, StandingAnswer::Allow))	-p view-core --lib update::ai
+crates/view-core/src/update/ai.rs	                    let mut effects = if model.ai_panel_overlay_open() {	                    let mut effects = if true {	-p view-core --lib update::tests
+crates/view-core/src/update/ai.rs	            panel.clear_standing_answers();		-p view-core --lib update::ai
+crates/view/src/vlog.rs	        FsError::Other { message } => format!("Other {{ message: {} }}", capped(message)),	        FsError::Other { message } => format!("Other {{ message: {message:?} }}"),	-p view --lib vlog

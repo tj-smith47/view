@@ -79,8 +79,8 @@ offered them:
 
 No letter answers a prompt: the diff review that pends alongside it owns
 letters of its own, and one key cannot mean both "allow always" and "accept
-this hunk". See [ai.md](ai.md) for what each option does and what an
-always-allow grants.
+this hunk". See [ai.md](ai.md) for what each option does and what the two
+"always" answers stand for.
 
 ## Resizing the sidebars
 

@@ -115,6 +115,12 @@ pub enum StyleRole {
     AiPermissionAlways,
     /// A permission option that refuses the call.
     AiPermissionReject,
+    /// A transcript row view itself wrote into the conversation, rather
+    /// than either party to it -- an answer given from a standing answer
+    /// being the case it exists for. Not a permission role: nothing here is
+    /// a question, and a row that paints like one would be waiting for a
+    /// key nobody needs to press.
+    AiNotice,
     /// A transcript tool call's status glyph once the call has completed.
     AiToolDone,
     /// A transcript tool call's status glyph once the call has failed.
@@ -155,6 +161,7 @@ impl StyleRole {
             Self::AiPermissionAllow => Some(ChromeGroup::OkMsg),
             Self::AiPermissionAlways => Some(ChromeGroup::WarningMsg),
             Self::AiPermissionReject => Some(ChromeGroup::ErrorMsg),
+            Self::AiNotice => Some(ChromeGroup::WarningMsg),
             Self::AiToolDone => Some(ChromeGroup::OkMsg),
             Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
         }

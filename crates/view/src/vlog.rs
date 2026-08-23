@@ -319,8 +319,15 @@ pub fn ai_command_payload(command: &view_core::native::ai_event::AiCommand) -> S
         AiCommand::FsReadReply { request_id, result } => format!(
             "FsReadReply {{ request_id: {request_id}, result: {} }}",
             result.as_ref().map_or_else(
-                |error| format!("Err({error:?})"),
+                |error| format!("Err({})", fs_error_payload(error)),
                 |content| format!("Ok({} bytes)", content.len())
+            )
+        ),
+        AiCommand::FsWriteReply { request_id, result } => format!(
+            "FsWriteReply {{ request_id: {request_id}, result: {} }}",
+            result.as_ref().map_or_else(
+                |error| format!("Err({})", fs_error_payload(error)),
+                |()| { "Ok".to_string() }
             )
         ),
         AiCommand::Prompt { text, context } => format!(
@@ -328,8 +335,23 @@ pub fn ai_command_payload(command: &view_core::native::ai_event::AiCommand) -> S
             capped(text),
             context.len()
         ),
-        // Cancel, FsWriteReply and DiscardProposal carry an id and an
-        // outcome word at most.
+        // Cancel and DiscardProposal carry an id and an outcome word at
+        // most.
+        bounded => format!("{bounded:?}"),
+    }
+}
+
+/// One [`view_core::native::ai_event::FsError`] rendered for the log.
+///
+/// `Other` is the arm that needs one: it carries whatever nvim said, which
+/// includes a path the agent chose and, on some failures, the line it tried
+/// to write -- unbounded text reaching the log through an error is the same
+/// leak as unbounded text reaching it through a reply.
+fn fs_error_payload(error: &view_core::native::ai_event::FsError) -> String {
+    use view_core::native::ai_event::FsError;
+    match error {
+        FsError::Other { message } => format!("Other {{ message: {} }}", capped(message)),
+        // NotFound and PermissionDenied are their own whole spelling.
         bounded => format!("{bounded:?}"),
     }
 }
@@ -576,6 +598,35 @@ mod tests {
         assert!(
             submitted.len() < PAYLOAD_CAP * 4 && submitted.contains("+199880B"),
             "and so must the prompt handed to the context worker: {submitted}"
+        );
+
+        // The error arms carry nvim's own wording, which quotes the path
+        // and the text the agent handed it -- a reply that failed must not
+        // be the way the whole file reaches the log.
+        let read_error = ai_command_payload(&AiCommand::FsReadReply {
+            request_id: 2,
+            result: Err(view_core::native::ai_event::FsError::Other {
+                message: huge.clone(),
+            }),
+        });
+        assert!(
+            read_error.len() < PAYLOAD_CAP * 4 && read_error.contains("+199880B"),
+            "a failed read must be capped like any other free text: {read_error}"
+        );
+        let write_error = ai_command_payload(&AiCommand::FsWriteReply {
+            request_id: 3,
+            result: Err(view_core::native::ai_event::FsError::Other { message: huge }),
+        });
+        assert!(
+            write_error.len() < PAYLOAD_CAP * 4 && write_error.contains("+199880B"),
+            "and so must a failed write: {write_error}"
+        );
+        assert_eq!(
+            ai_command_payload(&AiCommand::FsWriteReply {
+                request_id: 4,
+                result: Ok(()),
+            }),
+            "FsWriteReply { request_id: 4, result: Ok }"
         );
 
         assert_eq!(ai_command_payload(&AiCommand::Cancel), "Cancel");

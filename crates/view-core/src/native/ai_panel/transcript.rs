@@ -689,7 +689,7 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span
                 TranscriptRole::User => (USER_MARK, StyleRole::AiUser),
                 TranscriptRole::Agent => (AGENT_MARK, StyleRole::AiAgent),
                 TranscriptRole::Thought => (THOUGHT_MARK, StyleRole::AiThought),
-                TranscriptRole::Notice => (NOTICE_MARK, StyleRole::AiPermissionAsk),
+                TranscriptRole::Notice => (NOTICE_MARK, StyleRole::AiNotice),
             };
             vec![vec![
                 Span::new(mark, style),

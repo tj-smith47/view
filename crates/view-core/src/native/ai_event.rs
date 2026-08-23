@@ -101,9 +101,9 @@ pub enum AiEvent {
         /// `docs/acp-v1-wire-capture.md` and a view-invented enum over it
         /// would be a vocabulary no agent agreed to.
         ///
-        /// It is the scope a standing permission grant is keyed on
-        /// (`AiPanelState::grant_permission`), which is why an agent that
-        /// omits it can be answered but never granted: there is nothing to
+        /// It is the scope a standing answer is keyed on
+        /// (`AiPanelState::record_standing_answer`), which is why an agent
+        /// that omits it can be answered but never granted: there is nothing to
         /// scope a later auto-answer to, and widening that to "every tool"
         /// is not what a user answering one prompt agreed to.
         tool_kind: Option<String>,

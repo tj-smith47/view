@@ -10,6 +10,20 @@
 use crate::native::ai_event::{PermissionOption, PermissionOptionKind};
 use crate::native::views::{Span, StyleRole};
 
+/// What a session-standing answer for one tool kind says: the two answers
+/// that outlive their own question.
+///
+/// One enum with two arms rather than one store per direction, so "granted
+/// and refused for the same kind" is unrepresentable and the user's latest
+/// standing answer is simply the one that holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StandingAnswer {
+    /// A later call of this kind is allowed without asking.
+    Allow,
+    /// A later call of this kind is refused without asking.
+    Reject,
+}
+
 /// One outstanding permission request the agent is blocked on: which
 /// boundary id answering it must cite, a display question, and the options
 /// the agent itself offered.
@@ -86,24 +100,33 @@ impl PermissionPrompt {
         self.options.get(index)
     }
 
-    /// The offered option a standing grant for this prompt's tool kind
-    /// answers with, preferring the always-allow the user originally chose
-    /// and falling back to allow-once, or `None` from an agent that offered
-    /// no allow at all.
+    /// The offered option a standing `answer` for this prompt's tool kind
+    /// is given with, preferring the always-form the user originally chose
+    /// and falling back to the once-form, or `None` from an agent that
+    /// offered neither.
     ///
-    /// Answering with the always-allow again rather than downgrading to
-    /// allow-once restates the user's own choice to every request: an
-    /// adapter that does honour `allow_always` then installs the rule it
-    /// meant to, and the grant store simply never fires again.
-    pub(crate) fn standing_allow(options: &[PermissionOption]) -> Option<&PermissionOption> {
+    /// Answering with the always-form again rather than downgrading to the
+    /// once-form restates the user's own choice to every request: an adapter
+    /// that does honour `allow_always`/`reject_always` then installs the rule
+    /// it meant to, and the store simply never fires again.
+    pub(crate) fn standing_option(
+        options: &[PermissionOption],
+        answer: StandingAnswer,
+    ) -> Option<&PermissionOption> {
+        let (always, once) = match answer {
+            StandingAnswer::Allow => (
+                PermissionOptionKind::AllowAlways,
+                PermissionOptionKind::AllowOnce,
+            ),
+            StandingAnswer::Reject => (
+                PermissionOptionKind::RejectAlways,
+                PermissionOptionKind::RejectOnce,
+            ),
+        };
         options
             .iter()
-            .find(|option| option.kind == PermissionOptionKind::AllowAlways)
-            .or_else(|| {
-                options
-                    .iter()
-                    .find(|option| option.kind == PermissionOptionKind::AllowOnce)
-            })
+            .find(|option| option.kind == always)
+            .or_else(|| options.iter().find(|option| option.kind == once))
     }
 
     /// The prompt's own paint rows: the question, one row per offered option
@@ -128,12 +151,38 @@ impl PermissionPrompt {
                 _ => UNREACHABLE_OPTION_MARK.to_string(),
             };
             vec![Span::new(
-                format!("  {key} {} ({})", option.name, kind_label(option.kind)),
+                format!(
+                    "  {key} {} ({})",
+                    option.name,
+                    self.option_note(option.kind)
+                ),
                 option_role(option.kind),
             )]
         }));
         rows.push(vec![Span::new(KEY_HINT, StyleRole::AiPermissionAsk)]);
         rows
+    }
+
+    /// What the parenthesis after an option's own name says it does.
+    ///
+    /// The two always-answers say the consequence view will actually deliver
+    /// -- every later call of this kind, until the session ends -- because
+    /// that consequence is view's own doing (`super::AiPanelState`'s standing
+    /// answers) and "Always Allow" alone names neither the scope nor the
+    /// lifetime the user is agreeing to. Without a kind to scope it there is
+    /// no standing answer to promise, so the row falls back to the wire
+    /// spelling like every other option: the label never claims a grant that
+    /// would not be recorded.
+    fn option_note(&self, kind: PermissionOptionKind) -> String {
+        match (kind, self.tool_kind.as_deref()) {
+            (PermissionOptionKind::AllowAlways, Some(tool)) => {
+                format!("all {tool} this session")
+            }
+            (PermissionOptionKind::RejectAlways, Some(tool)) => {
+                format!("no {tool} this session")
+            }
+            _ => kind_label(kind).to_string(),
+        }
     }
 }
 
@@ -250,34 +299,91 @@ mod tests {
     }
 
     #[test]
-    fn a_standing_grant_answers_with_the_always_allow_when_one_is_offered() {
+    fn a_standing_answer_is_given_with_the_always_option_of_its_own_direction() {
         let options = vec![
             option("allow-once", PermissionOptionKind::AllowOnce),
             option("allow-always", PermissionOptionKind::AllowAlways),
             option("reject-once", PermissionOptionKind::RejectOnce),
+            option("reject-always", PermissionOptionKind::RejectAlways),
         ];
         assert_eq!(
-            PermissionPrompt::standing_allow(&options)
+            PermissionPrompt::standing_option(&options, StandingAnswer::Allow)
                 .unwrap()
                 .option_id,
             "allow-always"
         );
+        assert_eq!(
+            PermissionPrompt::standing_option(&options, StandingAnswer::Reject)
+                .unwrap()
+                .option_id,
+            "reject-always"
+        );
     }
 
     #[test]
-    fn a_standing_grant_falls_back_to_allow_once_and_never_to_a_reject() {
-        let allow_once = vec![
+    fn a_standing_answer_falls_back_to_the_once_option_and_never_crosses_direction() {
+        let once_only = vec![
             option("reject-once", PermissionOptionKind::RejectOnce),
             option("allow-once", PermissionOptionKind::AllowOnce),
         ];
         assert_eq!(
-            PermissionPrompt::standing_allow(&allow_once)
+            PermissionPrompt::standing_option(&once_only, StandingAnswer::Allow)
                 .unwrap()
                 .option_id,
             "allow-once"
         );
+        assert_eq!(
+            PermissionPrompt::standing_option(&once_only, StandingAnswer::Reject)
+                .unwrap()
+                .option_id,
+            "reject-once"
+        );
         let no_allow = vec![option("reject-always", PermissionOptionKind::RejectAlways)];
-        assert!(PermissionPrompt::standing_allow(&no_allow).is_none());
+        assert!(PermissionPrompt::standing_option(&no_allow, StandingAnswer::Allow).is_none());
+        let no_reject = vec![option("allow-always", PermissionOptionKind::AllowAlways)];
+        assert!(PermissionPrompt::standing_option(&no_reject, StandingAnswer::Reject).is_none());
+    }
+
+    /// The two answers that outlive their question must say so on the row
+    /// that offers them: "Always Allow" alone names neither what it covers
+    /// nor how long it lasts.
+    #[test]
+    fn the_always_rows_name_the_kind_and_the_session_they_stand_for() {
+        let prompt = PermissionPrompt::new(
+            1,
+            "call_1",
+            None,
+            Some("edit".to_string()),
+            vec![
+                option("Always Allow", PermissionOptionKind::AllowAlways),
+                option("Always Reject", PermissionOptionKind::RejectAlways),
+                option("Allow once", PermissionOptionKind::AllowOnce),
+            ],
+        );
+        let rows = prompt.render_rows();
+        assert_eq!(rows[1][0].text, "  1 Always Allow (all edit this session)");
+        assert_eq!(rows[2][0].text, "  2 Always Reject (no edit this session)");
+        assert_eq!(
+            rows[3][0].text, "  3 Allow once (allow_once)",
+            "an answer with no standing consequence keeps naming its wire kind"
+        );
+    }
+
+    /// No kind means no standing answer can be recorded, so the row must not
+    /// promise one.
+    #[test]
+    fn an_always_row_with_no_tool_kind_promises_nothing_beyond_its_wire_spelling() {
+        let prompt = PermissionPrompt::new(
+            1,
+            "call_1",
+            None,
+            None,
+            vec![option("Always Allow", PermissionOptionKind::AllowAlways)],
+        );
+        assert_eq!(
+            prompt.render_rows()[1][0].text,
+            "  1 Always Allow (allow_always)"
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::model::Model;
 use crate::msg::Effect;
 use crate::native::ai_event::{AiCommand, AiEvent, PermissionOutcome};
-use crate::native::ai_panel::{DiffReviewState, PermissionPrompt};
+use crate::native::ai_panel::{DiffReviewState, PermissionPrompt, StandingAnswer};
 
 /// Applies `event` to [`Model::ai_panel`].
 ///
@@ -53,35 +53,43 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             tool_kind,
             options,
         } => {
-            // A kind this session already granted is answered here rather
-            // than asked again (see
-            // `AiPanelState::permission_grants`). Ahead of the overlap
+            // A kind this session already answered for good is answered
+            // here rather than asked again (see
+            // `AiPanelState::standing_answers`). Ahead of the overlap
             // degrade below because it is not a degrade: this request gets
             // the answer the user already gave for its kind, whatever else
             // is on screen.
-            if let Some(granted) = tool_kind
+            if let Some((kind, answer)) = tool_kind
                 .as_deref()
-                .filter(|kind| model.ai_panel().is_granted(kind))
+                .and_then(|kind| Some((kind, model.ai_panel().standing_answer(kind)?)))
             {
-                if let Some(option) = PermissionPrompt::standing_allow(&options) {
+                if let Some(option) = PermissionPrompt::standing_option(&options, answer) {
                     let outcome = PermissionOutcome::Selected {
                         option_id: option.option_id.clone(),
                     };
-                    // The transcript, not a toast: an answer view gave on
-                    // the user's behalf is the one thing about a standing
-                    // grant they cannot otherwise audit, and it belongs in
-                    // the record of the conversation it was part of.
-                    let line = format!("auto-allowed {granted} (standing grant)");
+                    let line = standing_answer_line(kind, answer);
+                    // Both surfaces, because either one alone leaves an
+                    // answer view gave on the user's behalf invisible: the
+                    // transcript is the durable record of the conversation
+                    // it was part of, and it is unread behind a closed
+                    // panel -- which is exactly the state a standing answer
+                    // makes comfortable to sit in.
+                    let mut effects = if model.ai_panel_overlay_open() {
+                        Vec::new()
+                    } else {
+                        model.engine.record_native_notice(line.clone(), false)
+                    };
                     model.ai_panel_mut().transcript.append_or_extend(
                         None,
                         &line,
                         crate::native::ai_panel::TranscriptRole::Notice,
                     );
                     model.dirty = true;
-                    return vec![Effect::Ai(AiCommand::AnswerPermission {
+                    effects.push(Effect::Ai(AiCommand::AnswerPermission {
                         request_id,
                         outcome,
-                    })];
+                    }));
+                    return effects;
                 }
             }
             if model.ai_panel().pending_permission.is_some() {
@@ -228,12 +236,12 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             let panel = model.ai_panel_mut();
             panel.session_id = Some(session_id);
             panel.local_error = None;
-            // A standing grant answers questions on the user's behalf, so
+            // A standing answer answers questions on the user's behalf, so
             // it lasts exactly as long as the session it was given in --
             // including across a recovery, where the agent that was asked
             // is gone and the one that replaced it has never asked
             // anything.
-            panel.clear_permission_grants();
+            panel.clear_standing_answers();
             model.dirty = true;
         }
         // A proposal opens the panel's own diff review. Its hunks are
@@ -333,6 +341,19 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         }
     }
     Vec::new()
+}
+
+/// What view says, in the transcript and in the toast behind a closed panel,
+/// when it answers a request from a standing answer rather than asking.
+///
+/// One wording for both surfaces so the toast and the record cannot drift,
+/// and it names the kind: "view answered for you" is only auditable if the
+/// user can tell which of their standing answers did it.
+fn standing_answer_line(tool_kind: &str, answer: StandingAnswer) -> String {
+    match answer {
+        StandingAnswer::Allow => format!("auto-allowed {tool_kind} (standing answer)"),
+        StandingAnswer::Reject => format!("auto-refused {tool_kind} (standing answer)"),
+    }
 }
 
 /// Opens the per-project AI trust confirm as the topmost overlay, the first
@@ -589,7 +610,9 @@ mod tests {
     #[test]
     fn a_session_becoming_ready_drops_every_standing_grant() {
         let mut model = Model::new();
-        model.ai_panel_mut().grant_permission("edit".to_string());
+        model
+            .ai_panel_mut()
+            .record_standing_answer("edit".to_string(), StandingAnswer::Allow);
 
         let _ = update(
             &mut model,
@@ -598,7 +621,7 @@ mod tests {
             }),
         );
 
-        assert!(!model.ai_panel().is_granted("edit"));
+        assert!(model.ai_panel().standing_answer("edit").is_none());
         let effects = update(&mut model, permission_requested(1, "call_1", "allow-once"));
         assert!(
             !effects
@@ -615,7 +638,9 @@ mod tests {
     #[test]
     fn a_request_naming_no_tool_kind_is_never_answered_by_a_grant() {
         let mut model = Model::new();
-        model.ai_panel_mut().grant_permission("edit".to_string());
+        model
+            .ai_panel_mut()
+            .record_standing_answer("edit".to_string(), StandingAnswer::Allow);
 
         let effects = update(
             &mut model,
@@ -643,7 +668,9 @@ mod tests {
     #[test]
     fn a_granted_kind_offering_only_rejects_still_asks() {
         let mut model = Model::new();
-        model.ai_panel_mut().grant_permission("edit".to_string());
+        model
+            .ai_panel_mut()
+            .record_standing_answer("edit".to_string(), StandingAnswer::Allow);
 
         let effects = update(
             &mut model,

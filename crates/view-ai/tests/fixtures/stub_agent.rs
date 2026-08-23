@@ -62,6 +62,11 @@
 //!   what came back for each. The pinned adapter re-prompts forever after
 //!   an always-allow, so the client keeps that promise itself; this is how
 //!   a standing grant is driven over a real wire.
+//! - `refuse-always` -- the same two-request shape with the refusing half
+//!   of the vocabulary: a `toolCall.kind` of its own, an always-reject
+//!   among its options, and a second request of that kind once the first
+//!   is answered. A standing answer that only held one way would leave
+//!   this one asking again.
 //! - `propose` -- announce a tool call and complete it with a
 //!   `ToolCallContent` `"diff"` item over `view-ai-stub-diff.txt` in this
 //!   process's own working directory. Any suffix after the word (`propose2`)
@@ -216,6 +221,23 @@ fn main() {
                     end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
                     cancelled = false;
                 }
+                Some("perm-refuse-1") => {
+                    chunk(
+                        &mut stdout,
+                        "agent_message_chunk",
+                        &format!("first {}", outcome_label(&frame)),
+                    );
+                    ask_permission_refuse(&mut stdout, "perm-refuse-2", "call_202");
+                }
+                Some("perm-refuse-2") => {
+                    chunk(
+                        &mut stdout,
+                        "agent_message_chunk",
+                        &format!("second {}", outcome_label(&frame)),
+                    );
+                    end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
+                    cancelled = false;
+                }
                 Some("perm-2") => {
                     // reported rather than ended on: the first request is
                     // still open, and a turn that ended here would hide
@@ -356,6 +378,10 @@ fn main() {
                     "ask-always" => {
                         pending_prompt = Some(id);
                         ask_permission_always(&mut stdout, "perm-always-1", "call_101");
+                    }
+                    "refuse-always" => {
+                        pending_prompt = Some(id);
+                        ask_permission_refuse(&mut stdout, "perm-refuse-1", "call_201");
                     }
                     "ask-twice" => {
                         pending_prompt = Some(id);
@@ -743,6 +769,27 @@ fn ask_permission_always(stdout: &mut std::io::Stdout, request_id: &str, tool_ca
                 { "optionId": "reject-once", "name": "Deny", "kind": "reject_once" },
                 { "optionId": "allow-once", "name": "Allow Once", "kind": "allow_once" },
                 { "optionId": "allow-always", "name": "Always Allow", "kind": "allow_always" }
+            ]
+        }),
+    );
+}
+
+/// The refusing twin of [`ask_permission_always`], under a tool kind of its
+/// own so the two standing answers cannot be proved by the same grant: an
+/// always-reject is the same promise in the other direction, and a client
+/// that keeps only the allow half leaves this request being asked forever.
+fn ask_permission_refuse(stdout: &mut std::io::Stdout, request_id: &str, tool_call_id: &str) {
+    request(
+        stdout,
+        serde_json::json!(request_id),
+        "session/request_permission",
+        serde_json::json!({
+            "sessionId": "sess_stub",
+            "toolCall": { "toolCallId": tool_call_id, "kind": "execute" },
+            "options": [
+                { "optionId": "allow-once", "name": "Allow Once", "kind": "allow_once" },
+                { "optionId": "reject-once", "name": "Deny", "kind": "reject_once" },
+                { "optionId": "reject-always", "name": "Always Reject", "kind": "reject_always" }
             ]
         }),
     );

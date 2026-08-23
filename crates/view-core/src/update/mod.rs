@@ -5,7 +5,7 @@ use crate::msg::{
     DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
 };
 use crate::native::ai_event::{AiCommand, PermissionOptionKind, PermissionOutcome};
-use crate::native::ai_panel::TranscriptScroll;
+use crate::native::ai_panel::{StandingAnswer, TranscriptScroll};
 use crate::native::diff::BufTextChangedEvent;
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
@@ -1331,12 +1331,19 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                         // answer is recorded against the request's own tool
                         // kind, and the next request naming that kind is
                         // answered without asking (see
-                        // `AiPanelState::permission_grants` for why view
-                        // keeps this rather than the adapter).
-                        if option.kind == PermissionOptionKind::AllowAlways {
-                            if let Some(kind) = prompt.tool_kind.clone() {
-                                model.ai_panel_mut().grant_permission(kind);
+                        // `AiPanelState::standing_answers` for why view
+                        // keeps this rather than the adapter). Both
+                        // directions, since both are answers the user asked
+                        // to stand; the two once-answers record nothing.
+                        let standing = match option.kind {
+                            PermissionOptionKind::AllowAlways => Some(StandingAnswer::Allow),
+                            PermissionOptionKind::RejectAlways => Some(StandingAnswer::Reject),
+                            PermissionOptionKind::AllowOnce | PermissionOptionKind::RejectOnce => {
+                                None
                             }
+                        };
+                        if let Some((kind, answer)) = prompt.tool_kind.clone().zip(standing) {
+                            model.ai_panel_mut().record_standing_answer(kind, answer);
                         }
                         model.dirty = true;
                         return vec![Effect::Ai(AiCommand::AnswerPermission {

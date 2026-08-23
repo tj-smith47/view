@@ -732,6 +732,29 @@ leg_permission_keys_and_grant() {
     refute "$PERMISSION_PROMPT call_102" 'a granted kind asked the user again'
     wait_for_log 'ai TurnEnded' "$WAIT_SECS" "the turn ending after the grant" >/dev/null
     pass 'an always-allow answered the next request of that kind without asking'
+
+    # The refusing half of the same promise, on a kind the grant above says
+    # nothing about: an "always" that only held one way would leave this
+    # second request asking again.
+    submit 'refuse-always'
+    wait_for "$PERMISSION_PROMPT call_201" "$WAIT_SECS" "the refusal request" >/dev/null
+    wait_for "$PERMISSION_ROW_NEVER" "$WAIT_SECS" \
+        "the always-reject row '$PERMISSION_ROW_NEVER'" >/dev/null
+
+    send_text '3'
+    wait_for_log 'ai AnswerPermission .* option_id: "reject-always"' "$WAIT_SECS" \
+        "the refusal view sent back" >/dev/null
+    # From the log for the same reason the auto-answer below is: every
+    # chunk this stub sends shares one message id, so they fold into a
+    # single transcript row wider than the panel.
+    wait_for_log 'ai MessageChunk .* text: "first reject-always"' "$WAIT_SECS" \
+        "the agent's report of the first refusal" >/dev/null
+
+    wait_for "$AUTO_REFUSE_LINE" "$WAIT_SECS" "the standing refusal's own row" >/dev/null
+    wait_for_log 'ai MessageChunk .* text: "second reject-always"' "$WAIT_SECS" \
+        "the agent's report of the auto-refusal" >/dev/null
+    refute "$PERMISSION_PROMPT call_202" 'a refused kind asked the user again'
+    pass 'an always-reject refused the next request of that kind without asking'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
@@ -891,20 +914,32 @@ TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$REPO_ROOT/crates/view-core/src/update/ai
 require_template "$PERMISSION_RS" '"  {key} {} ({})"' || exit 1
 PERMISSION_ROW_DENY='1 Deny (reject_once)'
 PERMISSION_ROW_ONCE='2 Allow Once (allow_once)'
-PERMISSION_ROW_ALWAYS='3 Always Allow (allow_always)'
+# The two rows whose answer outlives the question say what they cover and
+# how long for, off the request's own tool kind. Asserted as a prefix: at
+# this width the row is a few columns wider than the panel's interior, the
+# same truncation `REVIEW_KEY_HINT` is read through.
+require_template "$PERMISSION_RS" '"all {tool} this session"' || exit 1
+require_template "$PERMISSION_RS" '"no {tool} this session"' || exit 1
+PERMISSION_ROW_ALWAYS='3 Always Allow (all edit this'
+PERMISSION_ROW_NEVER='3 Always Reject (no execute'
 for stub_option in \
     '{ "optionId": "reject-once", "name": "Deny", "kind": "reject_once" }' \
     '{ "optionId": "allow-once", "name": "Allow Once", "kind": "allow_once" }' \
-    '{ "optionId": "allow-always", "name": "Always Allow", "kind": "allow_always" }'; do
+    '{ "optionId": "allow-always", "name": "Always Allow", "kind": "allow_always" }' \
+    '{ "optionId": "reject-always", "name": "Always Reject", "kind": "reject_always" }'; do
     require_template "$STUB_RS" "$stub_option" || exit 1
 done
 PERMISSION_KEY_HINT=$(const_str "$PERMISSION_RS" KEY_HINT) || exit 1
-# What the panel says when a standing grant answered for the user. The
-# template lives where the answer is given; `edit` is the kind the stub's
-# own request names.
+# What the panel says when a standing answer answered for the user. The
+# template lives where the answer is given; `edit` and `execute` are the
+# kinds the stub's own two requests name. Both are read as a prefix for the
+# same width reason as the option rows above.
 require_template "$REPO_ROOT/crates/view-core/src/update/ai.rs" \
-    '"auto-allowed {granted} (standing grant)"' || exit 1
-AUTO_ALLOW_LINE='auto-allowed edit (standing grant)'
+    '"auto-allowed {tool_kind} (standing answer)"' || exit 1
+require_template "$REPO_ROOT/crates/view-core/src/update/ai.rs" \
+    '"auto-refused {tool_kind} (standing answer)"' || exit 1
+AUTO_ALLOW_LINE='auto-allowed edit (standing'
+AUTO_REFUSE_LINE='auto-refused execute (standing'
 
 # How the first-run provisioning wait announces itself.
 PROVISION_NOTICE=$(const_str "$REPO_ROOT/crates/view/src/ai_worker.rs" PROVISION_NOTICE_PREFIX)
