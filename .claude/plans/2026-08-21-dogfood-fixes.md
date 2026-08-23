@@ -405,20 +405,53 @@ not the panel is focused (the unfocused hint stays too). Tests pin
 the rendered rows; docs/keymaps.md gains the review + permission key
 tables it currently lacks.
 
-## T22 — the review overlay earns the trust gate
+Extended from the session's forensics (frozen-session VIEW_LOG): the
+user answered `a` (always-allow) and was still prompted on all five
+Edit calls — either the pinned adapter ignores `allow_always` across
+tool calls or view answers with the wrong option id; view logs no
+outbound permission answers, so the log cannot say which. This task
+root-causes that against the pinned adapter (a live-adapter probe,
+not an assumption), fixes whichever side lies, and adds the answer
+breadcrumb (request id, option id, kind) to VIEW_LOG so the next
+session can be read. Also: when a permission prompt and a diff review
+pend together, the permission consumes keys first — the user's `a`
+answered an invisible prompt instead of accepting the hunk under
+their eyes. The two `a` meanings must not collide: when both pend,
+the permission renders and answers with keys that are not review
+keys (numbers or distinct letters, shown on screen per the above),
+and a test pins the stacked-pending routing.
 
-Found live ("no trust"): the selected hunk is only highlighted on its
-`@@` header row; the key hints vanish exactly when the review desyncs
-(replaced by the sync notice — and a fully-stale review's only exit
-is the `q` those hints name); resolving a review writes nothing to
-the transcript; and back-to-back proposals promote silently, so the
-user saw "the same task" open a third edit they never got to read.
-Fix: hunk selection highlights the whole hunk body; the key-hint row
-and the sync notice coexist; every resolution writes a transcript
-entry ("accepted 2 hunks in Taskfile.yml", "discarded proposal");
-a promoted next proposal announces itself as a new entry + title
-change. Root-cause the recorded third-edit sequence from the
-preserved typescript + VIEW_LOG and pin whatever it exposes.
+## T22 — review happens in the buffer, not a modal
+
+Found live ("no trust"), then ruled by the user 2026-08-23: the modal
+diff view is rejected as the review surface. The user expected —
+and the task now builds — inline review: when a proposal targets an
+open file, the diff renders in that buffer with focus shifted to it,
+hunks shown in place (the modern shape: deletions and additions
+visible at their real location), and the accept/reject decision made
+where the code lives. The panel transcript records the outcome; it
+does not host the diff.
+
+Constraints that shape the design: nvim owns all buffer text, so
+proposed content renders through extmarks/virtual lines issued via
+`Effect::Rpc` (or grid-level composition over the window) — never a
+view-side shadow of buffer text; the paint loop never awaits RPC.
+This converges with the chartered agent-change-gallery direction
+(`.claude/plans/2026-08-14-post-v01-charters.md`, C4 gallery
+charter): the design pass reads that charter first and builds the
+inline mechanism as its foundation rather than a second throwaway
+surface — planned thoughtfully against it, per the user's standing
+instruction to check future work for overlap before building.
+
+Carried forward from the modal's failures (they must not recur in
+whatever renders): selection always visible on the full hunk body,
+keys always on screen, every resolution written to the transcript
+("accepted 2 hunks in Taskfile.yml", "discarded proposal"), a
+promoted next proposal announces itself, and a fully-stale review
+always has a visible exit. The recorded third-edit sequence from the
+preserved VIEW_LOG gets root-caused and pinned as part of this task.
+Design doc first (agreed shape, judged against the charter and the
+§3 budgets), then implementation through the standard loop.
 
 ## T23 — the composer paints its cursor
 
