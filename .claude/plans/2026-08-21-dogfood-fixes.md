@@ -281,6 +281,20 @@ in nothing on screen is a bug). Sweep leg: tmux `load-buffer` +
 `paste-buffer -p` into the focused composer, assert the text appears in
 the box and no submission happened.
 
+## T15 — `<leader>ai` re-enters an open, unfocused panel
+
+Found live 2026-08-23, seconds after T14: `<Esc>` un-enters the panel
+(non-modal, stays visible), and then no key returns to it —
+`<leader>ai` is `:View ai toggle`, which closes an open panel outright,
+so refocus needs `:View ai open` typed into the cmdline.
+
+Fix: toggle becomes focus-aware. Open + focused → close (today's
+behavior). Open + unfocused → re-enter (claim focus, do not close).
+Closed → open. `:View ai toggle` and `<leader>ai` stay one verb;
+docs/keymaps.md's line updates with it (its render test will insist).
+Tests pin all three states; the sweep's panel leg gains the
+esc-then-leader-ai round trip.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
