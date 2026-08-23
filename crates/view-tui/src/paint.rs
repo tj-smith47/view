@@ -93,6 +93,15 @@ impl Damage {
             || (area.y..area.y.saturating_add(area.height)).any(|row| self.rows.contains(&row))
     }
 
+    /// Whether this frame repaints the buffer row `row` rows below `area`'s
+    /// own top -- the row-level clip every painter that writes more than one
+    /// row applies, so a layer only ever writes inside the rows
+    /// [`composite_layers`] cleared for it.
+    #[must_use]
+    pub fn covers_row_of(&self, area: ratatui::layout::Rect, row: u16) -> bool {
+        self.covers(area.y.saturating_add(row))
+    }
+
     /// Whether this damage repaints something, and nothing outside `rows`.
     ///
     /// Containment rather than set equality, because the bench taps use it
@@ -1089,7 +1098,7 @@ fn paint_messages(
     let msg_area = theme.chrome(ChromeGroup::MsgArea);
     let style = ratatui_style(msg_area);
     let blank = " ".repeat(usize::from(area.width));
-    for row in (0..area.height).filter(|&row| repaints(damage, area, row)) {
+    for row in (0..area.height).filter(|&row| damage.covers_row_of(area, row)) {
         paint_text_row(&blank, style, area, row, buf);
     }
 
@@ -1110,7 +1119,7 @@ fn paint_messages(
         let Ok(row) = u16::try_from(i) else {
             break;
         };
-        if !repaints(damage, inner, row) {
+        if !damage.covers_row_of(inner, row) {
             continue;
         }
         paint_text_row(
@@ -1121,14 +1130,6 @@ fn paint_messages(
             buf,
         );
     }
-}
-
-/// Whether this frame repaints the buffer row `row` rows below `area`'s own
-/// top -- the row-level clip every painter that writes more than one row
-/// applies, so a layer only ever writes inside the rows
-/// [`composite_layers`] cleared for it.
-fn repaints(damage: &Damage, area: ratatui::layout::Rect, row: u16) -> bool {
-    damage.covers(area.y.saturating_add(row))
 }
 
 /// `area` shrunk by one cell on every edge: the interior the border frame
@@ -1162,8 +1163,8 @@ fn paint_message_border(
     }
     let last_col = area.width - 1;
     let last_row = area.height - 1;
-    let top_row = repaints(damage, area, 0);
-    let bottom_row = repaints(damage, area, last_row);
+    let top_row = damage.covers_row_of(area, 0);
+    let bottom_row = damage.covers_row_of(area, last_row);
     for col in 0..area.width {
         let (top, bottom) = match col {
             0 => ('┌', '└'),
@@ -1178,7 +1179,7 @@ fn paint_message_border(
         }
     }
     for row in 1..last_row {
-        if !repaints(damage, area, row) {
+        if !damage.covers_row_of(area, row) {
             continue;
         }
         set_border_cell(buf, area.x, area.y + row, '│', style);
@@ -1346,7 +1347,7 @@ fn paint_popupmenu(
         if row >= area.height {
             break;
         }
-        if !repaints(damage, area, row) {
+        if !damage.covers_row_of(area, row) {
             continue;
         }
         let is_selected = i64::try_from(i).is_ok_and(|idx| idx == state.selected);
@@ -1462,7 +1463,7 @@ fn paint_native_overlay(
         // whole layer: a framed overlay is one layer but many independent
         // rows, and a keystroke in a panel's composer changes exactly one
         // of them
-        if !damage.covers(area.y.saturating_add(row)) {
+        if !damage.covers_row_of(area, row) {
             continue;
         }
         let edge_row = laid.framed && (i == 0 || i == last);
@@ -1575,14 +1576,14 @@ fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, damage: &Damage, buf:
         return;
     }
     let bottom_row = area.height - 1;
-    if repaints(damage, area, bottom_row) {
+    if damage.covers_row_of(area, bottom_row) {
         let fill = " ".repeat(usize::from(area.width));
         let style = ratatui_style(theme.chrome(ChromeGroup::StatusLine));
         paint_text_row(&fill, style, area, bottom_row, buf);
     }
 
     let mid_row = area.height / 2;
-    if repaints(damage, area, mid_row) {
+    if damage.covers_row_of(area, mid_row) {
         let text: String = view_surface::SHELL_PLACEHOLDER
             .chars()
             .take(usize::from(area.width))
@@ -1668,10 +1669,9 @@ fn paint_grid(
     let mut styles = StyleCache::new();
     let cols = w.min(area.width) as usize;
     for row in 0..h.min(area.height) {
-        // `area.y + row` is the terminal-space row `damage` is expressed in;
         // skipping an unchanged row leaves its cells as the previous frame
         // painted them
-        if !damage.covers(area.y + row) {
+        if !damage.covers_row_of(area, row) {
             continue;
         }
         // the row's destination cells as one slice: indexing each cell
@@ -4653,6 +4653,98 @@ mod tests {
                         replace_last: false,
                     },
                 );
+                open_tree_with_entries(m);
+            },
+            60,
+            12,
+            |m| type_key(m, "<Down>"),
+        );
+    }
+
+    /// The same shape for the completion popup, which shares the toast's
+    /// defect exactly: an unframed multi-row layer under a row-clipped
+    /// sidebar, unchanged this frame and therefore damaging none of its own
+    /// rows, admitted by the rect-level gate because it happens to cover one
+    /// the sidebar changed.
+    #[test]
+    fn clip_matches_full_popupmenu_over_the_sidebar_leaves_its_undamaged_rows() {
+        assert_clip_matches_full(
+            60,
+            12,
+            |m| {
+                seed_grid(m, 60, 12);
+                // anchored at the sidebar's own top-left, so the menu's
+                // first rows are rows the tree's frame owns and a selection
+                // move never repaints
+                apply(
+                    m,
+                    view_core::events::UiEvent::PopupmenuShow {
+                        items: ["alpha", "beta", "gamma", "delta"]
+                            .into_iter()
+                            .map(|word| view_core::events::PmItem {
+                                word: word.into(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        selected: 0,
+                        row: 0,
+                        col: 0,
+                        grid: 0,
+                    },
+                );
+                open_tree_with_entries(m);
+            },
+            60,
+            12,
+            |m| type_key(m, "<Down>"),
+        );
+    }
+
+    /// The startup shell under the same sidebar. Its two writes are the
+    /// screen's middle and bottom rows, neither of which a selection move
+    /// damages, and both of which the tree's frame covers.
+    #[test]
+    fn clip_matches_full_shell_under_the_sidebar_leaves_its_undamaged_rows() {
+        assert_clip_matches_full(
+            60,
+            12,
+            |m| {
+                set_term_size(m, 60, 12);
+                // the shell layer exists only before the first real content
+                // flush, which is also when a sidebar opened from the
+                // command line is already on screen
+                m.content_painted = false;
+                open_tree_with_entries(m);
+            },
+            60,
+            12,
+            |m| type_key(m, "<Down>"),
+        );
+    }
+
+    /// Predicted glyphs under the same sidebar. Their coordinates are the
+    /// grid's own, so the clip reads the absolute row rather than a
+    /// rect-relative one, and a prediction still pending from an earlier
+    /// keystroke damages nothing on the frame the sidebar moves.
+    #[test]
+    fn clip_matches_full_speculation_under_the_sidebar_leaves_its_undamaged_rows() {
+        assert_clip_matches_full(
+            60,
+            12,
+            |m| {
+                seed_grid(m, 60, 12);
+                let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
+                // two rows far enough apart that the layer rect spans the
+                // sidebar rows a selection move damages as well as ones it
+                // does not
+                for row in [0, 8] {
+                    assert!(
+                        m.speculate
+                            .predict("insert", 'z', (row, 2), stamp)
+                            .is_some(),
+                        "the fixture must leave a prediction pending"
+                    );
+                }
                 open_tree_with_entries(m);
             },
             60,
