@@ -727,7 +727,15 @@ fn any_sequence_of_pushes_pops_and_escapes_leaves_focus_on_the_stack_top() {
                 }
                 _ => {
                     let effects = update(&mut m, Msg::Paste("p".into()));
-                    assert_eq!(effects.is_empty(), depth_before > 0);
+                    // a covered paste is answered by the overlay -- with a
+                    // notice, at one composing nothing (see
+                    // `a_paste_at_a_native_surface_with_no_text_input_
+                    // answers_with_a_notice`) -- and never forwarded
+                    assert_eq!(
+                        rpc_calls(&effects).is_empty(),
+                        depth_before > 0,
+                        "a paste reaches the engine only with no overlay focused"
+                    );
                 }
             }
 
@@ -819,11 +827,174 @@ fn esc_on_the_top_of_a_stack_forwards_without_touching_what_is_beneath() {
     );
 }
 
+/// The reported defect, as an assertion: a bracketed paste into the entered
+/// panel reached the `Focus::Native` arm and was dropped there, so the
+/// prompt the user pasted produced no text, no notice and no effect --
+/// nothing on screen at all.
 #[test]
-fn paste_in_native_focus_is_consumed_not_forwarded() {
+fn a_paste_into_the_focused_composer_lands_at_its_cursor() {
+    let mut m = entered_ai_panel_model();
+    m.ai_panel_mut().input = "draft ".to_string();
+    m.dirty = false;
+
+    let effects = update(&mut m, Msg::Paste("pasted text".into()));
+
+    assert_eq!(
+        m.ai_panel().input,
+        "draft pasted text",
+        "the paste lands whole, at the composer's cursor"
+    );
+    assert!(
+        effects.is_empty(),
+        "a composer paste is local: nothing crosses the boundary for it: {effects:?}"
+    );
+    assert!(m.dirty, "the composer's new text has to be painted");
+}
+
+/// One insertion of text, never a replay of the keys that text spells: a
+/// paste routed through the composer's own key handling would read `<CR>`
+/// as the submit key and `<lt>` as a literal `<`, so a pasted snippet
+/// naming either would arrive as something nobody copied -- and part of it
+/// would arrive as an agent turn.
+#[test]
+fn a_pasted_key_notation_is_text_and_not_the_key_it_names() {
+    let mut m = entered_ai_panel_model();
+
+    let effects = update(&mut m, Msg::Paste("press <CR> or <lt>".into()));
+
+    assert_eq!(m.ai_panel().input, "press <CR> or <lt>");
+    assert!(
+        !m.ai_panel().turn_in_flight,
+        "a pasted <CR> is two characters of a prompt, not the key that sends one"
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+}
+
+/// Bracketed paste exists so that a pasted line break is text rather than
+/// the key it looks like. A trailing newline is the ordinary shape of a
+/// copied line, and submitting on it would send a prompt the user was still
+/// editing -- while the panel's own `<CR>` still sends it afterwards.
+#[test]
+fn a_pasted_trailing_newline_leaves_the_prompt_in_the_composer() {
+    let mut m = entered_ai_panel_model();
+
+    let effects = update(&mut m, Msg::Paste("first line\nsecond line\n".into()));
+
+    assert_eq!(
+        m.ai_panel().input,
+        "first line\nsecond line\n",
+        "the text is kept verbatim, its line breaks included"
+    );
+    assert!(effects.is_empty(), "nothing was sent: {effects:?}");
+    assert!(!m.ai_panel().turn_in_flight);
+    assert!(
+        panel_transcript_texts(&m).is_empty(),
+        "no turn was started, so the transcript has no prompt to echo: {:?}",
+        panel_transcript_texts(&m)
+    );
+
+    let effects = update(&mut m, key("<CR>"));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::AiPromptSubmit { text }] if text == "first line\nsecond line\n"
+        ),
+        "the key the user presses still sends what they pasted: {effects:?}"
+    );
+}
+
+/// A paste far past the composer's own width is bounded by the same
+/// accounting a typed prompt is: the composer keeps every character, paints
+/// its tail, and never grows past the share of the panel it may take -- the
+/// transcript keeps the rest.
+#[test]
+fn a_paste_past_the_wrap_cap_keeps_every_character_and_paints_its_tail() {
+    const PANEL_HEIGHT: usize = 16;
+    const PANEL_WIDTH: usize = 60;
+    let mut m = entered_ai_panel_model();
+    let pasted: String = (0..crate::native::ai_panel::composer_width(PANEL_WIDTH) * 8)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+
+    let _ = update(&mut m, Msg::Paste(pasted.clone()));
+
+    assert_eq!(m.ai_panel().input, pasted, "no pasted character is cut");
+    let rows = m.ai_panel().view(PANEL_HEIGHT, PANEL_WIDTH).input;
+    assert!(rows.len() > 1, "a paste this long has to wrap");
+    assert!(
+        rows.len() * 2 <= PANEL_HEIGHT,
+        "the composer may take at most half the rows it shares with the \
+         transcript, wherever the text came from: {} rows of {PANEL_HEIGHT}",
+        rows.len()
+    );
+    assert!(
+        pasted.ends_with(&rows.concat()),
+        "the rows on screen are the tail of the paste, where the cursor is"
+    );
+}
+
+/// A focused native surface that composes no text answers the paste instead
+/// of swallowing it. Three shapes reach this, and all three own every key
+/// while they are up: a confirm prompt, an unanswered permission request,
+/// and an open review.
+#[test]
+fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
+    let with_prompt = || {
+        let mut m = model();
+        open_overlay(&mut m);
+        m
+    };
+    for (what, mut m) in [
+        ("a confirm prompt", with_prompt()),
+        ("an unanswered permission", pending_permission_model()),
+        ("an open review", live_review_model()),
+    ] {
+        m.ai_panel_mut().input = "draft".to_string();
+
+        let effects = update(&mut m, Msg::Paste("pasted text".into()));
+
+        assert!(
+            rpc_calls(&effects).is_empty(),
+            "{what} must not forward the paste to the engine: {effects:?}"
+        );
+        assert_eq!(
+            m.ai_panel().input,
+            "draft",
+            "{what} owns the keyboard, so nothing lands in the composer behind it"
+        );
+        assert!(
+            visible_texts(&m)
+                .iter()
+                .any(|line| line == NO_TEXT_INPUT_NOTICE),
+            "{what} left the paste with no answer on screen: {:?}",
+            visible_texts(&m)
+        );
+    }
+}
+
+/// The picker's filter is the other native surface that takes typed text,
+/// and a paste edits it the same way a keystroke does: one insertion, and
+/// the matcher worker re-asked for the query it produced.
+#[test]
+fn a_paste_at_the_focused_picker_filters_on_what_was_pasted() {
     let mut m = model();
-    open_overlay(&mut m);
-    assert!(update(&mut m, Msg::Paste("x".into())).is_empty());
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "picker".to_string(),
+            verb: "files".to_string(),
+        },
+    );
+
+    let effects = update(&mut m, Msg::Paste("src/main\n".into()));
+
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::PickerQuery { needle, .. }] if needle == "src/main "
+        ),
+        "the filter takes the paste, its line break spaced out: {effects:?}"
+    );
 }
 
 #[test]

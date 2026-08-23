@@ -87,7 +87,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract
             Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
-            Focus::Native(_) => Vec::new(),
+            Focus::Native(_) => paste_into_focused_surface(model, &text),
         },
         Msg::Mouse(input) => route_mouse(model, input),
         Msg::Redraw(events) => {
@@ -1481,6 +1481,64 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         },
     }
 }
+
+/// Delivers one bracketed paste to whichever native surface owns the
+/// keyboard: the picker takes it into its filter, the agent panel's composer
+/// takes it at its cursor, and a surface with no text input of its own
+/// answers with [`NO_TEXT_INPUT_NOTICE`] rather than swallowing it.
+///
+/// One insertion, never a submission, whatever the text ends with: that a
+/// pasted trailing newline does not press `<CR>` is the whole reason
+/// bracketed paste exists, and the composer's own `<CR>` arm is the only
+/// thing that starts a turn.
+fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<Effect> {
+    if let Some(OverlayKind::Picker(p)) = model.focused_overlay_mut().map(|ov| &mut ov.kind) {
+        let generation = p.paste_query(text);
+        let needle = p.query().to_string();
+        let source = p.source().clone();
+        return vec![Effect::PickerQuery {
+            generation,
+            needle,
+            source,
+            resolved: None,
+        }];
+    }
+    // An open review and an unanswered permission request each own every key
+    // the panel receives (see `route_key`'s `OverlayKind::Ai` arm); a paste
+    // is no more theirs to answer than an `a` is, so it takes the notice
+    // below instead of landing in a composer the reader cannot see typing in.
+    let composer_takes_it = matches!(
+        model.focused_overlay_mut().map(|ov| &ov.kind),
+        Some(OverlayKind::Ai)
+    ) && model.ai_panel().pending_permission.is_none()
+        && model.ai_panel().pending_diff.is_none();
+    if composer_takes_it {
+        if !text.is_empty() {
+            // Verbatim, control characters and all: the composer is one
+            // logical line -- `AiPanelState`'s wrap gives a line break no
+            // meaning of its own -- but every painted row is control-
+            // sanitized by `view-surface`, so a pasted newline shows as the
+            // single space the wrap and the composer cursor already measure
+            // it as. Storing it as typed keeps the prompt the agent is sent
+            // the text that was copied, line breaks included, without the
+            // panel's row accounting and what is on screen disagreeing.
+            model.ai_panel_mut().input.push_str(text);
+            model.dirty = true;
+        }
+        return Vec::new();
+    }
+    model
+        .engine
+        .record_native_notice(NO_TEXT_INPUT_NOTICE.to_string(), false)
+}
+
+/// What a paste answers with at a focused native surface that composes no
+/// text: the tree, a confirm prompt, an open review, an unanswered
+/// permission request. Names the way to a surface that would have taken it,
+/// because a paste that ends in nothing on screen reads as a dead editor
+/// rather than as text delivered nowhere.
+const NO_TEXT_INPUT_NOTICE: &str =
+    "view: nothing here takes pasted text -- <Esc> leaves this surface, then paste again";
 
 /// Pops the Prompt overlay if it is the topmost one -- the shared first
 /// step every tree prompt-reply arm takes, since each of the three

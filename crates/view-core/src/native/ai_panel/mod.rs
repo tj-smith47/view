@@ -930,6 +930,37 @@ mod tests {
         );
     }
 
+    /// A pasted line break is kept in the composer's text and measured as
+    /// the one cell `view-surface` paints it as, so the wrap, the cap and
+    /// the cursor all agree with the screen. A break given a row of its own
+    /// here, or measured as nothing at all, would put the cursor on a column
+    /// the panel never painted to.
+    #[test]
+    fn a_pasted_line_break_is_kept_and_measured_as_the_one_cell_it_paints_as() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = AiPanelState::new();
+        state.input = "ab\ncd".to_string();
+
+        assert_eq!(
+            state.view(ROOM, WIDE_PANEL).input,
+            vec!["ab\ncd".to_string()],
+            "a line break neither breaks the row nor is dropped from it"
+        );
+        assert_eq!(
+            state.composer_cursor(ROOM, WIDE_PANEL),
+            (0, 5),
+            "the break occupies exactly one column between the two halves"
+        );
+
+        // the boundary the measurement decides: a row filled to the width
+        // with the break as its last cell is still one row, and the
+        // character after it opens the next
+        state.input = format!("{}\n", "x".repeat(width - 1));
+        assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (0, width));
+        state.input.push('y');
+        assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (1, 1));
+    }
+
     /// The wrap boundary itself, where an off-by-one puts the cursor on a
     /// row that is not there: a row exactly full keeps the cursor on its
     /// own last column, and the next character opens the next row.

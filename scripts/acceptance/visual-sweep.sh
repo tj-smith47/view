@@ -966,7 +966,47 @@ leg_narrow_title() {
     end_session
 }
 
-LEGS=(leg_entry_points leg_toast_and_history leg_panel_typing leg_narrow_title)
+# A clipboard paste into the entered composer, sent the way a terminal
+# sends one: the text wrapped in the paste brackets, which is the only way
+# to drive the decode this leg is about. The defect it exists for dropped
+# the whole paste on the floor -- the prompt the user pasted produced no
+# text, no notice and nothing on screen -- and no unit test above the
+# routing could see it, because what a real paste even looks like is
+# decided by the terminal, not by the model.
+leg_panel_paste() {
+    CURRENT_LEG=panel-paste
+    local mark=PASTEMARK buffer=$WORK/paste.txt echoed copies
+    start_session paste 'visual sweep seed line'
+    command_line ':View ai'
+    wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
+    send_text 'y'
+    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
+
+    # the trailing newline is the point of the leg: a copied line ends with
+    # one, and not submitting on it is what bracketed paste exists for.
+    # `-r` keeps it a newline -- tmux otherwise translates it to a carriage
+    # return, which is a different byte from the one a real paste carries
+    printf '%s\n' "$mark" >"$buffer"
+    tmux load-buffer -b view-paste "$buffer"
+    tmux paste-buffer -b view-paste -d -r -p -t "$SESSION"
+
+    # on the composer's own line, named by the prompt mark: a submitted
+    # prompt leaves that line empty and moves its text into the transcript,
+    # so finding it here is the same assertion as "nothing was sent"
+    echoed=$(wait_in_box "> $mark" "$REACTION_SECS" "the pasted prompt on the composer line")
+    copies=$(box_text | grep -cF -- "$mark" || true)
+    if [ "$copies" != 1 ]; then
+        fail "the pasted prompt is on screen $copies times, so something echoed it into the transcript as well as holding it in the composer"
+        return 1
+    fi
+    assert_chrome 'the agent panel holding a pasted prompt'
+    pass "a bracketed paste lands in the composer and sends nothing (${echoed}s)"
+
+    dismiss ai
+    end_session
+}
+
+LEGS=(leg_entry_points leg_toast_and_history leg_panel_typing leg_panel_paste leg_narrow_title)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

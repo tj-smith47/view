@@ -920,6 +920,31 @@ fn a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first() {
     );
 }
 
+/// A pasted line break is stored in the composer as it was copied, so the
+/// prompt the agent is sent is the text the user pasted -- which makes this
+/// the place the break becomes the single space `view-core` already
+/// measured it as when it wrapped the row and placed the cursor. A control
+/// character surviving into the row instead would move the terminal's own
+/// cursor out of the frame the panel just drew, and the composer would be
+/// painting to a column nothing else agrees on.
+#[test]
+fn a_pasted_line_break_paints_as_the_one_space_the_composer_measured() {
+    use view_core::native::views::AiPanelView;
+    let kind = LayerKind::Ai(AiPanelView::new("AI Agent").with_input("first\nsecond"));
+
+    let framed = rows(40, 6, &kind, BorderSet::ASCII);
+    let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+
+    assert!(
+        text.iter().any(|line| line.contains("> first second")),
+        "the break paints as one space between the halves it separates: {text:?}"
+    );
+    assert!(
+        text.iter().all(|line| !line.chars().any(char::is_control)),
+        "no control character reaches the terminal: {text:?}"
+    );
+}
+
 /// One row shorter still than
 /// `a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first`,
 /// where the header's one surviving row and the rule are no longer both

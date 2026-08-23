@@ -208,6 +208,26 @@ impl PickerState {
         } else if let Some(c) = single_char(notation) {
             self.query.push(c);
         }
+        self.requery()
+    }
+
+    /// Inserts one pasted `text` into the query as a single edit, every
+    /// control character in it standing in as the space it would paint as.
+    ///
+    /// A query is one line and the filter matches against one: dropping the
+    /// line breaks out of a pasted list instead would run its last word into
+    /// the next one's first and filter for a needle that was never on the
+    /// clipboard.
+    pub fn paste_query(&mut self, text: &str) -> u64 {
+        self.query
+            .extend(text.chars().map(|c| if c.is_control() { ' ' } else { c }));
+        self.requery()
+    }
+
+    /// The bookkeeping every query edit ends with: the fresh generation the
+    /// matcher worker's answer must carry back, and the selection returned
+    /// to the top of results that have not arrived yet.
+    fn requery(&mut self) -> u64 {
         self.generation = next_generation();
         self.selected = 0;
         self.generation
@@ -451,6 +471,21 @@ mod tests {
         let after = state.edit_query("<Up>");
         assert_eq!(state.query(), "");
         assert!(after > before);
+    }
+
+    #[test]
+    fn paste_query_inserts_the_whole_text_with_its_line_breaks_spaced_out() {
+        let mut state = PickerState::open(Source::Buffers);
+        state.edit_query("s");
+        let before = state.generation();
+        let after = state.paste_query("rc/main.rs\nsrc/lib.rs\n");
+
+        assert_eq!(
+            state.query(),
+            "src/main.rs src/lib.rs ",
+            "the paste lands whole, each break standing in as a space"
+        );
+        assert!(after > before, "the matcher worker gets a fresh generation");
     }
 
     #[test]
