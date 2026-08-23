@@ -329,6 +329,28 @@ named coverage gap: an end-to-end yank test with a PRE-EXISTING
 `g:clipboard` (the stand-down branch that today is asserted as correct
 and never exercised further).
 
+## T18 — `"+p` pastes through the user's OSC 52 provider
+
+Ruled 2026-08-23: paste is T17's other half, not separate work — the
+clipboard feature is not done while `"+p` hangs ~10s and delivers
+nothing. nvim's OSC 52 provider paste emits a read query
+(`ESC ] 52 ; {sel} ; ?`) via `nvim_ui_send()` and waits on a
+`TermResponse` the UI must deliver back; T17's whitelist drops the
+query as unanswerable because view has no way to capture the
+terminal's reply — it would arrive on stdin and be typed into the
+buffer as garbage.
+
+Fix: an input-side terminal-reply router. Forward the OSC 52 read
+query to the real terminal; recognize the terminal's OSC 52 response
+in view's input path before it reaches key decoding; deliver it to
+nvim through the UI term-event API so the provider's wait resolves.
+A terminal that never answers (common; tmux gates it behind
+set-clipboard) must not turn every paste into a 10s hang — the
+failure policy is part of the task, decided from how nvim's own TUI
+handles the same silence. Coverage: an end-to-end paste leg mirroring
+T17's yank test (query forwarded, reply injected, buffer receives the
+pasted text), red/green under mutation.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
