@@ -196,14 +196,24 @@ pub(super) fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
     Vec::new()
 }
 
-/// Opens the agent panel if it is closed, closes it if it is open. Closing
-/// never tears down a live session, for the same reason opening never
-/// starts one (see [`open_ai_panel`]'s doc): a session already running
-/// keeps running, unattended, exactly as `close_ai_panel`'s own doc
-/// promises. Either direction is an explicit user invoke, so it claims or
-/// releases the panel's keyboard focus the same way the `open`/`close`
-/// verbs do -- see `AiPanelState::focused`'s own doc.
+/// One verb over three states: closed opens and enters, open-and-entered
+/// closes, open-but-left re-enters. The middle state is the one the panel
+/// alone has -- it is non-modal, so `<Esc>` un-enters it without closing it
+/// (see `AiPanelState::focused`'s own doc), and a toggle that read that as
+/// "open, therefore close" left the visible panel with no key back into it.
+///
+/// Closing never tears down a live session, for the same reason opening
+/// never starts one (see [`open_ai_panel`]'s doc): a session already
+/// running keeps running, unattended, exactly as `close_ai_panel`'s own doc
+/// promises. Every direction here is an explicit user invoke, so it claims
+/// or releases the panel's keyboard focus the same way the `open`/`close`
+/// verbs do.
 pub(super) fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
+    if model.ai_panel_overlay_open() && !model.ai_panel().focused {
+        model.ai_panel_mut().focused = true;
+        model.dirty = true;
+        return Vec::new();
+    }
     // `close_ai_panel` itself clears `AiPanelState::focused`, at the single
     // authoritative closing point
     if model.close_ai_panel() {

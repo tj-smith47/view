@@ -5432,6 +5432,62 @@ fn ai_panel_toggle_pushes_then_pops_the_overlay() {
 }
 
 #[test]
+fn ai_panel_toggle_re_enters_an_open_panel_the_user_has_escaped_out_of() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let toggle = || Msg::FeatureInvoke {
+        feature: "ai".to_string(),
+        verb: "toggle".to_string(),
+    };
+    let _ = update(&mut m, toggle());
+    assert!(m.ai_panel().focused, "the first toggle opens and enters");
+
+    let escaped = press(&mut m, "<Esc>");
+    assert!(
+        escaped.is_empty(),
+        "un-entering is view-local, the key reaches nobody else: {escaped:?}"
+    );
+    assert!(
+        m.ai_panel_overlay_open() && !m.ai_panel().focused,
+        "<Esc> leaves the panel open and un-entered, the state this toggle \
+             has to tell apart from an entered one"
+    );
+
+    m.dirty = false;
+    let effects = update(&mut m, toggle());
+
+    assert!(
+        m.ai_panel_overlay_open(),
+        "a toggle against an un-entered panel re-enters it rather than \
+             closing it: {:?}",
+        m.overlays()
+    );
+    assert!(m.ai_panel().focused, "re-entering claims the keyboard back");
+    assert!(
+        matches!(m.focus(), Focus::Native(_)),
+        "the re-entered panel owns focus the way an opened one does: {:?}",
+        m.focus()
+    );
+    assert!(m.dirty, "taking focus back must trigger a repaint");
+    assert!(
+        effects.is_empty(),
+        "re-entering issues no effect of its own: {effects:?}"
+    );
+
+    let effects = update(&mut m, toggle());
+
+    assert!(
+        m.overlays().is_empty(),
+        "the next toggle, entered again, closes: {:?}",
+        m.overlays()
+    );
+    assert!(
+        effects.is_empty(),
+        "closing issues no effect of its own: {effects:?}"
+    );
+}
+
+#[test]
 fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_stealing_focus() {
     let mut m = model();
     m.ai_trusted = true;

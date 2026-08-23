@@ -19,6 +19,23 @@ the keys view registers disagree.
 | `<leader>fm` | `notifications` | `:View notifications history` |
 | `<leader>ai` | `ai` | `:View ai toggle` |
 
+## `<leader>ai` reads the panel before it acts
+
+The AI panel is non-modal: `<Esc>` steps out of it and leaves it on screen
+beside your buffer. So `<leader>ai` (`:View ai toggle`) is one verb over the
+three states that gives you:
+
+| the panel is | `<leader>ai` |
+| --- | --- |
+| closed | opens it and puts the cursor in the composer |
+| open, and you are in it | closes it |
+| open, and you have stepped out | puts you back in it |
+
+The third row is why the key never dead-ends: a panel you escaped out of is
+one press from being yours again, not one press from disappearing. Closing
+it, whichever way you get there, leaves the agent session running -- reopen
+and the transcript is where you left it.
+
 ## Turning them off
 
 A default key is registered only for a feature that is on, and only for

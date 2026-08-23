@@ -933,6 +933,40 @@ leg_panel_typing() {
     assert_chrome 'the agent panel holding a wrapped prompt'
     pass "a $((${#typed} + ${#tail_mark}))-character prompt keeps its tail on screen (${echoed}s)"
 
+    # Out of the panel and back in on the key that put the user there. The
+    # defect this exists for was a dead end: Escape leaves the composer
+    # without closing the panel, and the toggle read "open" as "close", so
+    # the visible panel had no key back into it and only `:View ai open`
+    # returned. Driven here rather than in a unit test because "the user is
+    # in the composer again" is a claim about what the terminal accepts, not
+    # about a flag.
+    local ai_key
+    ai_key=$(printf '%s\n' "$ENTRY_POINTS" | awk '$1 == "ai" && $3 == "toggle" { print $2 }')
+    ai_key=$(tmux_key "$ai_key") || return 1
+    mark
+    send_key Escape
+    wait_change "$REACTION_SECS" "Escape leaving the composer" >/dev/null
+    settle
+    if box_text | grep -qF -- "$FOCUSED_TITLE"; then
+        fail 'Escape left the panel entered, so the round trip below would re-enter a panel it never left'
+        return 1
+    fi
+    if ! box_text | grep -qF -- "$PANEL_TITLE"; then
+        fail 'Escape closed the panel outright, so there is no un-entered panel for the toggle to return to'
+        return 1
+    fi
+    pass "Escape leaves the panel framed and un-entered ('$PANEL_TITLE')"
+
+    mark
+    send_text "$ai_key"
+    echoed=$(wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the panel the toggle re-enters")
+    # the title alone would pass on a panel that merely repainted its own
+    # border, so the keyboard is proven by a key landing in the composer
+    send_text REENTERED
+    wait_in_box 'REENTERED' "$REACTION_SECS" "a keystroke in the re-entered composer" >/dev/null
+    assert_chrome 'the re-entered agent panel'
+    pass "the toggle re-enters an escaped-out-of panel and its composer takes keys again (${echoed}s)"
+
     dismiss ai
     end_session
 }
