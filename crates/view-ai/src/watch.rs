@@ -97,6 +97,14 @@ const NEVER_WATCHED: [&str; 4] = [".git", "target", "node_modules", ".venv"];
 /// Ordered by the precedence the walk gives them, highest first.
 const IGNORE_FILES: [&str; 2] = [".ignore", ".gitignore"];
 
+/// How long the index read (see [`index_paths`]) is given to answer. Paid
+/// once by the registration walk and once per ignore-file change, both on
+/// the watch's own thread -- but a `git` that never answers at all (a wedged
+/// filesystem, a network home directory) must cost this watch a bounded
+/// pause rather than its whole registration, so the wait ends and the rules
+/// alone decide from there.
+const INDEX_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Everything [`spawn`] can fail with.
 ///
 /// Registering the tree is deliberately absent: it happens on the watch's
@@ -272,6 +280,17 @@ struct IgnoreRules {
     /// dropping a real write wherever the nested file re-includes what the
     /// root ignores.
     files: BTreeMap<(u8, usize, PathBuf), ignore::gitignore::Gitignore>,
+    /// The tracked files everything above rejects, absolute (see
+    /// [`Self::refresh_tracked`]).
+    ///
+    /// git applies its ignore rules to untracked files only: a file added
+    /// with `git add -f` inside an ignored directory is versioned from then
+    /// on, is edited like any other source file, and a watch that stopped at
+    /// the rules never reported a write to it. The files themselves are held
+    /// rather than the directories above them, so the exception stays
+    /// exactly as wide as the index says -- an untracked sibling in the same
+    /// ignored directory is still answered by the rules alone.
+    tracked: BTreeSet<PathBuf>,
 }
 
 impl IgnoreRules {
@@ -281,6 +300,7 @@ impl IgnoreRules {
         Self {
             root: root.to_path_buf(),
             files: BTreeMap::new(),
+            tracked: BTreeSet::new(),
         }
     }
 
@@ -351,8 +371,62 @@ impl IgnoreRules {
         };
     }
 
+    /// Re-reads the index and keeps whichever tracked paths the rules
+    /// reject, which is the whole of [`Self::tracked`].
+    ///
+    /// Called after the registration walk rather than before it: the walk is
+    /// what discovers the per-directory ignore files a tracked path has to
+    /// be judged against, so a whitelist computed first would keep paths no
+    /// rule ever rejected.
+    ///
+    /// Silent on every failure -- no `git`, not a checkout, a nonzero exit,
+    /// no answer inside [`INDEX_READ_TIMEOUT`] -- because an empty whitelist
+    /// is exactly the behaviour this watch had before the index was ever
+    /// read, and a project that is not a checkout has nothing to report.
+    fn refresh_tracked(&mut self) {
+        // emptied before the verdicts below are taken, so they are the
+        // rules' own: a path force-added into a previous read would
+        // otherwise keep whitelisting itself after it left the index
+        self.tracked = BTreeSet::new();
+        let root = self.root.clone();
+        let tracked = index_paths(&root)
+            .into_iter()
+            // `NEVER_WATCHED` is not a rule the index outranks: a repository
+            // that commits its own `node_modules` would otherwise buy a
+            // descriptor per directory of it, which is the cost the list
+            // exists to refuse
+            .filter(|path| !is_excluded(path, &root) && self.ignores(path, false))
+            .collect();
+        self.tracked = tracked;
+    }
+
+    /// The directories that have to be watched for [`Self::tracked`] to be
+    /// reachable at all: the ones on a whitelisted file's own path that the
+    /// rules reject, and so the ones the registration walk stopped at.
+    ///
+    /// Force-added paths nest, so every rejected directory between the root
+    /// and the file is named rather than only the one holding it -- a
+    /// descriptor on `generated/deep` is unreachable while `generated`
+    /// itself has none.
+    fn tracked_hosts(&self) -> BTreeSet<&Path> {
+        let mut hosts = BTreeSet::new();
+        for file in &self.tracked {
+            for dir in file.ancestors().skip(1).take_while(|dir| *dir != self.root) {
+                if self.ignores(dir, true) {
+                    hosts.insert(dir);
+                }
+            }
+        }
+        hosts
+    }
+
     /// Whether the ignore rules cover `path`, itself or through an excluded
     /// directory above it.
+    ///
+    /// A path the index holds is never covered: git's own rules stop at the
+    /// files it does not track (see [`Self::tracked`]), so the whitelist
+    /// answers ahead of every source below and the ordering between those
+    /// sources is left to decide the untracked paths alone.
     ///
     /// Resolved the way git descends rather than by asking one matcher
     /// about the whole path: every directory between the root and `path` is
@@ -369,6 +443,9 @@ impl IgnoreRules {
     /// registered and swept into a batch by the one create event the walk
     /// had already refused.
     fn ignores(&self, path: &Path, is_dir: bool) -> bool {
+        if self.tracked.contains(path) {
+            return false;
+        }
         // gathered once, in precedence order: a matcher that governs any
         // directory on this path governs the path too, so the walk below
         // reuses this list instead of re-scanning every rule file in the
@@ -423,6 +500,95 @@ fn decide(matcher: &ignore::gitignore::Gitignore, path: &Path, is_dir: bool) -> 
         return Some(true);
     }
     None
+}
+
+/// Every path the index at `root` holds, absolute. Empty for anything that
+/// is not a readable checkout -- no `git` on the host, a root outside a
+/// repository, a refusing or hanging subprocess -- which is what makes the
+/// whitelist an addition to the ignore rules rather than a dependency of
+/// them.
+///
+/// `git ls-files` rather than a read of `.git/index` here: the index format
+/// is versioned and extensible, and the one reader guaranteed to understand
+/// the version in front of it is the git that wrote it. The subprocess runs
+/// on a thread of its own so the wait can be bounded from this side; the
+/// abandoned thread reaps its own child whenever the command finally
+/// returns, so a slow answer costs an idle thread rather than a zombie.
+/// stderr goes nowhere: a root that is not a checkout is an ordinary
+/// project this watch still covers, not a message to print over a running
+/// editor's screen.
+fn index_paths(root: &Path) -> Vec<PathBuf> {
+    let (tx, rx) = std_mpsc::channel();
+    let dir = root.to_path_buf();
+    if std::thread::Builder::new()
+        .name("view-ai-watch-index".to_string())
+        .spawn(move || {
+            let _ = tx.send(
+                std::process::Command::new("git")
+                    .args(["ls-files", "-z"])
+                    .current_dir(&dir)
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output(),
+            );
+        })
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Ok(Ok(listed)) = rx.recv_timeout(INDEX_READ_TIMEOUT) else {
+        return Vec::new();
+    };
+    if !listed.status.success() {
+        return Vec::new();
+    }
+    listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        // a name git could not hand back as UTF-8 is left to the rules
+        // alone: `-z` emits those bytes exactly as they are on disk, and a
+        // lossy conversion would whitelist a path that is not the one the
+        // backend will report an event for
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .map(|rel| root.join(rel))
+        .collect()
+}
+
+/// Places a descriptor on every directory holding a whitelisted file that
+/// the registration walk refused (see [`IgnoreRules::tracked_hosts`]).
+///
+/// The walk stops at an ignored directory, so a file force-added inside one
+/// raises no event at all and the pump's whitelist is never even consulted.
+/// Only the directories on a whitelisted file's own path are registered, and
+/// never their subdirectories: an ignored tree costs one descriptor per
+/// force-added file's directory rather than a walk of the output it holds.
+fn register_tracked(slot: &WatcherSlot, ignores: &IgnoreRules, emit: &dyn Fn(Msg)) {
+    let mut reported = false;
+    for dir in ignores.tracked_hosts() {
+        // the index names paths deleted from disk too, and asking the
+        // backend to watch one of those would report a degradation over a
+        // directory the project no longer has
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(watcher) = guard.as_mut() else {
+            return;
+        };
+        let Err(err) = watcher.watch(dir, RecursiveMode::NonRecursive) else {
+            continue;
+        };
+        drop(guard);
+        if !reported {
+            reported = true;
+            emit(degraded(format!(
+                "{} could not be watched ({err}); writes to the tracked files \
+                 inside it will not be noticed",
+                dir.display()
+            )));
+        }
+    }
 }
 
 /// The message a degraded watch reports itself with. Never silent: after
@@ -655,6 +821,14 @@ fn pump(
                 .any(|name| path.file_name().is_some_and(|got| got == *name))
             {
                 ignores.add(&path);
+                // the index is re-read on the same event, because a
+                // force-add leaves no trace in the ignore files at all: a
+                // whitelist refreshed only at registration would stay
+                // pinned to whatever the index held when the session
+                // started, and the directory hosting a new force-add would
+                // still have no descriptor over it
+                ignores.refresh_tracked();
+                register_tracked(slot, ignores, emit);
             }
             if ignores.ignores(&path, false) {
                 continue;
@@ -775,6 +949,8 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
                 None,
                 &mut ignores,
             );
+            ignores.refresh_tracked();
+            register_tracked(&thread_slot, &ignores, emit);
             #[cfg(any(test, feature = "test-support"))]
             {
                 let (lock, cv) = &*thread_ready;
@@ -2174,5 +2350,230 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&outer);
+    }
+
+    /// `git` in `root`, or a panic naming what it said. Asserted rather than
+    /// ignored because a `git` that quietly did nothing leaves an empty
+    /// index behind, and an empty index is exactly what the tests below
+    /// would read as "the whitelist is working".
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git must be on PATH for the index-aware watch tests");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A file force-added inside an ignored directory is tracked, and git
+    /// stops applying its ignore rules to a path the moment the index holds
+    /// it -- so a watch that treated those rules as the last word placed no
+    /// descriptor over the directory and never noticed the agent rewriting
+    /// a file the user has open.
+    #[test]
+    fn a_force_added_file_inside_an_ignored_directory_is_watched() {
+        let root = tempdir();
+        git(&root, &["init"]);
+        std::fs::write(root.join(".gitignore"), b"generated/\n").unwrap();
+        std::fs::create_dir(root.join("generated")).unwrap();
+        let forced = root.join("generated").join("kept.rs");
+        std::fs::write(&forced, b"before").unwrap();
+        git(&root, &["add", "-f", "generated/kept.rs"]);
+
+        let (tx, rx) = channel::<Msg>();
+        let handle = spawn(&root, move |msg| {
+            let _ = tx.send(msg);
+        })
+        .expect("watch must start");
+        assert!(handle.wait_until_watching(Duration::from_secs(5)));
+
+        std::fs::write(&forced, b"after").unwrap();
+
+        let paths = wait_for_path(&rx, &forced);
+        assert!(paths.contains(&forced), "got {paths:?}");
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The whitelist is as wide as the index and no wider: the force-added
+    /// file is forwarded, the untracked file beside it in the same ignored
+    /// directory is not. Driven from one synthetic event holding both, so
+    /// the pair is answered by one pass of the same rules rather than by two
+    /// races against a coalescing window.
+    #[test]
+    fn an_untracked_sibling_of_a_force_added_file_stays_ignored() {
+        let root = tempdir();
+        git(&root, &["init"]);
+        std::fs::create_dir(root.join("generated")).unwrap();
+        let kept = root.join("generated").join("kept.rs");
+        let junk = root.join("generated").join("junk.rs");
+        std::fs::write(&kept, b"x").unwrap();
+        std::fs::write(&junk, b"x").unwrap();
+        git(&root, &["add", "-f", "generated/kept.rs"]);
+        let (slot, mut ignores) = walked(&root, &[(".gitignore", "generated/\n")], &[]);
+        ignores.refresh_tracked();
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[kept.clone(), junk.clone()]),
+        );
+
+        assert!(
+            seen.contains(&kept),
+            "a tracked file inside an ignored directory was dropped: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&junk),
+            "the whitelist re-included the whole ignored directory: {seen:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every ignored directory between the root and a force-added file is
+    /// registered, not only the one holding it: a descriptor on
+    /// `generated/deep` is unreachable while `generated` itself has none,
+    /// and the walk stopped at the shallowest of them.
+    #[test]
+    fn the_directories_hosting_a_force_added_file_are_registered() {
+        let (root, slot, watched) = fake_backend(usize::MAX, usize::MAX);
+        git(&root, &["init"]);
+        std::fs::write(root.join(".gitignore"), b"generated/\n").unwrap();
+        std::fs::create_dir_all(root.join("generated").join("deep")).unwrap();
+        std::fs::write(root.join("generated").join("deep").join("kept.rs"), b"x").unwrap();
+        git(&root, &["add", "-f", "generated/deep/kept.rs"]);
+        // the walk runs against a slot of its own, so what `watched` holds
+        // afterward is what the whitelist registered and nothing else
+        let (_, mut ignores) = registered(&root, IgnoreRules::for_project(&root));
+        ignores.refresh_tracked();
+        let quiet = |msg: Msg| panic!("an accepting backend must report nothing, got {msg:?}");
+
+        register_tracked(&slot, &ignores, &quiet);
+
+        let got = watched.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![root.join("generated"), root.join("generated").join("deep")],
+            "the directories hosting the force-added file were not registered"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The whitelist follows the index across the pump's existing
+    /// ignore-rebuild path, in both directions: nothing in the ignore files
+    /// themselves changes when a path enters or leaves the index, so a
+    /// whitelist read only at registration would stay stale for the rest of
+    /// the session.
+    ///
+    /// The unchanged repeat in the middle is the mutation that a refresh not
+    /// clearing itself first would survive otherwise: its own verdicts would
+    /// be taken against the whitelist it is replacing, so every path already
+    /// on it would read as unignored and drop straight back off.
+    #[test]
+    fn the_whitelist_follows_the_index_across_ignore_file_changes() {
+        let root = tempdir();
+        git(&root, &["init"]);
+        std::fs::create_dir(root.join("generated")).unwrap();
+        let kept = root.join("generated").join("kept.rs");
+        std::fs::write(&kept, b"x").unwrap();
+        let (slot, mut ignores) = walked(&root, &[(".gitignore", "generated/\n")], &[]);
+        ignores.refresh_tracked();
+
+        let before = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(std::slice::from_ref(&kept)),
+        );
+        assert!(
+            !before.contains(&kept),
+            "an untracked path in an ignored directory was forwarded: {before:?}"
+        );
+
+        git(&root, &["add", "-f", "generated/kept.rs"]);
+        let gitignore = root.join(".gitignore");
+        std::fs::write(&gitignore, b"generated/\n").unwrap();
+        let after = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[gitignore.clone(), kept.clone()]),
+        );
+        assert!(
+            after.contains(&kept),
+            "a mid-session force-add was not picked up: {after:?}"
+        );
+
+        std::fs::write(&gitignore, b"generated/\n").unwrap();
+        let again = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[gitignore.clone(), kept.clone()]),
+        );
+        assert!(
+            again.contains(&kept),
+            "a second refresh dropped a path the index still holds: {again:?}"
+        );
+
+        git(&root, &["rm", "--cached", "generated/kept.rs"]);
+        std::fs::write(&gitignore, b"generated/\n").unwrap();
+        let untracked = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[gitignore, kept.clone()]),
+        );
+        assert!(
+            !untracked.contains(&kept),
+            "a path that left the index kept its exemption: {untracked:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A root that is not a checkout keeps exactly the behaviour this watch
+    /// had before it read an index at all: `git ls-files` exits nonzero
+    /// there, the whitelist stays empty, and the ignore rules alone decide.
+    /// The same silence covers a host with no `git` on it, where the
+    /// subprocess never starts.
+    #[test]
+    fn without_an_index_the_ignore_rules_alone_decide() {
+        let root = tempdir();
+        std::fs::create_dir(root.join("generated")).unwrap();
+        let built = root.join("generated").join("out.rs");
+        std::fs::write(&built, b"x").unwrap();
+        let kept = root.join("hand-written.rs");
+        std::fs::write(&kept, b"x").unwrap();
+        let (slot, mut ignores) = walked(&root, &[(".gitignore", "generated/\n")], &[]);
+
+        ignores.refresh_tracked();
+
+        assert!(
+            ignores.tracked.is_empty(),
+            "a root with no repository produced a whitelist: {:?}",
+            ignores.tracked
+        );
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[built.clone(), kept.clone()]),
+        );
+        assert!(
+            !seen.contains(&built),
+            "the ignore rules stopped deciding without an index: {seen:?}"
+        );
+        assert!(seen.contains(&kept), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
