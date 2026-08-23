@@ -1504,11 +1504,22 @@ fn paint_native_overlay(
             // (most of them: a colorscheme colors a diagnostic glyph, not
             // the box behind it) keeps the overlay's, so a styled span never
             // punches a hole in the surface it sits on.
+            //
+            // "Names none" is read by comparison rather than off an
+            // `Option`, because by here there is no `Option` left to read:
+            // `Theme::style_for` resolves a chrome group the way nvim
+            // resolves a grid cell, filling an unset background from the
+            // buffer's own -- correct on the grid, and a hole through every
+            // float. The buffer's background is exactly the value an
+            // overlay must never paint, so a colorscheme that named it
+            // deliberately is asking for the same hole and is answered the
+            // same way.
+            let buffer_bg = theme.normal().bg;
             let resolve = |role: StyleRole| -> Style {
                 role.chrome_group().map_or(interior, |group| {
                     let style = theme.chrome(group);
                     ratatui_style(ResolvedStyle {
-                        bg: style.bg.or(base.bg),
+                        bg: style.bg.filter(|bg| Some(*bg) != buffer_bg).or(base.bg),
                         ..style
                     })
                 })
@@ -5149,6 +5160,87 @@ mod tests {
             };
             assert_eq!(cell.bg, expected, "row {row} background");
         }
+    }
+
+    /// A styled span inside a float keeps the float's background, whatever
+    /// the colorscheme said about the group behind its role.
+    ///
+    /// The live defect: most colorschemes color a group's foreground and
+    /// leave its background alone, and an unset background resolves to the
+    /// buffer's own. Painted into an overlay that is the one background it
+    /// must not be, so every user prompt row in the agent panel came out on
+    /// the buffer's color -- a hole in an opaque box, in the shape of the
+    /// text.
+    #[test]
+    fn a_styled_span_in_a_float_keeps_the_floats_background_not_the_buffers() {
+        let buffer_bg = 0x0028_2A36;
+        let float_bg = 0x0021_222C;
+        let mut model = caps_model(true, true, true);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00F8_F8F2),
+                bg: Some(buffer_bg),
+                sp: None,
+            },
+        );
+        for (id, group, fg, bg) in [
+            (
+                11_u64,
+                ChromeGroup::NormalFloat,
+                0x00F8_F8F2,
+                Some(float_bg),
+            ),
+            // the shape a colorscheme actually ships: a color for the text,
+            // nothing for the box behind it
+            (12, ChromeGroup::Question, 0x0050_FA7B, None),
+        ] {
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlAttrDefine {
+                    id,
+                    fg: Some(fg),
+                    bg,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+            );
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlGroupSet {
+                    name: group.hl_name().to_string(),
+                    hl_id: id,
+                },
+            );
+        }
+        let panel = LayerKind::Ai(
+            view_core::native::views::AiPanelView::new("AI Agent")
+                .with_rows(vec![vec![Span::new("propose", StyleRole::AiUser)]]),
+        );
+        assert_eq!(
+            StyleRole::AiUser.chrome_group(),
+            Some(ChromeGroup::Question),
+            "this test colors the group the role reads; a re-pointed role would leave it painting nothing"
+        );
+        let layer = Layer::new(Rect::new(0, 0, 24, 7), panel, model.caps.tier);
+        let buf = paint_layer_alone(&model, layer, 24, 7);
+        let mut found = false;
+        for row in 0..7_u16 {
+            for col in 0..24_u16 {
+                if buf[(col, row)].symbol() != "p" || buf[(col, row)].fg != rgb(0x0050_FA7B) {
+                    continue;
+                }
+                found = true;
+                assert_eq!(
+                    buf[(col, row)].bg,
+                    rgb(float_bg),
+                    "({col},{row}) paints the styled span on the buffer's own background"
+                );
+            }
+        }
+        assert!(found, "the styled span never reached the panel's interior");
     }
 
     /// A colorscheme that never defines `PmenuSel` leaves it on the theme's
