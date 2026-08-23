@@ -351,7 +351,7 @@ pub fn spawn<E: EngineOps + Send + 'static>(
 /// only caller that needs the real backend, and a test supplying a fake
 /// instead is the only way to prove `read_lines`'s unreachable-vs-failed
 /// branches without a host display.
-fn run<E: EngineOps, C: ClipboardBackend>(
+fn run<E: EngineOps, C: ClipboardBackend + Send + 'static>(
     route: &ReplyRoute<E>,
     jobs: &mpsc::Receiver<ClipboardJob>,
     connect: impl Fn() -> Option<C>,
@@ -394,10 +394,10 @@ fn run<E: EngineOps, C: ClipboardBackend>(
                 store(&mut clip, &connect, &mut shadow, register, text);
             }
             ClipboardJobKind::Query { register } => {
-                // answered on every path, including both failures
-                // `read_text` folds into an empty string: nvim's provider
-                // is inside `vim.wait` and silence there is a ten-second
-                // stall, while an empty payload is a paste of nothing
+                // answered on every path and inside `READ_BUDGET` on every
+                // path, which for this job are the same requirement: nvim's
+                // provider is inside `vim.wait` for one second, so a late
+                // answer costs exactly what silence does
                 let text = read_text(&mut clip, &connect, register, &shadow);
                 let _ = route.ui_term_event(
                     job.epoch,
@@ -423,6 +423,23 @@ fn store<C: ClipboardBackend>(
     shadow.insert(register, text);
 }
 
+/// How long a system-clipboard read may take before this worker stops
+/// waiting for it and answers from what it already has.
+///
+/// The number is set by the consumer with the tightest deadline, nvim's own
+/// OSC 52 provider: it waits one second for a paste answer, and past that
+/// echoes a notice that raises a hit-enter prompt -- an editor wedged until
+/// a keystroke on any window under 100 columns (see
+/// `Effect::ClipboardQuery`). So an answer is only an answer if it is back
+/// well inside that second, and 250 ms leaves room for the RPC hop and the
+/// provider's own polling granularity on top.
+///
+/// The bound is not theoretical: `arboard`'s X11 backend waits up to four
+/// seconds for a slow or wedged selection owner, and its Wayland backend
+/// reads the owner's pipe to EOF with no timeout at all. Both are ordinary
+/// desktop configurations, and both are longer than the provider will wait.
+const READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Returns the live backend, retrying `connect()` if the worker started
 /// before a display was reachable and none has been claimed yet. Once a
 /// connection exists it is never dropped and re-opened between jobs: on
@@ -447,7 +464,7 @@ fn ensure_clip<'a, C: ClipboardBackend>(
 /// [`read_text`] in the line-list-plus-regtype shape a `g:clipboard.paste`
 /// reply takes, the trailing newline decoded back into a
 /// [`RegisterType`] by [`text_to_lines`].
-fn read_lines<C: ClipboardBackend>(
+fn read_lines<C: ClipboardBackend + Send + 'static>(
     clip: &mut Option<C>,
     connect: &impl Fn() -> Option<C>,
     register: char,
@@ -472,18 +489,72 @@ fn read_lines<C: ClipboardBackend>(
 /// end: an OSC 52 answer carries text and has no regtype field to split
 /// one out for (see `Effect::ClipboardQuery`), and [`read_lines`] recovers
 /// the pair from the same string.
-fn read_text<C: ClipboardBackend>(
+///
+/// # The [`READ_BUDGET`] and what it costs
+///
+/// The backend call is made on a scratch thread and collected with a
+/// timeout, because two of `arboard`'s three backends can outlast the
+/// deadline the answer has to meet (see [`READ_BUDGET`]). Every caller
+/// therefore returns inside the budget, whatever the host's clipboard
+/// owner is doing.
+///
+/// A read that overruns is treated as an unreachable clipboard: the answer
+/// falls back to `shadow`, which is the same degrade a host with no
+/// display already takes, and `clip` is left `None` so the next job
+/// reconnects. The backend goes with the stranded thread and is not
+/// waited on -- the alternative is holding the worker's single job queue
+/// open behind it, which would strand the `Read` and `Write` jobs behind
+/// it too, each owing a reply token to an nvim blocked on `rpcrequest`. A
+/// leaked thread on a connection that is already wedged is the cheaper
+/// half of that trade.
+///
+/// ponytail: one orphaned thread and one dropped connection per overrun.
+/// Fine while an overrun means a wedged clipboard owner, which is rare and
+/// not self-inflicted; if a backend is ever found that overruns routinely,
+/// the upgrade is one long-lived reader thread the worker hands requests
+/// to, so a wedge costs one thread for the session rather than one per
+/// read.
+fn read_text<C: ClipboardBackend + Send + 'static>(
     clip: &mut Option<C>,
     connect: &impl Fn() -> Option<C>,
     register: char,
     shadow: &HashMap<char, String>,
 ) -> String {
-    match ensure_clip(clip, connect) {
-        Some(clip) => clip.get_text().unwrap_or_else(|err| {
-            crate::vlog::log_with("clipboard", || format!("read failed: {err}"));
-            String::new()
-        }),
-        None => shadow.get(&register).cloned().unwrap_or_default(),
+    let from_shadow = || shadow.get(&register).cloned().unwrap_or_default();
+    ensure_clip(clip, connect);
+    let Some(mut backend) = clip.take() else {
+        return from_shadow();
+    };
+    let (tx, rx) = mpsc::channel();
+    if thread::Builder::new()
+        .name("view-clipboard-read".to_owned())
+        .spawn(move || {
+            let read = backend.get_text();
+            // the backend rides back with its answer so an in-budget read
+            // keeps the one connection alive: reopening per read can erase
+            // an X11 selection this worker itself just wrote (see
+            // `ensure_clip`)
+            let _ = tx.send((backend, read));
+        })
+        .is_err()
+    {
+        crate::vlog::log("clipboard", "could not start a read thread");
+        return from_shadow();
+    }
+    match rx.recv_timeout(READ_BUDGET) {
+        Ok((backend, read)) => {
+            *clip = Some(backend);
+            read.unwrap_or_else(|err| {
+                crate::vlog::log_with("clipboard", || format!("read failed: {err}"));
+                String::new()
+            })
+        }
+        Err(_) => {
+            crate::vlog::log_with("clipboard", || {
+                format!("read exceeded {READ_BUDGET:?}; answering from the shadow register")
+            });
+            from_shadow()
+        }
     }
 }
 
@@ -519,6 +590,11 @@ mod tests {
     struct FakeClipboard {
         text: Option<String>,
         fail_get: bool,
+        /// How long `get_text` blocks before answering, standing in for
+        /// `arboard`'s X11 four-second ceiling and its Wayland backend's
+        /// unbounded pipe read -- the two configurations that can outlast
+        /// the deadline a paste answer has to meet.
+        get_delay: std::time::Duration,
     }
 
     impl FakeClipboard {
@@ -526,6 +602,7 @@ mod tests {
             Self {
                 text: text.map(str::to_owned),
                 fail_get: false,
+                get_delay: std::time::Duration::ZERO,
             }
         }
 
@@ -533,12 +610,22 @@ mod tests {
             Self {
                 text: None,
                 fail_get: true,
+                get_delay: std::time::Duration::ZERO,
+            }
+        }
+
+        fn reachable_but_slow(delay: std::time::Duration) -> Self {
+            Self {
+                text: Some("the wedged owner finally answered".to_owned()),
+                fail_get: false,
+                get_delay: delay,
             }
         }
     }
 
     impl ClipboardBackend for FakeClipboard {
         fn get_text(&mut self) -> Result<String, String> {
+            thread::sleep(self.get_delay);
             if self.fail_get {
                 Err("fake read failure".to_owned())
             } else {
@@ -1145,6 +1232,74 @@ mod tests {
         assert!(
             term_rx.try_recv().is_err(),
             "a store must answer nothing of its own"
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// A backend slower than the provider will wait is answered *around*,
+    /// not waited on. `arboard` gives X11 a four-second ceiling and Wayland
+    /// none at all, both of which outlast the one second nvim's provider
+    /// waits before echoing the notice that wedges a narrow window -- so an
+    /// answer that arrives late is the very bug this job exists to prevent,
+    /// and the shadow's copy delivered on time beats the real clipboard's
+    /// delivered after the editor has already stalled.
+    ///
+    /// The second query is the other half of the finding: the worker is a
+    /// serial queue, so a read that blocked it would strand every job
+    /// behind it, `Read` and `Write` included -- and those owe reply tokens
+    /// to an nvim blocked on `rpcrequest`.
+    #[test]
+    fn a_backend_slower_than_the_budget_is_answered_around_and_blocks_no_later_job() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        let (term_tx, term_rx) = mpsc::channel();
+        let worker = spawn_fake(
+            ReplyRoute::new(ReplyRecorder {
+                tx: reply_tx,
+                terms: term_tx,
+            }),
+            job_rx,
+            || {
+                Some(FakeClipboard::reachable_but_slow(
+                    std::time::Duration::from_secs(4),
+                ))
+            },
+        );
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Store {
+                    register: '+',
+                    text: "yanked\n".to_owned(),
+                },
+            })
+            .unwrap();
+        for _ in 0..2 {
+            job_tx
+                .send(ClipboardJob {
+                    epoch: 0,
+                    kind: ClipboardJobKind::Query { register: '+' },
+                })
+                .unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let first = term_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("a slow backend must not hold the answer past the provider's own wait");
+        let second = term_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("a timed-out read must not strand the jobs queued behind it");
+        let elapsed = started.elapsed();
+
+        let from_shadow = view_core::osc52::clipboard_escape('+', "yanked\n");
+        assert_eq!(first, from_shadow);
+        assert_eq!(second, from_shadow);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "two answers took {elapsed:?}; each read must cost at most READ_BUDGET"
         );
 
         drop(job_tx);

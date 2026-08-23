@@ -1657,13 +1657,15 @@ fn only_a_bare_question_mark_payload_is_a_read_query() {
     }
 }
 
-/// The terminal still gets exactly what nvim formed even when view cannot
-/// make sense of the payload: a copy of bytes that are not text has nowhere
-/// to go in a register model, but the remote clipboard the escape targets
-/// has no such restriction, and mangling or withholding the escape over
-/// view's own limitation would be the worse trade.
+/// The terminal still gets exactly what nvim formed even when the payload
+/// is not text -- nvim buffers hold arbitrary bytes, so a yank out of a
+/// latin-1 file lands here -- and the register is updated anyway, lossily.
+/// Skipping the store instead leaves the shadow describing the copy before
+/// this one, so the next `"+p` silently pastes the yank before last: a
+/// wrong answer nothing marks as wrong, which is worse than a visibly
+/// approximate one.
 #[test]
-fn a_clipboard_write_whose_payload_is_not_text_still_reaches_the_terminal() {
+fn a_clipboard_write_whose_payload_is_not_text_reaches_the_terminal_and_still_stores() {
     let mut m = model();
     // base64 for 0xff 0xfe 0xfd, which is not valid UTF-8
     const ESCAPE: &str = "\x1b]52;c;//79\x1b\\";
@@ -1674,8 +1676,35 @@ fn a_clipboard_write_whose_payload_is_not_text_still_reaches_the_terminal() {
         }]),
     );
     assert!(
-        matches!(&effects[..], [Effect::TermWrite { bytes }] if bytes == ESCAPE.as_bytes()),
-        "expected the escape alone, with no store, got {effects:?}"
+        matches!(
+            &effects[..],
+            [
+                Effect::TermWrite { bytes },
+                Effect::ClipboardStore { register: '+', text },
+            ] if bytes == ESCAPE.as_bytes() && text == "\u{fffd}\u{fffd}\u{fffd}"
+        ),
+        "expected the escape verbatim and a lossy store beside it, got {effects:?}"
+    );
+}
+
+/// A payload inside the base64 alphabet that is not base64 all the same (a
+/// truncated quad). No terminal can act on it, and forwarding it alone
+/// would leave the register describing the previous copy -- the same silent
+/// stale paste the lossy store above exists to prevent, reached by the
+/// other door. Dropped whole instead.
+#[test]
+fn a_clipboard_write_whose_payload_is_not_decodable_is_dropped_whole() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::UiSend {
+            content: "\x1b]52;c;aGVsbG8\x1b\\".to_string(),
+        }]),
+    );
+    assert!(
+        effects.is_empty(),
+        "a payload that cannot decode must reach neither the terminal nor \
+         the register, got {effects:?}"
     );
 }
 

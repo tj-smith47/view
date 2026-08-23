@@ -875,7 +875,12 @@ impl<E: EngineOps> Executor<E> {
                 self.queue_ai_job(crate::ai_context_worker::AiContextJob::Submit { text });
                 Flow::Continue
             }
-            // Effect is #[non_exhaustive]: same degrade-to-no-op rule
+            // Effect is #[non_exhaustive]: same degrade-to-no-op rule.
+            // Which means an effect that owes an answer gets no protection
+            // from the compiler here -- a missing arm is a silent no-op,
+            // not a build failure. `ClipboardRead`/`Write`/`Query` are held
+            // to their obligation by their own executor tests instead, and
+            // anything added later that owes an answer needs one too.
             _ => Flow::Continue,
         }
     }
@@ -3879,8 +3884,9 @@ mod tests {
     }
 
     /// `Osc52Copy` carries no `ReplyToken` (see the effect's own doc): an
-    /// unwired channel is an ordinary fire-and-forget no-op, unlike the two
-    /// clipboard effects above which owe a reply regardless.
+    /// unwired channel is an ordinary fire-and-forget no-op, unlike three
+    /// of the four clipboard effects above, which owe an answer regardless
+    /// (`ClipboardStore` is the one that degrades the same way this does).
     #[test]
     fn osc52_copy_with_no_channel_wired_is_a_silent_no_op() {
         let ops = FakeOps::default();

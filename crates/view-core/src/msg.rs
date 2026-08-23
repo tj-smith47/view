@@ -1053,11 +1053,15 @@ pub enum Effect {
     ///
     /// Tokenless: nvim is spinning in `vim.wait`, not blocked on an
     /// `rpcrequest`, so there is no msgid to answer. The obligation is
-    /// stricter than a reply token's all the same, and it is the reason
-    /// every path here answers: silence costs the user a one-second stall,
-    /// then a hit-enter prompt that wedges the editor on a window under 100
-    /// columns until a key is pressed, then nine seconds more. Nothing to
-    /// report answers an empty payload instead, which the provider's own
+    /// stricter than a reply token's all the same, because it carries a
+    /// deadline a token does not: the provider waits one second, and past
+    /// that echoes a notice that raises a hit-enter prompt -- an editor
+    /// wedged until a keystroke on any window under 100 columns -- before
+    /// waiting nine seconds more. So a late answer costs exactly what
+    /// silence costs, and the executor and the clipboard worker each bound
+    /// their own path rather than assume the clipboard is quick (see the
+    /// worker's `READ_BUDGET`). Nothing to report, and a read that
+    /// overruns, both answer an empty payload, which the provider's own
     /// capture accepts and returns from at once.
     ClipboardQuery {
         register: char,

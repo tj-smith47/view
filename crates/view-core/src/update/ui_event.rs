@@ -336,9 +336,7 @@ fn forward_ui_send(content: &str) -> Vec<Effect> {
                 effects.push(Effect::TermWrite {
                     bytes: escape.as_bytes().to_vec(),
                 });
-                if let Some(text) = text {
-                    effects.push(Effect::ClipboardStore { register, text });
-                }
+                effects.push(Effect::ClipboardStore { register, text });
             }
             Some(Osc52Sequence::Query { register }) => {
                 effects.push(Effect::ClipboardQuery { register });
@@ -354,14 +352,13 @@ const OSC52_PREFIX: &str = "\x1b]52;";
 /// One recognized OSC 52 sequence out of an `nvim_ui_send` payload.
 enum Osc52Sequence<'a> {
     /// A clipboard set. `escape` is the whole sequence as nvim formed it,
-    /// forwarded byte for byte; `text` is the same payload decoded, and is
-    /// `None` when it decodes to bytes that are not UTF-8 -- the terminal
-    /// still gets the escape, only the local mirror is skipped, since view's
-    /// register model has nowhere to keep non-text.
+    /// forwarded byte for byte, and `text` is the same payload decoded --
+    /// lossily if it is not UTF-8, so the two never describe different
+    /// copies (see [`osc52_at`]).
     Write {
         escape: &'a str,
         register: char,
-        text: Option<String>,
+        text: String,
     },
     /// A clipboard read: `OSC 52 ; {selection} ; ?`, which nvim's provider
     /// sends and then waits on.
@@ -411,9 +408,19 @@ fn osc52_at(content: &str, start: usize) -> Option<Osc52Sequence<'_>> {
     {
         return None;
     }
+    // a payload that does not decode is not a clipboard write: forwarding
+    // it would put an escape on the terminal that no terminal can act on,
+    // and -- worse -- would leave view's own register describing the copy
+    // before it, which the next paste would answer with
+    let bytes = crate::osc52::base64_decode(payload)?;
     Some(Osc52Sequence::Write {
         escape: &content[start..start + OSC52_PREFIX.len() + end + terminator.len()],
         register,
-        text: crate::osc52::base64_decode(payload).and_then(|bytes| String::from_utf8(bytes).ok()),
+        // lossy rather than dropping the store on non-UTF-8: the register
+        // has to stay in step with what the terminal was just told, and a
+        // visibly approximate paste is better than silently pasting the
+        // yank before last. nvim buffers hold arbitrary bytes, so a yank
+        // out of a latin-1 or binary file lands here
+        text: String::from_utf8_lossy(&bytes).into_owned(),
     })
 }
