@@ -1550,6 +1550,67 @@ fn an_unrecognized_ui_send_payload_is_dropped() {
     }
 }
 
+/// A well-formed frame is not an inert one. Both payloads below satisfy
+/// `OSC 52 ; {selection} ; {payload} {terminator}` by their delimiters alone
+/// while smuggling a query the terminal executes once it abandons the OSC
+/// string at the bare `ESC` -- the reply lands on view's stdin as typed text,
+/// the one outcome the whitelist exists to prevent.
+#[test]
+fn a_ui_send_query_smuggled_inside_a_clipboard_write_is_dropped() {
+    let mut m = model();
+    for content in [
+        "\x1b]52;c;aGk=\x1b[5n\x07",
+        "\x1b]52;\x1b[c;aGk=\x07",
+        "\x1b]52;c;? \x1b\\",
+    ] {
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::UiSend {
+                content: content.to_string(),
+            }]),
+        );
+        assert!(
+            effects.is_empty(),
+            "{content:?} hides a query and must be dropped whole, got {effects:?}"
+        );
+    }
+}
+
+/// One `nvim_ui_send` payload may carry several sequences, so position must
+/// not decide: a write is no less a write for sitting behind a read query,
+/// and a second write is not a duplicate of the first.
+#[test]
+fn every_clipboard_write_in_one_payload_is_forwarded_whatever_precedes_it() {
+    let mut m = model();
+    const BEHIND_A_QUERY: &str = "\x1b]52;c;?\x1b\\\x1b]52;c;aGk=\x1b\\";
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::UiSend {
+            content: BEHIND_A_QUERY.to_string(),
+        }]),
+    );
+    assert!(
+        matches!(&effects[..], [Effect::TermWrite { bytes }]
+            if bytes == b"\x1b]52;c;aGk=\x1b\\"),
+        "the write behind the query must still be found, got {effects:?}"
+    );
+
+    const TWO_WRITES: &str = "\x1b]52;c;aGk=\x1b\\\x1b]52;p;Ynll\x07";
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::UiSend {
+            content: TWO_WRITES.to_string(),
+        }]),
+    );
+    assert!(
+        matches!(&effects[..], [
+            Effect::TermWrite { bytes: first },
+            Effect::TermWrite { bytes: second },
+        ] if first == b"\x1b]52;c;aGk=\x1b\\" && second == b"\x1b]52;p;Ynll\x07"),
+        "both writes must reach the terminal, got {effects:?}"
+    );
+}
+
 #[test]
 fn resize_marks_the_model_dirty_so_the_new_area_is_actually_painted() {
     let mut m = model();

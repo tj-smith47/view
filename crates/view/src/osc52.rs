@@ -96,6 +96,12 @@ pub(crate) fn drain_osc52<S: Osc52Sink>(osc52_rx: &mpsc::Receiver<Osc52Job>, sin
 /// Whether `encoded_len` bytes exceed [`OSC52_MAX_PAYLOAD_BYTES`], logging
 /// the skip when they do. `>`, not `>=`: a payload landing exactly on the
 /// cap is within it, per the constant's own contract.
+///
+/// Callers measure slightly different things -- a copy weighs the base64 it
+/// is about to build, a passthrough weighs the whole framed escape, prefix
+/// and terminator included -- so the two differ by the ~9 bytes of framing.
+/// Immaterial against a 100 KiB cap whose job is to refuse the pathological,
+/// and the log calls both a payload rather than pretending otherwise.
 fn over_cap(encoded_len: usize) -> bool {
     if encoded_len <= OSC52_MAX_PAYLOAD_BYTES {
         return false;

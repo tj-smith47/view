@@ -140,13 +140,17 @@ fn a_yank_through_the_users_own_osc52_provider_reaches_the_terminal() {
         "the escape nvim formed must reach the terminal byte for byte"
     );
 
-    // the other half of claiming a terminal: nvim's `nvim.tty` defaults
-    // query one the moment they find a `stdout_tty` UI and then block
-    // `VimEnter` for 100 ms on a reply view has no channel to give, eating
-    // the keystrokes pressed in that window. Claiming it after those defaults
-    // have stopped looking is what keeps the query out of this log -- with
-    // the claim moved back to attach time, this session's startup measured
-    // 123-128 ms against 18-19 ms, and the log opens with `OSC 11 ; ?`
+    // the other half of claiming a terminal: every consumer of a `stdout_tty`
+    // UI in nvim's runtime looks for one exactly once and queries it if found
+    // -- the `nvim.tty` defaults with `OSC 11` + a DSR, then a 100 ms
+    // `VimEnter` block on a reply view has no channel to give, and
+    // `plugin/osc52.lua` with DA1 at `UIEnter`. Claiming the tty after they
+    // have all stopped looking is what keeps every one of those out of this
+    // log. Moved back to attach time, this session's startup measured 123-128
+    // ms against 18-19 ms and the log opens with the DA1 (`\x1b[c`) -- the
+    // earliest query this recorder can witness, since the `nvim.tty` probe
+    // goes out while nvim loads its defaults, before the wrapper below is
+    // installed
     let sent = std::fs::read_to_string(state_home.join(UI_SEND_LOG)).unwrap_or_default();
     assert_eq!(
         sent, expected,

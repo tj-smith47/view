@@ -321,40 +321,60 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
 /// (`OSC 52 ; c ; ?`) that view drops, so nvim times it out -- unchanged from
 /// the behaviour before `stdout_tty` was claimed at all.
 fn forward_ui_send(content: &str) -> Vec<Effect> {
-    match osc52_write(content) {
-        Some(escape) => vec![Effect::TermWrite {
+    osc52_writes(content)
+        .map(|escape| Effect::TermWrite {
             bytes: escape.as_bytes().to_vec(),
-        }],
-        None => Vec::new(),
-    }
+        })
+        .collect()
 }
 
-/// The one complete `OSC 52 ; {c|p} ; {base64}` clipboard-write escape in
-/// `content`, or `None` when there is none.
+const OSC52_PREFIX: &str = "\x1b]52;";
+
+/// Every complete `OSC 52 ; {selection} ; {base64}` clipboard-write escape in
+/// `content`, in the order they appear.
 ///
-/// A payload of `?` is a read query, not a write, and is excluded: it is the
-/// half of the OSC 52 protocol that expects the terminal to answer (see
-/// [`forward_ui_send`]). The scan is over `content` as a whole rather than a
-/// prefix test, because one `nvim_ui_send` payload may hold several
-/// concatenated sequences (nvim's own startup probe writes `OSC 11` and a DSR
-/// in one call), and an escape that is merely not first still has to be
-/// found.
-fn osc52_write(content: &str) -> Option<&str> {
-    const PREFIX: &str = "\x1b]52;";
+/// The scan covers `content` as a whole rather than testing its prefix,
+/// because one `nvim_ui_send` payload may hold several concatenated sequences
+/// (nvim's own startup probe writes `OSC 11` and a DSR in one call): a write
+/// that is merely not first still has to be found, and a second write behind
+/// the first still has to be forwarded.
+fn osc52_writes(content: &str) -> impl Iterator<Item = &str> {
+    content
+        .match_indices(OSC52_PREFIX)
+        .filter_map(|(start, _)| osc52_write_at(content, start))
+}
+
+/// The clipboard-write escape beginning at `start`, or `None` when what
+/// begins there is anything else.
+///
+/// Both fields are charset-checked, and that check is the trust boundary
+/// [`forward_ui_send`] describes rather than a tidiness pass. A frame is only
+/// as inert as its contents: `OSC 52 ; c ; aGk=<ESC>[5n BEL` is a well-formed
+/// write by its delimiters alone, but a terminal abandons the OSC string at
+/// the bare `ESC` and executes the `DSR` hiding behind it, answering onto a
+/// stdin that view reads as typed keys. Rejecting anything outside base64
+/// (and outside the selection alphabet) leaves no room to hide a query --
+/// including the bare `?` of a read query, which is a payload this must
+/// refuse whatever else changes here.
+fn osc52_write_at(content: &str, start: usize) -> Option<&str> {
     // `ST` per nvim's own provider; `BEL` is the other terminator OSC
     // sequences are written with, and costs one more `find` to accept
     const TERMINATORS: [&str; 2] = ["\x1b\\", "\x07"];
-    let start = content.find(PREFIX)?;
-    let body = &content[start + PREFIX.len()..];
-    let end = TERMINATORS.iter().filter_map(|t| body.find(t)).min()?;
-    // `{clipboard};{payload}` -- a read query's payload is exactly `?`
-    let (_, payload) = body[..end].split_once(';')?;
-    if payload == "?" {
+    const SELECTION_ALPHABET: &[u8] = b"cpqs01234567*+";
+    let body = &content[start + OSC52_PREFIX.len()..];
+    let (end, terminator) = TERMINATORS
+        .iter()
+        .filter_map(|t| body.find(t).map(|at| (at, *t)))
+        .min()?;
+    let (selection, payload) = body[..end].split_once(';')?;
+    if !selection.bytes().all(|b| SELECTION_ALPHABET.contains(&b)) {
         return None;
     }
-    let terminator_len = TERMINATORS
-        .iter()
-        .find(|t| body[end..].starts_with(*t))
-        .map_or(0, |t| t.len());
-    Some(&content[start..start + PREFIX.len() + end + terminator_len])
+    if !payload
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        return None;
+    }
+    Some(&content[start..start + OSC52_PREFIX.len() + end + terminator.len()])
 }

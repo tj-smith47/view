@@ -1418,8 +1418,14 @@ pub enum RpcCall {
     /// runtime files load, and a UI that already claimed one is queried and
     /// then waited on for 100 ms it will never answer -- eating the
     /// keystrokes pressed in that window. Claiming it once those defaults
-    /// have looked and moved on costs nothing and loses nothing (see
-    /// `view_engine`'s `STDOUT_TTY_OPTION`).
+    /// have looked and moved on costs nothing (see `view_engine`'s
+    /// `STDOUT_TTY_OPTION`).
+    ///
+    /// What the late claim gives up: nvim drops an `ui_send` issued before
+    /// any UI holds the option, so a yank performed by config during startup
+    /// is lost. That window closes before the user can press a key, and it is
+    /// what every session did prior to this claim existing, so the trade runs
+    /// one way.
     ClaimStdoutTty,
     /// Registers `specs` as real nvim mappings and the `:View` command, in
     /// one chunk, and answers with every claim as [`Msg::MappingsClaimed`].
