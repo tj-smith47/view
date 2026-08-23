@@ -279,7 +279,10 @@ struct IgnoreRules {
     /// hand `app/(marketing)/.gitignore` a lower standing than the root's,
     /// dropping a real write wherever the nested file re-includes what the
     /// root ignores.
-    files: BTreeMap<(u8, usize, PathBuf), ignore::gitignore::Gitignore>,
+    /// Each matcher is held beside the bytes it was built from, so a re-read
+    /// of an unchanged file can be answered without rebuilding anything (see
+    /// [`Self::add_rooted`]).
+    files: BTreeMap<(u8, usize, PathBuf), (Vec<u8>, ignore::gitignore::Gitignore)>,
     /// The tracked files everything above rejects, absolute (see
     /// [`Self::refresh_tracked`]).
     ///
@@ -291,6 +294,11 @@ struct IgnoreRules {
     /// exactly as wide as the index says -- an untracked sibling in the same
     /// ignored directory is still answered by the rules alone.
     tracked: BTreeSet<PathBuf>,
+    /// The index listing [`Self::tracked`] was computed from, and whether
+    /// any matcher has moved since -- the two inputs of that computation, so
+    /// a repeat with both unchanged can be skipped rather than recomputed.
+    listing: Option<u64>,
+    rules_changed: bool,
 }
 
 impl IgnoreRules {
@@ -301,6 +309,8 @@ impl IgnoreRules {
             root: root.to_path_buf(),
             files: BTreeMap::new(),
             tracked: BTreeSet::new(),
+            listing: None,
+            rules_changed: false,
         }
     }
 
@@ -359,16 +369,36 @@ impl IgnoreRules {
     /// A file holding nothing that matches is dropped rather than kept, and
     /// a file that cannot be read holds nothing: every rule left here is
     /// one the pump consults per event.
+    ///
+    /// The bytes are kept beside the matcher and compared on the way in,
+    /// because one editor save of a `.gitignore` raises two or three events
+    /// and only the first of them changed anything: the rest re-read a file
+    /// whose contents already stand, and what hangs off "did the rules
+    /// change" is far more expensive than a matcher rebuild (see
+    /// [`Self::refresh_tracked`]). A file with nothing to contribute keeps
+    /// no bytes, so the rare event on one counts as a change every time --
+    /// spending a pass that was not needed, never skipping one that was.
     fn add_rooted(&mut self, dir: &Path, file: &Path, authority: u8) {
-        let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
-        // a partial error still yields the lines that did parse, exactly
-        // what the walk itself matched against
-        let _ = builder.add(file);
+        let contents = std::fs::read(file).unwrap_or_default();
         let key = (authority, dir.components().count(), file.to_path_buf());
+        if self
+            .files
+            .get(&key)
+            .is_some_and(|(seen, _)| *seen == contents)
+        {
+            return;
+        }
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
+        // read from the path a second time rather than from the bytes above:
+        // how the crate splits, trims and reports a partial parse is its own
+        // business, and the walk matched against exactly what this call
+        // produces
+        let _ = builder.add(file);
         match builder.build() {
-            Ok(matcher) if !matcher.is_empty() => self.files.insert(key, matcher),
+            Ok(matcher) if !matcher.is_empty() => self.files.insert(key, (contents, matcher)),
             _ => self.files.remove(&key),
         };
+        self.rules_changed = true;
     }
 
     /// Re-reads the index and keeps whichever tracked paths the rules
@@ -380,17 +410,52 @@ impl IgnoreRules {
     /// rule ever rejected.
     ///
     /// Silent on every failure -- no `git`, not a checkout, a nonzero exit,
-    /// no answer inside [`INDEX_READ_TIMEOUT`] -- because an empty whitelist
-    /// is exactly the behaviour this watch had before the index was ever
-    /// read, and a project that is not a checkout has nothing to report.
-    fn refresh_tracked(&mut self) {
+    /// no answer inside [`INDEX_READ_TIMEOUT`] -- because a project that is
+    /// not a checkout has nothing to report. A failed read leaves the
+    /// previous whitelist standing rather than emptying it: the descriptors
+    /// it earned are already registered and are never withdrawn, so an
+    /// emptied whitelist is not the matchers-alone behaviour this watch
+    /// started from, it is a watch that keeps receiving a force-added file's
+    /// events and silently drops every one of them.
+    ///
+    /// Answers whether the whitelist was recomputed, which is also whether
+    /// the descriptors it needs can have moved.
+    ///
+    /// Every index entry pays one [`Self::ignores`] call, which scans the
+    /// matcher set: at a monorepo's scale (a hundred thousand entries,
+    /// dozens of nested ignore files) that pass is the pump's most expensive
+    /// moment, and an ignore file's own save raises two or three events. It
+    /// is therefore taken only when something it depends on actually moved
+    /// -- the rules (see [`Self::add_rooted`]) or the listing itself -- so a
+    /// burst of events costs one pass rather than three. The residual is the
+    /// pass itself: still linear in the index, still on the pump thread, and
+    /// the thing to reach for first if a project large enough to feel it
+    /// turns up. The listing is compared by digest rather than kept, because
+    /// keeping it would hold a megabyte of index paths for the session.
+    fn refresh_tracked(&mut self) -> bool {
+        let root = self.root.clone();
+        let Some(listing) = index_listing(&root) else {
+            return false;
+        };
+        let seen = digest(&listing);
+        if !self.rules_changed && self.listing == Some(seen) {
+            return false;
+        }
+        self.rules_changed = false;
+        self.listing = Some(seen);
         // emptied before the verdicts below are taken, so they are the
         // rules' own: a path force-added into a previous read would
         // otherwise keep whitelisting itself after it left the index
         self.tracked = BTreeSet::new();
-        let root = self.root.clone();
-        let tracked = index_paths(&root)
-            .into_iter()
+        let tracked = listing
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            // a name git could not hand back as UTF-8 is left to the rules
+            // alone: `-z` emits those bytes exactly as they are on disk, and
+            // a lossy conversion would whitelist a path that is not the one
+            // the backend will report an event for
+            .filter_map(|entry| std::str::from_utf8(entry).ok())
+            .map(|rel| root.join(rel))
             // `NEVER_WATCHED` is not a rule the index outranks: a repository
             // that commits its own `node_modules` would otherwise buy a
             // descriptor per directory of it, which is the cost the list
@@ -398,6 +463,7 @@ impl IgnoreRules {
             .filter(|path| !is_excluded(path, &root) && self.ignores(path, false))
             .collect();
         self.tracked = tracked;
+        true
     }
 
     /// The directories that have to be watched for [`Self::tracked`] to be
@@ -443,6 +509,15 @@ impl IgnoreRules {
     /// registered and swept into a batch by the one create event the walk
     /// had already refused.
     fn ignores(&self, path: &Path, is_dir: bool) -> bool {
+        // ponytail: the lookup is component-wise and case-sensitive, which is
+        // what git records and what every case-sensitive volume reports. On a
+        // case-insensitive one (Windows, an APFS volume created that way) an
+        // index entry whose recorded case differs from the name the backend
+        // reports -- what a case-only rename leaves behind -- misses the
+        // whitelist and the file goes back to being covered by the rules
+        // alone. Case-folding the whole set is what fixes it, and it is worth
+        // the ambiguity it introduces only once a force-add is actually
+        // reported missed on such a volume.
         if self.tracked.contains(path) {
             return false;
         }
@@ -454,6 +529,7 @@ impl IgnoreRules {
             .files
             .values()
             .rev()
+            .map(|(_, matcher)| matcher)
             .filter(|matcher| path.starts_with(matcher.path()))
             .collect();
         let above: Vec<&Path> = path
@@ -502,57 +578,89 @@ fn decide(matcher: &ignore::gitignore::Gitignore, path: &Path, is_dir: bool) -> 
     None
 }
 
-/// Every path the index at `root` holds, absolute. Empty for anything that
-/// is not a readable checkout -- no `git` on the host, a root outside a
-/// repository, a refusing or hanging subprocess -- which is what makes the
-/// whitelist an addition to the ignore rules rather than a dependency of
-/// them.
+/// The index listing at `root` -- `git ls-files -z` output, verbatim -- or
+/// `None` for every way the read can fail: no `git` on the host, a thread
+/// the OS refuses, a root outside a repository, an unreadable index, no
+/// answer inside [`INDEX_READ_TIMEOUT`].
+///
+/// The failures are distinguished from an empty index rather than folded
+/// into it, because the caller's whitelist is warm by the time the pump
+/// re-reads: an emptied whitelist is not "the rules alone" once descriptors
+/// are already registered, it is a watch that keeps receiving the events
+/// and drops every one of them (see [`IgnoreRules::refresh_tracked`]).
 ///
 /// `git ls-files` rather than a read of `.git/index` here: the index format
 /// is versioned and extensible, and the one reader guaranteed to understand
-/// the version in front of it is the git that wrote it. The subprocess runs
-/// on a thread of its own so the wait can be bounded from this side; the
-/// abandoned thread reaps its own child whenever the command finally
-/// returns, so a slow answer costs an idle thread rather than a zombie.
-/// stderr goes nowhere: a root that is not a checkout is an ordinary
-/// project this watch still covers, not a message to print over a running
-/// editor's screen.
-fn index_paths(root: &Path) -> Vec<PathBuf> {
+/// the version in front of it is the git that wrote it. stderr goes
+/// nowhere: a root that is not a checkout is an ordinary project this watch
+/// still covers, not a message to print over a running editor's screen.
+fn index_listing(root: &Path) -> Option<Vec<u8>> {
+    let mut child = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut pipe = child.stdout.take()?;
     let (tx, rx) = std_mpsc::channel();
-    let dir = root.to_path_buf();
-    if std::thread::Builder::new()
+    // the pipe is drained on a thread of its own so the wait below can carry
+    // a deadline: a listing of a large repository is far more than a pipe
+    // buffer holds, so a reader that waited on the child first would deadlock
+    // with a git blocked on writing to it
+    let drain = std::thread::Builder::new()
         .name("view-ai-watch-index".to_string())
         .spawn(move || {
-            let _ = tx.send(
-                std::process::Command::new("git")
-                    .args(["ls-files", "-z"])
-                    .current_dir(&dir)
-                    .stdin(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .output(),
-            );
-        })
-        .is_err()
-    {
-        return Vec::new();
+            let mut listing = Vec::new();
+            let read = std::io::Read::read_to_end(&mut pipe, &mut listing);
+            let _ = tx.send(read.map(|_| listing));
+        });
+    if drain.is_err() {
+        abandon(child);
+        return None;
     }
-    let Ok(Ok(listed)) = rx.recv_timeout(INDEX_READ_TIMEOUT) else {
-        return Vec::new();
+    let Ok(Ok(listing)) = rx.recv_timeout(INDEX_READ_TIMEOUT) else {
+        abandon(child);
+        return None;
     };
-    if !listed.status.success() {
-        return Vec::new();
-    }
-    listed
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        // a name git could not hand back as UTF-8 is left to the rules
-        // alone: `-z` emits those bytes exactly as they are on disk, and a
-        // lossy conversion would whitelist a path that is not the one the
-        // backend will report an event for
-        .filter_map(|entry| std::str::from_utf8(entry).ok())
-        .map(|rel| root.join(rel))
-        .collect()
+    // reaped here rather than abandoned: the pipe reached end of file, so
+    // git has written everything it has and its exit is what the status
+    // below reads -- and the status is what tells a root that is not a
+    // checkout apart from a checkout holding nothing
+    child.wait().ok().filter(|status| status.success())?;
+    Some(listing)
+}
+
+/// A stand-in for a whole index listing, so the comparison that decides
+/// whether the whitelist has to be recomputed costs eight bytes rather than
+/// a copy of every path in the repository. Not a security boundary: the only
+/// writer is the project's own `git`.
+fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Kills a `git` that outstayed [`INDEX_READ_TIMEOUT`] and reaps it
+/// elsewhere.
+///
+/// The pump reads the index on every ignore-file change, so anything left
+/// behind here accumulates for the session: a child that is merely
+/// abandoned stays alive holding whatever wedged it, and one that is killed
+/// but never waited on stays a zombie. Reaping happens on a thread of its
+/// own because the kill itself does not land while the process sits in an
+/// uninterruptible filesystem call -- which is exactly how a `git` on a
+/// stalled network home wedges -- and the watch thread must not wait for
+/// that.
+fn abandon(mut child: std::process::Child) {
+    let _ = child.kill();
+    let _ = std::thread::Builder::new()
+        .name("view-ai-watch-index-reap".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
 }
 
 /// Places a descriptor on every directory holding a whitelisted file that
@@ -563,8 +671,16 @@ fn index_paths(root: &Path) -> Vec<PathBuf> {
 /// Only the directories on a whitelisted file's own path are registered, and
 /// never their subdirectories: an ignored tree costs one descriptor per
 /// force-added file's directory rather than a walk of the output it holds.
-fn register_tracked(slot: &WatcherSlot, ignores: &IgnoreRules, emit: &dyn Fn(Msg)) {
-    let mut reported = false;
+///
+/// `reported` outlives one call, because this one runs on every ignore-file
+/// change rather than once per walk: a host directory the backend refuses
+/// for good would otherwise re-announce itself for the rest of the session.
+fn register_tracked(
+    slot: &WatcherSlot,
+    ignores: &IgnoreRules,
+    emit: &dyn Fn(Msg),
+    reported: &mut bool,
+) {
     for dir in ignores.tracked_hosts() {
         // the index names paths deleted from disk too, and asking the
         // backend to watch one of those would report a degradation over a
@@ -580,8 +696,8 @@ fn register_tracked(slot: &WatcherSlot, ignores: &IgnoreRules, emit: &dyn Fn(Msg
             continue;
         };
         drop(guard);
-        if !reported {
-            reported = true;
+        if !*reported {
+            *reported = true;
             emit(degraded(format!(
                 "{} could not be watched ({err}); writes to the tracked files \
                  inside it will not be noticed",
@@ -738,6 +854,7 @@ fn pump(
     root: &Path,
     ignores: &mut IgnoreRules,
     emit: &dyn Fn(Msg),
+    host_refused: &mut bool,
 ) {
     let mut pending: BTreeSet<PathBuf> = BTreeSet::new();
     let mut window_closes: Option<Instant> = None;
@@ -815,20 +932,27 @@ fn pump(
             // waiting for its directory to be registered again: an agent
             // adding `dist/` to `.gitignore` and then building is a whole
             // session's worth of churn otherwise, and rebuilding one
-            // matcher is bounded work the walk would repeat anyway
-            if IGNORE_FILES
+            // matcher is bounded work the walk would repeat anyway.
+            //
+            // One inside an ignored directory is not such a file: git never
+            // reads it, because it does not descend there at all, and the
+            // descriptor a force-added file buys is how one reaches this
+            // pump in the first place. Judged before it is read, so this
+            // module keeps answering what git would answer
+            let governs = IGNORE_FILES
                 .iter()
                 .any(|name| path.file_name().is_some_and(|got| got == *name))
-            {
+                && path.parent().is_some_and(|dir| !ignores.ignores(dir, true));
+            // the index is re-read on the same event, because a force-add
+            // leaves no trace in the ignore files at all: a whitelist
+            // refreshed only at registration would stay pinned to whatever
+            // the index held when the session started, and the directory
+            // hosting a new force-add would still have no descriptor over it
+            if governs {
                 ignores.add(&path);
-                // the index is re-read on the same event, because a
-                // force-add leaves no trace in the ignore files at all: a
-                // whitelist refreshed only at registration would stay
-                // pinned to whatever the index held when the session
-                // started, and the directory hosting a new force-add would
-                // still have no descriptor over it
-                ignores.refresh_tracked();
-                register_tracked(slot, ignores, emit);
+                if ignores.refresh_tracked() {
+                    register_tracked(slot, ignores, emit, host_refused);
+                }
             }
             if ignores.ignores(&path, false) {
                 continue;
@@ -950,14 +1074,24 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
                 &mut ignores,
             );
             ignores.refresh_tracked();
-            register_tracked(&thread_slot, &ignores, emit);
+            // one flag for the whole session, shared with the pump's own
+            // calls below
+            let mut host_refused = false;
+            register_tracked(&thread_slot, &ignores, emit, &mut host_refused);
             #[cfg(any(test, feature = "test-support"))]
             {
                 let (lock, cv) = &*thread_ready;
                 *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
                 cv.notify_all();
             }
-            pump(&rx, &thread_slot, &root_owned, &mut ignores, emit);
+            pump(
+                &rx,
+                &thread_slot,
+                &root_owned,
+                &mut ignores,
+                emit,
+                &mut host_refused,
+            );
         })
         .map_err(WatchError::ThreadSpawn)?;
 
@@ -1661,7 +1795,14 @@ mod tests {
         let emit = move |msg: Msg| {
             let _ = msg_tx.send(msg);
         };
-        pump(&rx, &slot, &root, &mut IgnoreRules::rooted_at(&root), &emit);
+        pump(
+            &rx,
+            &slot,
+            &root,
+            &mut IgnoreRules::rooted_at(&root),
+            &emit,
+            &mut false,
+        );
 
         match msg_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Msg::ExternalWatchDegraded { reason }) => {
@@ -1774,7 +1915,7 @@ mod tests {
             let _ = msg_tx.send(msg);
             let _ = emitted_tx.send(());
         };
-        pump(&rx, slot, root, ignores, &emit);
+        pump(&rx, slot, root, ignores, &emit, &mut false);
         closer.join().unwrap();
 
         let mut seen: Vec<PathBuf> = Vec::new();
@@ -2455,7 +2596,7 @@ mod tests {
         ignores.refresh_tracked();
         let quiet = |msg: Msg| panic!("an accepting backend must report nothing, got {msg:?}");
 
-        register_tracked(&slot, &ignores, &quiet);
+        register_tracked(&slot, &ignores, &quiet, &mut false);
 
         let got = watched.lock().unwrap().clone();
         assert_eq!(
@@ -2473,10 +2614,10 @@ mod tests {
     /// whitelist read only at registration would stay stale for the rest of
     /// the session.
     ///
-    /// The unchanged repeat in the middle is the mutation that a refresh not
-    /// clearing itself first would survive otherwise: its own verdicts would
-    /// be taken against the whitelist it is replacing, so every path already
-    /// on it would read as unignored and drop straight back off.
+    /// The second force-add in the middle is what a refresh that did not
+    /// clear itself first would fail: its verdicts would be taken against
+    /// the whitelist it is replacing, so the path already on it would read
+    /// as unignored and drop straight back off.
     #[test]
     fn the_whitelist_follows_the_index_across_ignore_file_changes() {
         let root = tempdir();
@@ -2512,15 +2653,18 @@ mod tests {
             "a mid-session force-add was not picked up: {after:?}"
         );
 
+        let second = root.join("generated").join("also-kept.rs");
+        std::fs::write(&second, b"x").unwrap();
+        git(&root, &["add", "-f", "generated/also-kept.rs"]);
         std::fs::write(&gitignore, b"generated/\n").unwrap();
         let again = paths_surviving_the_pump(
             &root,
             &slot,
             &mut ignores,
-            modify_event(&[gitignore.clone(), kept.clone()]),
+            modify_event(&[gitignore.clone(), kept.clone(), second.clone()]),
         );
         assert!(
-            again.contains(&kept),
+            again.contains(&kept) && again.contains(&second),
             "a second refresh dropped a path the index still holds: {again:?}"
         );
 
@@ -2536,6 +2680,188 @@ mod tests {
             !untracked.contains(&kept),
             "a path that left the index kept its exemption: {untracked:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A read that fails while the whitelist is already warm leaves it
+    /// standing. Emptying it there is worse than never having had it: the
+    /// host descriptors stay registered and are never withdrawn, so every
+    /// event the force-added file raises still arrives and every one of them
+    /// is silently dropped. Driven by making the index unreadable, which is
+    /// the failure class a transient one (a timeout under load, a `git` that
+    /// moved) shares an answer with.
+    #[test]
+    fn a_failed_refresh_keeps_the_whitelist_it_already_had() {
+        let root = tempdir();
+        git(&root, &["init"]);
+        std::fs::create_dir(root.join("generated")).unwrap();
+        let kept = root.join("generated").join("kept.rs");
+        std::fs::write(&kept, b"x").unwrap();
+        git(&root, &["add", "-f", "generated/kept.rs"]);
+        let (slot, mut ignores) = walked(&root, &[(".gitignore", "generated/\n")], &[]);
+        assert!(ignores.refresh_tracked(), "the warm read must have run");
+        assert!(ignores.tracked.contains(&kept));
+        assert!(
+            !ignores.refresh_tracked(),
+            "an unchanged index and unchanged rules must not be recomputed"
+        );
+
+        std::fs::write(root.join(".git").join("index"), b"not an index").unwrap();
+        assert!(
+            !ignores.refresh_tracked(),
+            "an unreadable index must not count as a recomputed whitelist"
+        );
+
+        assert!(
+            ignores.tracked.contains(&kept),
+            "a failed read emptied a warm whitelist: {:?}",
+            ignores.tracked
+        );
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(std::slice::from_ref(&kept)),
+        );
+        assert!(
+            seen.contains(&kept),
+            "the force-added file stopped reporting after a failed read: {seen:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The index does not outrank [`NEVER_WATCHED`]. A repository that
+    /// commits its own `node_modules` still buys no descriptors from the
+    /// whitelist: the walk refuses that tree by name whatever the ignore
+    /// rules or the index say, and a whitelist that re-included it would
+    /// hand the backend a descriptor per directory of exactly the output
+    /// the list exists to refuse.
+    #[test]
+    fn the_index_does_not_re_include_a_never_watched_tree() {
+        let (root, slot, watched) = fake_backend(usize::MAX, usize::MAX);
+        git(&root, &["init"]);
+        std::fs::write(root.join(".gitignore"), b"node_modules/\n").unwrap();
+        std::fs::create_dir_all(root.join("node_modules").join("pkg")).unwrap();
+        std::fs::write(root.join("node_modules").join("pkg").join("i.js"), b"x").unwrap();
+        git(&root, &["add", "-f", "node_modules/pkg/i.js"]);
+        let (_, mut ignores) = registered(&root, IgnoreRules::for_project(&root));
+        ignores.refresh_tracked();
+        let quiet = |msg: Msg| panic!("an accepting backend must report nothing, got {msg:?}");
+
+        register_tracked(&slot, &ignores, &quiet, &mut false);
+
+        assert!(
+            ignores.tracked.is_empty(),
+            "a committed node_modules reached the whitelist: {:?}",
+            ignores.tracked
+        );
+        assert!(
+            watched.lock().unwrap().is_empty(),
+            "a never-watched tree bought descriptors: {:?}",
+            watched.lock().unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A name git cannot hand back as UTF-8 is left to the ignore rules
+    /// alone rather than lossily converted -- a converted name is not the
+    /// one the backend will report an event for, so whitelisting it would
+    /// cover nothing while claiming to. The sibling proves the rest of the
+    /// listing is still read: one unreadable name must not cost the whole
+    /// index.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_index_entry_is_dropped_without_costing_the_rest() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempdir();
+        git(&root, &["init"]);
+        std::fs::create_dir(root.join("generated")).unwrap();
+        let kept = root.join("generated").join("kept.rs");
+        std::fs::write(&kept, b"x").unwrap();
+        let raw = root
+            .join("generated")
+            .join(std::ffi::OsStr::from_bytes(b"bad\xffname.rs"));
+        std::fs::write(&raw, b"x").unwrap();
+        git(&root, &["add", "-f", "generated"]);
+        let (_, mut ignores) = walked(&root, &[(".gitignore", "generated/\n")], &[]);
+
+        ignores.refresh_tracked();
+
+        assert_eq!(
+            ignores.tracked,
+            BTreeSet::from([kept]),
+            "the whitelist did not drop the unreadable name, or dropped the rest with it"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An ignore file inside an ignored directory is one git never reads --
+    /// it does not descend there at all -- and the descriptor a force-add
+    /// buys is how one now reaches the pump. Its rules must stay unread:
+    /// the whole point of the whitelist is that it re-includes the indexed
+    /// file and nothing else about the tree around it.
+    #[test]
+    fn an_ignore_file_inside_an_ignored_directory_is_never_read() {
+        let root = tempdir();
+        std::fs::create_dir(root.join("generated")).unwrap();
+        let planted = root.join("generated").join(".gitignore");
+        std::fs::write(&planted, b"!/../hand-written.rs\n*.rs\n").unwrap();
+        let (slot, mut ignores) = walked(&root, &[(".gitignore", "generated/\n")], &[]);
+        let kept = root.join("hand-written.rs");
+        std::fs::write(&kept, b"x").unwrap();
+
+        let seen = paths_surviving_the_pump(
+            &root,
+            &slot,
+            &mut ignores,
+            modify_event(&[planted.clone(), kept.clone()]),
+        );
+
+        assert!(
+            !ignores.files.keys().any(|(_, _, file)| *file == planted),
+            "an ignore file git never reads joined the rules: {:?}",
+            ignores.files.keys().collect::<Vec<_>>()
+        );
+        assert!(seen.contains(&kept), "got {seen:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A host directory the backend refuses for good says so once for the
+    /// session, not once per ignore-file change: this registration runs on
+    /// every one of them, and a notice that re-armed per call would turn a
+    /// permanently refused directory into a stream of them.
+    #[test]
+    fn a_refused_host_directory_is_reported_once_for_the_session() {
+        let (root, slot, _) = fake_backend(usize::MAX, 0);
+        git(&root, &["init"]);
+        std::fs::write(root.join(".gitignore"), b"generated/\n").unwrap();
+        std::fs::create_dir(root.join("generated")).unwrap();
+        std::fs::write(root.join("generated").join("kept.rs"), b"x").unwrap();
+        git(&root, &["add", "-f", "generated/kept.rs"]);
+        let (_, mut ignores) = registered(&root, IgnoreRules::for_project(&root));
+        ignores.refresh_tracked();
+        let (msg_tx, msg_rx) = channel::<Msg>();
+        let emit = move |msg: Msg| {
+            let _ = msg_tx.send(msg);
+        };
+        let mut reported = false;
+
+        register_tracked(&slot, &ignores, &emit, &mut reported);
+        register_tracked(&slot, &ignores, &emit, &mut reported);
+
+        let mut notices = Vec::new();
+        while let Ok(Msg::ExternalWatchDegraded { reason }) =
+            msg_rx.recv_timeout(Duration::from_millis(200))
+        {
+            notices.push(reason);
+        }
+        assert_eq!(notices.len(), 1, "got {notices:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
