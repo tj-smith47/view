@@ -327,6 +327,17 @@ impl Surface {
 /// while their originating state is `Some`/non-empty) and vanish the frame
 /// after nvim clears that state.
 ///
+/// # Z-order
+///
+/// Ascending: the engine grid (with any speculation directly over it), then
+/// the persistent chrome (shell placeholder, tabline, statusline), then the
+/// native overlays in stack order, and last nvim's own transient surfaces --
+/// cmdline (or the palette standing in for it), messages, popupmenu. Those
+/// three are last because they are ephemeral notice: they exist only while
+/// nvim is actively showing something and vanish the frame after, so a
+/// native overlay that outranked them would silently swallow whatever the
+/// editor was trying to say for as long as it stayed open.
+///
 /// Total: any `Model`, including a hostile or partially-initialized one,
 /// yields a valid `Surface`. Never panics.
 ///
@@ -387,6 +398,38 @@ pub fn render(model: &Model) -> Surface {
             ));
         }
     }
+    if model.statusline_rows() > 0 {
+        // `grid_target()` already shrank the engine's own grid by
+        // `statusline_rows()`, so this row sits immediately below whatever
+        // `grid_h` the engine actually reported -- never recomputed from
+        // `term_height`, which would disagree the moment a resize is still
+        // in flight to nvim.
+        layers.push(Layer::new(
+            Rect::new(
+                offset.saturating_add(grid_h),
+                0,
+                grid_w,
+                model.statusline_rows(),
+            ),
+            LayerKind::Statusline(engine.statusline.view(grid_w)),
+            model.caps.tier,
+        ));
+    }
+    // native overlays sit above the grid and the persistent chrome, and
+    // within the stack the tail is the one holding focus, so painting in
+    // stack order puts the focused overlay on top of the ones it opened
+    // over. They stop below nvim's own transient surfaces, which are pushed
+    // after this: a toast, a completion menu or a cmdline is ephemeral
+    // notice the user is being shown right now, and a right-pinned panel
+    // covering the exact top-right corner the messages box pins itself to
+    // hid every one of them -- including the panel's own review and
+    // permission notices, which travel that same Messages layer.
+    layers.extend(
+        model
+            .overlays()
+            .iter()
+            .filter_map(|open| native_layer(model, open)),
+    );
     // whether a Prompt overlay currently holds the stack's top: it already
     // renders this exact cmdline state as its own floating input line (see
     // `overlay::prompt_body`), so painting it a second time here, in either
@@ -518,33 +561,6 @@ pub fn render(model: &Model) -> Surface {
             }
         }
     }
-    if model.statusline_rows() > 0 {
-        // `grid_target()` already shrank the engine's own grid by
-        // `statusline_rows()`, so this row sits immediately below whatever
-        // `grid_h` the engine actually reported -- never recomputed from
-        // `term_height`, which would disagree the moment a resize is still
-        // in flight to nvim.
-        layers.push(Layer::new(
-            Rect::new(
-                offset.saturating_add(grid_h),
-                0,
-                grid_w,
-                model.statusline_rows(),
-            ),
-            LayerKind::Statusline(engine.statusline.view(grid_w)),
-            model.caps.tier,
-        ));
-    }
-    // last, and in stack order: a native overlay sits above every engine
-    // overlay, and the stack's tail is the one holding focus, so painting
-    // in stack order puts the focused overlay on top of the ones it opened
-    // over
-    layers.extend(
-        model
-            .overlays()
-            .iter()
-            .filter_map(|open| native_layer(model, open)),
-    );
 
     Surface {
         layers,
@@ -1670,6 +1686,82 @@ mod tests {
         assert!(
             shell_idx < messages_idx,
             "Shell must paint before (underneath) Messages in z-order"
+        );
+    }
+
+    /// The agent panel is a right-pinned, full-height box covering the exact
+    /// top-right corner the messages box pins itself to, so an order that put
+    /// it on top hid every toast, completion menu and cmdline nvim raised
+    /// while it was open -- the panel's own review and permission notices
+    /// included, since those travel that same Messages layer. Both halves are
+    /// pinned here: the transient surfaces above the panel, and the panel
+    /// still above the grid and the statusline it is meant to cover, so an
+    /// ordering that simply hoisted everything would fail too.
+    #[test]
+    fn nvims_transient_surfaces_paint_above_an_open_native_panel() {
+        use view_core::native::geometry::{Anchor, OverlayBox};
+
+        let mut model = model_with_grid(80, 23);
+        model.term_width = 80;
+        model.term_height = 24;
+        model.statusline_enabled = true;
+        model.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Right),
+            OverlayKind::Ai,
+        );
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "emsg".into(),
+                content: vec![(0, "E492: Not an editor command: bogus".into())],
+                replace_last: false,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "set nu".into())],
+                pos: 6,
+                firstc: ":".into(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::PopupmenuShow {
+                items: vec![view_core::events::PmItem::default()],
+                selected: -1,
+                row: 2,
+                col: 3,
+                grid: 1,
+            },
+        );
+
+        let surface = render(&model);
+        let position =
+            |matches: fn(&LayerKind) -> bool| surface.layers.iter().position(|l| matches(&l.kind));
+        let statusline = position(|k| matches!(k, LayerKind::Statusline(_)))
+            .expect("the statusline feature is on, so its layer must be present");
+        let panel = position(|k| matches!(k, LayerKind::Ai(_))).expect("the panel overlay is open");
+        let cmdline = position(|k| matches!(k, LayerKind::Cmdline(_)))
+            .expect("a cmdline is open and the palette is off");
+        let messages =
+            position(|k| matches!(k, LayerKind::Messages(_))).expect("an error message is showing");
+        let popupmenu = position(|k| matches!(k, LayerKind::Popupmenu(_)))
+            .expect("a buffer-anchored completion menu is showing");
+
+        assert_eq!(surface.layers[0].kind, LayerKind::EngineGrid);
+        assert!(
+            statusline < panel,
+            "the panel must still cover the persistent chrome it overlaps"
+        );
+        assert!(panel < cmdline, "an open cmdline must outrank the panel");
+        assert!(panel < messages, "a toast must outrank the panel");
+        assert!(
+            panel < popupmenu,
+            "a completion menu must outrank the panel"
         );
     }
 

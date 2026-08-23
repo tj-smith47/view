@@ -276,6 +276,38 @@ END {
     exit (findings > 0 || reversed > 0)
 }'
 
+# Where an ASCII string is painted, and where the leftmost vertical border
+# on that same row is: "row col left", or nothing at all when the string is
+# not on screen.
+#
+# Column-indexed rather than derived from the plain-text screen, because a
+# byte offset into a row is not a column -- every box-drawing glyph on it is
+# three bytes -- and the whole question this answers is which columns the
+# string occupies relative to a box's edge.
+SPAN_AWK='
+BEGIN { FS = "\t" }
+{
+    glyph[$1 "," $2] = $6
+    if ($2 > widest[$1]) widest[$1] = $2
+    rows[$1] = 1
+}
+END {
+    n = length(text)
+    for (r in rows) {
+        for (c = 0; c + n - 1 <= widest[r]; c++) {
+            ok = 1
+            for (k = 1; k <= n; k++)
+                if (glyph[r "," (c + k - 1)] != substr(text, k, 1)) { ok = 0; break }
+            if (!ok) continue
+            left = -1
+            for (b = 0; b <= widest[r] && left < 0; b++)
+                if (glyph[r "," b] == "\342\224\202") left = b
+            printf "%d %d %d\n", r, c, left
+            exit
+        }
+    }
+}'
+
 # The text inside each framed box, one span per line.
 #
 # What a surface paints into its own frame -- its title on the top edge
@@ -408,6 +440,10 @@ wait_no_box() {
 
 # The text of every framed box in the last capture.
 box_text() { LC_ALL=C awk "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
+
+# "row col left" for `text` in the last capture; empty when it is not on
+# screen at all.
+text_span() { LC_ALL=C awk -v text="$1" "$SPAN_AWK" "$CELLS"; }
 
 # Waits for `text` to be painted inside a framed overlay -- its title bar
 # included -- rather than anywhere on screen.
@@ -903,6 +939,64 @@ leg_toast_and_history() {
     end_session
 }
 
+# Ephemeral nvim UI over the open agent panel.
+#
+# The defect this leg exists for was a z-order: the native overlay stack was
+# composed last, so the panel -- right-pinned and full height -- covered the
+# exact top-right corner the messages box pins itself to, and every toast
+# nvim raised while it was open painted underneath it. Nothing failed; the
+# notice simply was not on screen. The panel's own review and permission
+# notices travel that same Messages layer, so the surface most in need of
+# saying something was the one that could not.
+#
+# Read here rather than in a paint test because the claim is about what a
+# terminal was told: a unit test can assert a layer's index, only a capture
+# can say the glyphs reached the cells the panel owns.
+leg_toast_over_panel() {
+    CURRENT_LEG=toast-over-panel
+    local toast='Not an editor command' span trow tcol pleft
+    start_session overlap 'visual sweep seed line'
+    command_line ':View ai'
+    wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
+    send_text 'y'
+    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
+
+    # out of the composer, not out of the panel: the toast below is raised
+    # from nvim's own cmdline, which needs the engine to own the keyboard
+    # while the panel stays framed on screen
+    send_key Escape
+    settle
+    if ! box_text | grep -qF -- "$PANEL_TITLE"; then
+        fail 'Escape closed the panel outright, so there is no panel for a toast to land over'
+        return 1
+    fi
+
+    mark
+    command_line ':bogus'
+    wait_change "$REACTION_SECS" "a mistyped command with the panel open" >/dev/null
+    wait_for "$toast" "$WAIT_SECS" "the error toast over the open panel" >/dev/null
+    assert_chrome 'the error toast over the open panel'
+
+    # the whole point, in three numbers: the toast's text has to start
+    # inside the columns the panel occupies. Without this the leg would pass
+    # on a toast that merely happened to land beside a panel narrow enough
+    # to miss it, and prove nothing about the order at all.
+    span=$(text_span "$toast")
+    if [ -z "$span" ]; then
+        fail "the toast text is not in any cell on screen, so the panel is painting over it"
+        return 1
+    fi
+    read -r trow tcol pleft <<<"$span"
+    if [ "$pleft" -lt 0 ] || [ "$pleft" -ge "$tcol" ]; then
+        fail "the toast on row $trow starts at column $tcol with no box edge to its left ($pleft), so it is not over the panel and this leg proves nothing"
+        return 1
+    fi
+    pass "a toast paints over the open panel (row $trow, columns $tcol.., panel edge at $pleft)"
+
+    dismiss ai
+    end_session
+}
+
 leg_panel_typing() {
     CURRENT_LEG=panel-typing
     start_session typing 'visual sweep seed line'
@@ -1086,7 +1180,7 @@ leg_panel_paste() {
     end_session
 }
 
-LEGS=(leg_entry_points leg_toast_and_history leg_panel_typing leg_panel_paste leg_narrow_title)
+LEGS=(leg_entry_points leg_toast_and_history leg_toast_over_panel leg_panel_typing leg_panel_paste leg_narrow_title)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else
