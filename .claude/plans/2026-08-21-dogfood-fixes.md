@@ -270,3 +270,29 @@ stays — the fix is skip-with-announcement, not measurement.
   that would have caught T1/T2/T5/T6 before the user did.
 - Dogfood journal appended with the findings + fix commits.
 - Verified live in the same tmux repro flow that reproduced each defect.
+
+### Exit record — 2026-08-23
+
+Every box observed at the chain tip (d2b1533):
+
+- T1–T12 landed through SDD loops (ledger:
+  `.superpowers/sdd/2026-08-21-dogfood-fixes/progress.md`); final
+  whole-chain review of ebc2812..1a5b08b APPROVED — zero blockers,
+  majors, or minors; its three NITs drained (precedence pin test
+  d2b1533, host debris removed, one commit-message magnitude ledgered).
+  `task ci` green (3156 tests) in that review's own run and again at
+  every slot commit.
+- `task acceptance` exit 0 at the tip: visual sweep 4/4 legs including
+  narrow-title, ai-conformance 7/7, supervision 3/3,
+  remote-reconnect 4/4, and remote-rtt announcing
+  `SKIPPED (class controlled-linux, host is dev-linux)`.
+- Journal appended (6dbb581) with findings and fix commits.
+- Live tmux pass against the rebuilt release binary (code tip ffe4a75):
+  trust prompt → panel, composer echo, `❯`-marked user entry in its own
+  theme color under truecolor capture, sticky `E492` toast dismissed by
+  a deliberate `<Esc>`.
+
+Bench evidence en route: `ai_composer` gate OK (p50 0.08ms, p99 0.141ms
+vs 0.169 bar) in the final review's run; the gh legs re-record on the
+next push round. Latency note owed by 2010df6's body: one fewer
+O(overlays) scan per keypress, sub-microsecond, no allocation.
