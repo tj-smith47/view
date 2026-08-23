@@ -370,17 +370,20 @@ pub(crate) struct EngineStop {
 /// in the message queue is exactly the drift that would let a crashed engine
 /// quit the editor down one path and offer recovery down another.
 ///
-/// `stop` resolves the child's real status alongside whether the engine
-/// announced it was leaving, and is called only on the failed write that has
-/// not already been resolved -- a bounded (up to the engine's
-/// `shutdown_timeout`) block on a transition that happens at most once per
-/// engine, never on a steady-state pass.
+/// `stop` reports the child's real status alongside whether the engine
+/// announced it was leaving -- and reports `None` when the child is still
+/// running. It is called only on the failed write that has not already been
+/// resolved, and it must never *cause* the stop it reports: a write error is
+/// evidence about the pipe, never proof the engine died, and a resolution
+/// that sends `qa!` to find out would quit the editor it was asking about.
+/// A bounded (up to the reader's own settle) block on a transition that
+/// happens at most once per engine, never on a steady-state pass.
 pub(crate) fn step<E: EngineOps>(
     model: &mut Model,
     executor: &Executor<E>,
     follow_ups: &mut FollowUps<'_>,
     state: &mut LoopState,
-    stop: impl FnOnce() -> EngineStop,
+    stop: impl FnOnce() -> Option<EngineStop>,
     msg: Msg,
 ) -> Option<i32> {
     match dispatch(model, executor, follow_ups, msg) {
@@ -398,10 +401,21 @@ pub(crate) fn step<E: EngineOps>(
         // than reporting the same loss once per remaining effect
         Flow::EngineLost if state.connection_lost => None,
         Flow::EngineLost => {
-            let EngineStop {
+            let Some(EngineStop {
                 exit,
                 announced_exit,
-            } = stop();
+            }) = stop()
+            else {
+                // the child is still running: the write failed, the engine
+                // did not. Handing this to supervision is the whole point
+                // -- the alternative reading, "resolve it as a stop", ends
+                // in a `qa!` to a healthy nvim, a `VimLeavePre` that marks
+                // the exit announced, and view leaving 0 with no modal and
+                // no message, which is an unsolicited disappearance wearing
+                // the user's own quit as a disguise
+                state.connection_lost = true;
+                return None;
+            };
             if model.supervision.note_engine_stop(exit, announced_exit) {
                 state.connection_lost = true;
                 None
@@ -454,22 +468,27 @@ mod tests {
     }
 
     /// The stop an engine that said it was leaving reports: `:q` / `:cq`.
-    fn announced(code: i32) -> EngineStop {
-        EngineStop {
+    fn announced(code: i32) -> Option<EngineStop> {
+        Some(EngineStop {
             exit: ExitInfo {
                 code: Some(code),
                 by_signal: false,
             },
             announced_exit: true,
-        }
+        })
     }
 
     /// The stop an engine that never got to say anything reports.
-    fn silent(code: Option<i32>, by_signal: bool) -> EngineStop {
-        EngineStop {
+    fn silent(code: Option<i32>, by_signal: bool) -> Option<EngineStop> {
+        Some(EngineStop {
             exit: ExitInfo { code, by_signal },
             announced_exit: false,
-        }
+        })
+    }
+
+    /// What a child that is still running reports: no stop at all.
+    fn still_running() -> Option<EngineStop> {
+        None
     }
 
     /// A model with the dead-engine modal already on screen, reached the way
@@ -586,6 +605,48 @@ mod tests {
             model.supervision.exit_code(),
             139,
             "the status a user answering with Quit would leave with"
+        );
+    }
+
+    /// The write failed and the child is still running: view must hand the
+    /// connection to supervision, never leave.
+    ///
+    /// The bug this pins let a transient write error quit a healthy editor.
+    /// The old resolution asked for the stop by *causing* one -- `qa!` down
+    /// the same connection -- so nvim ran `VimLeavePre`, marked the exit
+    /// announced, and exited 0; the announcement then selected this arm's
+    /// "the user quit" branch and view left 0 with no modal, no message and
+    /// nothing in the log to distinguish it from the user's own `:q`.
+    #[test]
+    fn a_failed_write_to_a_live_engine_never_ends_the_session() {
+        let ops = crate::engine_ops::FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let mut native = crate::native::NativeSession::inert();
+        let mut theme = crate::bridge::ThemeBridge::new(None);
+        let mut model = Model::with_term_size(80, 24);
+        let mut state = LoopState::default();
+
+        let code = step(
+            &mut model,
+            &executor,
+            &mut inert_follow_ups(&mut native, &mut theme),
+            &mut state,
+            still_running,
+            Msg::Key(Key {
+                notation: "a".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            code, None,
+            "a write error is evidence about the pipe, never a reason to quit the user's editor"
+        );
+        assert!(model.running, "the session continues");
+        assert!(
+            state.connection_lost,
+            "supervision owns the connection from here: it is what raises the banner and the \
+             modal a user can answer, and the alternative is a silent disappearance"
         );
     }
 

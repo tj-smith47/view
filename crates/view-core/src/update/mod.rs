@@ -124,6 +124,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 exit_code: exit.code.unwrap_or(1),
             }]
         }
+        // `128 + signal` is the status a shell reports for a process a
+        // signal ended, and reporting anything else would make view the one
+        // command in a pipeline whose death cannot be read the usual way
+        Msg::Terminated { signal } => {
+            model.running = false;
+            vec![Effect::Quit {
+                exit_code: 128 + signal,
+            }]
+        }
         Msg::EngineRequest(EngineRequest::VimEnter { token }) => vec![
             Effect::Reply {
                 token,

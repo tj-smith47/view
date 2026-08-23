@@ -1379,6 +1379,22 @@ fn engine_down_without_code_exits_one_and_signal_code_passes_through() {
     assert!(matches!(&effects[..], [Effect::Quit { exit_code: 137 }]));
 }
 
+/// A signal ends the session through the same quit every other exit takes,
+/// so the terminal restore, the child teardown and the theme write all still
+/// happen -- and it leaves with the status a shell reports for that signal.
+#[test]
+fn a_delivered_signal_quits_with_the_conventional_status() {
+    for (signal, exit_code) in [(1, 129), (2, 130), (15, 143)] {
+        let mut m = model();
+        let effects = update(&mut m, Msg::Terminated { signal });
+        assert!(
+            matches!(&effects[..], [Effect::Quit { exit_code: code }] if *code == exit_code),
+            "signal {signal} must quit with {exit_code}, got {effects:?}"
+        );
+        assert!(!m.running, "the session is over");
+    }
+}
+
 #[test]
 fn loop_tokens_are_noops_and_engine_request_always_replies() {
     let mut m = model();

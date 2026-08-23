@@ -966,7 +966,9 @@ fn main() -> Result<()> {
         // graceful-shutdown sequence still runs, since process::exit below
         // would otherwise skip every destructor on this stack
         drop(engine);
+        vlog::log("exit", "children stopped");
         term.restore_now();
+        vlog::log("exit", "terminal restored");
         // after restore_now, not before: persist_theme's own diagnostic (on
         // a cache-write failure) is a plain stderr write, and the terminal
         // is raw-mode/alternate-screen owned until the line above -- see
@@ -974,6 +976,7 @@ fn main() -> Result<()> {
         // requirement on the read side.
         persist_theme(&model, &config_path);
         report_fatal_reason(&model);
+        vlog::log_with("exit", || format!("leaving code={code}"));
         std::process::exit(code);
     }
 
@@ -1000,6 +1003,12 @@ fn main() -> Result<()> {
         ai_agent,
     )?;
     vlog::log_with("engine", || format!("exit code={exit_code}"));
+    // every child `run` owned -- the engine and the agent session -- was
+    // signalled by its frame's teardown before this line; a log that goes
+    // silent between the engine's exit and the process's own leaves a user
+    // handing in VIEW_LOG after a stranded terminal unable to say whether
+    // the teardown ran or the process was killed one instruction later
+    vlog::log("exit", "children stopped");
     // std::process::exit bypasses destructors, so the terminal must be
     // restored explicitly first; every other return path (an error
     // propagated via `?` above) is covered by `Drop` on `term`. Also why
@@ -1007,8 +1016,10 @@ fn main() -> Result<()> {
     // diagnostic (on a cache-write failure) is a plain stderr write, valid
     // only once the terminal is no longer raw-mode/alternate-screen owned.
     term.restore_now();
+    vlog::log("exit", "terminal restored");
     persist_theme(&model, &config_path);
     report_fatal_reason(&model);
+    vlog::log_with("exit", || format!("leaving code={exit_code}"));
     std::process::exit(exit_code);
 }
 

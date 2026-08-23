@@ -298,6 +298,45 @@ fn wait_exit_resolves_a_normally_exiting_child() {
     assert!(!info.by_signal);
 }
 
+/// The seam a failed write asks through: it must report on the child, never
+/// end it.
+///
+/// The bug this pins had the runtime resolve every failed write by calling
+/// `stop_report`, whose `wait_exit` opens with `qa!`. Against a live nvim
+/// that is not a diagnosis, it is a cause of death: nvim runs `VimLeavePre`,
+/// the exit comes back announced and clean, and the caller reads a transient
+/// write error as the user's own `:q` and leaves 0 with nothing on screen to
+/// say why.
+#[test]
+fn a_live_child_reports_no_stop_and_is_not_asked_to_quit() {
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let pid = engine.pid();
+    let mut orphan_guard = KillOnDrop(Some(pid));
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    assert!(
+        engine.stop_report_if_exited().is_none(),
+        "a running child has no stop to report, and saying otherwise is what \
+         turns a write error into an exit"
+    );
+
+    // the connection still answers, so nothing was sent that would make it
+    // stop answering: an engine handed `qa!` is inside VimLeavePre or gone
+    assert_eq!(
+        engine.handle.eval_str("1 + 1").unwrap(),
+        "2",
+        "the engine stopped answering, so the observation ended the session \
+         it was supposed to be observing"
+    );
+    assert!(
+        engine.stop_report_if_exited().is_none(),
+        "asking twice must not be what kills it either"
+    );
+
+    drop(engine);
+    orphan_guard.disarm();
+}
+
 #[cfg(unix)]
 #[test]
 fn wait_exit_maps_external_signal_kill_to_128_plus_signal() {

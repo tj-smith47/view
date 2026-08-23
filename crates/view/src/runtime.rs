@@ -1241,6 +1241,22 @@ fn wait_for_msg(
     }
 }
 
+/// Ends the session's agent when [`run`]'s frame is torn down, whichever
+/// way it leaves.
+///
+/// A guard rather than a call before each `return`: `run` has five exits and
+/// an error path through `?`, and a shutdown missing from any one of them is
+/// an agent child that outlives the editor with no way for the user to see
+/// it, let alone stop it.
+struct AgentShutdown(crate::ai_worker::AiWorker);
+
+impl Drop for AgentShutdown {
+    fn drop(&mut self) {
+        self.0.shutdown();
+        crate::vlog::log("exit", "agent stopped");
+    }
+}
+
 /// The terminal-input handle [`run`] polls and drains inline: the pollable
 /// handle `view-tui` exposes on unix, and nothing at all elsewhere (the
 /// non-unix loop still receives input from the dedicated thread through
@@ -1263,7 +1279,9 @@ pub struct InputHandles<'a> {
 }
 
 /// [`wait_for_msg`]'s unix counterpart: sleeps in the fd readiness poll
-/// over the terminal fd, the SIGWINCH pipe, and the wake pipe, so a
+/// over the terminal fd, the SIGWINCH pipe, the fatal-signal pipe (whose
+/// delivery becomes [`Msg::Terminated`], so an exit view did not choose
+/// still leaves through the one teardown), and the wake pipe, so a
 /// keystroke wakes this thread directly and is decoded inline in
 /// `view-tui` -- the cross-thread hop the input thread used to charge
 /// every key is gone by construction. Staged terminal events win ties: a
@@ -1294,6 +1312,7 @@ fn wait_for_msg_unified(
     waker: &crate::wake::LoopWaker,
     term_size: &view_tui::terminal::TermSizeCell,
     pending: &mut std::collections::VecDeque<Msg>,
+    armed: &mut Option<Option<u128>>,
 ) -> std::io::Result<Option<Result<Msg, mpsc::RecvError>>> {
     loop {
         if let Some(msg) = pending.pop_front() {
@@ -1311,11 +1330,28 @@ fn wait_for_msg_unified(
             Err(mpsc::TryRecvError::Empty) => {}
         }
         let deadline = watch_deadline(wakeups);
-        crate::vlog::log_with("sleep", || match deadline {
-            Some(d) => format!("armed {}ms", d.as_millis()),
-            None => "unbounded".to_owned(),
-        });
+        // logged on change rather than on every block: an idle session
+        // re-arms the same engine-liveness deadline twice a second forever,
+        // and a log a user is asked to attach to a bug report was 96% that
+        // one repeated line. A deadline that moves still logs, so every
+        // distinct arming is on the record
+        let arming = deadline.map(|d| d.as_millis());
+        if *armed != Some(arming) {
+            *armed = Some(arming);
+            crate::vlog::log_with("sleep", || match arming {
+                Some(ms) => format!("armed {ms}ms"),
+                None => "unbounded".to_owned(),
+            });
+        }
         let ready = crate::wake::poll_readiness(input, waker, deadline)?;
+        // before the drain and before the timeout verdict: a signal
+        // delivered mid-poll is this session's last message, and anything
+        // dispatched ahead of it would be work done for a process that is
+        // already leaving
+        if let Some(signal) = input.take_fatal_signal() {
+            crate::vlog::log_with("exit", || format!("signal {signal}"));
+            return Ok(Some(Ok(Msg::Terminated { signal })));
+        }
         if ready.timed_out {
             crate::vlog::log("sleep", "expired");
             return Ok(None);
@@ -1338,17 +1374,23 @@ fn wait_for_msg_unified(
 ///
 /// `None` means the wakeup carried nothing this session should act on: a
 /// terminal message belonging to a connection it has already replaced.
-/// The whole stop, in the shape [`step`] resolves it from.
+/// The whole stop, in the shape [`step`] resolves it from -- or `None` when
+/// the child is still running and so there is no stop to resolve.
+///
+/// Observes the child rather than stopping it
+/// ([`Engine::stop_report_if_exited`], never `stop_report`): the only caller
+/// is the failed-write arm, which holds evidence about a pipe and none about
+/// the process behind it.
 ///
 /// A named function rather than a closure spelled out at each of `run`'s
 /// dispatch sites: three copies of "what counts as a stop" is exactly the
 /// drift `step` exists to prevent.
-fn engine_stop(engine: &mut Engine) -> crate::recovery::EngineStop {
-    let (exit, announced_exit) = engine.stop_report();
-    crate::recovery::EngineStop {
+fn engine_stop(engine: &mut Engine) -> Option<crate::recovery::EngineStop> {
+    let (exit, announced_exit) = engine.stop_report_if_exited()?;
+    Some(crate::recovery::EngineStop {
         exit,
         announced_exit,
-    }
+    })
 }
 
 fn intake(
@@ -1549,6 +1591,11 @@ pub fn run(
     })?;
     #[cfg(unix)]
     let mut pending = std::collections::VecDeque::new();
+    // the last deadline this loop logged arming, so the idle cadence is
+    // recorded once per value rather than once per block (see the wait's
+    // own comment)
+    #[cfg(unix)]
+    let mut armed: Option<Option<u128>> = None;
     let (clipboard_tx, clipboard_rx) = mpsc::channel();
     let (osc52_tx, osc52_rx) = mpsc::channel();
     // the route, not the handle: the worker answers whichever engine this
@@ -1570,6 +1617,10 @@ pub fn run(
     // engine restart's fresh `Executor` re-wiring this same worker (below)
     // still targets the one project this session was ever asked about
     let ai = crate::ai_worker::AiWorker::new(ai_agent, model.cwd.clone(), msg_tx.clone());
+    // declared here so every way out of this function -- the quit returns
+    // below and the `?` on a terminal write alike -- signals the agent
+    // child, which no refcount can promise (see `AiWorker::shutdown`)
+    let _ai_shutdown = AgentShutdown(ai.clone());
     let (ai_context_tx, ai_context_rx) = mpsc::channel();
     // the route, not the handle, for the same reason `clipboard_route` is:
     // a restart re-points this worker at the fresh engine rather than
@@ -1776,6 +1827,7 @@ pub fn run(
             &waker,
             &term_size,
             &mut pending,
+            &mut armed,
         )?;
         #[cfg(not(unix))]
         let received = wait_for_msg(

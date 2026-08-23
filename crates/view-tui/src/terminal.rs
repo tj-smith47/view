@@ -124,14 +124,27 @@ impl Drop for TerminalGuard {
 /// closing write. Ordered before [`LeaveAlternateScreen`] deliberately: the
 /// bracket must close while still on the screen that opened it, not after
 /// switching back to the one the host shell was showing.
+///
+/// The caret is shown again and its shape reset for the same reason and in
+/// the same place: [`Term::draw_surface`] hides the cursor on any frame
+/// whose surface carries none and writes a DECSCUSR shape for every frame
+/// that does, so a session ending from such a frame would hand the host
+/// shell an invisible or insert-mode caret at its own prompt -- which reads
+/// to a user as a terminal that has stopped responding.
 fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
     out.write_all(b"\x1b[?2026l")?;
+    // DECSCUSR 0 rather than the steady block `write_cursor_shape` emits:
+    // 0 is "the terminal's own configured default", which is the caret the
+    // host shell had before view started; 2 would impose a block on a user
+    // whose shell was set to a bar
+    out.write_all(b"\x1b[0 q")?;
     // mouse capture disabled unconditionally, even though it is only ever
     // turned on dynamically (see Term::draw_surface): leaving it enabled
     // across process exit would swallow the host shell's own mouse
     // gestures until the terminal emulator itself is reset
     crossterm::execute!(
         out,
+        crossterm::cursor::Show,
         DisableMouseCapture,
         crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen
@@ -706,6 +719,20 @@ mod tests {
             esu_close < leave_alt,
             "ESU close must be written before leaving the alternate screen, so the bracket \
              closes on the screen that opened it"
+        );
+
+        let show = find_subslice(&buf, b"\x1b[?25h").expect(
+            "restore must show the cursor again: draw_surface hides it on any frame whose \
+             surface carries none, and a hidden caret at the host shell's prompt reads as a \
+             frozen terminal",
+        );
+        let shape_reset = find_subslice(&buf, b"\x1b[0 q").expect(
+            "restore must reset DECSCUSR: a session ending in insert mode otherwise leaves a \
+             bar caret at the host shell's prompt",
+        );
+        assert!(
+            show < leave_alt && shape_reset < leave_alt,
+            "the caret must be restored on the screen view drew on, before switching back"
         );
     }
 

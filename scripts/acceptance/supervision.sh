@@ -21,10 +21,19 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # shellcheck source=scripts/acceptance/artifacts.sh
 . "$SCRIPT_DIR/artifacts.sh"
 VIEW_BIN=${VIEW_BIN:-$REPO_ROOT/target/release/view}
+STUB_BIN=${STUB_BIN:-$REPO_ROOT/target/release/view-ai-stub-agent}
 FIXTURE=$REPO_ROOT/compat/fixtures/minimal
 SUPERVISION_RS=$REPO_ROOT/crates/view-core/src/native/supervision.rs
 HEARTBEAT_RS=$REPO_ROOT/crates/view-engine/src/heartbeat.rs
 STALL_RS=$REPO_ROOT/crates/view-engine/src/stall.rs
+PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
+AI_UPDATE_RS=$REPO_ROOT/crates/view-core/src/update/ai.rs
+
+# What the exit legs' buffer holds, and what their shell prints once it has
+# the tty back. Distinct strings, because the assertion that view left is
+# exactly "the second one is on screen and the first one's frame is not".
+EXIT_SEED='exit-path seed line'
+SHELL_BACK='SHELL-HAS-THE-TTY'
 
 # The pane the legs read. Wide enough that no notice or modal row is
 # truncated before the text an assertion greps for, tall enough that the
@@ -300,6 +309,144 @@ assert_restart_recovered() {
     read_engine_pid || return 1
 }
 
+# A session whose pane keeps a shell alive after view has left, so the state
+# view handed the terminal back in can be read where the user meets it: from
+# the shell that gets the tty next.
+#
+# The three legs above never need this -- they observe view while it runs and
+# kill the pane afterwards -- but the whole failure this shape exists for is
+# invisible from inside view: a raw-mode alternate screen with nothing left
+# running reads to a user as a frozen editor, and only the next occupant of
+# the tty can say whether it was handed back.
+#
+# `stty -g` on both sides of the run rather than a reading of any single
+# flag: it is the terminal's own restorable dump, so an exact comparison
+# covers raw mode, echo, ISIG and everything else a session could leave
+# altered.
+start_exit_session() {
+    local tag="$1"
+    SESSION="view-acc-$$-$tag"
+    ROOT=$(mktemp -d "${TMPDIR:-/tmp}/view-acc-$tag-XXXXXX")
+    ROOTS+=("$ROOT")
+    cp -R "$FIXTURE" "$ROOT/xdg_config_home"
+    mkdir -p "$ROOT/xdg_data_home" "$ROOT/xdg_state_home" "$ROOT/xdg_cache_home"
+    printf '\n[ai]\nagent = ["%s"]\n' "$STUB_BIN" >>"$ROOT/xdg_config_home/view/view.toml"
+    printf '%s\n' "$EXIT_SEED" >"$ROOT/scratch.txt"
+
+    cat >"$ROOT/run.sh" <<EOF
+stty -g >"$ROOT/termios.before"
+env VIEW_COMPAT_SOCK=$ROOT/compat.sock \
+    XDG_CONFIG_HOME=$ROOT/xdg_config_home \
+    XDG_DATA_HOME=$ROOT/xdg_data_home \
+    XDG_STATE_HOME=$ROOT/xdg_state_home \
+    XDG_CACHE_HOME=$ROOT/xdg_cache_home \
+    VIEW_LOG=$ROOT/view.log \
+    TERM=xterm-256color COLORTERM=truecolor \
+    "$VIEW_BIN" "$ROOT/scratch.txt"
+printf '%s' "\$?" >"$ROOT/exit.code"
+stty -g >"$ROOT/termios.after"
+printf '$SHELL_BACK\n'
+exec sleep 600
+EOF
+
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    SESSIONS+=("$SESSION")
+    tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$ROOT" \
+        "sh $ROOT/run.sh"
+    # the raw byte stream the pane receives, which is where the teardown
+    # escapes themselves are provable: tmux acts on them rather than echoing
+    # them, so a screen capture can show the outcome but never the sequence
+    tmux pipe-pane -o -t "$SESSION" "cat >>$ROOT/pane.raw"
+
+    wait_for "$EXIT_SEED" 30 "the seeded buffer" >/dev/null || return 1
+    # the pane runs the shell above, so view is its child rather than the
+    # pane process itself
+    VIEW_PID=$(pgrep -P "$(tmux list-panes -t "$SESSION" -F '#{pane_pid}')" -x view | head -1)
+    [ -n "$VIEW_PID" ] || {
+        fail "the exit session's shell has no view child"
+        return 1
+    }
+    read_engine_pid || return 1
+}
+
+# Opens the agent panel and gets a stub agent genuinely running underneath
+# it, so the exit under test is one with both children alive.
+open_stub_panel() {
+    local start el
+    type_line ':View ai'
+    wait_for "$TRUST_PROMPT" 30 "the project trust prompt" >/dev/null || return 1
+    tmux send-keys -t "$SESSION" -l 'y'
+    wait_for "$FOCUSED_TITLE" 30 "the entered agent panel" >/dev/null || return 1
+    # a session starts on the first command, never on the panel opening
+    tmux send-keys -t "$SESSION" -l 'hello'
+    tmux send-keys -t "$SESSION" Enter
+    start=$(now)
+    while :; do
+        STUB_PID=$(pgrep -P "$VIEW_PID" -f "$STUB_BIN" | head -1 || true)
+        [ -n "$STUB_PID" ] && return 0
+        el=$(elapsed "$start" "$(now)")
+        if ! in_range "$el" 0 30; then
+            fail "the stub agent never started under view (pid $VIEW_PID), so this leg would prove nothing about orphaned children"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+
+# Everything view owes the terminal and the process table on its way out,
+# asserted from the shell that got the tty back.
+assert_exit_was_clean() {
+    local want_code="$1" start el code
+    wait_for "$SHELL_BACK" 30 "the shell after view left" >/dev/null || return 1
+
+    code=$(cat "$ROOT/exit.code" 2>/dev/null || true)
+    if [ "$code" != "$want_code" ]; then
+        fail "view left with status ${code:-<none>}, expected $want_code"
+        return 1
+    fi
+
+    if ! cmp -s "$ROOT/termios.before" "$ROOT/termios.after"; then
+        fail "the terminal modes view was handed are not the ones it gave back: $(cat "$ROOT/termios.before") vs $(cat "$ROOT/termios.after")"
+        return 1
+    fi
+
+    if [ "$(tmux display-message -p -t "$SESSION" '#{alternate_on}')" != 0 ]; then
+        fail "the pane is still on the alternate screen, so the shell's own scrollback is behind view's last frame"
+        return 1
+    fi
+    if [ "$(tmux display-message -p -t "$SESSION" '#{cursor_flag}')" != 1 ]; then
+        fail "the caret is still hidden, which reads to a user as a terminal that stopped responding"
+        return 1
+    fi
+
+    # the escapes themselves, off the raw stream: the two readings above are
+    # tmux's verdict, and this is the byte sequence that produced it
+    grep -qU $'\033\[?1049l' "$ROOT/pane.raw" || {
+        fail "no leave-alternate-screen escape ever reached the pty"
+        return 1
+    }
+    grep -qU $'\033\[?25h' "$ROOT/pane.raw" || {
+        fail "no show-cursor escape ever reached the pty"
+        return 1
+    }
+
+    # nothing view spawned outlives it. Both children are signalled by
+    # destructors `std::process::exit` would otherwise skip, so an orphan
+    # here is a teardown that did not run rather than one that was slow.
+    start=$(now)
+    while :; do
+        if ! kill -0 "$NVIM_PID" 2>/dev/null && ! kill -0 "$STUB_PID" 2>/dev/null; then
+            return 0
+        fi
+        el=$(elapsed "$start" "$(now)")
+        if ! in_range "$el" 0 10; then
+            fail "view left children behind after ${el}s: nvim $NVIM_PID $(kill -0 "$NVIM_PID" 2>/dev/null && echo alive || echo gone), agent $STUB_PID $(kill -0 "$STUB_PID" 2>/dev/null && echo alive || echo gone)"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+
 end_session() {
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
@@ -312,6 +459,8 @@ for tool in tmux awk sed grep pgrep; do
 done
 ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
     cargo build --release -p view || exit 1
+ensure_artifact "$STUB_BIN" "$REPO_ROOT/target/release/view-ai-stub-agent" \
+    cargo build --release -p view-ai --features test-support --bin view-ai-stub-agent || exit 1
 [ -d "$FIXTURE" ] || {
     printf 'FAIL: the no-plugins fixture is missing at %s\n' "$FIXTURE" >&2
     exit 1
@@ -324,6 +473,27 @@ BUSY_TITLE=$(wedge_arm title ReadSide)
 GONE_TITLE=$(wedge_arm title Dead)
 INTERRUPT_KEY=$(tmux_key "$(const_str "$SUPERVISION_RS" INTERRUPT_NOTATION)")
 RESTART_KEY=$(tmux_key "$(const_str "$SUPERVISION_RS" RESTART_NOTATION)")
+# crate-private rather than `pub`, so `const_str`'s pattern does not reach it.
+# Only the head of it is ever asserted: the panel is a third of this pane
+# wide, so its own framing truncates the title, and the part that survives is
+# still the half that says "focused" -- the unfocused title is the bare
+# `TITLE`, which carries no separator at all.
+FOCUSED_TITLE=$(grep -oE 'const FOCUSED_TITLE: &str = "[^"]+"' "$PANEL_RS" |
+    sed -E 's/.*"(.*)"/\1/' | cut -c1-16)
+case "$FOCUSED_TITLE" in
+*--*) ;;
+*)
+    printf 'FAIL: FOCUSED_TITLE in %s no longer reads as focused within its first 16 columns (%s), so a truncated title cannot be told from the unfocused one\n' \
+        "$PANEL_RS" "${FOCUSED_TITLE:-nothing this can read}" >&2
+    exit 1
+    ;;
+esac
+TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$AI_UPDATE_RS" | sed -E 's/"(.*)\{\}/\1/')
+[ -n "$TRUST_PROMPT" ] || {
+    printf 'FAIL: the AI trust prompt is not built from a literal in %s any more\n' "$AI_UPDATE_RS" >&2
+    exit 1
+}
+STUB_PID=""
 
 WEDGE_THRESHOLD=$(const_secs "$HEARTBEAT_RS" HEARTBEAT_WEDGE_THRESHOLD)
 PROBE_INTERVAL=$(const_secs "$HEARTBEAT_RS" HEARTBEAT_PROBE_INTERVAL)
@@ -409,7 +579,7 @@ assert_within "$unanswered" "$INTERRUPT_MIN" "$INTERRUPT_MAX" "the unanswered-in
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 assert_restart_recovered "$UNSAVED" "LIVE-LUA-$$" "$BUSY_TITLE"
 end_session
-printf '[1/3] %-33s ... %s  OK\n' 'read-side wedge (blocked Lua)' \
+printf '[1/5] %-33s ... %s  OK\n' 'read-side wedge (blocked Lua)' \
     "banner at ${banner}s, modal at ${modal}s after it, interrupt unanswered at ${unanswered}s, restart recovers (swap rehydrated)"
 
 CURRENT_LEG=read-side-vimscript
@@ -444,7 +614,7 @@ assert_within "$(plus "$dead_notice" "$dead_modal")" 0 "$DEAD_MAX" "the dead-con
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 assert_restart_recovered "$UNSAVED" "LIVE-DEAD-$$" "$GONE_TITLE"
 end_session
-printf '[2/3] %-33s ... %s  OK\n' 'dead connection (SIGKILL)' \
+printf '[2/5] %-33s ... %s  OK\n' 'dead connection (SIGKILL)' \
     "banner+modal at $(plus "$dead_notice" "$dead_modal")s (Dead skips the grace period), restart recovers, swap rehydrated"
 
 CURRENT_LEG=write-side
@@ -471,5 +641,35 @@ if pane | grep -qF -- "$READ_NOTICE"; then
 fi
 kill -CONT "$NVIM_PID"
 end_session
-printf '[3/3] %-33s ... %s  OK\n' 'write-side wedge (existing)' \
+printf '[3/5] %-33s ... %s  OK\n' 'write-side wedge (existing)' \
     "banner at ${write_notice}s (regression check, unchanged)"
+
+# The two legs below are about the exit rather than the wedge: an engine
+# that stops is only half the contract, and the half a user meets is what
+# the terminal looks like afterwards. Both are run with the panel open and a
+# real agent child underneath it, because the exit that stranded a terminal
+# in the field was one taken from that state.
+CURRENT_LEG=clean-exit
+start_exit_session quit
+open_stub_panel
+tmux send-keys -t "$SESSION" Escape
+type_line ':q'
+assert_exit_was_clean 0
+end_session
+printf '[4/5] %-33s ... %s  OK\n' 'user quit under a live panel' \
+    'exits 0, termios identical, alternate screen left, caret shown, no children behind'
+
+CURRENT_LEG=fatal-signal
+start_exit_session signal
+open_stub_panel
+tmux send-keys -t "$SESSION" Escape
+# the death view does not choose, and the ordinary one over SSH: the link
+# drops, sshd HUPs the session, and the foreground job is signalled where it
+# stands. Handled, it takes the same teardown `:q` does; unhandled, it ends
+# the process on a raw-mode alternate screen the user has to repair from
+# another shell.
+kill -TERM "$VIEW_PID"
+assert_exit_was_clean 143
+end_session
+printf '[5/5] %-33s ... %s  OK\n' 'SIGTERM under a live panel' \
+    'exits 143, termios identical, alternate screen left, caret shown, no children behind'

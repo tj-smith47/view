@@ -117,10 +117,10 @@ pub enum DrainOutcome {
     SourceLost,
 }
 
-/// Creates the SIGWINCH self-pipe's two ends with `O_CLOEXEC`/`O_NONBLOCK`
+/// Creates a signal self-pipe's two ends with `O_CLOEXEC`/`O_NONBLOCK`
 /// already set on both, matching `pipe2`'s atomic guarantee.
 #[cfg(all(unix, not(target_vendor = "apple")))]
-fn new_winch_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+fn new_signal_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok(rustix::pipe::pipe_with(
         rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
     )?)
@@ -136,7 +136,7 @@ fn new_winch_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
 // any other thread exists -- there is no fork/exec in the program's
 // lifetime yet that could inherit these fds un-flagged.
 #[cfg(target_vendor = "apple")]
-fn new_winch_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+fn new_signal_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     let (read, write) = rustix::pipe::pipe()?;
     set_cloexec_nonblock(&read)?;
     set_cloexec_nonblock(&write)?;
@@ -181,20 +181,45 @@ const BUFFERED_POLL_LIMIT: usize = 4;
 /// signal out to every registered hook) gives the loop's poll set a
 /// readable fd for exactly that moment; the drain that follows lets
 /// crossterm translate its own copy of the signal into `Event::Resize`.
+///
+/// A second self-pipe carries the signals that ask this process to stop.
+/// They are folded into the loop rather than left to their default
+/// disposition because the default one ends the process where it stands:
+/// raw mode on, alternate screen up, no destructor and no panic hook run --
+/// a terminal the user has to repair from another shell, which over SSH
+/// (the link drops, sshd HUPs the session) is the ordinary way to die. A
+/// self-pipe is what keeps the handler itself async-signal-safe: it stores
+/// the signal number and writes one byte, and every restore runs on the
+/// loop thread afterwards.
 #[cfg(unix)]
 pub struct InputSource {
     tty: TtyFd,
     winch_read: OwnedFd,
+    fatal_read: OwnedFd,
+    fatal_signal: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     dead: bool,
 }
+
+/// The signals that must end the session through view's own teardown
+/// rather than where they land.
+///
+/// `SIGINT` is in the set for signals sent from outside (`kill -INT`, a
+/// process-group interrupt): raw mode clears `ISIG`, so a user's own
+/// `<C-c>` reaches view as a key and never reaches this path.
+#[cfg(unix)]
+const FATAL_SIGNALS: [std::ffi::c_int; 3] = [
+    signal_hook::consts::SIGHUP,
+    signal_hook::consts::SIGTERM,
+    signal_hook::consts::SIGINT,
+];
 
 #[cfg(unix)]
 impl InputSource {
     /// Opens the handle: resolves the terminal fd, registers the SIGWINCH
-    /// self-pipe, and touches crossterm's event source once so its own
-    /// SIGWINCH registration exists from here on (it is created lazily on
-    /// first use; a resize delivered before that would otherwise be lost
-    /// rather than translated on the next drain).
+    /// and fatal-signal self-pipes, and touches crossterm's event source
+    /// once so its own SIGWINCH registration exists from here on (it is
+    /// created lazily on first use; a resize delivered before that would
+    /// otherwise be lost rather than translated on the next drain).
     ///
     /// # Errors
     ///
@@ -202,12 +227,42 @@ impl InputSource {
     /// signal pipe cannot be set up.
     pub fn open() -> std::io::Result<Self> {
         let tty = TtyFd::open()?;
-        let (winch_read, winch_write) = new_winch_pipe()?;
+        let (winch_read, winch_write) = new_signal_pipe()?;
         signal_hook::low_level::pipe::register(signal_hook::consts::SIGWINCH, winch_write)?;
+        let (fatal_read, fatal_write) = new_signal_pipe()?;
+        let fatal_signal = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // one signal's hooks run in registration order, so the three below
+        // are ordered by what each of them makes true for the next:
+        //
+        // 1. the number is recorded first, so a byte on the pipe always
+        //    has a signal to read behind it;
+        // 2. the shutdown is armed on a flag still false, so it fires on
+        //    the *second* delivery only -- a loop too wedged to reach its
+        //    own quit stays killable with a repeat `kill`, not just
+        //    `SIGKILL`;
+        // 3. the flag is raised, arming that second delivery;
+        // 4. the byte wakes the readiness poll last of all.
+        let repeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for signal in FATAL_SIGNALS {
+            signal_hook::flag::register_usize(
+                signal,
+                std::sync::Arc::clone(&fatal_signal),
+                usize::try_from(signal).unwrap_or(0),
+            )?;
+            signal_hook::flag::register_conditional_shutdown(
+                signal,
+                128 + signal,
+                std::sync::Arc::clone(&repeat),
+            )?;
+            signal_hook::flag::register(signal, std::sync::Arc::clone(&repeat))?;
+            signal_hook::low_level::pipe::register(signal, fatal_write.try_clone()?)?;
+        }
         let _ = crossterm::event::poll(Duration::ZERO);
         Ok(Self {
             tty,
             winch_read,
+            fatal_read,
+            fatal_signal,
             dead: false,
         })
     }
@@ -222,6 +277,39 @@ impl InputSource {
     #[must_use]
     pub fn winch_fd(&self) -> BorrowedFd<'_> {
         self.winch_read.as_fd()
+    }
+
+    /// The fatal-signal self-pipe's read end, for readiness polling only.
+    ///
+    /// Stays in the poll set even after the terminal is marked dead: the
+    /// terminal going away is exactly when a `SIGHUP` is most likely, and a
+    /// session that dropped this fd then would be one no signal could end
+    /// through its own teardown.
+    #[must_use]
+    pub fn fatal_fd(&self) -> BorrowedFd<'_> {
+        self.fatal_read.as_fd()
+    }
+
+    /// The signal that asked this process to stop, if one has been
+    /// delivered since the last call; clears the record and drains the
+    /// self-pipe, so a second call reports only a genuinely new signal.
+    ///
+    /// The number is read before the pipe is drained, and that is also why
+    /// the drain is skipped when there is no number: the handlers store it
+    /// before they write the byte ([`open`](Self::open)), so a pipe holding
+    /// a byte always has a number behind it and the steady state -- every
+    /// wakeup of every session that is never signalled -- costs one atomic
+    /// swap and no syscall at all.
+    pub fn take_fatal_signal(&mut self) -> Option<std::ffi::c_int> {
+        use std::sync::atomic::Ordering;
+
+        let signal = self.fatal_signal.swap(0, Ordering::AcqRel);
+        if signal == 0 {
+            return None;
+        }
+        let mut scratch = [0_u8; 64];
+        while matches!(rustix::io::read(&self.fatal_read, &mut scratch), Ok(n) if n > 0) {}
+        std::ffi::c_int::try_from(signal).ok()
     }
 
     /// Whether a prior drain reported the terminal gone; the poll loop

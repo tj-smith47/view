@@ -269,8 +269,11 @@ fn classify_terminal_revents(
     verdict
 }
 
-/// Polls the terminal's fds and the wake pipe for readiness, sleeping up
-/// to `timeout` (`None` sleeps until something is ready). A readiness
+/// Polls the terminal's fds, the fatal-signal pipe and the wake pipe for
+/// readiness, sleeping up to `timeout` (`None` sleeps until something is
+/// ready). The signal pipe's own delivery is read off the handle by the
+/// caller rather than reported here: it is not input, and a session that
+/// has been asked to stop has nothing left to drain. A readiness
 /// poll, not a read: every byte the kernel holds stays where it is until
 /// the owning side drains it -- and not an RPC await: no nvim reply is
 /// ever waited on here, only readiness, so the paint loop's
@@ -324,8 +327,12 @@ pub fn poll_readiness(
         tv_sec: i64::try_from(t.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: i64::from(t.subsec_nanos()),
     });
-    let mut fds = Vec::with_capacity(3);
+    let mut fds = Vec::with_capacity(4);
     fds.push(PollFd::from_borrowed_fd(waker.fd(), PollFlags::IN));
+    // ahead of the terminal's own fds, and outside the `is_dead` guard: a
+    // terminal that has gone away is exactly when a SIGHUP arrives, and the
+    // classification below reads only the fds after these two
+    fds.push(PollFd::from_borrowed_fd(input.fatal_fd(), PollFlags::IN));
     if !input.is_dead() {
         fds.push(PollFd::from_borrowed_fd(input.tty_fd(), PollFlags::IN));
         fds.push(PollFd::from_borrowed_fd(input.winch_fd(), PollFlags::IN));
@@ -339,7 +346,7 @@ pub fn poll_readiness(
                 })
             }
             Ok(_) => {
-                let verdict = classify_terminal_revents(fds.iter().skip(1).map(PollFd::revents));
+                let verdict = classify_terminal_revents(fds.iter().skip(2).map(PollFd::revents));
                 if verdict.unwatchable {
                     input.mark_lost();
                 }

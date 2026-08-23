@@ -93,6 +93,21 @@ pub enum Msg {
     /// writing into the sink its predecessor was given -- cannot reach it.
     EngineAttached,
     EngineDown(ExitInfo),
+    /// The operating system asked this process to stop: `SIGHUP`, `SIGTERM`
+    /// or `SIGINT` delivered from outside, carrying the signal number.
+    ///
+    /// Folded into an ordinary quit rather than handled where it arrives so
+    /// the one teardown every other exit takes -- restore the terminal, stop
+    /// the children, persist the theme -- covers the exits view did not
+    /// choose too. A signal that ends the process where it lands leaves the
+    /// terminal raw and on the alternate screen, which is the state a user
+    /// has to repair from another shell.
+    ///
+    /// Not the raw-mode `<C-c>` a user types: raw mode clears `ISIG`, so
+    /// that arrives as a key and never as a signal.
+    Terminated {
+        signal: i32,
+    },
     EngineRequest(EngineRequest),
     Resized {
         width: u16,

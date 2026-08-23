@@ -367,6 +367,29 @@ impl AiWorker {
         }
     }
 
+    /// Ends whatever session this worker holds, signalling the agent child
+    /// before the caller leaves.
+    ///
+    /// Called from the loop thread on the way out rather than left to the
+    /// `Arc`'s own refcount: `AiSession`'s `Drop` is what signals the child,
+    /// and the last handle is not the loop's -- the AI-context worker thread
+    /// holds a clone and only drops it after its job channel closes, which
+    /// is strictly after the loop has already gone. `main` then reaches
+    /// `std::process::exit`, destructors are skipped, and the adapter
+    /// outlives the editor it was answering.
+    ///
+    /// One non-blocking kill syscall plus a background runtime shutdown (see
+    /// [`AiSession`]'s own `Drop`), so it costs the exit nothing measurable
+    /// and cannot hang it.
+    pub(crate) fn shutdown(&self) {
+        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        let ended = std::mem::replace(&mut *slot, AiSlot::Idle);
+        // outside the lock: the session task's own paths take it, and there
+        // is no reason to hold it across a syscall
+        drop(slot);
+        drop(ended);
+    }
+
     /// The live child's OS process id, if the slot is `Ready` and its
     /// session still holds one -- `None` for `Idle`, `Spawning`, or a
     /// `Ready` session whose child has already been reaped. Exists only for

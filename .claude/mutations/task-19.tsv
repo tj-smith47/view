@@ -1,0 +1,5 @@
+crates/view/src/recovery.rs	                return None;	                return Some(0);	-p view --bin view a_failed_write_to_a_live_engine
+crates/view-engine/src/process.rs	        let status = self.child.try_wait().ok().flatten()?;	        let status = graceful_kill(&self.handle, &mut self.child, self.shutdown_timeout).ok()?.status;	-p view-engine --test shutdown a_live_child_reports_no_stop
+crates/view-tui/src/terminal.rs	    out.write_all(b"\x1b[0 q")?;		-p view-tui --lib restore_bytes
+crates/view-tui/src/terminal.rs	        crossterm::cursor::Show,		-p view-tui --lib restore_bytes
+crates/view-core/src/update/mod.rs	                exit_code: 128 + signal,	                exit_code: signal,	-p view-core a_delivered_signal_quits

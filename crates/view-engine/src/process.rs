@@ -1061,6 +1061,37 @@ impl Engine {
     /// a transition that happens at most once per engine.
     pub fn stop_report(&mut self) -> (ExitInfo, bool) {
         let exit = self.wait_exit();
+        self.settled_report(exit)
+    }
+
+    /// The same report, but only for a child that has *already* exited:
+    /// `None` means the child is still running, so whatever went wrong was
+    /// the caller's write and not the engine.
+    ///
+    /// The distinction is the whole point of the method. [`stop_report`]
+    /// resolves a stop by *causing* one -- its `wait_exit` runs
+    /// `graceful_kill`, whose first act is to send nvim `qa!` -- which is
+    /// correct once the connection is known to be gone and catastrophic
+    /// before then: a single failed write would quit a healthy editor, run
+    /// its `VimLeavePre`, and hand the caller an announced clean exit
+    /// indistinguishable from the user's own `:q`. A caller holding only a
+    /// write error has to ask this one.
+    ///
+    /// An unreadable status reads as "still running" for the same reason:
+    /// it routes to supervision, which is recoverable, rather than to a
+    /// silent exit, which is not.
+    ///
+    /// [`stop_report`]: Self::stop_report
+    #[must_use]
+    pub fn stop_report_if_exited(&mut self) -> Option<(ExitInfo, bool)> {
+        let status = self.child.try_wait().ok().flatten()?;
+        Some(self.settled_report(exit_info_from_status(status)))
+    }
+
+    /// Pairs a resolved exit status with the announcement that qualifies
+    /// it, waiting out the reader's own publish first (see
+    /// [`EngineHandle::wait_until_settled`](crate::handle::EngineHandle::wait_until_settled)).
+    fn settled_report(&mut self, exit: ExitInfo) -> (ExitInfo, bool) {
         self.handle.wait_until_settled(Self::READER_SETTLE);
         (exit, self.handle.announced_exit())
     }
