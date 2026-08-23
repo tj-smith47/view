@@ -1699,7 +1699,22 @@ macro_rules! review_ns_lua {
 /// palette, so a theme the user already has colors the review without view
 /// mapping anything: `DiffDelete` on the rows a hunk replaces (`DiffChange`
 /// once the buffer has moved under it), `DiffAdd` on the lines it proposes,
-/// `DiffText` on the header and the current hunk's sign.
+/// `DiffText` on the header and the current hunk's sign. The sign is the
+/// only part a user can have turned off (`signcolumn=no`); the header names
+/// the verbs, so nothing is unreachable without it.
+///
+/// The validity guard is the chunk's first statement because a notify
+/// carries no reply to fail: a buffer wiped while this call was in flight
+/// would raise inside nvim, and that raise reaches nvim's log rather than
+/// `:messages`, `v:errmsg` or this connection -- invisible to the session
+/// and to any test it could be written into.
+///
+/// `end_row - 1` on the range mark, because the two ends do not mean the
+/// same thing: a hunk's `old_range` is half-open and nvim's `end_row` is
+/// inclusive for `line_hl_group`, so passing it through paints one
+/// untouched row below every hunk as deleted. The `m.end_row > m.row` guard
+/// above keeps the subtraction off a pure insertion, which sets no range
+/// mark at all.
 ///
 /// `strict = false` on every mark is load-bearing rather than defensive: a
 /// row this payload names can already be past the end of the buffer by the
@@ -1729,7 +1744,7 @@ vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
 for _, m in ipairs(marks) do
   if m.end_row > m.row then
     vim.api.nvim_buf_set_extmark(buf, ns, m.row, 0, {
-      end_row = m.end_row,
+      end_row = m.end_row - 1,
       line_hl_group = m.stale and 'DiffChange' or 'DiffDelete',
       priority = 100,
       strict = false,
@@ -3145,15 +3160,6 @@ impl EngineHandle {
     pub fn with_channel_id(mut self, channel_id: u64) -> Self {
         self.channel_id = channel_id;
         self
-    }
-
-    /// The msgpack-RPC channel id nvim assigned this connection, or `0` on
-    /// a handle that never went through
-    /// [`with_channel_id`](Self::with_channel_id) -- not a channel any
-    /// notify can come back over, and unreachable on a spawned connection.
-    #[must_use]
-    pub fn channel_id(&self) -> u64 {
-        self.channel_id
     }
 
     /// Draws the whole open review inside `buf` via [`REVIEW_SHOW_CHUNK`]:

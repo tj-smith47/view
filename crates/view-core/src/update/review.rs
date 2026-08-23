@@ -189,11 +189,14 @@ pub(super) fn on_buf_write_refused(
 ///
 /// A verb the review does not know is different, and is answered: `:View
 /// review <Tab>` offers these words, so a typo in one of them is a user
-/// asking for something view advertised. It changes nothing else -- no
-/// status, no cursor, no repaint, not even the dirty flag -- because there
-/// is nothing about the review it could have changed.
+/// asking for something view advertised. The notice costs the repaint that
+/// puts it on screen -- a line recorded without one waits for an unrelated
+/// event to show it -- and changes nothing else: no review state, no
+/// status, no cursor, because there is nothing about the review it could
+/// have changed.
 pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
     if !VERBS.contains(&verb) {
+        model.dirty = true;
         return model
             .engine
             .record_native_notice(refusal_notice(Refusal::UnknownVerb), false);

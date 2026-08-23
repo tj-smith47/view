@@ -23,8 +23,6 @@ crates/view-tui/src/paint.rs	            && self.rows.iter().all(|row| rows.cont
 crates/view-bench/src/scenarios/ai_session.rs	    cwd.parent().unwrap_or(cwd).join(PROGRESS_FILE)	    cwd.join(PROGRESS_FILE)	-p view-bench --lib the_progress_file_lands_beside
 crates/view-ai/tests/fixtures/stub_agent.rs	        .nth(5)	        .nth(4)	-p view-ai --test session a_sustained_stream
 crates/view-harness/src/bin/bench/cell_world.rs	            "\n[ai]\nenabled = true\nagent = [{:?}, \"\", \"\", \"\", \"\", {:?}]\n",	            "\n[ai]\nenabled = true\nagent = [{:?}, {:?}]\n",	-p view-harness --bin bench the_armed_agent
-crates/view-core/src/update/review.rs	            stray = true;	            stray = false;	-p view-core --lib update::tests
-crates/view-core/src/update/review.rs	or close it (q) before typing";	or close it before typing";	-p view-core --lib update::tests
 crates/view/src/runtime.rs	                    RpcCall::ReleaseHidden { path } => self.ops.release_hidden(&path),	                    RpcCall::ReleaseHidden { path } => self.ops.load_hidden(&path, 0),	-p view --lib runtime::tests
 crates/view-core/src/update/ai.rs	                crate::native::ai_panel::TranscriptRole::Thought,	                crate::native::ai_panel::TranscriptRole::Agent,	-p view-core --lib update::ai
 crates/view-core/src/native/ai_panel/mod.rs	            view = view.with_usage(vec![Span::plain(usage.render())]);	            let _ = usage;	-p view-core --lib native::ai_panel
@@ -40,7 +38,6 @@ crates/view-core/src/native/ai_panel/permission.rs	                key @ 1..=9 =
 crates/view-core/src/update/mod.rs	                            PermissionOptionKind::AllowAlways => Some(StandingAnswer::Allow),	                            PermissionOptionKind::AllowAlways => None,	-p view-core --lib update::tests
 crates/view-core/src/update/mod.rs	                            PermissionOptionKind::RejectAlways => Some(StandingAnswer::Reject),	                            PermissionOptionKind::RejectAlways => None,	-p view-core --lib update::tests
 crates/view-core/src/update/mod.rs	                        if let Some((kind, answer)) = prompt.tool_kind.clone().zip(standing) {	                        if let Some((kind, answer)) = prompt.tool_kind.clone().zip(Some(StandingAnswer::Allow)) {	-p view-core --lib update::tests
-crates/view-core/src/update/mod.rs	                    if model.ai_panel().pending_diff.is_none()	                    if false	-p view-core --lib update::tests
 crates/view-core/src/update/ai.rs	                .and_then(|kind| Some((kind, model.ai_panel().standing_answer(kind)?)))	                .map(|kind| (kind, StandingAnswer::Allow))	-p view-core --lib update::ai
 crates/view-core/src/update/ai.rs	                    let mut effects = if model.ai_panel_overlay_open() {	                    let mut effects = if true {	-p view-core --lib update::tests
 crates/view-core/src/update/ai.rs	            panel.clear_standing_answers();		-p view-core --lib update::ai

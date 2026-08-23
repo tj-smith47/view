@@ -1941,7 +1941,7 @@ mod tests {
     use crate::engine_ops::{FakeOps, SlowOps};
     use crate::osc52::FakeOsc52Sink;
     use view_core::msg::{
-        BufferHandle, OptionValue, RegisterType, ReplyToken, ReplyValue, TextEdit,
+        BufferHandle, OptionValue, RegisterType, ReplyToken, ReplyValue, ReviewOpenTarget, TextEdit,
     };
 
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
@@ -2513,8 +2513,12 @@ mod tests {
         let ops = FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
-        let flow = executor.run(Effect::Rpc(RpcCall::ReviewClear {
+        let flow = executor.run(Effect::Rpc(RpcCall::ReviewShow {
             buf: BufferHandle(3),
+            marks: Vec::new(),
+            cursor_row: 0,
+            focus: false,
+            open_target: ReviewOpenTarget::Current,
         }));
         assert!(matches!(flow, Flow::EngineLost));
     }

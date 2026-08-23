@@ -1145,7 +1145,7 @@ mod tests {
         for hint in hints {
             for token in hint
                 .split_whitespace()
-                .filter(|word| word.starts_with("<leader>") || word.ends_with('c'))
+                .filter(|word| word.starts_with("<leader>") || matches!(*word, "]c" | "[c"))
             {
                 assert!(
                     installed.iter().any(|key| key.lhs == token),

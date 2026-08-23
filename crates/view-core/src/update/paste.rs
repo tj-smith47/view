@@ -71,6 +71,7 @@ pub(super) fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<E
     } else {
         NO_TEXT_INPUT_NOTICE
     };
+    model.dirty = true;
     model.engine.record_native_notice(notice.to_string(), false)
 }
 

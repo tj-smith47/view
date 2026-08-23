@@ -9,7 +9,7 @@ if [ -z "$BATTERY" ] || [ ! -f "$BATTERY" ]; then
   echo "usage: task mutate -- <battery.tsv>" >&2
   echo "  columns, tab separated: file<TAB>old<TAB>new<TAB>cargo-test-args" >&2
   echo "  a row whose 'old' is absent from 'file' is a battery bug and fails" >&2
-  echo "  \\n in 'old'/'new' is a line break: rows themselves are single lines" >&2
+  echo "  an 'old' prefixed ml: spans lines: \\n in it and in 'new' is a break" >&2
   exit 2
 fi
 
@@ -47,10 +47,15 @@ while IFS=$'\t' read -r file old new test_args; do
   if ! OLD="$old" NEW="$new" python3 - "$file" <<'PY'
 import os, sys
 path = sys.argv[1]
-# a row is one line, so a mutation spanning lines writes `\n` for each
-# break -- the only way to target one of two textually identical lines
-old = os.environ["OLD"].replace("\\n", "\n")
-new = os.environ["NEW"].replace("\\n", "\n")
+old, new = os.environ["OLD"], os.environ["NEW"]
+# a row is one line, so a mutation spanning lines opts in with `ml:` on its
+# `old` and writes `\n` for each break -- the only way to target one of two
+# textually identical lines. Opt-in rather than always: Rust and Lua source
+# hold `\n` sequences of their own, and an ordinary row mutates those as the
+# two characters they are.
+if old.startswith("ml:"):
+    old = old[3:].replace("\\n", "\n")
+    new = new.replace("\\n", "\n")
 text = open(path, encoding="utf-8").read()
 n = text.count(old)
 if n == 0:

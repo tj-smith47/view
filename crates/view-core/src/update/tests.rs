@@ -1008,12 +1008,17 @@ fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
         ),
     ] {
         m.ai_panel_mut().input = "draft".to_string();
+        m.dirty = false;
 
         let effects = update(&mut m, Msg::Paste("pasted text".into()));
 
         assert!(
             rpc_calls(&effects).is_empty(),
             "{what} must not forward the paste to the engine: {effects:?}"
+        );
+        assert!(
+            m.dirty,
+            "{what}'s notice is scheduled to be painted, not just filed"
         );
         assert_eq!(
             m.ai_panel().input,
@@ -4275,6 +4280,51 @@ fn a_scroll_key_cannot_move_the_transcript_behind_an_unanswered_permission() {
             "{notation} left the transcript following the tail"
         );
     }
+}
+
+/// The `<C-d>` half of the same gate, which a window at the tail cannot
+/// see: there is nothing below the tail to scroll to, so the only reader a
+/// wrongly-through `<C-d>` moves is one who had scrolled back before the
+/// question arrived. `<C-d>` reaches past an unanswered permission only as
+/// the banner dismissal it was added for, and there is no banner here.
+#[test]
+fn ctrl_d_with_no_banner_scrolls_nothing_behind_an_unanswered_permission() {
+    let mut m = entered_ai_panel_model();
+    m.ai_trusted = true;
+    m.term_width = 80;
+    m.term_height = 24;
+    for i in 0..100 {
+        m.ai_panel_mut().transcript.append_or_extend(
+            Some(&format!("m{i}")),
+            &format!("line {i}"),
+            crate::native::ai_panel::TranscriptRole::Agent,
+        );
+    }
+    let at_tail = panel_transcript_texts(&m);
+    let _ = update(&mut m, key("<PageUp>"));
+    assert_ne!(
+        panel_transcript_texts(&m),
+        at_tail,
+        "the premise: the reader has scrolled off the tail"
+    );
+    let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+    assert!(
+        m.ai_panel().local_error.is_none(),
+        "the premise: no banner for <C-d> to dismiss"
+    );
+    let scrolled_back = panel_transcript_texts(&m);
+
+    let effects = update(&mut m, key("<C-d>"));
+
+    assert!(
+        effects.is_empty(),
+        "<C-d> must not forward past the prompt: {effects:?}"
+    );
+    assert_eq!(
+        panel_transcript_texts(&m),
+        scrolled_back,
+        "a question the user has not answered keeps the window it is drawn over"
+    );
 }
 
 /// The share of the terminal the open agent panel resolves to.
@@ -9405,10 +9455,12 @@ fn rejecting_them_all_writes_nothing_and_ends_the_review_in_one_verb() {
     );
 }
 
-/// A verb the review does not know changes nothing about the review -- no
-/// repaint, no status, no cursor -- and says so. `:View review <Tab>`
-/// offers these words, so a typo in one of them is a user asking for
-/// something view advertised, and silence would read as a dropped command.
+/// A verb the review does not know says so and changes nothing about the
+/// review -- no status, no cursor, no hunk. `:View review <Tab>` offers
+/// these words, so a typo in one of them is a user asking for something
+/// view advertised, and silence would read as a dropped command. The notice
+/// is only an answer if it reaches the screen, which is what the repaint
+/// this schedules is for.
 #[test]
 fn a_verb_the_review_does_not_know_says_so_and_changes_nothing() {
     let mut m = live_review_model();
@@ -9422,7 +9474,10 @@ fn a_verb_the_review_does_not_know_says_so_and_changes_nothing() {
         texts.iter().any(|line| line.contains("no such verb")),
         "an unknown verb is answered rather than swallowed: {texts:?}"
     );
-    assert!(!m.dirty, "an unknown verb does not even cost a repaint");
+    assert!(
+        m.dirty,
+        "the notice is scheduled to be painted, not just filed"
+    );
     let after = m.ai_panel().pending_diff.as_ref().unwrap();
     assert_eq!(after.cursor, before.cursor);
     assert_eq!(

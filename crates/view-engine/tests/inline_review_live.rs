@@ -196,18 +196,89 @@ fn a_shown_review_decorates_the_rows_it_replaces_and_nothing_else() {
         "two hunks, a highlight and a body each: {marks:?}"
     );
     assert_eq!(
-        marks[0], "1:2:DiffDelete:nil:nil:",
+        marks[0], "1:1:DiffDelete:nil:nil:",
         "the replaced row is highlighted where it really is: {marks:?}"
     );
     assert_eq!(
         marks[1], "1:nil:nil:\u{25b6} :false:hunk 1/2 -- <leader>ha accept/DiffText|+TWO/DiffAdd",
         "the current hunk carries the header, the sign, and the proposed line: {marks:?}"
     );
-    assert_eq!(marks[2], "5:6:DiffDelete:nil:nil:");
+    assert_eq!(marks[2], "5:5:DiffDelete:nil:nil:");
     assert_eq!(
         marks[3], "5:nil:nil:nil:false:+SIX/DiffAdd",
         "every other hunk shows its lines and no header: {marks:?}"
     );
+}
+
+/// What the user sees, not what the extmark stores: a hunk's `old_range`
+/// is half-open and nvim's `end_row` is inclusive, so a range that reads
+/// correct in the mark can still paint the untouched row below the hunk as
+/// deleted. Only a rendered cell answers that, and this is the surface
+/// that *is* the feature.
+#[test]
+fn the_deletion_highlight_stops_at_the_last_row_the_hunk_replaces() {
+    let s = start();
+    let buf = s.buffer();
+    s.show_in_current_window(buf);
+
+    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
+
+    // screen rows, not buffer rows: the header and the proposed line are
+    // drawn between the replaced row and the row that follows it
+    let attrs = s.strings(
+        "vim.cmd('redraw')
+local out = {}
+for row = 1, 5 do
+  out[#out + 1] = tostring(vim.fn.screenattr(row, 3))
+end
+return out",
+        vec![],
+    );
+
+    assert_ne!(
+        attrs[1], attrs[0],
+        "the row the hunk replaces is painted: {attrs:?}"
+    );
+    assert_eq!(
+        attrs[4], attrs[0],
+        "the row below the hunk is not the proposal's to paint: {attrs:?}"
+    );
+}
+
+/// Both chunks answer for a buffer that is gone -- a show racing a
+/// `:bwipeout`, a clear after one -- rather than raising inside nvim,
+/// which is what each chunk's validity guard is for. The raise itself is
+/// unobservable from inside the editor (a notification's error reaches
+/// nvim's log, not `:messages`, not `v:errmsg`, and not this connection),
+/// so what is asserted here is the observable half: the session carries on,
+/// and the next review still lands.
+#[test]
+fn a_wiped_buffer_is_neither_drawn_nor_an_error() {
+    let s = start();
+    let buf = s.buffer();
+    s.show_in_current_window(s.buffer());
+    s.lua(
+        "vim.api.nvim_buf_delete(..., { force = true })",
+        vec![rmpv::Value::from(buf.0)],
+    );
+
+    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, true);
+    s.engine.handle.review_clear(buf).unwrap();
+    s.barrier();
+
+    let live = s.buffer();
+    s.show(
+        live,
+        &[replacement(1, &["TWO"], Some("hunk 1/1"))],
+        1,
+        false,
+    );
+    assert_eq!(
+        s.decoration(live).len(),
+        2,
+        "the review after the wiped one lands, so neither call left the session disturbed"
+    );
+    assert_eq!(s.buffer_keys(live).len(), review_keys().len());
 }
 
 /// A pure insertion replaces no row, so it highlights nothing and draws
@@ -302,7 +373,7 @@ fn an_edit_above_a_hunk_carries_its_decoration_down_with_it() {
 
     let marks = s.decoration(buf);
     assert!(
-        marks[0].starts_with("6:7:"),
+        marks[0].starts_with("6:6:"),
         "two rows inserted above must move the mark by two: {marks:?}"
     );
 }
