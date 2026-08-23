@@ -295,6 +295,40 @@ docs/keymaps.md's line updates with it (its render test will insist).
 Tests pin all three states; the sweep's panel leg gains the
 esc-then-leader-ai round trip.
 
+## T16 — the native tree paints its entries again (compat regression)
+
+Caught by CI at e432867 and reproduced locally: the compat harness's
+neo-tree and nvim-tree native-only legs fail at step 1 — `wait_for
+"init.lua"` times out; the native tree opens but never shows the file.
+Green at ebc2812, so a chain commit regressed it, and `task compat` was
+in no local gate this chain — the fix closes that process gap too
+(compat joins the chain-exit evidence, welded to the final-review
+dispatch).
+
+Root-cause first (bisect ebc2812..HEAD if reading doesn't pin it), fix
+at the cause, keep the failing legs as the red/green proof, and state
+why every other native-only leg stayed green.
+
+## T17 — engine `ui_send` bytes reach the terminal
+
+Found live 2026-08-23: `"+y` never reaches the system clipboard for a
+user whose config sets `g:clipboard` to nvim's OSC 52 provider under
+`$SSH_TTY` — view's own provider correctly stands down, nvim emits the
+escape via `nvim_ui_send()`, and that event is delivered only to UIs
+attached with the `stdout_tty` ui-option, which view neither sets nor
+decodes. The bytes vanish silently (root-cause boundary table:
+`.superpowers/sdd/2026-08-21-dogfood-fixes/task-17-rootcause.md`).
+
+Fix: attach with `stdout_tty: true`; decode the `ui_send` redraw event
+and write its raw bytes to the terminal through the existing
+`Osc52Job`/`drain_osc52` direct-write path, generalized to raw bytes —
+one route for every `nvim_ui_send` caller, clipboard included. Absorb
+the terminal queries nvim starts issuing at attach (`\x1b]11;?` +
+`\x1b[5n`) so their replies never surface as keystrokes. Close the
+named coverage gap: an end-to-end yank test with a PRE-EXISTING
+`g:clipboard` (the stand-down branch that today is asserted as correct
+and never exercised further).
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
