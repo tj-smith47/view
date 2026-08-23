@@ -276,15 +276,35 @@ END {
     exit (findings > 0 || reversed > 0)
 }'
 
-# Where an ASCII string is painted, and where the leftmost vertical border
-# on that same row is: "row col left", or nothing at all when the string is
-# not on screen.
+# Where an ASCII string is painted, and where the vertical borders left of
+# it on that same row are: "row col leftmost nearest", or nothing at all when
+# the string is not on screen. `nearest` is the last border before the text
+# and `leftmost` the first on the row, so the two differ only when something
+# other than the box the text sits in has an edge further left -- which is
+# the whole of "this box is drawn over that one" and not merely beside it.
+# Both are -1 when the row has no border left of the text at all.
 #
 # Column-indexed rather than derived from the plain-text screen, because a
 # byte offset into a row is not a column -- every box-drawing glyph on it is
 # three bytes -- and the whole question this answers is which columns the
 # string occupies relative to a box's edge.
+#
+# The lowest matching row wins rather than the first one awk happens to walk
+# to: `for (r in rows)` visits an array in hash order, so a string that also
+# appears in the buffer, a transcript or the message history would otherwise
+# be reported from whichever copy the walk reached first, and the border
+# columns beside it answered for the wrong row.
 SPAN_AWK='
+function match_col(r, text,   n, c, k, ok) {
+    n = length(text)
+    for (c = 0; c + n - 1 <= widest[r]; c++) {
+        ok = 1
+        for (k = 1; k <= n; k++)
+            if (glyph[r "," (c + k - 1)] != substr(text, k, 1)) { ok = 0; break }
+        if (ok) return c
+    }
+    return -1
+}
 BEGIN { FS = "\t" }
 {
     glyph[$1 "," $2] = $6
@@ -292,20 +312,20 @@ BEGIN { FS = "\t" }
     rows[$1] = 1
 }
 END {
-    n = length(text)
+    hit = -1
     for (r in rows) {
-        for (c = 0; c + n - 1 <= widest[r]; c++) {
-            ok = 1
-            for (k = 1; k <= n; k++)
-                if (glyph[r "," (c + k - 1)] != substr(text, k, 1)) { ok = 0; break }
-            if (!ok) continue
-            left = -1
-            for (b = 0; b <= widest[r] && left < 0; b++)
-                if (glyph[r "," b] == "\342\224\202") left = b
-            printf "%d %d %d\n", r, c, left
-            exit
-        }
+        c = match_col(r, text)
+        if (c >= 0 && (hit < 0 || r + 0 < hit)) { hit = r + 0; col = c }
     }
+    if (hit < 0) exit
+    leftmost = -1
+    nearest = -1
+    for (b = 0; b < col; b++)
+        if (glyph[hit "," b] == "\342\224\202") {
+            if (leftmost < 0) leftmost = b
+            nearest = b
+        }
+    printf "%d %d %d %d\n", hit, col, leftmost, nearest
 }'
 
 # The text inside each framed box, one span per line.
@@ -441,8 +461,8 @@ wait_no_box() {
 # The text of every framed box in the last capture.
 box_text() { LC_ALL=C awk "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
 
-# "row col left" for `text` in the last capture; empty when it is not on
-# screen at all.
+# "row col leftmost nearest" for `text` in the last capture; empty when it is
+# not on screen at all.
 text_span() { LC_ALL=C awk -v text="$1" "$SPAN_AWK" "$CELLS"; }
 
 # Waits for `text` to be painted inside a framed overlay -- its title bar
@@ -899,6 +919,22 @@ leg_toast_and_history() {
     assert_chrome 'the error toast'
     pass 'a mistyped command toasts over the cursor row, opaque'
 
+    # The live negative control for `leg_toast_over_panel`'s overlap check.
+    # A bordered box always has an edge left of its own text, so a check that
+    # asked only for "some edge to the left" would be answered by the toast
+    # itself and would pass over an empty buffer. Here there is nothing under
+    # the toast, and the two columns that check compares must therefore be
+    # the same one -- if they can differ with no second box on screen, that
+    # check is measuring something other than overlap.
+    local bare_span bare_left bare_near
+    bare_span=$(text_span 'Not an editor command')
+    read -r _ _ bare_left bare_near <<<"$bare_span"
+    if [ "$bare_left" != "$bare_near" ]; then
+        fail "a toast over a bare buffer reports two different box edges left of its text ($bare_left and $bare_near), so the overlap check in leg_toast_over_panel would pass with no panel on screen"
+        return 1
+    fi
+    pass "an unoverlapped toast has only its own frame to its left (column $bare_left)"
+
     # and the history browser over it. An error toast is sticky (see
     # `toast::route`), so this is two overlays on screen at once, which is
     # the layered case the reported defect showed a box reading through in.
@@ -977,21 +1013,25 @@ leg_toast_over_panel() {
     wait_for "$toast" "$WAIT_SECS" "the error toast over the open panel" >/dev/null
     assert_chrome 'the error toast over the open panel'
 
-    # the whole point, in three numbers: the toast's text has to start
-    # inside the columns the panel occupies. Without this the leg would pass
-    # on a toast that merely happened to land beside a panel narrow enough
-    # to miss it, and prove nothing about the order at all.
+    # the whole point, in four numbers: two distinct box edges left of the
+    # toast's text. The nearer one is the toast's own frame -- a bordered box
+    # always has one, so a check that only asked for "an edge to the left"
+    # would be answered by the toast itself and pass with no panel on screen
+    # at all. The further one is the panel, and only a toast drawn over the
+    # panel's interior has both. A panel that instead reserved its column and
+    # let the toast reflow beside it would leave the two equal, which is the
+    # layout this leg exists to tell apart from the one that ships.
     span=$(text_span "$toast")
     if [ -z "$span" ]; then
         fail "the toast text is not in any cell on screen, so the panel is painting over it"
         return 1
     fi
-    read -r trow tcol pleft <<<"$span"
-    if [ "$pleft" -lt 0 ] || [ "$pleft" -ge "$tcol" ]; then
-        fail "the toast on row $trow starts at column $tcol with no box edge to its left ($pleft), so it is not over the panel and this leg proves nothing"
+    read -r trow tcol pleft pnear <<<"$span"
+    if [ "$pleft" -lt 0 ] || [ "$pleft" -ge "$pnear" ]; then
+        fail "the toast on row $trow starts at column $tcol with only its own frame to its left (edges at $pleft and $pnear), so nothing on that row is underneath it and this leg proves nothing"
         return 1
     fi
-    pass "a toast paints over the open panel (row $trow, columns $tcol.., panel edge at $pleft)"
+    pass "a toast paints over the open panel (row $trow, text at column $tcol, its own frame at $pnear, the panel's edge at $pleft)"
 
     dismiss ai
     end_session

@@ -786,9 +786,27 @@ impl Model {
     /// hit-testing and for painting alike: two resolutions reading two
     /// terminal sizes would let a click land on a rect the user is not
     /// looking at.
+    ///
+    /// Resolved against the rows left over after the persistent chrome
+    /// ([`Model::chrome_rows`] above, [`Model::statusline_rows`] below) and
+    /// then shifted down past the former, rather than against the whole
+    /// terminal: a full-height side panel resolved against `term_height`
+    /// covers the tabline and the statusline as well, and both of those
+    /// carry live editor state the user still needs while the panel is open
+    /// -- the ruler and the search count among it. The share stays a share
+    /// of what an overlay may actually have.
     #[must_use]
     pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
-        overlay.geometry.rect(self.term_width, self.term_height)
+        let top = self.chrome_rows();
+        let content = self
+            .term_height
+            .saturating_sub(top)
+            .saturating_sub(self.statusline_rows());
+        let rect = overlay.geometry.rect(self.term_width, content);
+        OverlayRect {
+            row: rect.row.saturating_add(top),
+            ..rect
+        }
     }
 
     /// Steps the agent panel one notch wider or narrower, reporting whether
@@ -2220,5 +2238,52 @@ mod tests {
     fn grid_target_matches_term_size_with_no_chrome_reserved() {
         let m = Model::with_term_size(80, 24);
         assert_eq!(m.grid_target(), (80, 24));
+    }
+
+    /// A full-height side panel takes its share of the rows an overlay may
+    /// actually have, never of the whole terminal. Resolved against
+    /// `term_height` it covered the tabline and the statusline as well, and
+    /// the statusline's right zone is where nvim's ruler and search count
+    /// live: with the panel open, `/foo` reported its `1/12` into cells
+    /// nothing could see for as long as the panel stayed open.
+    #[test]
+    fn a_full_height_overlay_stops_short_of_the_persistent_chrome() {
+        use crate::native::geometry::{Anchor, OverlayBox};
+
+        let mut m = Model::with_term_size(80, 24);
+        m.statusline_enabled = true;
+        m.engine.tabline = Some(TablineState {
+            current: TabHandle(1),
+            tabs: vec![
+                TabEntry {
+                    tab: TabHandle(1),
+                    name: "a".into(),
+                },
+                TabEntry {
+                    tab: TabHandle(2),
+                    name: "b".into(),
+                },
+            ],
+        });
+        m.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Right),
+            OverlayKind::Ai,
+        );
+
+        let overlay = m.overlays().last().expect("the panel was just pushed");
+        let rect = m.overlay_rect(overlay);
+        assert_eq!(rect.row, 1, "the tabline owns row 0");
+        assert_eq!(
+            rect.height, 22,
+            "24 rows less the tabline's and the statusline's"
+        );
+        assert!(
+            !rect.contains(0, 79),
+            "a click on the tabline is not a click on the panel"
+        );
+        assert!(
+            !rect.contains(23, 79),
+            "the statusline row stays the statusline's, so the ruler and the search count stay readable"
+        );
     }
 }
