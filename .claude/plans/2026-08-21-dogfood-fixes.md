@@ -395,3 +395,36 @@ Bench evidence en route: `ai_composer` gate OK (p50 0.08ms, p99 0.141ms
 vs 0.169 bar) in the final review's run; the gh legs re-record on the
 next push round. Latency note owed by 2010df6's body: one fewer
 O(overlays) scan per keypress, sub-microsecond, no allocation.
+
+### Exit record — 2026-08-23, second stretch (T13–T18)
+
+Every box observed at the chain tip (e3ec6a8):
+
+- T13–T18 landed through SDD loops (same ledger); each task closed
+  APPROVED after its fix round; final whole-branch review of
+  e432867..22b5de2 APPROVED — its one MINOR (this file's T18 paragraph
+  described the rejected router) and one NIT (audit-tag comments in
+  clipboard.rs) drained at e3ec6a8; the ponytail ceiling marker in
+  `read_text` ruled in-policy and kept.
+- Gates in the final review's own run at 22b5de2: `task ci` exit 0
+  (3235 tests), `task compat` exit 0 (29 scenarios, both formerly-red
+  tree legs and the clipboard-precedence leg green).
+- Visual sweep 5/5 legs against the rebuilt release binary at e3ec6a8 —
+  now including the panel-paste leg (composer paste + blocked-prompt
+  paste) and the toggle re-enter assertion, the legs born from the live
+  session's findings.
+- Live tmux smoke against the rebuilt binary: trust prompt → panel,
+  composer echo, `❯`-marked user entry under truecolor capture, sticky
+  `E492` toast dismissed by `<Esc>`.
+- Journal appended with the T13–T18 story, including the honest
+  residual: over SSH `"+p` answers from the session/host clipboard,
+  not foreign local-machine content (needs the terminal round trip
+  crossterm's decoder cannot survive; terminal-native paste covers it).
+- Known ceilings documented in code + reports, none actionable-unfixed:
+  startup-window yank drop (attach→VimEnter, identical to pre-fix), one
+  stranded thread per clipboard-read overrun, uncapped ClipboardStore
+  (payload already in memory).
+
+Owed beyond this plan: the recorded long-session dogfood (unblocked by
+this stretch), then the push round that re-records the gh bench legs
+and flips them to --gate.

@@ -210,3 +210,42 @@ the vendored ignore-crate source and 20 clean runs on mbp.
 Still owed: the recorded long-session dogfood against this build — the
 prompt for it is staged — and the gh-runner proof of the new visual CI
 job, which lands with the bench-baseline push round.
+
+## 2026-08-23 — the live session's second harvest (T13–T18)
+
+The user sat down to record the long-session dogfood and found three
+defects in the first minutes — which is the system working: paste into
+the composer was silently swallowed (routed to a dead arm and dropped);
+`<Esc>` un-entered the panel and no key led back in (`<leader>ai` closed
+it instead); and `"+y` never reached the system clipboard. All three
+fixed this round, plus two the chain found on its own: the native tree
+went blank in every compat leg (a toast's border repainted rows the
+damage didn't cover, killing debug builds on the shadow assert), and
+tracked files inside gitignored directories lost their watch
+descriptors on macOS.
+
+The clipboard one went deep. The user's config routes `g:clipboard`
+through nvim's OSC 52 provider over SSH; nvim emits those bytes via
+`nvim_ui_send()`, which only reaches UIs that claim `stdout_tty` —
+view didn't, so the yank vanished without a trace. Claiming it naively
+at attach cost 100ms of startup and ate keystrokes while nvim probed a
+terminal that wasn't there; claiming it after `VimEnter` provokes no
+probe at all. Yank alone wasn't the feature, though: `"+p` waited ten
+seconds on a terminal reply view could never deliver — at narrow
+widths it wedged behind a hit-enter prompt indefinitely. The shipped
+answer skips the terminal entirely: view answers the provider's query
+itself over RPC in ~60ms, from the host clipboard when it responds
+within a 250ms budget, else from the shadow the passthrough writes now
+feed. Every query gets exactly one immediate answer — no terminal
+configuration can reproduce the hang. The residual, stated plainly:
+over SSH, `"+p` returns what the session put on the clipboard, not
+foreign content copied on the local machine — that path needs the
+terminal round trip crossterm's decoder cannot survive, and
+terminal-native paste already covers it.
+
+Fifteen commits, every task review-approved after fix rounds, final
+whole-branch review run at the tip: 3235 tests, compat 29/29 runnable
+legs, the visual sweep 5/5 against the rebuilt release binary — the
+sweep now including the paste, re-enter, and narrow-title legs born
+from this session's findings. Still owed: the recorded long-session
+dogfood itself, now unblocked.
