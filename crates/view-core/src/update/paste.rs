@@ -10,7 +10,6 @@ use crate::model::{Model, OverlayKind};
 use crate::msg::{Effect, RpcCall};
 
 use super::picker_query;
-use super::review::STRAY_KEY_NOTICE;
 
 /// Delivers one bracketed paste to whichever native surface owns the
 /// keyboard: the picker takes it into its filter, a `vim.fn.input()` prompt
@@ -65,7 +64,10 @@ pub(super) fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<E
         return Vec::new();
     }
     let notice = if panel_has_the_keyboard {
-        panel_owner_paste_notice(model)
+        // The only state left that owns the panel's keys, so the notice is
+        // named directly rather than chosen; see
+        // `AiPanelState::an_owner_holds_the_keys`.
+        PERMISSION_PASTE_NOTICE
     } else {
         NO_TEXT_INPUT_NOTICE
     };
@@ -96,25 +98,15 @@ fn as_prompt_keys(text: &str) -> String {
     keys
 }
 
-/// What a paste is answered with while the entered panel is showing
-/// something that owns its keys.
+/// What a paste is answered with while an unanswered permission request
+/// owns the entered panel's keys. The offered options are on screen above
+/// the composer with their own keys, so this names the decision rather
+/// than restating them.
 ///
-/// Each names that state's own way forward and no other key. `<Esc>` is
-/// deliberately never offered: at a pending permission it is an answer --
-/// the request is settled `Cancelled` and the agent's tool call is gone
-/// (see `route_key`'s `OverlayKind::Ai` arm) -- so advising it would spend
-/// a decision the reader had not made, for a paste.
-fn panel_owner_paste_notice(model: &Model) -> &'static str {
-    if model.ai_panel().pending_permission.is_some() {
-        PERMISSION_PASTE_NOTICE
-    } else {
-        STRAY_KEY_NOTICE
-    }
-}
-
-/// [`panel_owner_paste_notice`]'s answer for an unanswered permission
-/// request. The offered options are on screen above the composer with their
-/// own keys, so this names the decision rather than restating them.
+/// `<Esc>` is deliberately never offered: at a pending permission it is an
+/// answer -- the request is settled `Cancelled` and the agent's tool call
+/// is gone (see `route_key`'s `OverlayKind::Ai` arm) -- so advising it
+/// would spend a decision the reader had not made, for a paste.
 pub(super) const PERMISSION_PASTE_NOTICE: &str =
     "view: the agent is waiting on this request -- answer it, and the composer takes text again";
 

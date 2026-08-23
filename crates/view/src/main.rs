@@ -663,14 +663,17 @@ fn seed_ai_enabled(
         Ok(cfg) => {
             model.ai_enabled = cfg.enabled();
             model.ai_panel_width_pct = cfg.panel_width();
+            model.ai_review_open_target = cfg.review_open_target();
             let agent = cfg.agent_spec().clone();
-            // a width that could not be read never fails the table (see
-            // `resolve_panel_width`): failing it here would answer a
-            // mistyped percentage by turning the agent off for the run
-            let effects = match cfg.panel_width_notice() {
-                Some(notice) => model.engine.record_native_notice(notice.to_string(), false),
-                None => Vec::new(),
-            };
+            // a width or an open target that could not be read never fails
+            // the table (see `resolve_panel_width`): failing it here would
+            // answer a mistyped percentage by turning the agent off for
+            // the run
+            let effects = [cfg.panel_width_notice(), cfg.review_open_target_notice()]
+                .into_iter()
+                .flatten()
+                .flat_map(|notice| model.engine.record_native_notice(notice.to_string(), false))
+                .collect();
             (effects, agent)
         }
         Err(err) => {

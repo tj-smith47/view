@@ -5,16 +5,23 @@
 //! A state inside the panel rather than a second top-level overlay: a
 //! proposed diff is always the direct consequence of an in-flight agent
 //! turn, so it opens as part of the panel's own flow and closes with it.
+//! The review is *read* in the file itself -- [`DiffReviewState::marks`]
+//! is the whole of its presentation, drawn by nvim as extmarks over the
+//! real rows through [`crate::msg::RpcCall::ReviewShow`] -- and the panel
+//! keeps only the one summary row that says which file and how far in.
 //!
 //! Nothing here writes: an accept produces the
 //! [`crate::msg::RpcCall::BufSetText`] call that does, and nvim remains the
-//! sole owner of every byte in the buffer.
+//! sole owner of every byte in the buffer. The marks are presentation and
+//! nothing else -- no view-side shadow of buffer text ever exists, and an
+//! extmark shifts with the user's own edits without this state hearing
+//! about it.
 
 use std::path::PathBuf;
 
 use super::super::diff::{rebase, BufTextChangedEvent, Hunk, HunkStatus};
-use super::super::views::{Span, StyleRole};
-use crate::msg::{BufferHandle, Effect, RpcCall};
+use super::super::views::Span;
+use crate::msg::{BufferHandle, Effect, HunkMark, ReviewOpenTarget, RpcCall};
 
 /// What the review's buffer is still able to tell this session.
 ///
@@ -234,7 +241,15 @@ impl DiffReviewState {
         let detach = self
             .buffer
             .filter(|_| matches!(self.sync, ReviewSync::Live | ReviewSync::Desynced));
-        let mut effects = Vec::with_capacity(2);
+        let mut effects = Vec::with_capacity(3);
+        // Ahead of the detach, and for a detached review too: the
+        // decoration outlives the subscription that maintained it (nvim
+        // ends one on a `:edit!` reload, which leaves the buffer and this
+        // namespace on it very much alive), and marks left behind would
+        // offer keys no review answers.
+        if let Some(buf) = self.buffer {
+            effects.push(Effect::Rpc(RpcCall::ReviewClear { buf }));
+        }
         if let Some(buf) = detach {
             effects.push(Effect::Rpc(RpcCall::BufDetach { buf }));
         }
@@ -440,6 +455,23 @@ impl DiffReviewState {
         true
     }
 
+    /// Declines every hunk still open, answering whether any was.
+    ///
+    /// [`Self::accept_all`]'s counterpart, and the reason it exists is the
+    /// same: a proposal a reader has decided against as a whole is one
+    /// decision, not one per hunk. Unlike accept-all it takes stale hunks
+    /// too -- rejecting needs nothing anchored, since nothing is written.
+    pub fn reject_all(&mut self) -> bool {
+        let mut any = false;
+        for hunk in &mut self.hunks {
+            if hunk.status.is_open() {
+                hunk.status = HunkStatus::Rejected;
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Re-anchors the stale hunk at `index` against the text the rebase
     /// carried forward for it. Refused on a review whose buffer state is no
     /// longer trustworthy at all, for the reason [`ReviewSync`]'s own doc
@@ -458,8 +490,13 @@ impl DiffReviewState {
         true
     }
 
-    /// The review's always-visible summary rows: which file, which hunk of
+    /// The review's summary rows in the panel: which file, which hunk of
     /// how many, and the keys that act on it.
+    ///
+    /// The second copy of the key hint on purpose -- the first is the
+    /// header [`Self::marks`] puts at the hunk itself, where the decision
+    /// is made. This one costs two rows and survives the user scrolling
+    /// the buffer away from every hunk.
     #[must_use]
     pub fn summary_rows(&self) -> Vec<Vec<Span>> {
         let open = self.hunks.iter().filter(|h| h.status.is_open()).count();
@@ -477,92 +514,146 @@ impl DiffReviewState {
         rows
     }
 
-    /// The scrolling rows: every hunk's own header, the buffer row above
-    /// it, its removed and added lines, and the buffer row below it.
-    /// Deliberately nothing further -- the review's scroll region is the
-    /// hunks and their own context, never the whole file, so hunk-jump
-    /// stays the way to reach the next decision rather than scrolling
-    /// across buffer regions the proposal does not touch.
+    /// Every open hunk's presentation in the buffer itself, top of the
+    /// buffer first.
+    ///
+    /// Only the open ones: an accepted hunk's lines are already the
+    /// buffer's own text and a rejected one is not on offer, so either
+    /// still drawn would be view asserting a change nobody can act on.
+    ///
+    /// Nothing here is styled by view -- see [`HunkMark`] for why the
+    /// highlight groups are nvim's and are resolved on the engine side.
     #[must_use]
-    pub fn hunk_rows(&self) -> Vec<Vec<Span>> {
-        let mut rows = Vec::new();
-        for hunk in &self.hunks {
-            rows.push(vec![Span::plain(format!(
-                "@@ {}..{} @@ {}",
-                hunk.old_range.0,
-                hunk.old_range.1,
-                status_label(hunk.status)
-            ))]);
-            if hunk.has_leading_context() {
-                rows.push(context_row(hunk, hunk.old_range.0.saturating_sub(1)));
-            }
-            for row in hunk.old_range.0..hunk.old_range.1 {
-                let text = hunk.anchor_row(row).map_or("", String::as_str);
-                rows.push(vec![Span::new(format!("-{text}"), StyleRole::DiffRemoved)]);
-            }
-            for line in &hunk.new_lines {
-                rows.push(vec![Span::new(format!("+{line}"), StyleRole::DiffAdded)]);
-            }
-            if hunk.has_trailing_context() {
-                rows.push(context_row(hunk, hunk.old_range.1));
-            }
-        }
-        rows
+    pub fn marks(&self) -> Vec<HunkMark> {
+        self.hunks
+            .iter()
+            .enumerate()
+            .filter(|(_, hunk)| hunk.status.is_open())
+            .map(|(index, hunk)| {
+                let (row, end_row) = hunk.old_range;
+                HunkMark {
+                    row,
+                    end_row,
+                    // A pure insertion replaces no row, so it hangs off the
+                    // row it is inserted before and is drawn above it; every
+                    // other hunk hangs off the last row it replaces, where
+                    // the proposed lines read as following the removed ones.
+                    anchor: if end_row > row { end_row - 1 } else { row },
+                    added: hunk.new_lines.clone(),
+                    stale: hunk.status == HunkStatus::Stale,
+                    current: index == self.cursor,
+                    header: (index == self.cursor).then(|| self.header(index)),
+                }
+            })
+            .collect()
     }
 
-    /// The index into [`Self::hunk_rows`] of the cursor's own hunk header,
-    /// which is what the panel's scroll window anchors on.
+    /// The current hunk's header: where the user is in the review, and
+    /// either the keys that decide this hunk or the reason nothing here
+    /// can be decided any more.
+    fn header(&self, index: usize) -> String {
+        let position = format!("hunk {}/{}", index + 1, self.hunks.len());
+        if let Some(notice) = self.sync.notice() {
+            return format!("{position} -- {notice} -- {LEAVE_HINT}");
+        }
+        let stale = self
+            .hunks
+            .get(index)
+            .is_some_and(|hunk| hunk.status == HunkStatus::Stale);
+        // A stale hunk has no accept to offer -- `accept` refuses it -- so
+        // its header names the two keys that do work on it instead of
+        // advertising the one that answers with a refusal notice.
+        format!(
+            "{position} -- {}",
+            if stale { STALE_KEY_HINT } else { KEY_HINT }
+        )
+    }
+
+    /// The call that draws this review in its buffer, or `None` for a
+    /// review with no buffer to draw in (still binding, or unbindable).
+    ///
+    /// `focus` decides whether the review comes to the user or merely
+    /// repaints under them; see [`RpcCall::ReviewShow`]'s own doc.
     #[must_use]
-    pub fn cursor_row(&self) -> Option<usize> {
-        if self.hunks.is_empty() {
-            return None;
+    pub fn show_effect(&self, focus: bool, open_target: ReviewOpenTarget) -> Option<Effect> {
+        let buf = self.buffer?;
+        Some(Effect::Rpc(RpcCall::ReviewShow {
+            buf,
+            marks: self.marks(),
+            cursor_row: self
+                .hunks
+                .get(self.cursor)
+                .map_or(0, |hunk| hunk.old_range.0),
+            focus,
+            open_target,
+        }))
+    }
+
+    /// What a repaint depends on, cheaply: how many hunks have gone stale
+    /// and whether the review as a whole still trusts its buffer.
+    ///
+    /// The gate on re-issuing [`Self::show_effect`] after folding an edit
+    /// (`update::review::on_buf_text_changed`), so ordinary typing
+    /// somewhere else in the reviewed buffer costs no RPC at all. A count
+    /// rather than the status vector because a fold can only ever stale a
+    /// hunk, never un-stale one, so the count moving is exactly "some
+    /// hunk's presentation changed" -- and it is O(hunks) with no
+    /// allocation, on a path that runs once per keystroke.
+    #[must_use]
+    pub fn presentation_stamp(&self) -> (usize, ReviewSync) {
+        (
+            self.hunks
+                .iter()
+                .filter(|hunk| hunk.status == HunkStatus::Stale)
+                .count(),
+            self.sync,
+        )
+    }
+
+    /// What the transcript records when this review ends: what was decided
+    /// and in which file, or that the proposal was dismissed with
+    /// decisions still owed.
+    ///
+    /// The review's own sentence rather than the caller's, so the two ways
+    /// it can end cannot describe the same outcome differently.
+    #[must_use]
+    pub fn outcome(&self) -> String {
+        let open = self.hunks.iter().filter(|h| h.status.is_open()).count();
+        let path = self.path.display();
+        if open > 0 {
+            return format!("discarded the proposal for {path} -- {open} hunks left undecided");
         }
-        let mut row = 0;
-        for (index, hunk) in self.hunks.iter().enumerate() {
-            if index == self.cursor {
-                return Some(row);
-            }
-            row += rendered_rows(hunk);
-        }
-        None
+        let accepted = count(&self.hunks, HunkStatus::Accepted);
+        let rejected = count(&self.hunks, HunkStatus::Rejected);
+        format!("accepted {accepted} and rejected {rejected} hunks in {path}")
     }
 }
 
-/// One unchanged buffer row shown beside a hunk, rendered in the diff's
-/// own gutter shape (a leading space) so the removed and added rows still
-/// line up with it.
-fn context_row(hunk: &Hunk, row: u32) -> Vec<Span> {
-    vec![Span::plain(format!(
-        " {}",
-        hunk.anchor_row(row).map_or("", String::as_str)
-    ))]
+/// How many hunks are in `status`.
+fn count(hunks: &[Hunk], status: HunkStatus) -> usize {
+    hunks.iter().filter(|hunk| hunk.status == status).count()
 }
 
-/// How many rows one hunk contributes to [`DiffReviewState::hunk_rows`].
-/// Shared with `cursor_row` rather than counted twice: a cursor row that
-/// disagreed with the rendered rows would scroll the window to the wrong
-/// hunk.
-fn rendered_rows(hunk: &Hunk) -> usize {
-    1 + usize::from(hunk.has_leading_context())
-        + usize::try_from(hunk.old_range.1.saturating_sub(hunk.old_range.0)).unwrap_or(0)
-        + hunk.new_lines.len()
-        + usize::from(hunk.has_trailing_context())
-}
+/// The review's own keys, on the current hunk's header in the buffer and
+/// on the panel's summary row. Buffer-local nvim mappings rather than
+/// panel keys (see `docs/keymaps.md`): a reviewed buffer stays editable,
+/// so claiming bare `a`/`x`/`q` in it for the length of a review would
+/// break the one contract -- ordinary nvim keys do ordinary nvim things --
+/// that everything else here is built on.
+///
+/// One line rather than a continuation on purpose: `ai-conformance.sh`
+/// reads this constant out of the source to know what to look for on
+/// screen, and its reader takes the value from a single `const` line.
+const KEY_HINT: &str = "<leader>ha accept  <leader>hA accept all  <leader>hx reject  ]c next  [c prev  <leader>hq leave";
 
-fn status_label(status: HunkStatus) -> &'static str {
-    match status {
-        HunkStatus::Fresh => "fresh",
-        HunkStatus::Stale => "stale -- re-diff or reject",
-        HunkStatus::Accepted => "accepted",
-        HunkStatus::Rejected => "rejected",
-    }
-}
+/// [`KEY_HINT`] for a hunk the buffer has moved under: re-diff in place of
+/// the accept that would be refused.
+const STALE_KEY_HINT: &str =
+    "stale -- <leader>hR re-diff  <leader>hx reject  ]c next  [c prev  <leader>hq leave";
 
-/// The review's own keys, shown in place of the sync notice while nothing
-/// is wrong. Named here rather than in the key handler because this is the
-/// text a reader sees; `update::mod`'s entered-panel arm is what answers
-/// them.
-const KEY_HINT: &str = "a accept  A accept all  x reject  R re-diff  ] next  [ prev  q close";
+/// The one key a review whose buffer can no longer be trusted still has,
+/// appended to the sync notice that says why nothing else is on offer.
+const LEAVE_HINT: &str = "<leader>hq leave";
 
 #[cfg(test)]
 mod tests {
@@ -831,9 +922,17 @@ mod tests {
             "nvim already ended the subscription; asking it to detach again \
              names a subscription that no longer exists"
         );
-        assert_eq!(effects.len(), 1);
+        assert_eq!(effects.len(), 2);
         assert_eq!(
             rpc(&effects[0]),
+            &RpcCall::ReviewClear {
+                buf: BufferHandle(9),
+            },
+            "the decoration outlives the subscription and is still this \
+             review's to take back off the buffer"
+        );
+        assert_eq!(
+            rpc(&effects[1]),
             &RpcCall::ReleaseHidden {
                 path: "/tmp/a.rs".to_string(),
             },
@@ -843,18 +942,24 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_live_review_detaches_and_releases_the_hidden_hold() {
+    fn closing_a_live_review_undecorates_detaches_and_releases_the_hidden_hold() {
         let state = review();
         let effects = state.close_effects();
-        assert_eq!(effects.len(), 2);
+        assert_eq!(effects.len(), 3);
         assert_eq!(
             rpc(&effects[0]),
-            &RpcCall::BufDetach {
+            &RpcCall::ReviewClear {
                 buf: BufferHandle(9),
             }
         );
         assert_eq!(
             rpc(&effects[1]),
+            &RpcCall::BufDetach {
+                buf: BufferHandle(9),
+            }
+        );
+        assert_eq!(
+            rpc(&effects[2]),
             &RpcCall::ReleaseHidden {
                 path: "/tmp/a.rs".to_string(),
             }
@@ -928,30 +1033,189 @@ mod tests {
         );
     }
 
+    /// A replacement marks the rows it replaces and hangs its proposed
+    /// lines off the last of them; the header belongs to the cursor's hunk
+    /// and to no other, so the keys are on screen exactly once.
     #[test]
-    fn hunk_rows_carry_the_diff_roles_and_never_the_untouched_buffer() {
+    fn marks_name_the_replaced_rows_and_header_only_the_current_hunk() {
         let state = review();
-        let rows = state.hunk_rows();
-        assert_eq!(rows[0], vec![Span::plain("@@ 1..2 @@ fresh")]);
-        assert_eq!(rows[1], vec![Span::plain(" a")], "the row above the hunk");
-        assert_eq!(rows[2], vec![Span::new("-b", StyleRole::DiffRemoved)]);
-        assert_eq!(rows[3], vec![Span::new("+B", StyleRole::DiffAdded)]);
-        assert_eq!(rows[4], vec![Span::plain(" c")], "the row below it");
-        assert_eq!(
-            rows.len(),
-            10,
-            "two hunks of one removed and one added line each, plus their \
-             headers and their own one row of context on each side -- the \
-             rows between the hunks are not part of the review's scroll \
-             region: {rows:?}"
+        let marks = state.marks();
+        assert_eq!(marks.len(), 2);
+        assert_eq!((marks[0].row, marks[0].end_row), (1, 2));
+        assert_eq!(marks[0].anchor, 1, "the last row the hunk replaces");
+        assert_eq!(marks[0].added, vec!["B".to_string()]);
+        assert!(!marks[0].stale);
+        assert!(marks[0].current);
+        let header = marks[0].header.clone().expect("the current hunk's header");
+        assert!(header.starts_with("hunk 1/2 --"), "{header}");
+        assert!(header.contains("<leader>ha accept"), "{header}");
+        assert!(header.contains("]c next"), "{header}");
+        assert!(header.contains("<leader>hq leave"), "{header}");
+        assert!(
+            !marks[1].current && marks[1].header.is_none(),
+            "one copy of the keys, at the decision being made: {marks:?}"
         );
     }
 
+    /// A pure insertion replaces nothing, so it highlights nothing: its
+    /// mark is an empty row span the engine draws above, and a pure
+    /// deletion is the mirror image with no lines to add.
     #[test]
-    fn the_cursor_row_names_the_focused_hunks_own_header() {
+    fn a_pure_insertion_spans_no_row_and_a_pure_deletion_adds_no_line() {
+        let insert = DiffReviewState::new(
+            1,
+            PathBuf::from("/tmp/a.rs"),
+            3,
+            hunk::diff(Some("a\nb\n"), "a\nNEW\nb\n"),
+        );
+        let marks = insert.marks();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(
+            marks[0].row, marks[0].end_row,
+            "an insertion replaces no row, so nothing is highlighted as \
+             removed: {marks:?}"
+        );
+        assert_eq!(marks[0].anchor, marks[0].row);
+        assert_eq!(marks[0].added, vec!["NEW".to_string()]);
+
+        let delete = DiffReviewState::new(
+            1,
+            PathBuf::from("/tmp/a.rs"),
+            3,
+            hunk::diff(Some("a\nb\nc\n"), "a\nc\n"),
+        );
+        let marks = delete.marks();
+        assert_eq!(marks.len(), 1);
+        assert!(marks[0].end_row > marks[0].row, "{marks:?}");
+        assert!(
+            marks[0].added.is_empty(),
+            "a deletion proposes no line: {marks:?}"
+        );
+    }
+
+    /// A hunk the buffer moved under says so where the decision is made,
+    /// and offers the key that makes it decidable again rather than the
+    /// accept that would be refused.
+    #[test]
+    fn a_stale_current_hunk_carries_the_stale_flag_and_the_re_diff_key() {
         let mut state = review();
-        assert_eq!(state.cursor_row(), Some(0));
+        state.hunks[0].status = HunkStatus::Stale;
+        let marks = state.marks();
+        assert!(marks[0].stale);
+        let header = marks[0].header.clone().expect("the current hunk's header");
+        assert!(header.contains("<leader>hR re-diff"), "{header}");
+        assert!(!header.contains("<leader>ha accept"), "{header}");
+    }
+
+    /// A review that can no longer be acted on has to say so at the code,
+    /// not only in the panel, and still name the way out.
+    #[test]
+    fn a_broken_review_replaces_the_keys_with_the_reason_and_the_way_out() {
+        let mut state = review();
+        state.sync = ReviewSync::Detached;
+        let header = state.marks()[0]
+            .header
+            .clone()
+            .expect("the current hunk's header");
+        assert!(header.contains("edit stream ended"), "{header}");
+        assert!(header.contains(LEAVE_HINT), "{header}");
+    }
+
+    /// Only decisions the user still owes are drawn: an accepted hunk's
+    /// lines are the buffer's own text by then, and a rejected one is not
+    /// on offer.
+    #[test]
+    fn a_decided_hunk_leaves_no_mark_behind() {
+        let mut state = review();
+        assert!(state.reject(0));
+        let marks = state.marks();
+        assert_eq!(marks.len(), 1);
+        assert_eq!((marks[0].row, marks[0].end_row), (5, 6));
+    }
+
+    /// The gate on repainting: a fold that stales nothing and breaks
+    /// nothing leaves the stamp where it was, so typing elsewhere in a
+    /// reviewed buffer costs no RPC.
+    #[test]
+    fn the_presentation_stamp_moves_only_when_a_hunk_or_the_sync_changes() {
+        let mut state = DiffReviewState::new(
+            1,
+            PathBuf::from("/tmp/a.rs"),
+            3,
+            hunk::diff(Some("a\nb\nc\nd\ne\nf\ng\nh\n"), "a\nB\nc\nd\ne\nf\ng\nh\n"),
+        );
+        assert_eq!(state.bind(3, Some(BufferHandle(9)), 11).len(), 1);
+        let before = state.presentation_stamp();
+        state.apply_change(&BufTextChangedEvent {
+            buf: BufferHandle(9),
+            generation: 3,
+            firstline: 6,
+            lastline: 7,
+            linedata: vec!["G".to_string()],
+            changedtick: 12,
+            desynced: false,
+        });
+        assert_eq!(
+            state.presentation_stamp(),
+            before,
+            "an edit outside every anchor changes nothing on screen"
+        );
+        state.hunks[0].status = HunkStatus::Stale;
+        assert_ne!(state.presentation_stamp(), before);
+    }
+
+    #[test]
+    fn show_effect_carries_the_marks_the_cursor_row_and_the_focus() {
+        let mut state = review();
         state.next_hunk();
-        assert_eq!(state.cursor_row(), Some(5));
+        let effect = state
+            .show_effect(true, ReviewOpenTarget::Split)
+            .expect("a bound review draws");
+        let RpcCall::ReviewShow {
+            buf,
+            marks,
+            cursor_row,
+            focus,
+            open_target,
+        } = rpc(&effect)
+        else {
+            panic!("show_effect emits only ReviewShow")
+        };
+        assert_eq!(*buf, BufferHandle(9));
+        assert_eq!(marks.len(), 2);
+        assert_eq!(*cursor_row, 5, "the row the second hunk starts at");
+        assert!(*focus);
+        assert_eq!(*open_target, ReviewOpenTarget::Split);
+    }
+
+    #[test]
+    fn an_unbound_review_has_nothing_to_draw_in() {
+        let state = DiffReviewState::new(1, PathBuf::from("/tmp/a.rs"), 3, Vec::new());
+        assert!(state.show_effect(true, ReviewOpenTarget::Current).is_none());
+    }
+
+    #[test]
+    fn reject_all_declines_every_open_hunk_including_the_stale_ones() {
+        let mut state = review();
+        state.hunks[0].status = HunkStatus::Stale;
+        assert!(state.reject_all());
+        assert!(state.hunks.iter().all(|h| h.status == HunkStatus::Rejected));
+        assert!(!state.is_open());
+        assert!(!state.reject_all(), "nothing left to decline");
+    }
+
+    #[test]
+    fn the_outcome_counts_the_decisions_or_says_the_proposal_was_dismissed() {
+        let mut state = review();
+        assert_eq!(
+            state.outcome(),
+            "discarded the proposal for /tmp/a.rs -- 2 hunks left undecided"
+        );
+        let _ = state.accept(0).unwrap();
+        assert!(state.reject(1));
+        assert_eq!(
+            state.outcome(),
+            "accepted 1 and rejected 1 hunks in /tmp/a.rs"
+        );
     }
 }

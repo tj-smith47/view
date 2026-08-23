@@ -687,13 +687,6 @@ pub struct AiPanelView {
     /// no longer be acted on. Empty when no review is open, on the same
     /// "empty means nothing extra to draw" terms above.
     pub review: Vec<Vec<Span>>,
-    /// Which of [`Self::rows`] the scroll window keeps on screen, or `None`
-    /// when nothing anchors it. Set only while a review is open, where the
-    /// rows are that review's hunks and this names the focused one's header
-    /// -- hunk-jump is the review's navigation, so the window follows the
-    /// cursor rather than offering a free scroll across a file the proposal
-    /// mostly does not touch.
-    pub selected: Option<usize>,
 }
 
 impl AiPanelView {
@@ -756,13 +749,11 @@ impl AiPanelView {
         }
     }
 
-    /// The same panel showing `rows` as its open review's summary, with
-    /// `selected` anchoring the scroll window on the focused hunk.
+    /// The same panel showing `rows` as its open review's summary.
     #[must_use]
-    pub fn with_review(self, rows: Vec<Vec<Span>>, selected: Option<usize>) -> Self {
+    pub fn with_review(self, rows: Vec<Vec<Span>>) -> Self {
         Self {
             review: rows,
-            selected,
             ..self
         }
     }

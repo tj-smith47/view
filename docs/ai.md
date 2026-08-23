@@ -112,10 +112,10 @@ scroll.
 
 `<C-d>` is the one key with two jobs: while the crash banner is up it
 dismisses the banner (which is what the banner itself says), and it scrolls
-once the banner is gone. A review or an unanswered permission request owns
-the panel's keys while it is up, so none of the four scroll then -- inside
-a review they answer the way every other key a review owns does, with the
-notice naming the ways out.
+once the banner is gone. An unanswered permission request owns the panel's
+keys while it is up, so none of the four scroll then. An open review does
+not: it is read and decided in the file itself, so the panel beside it
+scrolls the way it always does.
 
 ## Panel width
 
@@ -129,9 +129,9 @@ The focused panel resizes where it stands, 5% of the terminal per press:
 The width holds between 15% and 70% and lasts the session -- close the panel
 and reopen it and it comes back the width you left it at. Both are named
 keys the composer cannot type, so a half-written prompt survives a resize,
-and unlike the scroll keys they work while a review or a permission request
-is up: a width decides nothing either of those owns, and a diff too narrow
-to read is exactly when you want it.
+and unlike the scroll keys they work while a permission request is up: a
+width decides nothing the question owns, and a summary too narrow to read
+is exactly when you want it.
 
 The width a session *starts* at is `view.toml`'s, and the file tree has the
 same key beside it:
@@ -171,9 +171,9 @@ stands after them.
 
 You answer with the digit. `<Esc>` answers too -- it cancels the request,
 which is the one answer that exists whatever the agent offered. No letter
-answers a prompt, deliberately: a diff review pends alongside the prompt on
-every agent edit and owns letters of its own, so `a` accepts the hunk you
-are looking at and never the question you are not.
+answers a prompt, deliberately: the letters belong to the buffer -- an
+agent edit raises a review in the file beside the panel, and that file stays
+an ordinary editable buffer while you read the question.
 
 The colors carry the same split as the words: the always-allow row is not
 painted as another allow, because it is the one answer whose consequence
@@ -208,16 +208,46 @@ behalf is on the record with everything else the session did.
 ## Reviewing an agent's edits
 
 An edit the agent proposes through ACP does not touch your buffer until
-you accept it. The proposal opens as a hunk-by-hunk review:
+you accept it. The proposal opens as a review **in the file itself**: view
+brings the target buffer up, marks what the agent would remove, shows what
+it would put there, and puts your cursor on the first hunk.
 
-```
-a accept  A accept all  x reject  R re-diff  ] next  [ prev  q close
+The reviewed buffer stays an ordinary editable buffer -- every nvim key
+still does what it always did -- so the review's own vocabulary is mapped
+out of the single-letter space, buffer-locally, for as long as the review
+is open:
+
+| key | does |
+| --- | --- |
+| `<leader>ha` | accept the hunk under the cursor |
+| `<leader>hA` | accept every hunk still fresh, as one write |
+| `<leader>hx` | reject the hunk under the cursor |
+| `<leader>hR` | re-diff a hunk your own edit moved under |
+| `]c` / `[c` | next / previous hunk still awaiting a decision |
+| `<leader>hq` | leave, deciding nothing further |
+
+Each is also a command -- `:View review accept`, `:View review leave` --
+which is what to reach for if `<leader>h` is already yours.
+
+Type over a hunk yourself and it goes *stale*: view will not write a
+proposal against text that has moved, so a stale hunk offers `<leader>hR`
+(re-anchor it against what the buffer now holds) or `<leader>hx` in place of
+the accept it would have to refuse. The panel keeps a summary row beside the
+buffer -- which file, which hunk of how many, and the same keys -- so a
+scroll away from every hunk does not lose you the review.
+
+An accepted review is one undo entry -- a single `u` retracts the whole
+thing, never joined onto your own preceding edit.
+
+Where the file opens, when it was not already on screen, is yours:
+
+```toml
+[ai.review]
+open_target = "current"    # "current" (default) or "split"
 ```
 
-While a review is open it owns the keys; anything unmapped answers with a
-notice naming the open review and both ways out, rather than doing
-nothing. An accepted review is one undo entry -- a single `u` retracts the
-whole thing, never joined onto your own preceding edit.
+`current` puts the review in the window you were in; `split` opens one
+beside it and leaves the window you were reading in where it was.
 
 ## How an agent's writes reach your buffers
 

@@ -125,6 +125,13 @@ pub struct Model {
     /// the user left it at, the same way [`Model::ai_panel`] keeps the
     /// session behind a hidden sidebar.
     pub ai_panel_width_pct: u16,
+    /// Where a review's file is shown when no window already has it open,
+    /// seeded once at startup from `[ai.review] open_target` on the same
+    /// terms as [`Model::ai_panel_width_pct`]. Plain data, carried into
+    /// every `RpcCall::ReviewShow` this session issues; see
+    /// [`crate::msg::ReviewOpenTarget`] for why the default is the current
+    /// window.
+    pub ai_review_open_target: crate::msg::ReviewOpenTarget,
     /// The tree sidebar's share of the terminal width, in percent, on the
     /// same terms as [`Model::ai_panel_width_pct`]: seeded from
     /// `[native] tree_width` and stepped by the sidebar's resize keys.
@@ -232,6 +239,7 @@ impl Model {
             ai_trusted: false,
             ai_enabled: true,
             ai_panel_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            ai_review_open_target: crate::msg::ReviewOpenTarget::default(),
             tree_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),

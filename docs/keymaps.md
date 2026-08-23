@@ -77,10 +77,12 @@ offered them:
 | `1` … `9` | the option on that row, whatever the agent called it |
 | `<Esc>` | cancels the request |
 
-No letter answers a prompt: the diff review that pends alongside it owns
-letters of its own, and one key cannot mean both "allow always" and "accept
-this hunk". See [ai.md](ai.md) for what each option does and what the two
-"always" answers stand for.
+No letter answers a prompt: the same agent edit that raises the question
+raises a review in the buffer beside it, and that buffer stays an ordinary
+editable one -- a letter that answered the prompt from there would mean two
+things at once. The review's own keys are buffer-local and live under
+`<leader>h`; see [ai.md](ai.md) for those, for what each option does, and
+for what the two "always" answers stand for.
 
 ## Resizing the sidebars
 

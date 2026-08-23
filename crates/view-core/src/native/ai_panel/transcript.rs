@@ -23,6 +23,8 @@ const AGENT_MARK: &str = "\u{25cf} ";
 const THOUGHT_MARK: &str = "\u{25e6} ";
 /// The glyph opening a line view itself wrote into the transcript.
 const NOTICE_MARK: &str = "\u{203c} ";
+/// The glyph opening what became of a diff review.
+const REVIEW_MARK: &str = "\u{00b1} ";
 /// The glyph a tool call that has not started yet opens with.
 const TOOL_PENDING_MARK: &str = "\u{b7} ";
 /// The glyph a completed tool call opens with.
@@ -128,6 +130,16 @@ pub enum TranscriptEntryKind {
     /// live plan to reconcile against, and [`Transcript::upsert_plan`]
     /// keeps at most one `Plan` entry in the transcript at a time.
     Plan { entries: Vec<PlanEntry> },
+    /// What became of one diff review: which hunks were accepted and
+    /// rejected in which file, or that the proposal was dismissed. The
+    /// sentence itself is the entry's own `text`.
+    ///
+    /// Its own kind rather than a [`Self::Message`] in
+    /// [`TranscriptRole::Agent`]'s voice, for the reason that role's doc
+    /// gives: the agent proposed the diff, it did not decide it, and a
+    /// record of the user's decision attributed to the agent is the
+    /// opposite of the audit trail this log exists to be.
+    Review,
 }
 
 /// One folded entry in the transcript: what it is, and its text so far --
@@ -633,6 +645,20 @@ impl Transcript {
         }
     }
 
+    /// Records what became of one diff review (see
+    /// [`TranscriptEntryKind::Review`]).
+    ///
+    /// Always a new entry, never folded into anything: each review is one
+    /// decision the user made, and a session that reviewed the same file
+    /// twice owes two lines.
+    pub fn record_review(&mut self, text: String) {
+        self.entries.push(TranscriptEntry {
+            kind: TranscriptEntryKind::Review,
+            text,
+        });
+        self.row_cache.get_mut().push(None);
+    }
+
     /// Replaces the transcript's plan wholesale, per the wire's own
     /// full-replace contract (see [`TranscriptEntryKind::Plan`]'s doc). The
     /// first plan update starts the transcript's one `Plan` entry; every
@@ -719,6 +745,10 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span
             );
             rows
         }
+        TranscriptEntryKind::Review => vec![vec![
+            Span::new(REVIEW_MARK, StyleRole::AiNotice),
+            Span::new(paintable(&entry.text), StyleRole::AiNotice),
+        ]],
         TranscriptEntryKind::Plan { entries } => entries
             .iter()
             .map(|e| {

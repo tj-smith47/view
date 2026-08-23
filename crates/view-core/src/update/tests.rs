@@ -1006,11 +1006,6 @@ fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
             pending_permission_model(),
             PERMISSION_PASTE_NOTICE,
         ),
-        (
-            "an open review",
-            live_review_model(),
-            review::STRAY_KEY_NOTICE,
-        ),
     ] {
         m.ai_panel_mut().input = "draft".to_string();
 
@@ -3653,38 +3648,39 @@ fn the_letter_a_no_longer_answers_a_permission_prompt() {
 }
 
 /// The stacked case the live session met: a diff review and a permission
-/// request are both up (an agent edit raises both), and the two key
-/// vocabularies must not cross. `a` is the review's accept and reaches the
-/// review even though the permission arm runs first; the digit answers the
-/// permission and leaves the review alone.
+/// request are both up (an agent edit raises both). The two vocabularies
+/// can no longer cross at all -- the review's live on the buffer under
+/// review and the prompt's in the panel -- and the question outranks the
+/// review for the panel's keyboard while it is unanswered, since an agent
+/// turn is blocked behind it.
 #[test]
-fn with_a_review_and_a_permission_both_pending_digits_answer_one_and_letters_the_other() {
-    let mut m = live_review_model();
-    let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+fn with_a_review_and_a_permission_both_pending_the_question_keeps_the_panels_keys() {
+    let mut m = pending_permission_model();
+    open_review(&mut m);
     assert!(
         m.ai_panel().pending_permission.is_some() && m.ai_panel().pending_diff.is_some(),
         "both must be pending for this to be the case under test"
     );
-
-    let effects = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "a".to_string(),
-        }),
+    assert!(
+        m.ai_panel().focused,
+        "a review does not hand the keyboard away while a question is \
+         still blocking the agent"
     );
+
+    let effects = update(&mut m, review_msg("accept"));
     assert!(
         !rpc_calls(&effects).is_empty(),
-        "`a` must reach the review's accept, not the invisible prompt: {effects:?}"
+        "the review's own verb reaches the review, not the prompt: {effects:?}"
     );
     assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::Ai(AiCommand::AnswerPermission { .. }))),
-        "`a` must never answer a permission request: {effects:?}"
+        "a review verb must never answer a permission request: {effects:?}"
     );
     assert!(
         m.ai_panel().pending_permission.is_some(),
-        "the review's key left the question unanswered"
+        "the review's verb left the question unanswered"
     );
 
     let effects = update(
@@ -3703,6 +3699,11 @@ fn with_a_review_and_a_permission_both_pending_digits_answer_one_and_letters_the
     assert!(
         m.ai_panel().pending_diff.is_some(),
         "answering the prompt decides nothing about the review"
+    );
+    assert!(
+        !m.ai_panel().focused,
+        "with the question settled, the keyboard goes back to the buffer \
+         the review's own keys are installed on"
     );
 }
 
@@ -3980,26 +3981,6 @@ fn the_composer_is_not_editable_behind_an_unanswered_permission() {
     }
 }
 
-/// The same closed list, from the other state that owns the panel's keys.
-/// `q` already reaches the review here; `<BS>` must reach it the same way
-/// rather than editing a composer the review is standing in front of.
-#[test]
-fn the_composer_is_not_editable_behind_an_open_review() {
-    let mut m = live_review_model();
-    m.ai_panel_mut().input = "draft".to_string();
-    let _ = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "<BS>".to_string(),
-        }),
-    );
-    assert_eq!(
-        m.ai_panel().input,
-        "draft",
-        "a review owns the keyboard, including the keys spelled with angle brackets"
-    );
-}
-
 /// One turn at a time: `<CR>` on a turn already in flight would put a
 /// second `session/prompt` on a wire that has no way to tell the two
 /// answers apart.
@@ -4226,15 +4207,16 @@ fn a_tool_call_in_flight_is_what_makes_the_panel_spin() {
     );
 }
 
-/// A review paints its own hunks in place of the transcript, so a scroll
-/// key inside one would move a window nobody can see and hand it back
-/// changed when the review ends. All four are answered the same way any
-/// other key a review owns is -- `<C-d>` included, which reaches past the
-/// review only while a crash banner is there for it to dismiss.
+/// The panel goes on painting the transcript through a review, so its
+/// scroll keys go on working inside one: the diff is in the file, and the
+/// conversation about it is still what the panel is for.
 #[test]
-fn every_scroll_key_inside_an_open_review_is_answered_and_moves_nothing() {
-    for notation in ["<PageUp>", "<PageDown>", "<C-u>", "<C-d>"] {
+fn every_scroll_key_still_scrolls_the_transcript_during_a_review() {
+    for notation in ["<PageUp>", "<C-u>"] {
         let mut m = live_review_model();
+        m.term_width = 80;
+        m.term_height = 24;
+        m.ai_panel_mut().focused = true;
         for i in 0..100 {
             m.ai_panel_mut().transcript.append_or_extend(
                 Some(&format!("m{i}")),
@@ -4247,24 +4229,16 @@ fn every_scroll_key_inside_an_open_review_is_answered_and_moves_nothing() {
 
         assert!(
             rpc_calls(&effects).is_empty(),
-            "{notation} must not reach the engine: {effects:?}"
+            "{notation} must not reach the engine from an entered panel: {effects:?}"
         );
         assert!(
             m.ai_panel().pending_diff.is_some(),
             "{notation} decides nothing"
         );
-        let texts = visible_texts(&m);
-        assert!(
-            texts.iter().any(|line| line.contains("A review is open")),
-            "{notation} must be answered rather than swallowed in silence: {texts:?}"
-        );
-
-        m.ai_panel_mut().pending_diff = None;
-        assert_eq!(
+        assert_ne!(
             panel_transcript_texts(&m).last().unwrap(),
             "● line 99",
-            "{notation} left the transcript following the tail, as the review \
-             found it"
+            "{notation} must move the transcript window off the tail"
         );
     }
 }
@@ -4385,6 +4359,7 @@ fn a_resize_key_is_honored_in_every_state_that_owns_the_panels_keys() {
     let mut review = live_review_model();
     review.term_width = 80;
     review.term_height = 24;
+    review.ai_panel_mut().focused = true;
     let effects = update(&mut review, key("<S-Right>"));
     assert!(rpc_calls(&effects).is_empty(), "nothing reaches the engine");
     assert_eq!(ai_panel_width_pct(&review), 35);
@@ -8437,8 +8412,19 @@ const REVIEW_NEW: &str = "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\nETA\ntheta\n
 /// starts from a review that was bound, never one assembled by hand.
 fn live_review_model() -> Model {
     let mut m = entered_ai_panel_model();
+    open_review(&mut m);
+    assert!(
+        !m.ai_panel().focused,
+        "the review is decided in the buffer, so the panel gives the \
+         keyboard back to it"
+    );
+    m
+}
+
+/// Drives one proposal through to a bound, decorated review on `m`.
+fn open_review(m: &mut Model) {
     let effects = update(
-        &mut m,
+        m,
         Msg::Ai(crate::native::ai_event::AiEvent::DiffProposed {
             request_id: 1,
             path: std::path::PathBuf::from(REVIEW_FILE),
@@ -8454,7 +8440,7 @@ fn live_review_model() -> Model {
         other => panic!("expected one LoadHidden, got {other:?}"),
     };
     let effects = update(
-        &mut m,
+        m,
         Msg::HiddenBufferLoaded {
             generation,
             buf: Some(REVIEW_BUF),
@@ -8462,16 +8448,40 @@ fn live_review_model() -> Model {
             changedtick: REVIEW_TICK,
         },
     );
-    assert_eq!(
-        rpc_calls(&effects),
-        vec![RpcCall::BufAttach {
-            buf: REVIEW_BUF,
-            generation
-        }],
-        "a resolved path subscribes before any hunk can be trusted to rebase"
+    assert!(
+        matches!(
+            rpc_calls(&effects).as_slice(),
+            [
+                RpcCall::BufAttach {
+                    buf: REVIEW_BUF,
+                    generation: g
+                },
+                RpcCall::ReviewShow { focus: true, .. }
+            ] if *g == generation
+        ),
+        "a resolved path subscribes before any hunk can be trusted to \
+         rebase, then the review comes to the user in the file itself: \
+         {effects:?}"
     );
     assert_eq!(m.ai_panel().pending_diff.as_ref().unwrap().hunks.len(), 2);
-    m
+}
+
+/// Whether any effect here would put bytes in a buffer -- the one thing a
+/// refused decision must never do.
+fn wrote_anything(effects: &[Effect]) -> bool {
+    rpc_calls(effects)
+        .iter()
+        .any(|call| matches!(call, RpcCall::BufSetText { .. }))
+}
+
+/// One of the review's verbs as it arrives: from the buffer-local
+/// mapping `RpcCall::ReviewShow` installs, or from `:View review <verb>`.
+/// No review vocabulary reaches `update()` as a key any more.
+fn review_msg(verb: &str) -> Msg {
+    Msg::FeatureInvoke {
+        feature: "review".to_string(),
+        verb: verb.to_string(),
+    }
 }
 
 /// `Effect` carries no `PartialEq`, so assertions name the calls rather
@@ -8511,7 +8521,7 @@ fn buf_text_changed(m: &Model, firstline: u64, lastline: u64, linedata: &[&str])
 fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
     let mut m = live_review_model();
 
-    let effects = update(&mut m, key("a"));
+    let effects = update(&mut m, review_msg("accept"));
     match rpc_calls(&effects).as_slice() {
         [RpcCall::BufSetText {
             buf,
@@ -8519,7 +8529,7 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
             undojoin,
             expected_changedtick,
             ..
-        }] => {
+        }, RpcCall::ReviewShow { focus: false, .. }] => {
             assert_eq!(
                 *expected_changedtick,
                 Some(REVIEW_TICK),
@@ -8534,7 +8544,9 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
             assert_eq!(edits.len(), 1);
             assert_eq!(edits[0].lines, vec!["BETA".to_string(), String::new()]);
         }
-        other => panic!("expected one BufSetText, got {other:?}"),
+        other => {
+            panic!("expected the write and the repaint that follows it, got {other:?}")
+        }
     }
     assert_eq!(
         m.ai_panel().pending_diff.as_ref().unwrap().cursor,
@@ -8542,9 +8554,9 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
         "the cursor follows the work onto the next undecided hunk"
     );
 
-    let effects = update(&mut m, key("a"));
+    let effects = update(&mut m, review_msg("accept"));
     match rpc_calls(&effects).as_slice() {
-        [RpcCall::BufSetText { undojoin, .. }, RpcCall::BufDetach { buf }, RpcCall::ReleaseHidden { path }] =>
+        [RpcCall::BufSetText { undojoin, .. }, RpcCall::ReviewClear { .. }, RpcCall::BufDetach { buf }, RpcCall::ReleaseHidden { path }] =>
         {
             assert!(
                 undojoin,
@@ -8635,11 +8647,11 @@ fn an_agent_read_of_a_reviewed_path_neither_folds_nor_ends_the_review() {
         "one hold taken, one hold given back"
     );
 
-    let accepted = update(&mut m, key("a"));
+    let accepted = update(&mut m, review_msg("accept"));
     assert!(
         matches!(
             rpc_calls(&accepted).as_slice(),
-            [RpcCall::BufSetText { .. }]
+            [RpcCall::BufSetText { .. }, RpcCall::ReviewShow { .. }]
         ),
         "the review's hunks must still be resolvable, got {accepted:?}"
     );
@@ -8652,7 +8664,7 @@ fn an_agent_read_of_a_reviewed_path_neither_folds_nor_ends_the_review() {
 fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
     let mut m = live_review_model();
 
-    let effects = update(&mut m, key("A"));
+    let effects = update(&mut m, review_msg("accept_all"));
 
     let calls = rpc_calls(&effects);
     assert_eq!(
@@ -8662,11 +8674,12 @@ fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
         }),
         "accepting the last hunk ends the review: {calls:?}"
     );
-    let [RpcCall::BufSetText { edits, .. }, RpcCall::BufDetach { .. }, RpcCall::ReleaseHidden { .. }] =
+    let [RpcCall::BufSetText { edits, .. }, RpcCall::ReviewClear { .. }, RpcCall::BufDetach { .. }, RpcCall::ReleaseHidden { .. }] =
         calls.as_slice()
     else {
         panic!(
-            "expected one batched write, the detach, and the hidden-buffer release, got {calls:?}"
+            "expected one batched write, the undecoration, the detach and \
+             the hidden-buffer release, got {calls:?}"
         )
     };
     let rows: Vec<u32> = edits.iter().map(|edit| edit.start_row).collect();
@@ -8683,15 +8696,20 @@ fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
 fn rejecting_through_the_key_path_writes_nothing_and_closes_the_review() {
     let mut m = live_review_model();
 
-    let effects = update(&mut m, key("x"));
+    let effects = update(&mut m, review_msg("reject"));
     assert!(
-        rpc_calls(&effects).is_empty(),
-        "a rejection is a decision not to write: {effects:?}"
+        matches!(
+            rpc_calls(&effects).as_slice(),
+            [RpcCall::ReviewShow { focus: false, .. }]
+        ),
+        "a rejection is a decision not to write -- the buffer only stops \
+         offering the hunk: {effects:?}"
     );
-    let effects = update(&mut m, key("x"));
+    let effects = update(&mut m, review_msg("reject"));
     assert_eq!(
         rpc_calls(&effects),
         vec![
+            RpcCall::ReviewClear { buf: REVIEW_BUF },
             RpcCall::BufDetach { buf: REVIEW_BUF },
             RpcCall::ReleaseHidden {
                 path: REVIEW_FILE.to_string()
@@ -8702,51 +8720,46 @@ fn rejecting_through_the_key_path_writes_nothing_and_closes_the_review() {
     assert!(m.ai_panel().pending_diff.is_none());
 }
 
-/// A prompt typed at an unanswered review reaches neither the composer nor
-/// the engine, because the review owns the panel's keys while it is open.
-/// The user is owed the reason: silence is indistinguishable from a panel
-/// that has stopped working.
+/// The modal's worst habit, gone: an open review claims no key of the
+/// user's. Typing goes to the buffer they are reading the diff in, exactly
+/// as it does with no review open, and the Stale machinery is what
+/// answers for the edit -- which is the whole reason the review's own
+/// keys had to leave the single-letter space.
 #[test]
-fn typing_at_an_open_review_is_answered_rather_than_swallowed() {
+fn an_open_review_claims_none_of_the_users_keys() {
     let mut m = live_review_model();
+
+    let effects = update(&mut m, key("z"));
+
+    assert_eq!(
+        rpc_calls(&effects),
+        vec![RpcCall::Input {
+            notation: "z".to_string()
+        }],
+        "a reviewed buffer is still an ordinary editable buffer: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_diff.is_some(),
+        "and typing decides nothing"
+    );
+}
+
+/// The panel's own composer is reachable again while a review is open --
+/// the review is in the file, not in front of the conversation -- so a
+/// reader can go on talking to the agent about the diff they are looking
+/// at.
+#[test]
+fn the_composer_takes_text_again_while_a_review_is_open() {
+    let mut m = live_review_model();
+    m.ai_panel_mut().focused = true;
 
     let effects = update(&mut m, key("z"));
 
     assert!(
         rpc_calls(&effects).is_empty(),
-        "a stray key must still not reach the engine: {effects:?}"
+        "an entered panel still keeps its keys off the engine: {effects:?}"
     );
-    assert!(
-        m.ai_panel().pending_diff.is_some(),
-        "a stray key decides nothing"
-    );
-    let texts = visible_texts(&m);
-    assert!(
-        texts.iter().any(|line| line.contains("A review is open")),
-        "the stray key is answered: {texts:?}"
-    );
-    assert!(
-        texts.iter().any(|line| line.contains("(q)")),
-        "the answer names the way out: {texts:?}"
-    );
-}
-
-/// The notice above is raised once per standing line, not once per key: a
-/// sentence typed at a review is one mistake, and a line per character
-/// would evict the answer out of the bounded `:messages` ring.
-#[test]
-fn a_sentence_typed_at_a_review_raises_one_notice_not_one_per_letter() {
-    let mut m = live_review_model();
-
-    for notation in ["z", "y", "w", "z"] {
-        let _ = update(&mut m, key(notation));
-    }
-
-    let standing = visible_texts(&m)
-        .into_iter()
-        .filter(|line| line.contains("A review is open"))
-        .count();
-    assert_eq!(standing, 1, "one standing notice for four stray keys");
+    assert_eq!(m.ai_panel().input, "z");
 }
 
 /// Hunk-jump is the review's primary navigation and it skips what is
@@ -8755,24 +8768,24 @@ fn a_sentence_typed_at_a_review_raises_one_notice_not_one_per_letter() {
 fn hunk_jump_keys_wrap_and_skip_decided_hunks() {
     let mut m = live_review_model();
 
-    let _ = update(&mut m, key("]"));
+    let _ = update(&mut m, review_msg("next"));
     assert_eq!(m.ai_panel().pending_diff.as_ref().unwrap().cursor, 1);
-    let _ = update(&mut m, key("]"));
+    let _ = update(&mut m, review_msg("next"));
     assert_eq!(
         m.ai_panel().pending_diff.as_ref().unwrap().cursor,
         0,
         "next from the last open hunk wraps"
     );
-    let _ = update(&mut m, key("["));
+    let _ = update(&mut m, review_msg("prev"));
     assert_eq!(m.ai_panel().pending_diff.as_ref().unwrap().cursor, 1);
 
-    let _ = update(&mut m, key("x"));
+    let _ = update(&mut m, review_msg("reject"));
     assert_eq!(
         m.ai_panel().pending_diff.as_ref().unwrap().cursor,
         0,
         "deciding the hunk under the cursor moves off it"
     );
-    let _ = update(&mut m, key("]"));
+    let _ = update(&mut m, review_msg("next"));
     assert_eq!(
         m.ai_panel().pending_diff.as_ref().unwrap().cursor,
         0,
@@ -8794,10 +8807,12 @@ fn accepting_a_stale_hunk_through_the_key_path_is_refused_and_says_why() {
         crate::native::diff::HunkStatus::Stale
     );
 
-    let effects = update(&mut m, key("a"));
+    let effects = update(&mut m, review_msg("accept"));
 
     assert!(
-        rpc_calls(&effects).is_empty(),
+        !rpc_calls(&effects)
+            .iter()
+            .any(|call| matches!(call, RpcCall::BufSetText { .. })),
         "a stale hunk's rows no longer name what it was computed against: {effects:?}"
     );
     assert_eq!(
@@ -8811,10 +8826,13 @@ fn accepting_a_stale_hunk_through_the_key_path_is_refused_and_says_why() {
         "the refusal names the way forward: {texts:?}"
     );
 
-    let _ = update(&mut m, key("R"));
-    let effects = update(&mut m, key("a"));
+    let _ = update(&mut m, review_msg("rediff"));
+    let effects = update(&mut m, review_msg("accept"));
     assert_eq!(
-        rpc_calls(&effects).len(),
+        rpc_calls(&effects)
+            .iter()
+            .filter(|call| matches!(call, RpcCall::BufSetText { .. }))
+            .count(),
         1,
         "a re-diffed hunk accepts again: {effects:?}"
     );
@@ -8851,15 +8869,15 @@ fn a_desynced_change_retires_the_whole_review_not_just_its_hunks() {
         "an incrementally rebased hunk after a dropped event is a wrong hunk"
     );
 
-    let effects = update(&mut m, key("a"));
-    assert!(rpc_calls(&effects).is_empty());
-    let effects = update(&mut m, key("A"));
+    let effects = update(&mut m, review_msg("accept"));
+    assert!(!wrote_anything(&effects));
+    let effects = update(&mut m, review_msg("accept_all"));
     assert!(
-        rpc_calls(&effects).is_empty(),
+        !wrote_anything(&effects),
         "accept-all is not a way around the desync refusal: {effects:?}"
     );
     // re-diff is refused rather than narrowing against a guess
-    let _ = update(&mut m, key("R"));
+    let _ = update(&mut m, review_msg("rediff"));
     assert_eq!(
         m.ai_panel().pending_diff.as_ref().unwrap().hunks[0].status,
         crate::native::diff::HunkStatus::Stale,
@@ -8890,8 +8908,8 @@ fn a_detached_subscription_stales_every_hunk_and_refuses_accepts() {
         .iter()
         .all(|h| h.status == crate::native::diff::HunkStatus::Stale));
 
-    let effects = update(&mut m, key("a"));
-    assert!(rpc_calls(&effects).is_empty());
+    let effects = update(&mut m, review_msg("accept"));
+    assert!(!wrote_anything(&effects));
 }
 
 /// A change event for another buffer, or from a superseded review, is not
@@ -8945,11 +8963,12 @@ fn change_events_from_another_buffer_or_generation_are_ignored() {
 fn closing_the_review_detaches_the_buffer_it_attached() {
     let mut m = live_review_model();
 
-    let effects = update(&mut m, key("q"));
+    let effects = update(&mut m, review_msg("leave"));
 
     assert_eq!(
         rpc_calls(&effects),
         vec![
+            RpcCall::ReviewClear { buf: REVIEW_BUF },
             RpcCall::BufDetach { buf: REVIEW_BUF },
             RpcCall::ReleaseHidden {
                 path: REVIEW_FILE.to_string(),
@@ -8988,35 +9007,32 @@ fn an_unresolvable_path_leaves_the_review_unbindable() {
         },
     );
 
-    assert!(rpc_calls(&effects).is_empty(), "nothing to attach to");
-    let review = m.ai_panel().pending_diff.as_ref().unwrap();
-    assert_eq!(review.sync, ReviewSync::Unbindable);
-    assert!(review.sync.notice().is_some());
-
-    let effects = update(&mut m, key("a"));
-    assert!(rpc_calls(&effects).is_empty());
-}
-
-/// While a review is open it owns the panel's printable keys, and the ways
-/// out of the panel still work: a stray printable never reaches nvim to
-/// edit the very buffer under review.
-#[test]
-fn a_review_owns_printables_but_not_the_named_ways_out() {
-    let mut m = live_review_model();
-
-    let effects = update(&mut m, key("z"));
-    assert!(rpc_calls(&effects).is_empty(), "{effects:?}");
-    assert_eq!(m.ai_panel().input, "", "the composer took no review key");
-
-    let _ = update(&mut m, key("<Esc>"));
-    assert!(
-        !m.ai_panel().focused,
-        "<Esc> still un-enters the panel from inside a review"
+    assert_eq!(
+        rpc_calls(&effects),
+        vec![RpcCall::ReleaseHidden {
+            path: "/tmp/nope.rs".to_string()
+        }],
+        "nothing to attach to and nothing to draw in -- only the hold this \
+         review's own bind took is given back: {effects:?}"
     );
     assert!(
-        m.ai_panel().pending_diff.is_some(),
-        "un-entering does not decide the review"
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Ai(AiCommand::DiscardProposal { request_id: 1 }))),
+        "a proposal that could never be shown is not one the session may \
+         deduplicate a later restatement against: {effects:?}"
     );
+    assert!(
+        m.ai_panel().pending_diff.is_none(),
+        "a review with nowhere to draw and nothing to write is not a \
+         decision the user can be left holding"
+    );
+    let said = m
+        .ai_panel()
+        .transcript
+        .iter()
+        .any(|entry| entry.text.contains("/tmp/nope.rs"));
+    assert!(said, "the one case inline review cannot serve says so");
 }
 
 /// One `AiEvent::DiffProposed`, as the driver raises it.
@@ -9118,7 +9134,7 @@ fn the_queued_proposal_opens_when_the_review_in_front_of_it_closes() {
         diff_proposed(2, "/tmp/second.rs", Some("x\n"), "y\n"),
     );
 
-    let effects = update(&mut m, key("q"));
+    let effects = update(&mut m, review_msg("leave"));
 
     let calls = rpc_calls(&effects);
     assert!(
@@ -9139,6 +9155,147 @@ fn the_queued_proposal_opens_when_the_review_in_front_of_it_closes() {
     assert!(m.ai_panel().pending_diff_next.is_none());
 }
 
+/// The promoted proposal says so in the transcript and takes the user to
+/// its own file: the review they were reading has just vanished out of the
+/// buffer in front of them, and a cursor that lands in a different file
+/// with nothing said reads as view having moved them for no reason.
+#[test]
+fn the_promoted_proposal_announces_itself_and_focuses_its_own_buffer() {
+    let mut m = live_review_model();
+    let _ = update(
+        &mut m,
+        diff_proposed(2, "/tmp/second.rs", Some("x\n"), "y\n"),
+    );
+
+    let effects = update(&mut m, review_msg("leave"));
+
+    let rows = panel_transcript_texts(&m);
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("now reviewing") && line.contains("second.rs")),
+        "the promotion is announced: {rows:?}"
+    );
+    let generation = match rpc_calls(&effects).into_iter().find_map(|call| match call {
+        RpcCall::LoadHidden { path, generation } if path == "/tmp/second.rs" => Some(generation),
+        _ => None,
+    }) {
+        Some(generation) => generation,
+        None => panic!("the queued proposal never bound: {effects:?}"),
+    };
+
+    let effects = update(
+        &mut m,
+        Msg::HiddenBufferLoaded {
+            generation,
+            buf: Some(BufferHandle(9)),
+            created: true,
+            changedtick: 1,
+        },
+    );
+
+    assert!(
+        matches!(
+            rpc_calls(&effects).as_slice(),
+            [
+                RpcCall::BufAttach {
+                    buf: BufferHandle(9),
+                    ..
+                },
+                RpcCall::ReviewShow {
+                    buf: BufferHandle(9),
+                    focus: true,
+                    ..
+                }
+            ]
+        ),
+        "the promoted review comes to the user in its own file: {effects:?}"
+    );
+}
+
+/// A jump moves the user and nothing else: no write, no teardown, and a
+/// show that carries the focus the gesture asked for.
+#[test]
+fn a_hunk_jump_only_redraws_the_review_with_the_cursor_on_the_next_hunk() {
+    let mut m = live_review_model();
+
+    let effects = update(&mut m, review_msg("next"));
+
+    let calls = rpc_calls(&effects);
+    let [RpcCall::ReviewShow {
+        buf,
+        cursor_row,
+        focus,
+        ..
+    }] = calls.as_slice()
+    else {
+        panic!("a jump draws the review and does nothing else: {calls:?}")
+    };
+    assert_eq!(*buf, REVIEW_BUF);
+    assert!(*focus, "a jump is the user asking to be taken there");
+    assert_eq!(
+        *cursor_row, 6,
+        "the second hunk of the fixture starts on row 6"
+    );
+    assert_eq!(m.ai_panel().pending_diff.as_ref().unwrap().cursor, 1);
+}
+
+/// Declining the lot is one gesture, not a decision per hunk: it writes
+/// nothing, ends the review, and leaves its own line behind.
+#[test]
+fn rejecting_them_all_writes_nothing_and_ends_the_review_in_one_verb() {
+    let mut m = live_review_model();
+
+    let effects = update(&mut m, review_msg("reject_all"));
+
+    assert_eq!(
+        rpc_calls(&effects),
+        vec![
+            RpcCall::ReviewClear { buf: REVIEW_BUF },
+            RpcCall::BufDetach { buf: REVIEW_BUF },
+            RpcCall::ReleaseHidden {
+                path: REVIEW_FILE.to_string()
+            }
+        ],
+        "every hunk declined at once still writes nothing: {effects:?}"
+    );
+    assert!(m.ai_panel().pending_diff.is_none());
+    let rows = panel_transcript_texts(&m);
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("accepted 0 and rejected 2 hunks")),
+        "the outcome is recorded in the transcript: {rows:?}"
+    );
+}
+
+/// A verb the review does not know is a true no-op -- no effect, no
+/// repaint, no status touched. `:View review whatever` typed by hand is
+/// the only way to reach this, and nothing happening is the honest answer.
+#[test]
+fn a_verb_the_review_does_not_know_changes_nothing() {
+    let mut m = live_review_model();
+    m.dirty = false;
+    let before = m.ai_panel().pending_diff.as_ref().unwrap().clone();
+
+    let effects = update(&mut m, review_msg("obliterate"));
+
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(!m.dirty, "an unknown verb does not even cost a repaint");
+    let after = m.ai_panel().pending_diff.as_ref().unwrap();
+    assert_eq!(after.cursor, before.cursor);
+    assert_eq!(
+        after
+            .hunks
+            .iter()
+            .map(|hunk| hunk.status)
+            .collect::<Vec<_>>(),
+        before
+            .hunks
+            .iter()
+            .map(|hunk| hunk.status)
+            .collect::<Vec<_>>()
+    );
+}
+
 /// A review the user abandoned with decisions still owed is forgotten at
 /// the session too, so the agent restating the same diff later reaches
 /// them again instead of being deduplicated against a proposal they
@@ -9148,7 +9305,7 @@ fn closing_a_review_with_hunks_left_discards_the_proposal_at_the_session() {
     let mut m = live_review_model();
     let request_id = m.ai_panel().pending_diff.as_ref().unwrap().request_id;
 
-    let effects = update(&mut m, key("q"));
+    let effects = update(&mut m, review_msg("leave"));
 
     assert!(
         effects.iter().any(|effect| matches!(
@@ -9157,6 +9314,14 @@ fn closing_a_review_with_hunks_left_discards_the_proposal_at_the_session() {
         )),
         "expected the proposal discarded at the driver, got {effects:?}"
     );
+    let rows = panel_transcript_texts(&m);
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("discarded the proposal")
+                && line.contains("2 hunks left undecided")),
+        "the abandoned review says so in the transcript rather than \
+         vanishing: {rows:?}"
+    );
 }
 
 /// A review whose every hunk was decided is not discarded: the user saw it
@@ -9164,8 +9329,8 @@ fn closing_a_review_with_hunks_left_discards_the_proposal_at_the_session() {
 #[test]
 fn a_fully_decided_review_is_not_discarded_at_the_session() {
     let mut m = live_review_model();
-    let _ = update(&mut m, key("x"));
-    let effects = update(&mut m, key("x"));
+    let _ = update(&mut m, review_msg("reject"));
+    let effects = update(&mut m, review_msg("reject"));
 
     assert!(
         !effects
@@ -9317,11 +9482,12 @@ fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
         },
     );
 
-    let effects = update(&mut m, key("a"));
+    let effects = update(&mut m, review_msg("accept"));
 
     assert_eq!(
         rpc_calls(&effects),
         vec![
+            RpcCall::ReviewClear { buf: REVIEW_BUF },
             RpcCall::BufDetach { buf: REVIEW_BUF },
             RpcCall::ReleaseHidden {
                 path: "/tmp/empty.rs".to_string(),

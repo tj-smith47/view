@@ -21,7 +21,6 @@ mod watch;
 
 use ai::{on_ai_event, open_ai_trust_prompt};
 use paste::paste_into_focused_surface;
-use review::review_key;
 use supervision::{note_engine_liveness, note_supervision_choice};
 use surfaces::{
     notice_ai_disabled, open_ai_panel, open_message_history, open_picker, picker_preview_request,
@@ -318,6 +317,16 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             if feature == "notifications" && verb == "history" {
                 return open_message_history(model);
+            }
+            // The open review's own vocabulary, arriving from the
+            // buffer-local mappings `RpcCall::ReviewShow` installs on the
+            // file under review (and from `:View review <verb>` typed by
+            // hand, which is the always-available way to answer a review
+            // whose maps did not install). No trust gate: a review only
+            // exists because a proposal the user has already seen raised
+            // one, and deciding it launches nothing.
+            if feature == "review" {
+                return review::review_verb(model, &verb);
             }
             // a bare `:View` (both tokens empty) is the discoverability
             // entry point: nothing was asked for, so nothing was invoked,
@@ -1346,6 +1355,12 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                             model.ai_panel_mut().record_standing_answer(kind, answer);
                         }
                         model.dirty = true;
+                        // The question is settled, so a review that was
+                        // waiting behind it gets the keyboard it needs:
+                        // its keys are on the buffer, not here.
+                        if model.ai_panel().pending_diff.is_some() {
+                            review::take_panel_focus_off(model);
+                        }
                         return vec![Effect::Ai(AiCommand::AnswerPermission {
                             request_id: prompt.request_id,
                             outcome: PermissionOutcome::Selected {
@@ -1362,31 +1377,9 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     // swallowing `<C-c>` here would leave that contract with
                     // no key that reaches it.
                     //
-                    // A review open behind the prompt is the other thing a
-                    // key can still be meant for, and on an agent edit both
-                    // are up together. The two vocabularies no longer
-                    // overlap -- digits answer the prompt, letters answer
-                    // the review -- so a key this prompt does not answer
-                    // reaches the review rather than being swallowed by a
-                    // question that had no use for it.
-                    if model.ai_panel().pending_diff.is_none()
-                        && !reaches_past_a_panel_owner(model, &notation)
-                    {
+                    if !reaches_past_a_panel_owner(model, &notation) {
                         return Vec::new();
                     }
-                }
-                // A review owns the panel's keys while it is open.
-                // Deliberately total rather than a few keys layered over
-                // the composer: `a` cannot mean both "accept this hunk" and
-                // "type an a", and a review is a decision the user opened
-                // the panel to make. Only the ways out (`<Esc>` to
-                // un-enter, `<C-c>`, and `<C-d>` while a crash banner is
-                // up) fall through to the arm below, so every way out of
-                // the panel still works from inside a review.
-                if model.ai_panel().pending_diff.is_some()
-                    && !reaches_past_a_panel_owner(model, &notation)
-                {
-                    return review_key(model, &notation);
                 }
                 // Nothing pending: the panel's own composer keys. Every key
                 // not named below is swallowed rather than leaked to nvim --

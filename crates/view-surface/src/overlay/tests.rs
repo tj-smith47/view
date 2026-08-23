@@ -528,27 +528,24 @@ fn an_ai_panel_with_a_pending_permission_renders_its_question_and_options() {
 }
 
 /// An open review has to reach the painted frame, not only
-/// `AiPanelView`'s own fields: its summary lands in the header, its hunk
-/// rows scroll below the rule, and the scroll window follows the
-/// hunk-jump cursor rather than starting from the top -- the review's
-/// primary navigation is only primary if the selected hunk is what the
-/// window shows.
+/// `AiPanelView`'s own fields -- and it reaches it as two summary rows in
+/// the header and nothing else. The diff itself is drawn in the file by
+/// nvim, so the panel goes on painting the transcript underneath: a
+/// reader watching the agent work does not lose the conversation the
+/// moment a proposal lands.
 #[test]
-fn an_ai_panel_with_an_open_review_paints_its_hunks_and_follows_the_cursor() {
+fn an_ai_panel_with_an_open_review_summarizes_it_and_keeps_the_transcript() {
     use view_core::native::views::AiPanelView;
-    let hunk_rows: Vec<Vec<Span>> = (0..30)
-        .map(|row| vec![Span::plain(format!("hunk row {row}"))])
+    let transcript: Vec<Vec<Span>> = (0..30)
+        .map(|row| vec![Span::plain(format!("transcript row {row}"))])
         .collect();
     let kind = LayerKind::Ai(
         AiPanelView::new("AI Agent")
             .with_input("")
-            .with_rows(hunk_rows)
-            .with_review(
-                vec![vec![Span::plain(
-                    "Review src/main.rs -- hunk 3/4, 2 open".to_string(),
-                )]],
-                Some(20),
-            ),
+            .with_rows(transcript)
+            .with_review(vec![vec![Span::plain(
+                "Review src/main.rs -- hunk 3/4, 2 open".to_string(),
+            )]]),
     );
 
     let framed = rows(60, 10, &kind, BorderSet::ASCII);
@@ -559,14 +556,8 @@ fn an_ai_panel_with_an_open_review_paints_its_hunks_and_follows_the_cursor() {
         "the review summary belongs in the header: {text:?}"
     );
     assert!(
-        text.iter().any(|line| line.contains("hunk row 20")),
-        "the window must show the hunk the cursor names, not the top of \
-         the review: {text:?}"
-    );
-    assert!(
-        !text.iter().any(|line| line.contains("hunk row 0")),
-        "the window scrolled to the cursor, so the first hunk is off it: \
-         {text:?}"
+        text.iter().any(|line| line.contains("transcript row")),
+        "the transcript is not displaced by a review any more: {text:?}"
     );
 }
 
@@ -782,12 +773,9 @@ fn a_short_ai_panel_keeps_the_crash_banner_over_the_permission_and_the_review() 
     use view_core::native::views::AiPanelView;
     let panel = AiPanelView::new("AI Agent")
         .with_input("draft prompt")
-        .with_review(
-            vec![vec![Span::plain(
-                "Review src/main.rs -- hunk 1/2".to_string(),
-            )]],
-            Some(0),
-        )
+        .with_review(vec![vec![Span::plain(
+            "Review src/main.rs -- hunk 1/2".to_string(),
+        )]])
         .with_pending_permission(vec![vec![Span::plain(
             "  Allow once (allow_once)".to_string(),
         )]])

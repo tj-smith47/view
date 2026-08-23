@@ -278,9 +278,14 @@ impl AiPanelState {
     /// which every state honors -- and the paste path asks this directly. A
     /// state added to one of the two and not the other is text landing
     /// under a modal the reader is looking at.
+    ///
+    /// An open review is deliberately not one of them: its keys are
+    /// buffer-local nvim mappings on the file being reviewed, not panel
+    /// keys, so a review no longer stands between the reader and their own
+    /// composer (see [`DiffReviewState::marks`]).
     #[must_use]
     pub fn an_owner_holds_the_keys(&self) -> bool {
-        self.pending_permission.is_some() || self.pending_diff.is_some()
+        self.pending_permission.is_some()
     }
 
     /// How many transcript rows a panel `panel_height` terminal rows tall
@@ -510,38 +515,26 @@ impl AiPanelState {
     /// otherwise has no way to tell a quiet agent from a transcript that
     /// has moved on beneath them.
     ///
-    /// An open review is not bounded the same way -- its rows are a fixed
-    /// set of hunks the user scrolls through by cursor, so the window it
-    /// needs is wherever that cursor is, not the first screenful.
+    /// An open review adds its summary rows and nothing else: the diff
+    /// itself is drawn in the file, by nvim, over the real rows
+    /// ([`DiffReviewState::marks`]).
     #[must_use]
     pub fn view(&self, panel_height: usize, panel_width: usize) -> AiPanelView {
         let composer = self.composer_rows(panel_height, panel_width);
         let visible_rows = self.transcript_rows(panel_height, composer.len());
-        // An open review takes over the scrolling rows rather than
-        // appending to them: its scroll region is its own hunks and their
-        // context, never the whole transcript with a diff somewhere in it
-        // (and never the whole buffer -- see `DiffReviewState::hunk_rows`).
-        // The transcript is still in state and comes back the moment the
-        // review closes.
-        let rows = match &self.pending_diff {
-            Some(review) => review.hunk_rows(),
-            None => {
-                let (start, tail) = self.window(visible_rows);
-                if start == tail {
-                    self.transcript.rows_from(tail, visible_rows)
-                } else {
-                    // The marker spends a row of the window rather than
-                    // sitting above it: it is the last row, where a reader
-                    // looking for the newest line looks, and it lands in
-                    // the same tail the overlay keeps when the panel is
-                    // shorter than this budget.
-                    let mut rows = self
-                        .transcript
-                        .rows_from(start, visible_rows.saturating_sub(MARKER_ROWS));
-                    rows.push(vec![Span::plain(MORE_BELOW)]);
-                    rows
-                }
-            }
+        let (start, tail) = self.window(visible_rows);
+        let rows = if start == tail {
+            self.transcript.rows_from(tail, visible_rows)
+        } else {
+            // The marker spends a row of the window rather than sitting
+            // above it: it is the last row, where a reader looking for the
+            // newest line looks, and it lands in the same tail the overlay
+            // keeps when the panel is shorter than this budget.
+            let mut rows = self
+                .transcript
+                .rows_from(start, visible_rows.saturating_sub(MARKER_ROWS));
+            rows.push(vec![Span::plain(MORE_BELOW)]);
+            rows
         };
         let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
             .with_input_rows(composer)
@@ -557,10 +550,7 @@ impl AiPanelState {
                     queued.path.display()
                 ))]);
             }
-            if !self.focused {
-                rows.push(vec![Span::plain(ENTER_HINT)]);
-            }
-            view = view.with_review(rows, review.cursor_row());
+            view = view.with_review(rows);
         }
         if let Some(message) = &self.local_error {
             let hint = if self.focused {

@@ -288,6 +288,16 @@ refute() {
 send_text() { tmux send-keys -t "$SESSION" -l -- "$1"; }
 send_key() { tmux send-keys -t "$SESSION" "$1"; }
 
+# One review verb, raised the way the review's own buffer-local mappings
+# raise it: `Msg::FeatureInvoke { feature: "review", .. }`. Typed as the
+# command rather than as the mapped keys because the mappings are installed
+# on the reviewed buffer by the decoration call, and this leg drives view
+# from the pane -- the command reaches the same dispatch either way.
+review_verb() {
+    send_text ":View review $1"
+    send_key Enter
+}
+
 # One session against `agent`, which is either the literal `default` (the
 # `[ai]` table left out entirely, so the pinned adapter is provisioned the
 # way a first-run user gets it) or a command line for the `[ai] agent` key.
@@ -547,23 +557,25 @@ leg_diff_accept_and_reject() {
     # deduplicated against a review nobody looked at.
     submit 'propose'
     wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the abandoned review's keys" >/dev/null
-    send_text 'q'
+    review_verb leave
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing unanswered" >/dev/null
+    wait_for "${REVIEW_MARK}discarded the proposal" "$WAIT_SECS" \
+        "the abandoned review's own account of itself" >/dev/null
     assert_file_is 'alpha
 beta
 gamma' 'an abandoned review changed the buffer'
 
     submit 'propose'
     wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the diff review's keys" >/dev/null
-    wait_for '+BETA' "$WAIT_SECS" "the proposed hunk" >/dev/null
     pass 'a proposal abandoned unread was raised again when the agent restated it'
-    send_text 'a'
-    # The review closing on its last open hunk, not the `+BETA` row the line
-    # above already proved is on screen -- that string is what the proposal
-    # renders as either way, so waiting on it would return on its first poll
-    # whether or not the accept did anything, and would leave the write
-    # below racing the RPC that carries the accept into the buffer.
+    review_verb accept
+    # The review closing on its last open hunk, and then its own count of
+    # what it decided: the file assertion below proves the bytes, and this
+    # proves they were written by an accept rather than by anything else
+    # that could have touched the buffer.
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing on the accept" >/dev/null
+    wait_for "${REVIEW_MARK}accepted 1 and rejected 0 hunks" "$WAIT_SECS" \
+        "the accepted review's own account of itself" >/dev/null
     assert_file_is 'alpha
 BETA
 gamma' 'the accepted hunk was not written byte for byte'
@@ -571,9 +583,10 @@ gamma' 'the accepted hunk was not written byte for byte'
 
     submit 'propose2'
     wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the second diff review's keys" >/dev/null
-    wait_for '+GAMMA' "$WAIT_SECS" "the second proposed hunk" >/dev/null
-    send_text 'x'
+    review_verb reject
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing on the reject" >/dev/null
+    wait_for "${REVIEW_MARK}accepted 0 and rejected 1 hunks" "$WAIT_SECS" \
+        "the rejected review's own account of itself" >/dev/null
     assert_file_is 'alpha
 BETA
 gamma' 'a rejected hunk changed the buffer'
@@ -704,13 +717,13 @@ leg_permission_keys_and_grant() {
     wait_for "$PERMISSION_KEY_HINT" "$WAIT_SECS" "the prompt's own key hint" >/dev/null
     pass 'the prompt paints every option with the key that answers it'
 
-    # The letter that used to mean always-allow, and means accept-hunk in a
-    # review: it must answer nothing at all now.
+    # The letter that used to mean always-allow: the prompt's vocabulary is
+    # the digits it paints, so a letter must answer nothing at all now.
     send_text 'a'
     sleep "$POLL"
     wait_for "$PERMISSION_PROMPT call_101" "$WAIT_SECS" \
-        "the prompt after a review key" >/dev/null
-    pass 'a review key answers no permission prompt'
+        "the prompt after an unmapped letter" >/dev/null
+    pass 'a letter answers no permission prompt'
 
     send_text '3'
     # The outbound breadcrumb, which is what the frozen-session forensics
@@ -833,8 +846,19 @@ FOCUSED_TITLE=$(const_str "$PANEL_RS" FOCUSED_TITLE)
 # Truncated deliberately: the panel is a column beside the buffer and the
 # hint row is wider than it, so the full constant is never on screen. The
 # leading run of it still fails loudly if the keys are reworded.
-REVIEW_KEY_HINT=$(const_str "$REVIEW_RS" KEY_HINT)
+REVIEW_KEY_HINT=$(const_str "$REVIEW_RS" KEY_HINT) || exit 1
 REVIEW_KEY_HINT=${REVIEW_KEY_HINT:0:20}
+# An empty needle is `grep -F ''`, which matches every screen there is:
+# every review assertion below would pass vacuously.
+[ -n "$REVIEW_KEY_HINT" ] || {
+    printf 'FAIL: the review key hint read empty from %s\n' "$REVIEW_RS" >&2
+    exit 1
+}
+# The marker the review's own transcript lines carry. Every review ends
+# with one, and what it says is how the review ended -- which is the one
+# reading of a decision that comes from the review itself rather than from
+# the screen it happened to be drawn on.
+REVIEW_MARK=$(mark_str REVIEW_MARK) || exit 1
 DONE_MARK=$(status_mark Completed) || exit 1
 PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_RS" |
     sed -E 's/.*"(.*)/\1/')

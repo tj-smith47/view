@@ -813,10 +813,7 @@ fn ai_body(view: &AiPanelView) -> Body {
         title: view.title.clone(),
         header,
         items: view.rows.iter().cloned().map(Line::Text).collect(),
-        // Set only by an open review, whose scroll window follows the
-        // hunk-jump cursor; the transcript has no selection and scrolls
-        // from the top the way it always did.
-        selected: view.selected,
+        selected: None,
         // the crash banner, the pending permission's options and the
         // review's summary are the actionable content of this header; see
         // `Body::header_keep_tail`'s own doc for why they must outlive the

@@ -13,6 +13,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use view_core::msg::ReviewOpenTarget;
 use view_core::native::geometry;
 
 /// Which agent an `[ai]` table names: a known adapter by id, or an
@@ -38,6 +39,8 @@ pub struct AiConfig {
     agent: AgentSpec,
     panel_width: u16,
     panel_width_notice: Option<&'static str>,
+    review_open_target: ReviewOpenTarget,
+    review_open_target_notice: Option<&'static str>,
 }
 
 impl AiConfig {
@@ -53,6 +56,8 @@ impl AiConfig {
             agent: AgentSpec::Id("claude-code".to_string()),
             panel_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
             panel_width_notice: None,
+            review_open_target: ReviewOpenTarget::Current,
+            review_open_target_notice: None,
         }
     }
 
@@ -71,11 +76,15 @@ impl AiConfig {
         // unboxed `Result<_, AiConfigError>` a large-error return there
         let file: ConfigFile = toml::from_str(s).map_err(|e| AiConfigError::Toml(Box::new(e)))?;
         let (panel_width, panel_width_notice) = resolve_panel_width(file.ai.panel_width);
+        let (review_open_target, review_open_target_notice) =
+            resolve_open_target(file.ai.review.open_target);
         Ok(Self {
             enabled: file.ai.enabled,
             agent: resolve_agent(file.ai.agent)?,
             panel_width,
             panel_width_notice,
+            review_open_target,
+            review_open_target_notice,
         })
     }
 
@@ -145,6 +154,22 @@ impl AiConfig {
     pub fn panel_width_notice(&self) -> Option<&'static str> {
         self.panel_width_notice
     }
+
+    /// Where a review shows a file no window already has open. See
+    /// [`ReviewOpenTarget`] for why the default is the current window.
+    #[must_use]
+    pub fn review_open_target(&self) -> ReviewOpenTarget {
+        self.review_open_target
+    }
+
+    /// What an `[ai.review] open_target` naming neither target owes the
+    /// user, or `None` when the key was absent or usable -- a notice
+    /// rather than a parse error, for the reason [`resolve_panel_width`]
+    /// states.
+    #[must_use]
+    pub fn review_open_target_notice(&self) -> Option<&'static str> {
+        self.review_open_target_notice
+    }
 }
 
 impl Default for AiConfig {
@@ -176,6 +201,23 @@ fn resolve_panel_width(value: Option<toml::Value>) -> (u16, Option<&'static str>
         None => (geometry::DEFAULT_PANEL_WIDTH_PCT, None),
         Some(toml::Value::Integer(pct)) => (geometry::clamp_panel_width(pct), None),
         Some(_) => (geometry::DEFAULT_PANEL_WIDTH_PCT, Some(PANEL_WIDTH_NOTICE)),
+    }
+}
+
+/// What an `open_target` naming neither target is answered with.
+const OPEN_TARGET_NOTICE: &str =
+    "view: [ai.review] open_target must be \"current\" or \"split\" -- \
+     a review opens an unopened file in the current window this run";
+
+/// Where a review opens a file no window has, and the notice an
+/// unrecognized value owes the user. Never fails the table, for the reason
+/// [`resolve_panel_width`] states.
+fn resolve_open_target(value: Option<toml::Value>) -> (ReviewOpenTarget, Option<&'static str>) {
+    match value.as_ref().and_then(toml::Value::as_str) {
+        None if value.is_none() => (ReviewOpenTarget::Current, None),
+        Some("current") => (ReviewOpenTarget::Current, None),
+        Some("split") => (ReviewOpenTarget::Split, None),
+        _ => (ReviewOpenTarget::Current, Some(OPEN_TARGET_NOTICE)),
     }
 }
 
@@ -223,6 +265,20 @@ struct ConfigFile {
     ai: WireAiTable,
 }
 
+/// The `[ai.review]` sub-table's wire shape: how a review presents itself.
+/// Its own table rather than a flat `review_open_target` key, so the
+/// review's later settings have a place to land that is already the shape
+/// a reader expects.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireReviewTable {
+    /// Left as whatever was written, for the reason
+    /// [`resolve_panel_width`] gives: a review setting must never be the
+    /// thing that turns the agent off for a run.
+    #[serde(default)]
+    open_target: Option<toml::Value>,
+}
+
 /// The `[ai]` table's wire shape. Unknown keys are refused rather than
 /// ignored, for the reason `[native]`'s key check states: a misspelled
 /// switch that parses as "leave the default alone" reads to a user exactly
@@ -239,6 +295,8 @@ struct WireAiTable {
     /// this table.
     #[serde(default)]
     panel_width: Option<toml::Value>,
+    #[serde(default)]
+    review: WireReviewTable,
 }
 
 impl Default for WireAiTable {
@@ -247,6 +305,7 @@ impl Default for WireAiTable {
             enabled: wire_enabled_default(),
             agent: wire_agent_default(),
             panel_width: None,
+            review: WireReviewTable::default(),
         }
     }
 }

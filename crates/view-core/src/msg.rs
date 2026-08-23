@@ -1354,6 +1354,60 @@ pub struct TextEdit {
     pub lines: Vec<String>,
 }
 
+/// One open hunk's whole presentation inside the reviewed buffer, as
+/// [`RpcCall::ReviewShow`] carries it: which rows the proposal would
+/// replace, what it would put there, and whether this is the hunk the
+/// review's own cursor is on.
+///
+/// Rows, not styled spans: the decoration is drawn by nvim's extmark API
+/// against nvim's own diff highlight groups, so a theme the user already
+/// has works on it without view mapping a palette onto someone else's
+/// colors. `stale` and `current` are the two facts that decide those
+/// groups, resolved engine-side rather than named here, so the group names
+/// live in exactly one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HunkMark {
+    /// First 0-indexed buffer row the proposal replaces.
+    pub row: u32,
+    /// One past the last row it replaces; equal to `row` for a pure
+    /// insertion, which highlights nothing and only adds virtual lines.
+    pub end_row: u32,
+    /// The row the added lines hang off: the last replaced row, or `row`
+    /// itself for a pure insertion (where they are drawn above it).
+    pub anchor: u32,
+    /// The lines the proposal would put there, verbatim and unprefixed --
+    /// the `+` gutter is the renderer's, not part of the text.
+    pub added: Vec<String>,
+    /// Whether the buffer moved under this hunk since it was computed, so
+    /// it can no longer be applied as it stands.
+    pub stale: bool,
+    /// Whether the review's cursor is on this hunk.
+    pub current: bool,
+    /// The line drawn above the current hunk's added lines: which hunk of
+    /// how many this is, and the keys that decide it (or the reason the
+    /// review can no longer be acted on). `None` on every other hunk --
+    /// one copy on screen, at the decision the user is making.
+    pub header: Option<String>,
+}
+
+/// Where a proposal's file is shown when no window already has it open.
+///
+/// Resolved from `[ai.review] open_target`, defaulting to
+/// [`Self::Current`]: "show me this file" means the current window
+/// everywhere else in view (the picker and the tree both do this), and a
+/// review that rearranged the user's layout would be the one surface that
+/// does not. [`Self::Split`] is there because review is the one case with
+/// a real argument for the other answer -- you are being asked about
+/// someone else's change to a file you may not have been reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewOpenTarget {
+    /// Show the file in the window the user is in.
+    #[default]
+    Current,
+    /// Split, leaving whatever the user was reading beside it.
+    Split,
+}
+
 /// A closed vocabulary of RPC calls instead of `(method, Vec<Value>)`: core
 /// stays rmpv-free and an unencodable call is unrepresentable. Runner-up
 /// (stringly method + opaque params) rejected: re-opens the door to core
@@ -1771,6 +1825,46 @@ pub enum RpcCall {
     /// states -- it clears the connection's generation map by this exact
     /// key, which only ever holds real handles.
     BufDetach {
+        buf: BufferHandle,
+    },
+    /// Draws the whole open review inside `buf`: every open hunk's
+    /// deletions highlighted where they really are, its proposed lines as
+    /// virtual lines beside them, and the review's buffer-local keys.
+    ///
+    /// Total and idempotent, never incremental: the call clears the
+    /// review's extmark namespace before it sets anything, so what is on
+    /// screen is a function of the payload alone and view's state and
+    /// nvim's decoration cannot drift apart. That is also why there is no
+    /// "update one hunk" call -- a partial one would have to be reconciled
+    /// against whatever the last full one left behind.
+    ///
+    /// `focus` is the difference between the review coming to the user and
+    /// the review repainting under them: true on open, on a hunk jump and
+    /// on a promoted proposal, where `cursor_row` is where the cursor
+    /// lands; false on every repaint a status change causes, which must
+    /// never yank the cursor of someone who has scrolled away.
+    ///
+    /// `open_target` decides only the case where no window shows `buf` at
+    /// all; a file the user already has open is always shown in the window
+    /// that already has it.
+    ///
+    /// Fire-and-forget: nothing here answers a reply, and a decoration
+    /// that fails to land is a repaint away from being correct again. The
+    /// marks themselves are advisory -- nvim owns the text, and this call
+    /// writes none of it.
+    ReviewShow {
+        buf: BufferHandle,
+        marks: Vec<HunkMark>,
+        cursor_row: u32,
+        focus: bool,
+        open_target: ReviewOpenTarget,
+    },
+    /// Takes the review's decoration and its buffer-local keys back off
+    /// `buf`, whichever way the review ended. Paired with
+    /// [`RpcCall::ReviewShow`] exactly as [`RpcCall::BufDetach`] is paired
+    /// with [`RpcCall::BufAttach`]: a buffer left decorated after its
+    /// review is gone would offer keys that answer nothing.
+    ReviewClear {
         buf: BufferHandle,
     },
     /// Reads `buf`'s text for an agent's `fs/read_text_file`, answering
