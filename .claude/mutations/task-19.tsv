@@ -6,3 +6,4 @@ crates/view-core/src/update/mod.rs	                exit_code: 128 + signal,	    
 crates/view/src/recovery.rs	                state.write_lost = true;	                state.connection_lost = true;	-p view --bin view a_failed_write_to_a_live_engine
 crates/view/src/runtime.rs	    let stalled = write.observe(handle) || write_lost;	    let stalled = write.observe(handle) || false;	-p view --bin view a_failed_write_to_a_live_child
 crates/view-engine/src/process.rs	        self.child.kill()?;	        let _ = self.handle.command("qa!");	-p view-engine --test shutdown a_restart_teardown_kills_the_child
+crates/view-engine/src/process.rs	            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {	            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {	-p view-engine --lib busy_text

@@ -849,7 +849,7 @@ impl Engine {
             command.stdin(Stdio::from(theirs));
             ours
         };
-        let mut guard = ChildGuard(Some(command.spawn()?));
+        let mut guard = ChildGuard(Some(spawn_past_busy_text(&mut command)?));
         // the child's own ends are the child's from here on. A `Command`
         // holds any handle it was configured with until it is dropped, so on
         // Windows this is what closes the parent's copy of the child's stdin
@@ -2068,6 +2068,36 @@ fn relay_stdin_fd(source: std::os::fd::RawFd) -> std::io::Result<()> {
 /// mid-session), sending `qa!` fails and this falls straight through to the
 /// poll loop, which sees the child has already exited on the very first
 /// `try_wait`.
+/// Spawns `command`, waiting out a program another process is still
+/// writing.
+///
+/// `ETXTBSY` says nothing about the program: it says some other process
+/// holds a write descriptor on that file across its own `fork`, and the
+/// kernel refuses the exec until every such descriptor is closed. The window
+/// belongs to that process's startup, not to anything the caller did wrong,
+/// and it closes on its own -- so failing the spawn reports a permanent
+/// error for a program that runs perfectly a millisecond later. The two
+/// places this actually bites are an editor started moments after an
+/// installer wrote its binary, and a test suite whose parallel threads
+/// write executables while their siblings fork.
+///
+/// Bounded rather than patient: a file genuinely held open for writing must
+/// still surface as an error, and no caller may be held on a spawn that
+/// never returns.
+fn spawn_past_busy_text(command: &mut Command) -> std::io::Result<Child> {
+    const ATTEMPTS: u32 = 6;
+    const BACKOFF: Duration = Duration::from_millis(10);
+    for attempt in 1..ATTEMPTS {
+        match command.spawn() {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(BACKOFF * attempt);
+            }
+            outcome => return outcome,
+        }
+    }
+    command.spawn()
+}
+
 /// Polls `child` until it has exited or `timeout` elapses; `None` means it
 /// was still running when the budget ran out.
 ///
@@ -2159,6 +2189,56 @@ fn decode_api_info(v: Value) -> Result<ApiInfo, EngineError> {
 fn map_get(v: &Value, key: &str) -> Option<Value> {
     let Value::Map(pairs) = v else { return None };
     crate::wire::map_find(pairs, key).cloned()
+}
+
+#[cfg(all(test, unix))]
+mod busy_text_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// Writes a runnable no-op program and hands back a write descriptor
+    /// still open on it, which is the whole `ETXTBSY` condition: the kernel
+    /// refuses to exec a file anyone can still write.
+    fn busy_program(dir: &std::path::Path) -> (std::path::PathBuf, std::fs::File) {
+        let program = dir.join("noop");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&program)
+            .unwrap();
+        (program, writer)
+    }
+
+    #[test]
+    fn a_program_someone_is_still_writing_is_refused_outright_by_a_plain_spawn() {
+        let dir = view_test_support::ScratchDir::new("busy-text-control").unwrap();
+        let (program, _writer) = busy_program(&dir);
+
+        let err = Command::new(&program).spawn().expect_err(
+            "the premise of the retry: an open write descriptor is what makes an exec fail",
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::ExecutableFileBusy);
+    }
+
+    #[test]
+    fn a_spawn_waits_out_the_writer_rather_than_reporting_a_runnable_program_broken() {
+        let dir = view_test_support::ScratchDir::new("busy-text-retry").unwrap();
+        let (program, writer) = busy_program(&dir);
+
+        // released from another thread while the spawn is in its backoff,
+        // which is the shape of the real race: the descriptor belongs to a
+        // process this one cannot wait on
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            drop(writer);
+        });
+
+        let mut child = spawn_past_busy_text(&mut Command::new(&program))
+            .expect("a program whose writer let go is a program that runs");
+        assert!(child.wait().unwrap().success());
+    }
 }
 
 #[cfg(test)]
