@@ -1476,8 +1476,14 @@ fn clipboard_set_produces_a_write_and_an_osc52_copy_effect_from_one_arm() {
 /// `g:clipboard` names nvim's own OSC 52 provider yanks through nvim, not
 /// through view's provider, and nvim hands the finished escape over as a
 /// `ui_send`. Nothing else in the suite fails if this arm drops it.
+///
+/// The store beside it is what makes the *next* paste work: view's own
+/// provider stood down for this user, so nothing else in the session ever
+/// puts this copy where a paste can find it (see
+/// `Effect::ClipboardStore`). Deleting it leaves this test's first
+/// assertion passing and `"+p` answering empty.
 #[test]
-fn a_ui_send_clipboard_write_is_forwarded_to_the_terminal_verbatim() {
+fn a_ui_send_clipboard_write_is_forwarded_verbatim_and_kept_for_the_next_paste() {
     let mut m = model();
     const ESCAPE: &str = "\x1b]52;c;aGVsbG8=\x1b\\";
     let effects = update(
@@ -1487,9 +1493,39 @@ fn a_ui_send_clipboard_write_is_forwarded_to_the_terminal_verbatim() {
         }]),
     );
     assert!(
-        matches!(&effects[..], [Effect::TermWrite { bytes }] if bytes == ESCAPE.as_bytes()),
-        "expected the escape forwarded unaltered, got {effects:?}"
+        matches!(
+            &effects[..],
+            [
+                Effect::TermWrite { bytes },
+                Effect::ClipboardStore { register: '+', text },
+            ] if bytes == ESCAPE.as_bytes() && text == "hello"
+        ),
+        "expected the escape forwarded unaltered and its text kept, got {effects:?}"
     );
+}
+
+/// A `"+p` through the user's own provider: nvim sends the read query and
+/// then sits in `vim.wait` for a `TermResponse`. The query must become an
+/// answerable effect -- dropping it (what this arm did before) costs a
+/// one-second stall and then a hit-enter prompt that wedges a narrow
+/// window -- and it must never reach the terminal, because view's stdin is
+/// a key decoder that would type the terminal's answer into the buffer.
+#[test]
+fn a_ui_send_clipboard_read_query_is_answered_locally_and_never_written_out() {
+    let mut m = model();
+    for (content, expected) in [("\x1b]52;c;?\x1b\\", '+'), ("\x1b]52;p;?\x07", '*')] {
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::UiSend {
+                content: content.to_string(),
+            }]),
+        );
+        assert!(
+            matches!(&effects[..], [Effect::ClipboardQuery { register }] if *register == expected),
+            "{content:?} must become a clipboard query for {expected:?} and nothing else, \
+             got {effects:?}"
+        );
+    }
 }
 
 /// nvim's own startup probe concatenates unrelated sequences into one
@@ -1509,24 +1545,6 @@ fn a_ui_send_terminal_query_is_never_written_out() {
     assert!(
         effects.is_empty(),
         "expected no terminal write, got {effects:?}"
-    );
-}
-
-/// The read half of OSC 52 is a question, not a write: forwarding it makes
-/// the terminal answer onto view's stdin. Sharing the `]52;` prefix with the
-/// write above is exactly why the payload, not the prefix, decides.
-#[test]
-fn a_ui_send_clipboard_read_query_is_not_forwarded() {
-    let mut m = model();
-    let effects = update(
-        &mut m,
-        Msg::Redraw(vec![UiEvent::UiSend {
-            content: "\x1b]52;c;?\x1b\\".to_string(),
-        }]),
-    );
-    assert!(
-        effects.is_empty(),
-        "a read query must reach neither the terminal nor the engine, got {effects:?}"
     );
 }
 
@@ -1590,8 +1608,11 @@ fn every_clipboard_write_in_one_payload_is_forwarded_whatever_precedes_it() {
         }]),
     );
     assert!(
-        matches!(&effects[..], [Effect::TermWrite { bytes }]
-            if bytes == b"\x1b]52;c;aGk=\x1b\\"),
+        matches!(&effects[..], [
+            Effect::ClipboardQuery { register: '+' },
+            Effect::TermWrite { bytes },
+            Effect::ClipboardStore { .. },
+        ] if bytes == b"\x1b]52;c;aGk=\x1b\\"),
         "the write behind the query must still be found, got {effects:?}"
     );
 
@@ -1605,9 +1626,56 @@ fn every_clipboard_write_in_one_payload_is_forwarded_whatever_precedes_it() {
     assert!(
         matches!(&effects[..], [
             Effect::TermWrite { bytes: first },
+            Effect::ClipboardStore { register: '+', text: first_text },
             Effect::TermWrite { bytes: second },
-        ] if first == b"\x1b]52;c;aGk=\x1b\\" && second == b"\x1b]52;p;Ynll\x07"),
-        "both writes must reach the terminal, got {effects:?}"
+            Effect::ClipboardStore { register: '*', text: second_text },
+        ] if first == b"\x1b]52;c;aGk=\x1b\\" && second == b"\x1b]52;p;Ynll\x07"
+            && first_text == "hi" && second_text == "bye"),
+        "both writes must reach the terminal, each with its own register's copy, \
+         got {effects:?}"
+    );
+}
+
+/// The two shapes that share the `]52;` prefix with a query but are not
+/// one. Nothing longer than a bare `?` is a read query -- `? ` is what
+/// `osc52_write_at`'s old payload-equality check let slip -- and neither is
+/// a write, so both must still be dropped whole rather than answered.
+#[test]
+fn only_a_bare_question_mark_payload_is_a_read_query() {
+    let mut m = model();
+    for content in ["\x1b]52;c;? \x1b\\", "\x1b]52;c;?\x1b[5n\x07"] {
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::UiSend {
+                content: content.to_string(),
+            }]),
+        );
+        assert!(
+            effects.is_empty(),
+            "{content:?} is neither a query nor a write and must be dropped, got {effects:?}"
+        );
+    }
+}
+
+/// The terminal still gets exactly what nvim formed even when view cannot
+/// make sense of the payload: a copy of bytes that are not text has nowhere
+/// to go in a register model, but the remote clipboard the escape targets
+/// has no such restriction, and mangling or withholding the escape over
+/// view's own limitation would be the worse trade.
+#[test]
+fn a_clipboard_write_whose_payload_is_not_text_still_reaches_the_terminal() {
+    let mut m = model();
+    // base64 for 0xff 0xfe 0xfd, which is not valid UTF-8
+    const ESCAPE: &str = "\x1b]52;c;//79\x1b\\";
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::UiSend {
+            content: ESCAPE.to_string(),
+        }]),
+    );
+    assert!(
+        matches!(&effects[..], [Effect::TermWrite { bytes }] if bytes == ESCAPE.as_bytes()),
+        "expected the escape alone, with no store, got {effects:?}"
     );
 }
 

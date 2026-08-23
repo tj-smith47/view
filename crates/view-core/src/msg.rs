@@ -1013,11 +1013,54 @@ pub enum Effect {
     /// `ui_send` payload only when it is a self-contained OSC 52 clipboard
     /// *write*, which is fire-and-forget and provokes no reply. Everything
     /// else a plugin may send through `nvim_ui_send` -- a DA1, an XTGETTCAP
-    /// request, an OSC 52 read query -- is a question, and the answer would
+    /// request, a cursor-shape query -- is a question, and the answer would
     /// land on view's stdin where the key reader would surface it as typed
-    /// text, so it is dropped rather than written.
+    /// text, so it is dropped rather than written. The one question view
+    /// does honour, the OSC 52 read query, is honoured without asking the
+    /// terminal anything (see [`ClipboardQuery`](Self::ClipboardQuery)).
     TermWrite {
         bytes: Vec<u8>,
+    },
+    /// Mirrors into view's own clipboard state a copy nvim's OSC 52
+    /// provider has already performed, the second half of the same
+    /// `ui_send` payload [`TermWrite`](Self::TermWrite) carries out.
+    ///
+    /// Tokenless, for the same reason `TermWrite` is: nvim is not blocked
+    /// on this, it did the copy itself. Without it the clipboard worker's
+    /// shadow register stays empty for the whole session -- view's own
+    /// provider stands down precisely when a user configures one, so
+    /// [`ClipboardWrite`](Self::ClipboardWrite) never runs -- and the
+    /// [`ClipboardQuery`](Self::ClipboardQuery) answering that user's next
+    /// `"+p` would report nothing. Carries text rather than lines and a
+    /// regtype because the escape it was decoded from carries neither: the
+    /// trailing newline in the text is the whole linewise signal (see
+    /// [`RegisterType`]), and it survives untouched.
+    ClipboardStore {
+        register: char,
+        text: String,
+    },
+    /// Answers the OSC 52 read query nvim's own provider issues for a
+    /// `"+p`, from view's clipboard rather than from the terminal.
+    ///
+    /// The provider sends `OSC 52 ; {selection} ; ?` through `nvim_ui_send`
+    /// and then sits in `vim.wait` for a `TermResponse`. Forwarding the
+    /// query to the real terminal is not an option -- view reads its stdin
+    /// through a key decoder, so the terminal's answer would be typed into
+    /// the buffer (see `update::ui_event`'s forwarding policy) -- but the
+    /// answer does not have to come from the terminal: the clipboard worker
+    /// already holds one, and `nvim_ui_term_event` is the documented way for
+    /// an external UI to raise `TermResponse` itself.
+    ///
+    /// Tokenless: nvim is spinning in `vim.wait`, not blocked on an
+    /// `rpcrequest`, so there is no msgid to answer. The obligation is
+    /// stricter than a reply token's all the same, and it is the reason
+    /// every path here answers: silence costs the user a one-second stall,
+    /// then a hit-enter prompt that wedges the editor on a window under 100
+    /// columns until a key is pressed, then nine seconds more. Nothing to
+    /// report answers an empty payload instead, which the provider's own
+    /// capture accepts and returns from at once.
+    ClipboardQuery {
+        register: char,
     },
     Quit {
         exit_code: i32,

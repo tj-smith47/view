@@ -1692,6 +1692,13 @@ pub const UI_EXT_OPTIONS: &[&str] = &[
 /// keystroke.
 const STDOUT_TTY_OPTION: &str = "stdout_tty";
 
+/// The one `nvim_ui_term_event` event name view sends (`:help
+/// nvim_ui_term_event`): a DA1, OSC, DCS or APC response the host terminal
+/// produced. Its payload is the received sequence, and delivering it sets
+/// `v:termresponse` and fires `TermResponse` (see
+/// [`EngineHandle::ui_term_event`]).
+const TERM_RESPONSE_EVENT: &str = "termresponse";
+
 /// The `nvim_ui_attach` option map both attach methods send, so neither can
 /// drift from the other's capability set.
 fn attach_options() -> Vec<(Value, Value)> {
@@ -2105,6 +2112,34 @@ impl EngineHandle {
         self.notify(
             "nvim_ui_set_option",
             vec![Value::from(STDOUT_TTY_OPTION), Value::from(true)],
+        )
+    }
+
+    /// Hands nvim a terminal response sequence as if the host terminal had
+    /// sent it, setting `v:termresponse` and firing `TermResponse`
+    /// (`nvim_ui_term_event`, `:help nvim_ui_term_event`, since 0.10).
+    ///
+    /// The documented way for an external UI to do what nvim's own TUI does
+    /// when it parses an OSC/DCS/APC reply off the terminal itself, and the
+    /// only channel view has for it. What rides here is view's answer to the
+    /// OSC 52 read query nvim's own clipboard provider sends for a `"+p`
+    /// (see [`view_core::msg::Effect::ClipboardQuery`]) -- an answer view
+    /// forms from its own clipboard, never one read off a terminal.
+    ///
+    /// A notification, not a request, for the same reason
+    /// [`claim_stdout_tty`](Self::claim_stdout_tty) is one, and verified
+    /// against the pinned engine: nvim processes it from inside the
+    /// `vim.wait` the provider is already sitting in, so the wait ends
+    /// without anything here reading a result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn ui_term_event(&self, sequence: &str) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_ui_term_event",
+            vec![Value::from(TERM_RESPONSE_EVENT), Value::from(sequence)],
         )
     }
 
@@ -3450,6 +3485,27 @@ mod tests {
         assert!(
             !REGISTER_BRIDGE_CHUNK.contains('7'),
             "the chunk must be constant: nothing about the caller may appear in its source"
+        );
+    }
+
+    /// The shape a `"+p` through a user's own OSC 52 provider is unblocked
+    /// by. Three things are load-bearing and none of them is checked
+    /// anywhere else: the event name (`termresponse` is the only one that
+    /// fires `TermResponse`), the sequence crossing as the second argument
+    /// verbatim (nvim's provider matches the escape with a Lua pattern, so a
+    /// re-encoded one would not capture), and its being a notification --
+    /// nvim is inside `vim.wait` when this arrives, and a request there
+    /// would park the sender on an engine that is not reading replies.
+    #[test]
+    fn ui_term_event_notifies_a_termresponse_carrying_the_sequence_verbatim() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        const ANSWER: &str = "\x1b]52;c;aGVsbG8=\x1b\\";
+        h.ui_term_event(ANSWER).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_ui_term_event");
+        assert_eq!(
+            params,
+            vec![Value::from("termresponse"), Value::from(ANSWER)]
         );
     }
 

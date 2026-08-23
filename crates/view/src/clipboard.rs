@@ -5,19 +5,25 @@
 //!
 //! # The remote-paste contract
 //!
-//! There is no OSC52 *read* path here, and that is a stated limitation, not
-//! an oversight: OSC52 paste-back requires the terminal to answer a query
-//! escape sequence, which most terminal emulators refuse by default for
-//! security reasons (an arbitrary program reading the system clipboard
-//! without a user gesture), so it is not a mechanism this worker can lean
-//! on. Instead, every successful [`ClipboardJobKind::Write`] updates an
-//! in-memory shadow register alongside the real system-clipboard write, and
-//! a [`ClipboardJobKind::Read`] falls back to that shadow whenever
-//! `arboard` itself cannot reach a clipboard -- which is exactly the
-//! situation an SSH session with no forwarded display is in. That matches
-//! the behavior every remote nvim setup already has: `"+p` after `"+yy`
-//! works across the same session, and reading a value copied on the far
-//! end (something no local backend can do either) simply is not promised.
+//! Nothing here ever asks a terminal what is on its clipboard. OSC 52
+//! paste-back would require the terminal to answer a query escape, which
+//! most emulators refuse by default for the obvious security reason (an
+//! arbitrary program reading the system clipboard without a user gesture),
+//! so it is not a mechanism this worker can lean on. Instead, every copy --
+//! [`ClipboardJobKind::Write`] through view's own provider, or
+//! [`ClipboardJobKind::Store`] mirroring one nvim's provider performed --
+//! updates an in-memory shadow register alongside the real system-clipboard
+//! write, and a read falls back to that shadow whenever `arboard` itself
+//! cannot reach a clipboard, which is exactly the situation an SSH session
+//! with no forwarded display is in. That matches the behavior every remote
+//! nvim setup already has: `"+p` after `"+yy` works across the same
+//! session, and reading a value copied on the far end (something no local
+//! backend can do either) simply is not promised.
+//!
+//! Both providers reach the same state, which is the point of the `Store`
+//! and `Query` pair: a user whose own `g:clipboard` names nvim's OSC 52
+//! provider gets the identical paste semantics as one who left the slot for
+//! view, rather than a second set that depends on which provider won.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -29,39 +35,62 @@ use view_native::clipboard::{lines_to_text, text_to_lines};
 
 use crate::engine_ops::EngineOps;
 
-/// One clipboard request the loop has handed off, carrying the token its
-/// reply must answer (see `Effect::ClipboardRead`/`Effect::ClipboardWrite`'s
-/// docs for why the worker, not the loop, owns that obligation).
+/// One clipboard request the loop has handed off. The obligation each kind
+/// carries rides inside it: the two that answer a blocked nvim request carry
+/// the token they must answer (see
+/// `Effect::ClipboardRead`/`Effect::ClipboardWrite`'s docs for why the
+/// worker, not the loop, owns that obligation), and the two that serve
+/// nvim's own OSC 52 provider carry none, because nothing on the wire is
+/// blocked on them.
 pub struct ClipboardJob {
-    pub token: ReplyToken,
-    /// Which engine this job's token belongs to
+    /// Which engine this job belongs to
     /// ([`ReplyRoute::epoch`]). A `ReplyToken` is a bare msgid, and a fresh
     /// nvim starts its own msgids low again, so a job still in flight when
     /// the engine is replaced holds a number that names a live request on
     /// the replacement -- an unrelated one. Stamped by the producer, not
-    /// read by the worker at reply time, because the worker cannot tell a
+    /// read by the worker at answer time, because the worker cannot tell a
     /// job queued before the swap from one queued after it.
     pub epoch: u64,
     pub kind: ClipboardJobKind,
 }
 
-/// The two operations a `g:clipboard` provider call can ask this worker
-/// for. `register` is carried on both rather than assumed: `'+'` and `'*'`
-/// share one backend (see `Effect::ClipboardRead`'s doc for why), but the
-/// shadow fallback keeps them as separate entries, so a design that later
-/// gave them distinct backends would not have to replumb this job shape.
-/// `Write` carries the copy's [`RegisterType`] alongside its lines: the
-/// system clipboard has no field of its own for it, so it must ride here
-/// to reach [`lines_to_text`]'s trailing-newline convention (see
-/// `view_native::clipboard`'s module doc).
+/// What this worker can be asked for. `register` is carried on every kind
+/// rather than assumed: `'+'` and `'*'` share one backend (see
+/// `Effect::ClipboardRead`'s doc for why), but the shadow fallback keeps
+/// them as separate entries, so a design that later gave them distinct
+/// backends would not have to replumb this job shape.
+///
+/// The two halves differ in who is waiting. [`Read`](Self::Read) and
+/// [`Write`](Self::Write) answer a `g:clipboard` provider call view itself
+/// registered, so each carries the [`ReplyToken`] of the nvim request
+/// blocked on it -- inside the variant rather than beside it, so a kind
+/// with nobody to answer cannot be handed one, and a kind that owes an
+/// answer cannot be built without it. [`Store`](Self::Store) and
+/// [`Query`](Self::Query) serve nvim's *own* OSC 52 provider, which blocks
+/// on no request at all (see `Effect::ClipboardStore` and
+/// `Effect::ClipboardQuery`), and carry text rather than lines because an
+/// OSC 52 escape carries no regtype field to split out.
 pub enum ClipboardJobKind {
     Read {
+        token: ReplyToken,
         register: char,
     },
+    /// `Write` carries the copy's [`RegisterType`] alongside its lines: the
+    /// system clipboard has no field of its own for it, so it must ride
+    /// here to reach [`lines_to_text`]'s trailing-newline convention (see
+    /// `view_native::clipboard`'s module doc).
     Write {
+        token: ReplyToken,
         register: char,
         lines: Vec<String>,
         regtype: RegisterType,
+    },
+    Store {
+        register: char,
+        text: String,
+    },
+    Query {
+        register: char,
     },
 }
 
@@ -201,6 +230,87 @@ impl<E: EngineOps> ReplyRoute<E> {
             Err(_) => Err(EngineError::Closed),
         }
     }
+
+    /// Delivers `sequence` to the engine this route names as a terminal
+    /// response, if `epoch` still names that engine.
+    ///
+    /// Epoch-checked for a milder version of [`reply`](Self::reply)'s
+    /// reason: a `TermResponse` is broadcast to whatever autocommands the
+    /// engine has, so an answer arriving at the *replacement* engine would
+    /// hand it a clipboard reply nothing there ever asked for. The paste
+    /// that did ask died with its connection.
+    fn ui_term_event(&self, epoch: u64, sequence: &str) -> Result<(), EngineError> {
+        match self.ops.lock() {
+            Ok(ops) => {
+                if epoch != self.epoch() {
+                    crate::vlog::log_with("clipboard", || {
+                        format!(
+                            "dropped a term event from engine epoch {epoch} (now {})",
+                            self.epoch()
+                        )
+                    });
+                    return Ok(());
+                }
+                ops.ui_term_event(sequence)
+            }
+            Err(_) => Err(EngineError::Closed),
+        }
+    }
+}
+
+/// Queues `kind` on the worker's channel, or -- when no worker is wired
+/// (every bare test `Executor`) or its thread is already gone -- discharges
+/// the obligation the job carries inline, on the loop thread.
+///
+/// The fallbacks are the whole reason this is one function rather than four
+/// effect arms. Each is the answer that costs the caller least while still
+/// being an answer:
+///
+/// - [`Read`](ClipboardJobKind::Read) replies charwise-empty, what an
+///   unreachable clipboard reads as, because the token must be answered
+///   exactly once whatever happens to the worker;
+/// - [`Write`](ClipboardJobKind::Write) replies `Nil`, for the same
+///   exactly-once reason;
+/// - [`Query`](ClipboardJobKind::Query) sends the empty OSC 52 payload,
+///   because nvim is sitting in `vim.wait` for it and silence there costs a
+///   one-second stall and then a hit-enter prompt that wedges a narrow
+///   window (see `Effect::ClipboardQuery`);
+/// - [`Store`](ClipboardJobKind::Store) alone degrades silently: nvim
+///   already performed that copy and nothing is waiting on the mirror.
+pub(crate) fn dispatch<E: EngineOps>(
+    jobs: Option<&mpsc::Sender<ClipboardJob>>,
+    ops: &E,
+    epoch: u64,
+    kind: ClipboardJobKind,
+) {
+    let undelivered = match jobs {
+        Some(tx) => tx
+            .send(ClipboardJob { epoch, kind })
+            .err()
+            .map(|err| err.0.kind),
+        None => Some(kind),
+    };
+    let Some(kind) = undelivered else {
+        return;
+    };
+    match kind {
+        ClipboardJobKind::Read { token, .. } => {
+            let _ = ops.reply(
+                token,
+                ReplyValue::ClipboardLines {
+                    lines: Vec::new(),
+                    regtype: RegisterType::Charwise,
+                },
+            );
+        }
+        ClipboardJobKind::Write { token, .. } => {
+            let _ = ops.reply(token, ReplyValue::Nil);
+        }
+        ClipboardJobKind::Query { register } => {
+            let _ = ops.ui_term_event(&view_core::osc52::clipboard_escape(register, ""));
+        }
+        ClipboardJobKind::Store { .. } => {}
+    }
 }
 
 /// Spawns the clipboard worker and returns its handle; the caller (`run`'s
@@ -250,7 +360,7 @@ fn run<E: EngineOps, C: ClipboardBackend>(
     let mut clip: Option<C> = connect();
     while let Ok(job) = jobs.recv() {
         match job.kind {
-            ClipboardJobKind::Read { register } => {
+            ClipboardJobKind::Read { token, register } => {
                 let (lines, regtype) = read_lines(&mut clip, &connect, register, &shadow);
                 // an EngineError here means the engine connection is
                 // already gone (the writer thread exited), and the token
@@ -261,22 +371,56 @@ fn run<E: EngineOps, C: ClipboardBackend>(
                 // connection is down, not this reply
                 let _ = route.reply(
                     job.epoch,
-                    job.token,
+                    token,
                     ReplyValue::ClipboardLines { lines, regtype },
                 );
             }
             ClipboardJobKind::Write {
+                token,
                 register,
                 lines,
                 regtype,
             } => {
-                let text = lines_to_text(&lines, regtype);
-                write_system(&mut clip, &connect, &text);
-                shadow.insert(register, text);
-                let _ = route.reply(job.epoch, job.token, ReplyValue::Nil);
+                store(
+                    &mut clip,
+                    &connect,
+                    &mut shadow,
+                    register,
+                    lines_to_text(&lines, regtype),
+                );
+                let _ = route.reply(job.epoch, token, ReplyValue::Nil);
+            }
+            ClipboardJobKind::Store { register, text } => {
+                store(&mut clip, &connect, &mut shadow, register, text);
+            }
+            ClipboardJobKind::Query { register } => {
+                // answered on every path, including both failures
+                // `read_text` folds into an empty string: nvim's provider
+                // is inside `vim.wait` and silence there is a ten-second
+                // stall, while an empty payload is a paste of nothing
+                let text = read_text(&mut clip, &connect, register, &shadow);
+                let _ = route.ui_term_event(
+                    job.epoch,
+                    &view_core::osc52::clipboard_escape(register, &text),
+                );
             }
         }
     }
+}
+
+/// Puts `text` on the system clipboard and in `shadow`'s entry for
+/// `register`, the pair every copy leaves behind whichever provider
+/// performed it -- so a paste answers the same text back whether the host
+/// has a reachable display or only this worker's own memory of the session.
+fn store<C: ClipboardBackend>(
+    clip: &mut Option<C>,
+    connect: &impl Fn() -> Option<C>,
+    shadow: &mut HashMap<char, String>,
+    register: char,
+    text: String,
+) {
+    write_system(clip, connect, &text);
+    shadow.insert(register, text);
 }
 
 /// Returns the live backend, retrying `connect()` if the worker started
@@ -300,6 +444,18 @@ fn ensure_clip<'a, C: ClipboardBackend>(
     clip.as_mut()
 }
 
+/// [`read_text`] in the line-list-plus-regtype shape a `g:clipboard.paste`
+/// reply takes, the trailing newline decoded back into a
+/// [`RegisterType`] by [`text_to_lines`].
+fn read_lines<C: ClipboardBackend>(
+    clip: &mut Option<C>,
+    connect: &impl Fn() -> Option<C>,
+    register: char,
+    shadow: &HashMap<char, String>,
+) -> (Vec<String>, RegisterType) {
+    text_to_lines(&read_text(clip, connect, register, shadow))
+}
+
 /// Reads the system clipboard, falling back to `shadow`'s entry for
 /// `register` only when the clipboard is unreachable at all (`ensure_clip`
 /// returns `None`, e.g. no display) -- see the module doc's remote-paste
@@ -308,27 +464,26 @@ fn ensure_clip<'a, C: ClipboardBackend>(
 /// reason (non-text content, e.g. an image copied in a browser) must not
 /// fall back to the shadow: that would silently resurrect this session's
 /// own last yank as the answer to a paste of something else entirely,
-/// which is a stale read, not a missing one -- it degrades to no lines
-/// instead, matching what a real clipboard with nothing pasteable in it
-/// looks like.
-fn read_lines<C: ClipboardBackend>(
+/// which is a stale read, not a missing one -- it degrades to the empty
+/// string instead, matching what a real clipboard with nothing pasteable
+/// in it looks like.
+///
+/// Text rather than lines because both callers want it that way in the
+/// end: an OSC 52 answer carries text and has no regtype field to split
+/// one out for (see `Effect::ClipboardQuery`), and [`read_lines`] recovers
+/// the pair from the same string.
+fn read_text<C: ClipboardBackend>(
     clip: &mut Option<C>,
     connect: &impl Fn() -> Option<C>,
     register: char,
     shadow: &HashMap<char, String>,
-) -> (Vec<String>, RegisterType) {
+) -> String {
     match ensure_clip(clip, connect) {
-        Some(clip) => match clip.get_text() {
-            Ok(text) => text_to_lines(&text),
-            Err(err) => {
-                crate::vlog::log_with("clipboard", || format!("read failed: {err}"));
-                (Vec::new(), RegisterType::Charwise)
-            }
-        },
-        None => shadow
-            .get(&register)
-            .map(|text| text_to_lines(text))
-            .unwrap_or((Vec::new(), RegisterType::Charwise)),
+        Some(clip) => clip.get_text().unwrap_or_else(|err| {
+            crate::vlog::log_with("clipboard", || format!("read failed: {err}"));
+            String::new()
+        }),
+        None => shadow.get(&register).cloned().unwrap_or_default(),
     }
 }
 
@@ -515,13 +670,28 @@ mod tests {
         assert_eq!(regtype, RegisterType::Charwise);
     }
 
-    /// An [`EngineOps`] whose only live method is `reply`: every other
-    /// method is unreachable from this worker's own logic, so this fake
-    /// exists to observe the one call the worker thread's reply obligation
-    /// actually needs proof of, over a channel a test thread can wait on
-    /// with a bound instead of joining a loop that never exits on its own.
+    /// An [`EngineOps`] whose only live methods are `reply` and
+    /// `ui_term_event`: every other method is unreachable from this
+    /// worker's own logic, so this fake exists to observe the two calls the
+    /// worker thread's answer obligation actually needs proof of, over
+    /// channels a test thread can wait on with a bound instead of joining a
+    /// loop that never exits on its own.
     struct ReplyRecorder {
         tx: mpsc::Sender<(u64, ReplyValue)>,
+        terms: mpsc::Sender<String>,
+    }
+
+    impl ReplyRecorder {
+        /// A recorder for a test that only watches replies. Its term-event
+        /// channel has no receiver, so an unexpected answer there is
+        /// dropped exactly as a closed engine connection would drop it,
+        /// rather than deadlocking the worker.
+        fn replies_only(tx: mpsc::Sender<(u64, ReplyValue)>) -> Self {
+            Self {
+                tx,
+                terms: mpsc::channel().0,
+            }
+        }
     }
 
     impl EngineOps for ReplyRecorder {
@@ -586,6 +756,10 @@ mod tests {
             Ok(())
         }
         fn claim_stdout_tty(&self) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn ui_term_event(&self, sequence: &str) -> Result<(), view_engine::handle::EngineError> {
+            let _ = self.terms.send(sequence.to_owned());
             Ok(())
         }
         fn register_mappings(
@@ -753,12 +927,18 @@ mod tests {
     fn a_read_job_answers_its_token_exactly_once_within_a_bounded_wait() {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        let worker = spawn(ReplyRoute::new(ReplyRecorder { tx: reply_tx }), job_rx).unwrap();
+        let worker = spawn(
+            ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
+            job_rx,
+        )
+        .unwrap();
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 42 },
                 epoch: 0,
-                kind: ClipboardJobKind::Read { register: '+' },
+                kind: ClipboardJobKind::Read {
+                    token: ReplyToken { msgid: 42 },
+                    register: '+',
+                },
             })
             .unwrap();
 
@@ -783,12 +963,16 @@ mod tests {
     fn a_write_job_answers_its_token_exactly_once_within_a_bounded_wait() {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        let worker = spawn(ReplyRoute::new(ReplyRecorder { tx: reply_tx }), job_rx).unwrap();
+        let worker = spawn(
+            ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
+            job_rx,
+        )
+        .unwrap();
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 7 },
                 epoch: 0,
                 kind: ClipboardJobKind::Write {
+                    token: ReplyToken { msgid: 7 },
                     register: '+',
                     lines: vec!["hello".to_owned()],
                     regtype: RegisterType::Charwise,
@@ -834,15 +1018,17 @@ mod tests {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let worker = spawn_fake(
-            ReplyRoute::new(ReplyRecorder { tx: reply_tx }),
+            ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
             job_rx,
             || Some(FakeClipboard::reachable(Some("hi\nthere\n"))),
         );
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 1 },
                 epoch: 0,
-                kind: ClipboardJobKind::Read { register: '+' },
+                kind: ClipboardJobKind::Read {
+                    token: ReplyToken { msgid: 1 },
+                    register: '+',
+                },
             })
             .unwrap();
 
@@ -871,15 +1057,15 @@ mod tests {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let worker = spawn_fake(
-            ReplyRoute::new(ReplyRecorder { tx: reply_tx }),
+            ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
             job_rx,
             || None,
         );
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 1 },
                 epoch: 0,
                 kind: ClipboardJobKind::Write {
+                    token: ReplyToken { msgid: 1 },
                     register: '+',
                     lines: vec!["shadowed".to_owned()],
                     regtype: RegisterType::Charwise,
@@ -892,9 +1078,11 @@ mod tests {
 
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 2 },
                 epoch: 0,
-                kind: ClipboardJobKind::Read { register: '+' },
+                kind: ClipboardJobKind::Read {
+                    token: ReplyToken { msgid: 2 },
+                    register: '+',
+                },
             })
             .unwrap();
         let (_msgid, value) = reply_rx
@@ -912,6 +1100,91 @@ mod tests {
         let _ = worker.join();
     }
 
+    /// The whole `"+y` then `"+p` round trip through nvim's *own* OSC 52
+    /// provider, at the layer where both halves meet.
+    ///
+    /// The store is not decoration: with a user's `g:clipboard` installed
+    /// view's provider stands down, so `Write` never runs and this shadow
+    /// would otherwise be empty for the entire session -- the query would
+    /// answer the user's own yank with nothing. The answer's exact bytes
+    /// matter too, because nvim's provider matches them with a Lua pattern
+    /// and decodes the capture as base64.
+    #[test]
+    fn a_store_then_query_answers_the_copy_back_as_an_osc52_escape() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        let (term_tx, term_rx) = mpsc::channel();
+        let worker = spawn_fake(
+            ReplyRoute::new(ReplyRecorder {
+                tx: reply_tx,
+                terms: term_tx,
+            }),
+            job_rx,
+            || None,
+        );
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Store {
+                    register: '+',
+                    text: "yanked\n".to_owned(),
+                },
+            })
+            .unwrap();
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Query { register: '+' },
+            })
+            .unwrap();
+
+        let answer = term_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a query must be answered within 2s, never left to nvim's own timeout");
+        assert_eq!(answer, "\x1b]52;c;eWFua2VkCg==\x1b\\");
+        assert!(
+            term_rx.try_recv().is_err(),
+            "a store must answer nothing of its own"
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// Nothing to report is still an answer. Silence here is what the
+    /// investigation measured as a one-second stall followed by a hit-enter
+    /// prompt that wedges any window under 100 columns until a key is
+    /// pressed, then nine seconds more; the empty payload satisfies the
+    /// provider's own capture and returns at once.
+    #[test]
+    fn a_query_with_nothing_to_report_answers_an_empty_payload() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        let (term_tx, term_rx) = mpsc::channel();
+        let worker = spawn_fake(
+            ReplyRoute::new(ReplyRecorder {
+                tx: reply_tx,
+                terms: term_tx,
+            }),
+            job_rx,
+            || None,
+        );
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Query { register: '*' },
+            })
+            .unwrap();
+
+        let answer = term_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("an empty clipboard must still answer within 2s");
+        assert_eq!(answer, "\x1b]52;p;\x1b\\");
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
     /// What a restart must not cost a user on a host with no reachable
     /// display: the shadow registers are the whole clipboard there, and
     /// they live in the worker thread. A second worker per engine would
@@ -921,13 +1194,13 @@ mod tests {
     fn a_rebound_route_answers_the_new_engine_and_keeps_the_registers_it_held() {
         let (job_tx, job_rx) = mpsc::channel();
         let (first_tx, first_rx) = mpsc::channel();
-        let route = ReplyRoute::new(ReplyRecorder { tx: first_tx });
+        let route = ReplyRoute::new(ReplyRecorder::replies_only(first_tx));
         let worker = spawn_fake(route.clone(), job_rx, || None);
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 1 },
                 epoch: 0,
                 kind: ClipboardJobKind::Write {
+                    token: ReplyToken { msgid: 1 },
                     register: '+',
                     lines: vec!["copied before the crash".to_owned()],
                     regtype: RegisterType::Charwise,
@@ -939,12 +1212,14 @@ mod tests {
             .expect("the write must reply within 2s");
 
         let (second_tx, second_rx) = mpsc::channel();
-        route.rebind(ReplyRecorder { tx: second_tx });
+        route.rebind(ReplyRecorder::replies_only(second_tx));
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 2 },
                 epoch: route.epoch(),
-                kind: ClipboardJobKind::Read { register: '+' },
+                kind: ClipboardJobKind::Read {
+                    token: ReplyToken { msgid: 2 },
+                    register: '+',
+                },
             })
             .unwrap();
 
@@ -978,22 +1253,26 @@ mod tests {
     fn a_job_stamped_by_the_dead_engine_is_never_answered_by_its_replacement() {
         let (job_tx, job_rx) = mpsc::channel();
         let (first_tx, _first_rx) = mpsc::channel();
-        let route = ReplyRoute::new(ReplyRecorder { tx: first_tx });
+        let route = ReplyRoute::new(ReplyRecorder::replies_only(first_tx));
         let worker = spawn_fake(route.clone(), job_rx, || None);
 
         let stale = ClipboardJob {
-            token: ReplyToken { msgid: 4 },
             epoch: route.epoch(),
-            kind: ClipboardJobKind::Read { register: '+' },
+            kind: ClipboardJobKind::Read {
+                token: ReplyToken { msgid: 4 },
+                register: '+',
+            },
         };
         let (second_tx, second_rx) = mpsc::channel();
-        route.rebind(ReplyRecorder { tx: second_tx });
+        route.rebind(ReplyRecorder::replies_only(second_tx));
         job_tx.send(stale).unwrap();
         job_tx
             .send(ClipboardJob {
-                token: ReplyToken { msgid: 4 },
                 epoch: route.epoch(),
-                kind: ClipboardJobKind::Read { register: '*' },
+                kind: ClipboardJobKind::Read {
+                    token: ReplyToken { msgid: 4 },
+                    register: '*',
+                },
             })
             .unwrap();
 

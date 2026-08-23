@@ -170,50 +170,16 @@ fn write_cursor_shape<W: Write>(writer: &mut W, shape: CursorShape) -> std::io::
     write!(writer, "\x1b[{} q", decscusr_param(shape))
 }
 
-const BASE64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Minimal RFC 4648 base64 encoder (standard alphabet, `=` padding).
-/// Hand-rolled rather than a dependency: OSC 52 is the only base64 consumer
-/// this crate has, and the whole encoder is smaller than the `Cargo.lock`
-/// diff and `scripts/audit-deps.sh` row a new crate would cost for it.
-fn write_base64<W: Write>(writer: &mut W, bytes: &[u8]) -> std::io::Result<()> {
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied();
-        let b2 = chunk.get(2).copied();
-        let n =
-            (u32::from(b0) << 16) | (u32::from(b1.unwrap_or(0)) << 8) | u32::from(b2.unwrap_or(0));
-        let c0 = BASE64_ALPHABET[usize::try_from((n >> 18) & 0x3f).unwrap_or(0)];
-        let c1 = BASE64_ALPHABET[usize::try_from((n >> 12) & 0x3f).unwrap_or(0)];
-        let c2 = if b1.is_some() {
-            BASE64_ALPHABET[usize::try_from((n >> 6) & 0x3f).unwrap_or(0)]
-        } else {
-            b'='
-        };
-        let c3 = if b2.is_some() {
-            BASE64_ALPHABET[usize::try_from(n & 0x3f).unwrap_or(0)]
-        } else {
-            b'='
-        };
-        writer.write_all(&[c0, c1, c2, c3])?;
-    }
-    Ok(())
-}
-
 /// Writes an OSC 52 clipboard-set escape (`ESC ] 5 2 ; {selection} ;
-/// {base64} ESC \`, `:help clipboard-osc52`) for `text` to `writer`.
-/// `register` selects the selection code the same way nvim's own bundled
-/// `lua/vim/ui/clipboard/osc52.lua` provider does (read directly off the
-/// pinned install, see `docs/clipboard-provider-wire-capture.md`): `'*'`
-/// maps to the primary-selection code `p`, everything else (in practice
-/// always `'+'`) to the clipboard code `c`. Generic over `Write` for the
-/// same testability reason as `write_cursor_shape`.
+/// {base64} ESC \`, `:help clipboard-osc52`) for `text` to `writer`. The
+/// escape itself is formed by
+/// [`view_core::osc52::clipboard_escape`](view_core::osc52::clipboard_escape),
+/// which the clipboard worker's paste answer shares, so a copy leaving
+/// through the terminal and a paste answered back through nvim speak one
+/// wire form. Generic over `Write` for the same testability reason as
+/// `write_cursor_shape`.
 fn write_osc52_bytes<W: Write>(writer: &mut W, register: char, text: &str) -> std::io::Result<()> {
-    let selection = if register == '*' { 'p' } else { 'c' };
-    write!(writer, "\x1b]52;{selection};")?;
-    write_base64(writer, text.as_bytes())?;
-    write!(writer, "\x1b\\")
+    writer.write_all(view_core::osc52::clipboard_escape(register, text).as_bytes())
 }
 
 /// The whole-terminal paint area for one frame, sized from the model's
@@ -764,21 +730,6 @@ mod tests {
         buf.clear();
         write_cursor_shape(&mut buf, CursorShape::Vertical(25)).unwrap();
         assert_eq!(buf, b"\x1b[6 q", "vertical/bar is DECSCUSR 6");
-    }
-
-    #[test]
-    fn write_base64_pads_to_the_next_multiple_of_four() {
-        let mut buf = Vec::new();
-        write_base64(&mut buf, b"hello").unwrap();
-        assert_eq!(buf, b"aGVsbG8=", "5 bytes -> one pad char");
-
-        buf.clear();
-        write_base64(&mut buf, b"hi!").unwrap();
-        assert_eq!(buf, b"aGkh", "3 bytes -> no padding needed");
-
-        buf.clear();
-        write_base64(&mut buf, b"").unwrap();
-        assert_eq!(buf, b"", "empty input encodes to nothing");
     }
 
     #[test]

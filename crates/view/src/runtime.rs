@@ -36,7 +36,7 @@ use crate::speculate::{
 use std::sync::mpsc;
 use std::time::Instant;
 use view_core::model::Model;
-use view_core::msg::{Effect, ExitInfo, Msg, RegisterType, ReplyValue, RpcCall};
+use view_core::msg::{Effect, ExitInfo, Msg, RpcCall};
 use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
 use view_core::update::update;
 use view_engine::handle::EngineHandle;
@@ -359,6 +359,14 @@ impl<E: EngineOps> Executor<E> {
         }
     }
 
+    /// Queues one clipboard job on the worker, or discharges the job's own
+    /// obligation inline when no worker takes it (see
+    /// [`crate::clipboard::dispatch`]).
+    fn hand_to_clipboard(&self, kind: crate::clipboard::ClipboardJobKind) -> Flow {
+        crate::clipboard::dispatch(self.clipboard.as_ref(), &self.ops, self.reply_epoch, kind);
+        Flow::Continue
+    }
+
     /// Carries out one effect, infallibly by signature: an engine-write
     /// failure never becomes an `Err` that would abort the UI, since the
     /// `Flow::EngineLost` -> `Msg::EngineDown` path exists precisely to
@@ -516,77 +524,38 @@ impl<E: EngineOps> Executor<E> {
                 Ok(()) => Flow::Continue,
                 Err(_) => Flow::EngineLost,
             },
-            // forwarded to the clipboard worker when one is wired; when
-            // none is (every bare test Executor), the token still must be
-            // answered exactly once, so this replies here directly with the
-            // safest default rather than silently dropping it the way an
-            // ordinary unmapped fire-and-forget RpcCall may
+            // the four clipboard effects share one hand-off, because they
+            // share the harder half of it: what happens when no worker is
+            // reachable. Each carries its own obligation and
+            // `clipboard::dispatch` discharges it (see its doc), rather
+            // than being silently dropped the way an unmapped
+            // fire-and-forget RpcCall may be
             Effect::ClipboardRead { token, register } => {
-                match &self.clipboard {
-                    Some(tx) => {
-                        let job = crate::clipboard::ClipboardJob {
-                            token,
-                            epoch: self.reply_epoch,
-                            kind: crate::clipboard::ClipboardJobKind::Read { register },
-                        };
-                        if tx.send(job).is_err() {
-                            // the worker thread is gone; still owe the
-                            // token exactly one reply -- charwise-empty is
-                            // the safest default a paste of nothing can
-                            // report, matching an unreachable clipboard
-                            let _ = self.ops.reply(
-                                token,
-                                ReplyValue::ClipboardLines {
-                                    lines: Vec::new(),
-                                    regtype: RegisterType::Charwise,
-                                },
-                            );
-                        }
-                    }
-                    None => {
-                        let _ = self.ops.reply(
-                            token,
-                            ReplyValue::ClipboardLines {
-                                lines: Vec::new(),
-                                regtype: RegisterType::Charwise,
-                            },
-                        );
-                    }
-                }
-                Flow::Continue
+                self.hand_to_clipboard(crate::clipboard::ClipboardJobKind::Read { token, register })
             }
             Effect::ClipboardWrite {
                 token,
                 register,
                 lines,
                 regtype,
-            } => {
-                match &self.clipboard {
-                    Some(tx) => {
-                        let job = crate::clipboard::ClipboardJob {
-                            token,
-                            epoch: self.reply_epoch,
-                            kind: crate::clipboard::ClipboardJobKind::Write {
-                                register,
-                                lines,
-                                regtype,
-                            },
-                        };
-                        if tx.send(job).is_err() {
-                            let _ = self.ops.reply(token, ReplyValue::Nil);
-                        }
-                    }
-                    None => {
-                        let _ = self.ops.reply(token, ReplyValue::Nil);
-                    }
-                }
-                Flow::Continue
+            } => self.hand_to_clipboard(crate::clipboard::ClipboardJobKind::Write {
+                token,
+                register,
+                lines,
+                regtype,
+            }),
+            Effect::ClipboardStore { register, text } => {
+                self.hand_to_clipboard(crate::clipboard::ClipboardJobKind::Store { register, text })
+            }
+            Effect::ClipboardQuery { register } => {
+                self.hand_to_clipboard(crate::clipboard::ClipboardJobKind::Query { register })
             }
             // carries no ReplyToken (see the effect's own doc): nothing on
             // the wire is blocked on this, so an unwired osc52 channel (or
             // one whose receiver is gone) costs nothing beyond the escape
             // never being written -- an ordinary fire-and-forget degrade,
-            // unlike the two effects above
+            // unlike the clipboard effects above, three of which owe an
+            // answer whatever happens to their worker
             Effect::Osc52Copy {
                 register,
                 lines,
@@ -1883,7 +1852,9 @@ mod tests {
     use super::*;
     use crate::engine_ops::{FakeOps, SlowOps};
     use crate::osc52::FakeOsc52Sink;
-    use view_core::msg::{BufferHandle, OptionValue, ReplyToken, TextEdit};
+    use view_core::msg::{
+        BufferHandle, OptionValue, RegisterType, ReplyToken, ReplyValue, TextEdit,
+    };
 
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
     /// reason `view-native::paths`' and `view-ai::trust`'s own suites each
@@ -3726,10 +3697,12 @@ mod tests {
             "a worker-wired read must not self-reply"
         );
         let job = rx.try_recv().expect("the read job must be forwarded");
-        assert_eq!(job.token.msgid, 4);
         assert!(matches!(
             job.kind,
-            crate::clipboard::ClipboardJobKind::Read { register: '*' }
+            crate::clipboard::ClipboardJobKind::Read {
+                token: ReplyToken { msgid: 4 },
+                register: '*'
+            }
         ));
     }
 
@@ -3792,8 +3765,8 @@ mod tests {
             "a worker-wired write must not self-reply"
         );
         let job = rx.try_recv().expect("the write job must be forwarded");
-        assert_eq!(job.token.msgid, 7);
         let crate::clipboard::ClipboardJobKind::Write {
+            token,
             register,
             lines,
             regtype,
@@ -3801,6 +3774,7 @@ mod tests {
         else {
             unreachable!("expected a Write job kind");
         };
+        assert_eq!(token.msgid, 7);
         assert_eq!(register, '*');
         assert_eq!(lines, vec!["x", "y"]);
         assert_eq!(regtype, RegisterType::Linewise);
@@ -3821,6 +3795,87 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow().len(), 1, "must reply exactly once");
         assert_eq!(ops.calls.borrow()[0], "reply(8,Nil)");
+    }
+
+    /// The one effect with no token and no permission to stay silent: nvim
+    /// is inside `vim.wait` for this answer and nothing else will ever
+    /// unblock it, so an executor with no worker to ask must answer the
+    /// empty payload itself rather than degrade the way `Osc52Copy` does.
+    #[test]
+    fn a_clipboard_query_with_no_worker_wired_answers_empty_inline() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::ClipboardQuery { register: '+' });
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(
+            ops.calls.borrow()[0],
+            format!("ui_term_event({:?})", "\x1b]52;c;\x1b\\")
+        );
+    }
+
+    /// The same obligation reached through the other failure: the worker
+    /// thread has exited, so the send fails after the channel accepted the
+    /// wiring.
+    #[test]
+    fn a_clipboard_query_with_a_dead_worker_still_answers_exactly_once() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let executor = Executor::new(&ops).with_clipboard(tx);
+        let flow = executor.run(Effect::ClipboardQuery { register: '*' });
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow().len(), 1, "must answer exactly once");
+        assert_eq!(
+            ops.calls.borrow()[0],
+            format!("ui_term_event({:?})", "\x1b]52;p;\x1b\\")
+        );
+    }
+
+    #[test]
+    fn a_clipboard_query_with_a_worker_wired_forwards_the_job_and_answers_nothing_itself() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        let executor = Executor::new(&ops).with_clipboard(tx);
+        let flow = executor.run(Effect::ClipboardQuery { register: '+' });
+        assert!(matches!(flow, Flow::Continue));
+        assert!(
+            ops.calls.borrow().is_empty(),
+            "a worker-wired query must not answer twice"
+        );
+        let job = rx.try_recv().expect("the query job must be forwarded");
+        assert!(matches!(
+            job.kind,
+            crate::clipboard::ClipboardJobKind::Query { register: '+' }
+        ));
+    }
+
+    /// The mirror of a copy nvim's own provider performed. Nothing waits on
+    /// it, so an unwired worker is a silent no-op -- the cost lands on the
+    /// next `ClipboardQuery`, not here.
+    #[test]
+    fn a_clipboard_store_forwards_its_text_and_degrades_silently_unwired() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        let executor = Executor::new(&ops).with_clipboard(tx);
+        let flow = executor.run(Effect::ClipboardStore {
+            register: '+',
+            text: "yanked\n".to_owned(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+        let job = rx.try_recv().expect("the store job must be forwarded");
+        let crate::clipboard::ClipboardJobKind::Store { register, text } = job.kind else {
+            unreachable!("expected a Store job kind");
+        };
+        assert_eq!(register, '+');
+        assert_eq!(text, "yanked\n");
+
+        let bare = Executor::new(&ops);
+        let flow = bare.run(Effect::ClipboardStore {
+            register: '+',
+            text: "yanked\n".to_owned(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert!(ops.calls.borrow().is_empty());
     }
 
     /// `Osc52Copy` carries no `ReplyToken` (see the effect's own doc): an

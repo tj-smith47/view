@@ -305,47 +305,77 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
 /// A whitelist, and narrow on purpose: view is not a terminal host. It writes
 /// to the terminal but reads its stdin through crossterm's key decoder, so
 /// any sequence the terminal answers would come back as keystrokes typed into
-/// the buffer. Only a self-contained OSC 52 clipboard *write* is safe to pass
-/// through -- it provokes no reply -- and it is also the one payload with a
-/// real cost to dropping, since it is how nvim's own clipboard provider
-/// performs a `"+y` (see [`Effect::TermWrite`]).
+/// the buffer. Exactly two OSC 52 shapes are recognized, and neither of them
+/// ever reaches the terminal as a question:
 ///
-/// nvim's own startup queries never reach here at all: view claims the tty
-/// only after nvim's `nvim.tty` defaults have stopped looking for one (see
-/// [`RpcCall::ClaimStdoutTty`]). What a *plugin* sends is what this drops.
-/// Widening the whitelist means first giving view a reader that recognises
-/// DA1/OSC/DCS/APC replies on stdin and feeds them back through
-/// `nvim_ui_term_event`; until that exists, forwarding a query would corrupt
-/// the buffer rather than answer it. One consequence is named rather than
-/// hidden: a `"+p` against a user-supplied OSC 52 provider sends a read query
-/// (`OSC 52 ; c ; ?`) that view drops, so nvim times it out -- unchanged from
-/// the behaviour before `stdout_tty` was claimed at all.
+/// - a clipboard **write** goes out verbatim ([`Effect::TermWrite`]) -- it is
+///   how nvim's own provider performs a `"+y`, and it provokes no reply --
+///   and is mirrored into view's own clipboard state
+///   ([`Effect::ClipboardStore`]) so a later paste has it;
+/// - a clipboard **read query** is answered locally
+///   ([`Effect::ClipboardQuery`]) and never written out, which is what lets
+///   a `"+p` through a user-supplied provider return in milliseconds instead
+///   of stalling in the ten seconds of `vim.wait` an unanswered query costs.
+///
+/// Everything else is dropped. nvim's own startup queries never reach here at
+/// all: view claims the tty only after nvim's `nvim.tty` defaults have
+/// stopped looking for one (see [`RpcCall::ClaimStdoutTty`]). What a *plugin*
+/// sends is what this drops -- a DA1, an XTGETTCAP request, a cursor-shape
+/// query -- and it stays dropped, because view still has no reader that
+/// recognizes a terminal's DA1/OSC/DCS/APC reply on stdin. The OSC 52 query
+/// is answerable without one only because view already knows the answer.
 fn forward_ui_send(content: &str) -> Vec<Effect> {
-    osc52_writes(content)
-        .map(|escape| Effect::TermWrite {
-            bytes: escape.as_bytes().to_vec(),
-        })
-        .collect()
+    let mut effects = Vec::new();
+    for (start, _) in content.match_indices(OSC52_PREFIX) {
+        match osc52_at(content, start) {
+            Some(Osc52Sequence::Write {
+                escape,
+                register,
+                text,
+            }) => {
+                effects.push(Effect::TermWrite {
+                    bytes: escape.as_bytes().to_vec(),
+                });
+                if let Some(text) = text {
+                    effects.push(Effect::ClipboardStore { register, text });
+                }
+            }
+            Some(Osc52Sequence::Query { register }) => {
+                effects.push(Effect::ClipboardQuery { register });
+            }
+            None => {}
+        }
+    }
+    effects
 }
 
 const OSC52_PREFIX: &str = "\x1b]52;";
 
-/// Every complete `OSC 52 ; {selection} ; {base64}` clipboard-write escape in
-/// `content`, in the order they appear.
+/// One recognized OSC 52 sequence out of an `nvim_ui_send` payload.
+enum Osc52Sequence<'a> {
+    /// A clipboard set. `escape` is the whole sequence as nvim formed it,
+    /// forwarded byte for byte; `text` is the same payload decoded, and is
+    /// `None` when it decodes to bytes that are not UTF-8 -- the terminal
+    /// still gets the escape, only the local mirror is skipped, since view's
+    /// register model has nowhere to keep non-text.
+    Write {
+        escape: &'a str,
+        register: char,
+        text: Option<String>,
+    },
+    /// A clipboard read: `OSC 52 ; {selection} ; ?`, which nvim's provider
+    /// sends and then waits on.
+    Query { register: char },
+}
+
+/// The OSC 52 sequence beginning at `start`, or `None` when what begins
+/// there is anything else.
 ///
-/// The scan covers `content` as a whole rather than testing its prefix,
+/// The caller scans `content` as a whole rather than testing its prefix,
 /// because one `nvim_ui_send` payload may hold several concatenated sequences
 /// (nvim's own startup probe writes `OSC 11` and a DSR in one call): a write
 /// that is merely not first still has to be found, and a second write behind
 /// the first still has to be forwarded.
-fn osc52_writes(content: &str) -> impl Iterator<Item = &str> {
-    content
-        .match_indices(OSC52_PREFIX)
-        .filter_map(|(start, _)| osc52_write_at(content, start))
-}
-
-/// The clipboard-write escape beginning at `start`, or `None` when what
-/// begins there is anything else.
 ///
 /// Both fields are charset-checked, and that check is the trust boundary
 /// [`forward_ui_send`] describes rather than a tidiness pass. A frame is only
@@ -353,10 +383,11 @@ fn osc52_writes(content: &str) -> impl Iterator<Item = &str> {
 /// write by its delimiters alone, but a terminal abandons the OSC string at
 /// the bare `ESC` and executes the `DSR` hiding behind it, answering onto a
 /// stdin that view reads as typed keys. Rejecting anything outside base64
-/// (and outside the selection alphabet) leaves no room to hide a query --
-/// including the bare `?` of a read query, which is a payload this must
-/// refuse whatever else changes here.
-fn osc52_write_at(content: &str, start: usize) -> Option<&str> {
+/// (and outside the selection alphabet) leaves no room to hide a query behind
+/// a write. The read query is recognized only as a payload of exactly `?`,
+/// nothing longer and nothing else: `? ` and `?\x1b[5n` are neither a query
+/// nor a write, and must stay dropped whole.
+fn osc52_at(content: &str, start: usize) -> Option<Osc52Sequence<'_>> {
     // `ST` per nvim's own provider; `BEL` is the other terminator OSC
     // sequences are written with, and costs one more `find` to accept
     const TERMINATORS: [&str; 2] = ["\x1b\\", "\x07"];
@@ -370,11 +401,19 @@ fn osc52_write_at(content: &str, start: usize) -> Option<&str> {
     if !selection.bytes().all(|b| SELECTION_ALPHABET.contains(&b)) {
         return None;
     }
+    let register = crate::osc52::register_for_selection(selection);
+    if payload == "?" {
+        return Some(Osc52Sequence::Query { register });
+    }
     if !payload
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
     {
         return None;
     }
-    Some(&content[start..start + OSC52_PREFIX.len() + end + terminator.len()])
+    Some(Osc52Sequence::Write {
+        escape: &content[start..start + OSC52_PREFIX.len() + end + terminator.len()],
+        register,
+        text: crate::osc52::base64_decode(payload).and_then(|bytes| String::from_utf8(bytes).ok()),
+    })
 }

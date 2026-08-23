@@ -57,6 +57,12 @@ pub trait EngineOps {
     /// Declares this UI's stdout a real terminal, starting `ui_send`
     /// delivery (see `RpcCall::ClaimStdoutTty`).
     fn claim_stdout_tty(&self) -> Result<(), EngineError>;
+    /// Hands nvim a terminal response sequence as if the host terminal had
+    /// sent it, firing `TermResponse` (see
+    /// `EngineHandle::ui_term_event`). The channel view's answer to an OSC
+    /// 52 read query rides (see `Effect::ClipboardQuery`); never blocks,
+    /// and nothing reads a result.
+    fn ui_term_event(&self, sequence: &str) -> Result<(), EngineError>;
     /// Registers this session's default keys and the `:View` command in one
     /// chunk; never blocks, and never itself returns the claims (see
     /// `Msg::MappingsClaimed`).
@@ -246,6 +252,9 @@ impl EngineOps for EngineHandle {
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         self.claim_stdout_tty()
     }
+    fn ui_term_event(&self, sequence: &str) -> Result<(), EngineError> {
+        self.ui_term_event(sequence)
+    }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         self.register_mappings(specs, channel_id)
     }
@@ -387,6 +396,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         (**self).claim_stdout_tty()
+    }
+    fn ui_term_event(&self, sequence: &str) -> Result<(), EngineError> {
+        (**self).ui_term_event(sequence)
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         (**self).register_mappings(specs, channel_id)
@@ -532,6 +544,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         (**self).claim_stdout_tty()
+    }
+    fn ui_term_event(&self, sequence: &str) -> Result<(), EngineError> {
+        (**self).ui_term_event(sequence)
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         (**self).register_mappings(specs, channel_id)
@@ -702,6 +717,9 @@ impl EngineOps for FakeOps {
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         self.record("claim_stdout_tty()".to_string())
+    }
+    fn ui_term_event(&self, sequence: &str) -> Result<(), EngineError> {
+        self.record(format!("ui_term_event({sequence:?})"))
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();
@@ -902,6 +920,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn ui_term_event(&self, _sequence: &str) -> Result<(), EngineError> {
         Ok(())
     }
     fn register_mappings(

@@ -6,6 +6,7 @@ pub mod hl;
 pub mod model;
 pub mod msg;
 pub mod native;
+pub mod osc52;
 pub mod sink;
 pub mod theme;
 pub mod update;
