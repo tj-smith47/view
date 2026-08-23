@@ -29,10 +29,11 @@ three states that gives you:
 | --- | --- |
 | closed | opens it and puts the cursor in the composer |
 | open, and you are in it | closes it |
-| open, and you have stepped out | puts you back in it |
+| open, and you are not in it | puts you back in it |
 
-The third row is why the key never dead-ends: a panel you escaped out of is
-one press from being yours again, not one press from disappearing. Closing
+The third row is why the key never dead-ends: a panel you are not in -- one
+you escaped out of, or one an agent's own permission request opened beside
+you -- is one press from being yours, not one press from disappearing. Closing
 it, whichever way you get there, leaves the agent session running -- reopen
 and the transcript is where you left it.
 

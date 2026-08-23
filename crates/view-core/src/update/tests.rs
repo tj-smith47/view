@@ -5524,10 +5524,17 @@ fn ai_panel_toggle_re_enters_an_open_panel_the_user_has_escaped_out_of() {
         m.overlays()
     );
     assert!(m.ai_panel().focused, "re-entering claims the keyboard back");
+    // the kind, not merely "some native overlay": the panel is the only
+    // thing on the stack here, so a bare `Focus::Native(_)` would pass on
+    // an overlay the re-entry had raised instead of it
+    let focus_names_the_panel = matches!(
+        m.focused_overlay_mut().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Ai)
+    );
     assert!(
-        matches!(m.focus(), Focus::Native(_)),
+        focus_names_the_panel,
         "the re-entered panel owns focus the way an opened one does: {:?}",
-        m.focus()
+        m.overlays()
     );
     assert!(m.dirty, "taking focus back must trigger a repaint");
     assert!(
@@ -5605,6 +5612,61 @@ fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_st
         m.ai_panel_overlay_open(),
         "the panel must still be reachable so a streamed transcript chunk \
              can reach it even while the prompt holds focus"
+    );
+    // The one state where the entered flag and effective focus disagree:
+    // the invoke enters the panel, and the prompt above it outranks that
+    // until it pops. Pinned because the toggle reads this flag to decide
+    // close from re-enter, so what it holds here decides what a second
+    // press does.
+    assert!(
+        m.ai_panel().focused,
+        "the invoke enters the panel even while the prompt outranks it, so \
+             the panel is the user's the moment that prompt pops"
+    );
+}
+
+/// The other side of the flag the test above pins: a second press under the
+/// same prompt closes, rather than re-entering a panel the user escaped
+/// nothing to leave. Deriving the direction from effective focus instead
+/// would make the panel uncloseable for as long as anything outranks it.
+#[test]
+fn a_second_ai_panel_toggle_under_the_same_blocked_prompt_closes_the_panel_it_entered() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "confirm".into(),
+            content: vec![(0, "test".into())],
+            replace_last: false,
+        }]),
+    );
+    let prompt_id = match m.focus() {
+        Focus::Native(id) => id,
+        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+    };
+    let toggle = || Msg::FeatureInvoke {
+        feature: "ai".to_string(),
+        verb: "toggle".to_string(),
+    };
+    let _ = update(&mut m, toggle());
+    assert!(m.ai_panel_overlay_open() && m.ai_panel().focused);
+
+    let effects = update(&mut m, toggle());
+
+    assert!(
+        !m.ai_panel_overlay_open(),
+        "the second press closes the panel the first one entered: {:?}",
+        m.overlays()
+    );
+    assert!(
+        effects.is_empty(),
+        "closing beneath the prompt issues no effect of its own: {effects:?}"
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Native(prompt_id),
+        "and the prompt still holds the keyboard it never gave up"
     );
 }
 

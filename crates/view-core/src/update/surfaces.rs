@@ -209,19 +209,19 @@ pub(super) fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
 /// or releases the panel's keyboard focus the same way the `open`/`close`
 /// verbs do.
 pub(super) fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
-    if model.ai_panel_overlay_open() && !model.ai_panel().focused {
-        model.ai_panel_mut().focused = true;
-        model.dirty = true;
-        return Vec::new();
-    }
+    // entered decides the direction, and only then does anything close:
     // `close_ai_panel` itself clears `AiPanelState::focused`, at the single
-    // authoritative closing point
-    if model.close_ai_panel() {
+    // authoritative closing point, so a `true` here always names a panel
+    // the user is actually in
+    if model.ai_panel().focused && model.close_ai_panel() {
         model.dirty = true;
         return Vec::new();
     }
+    // a no-op on the panel already open, which is what leaves re-entry with
+    // nothing to do but claim the keyboard below
     let effects = open_ai_panel(model);
     model.ai_panel_mut().focused = true;
+    model.dirty = true;
     effects
 }
 

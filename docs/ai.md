@@ -49,8 +49,20 @@ did not report, and never animates a marker for work nobody is doing.
 The agent's plan reads the same way, one row per task: `·` not started,
 `▸` under way, `✓` done.
 
-When the panel is open but not focused, it says so and names the way in
-(`:View ai focus`).
+The panel is non-modal: `<Esc>` steps out of the composer and leaves the
+panel on screen beside your buffer, and while you are out of it every key
+reaches the editor exactly as it did before. When the panel is open but not
+focused it says so and names the way in (`:View ai focus`), and `<leader>ai`
+puts you back in it -- the same key reads the panel before it acts:
+
+| the panel is | `<leader>ai` |
+| --- | --- |
+| closed | opens it and puts the cursor in the composer |
+| open, and you are in it | closes it |
+| open, and you are not in it | puts you back in it |
+
+So the key never dead-ends. Closing it, whichever way you get there, leaves
+the agent session running -- reopen and the transcript is where you left it.
 
 The prompt you are composing sits under the header, and it wraps rather
 than running off the edge -- a prompt several sentences long grows the

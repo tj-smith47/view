@@ -942,6 +942,13 @@ leg_panel_typing() {
     # about a flag.
     local ai_key
     ai_key=$(printf '%s\n' "$ENTRY_POINTS" | awk '$1 == "ai" && $3 == "toggle" { print $2 }')
+    # named here rather than left to the wait below: an empty key types
+    # nothing, and the leg would fail 25s later on "the panel never
+    # re-entered" -- a true statement about a key that was never pressed
+    [ -n "$ai_key" ] || {
+        fail 'no ai/toggle row in DEFAULT_MAPS any more, so there is no key to press; point this leg at whatever replaced it'
+        return 1
+    }
     ai_key=$(tmux_key "$ai_key") || return 1
     mark
     send_key Escape
