@@ -5,6 +5,17 @@ tasks:
     desc: Build the whole workspace
     cmd: cargo build --workspace
 
+  install:
+    desc: "Build the release binary and install it on PATH, where it outlives target/ (task install PREFIX=$HOME/bin)"
+    vars:
+      PREFIX: '{{.PREFIX | default "$HOME/.local/bin"}}'
+    cmds:
+      - cargo build --release -p view
+      - mkdir -p {{.PREFIX}}
+      # install(1) over cp: replacing the inode leaves a running view untouched
+      - install -m 755 target/release/view {{.PREFIX}}/view
+      - '{{.PREFIX}}/view --version'
+
   fmt:
     desc: Format all Rust code
     cmd: cargo fmt --all
