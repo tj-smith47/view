@@ -166,3 +166,47 @@ before that session runs: the transcript window is head-keep with no
 scroll or follow-tail, so a session longer than one panel height shows
 only its oldest screenful -- the long-session dogfood will hit this
 first, and it lands as planned work, not a surprise.
+
+## 2026-08-23 — dogfood-fix chain (T1–T12)
+
+The 2026-08-21 live session's findings became a twelve-task plan, all
+landed this round (ebc2812..d2b1533, final whole-chain review approved).
+What the session felt, and what fixed it:
+
+Every entry point now answers. Bare `:View ai` resolves its canonical
+verb; the trust prompt's Yes re-dispatches into an open panel instead of
+a dead-end notice; a bogus verb names the valid forms.
+
+The panel earned its keep as a place to live. The transcript follows its
+tail and scrolls; the composer wraps long prompts with the cap accounted
+against banners so a short panel never starves the transcript; user
+messages echo locally at submit and reconcile against the adapter's
+replay; entries differentiate by theme color with a marker glyph — user
+prompts one color behind `❯`, agent responses another, thoughts dimmed —
+and tool calls carry glyph status with a braille spinner while running,
+its wakeup folded into the existing deadline mechanism so view-core
+stays clockless.
+
+The echo latency wart was per-row damage all along: an overlay's
+presence dirtied its full height every frame. Root-caused and fixed —
+panel echo p50 0.86ms → 0.25ms.
+
+Silence got harder to ship. The visual acceptance sweep reads every
+overlay a user opens back cell by cell with escapes attached, gated in
+CI and on the exit-checklist template; class-scoped legs announce
+`SKIPPED (class …)` instead of taking the sweep down (which also
+resurrected remote-rtt — dead on every host from a hardcoded class flag
+nobody had caught). A sticky toast now has a deliberate way out
+(normal-mode Esc, still forwarded to nvim, precedence pinned against a
+live panel); a narrow panel keeps a truncated title rather than going
+anonymous; width config that would disable a feature on a typo clamps at
+the deserializer instead.
+
+macOS stopped leaking watch descriptors into ignored trees: the pump's
+matchers now mirror git's own authority ordering (global excludes <
+info/exclude < .gitignore < .ignore, deeper file wins), verified against
+the vendored ignore-crate source and 20 clean runs on mbp.
+
+Still owed: the recorded long-session dogfood against this build — the
+prompt for it is staged — and the gh-runner proof of the new visual CI
+job, which lands with the bench-baseline push round.
