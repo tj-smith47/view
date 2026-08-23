@@ -1137,8 +1137,18 @@ fn note_supervision(
     read: &HeartbeatWatch,
     handle: &EngineHandle,
     lost: bool,
+    write_lost: bool,
 ) -> Option<Msg> {
-    let stalled = write.observe(handle);
+    // a failed write joins the backlog reading rather than replacing it:
+    // both describe the same side of the same connection, and the failure
+    // is the strongest evidence of it there is -- the outbox watch infers a
+    // stall from output that has not moved, while this is the write saying
+    // so. It never contributes to `lost`, which is the resolution of a
+    // *stop*: a running child that cannot be written to is a wedge with more
+    // than one recovery, and `WedgeKind::Dead`'s unattended budget would
+    // tear it down with a `qa!` that deletes the swap files the restart is
+    // supposed to rehydrate from (see `LoopState::write_lost`)
+    let stalled = write.observe(handle) || write_lost;
     // `lost` short-circuits the closed-flag load rather than adding to it:
     // a connection the loop has already resolved as gone is not one this
     // pass has to ask about, and a pass that has not resolved one pays
@@ -1692,6 +1702,9 @@ pub fn run(
                     // write side is reset here for the same reason
                     write_stall = OutboxStallWatch::default();
                     state.connection_lost = false;
+                    // the replacement's write path is new, so the failure
+                    // that classified the old one describes nothing here
+                    state.write_lost = false;
                     // answered, not reported: a session that came back has
                     // no fatal reason left to print at exit
                     model.fatal_reason = None;
@@ -1771,6 +1784,7 @@ pub fn run(
             &engine.heartbeat,
             &engine.handle,
             state.connection_lost,
+            state.write_lost,
         ) {
             if let Some(code) = step(
                 &mut model,
@@ -1945,7 +1959,7 @@ mod tests {
         read: &HeartbeatWatch,
         handle: &EngineHandle,
     ) -> bool {
-        let Some(msg) = note_supervision(fold, write, read, handle, false) else {
+        let Some(msg) = note_supervision(fold, write, read, handle, false, false) else {
             return false;
         };
         model.dirty = false;
@@ -4662,6 +4676,48 @@ mod tests {
         }
     }
 
+    /// A write that failed outright against a child that is still running
+    /// reads as the write side, and must never read as a dead connection.
+    ///
+    /// The distinction is not cosmetic and it is not about the banner's
+    /// wording. `WedgeKind::Dead` is inside the unattended-restart budget,
+    /// so on the shipped `auto_restart` default this same pass would return
+    /// `Effect::RestartEngine`; the restart tears the old child down, and a
+    /// teardown that asks a *live* nvim to quit unloads its buffers normally
+    /// and deletes the swap files the restart is supposed to bring the
+    /// user's unsaved work back from. `WriteSide` offers the interrupt
+    /// first, then a modal, and takes nothing down on its own.
+    #[test]
+    fn a_failed_write_to_a_live_child_reads_as_the_write_side_and_restarts_nothing() {
+        let peer = WedgedPeer::new();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
+        // paused, and nothing written: neither watch has anything of its own
+        // to report, so the verdict below can only have come from the failed
+        // write the loop is reporting
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+
+        let msg = note_supervision(&mut fold, &mut watch, &heartbeat, &peer.handle, false, true)
+            .expect("a failed write is a condition the fold has something to say about");
+        assert_eq!(
+            fold.wedge,
+            Some(WedgeKind::WriteSide),
+            "a running child whose write path broke is a wedge with more than one recovery"
+        );
+
+        assert!(
+            model.supervision.recovers_unattended(),
+            "the shipped default recovers without asking, which is what makes the Dead \
+             classification destructive here rather than merely mislabelled"
+        );
+        assert!(
+            update(&mut model, msg).is_empty(),
+            "the write side must ask for no unattended restart: the teardown one performs \
+             sends `qa!` to the live child and takes its swap files with it"
+        );
+    }
+
     /// The combination production actually produces, and the one every
     /// other write-side test here deliberately excludes by leaving the
     /// heartbeat paused: probes leave through the same outbox as everything
@@ -5150,7 +5206,14 @@ mod tests {
         // and the fold the loop runs turns that into the read-side wedge,
         // with the write side draining perfectly throughout
         wait_until("the unanswered probe reads as a wedge", || {
-            note_supervision(&mut fold, &mut watch, &heartbeat, &peer.handle, false);
+            note_supervision(
+                &mut fold,
+                &mut watch,
+                &heartbeat,
+                &peer.handle,
+                false,
+                false,
+            );
             fold.wedge == Some(WedgeKind::ReadSide)
         });
     }

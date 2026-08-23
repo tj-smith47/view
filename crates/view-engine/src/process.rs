@@ -1081,11 +1081,60 @@ impl Engine {
     /// it routes to supervision, which is recoverable, rather than to a
     /// silent exit, which is not.
     ///
+    /// A child not yet reaped is asked about a second way before it is
+    /// called alive, and the discriminator is the connection rather than the
+    /// process table. "nvim has closed the embed channel but has not been
+    /// reaped" is a real window -- it is spent writing shada and running
+    /// `VimLeave` -- and a write losing its pipe inside it is the user's own
+    /// `:q` arriving a hair before the reader's `Msg::EngineStopped`.
+    /// Calling that transient would leave the session running against a
+    /// corpse until the stop caught up. A connection still *open* is the
+    /// only thing that makes a failed write genuinely the write's fault, and
+    /// [`wait_until_settled`](crate::handle::EngineHandle::wait_until_settled)
+    /// returns immediately on one already closed, so an open connection pays
+    /// its `READER_SETTLE` only on the pass that lost a write.
+    ///
     /// [`stop_report`]: Self::stop_report
     #[must_use]
     pub fn stop_report_if_exited(&mut self) -> Option<(ExitInfo, bool)> {
-        let status = self.child.try_wait().ok().flatten()?;
+        if let Some(status) = self.child.try_wait().ok().flatten() {
+            return Some(self.settled_report(exit_info_from_status(status)));
+        }
+        if !self.handle.wait_until_settled(Self::READER_SETTLE) {
+            return None;
+        }
+        // the connection is gone, so the child is on its way out rather than
+        // merely unwritable: the reap is worth the same bounded wait the
+        // ordinary teardown gives it, and still no `qa!` -- there is nothing
+        // left to send one down
+        let status = wait_for_exit(&mut self.child, self.shutdown_timeout)
+            .ok()
+            .flatten()?;
         Some(self.settled_report(exit_info_from_status(status)))
+    }
+
+    /// Tears the child down for a replacement that is about to take its
+    /// place: reaps one already gone, and `kill`s one still running.
+    ///
+    /// Never [`wait_exit`](Self::wait_exit), which opens with `qa!`. A
+    /// restart's whole promise is that the session comes back with what the
+    /// swap file held, and `qa!` unloads nvim's buffers *normally*, which
+    /// deletes exactly those swap files. Asking a live child to quit
+    /// politely is therefore the one teardown a restart must not perform:
+    /// the wedges that reach a restart with a live child (a broken write
+    /// path, an engine that stopped answering) are precisely the ones
+    /// holding unsaved work.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if `try_wait`, `kill` or
+    /// `wait` on the child fails.
+    pub fn kill_exit(&mut self) -> std::io::Result<ExitStatus> {
+        if let Some(status) = self.child.try_wait()? {
+            return Ok(status);
+        }
+        self.child.kill()?;
+        self.child.wait()
     }
 
     /// Pairs a resolved exit status with the announcement that qualifies
@@ -2019,24 +2068,36 @@ fn relay_stdin_fd(source: std::os::fd::RawFd) -> std::io::Result<()> {
 /// mid-session), sending `qa!` fails and this falls straight through to the
 /// poll loop, which sees the child has already exited on the very first
 /// `try_wait`.
+/// Polls `child` until it has exited or `timeout` elapses; `None` means it
+/// was still running when the budget ran out.
+///
+/// A poll rather than a blocking `wait`: every caller is bounded, because
+/// none of them may hold the loop thread on a child that has decided not to
+/// leave.
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn graceful_kill(
     handle: &EngineHandle,
     child: &mut Child,
     shutdown_timeout: Duration,
 ) -> std::io::Result<ShutdownOutcome> {
     let _ = handle.notify("nvim_command", vec![Value::from("qa!")]);
-    let deadline = Instant::now() + shutdown_timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(ShutdownOutcome {
-                path: ShutdownPath::Graceful,
-                status,
-            });
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    if let Some(status) = wait_for_exit(child, shutdown_timeout)? {
+        return Ok(ShutdownOutcome {
+            path: ShutdownPath::Graceful,
+            status,
+        });
     }
     child.kill()?;
     Ok(ShutdownOutcome {

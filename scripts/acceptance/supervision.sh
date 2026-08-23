@@ -111,6 +111,13 @@ fail() {
     pane >"$dump" 2>/dev/null || true
     printf 'FAIL [%s]: %s\n' "$CURRENT_LEG" "$1" >&2
     printf '      pane dump: %s\n' "$dump" >&2
+    # the screen says what the user saw; the session's own log says why, and
+    # the leg's root is removed on the way out, so it is copied out here or
+    # it is gone
+    if [ -n "${ROOT:-}" ] && [ -f "$ROOT/view.log" ]; then
+        cp "$ROOT/view.log" "$DUMP_DIR/$CURRENT_LEG.log" 2>/dev/null || true
+        printf '      view log:  %s\n' "$DUMP_DIR/$CURRENT_LEG.log" >&2
+    fi
     return 1
 }
 
@@ -236,6 +243,7 @@ start_session() {
              XDG_DATA_HOME=$ROOT/xdg_data_home \
              XDG_STATE_HOME=$ROOT/xdg_state_home \
              XDG_CACHE_HOME=$ROOT/xdg_cache_home \
+             VIEW_LOG=$ROOT/view.log \
              TERM=xterm-256color COLORTERM=truecolor \
              $VIEW_BIN $ROOT/scratch.txt"
 
@@ -425,8 +433,14 @@ assert_exit_was_clean() {
         fail "no leave-alternate-screen escape ever reached the pty"
         return 1
     }
-    grep -qU $'\033\[?25h' "$ROOT/pane.raw" || {
-        fail "no show-cursor escape ever reached the pty"
+    # the caret escapes are matched as one contiguous burst rather than
+    # searched for individually: `?25h` alone is written by every frame that
+    # has a caret to place, so finding one somewhere in a session's bytes
+    # proves nothing about the teardown. Only `restore_bytes` closes a sync
+    # bracket, resets the shape and shows the caret back to back, so this
+    # match fails the moment any of the three leaves it.
+    grep -qU $'\033\[?2026l\033\[0 q\033\[?25h' "$ROOT/pane.raw" || {
+        fail "the restore burst (sync-bracket close, caret shape reset, caret show) never reached the pty as one sequence"
         return 1
     }
 
@@ -579,7 +593,7 @@ assert_within "$unanswered" "$INTERRUPT_MIN" "$INTERRUPT_MAX" "the unanswered-in
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 assert_restart_recovered "$UNSAVED" "LIVE-LUA-$$" "$BUSY_TITLE"
 end_session
-printf '[1/5] %-33s ... %s  OK\n' 'read-side wedge (blocked Lua)' \
+printf '[1/6] %-33s ... %s  OK\n' 'read-side wedge (blocked Lua)' \
     "banner at ${banner}s, modal at ${modal}s after it, interrupt unanswered at ${unanswered}s, restart recovers (swap rehydrated)"
 
 CURRENT_LEG=read-side-vimscript
@@ -614,7 +628,7 @@ assert_within "$(plus "$dead_notice" "$dead_modal")" 0 "$DEAD_MAX" "the dead-con
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 assert_restart_recovered "$UNSAVED" "LIVE-DEAD-$$" "$GONE_TITLE"
 end_session
-printf '[2/5] %-33s ... %s  OK\n' 'dead connection (SIGKILL)' \
+printf '[2/6] %-33s ... %s  OK\n' 'dead connection (SIGKILL)' \
     "banner+modal at $(plus "$dead_notice" "$dead_modal")s (Dead skips the grace period), restart recovers, swap rehydrated"
 
 CURRENT_LEG=write-side
@@ -641,7 +655,7 @@ if pane | grep -qF -- "$READ_NOTICE"; then
 fi
 kill -CONT "$NVIM_PID"
 end_session
-printf '[3/5] %-33s ... %s  OK\n' 'write-side wedge (existing)' \
+printf '[3/6] %-33s ... %s  OK\n' 'write-side wedge (existing)' \
     "banner at ${write_notice}s (regression check, unchanged)"
 
 # The two legs below are about the exit rather than the wedge: an engine
@@ -656,20 +670,27 @@ tmux send-keys -t "$SESSION" Escape
 type_line ':q'
 assert_exit_was_clean 0
 end_session
-printf '[4/5] %-33s ... %s  OK\n' 'user quit under a live panel' \
+printf '[4/6] %-33s ... %s  OK\n' 'user quit under a live panel' \
     'exits 0, termios identical, alternate screen left, caret shown, no children behind'
 
-CURRENT_LEG=fatal-signal
-start_exit_session signal
-open_stub_panel
-tmux send-keys -t "$SESSION" Escape
-# the death view does not choose, and the ordinary one over SSH: the link
-# drops, sshd HUPs the session, and the foreground job is signalled where it
-# stands. Handled, it takes the same teardown `:q` does; unhandled, it ends
-# the process on a raw-mode alternate screen the user has to repair from
-# another shell.
-kill -TERM "$VIEW_PID"
-assert_exit_was_clean 143
-end_session
-printf '[5/5] %-33s ... %s  OK\n' 'SIGTERM under a live panel' \
-    'exits 143, termios identical, alternate screen left, caret shown, no children behind'
+# the deaths view does not choose. SIGHUP is the one the field incident was
+# diagnosed from -- the link drops, sshd HUPs the session, and the foreground
+# job is signalled where it stands -- and SIGTERM is what every supervisor and
+# `kill` sends. Handled, each takes the same teardown `:q` does; unhandled,
+# each ends the process on a raw-mode alternate screen the user has to repair
+# from another shell. Both are run because they arrive through different
+# registrations and a handler installed for one proves nothing about the other.
+leg=4
+for signal in HUP TERM; do
+    leg=$((leg + 1))
+    CURRENT_LEG="fatal-signal-$signal"
+    start_exit_session "signal-$signal"
+    open_stub_panel
+    tmux send-keys -t "$SESSION" Escape
+    kill "-$signal" "$VIEW_PID"
+    want=$((128 + $(kill -l "$signal")))
+    assert_exit_was_clean "$want"
+    end_session
+    printf '[%d/6] %-33s ... %s  OK\n' "$leg" "SIG$signal under a live panel" \
+        "exits $want, termios identical, alternate screen left, caret shown, no children behind"
+done

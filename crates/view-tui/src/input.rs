@@ -242,12 +242,29 @@ impl InputSource {
         //    `SIGKILL`;
         // 3. the flag is raised, arming that second delivery;
         // 4. the byte wakes the readiness poll last of all.
+        //
+        // that repeat-signal escape hatch is a deliberately blunt one:
+        // `_exit` runs from the handler, so a second signal ends the process
+        // with raw mode on and the alternate screen up -- the very state this
+        // whole path exists to avoid. It is still the better outcome,
+        // because the alternative is an editor that cannot be ended without
+        // `SIGKILL`, and a `reset` repairs a terminal where a lost session
+        // cannot be recovered. The flag is shared across all three signals
+        // on purpose: any second fatal signal, of any kind, is the user
+        // saying the first one did not work.
         let repeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         for signal in FATAL_SIGNALS {
+            // a signal that cannot be recorded is left unregistered rather
+            // than recorded as 0, which is `take_fatal_signal`'s "nothing
+            // delivered" answer and would spin the readiness poll on a woken
+            // fd with no message behind it
+            let Ok(recorded) = usize::try_from(signal) else {
+                continue;
+            };
             signal_hook::flag::register_usize(
                 signal,
                 std::sync::Arc::clone(&fatal_signal),
-                usize::try_from(signal).unwrap_or(0),
+                recorded,
             )?;
             signal_hook::flag::register_conditional_shutdown(
                 signal,

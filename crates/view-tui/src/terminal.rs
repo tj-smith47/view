@@ -133,10 +133,14 @@ impl Drop for TerminalGuard {
 /// to a user as a terminal that has stopped responding.
 fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
     out.write_all(b"\x1b[?2026l")?;
-    // DECSCUSR 0 rather than the steady block `write_cursor_shape` emits:
-    // 0 is "the terminal's own configured default", which is the caret the
-    // host shell had before view started; 2 would impose a block on a user
-    // whose shell was set to a bar
+    // DECSCUSR 0 rather than any of the explicit shapes `write_cursor_shape`
+    // emits. 0 is not a guaranteed restore -- xterm's own ctlseqs read it as
+    // blinking block, the same as 1 -- but terminals that track a configured
+    // default (VTE, kitty, foot, Windows Terminal) return to it on 0, and
+    // nothing view can send restores a shape it never learned. Leaving the
+    // session's last shape in place is the one certain wrong answer: a user
+    // who quit from insert mode would otherwise keep a bar caret at their
+    // shell prompt for the rest of that terminal's life.
     out.write_all(b"\x1b[0 q")?;
     // mouse capture disabled unconditionally, even though it is only ever
     // turned on dynamically (see Term::draw_surface): leaving it enabled

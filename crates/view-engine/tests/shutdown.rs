@@ -337,6 +337,60 @@ fn a_live_child_reports_no_stop_and_is_not_asked_to_quit() {
     orphan_guard.disarm();
 }
 
+/// The other half of the same seam: a child that is on its way out must be
+/// reported as a stop even though `try_wait` has not caught it yet.
+///
+/// The window is real -- nvim closes the embed channel, then writes shada
+/// and runs `VimLeave` before the process actually goes -- and a write
+/// losing its pipe inside it is the user's own `:q` arriving a hair ahead of
+/// the reader's `Msg::EngineStopped`. Calling that "still running" hands it
+/// to supervision, which on the shipped default respawns the editor the user
+/// just closed.
+#[test]
+fn a_child_whose_connection_closed_is_reported_as_a_stop_not_a_broken_write() {
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let pid = engine.pid();
+    let mut orphan_guard = KillOnDrop(Some(pid));
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    // nvim's own exit, not a teardown of view's: `command` never answers
+    // because the process leaves mid-request, so its Err is the barrier that
+    // says the exit has genuinely started
+    assert!(engine.handle.command("qa!").is_err());
+
+    let (exit, _) = engine
+        .stop_report_if_exited()
+        .expect("a connection that has closed is a stop, whatever try_wait has caught up with");
+    assert_eq!(exit.code, Some(0), "nvim's own status, got {exit:?}");
+    orphan_guard.disarm();
+}
+
+/// A restart's teardown never asks a live child to quit.
+///
+/// `:qa!` unloads nvim's buffers normally, which deletes their swap files --
+/// the very files the restart exists to bring the user's unsaved work back
+/// from. Killing the child leaves them on disk, and the exit status is the
+/// evidence of which of the two happened: a graceful `qa!` leaves 0, a
+/// signal leaves no code at all.
+#[cfg(unix)]
+#[test]
+fn a_restart_teardown_kills_the_child_rather_than_asking_it_to_quit() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let mut orphan_guard = KillOnDrop(Some(engine.pid()));
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    let status = engine.kill_exit().unwrap();
+    orphan_guard.disarm();
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "the child left on its own terms, so the teardown asked it to quit and took the \
+         user's swap files with it: {status:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn wait_exit_maps_external_signal_kill_to_128_plus_signal() {

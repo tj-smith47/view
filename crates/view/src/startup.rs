@@ -185,9 +185,8 @@ fn spawn_and_attach(
 /// terminal handshake this process performed once, long before any restart.
 ///
 /// The engine being replaced is torn down here, in place, and then kept:
-/// the teardown is [`Engine::wait_exit`]'s graceful-then-forced sequence,
-/// the same one `Engine::restart` performs by dropping, so no replacement is
-/// ever brought up alongside a live connection -- but the caller still holds
+/// the teardown is [`Engine::kill_exit`], so no replacement is ever brought
+/// up alongside a live connection -- but the caller still holds
 /// the corpse when this returns, whichever way it returned. That is what
 /// lets a failed attempt be retried: a session whose replacement could not
 /// be started has no second engine to report through, and one that had
@@ -200,8 +199,11 @@ pub(crate) fn restart_and_attach(
 ) -> Result<Engine, AttachFailure> {
     let stdin_relay = cfg.stdin_relay_requested();
     // on every attempt, not only the first: a child already reaped reports
-    // its cached status and this returns at once
-    let _ = engine.wait_exit();
+    // its cached status and this returns at once. `kill_exit`, never
+    // `wait_exit`: a restart reached with the child still alive is one the
+    // user's unsaved work depends on getting back off the swap file, and
+    // `wait_exit`'s opening `qa!` is what deletes it (see `kill_exit`)
+    let _ = engine.kill_exit();
     let engine = Engine::spawn_recovering(cfg).map_err(AttachFailure::Spawn)?;
     crate::vlog::log_with("engine", || {
         format!(

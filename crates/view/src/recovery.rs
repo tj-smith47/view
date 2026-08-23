@@ -36,6 +36,30 @@ pub(crate) struct LoopState {
     /// recovering from, so the supervision fold may finally reach
     /// [`WedgeKind::Dead`]. Cleared by the restart that answers it.
     pub(crate) connection_lost: bool,
+    /// A write to the engine failed while its child was still running: the
+    /// path out is broken, the process is not.
+    ///
+    /// Deliberately not [`connection_lost`](Self::connection_lost), and the
+    /// distinction is the whole recovery. `Dead` is the verdict for a
+    /// connection with exactly one recovery left, which is why the
+    /// unattended-restart budget is scoped to it -- and an unattended
+    /// restart of a *live* child tears it down with `qa!`, which unloads its
+    /// buffers normally and deletes the swap files a restart is supposed to
+    /// rehydrate from. A live child with a broken write path has more than
+    /// one recovery (the interrupt may free it, the backlog may drain), so
+    /// it reads as [`WedgeKind::WriteSide`]: banner, then a modal offering
+    /// Interrupt, Restart and Dismiss, and no unattended teardown of an
+    /// editor holding the user's unsaved work. Cleared by the restart that
+    /// answers it.
+    ///
+    /// Latching is what makes it safe to stop asking: the failed write is a
+    /// closed channel to the writer thread, which is a state no later write
+    /// recovers from, so re-resolving would only re-pay a bounded block on
+    /// the reader's settle once per effect in a batch. A child that turns
+    /// out to be dead after all still resolves, on the reader's own
+    /// `Msg::EngineStopped` rather than on a write -- this flag suppresses
+    /// the write-error shortcut, never the stop itself.
+    pub(crate) write_lost: bool,
     /// A restart is owed at the top of the next pass. Deferred rather than
     /// performed where it is asked for, so the replacement happens once,
     /// off any effect batch, with nothing borrowed from the engine it
@@ -399,7 +423,7 @@ pub(crate) fn step<E: EngineOps>(
         // UI. The rest of that batch targeted an engine that is already
         // gone, which is why `dispatch` stops on the first failure rather
         // than reporting the same loss once per remaining effect
-        Flow::EngineLost if state.connection_lost => None,
+        Flow::EngineLost if state.connection_lost || state.write_lost => None,
         Flow::EngineLost => {
             let Some(EngineStop {
                 exit,
@@ -407,13 +431,16 @@ pub(crate) fn step<E: EngineOps>(
             }) = stop()
             else {
                 // the child is still running: the write failed, the engine
-                // did not. Handing this to supervision is the whole point
-                // -- the alternative reading, "resolve it as a stop", ends
-                // in a `qa!` to a healthy nvim, a `VimLeavePre` that marks
-                // the exit announced, and view leaving 0 with no modal and
-                // no message, which is an unsolicited disappearance wearing
-                // the user's own quit as a disguise
-                state.connection_lost = true;
+                // did not. Two readings are wrong here and both end in a
+                // `qa!` to a healthy nvim -- "resolve it as a stop", which
+                // sends one directly and then reads the resulting
+                // `VimLeavePre` as the user's own quit, and "call it a dead
+                // connection", which puts a live child inside the
+                // unattended-restart budget whose teardown sends the same
+                // `qa!` and takes the swap files with it. What is actually
+                // true is that the write path is broken, which is a wedge
+                // (see `LoopState::write_lost`)
+                state.write_lost = true;
                 return None;
             };
             if model.supervision.note_engine_stop(exit, announced_exit) {
@@ -644,9 +671,15 @@ mod tests {
         );
         assert!(model.running, "the session continues");
         assert!(
-            state.connection_lost,
-            "supervision owns the connection from here: it is what raises the banner and the \
+            state.write_lost,
+            "supervision owns the write path from here: it is what raises the banner and the \
              modal a user can answer, and the alternative is a silent disappearance"
+        );
+        assert!(
+            !state.connection_lost,
+            "the child is alive, so this is not a lost connection -- reading it as one puts a \
+             live editor inside the unattended-restart budget, whose teardown sends the very \
+             `qa!` this arm exists to prevent and deletes the swap files with it"
         );
     }
 
@@ -663,6 +696,7 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         let mut state = LoopState {
             connection_lost: true,
+            write_lost: false,
             restart_requested: false,
         };
 
