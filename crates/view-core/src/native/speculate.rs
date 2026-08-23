@@ -509,6 +509,7 @@ fn answered_by(redraw: &[UiEvent], cell: &PredictedCell) -> bool {
         | UiEvent::PopupmenuHide
         | UiEvent::MouseOn
         | UiEvent::MouseOff
+        | UiEvent::UiSend { .. }
         | UiEvent::Unknown { .. } => false,
     })
 }

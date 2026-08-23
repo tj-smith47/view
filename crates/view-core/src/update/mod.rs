@@ -138,6 +138,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Effect::Rpc(RpcCall::ProbeSwapRecovery {
                 generation: model.supervision.renew_swap_probe(),
             }),
+            // and the first moment claiming a terminal is free: nvim's own
+            // tty defaults have finished looking for one by now, so the
+            // claim buys `ui_send` delivery without the startup query and
+            // keystroke-eating wait that finding it earlier would have cost
+            Effect::Rpc(RpcCall::ClaimStdoutTty),
         ],
         // delegated, not answered here: the worker owns the reply (see
         // Effect::ClipboardRead/ClipboardWrite's docs), so this loop never

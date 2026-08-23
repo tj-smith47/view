@@ -74,6 +74,7 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         // capture), same unconditional mapping as `flush`/`msg_clear` above
         "mouse_on" => UiEvent::MouseOn,
         "mouse_off" => UiEvent::MouseOff,
+        "ui_send" => decode_ui_send(args).unwrap_or_else(unknown),
         _ => unknown(),
     }
 }
@@ -323,6 +324,20 @@ fn decode_cmdline_show(args: &[Value]) -> Option<UiEvent> {
     })
 }
 
+/// nvim types `nvim_ui_send`'s payload as a `String`, and rmpv hands a
+/// msgpack `str` back as `Value::String`; a payload holding bytes that are
+/// not valid UTF-8 (`as_str` returns `None`) decodes to `Unknown` and is
+/// dropped rather than lossily transcoded, since a mangled escape written
+/// to the terminal is worse than none at all.
+fn decode_ui_send(args: &[Value]) -> Option<UiEvent> {
+    let [content, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::UiSend {
+        content: content.as_str()?.to_string(),
+    })
+}
+
 fn decode_cmdline_pos(args: &[Value]) -> Option<UiEvent> {
     let [pos, level, ..] = args else {
         return None;
@@ -550,6 +565,20 @@ mod tests {
             UiEvent::GridCursorGoto { row: 2, col: 5, .. }
         ));
         assert!(matches!(evs[4], UiEvent::Flush));
+    }
+
+    /// The payload arrives verbatim, escape bytes and all: what
+    /// `update()`'s forwarding policy decides is a clipboard write depends on
+    /// reading the sequence exactly as nvim formed it.
+    #[test]
+    fn ui_send_decodes_its_payload_unaltered() {
+        let escape = "\x1b]52;c;aGk=\x1b\\";
+        let params = vec![arr(vec![
+            Value::from("ui_send"),
+            arr(vec![Value::from(escape)]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert!(matches!(&evs[0], UiEvent::UiSend { content } if content == escape));
     }
 
     #[test]

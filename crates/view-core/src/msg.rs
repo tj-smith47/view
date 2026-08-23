@@ -998,6 +998,27 @@ pub enum Effect {
         lines: Vec<String>,
         regtype: RegisterType,
     },
+    /// Writes bytes nvim formed itself straight to the real terminal, the
+    /// passthrough half of [`Osc52Copy`](Self::Osc52Copy).
+    ///
+    /// nvim's own OSC 52 clipboard provider -- what a user's `g:clipboard`
+    /// selects over SSH, and the case view's provider registration stands
+    /// down for -- emits its escape through `nvim_ui_send`, already encoded.
+    /// The escape still has to cross to the terminal from the one thread
+    /// allowed to write there, so it rides the identical channel, cap and
+    /// skip-and-log policy `Osc52Copy` does; the only difference is that the
+    /// bytes arrive formed rather than being built at the drain.
+    ///
+    /// Carries whole escapes only, never a stream: `update()` forwards a
+    /// `ui_send` payload only when it is a self-contained OSC 52 clipboard
+    /// *write*, which is fire-and-forget and provokes no reply. Everything
+    /// else a plugin may send through `nvim_ui_send` -- a DA1, an XTGETTCAP
+    /// request, an OSC 52 read query -- is a question, and the answer would
+    /// land on view's stdin where the key reader would surface it as typed
+    /// text, so it is dropped rather than written.
+    TermWrite {
+        bytes: Vec<u8>,
+    },
     Quit {
         exit_code: i32,
     },
@@ -1389,6 +1410,17 @@ pub enum RpcCall {
     /// tracking earns, so this belongs only where view knows the screen is
     /// showing something the user did not ask for.
     Redraw,
+    /// Tells nvim this UI's stdout is a real terminal, which is what starts
+    /// `ui_send` delivery and so [`Effect::TermWrite`].
+    ///
+    /// Emitted from the `VimEnter` arm rather than asked for at attach time:
+    /// nvim's own `nvim.tty` defaults look for a `stdout_tty` UI while
+    /// runtime files load, and a UI that already claimed one is queried and
+    /// then waited on for 100 ms it will never answer -- eating the
+    /// keystrokes pressed in that window. Claiming it once those defaults
+    /// have looked and moved on costs nothing and loses nothing (see
+    /// `view_engine`'s `STDOUT_TTY_OPTION`).
+    ClaimStdoutTty,
     /// Registers `specs` as real nvim mappings and the `:View` command, in
     /// one chunk, and answers with every claim as [`Msg::MappingsClaimed`].
     /// `channel_id` is view's own RPC channel: the registered right-hand

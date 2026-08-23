@@ -585,6 +585,9 @@ mod tests {
         fn redraw(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn claim_stdout_tty(&self) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn register_mappings(
             &self,
             _specs: &[view_core::native::mappings::MappingSpec],

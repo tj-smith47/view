@@ -385,6 +385,7 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.probe_swap_recovery(generation)
                     }
                     RpcCall::Redraw => self.ops.redraw(),
+                    RpcCall::ClaimStdoutTty => self.ops.claim_stdout_tty(),
                     RpcCall::RegisterMappings { specs, channel_id } => {
                         self.ops.register_mappings(&specs, channel_id)
                     }
@@ -592,11 +593,20 @@ impl<E: EngineOps> Executor<E> {
                 regtype,
             } => {
                 if let Some(tx) = &self.osc52 {
-                    let _ = tx.send(Osc52Job {
+                    let _ = tx.send(Osc52Job::Copy {
                         register,
                         lines,
                         regtype,
                     });
+                }
+                Flow::Continue
+            }
+            // the same channel and the same fire-and-forget degrade as
+            // `Osc52Copy` above; only the encoding side differs (see
+            // `Osc52Job`)
+            Effect::TermWrite { bytes } => {
+                if let Some(tx) = &self.osc52 {
+                    let _ = tx.send(Osc52Job::Passthrough(bytes));
                 }
                 Flow::Continue
             }
@@ -3841,9 +3851,39 @@ mod tests {
         });
         assert!(matches!(flow, Flow::Continue));
         let job = rx.try_recv().expect("the osc52 job must be forwarded");
-        assert_eq!(job.register, '*');
-        assert_eq!(job.lines, vec!["a", "b"]);
-        assert_eq!(job.regtype, RegisterType::Linewise);
+        let Osc52Job::Copy {
+            register,
+            lines,
+            regtype,
+        } = job
+        else {
+            panic!("an Osc52Copy effect must queue an encoding job, not a passthrough one");
+        };
+        assert_eq!(register, '*');
+        assert_eq!(lines, vec!["a", "b"]);
+        assert_eq!(regtype, RegisterType::Linewise);
+    }
+
+    /// The passthrough twin of the job forwarding above: nvim's own escape
+    /// must reach the same channel, unaltered, or the clipboard write a
+    /// user's `g:clipboard` provider performs never reaches the terminal.
+    #[test]
+    fn term_write_forwards_the_bytes_verbatim_on_the_osc52_channel() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        let executor = Executor::new(&ops).with_osc52(tx);
+        const ESCAPE: &[u8] = b"\x1b]52;c;aGk=\x1b\\";
+        let flow = executor.run(Effect::TermWrite {
+            bytes: ESCAPE.to_vec(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+        let job = rx
+            .try_recv()
+            .expect("the passthrough job must be forwarded");
+        let Osc52Job::Passthrough(bytes) = job else {
+            panic!("a TermWrite effect must queue a passthrough job");
+        };
+        assert_eq!(bytes, ESCAPE);
     }
 
     #[test]

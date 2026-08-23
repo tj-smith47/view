@@ -668,7 +668,11 @@ impl ReferenceSession {
             | UiEvent::PopupmenuSelect { .. }
             | UiEvent::PopupmenuHide
             | UiEvent::MouseOn
-            | UiEvent::MouseOff => {}
+            | UiEvent::MouseOff
+            // no cell content either: bytes bound for a terminal this
+            // session does not have (it attaches without `stdout_tty`, so
+            // nvim never sends one here in the first place)
+            | UiEvent::UiSend { .. } => {}
         }
     }
 

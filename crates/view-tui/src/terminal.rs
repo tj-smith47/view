@@ -546,6 +546,25 @@ impl Term {
         out.flush()
     }
 
+    /// Writes already-formed bytes directly to the real terminal, the same
+    /// frame-buffer-bypassing route [`write_osc52`](Self::write_osc52)
+    /// takes and for the same reason -- see that method's doc.
+    ///
+    /// Nothing here inspects or escapes what it is handed: the caller owns
+    /// deciding that the bytes are a self-contained sequence safe to
+    /// interleave between frames (`view_core::msg::Effect::TermWrite`
+    /// states that policy).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if the write or flush
+    /// fails.
+    pub fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let mut out = std::io::stdout().lock();
+        out.write_all(bytes)?;
+        out.flush()
+    }
+
     /// Restores the terminal immediately rather than waiting for [`Drop`].
     ///
     /// `std::process::exit` bypasses destructors, so the exit path that

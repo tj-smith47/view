@@ -1670,6 +1670,37 @@ pub const UI_EXT_OPTIONS: &[&str] = &[
     "ext_tabline",
 ];
 
+/// The non-`ext_` option [`EngineHandle::claim_stdout_tty`] sets, declaring
+/// that this UI's stdout is a real terminal.
+///
+/// It is what makes `nvim_ui_send` deliver at all: nvim emits the `ui_send`
+/// event only to UIs carrying this option (`:help nvim_ui_send()`), and
+/// nvim's own OSC 52 clipboard provider -- the one a user's `g:clipboard`
+/// selects over SSH, which view's `REGISTER_CLIPBOARD_CHUNK` deliberately
+/// stands down for -- writes its escape through exactly that call. Without
+/// this, such a yank is discarded inside nvim with no error.
+///
+/// Set after startup rather than requested at attach, which is not a
+/// nicety: nvim's `nvim.tty` defaults look for a `stdout_tty` UI while
+/// runtime files load, and finding one they query the terminal and block
+/// `VimEnter` on the answer for 100 ms (`E1568` when none comes). view has
+/// no channel to carry a terminal's reply back -- its stdin is crossterm's
+/// key decoder, which would surface one as typed text -- so the answer would
+/// never come, and keys pressed inside that window are eaten as the wait's
+/// own interrupt. Claiming the tty once those defaults have already looked
+/// and moved on gets `ui_send` delivery with no query, no wait and no lost
+/// keystroke.
+const STDOUT_TTY_OPTION: &str = "stdout_tty";
+
+/// The `nvim_ui_attach` option map both attach methods send, so neither can
+/// drift from the other's capability set.
+fn attach_options() -> Vec<(Value, Value)> {
+    UI_EXT_OPTIONS
+        .iter()
+        .map(|&name| (Value::from(name), Value::from(true)))
+        .collect()
+}
+
 /// The child descriptor [`crate::process::EngineConfig::with_stdin_relay`]
 /// duplicates the caller's own stdin onto, and the value
 /// [`EngineHandle::ui_attach_with_stdin_relay`] sends as `nvim_ui_attach`'s
@@ -1706,16 +1737,7 @@ impl EngineHandle {
     /// nvim rejects the attach, or the reply does not arrive within
     /// `UI_ATTACH_TIMEOUT`.
     pub fn ui_attach(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        let opts = UI_EXT_OPTIONS
-            .iter()
-            .map(|&name| (Value::from(name), Value::from(true)))
-            .collect();
-        self.request_timeout(
-            "nvim_ui_attach",
-            vec![Value::from(width), Value::from(height), Value::Map(opts)],
-            UI_ATTACH_TIMEOUT,
-        )?;
-        Ok(())
+        self.attach(width, height, false)
     }
 
     /// Identical to [`ui_attach`](Self::ui_attach), plus the `stdin_fd`
@@ -1733,14 +1755,17 @@ impl EngineHandle {
     ///
     /// Same as [`ui_attach`](Self::ui_attach).
     pub fn ui_attach_with_stdin_relay(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        let mut opts: Vec<(Value, Value)> = UI_EXT_OPTIONS
-            .iter()
-            .map(|&name| (Value::from(name), Value::from(true)))
-            .collect();
-        opts.push((
-            Value::from("stdin_fd"),
-            Value::from(i64::from(STDIN_RELAY_CHILD_FD)),
-        ));
+        self.attach(width, height, true)
+    }
+
+    fn attach(&self, width: u16, height: u16, stdin_relay: bool) -> Result<(), EngineError> {
+        let mut opts = attach_options();
+        if stdin_relay {
+            opts.push((
+                Value::from("stdin_fd"),
+                Value::from(i64::from(STDIN_RELAY_CHILD_FD)),
+            ));
+        }
         self.request_timeout(
             "nvim_ui_attach",
             vec![Value::from(width), Value::from(height), Value::Map(opts)],
@@ -2060,6 +2085,27 @@ impl EngineHandle {
     /// already exited.
     pub fn redraw(&self) -> Result<(), EngineError> {
         self.notify("nvim_command", vec![Value::from("mode")])
+    }
+
+    /// Declares this UI's stdout a real terminal, so nvim starts delivering
+    /// `ui_send` here (see [`STDOUT_TTY_OPTION`] for what that carries and
+    /// why the declaration waits until after startup).
+    ///
+    /// A notification, not a request, for the same reason
+    /// [`redraw`](Self::redraw) is one: the runtime loop issues it and
+    /// nothing reads a result. Ordering is what matters instead, and the
+    /// connection provides it -- every later call on this channel, a yank's
+    /// clipboard write included, is written behind this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn claim_stdout_tty(&self) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_ui_set_option",
+            vec![Value::from(STDOUT_TTY_OPTION), Value::from(true)],
+        )
     }
 
     /// Reads [`SWAP_RECOVERY_PROBE`] -- what this engine replayed out of a

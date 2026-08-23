@@ -167,6 +167,12 @@ pub enum UiEvent {
     /// nvim wants terminal mouse reporting disabled. No fields, matching
     /// `MouseOn`.
     MouseOff,
+    /// Bytes nvim wants written verbatim to the host terminal
+    /// (`nvim_ui_send`, delivered only to a UI that attached with the
+    /// `stdout_tty` option). Carries the wire string unchanged; what may
+    /// actually reach the terminal is decided by
+    /// [`crate::update`]'s own forwarding policy, not here.
+    UiSend { content: String },
     /// An event name this decoder does not yet model.
     Unknown { name: String },
 }

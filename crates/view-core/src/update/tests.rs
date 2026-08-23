@@ -1405,10 +1405,11 @@ fn loop_tokens_are_noops_and_engine_request_always_replies() {
                 value: ReplyValue::Nil
             },
             // what the engine is asked the moment it is answered, and the
-            // ordering between the two, is
+            // ordering between the three, is
             // `vim_enter_is_answered_first_and_then_asked_what_it_recovered`'s
             // subject
             Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }),
+            Effect::Rpc(RpcCall::ClaimStdoutTty),
         ]
     ));
 }
@@ -1469,6 +1470,84 @@ fn clipboard_set_produces_a_write_and_an_osc52_copy_effect_from_one_arm() {
         ] if w_lines == &vec!["a".to_string(), "b".to_string()]
             && o_lines == &vec!["a".to_string(), "b".to_string()]
     ));
+}
+
+/// The whole reason `stdout_tty` is requested at all: a user whose
+/// `g:clipboard` names nvim's own OSC 52 provider yanks through nvim, not
+/// through view's provider, and nvim hands the finished escape over as a
+/// `ui_send`. Nothing else in the suite fails if this arm drops it.
+#[test]
+fn a_ui_send_clipboard_write_is_forwarded_to_the_terminal_verbatim() {
+    let mut m = model();
+    const ESCAPE: &str = "\x1b]52;c;aGVsbG8=\x1b\\";
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::UiSend {
+            content: ESCAPE.to_string(),
+        }]),
+    );
+    assert!(
+        matches!(&effects[..], [Effect::TermWrite { bytes }] if bytes == ESCAPE.as_bytes()),
+        "expected the escape forwarded unaltered, got {effects:?}"
+    );
+}
+
+/// nvim's own startup probe concatenates unrelated sequences into one
+/// payload (`OSC 11 ; ?` followed by a DSR), which is what a plugin's query
+/// can look like too: none of it is a clipboard write, and forwarding any of
+/// it makes the terminal answer onto view's stdin, where the key reader would
+/// surface the reply as typed text.
+#[test]
+fn a_ui_send_terminal_query_is_never_written_out() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::UiSend {
+            content: "\x1b]11;?\x07\x1b[5n".to_string(),
+        }]),
+    );
+    assert!(
+        effects.is_empty(),
+        "expected no terminal write, got {effects:?}"
+    );
+}
+
+/// The read half of OSC 52 is a question, not a write: forwarding it makes
+/// the terminal answer onto view's stdin. Sharing the `]52;` prefix with the
+/// write above is exactly why the payload, not the prefix, decides.
+#[test]
+fn a_ui_send_clipboard_read_query_is_not_forwarded() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::UiSend {
+            content: "\x1b]52;c;?\x1b\\".to_string(),
+        }]),
+    );
+    assert!(
+        effects.is_empty(),
+        "a read query must reach neither the terminal nor the engine, got {effects:?}"
+    );
+}
+
+/// DA1, XTGETTCAP and the progress-bar escapes all arrive by the same route
+/// and none of them is a clipboard write; a blacklist would have to grow
+/// with every nvim release, so nothing unrecognized passes.
+#[test]
+fn an_unrecognized_ui_send_payload_is_dropped() {
+    let mut m = model();
+    for content in ["\x1b[c", "\x1bP+q5463\x1b\\", "\x1b]9;4;1;40\x1b\\"] {
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::UiSend {
+                content: content.to_string(),
+            }]),
+        );
+        assert!(
+            effects.is_empty(),
+            "{content:?} must be dropped, got {effects:?}"
+        );
+    }
 }
 
 #[test]
@@ -7450,6 +7529,7 @@ fn vim_enter_is_answered_first_and_then_asked_what_it_recovered() {
                     ..
                 },
                 Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }),
+                Effect::Rpc(RpcCall::ClaimStdoutTty),
             ]
         ),
         "a probe queued ahead of the reply waits on the engine that is \

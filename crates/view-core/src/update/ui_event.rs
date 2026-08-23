@@ -291,10 +291,70 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             model.engine.mouse_on = false;
             Vec::new()
         }
+        UiEvent::UiSend { content } => forward_ui_send(&content),
         // no cell content and no chrome state: the window's own cells arrive
         // as `grid_line`, and the only reader of a viewport is
         // `native::speculate`, which the host folds a batch through before
         // this applier ever sees it
         UiEvent::WinViewport { .. } | UiEvent::Unknown { .. } => Vec::new(),
     }
+}
+
+/// The forwarding policy for one `nvim_ui_send` payload.
+///
+/// A whitelist, and narrow on purpose: view is not a terminal host. It writes
+/// to the terminal but reads its stdin through crossterm's key decoder, so
+/// any sequence the terminal answers would come back as keystrokes typed into
+/// the buffer. Only a self-contained OSC 52 clipboard *write* is safe to pass
+/// through -- it provokes no reply -- and it is also the one payload with a
+/// real cost to dropping, since it is how nvim's own clipboard provider
+/// performs a `"+y` (see [`Effect::TermWrite`]).
+///
+/// nvim's own startup queries never reach here at all: view claims the tty
+/// only after nvim's `nvim.tty` defaults have stopped looking for one (see
+/// [`RpcCall::ClaimStdoutTty`]). What a *plugin* sends is what this drops.
+/// Widening the whitelist means first giving view a reader that recognises
+/// DA1/OSC/DCS/APC replies on stdin and feeds them back through
+/// `nvim_ui_term_event`; until that exists, forwarding a query would corrupt
+/// the buffer rather than answer it. One consequence is named rather than
+/// hidden: a `"+p` against a user-supplied OSC 52 provider sends a read query
+/// (`OSC 52 ; c ; ?`) that view drops, so nvim times it out -- unchanged from
+/// the behaviour before `stdout_tty` was claimed at all.
+fn forward_ui_send(content: &str) -> Vec<Effect> {
+    match osc52_write(content) {
+        Some(escape) => vec![Effect::TermWrite {
+            bytes: escape.as_bytes().to_vec(),
+        }],
+        None => Vec::new(),
+    }
+}
+
+/// The one complete `OSC 52 ; {c|p} ; {base64}` clipboard-write escape in
+/// `content`, or `None` when there is none.
+///
+/// A payload of `?` is a read query, not a write, and is excluded: it is the
+/// half of the OSC 52 protocol that expects the terminal to answer (see
+/// [`forward_ui_send`]). The scan is over `content` as a whole rather than a
+/// prefix test, because one `nvim_ui_send` payload may hold several
+/// concatenated sequences (nvim's own startup probe writes `OSC 11` and a DSR
+/// in one call), and an escape that is merely not first still has to be
+/// found.
+fn osc52_write(content: &str) -> Option<&str> {
+    const PREFIX: &str = "\x1b]52;";
+    // `ST` per nvim's own provider; `BEL` is the other terminator OSC
+    // sequences are written with, and costs one more `find` to accept
+    const TERMINATORS: [&str; 2] = ["\x1b\\", "\x07"];
+    let start = content.find(PREFIX)?;
+    let body = &content[start + PREFIX.len()..];
+    let end = TERMINATORS.iter().filter_map(|t| body.find(t)).min()?;
+    // `{clipboard};{payload}` -- a read query's payload is exactly `?`
+    let (_, payload) = body[..end].split_once(';')?;
+    if payload == "?" {
+        return None;
+    }
+    let terminator_len = TERMINATORS
+        .iter()
+        .find(|t| body[end..].starts_with(*t))
+        .map_or(0, |t| t.len());
+    Some(&content[start..start + PREFIX.len() + end + terminator_len])
 }

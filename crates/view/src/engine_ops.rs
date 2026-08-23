@@ -54,6 +54,9 @@ pub trait EngineOps {
     /// Asks nvim to repaint from scratch and retract the messages it has
     /// shown (see `RpcCall::Redraw`).
     fn redraw(&self) -> Result<(), EngineError>;
+    /// Declares this UI's stdout a real terminal, starting `ui_send`
+    /// delivery (see `RpcCall::ClaimStdoutTty`).
+    fn claim_stdout_tty(&self) -> Result<(), EngineError>;
     /// Registers this session's default keys and the `:View` command in one
     /// chunk; never blocks, and never itself returns the claims (see
     /// `Msg::MappingsClaimed`).
@@ -240,6 +243,9 @@ impl EngineOps for EngineHandle {
     fn redraw(&self) -> Result<(), EngineError> {
         self.redraw()
     }
+    fn claim_stdout_tty(&self) -> Result<(), EngineError> {
+        self.claim_stdout_tty()
+    }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         self.register_mappings(specs, channel_id)
     }
@@ -378,6 +384,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn redraw(&self) -> Result<(), EngineError> {
         (**self).redraw()
+    }
+    fn claim_stdout_tty(&self) -> Result<(), EngineError> {
+        (**self).claim_stdout_tty()
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         (**self).register_mappings(specs, channel_id)
@@ -520,6 +529,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn redraw(&self) -> Result<(), EngineError> {
         (**self).redraw()
+    }
+    fn claim_stdout_tty(&self) -> Result<(), EngineError> {
+        (**self).claim_stdout_tty()
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         (**self).register_mappings(specs, channel_id)
@@ -687,6 +699,9 @@ impl EngineOps for FakeOps {
     }
     fn redraw(&self) -> Result<(), EngineError> {
         self.record("redraw()".to_string())
+    }
+    fn claim_stdout_tty(&self) -> Result<(), EngineError> {
+        self.record("claim_stdout_tty()".to_string())
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();
@@ -884,6 +899,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn redraw(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         Ok(())
     }
     fn register_mappings(

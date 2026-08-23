@@ -1008,17 +1008,18 @@ mod tests {
             content_painted,
             "the pending-damage Flush was not dispatched"
         );
-        // presink's VimEnter reply and the probe that reply carries, then
+        // presink's VimEnter reply and the two calls that reply carries, then
         // the attach probe the cutover closes the staged traffic with, then
         // the resize, then every buffered key, in that exact order -- the
         // arrival order run_cutover's doc comment claims
-        let expected_len = 4 + KEY_RING_CAPACITY;
+        let expected_len = 5 + KEY_RING_CAPACITY;
         assert_eq!(calls.len(), expected_len);
         assert_eq!(calls[0], "reply(1,Nil)");
         assert_eq!(calls[1], "probe_swap_recovery(1)");
-        assert_eq!(calls[2], "probe_swap_recovery(2)");
-        assert!(calls[3].starts_with("try_resize("));
-        assert_eq!(calls[4], "input(0)");
+        assert_eq!(calls[2], "claim_stdout_tty()");
+        assert_eq!(calls[3], "probe_swap_recovery(2)");
+        assert!(calls[4].starts_with("try_resize("));
+        assert_eq!(calls[5], "input(0)");
         assert_eq!(
             calls[expected_len - 1],
             format!("input({})", KEY_RING_CAPACITY - 1)
