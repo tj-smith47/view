@@ -1626,6 +1626,58 @@ fn a_normal_mode_escape_dismisses_a_sticky_error_and_still_reaches_nvim() {
     );
 }
 
+/// `<Esc>` has three consumers -- an entered overlay, a busy-modal, and a
+/// sticky toast -- and only the ordering keeps them from spending each
+/// other's key: a re-order of `route_key`'s arms that let the toast win
+/// would burn the error message on the keystroke the user meant as "leave
+/// the panel", with every single-consumer test still green.
+#[test]
+fn esc_spends_on_the_entered_panel_before_the_sticky_toast() {
+    let mut m = model_showing_a_sticky_error("normal");
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert!(m.ai_panel().focused, "open claims focus");
+
+    let first = press(&mut m, "<Esc>");
+
+    assert!(
+        !m.ai_panel().focused,
+        "the first <Esc> un-enters the panel, nothing else"
+    );
+    assert_eq!(
+        visible_texts(&m).len(),
+        1,
+        "the panel's <Esc> must not spend the toast too: {:?}",
+        visible_texts(&m)
+    );
+    assert!(
+        first.is_empty(),
+        "un-entering is view-local; the key never reaches nvim while an \
+             overlay owns it: {first:?}"
+    );
+
+    let second = press(&mut m, "<Esc>");
+
+    assert!(
+        visible_texts(&m).is_empty(),
+        "with the panel un-entered the next <Esc> dismisses the toast: {:?}",
+        visible_texts(&m)
+    );
+    assert!(
+        matches!(
+            second.as_slice(),
+            [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"
+        ),
+        "the dismissing key still reaches nvim unchanged: {second:?}"
+    );
+}
+
 #[test]
 fn an_escape_with_no_toast_up_is_the_bare_keystroke_it_always_was() {
     let mut m = model();
