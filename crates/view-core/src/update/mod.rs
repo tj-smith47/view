@@ -869,8 +869,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 /// narrow to read the request in is exactly when a user reaches for it.
 ///
 /// A closed list rather than "any `<...>` notation" on purpose. The
-/// composer's own named keys are edits like any other keystroke: `<CR>` starts a turn, `<BS>` and `<lt>` (nvim's escape
-/// for a literal `<`, see `keys::encode_key`) type into the prompt. Letting
+/// composer's own named keys are edits like any other keystroke: `<CR>`
+/// starts a turn, `<BS>` and `<lt>` (nvim's escape for a literal `<`, see
+/// `keys::encode_key`) type into the prompt. Letting
 /// those through because they are spelled with angle brackets would leave
 /// the composer editable behind a decision the user has not made yet --
 /// with `<CR>` able to start a second turn on top of the one whose
