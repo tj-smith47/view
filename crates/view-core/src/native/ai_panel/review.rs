@@ -105,6 +105,11 @@ pub enum Refusal {
     /// re-diff would need with them (see [`Hunk::anchor_intact`]), so it
     /// can never be made writable again.
     AnchorLost,
+    /// The verb itself is not one of the review's. The one refusal no hunk
+    /// and no review state produces -- the dispatch raises it, and it lives
+    /// here so that every sentence a review answers a verb with is worded
+    /// in one place.
+    UnknownVerb,
 }
 
 /// One agent proposal under review.
@@ -1120,6 +1125,34 @@ mod tests {
             vec![Span::plain("Review /tmp/a.rs -- hunk 1/2, 2 open")]
         );
         assert_eq!(rows[1], vec![Span::plain(KEY_HINT)]);
+    }
+
+    /// The hints are what the user reads; `review_keys()` is what the
+    /// engine actually sets on the buffer. A key advertised on the header
+    /// that nothing installs, or an installed key nothing ever names, is
+    /// the same failure seen from either side.
+    #[test]
+    fn the_hints_name_exactly_the_keys_a_review_installs() {
+        let hints = [KEY_HINT, STALE_KEY_HINT, UNANCHORED_KEY_HINT, LEAVE_HINT];
+        let installed = crate::native::mappings::review_keys();
+        for key in installed {
+            assert!(
+                hints.iter().any(|hint| hint.contains(key.lhs)),
+                "{} is installed on the buffer but no hint offers it",
+                key.lhs
+            );
+        }
+        for hint in hints {
+            for token in hint
+                .split_whitespace()
+                .filter(|word| word.starts_with("<leader>") || word.ends_with('c'))
+            {
+                assert!(
+                    installed.iter().any(|key| key.lhs == token),
+                    "{token} is offered in a hint but no review installs it: {hint}"
+                );
+            }
+        }
     }
 
     #[test]

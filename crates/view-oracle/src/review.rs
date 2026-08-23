@@ -23,9 +23,18 @@
 //!
 //! The review is driven through `DiffReviewState` directly rather than
 //! through key dispatch, on the same terms as
-//! `crates/view-engine/tests/diff_review_undo_live.rs`: the panel's key
+//! `crates/view-engine/tests/diff_review_undo_live.rs`: the review's key
 //! bindings are covered by their own dispatch tests, while the thing no
 //! unit test can answer is what nvim's buffer holds after the write.
+//!
+//! Nothing here issues `RpcCall::ReviewShow`, so no run of this module ever
+//! sets an extmark, and `parity::compare` reads text, cursor, registers and
+//! `getmarklist()` marks -- none of which an extmark appears in. A future
+//! leg that drives the review's effects rather than its state would change
+//! that, and owes an exclusion of
+//! [`view_engine::nvim_api::REVIEW_NAMESPACE`]: the decoration is view's own
+//! presentation of a proposal, not editor state a reference nvim could ever
+//! be expected to hold.
 
 use std::path::PathBuf;
 

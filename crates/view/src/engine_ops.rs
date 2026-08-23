@@ -4,7 +4,9 @@
 //! testable against a recording fake instead of a live nvim connection, and
 //! so growing the surface never grows the loop's own file.
 
-use view_core::msg::{BufferHandle, OptionValue, ReplyToken, ReplyValue, TextEdit};
+use view_core::msg::{
+    BufferHandle, HunkMark, OptionValue, ReplyToken, ReplyValue, ReviewOpenTarget, TextEdit,
+};
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
 };
@@ -134,6 +136,22 @@ pub trait EngineOps {
     fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError>;
     /// Unsubscribes from `buf`'s edit stream (see `RpcCall::BufDetach`).
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError>;
+    /// Draws the whole open review inside `buf` -- every open hunk's
+    /// deletions, its proposed lines, and the review's buffer-local keys --
+    /// taking the cursor there when `focus` asks (see
+    /// `RpcCall::ReviewShow`). Fire-and-forget: nothing correlates a reply,
+    /// which is what lets the loop emit it on the paint path.
+    fn review_show(
+        &self,
+        buf: BufferHandle,
+        marks: &[HunkMark],
+        cursor_row: u32,
+        focus: bool,
+        open_target: ReviewOpenTarget,
+    ) -> Result<(), EngineError>;
+    /// Takes the review's decoration and its keys back off `buf` (see
+    /// `RpcCall::ReviewClear`).
+    fn review_clear(&self, buf: BufferHandle) -> Result<(), EngineError>;
     /// Loads `path` into an unlisted hidden buffer (reusing an already-open
     /// one for the same path) and takes a hold on it, tagged `generation`;
     /// never blocks, and answers `Msg::HiddenBufferLoaded` (see
@@ -310,6 +328,19 @@ impl EngineOps for EngineHandle {
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         self.buf_detach(buf)
     }
+    fn review_show(
+        &self,
+        buf: BufferHandle,
+        marks: &[HunkMark],
+        cursor_row: u32,
+        focus: bool,
+        open_target: ReviewOpenTarget,
+    ) -> Result<(), EngineError> {
+        self.review_show(buf, marks, cursor_row, focus, open_target)
+    }
+    fn review_clear(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        self.review_clear(buf)
+    }
     fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.load_hidden(path, generation)
     }
@@ -454,6 +485,19 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         (**self).buf_detach(buf)
+    }
+    fn review_show(
+        &self,
+        buf: BufferHandle,
+        marks: &[HunkMark],
+        cursor_row: u32,
+        focus: bool,
+        open_target: ReviewOpenTarget,
+    ) -> Result<(), EngineError> {
+        (**self).review_show(buf, marks, cursor_row, focus, open_target)
+    }
+    fn review_clear(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        (**self).review_clear(buf)
     }
     fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).load_hidden(path, generation)
@@ -602,6 +646,19 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         (**self).buf_detach(buf)
+    }
+    fn review_show(
+        &self,
+        buf: BufferHandle,
+        marks: &[HunkMark],
+        cursor_row: u32,
+        focus: bool,
+        open_target: ReviewOpenTarget,
+    ) -> Result<(), EngineError> {
+        (**self).review_show(buf, marks, cursor_row, focus, open_target)
+    }
+    fn review_clear(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        (**self).review_clear(buf)
     }
     fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).load_hidden(path, generation)
@@ -790,6 +847,23 @@ impl EngineOps for FakeOps {
     }
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         self.record(format!("buf_detach({})", buf.0))
+    }
+    fn review_show(
+        &self,
+        buf: BufferHandle,
+        marks: &[HunkMark],
+        cursor_row: u32,
+        focus: bool,
+        open_target: ReviewOpenTarget,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "review_show({},{},{cursor_row},{focus},{open_target:?})",
+            buf.0,
+            marks.len()
+        ))
+    }
+    fn review_clear(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        self.record(format!("review_clear({})", buf.0))
     }
     fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         if let Some(reason) = view_engine::nvim_api::hidden_path_refusal(path) {
@@ -982,6 +1056,19 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn buf_detach(&self, _buf: BufferHandle) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn review_show(
+        &self,
+        _buf: BufferHandle,
+        _marks: &[HunkMark],
+        _cursor_row: u32,
+        _focus: bool,
+        _open_target: ReviewOpenTarget,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn review_clear(&self, _buf: BufferHandle) -> Result<(), EngineError> {
         Ok(())
     }
     fn load_hidden(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {

@@ -8962,16 +8962,7 @@ fn every_review_verb_the_command_completes_is_one_the_review_answers() {
         .collect();
     assert_eq!(
         listed,
-        vec![
-            super::review::ACCEPT,
-            super::review::ACCEPT_ALL,
-            super::review::REJECT,
-            super::review::REJECT_ALL,
-            super::review::REDIFF,
-            super::review::NEXT,
-            super::review::PREV,
-            super::review::LEAVE,
-        ],
+        super::review::VERBS.to_vec(),
         "the completion table and the dispatch name the same verbs"
     );
     for verb in listed {
@@ -9414,18 +9405,23 @@ fn rejecting_them_all_writes_nothing_and_ends_the_review_in_one_verb() {
     );
 }
 
-/// A verb the review does not know is a true no-op -- no effect, no
-/// repaint, no status touched. `:View review whatever` typed by hand is
-/// the only way to reach this, and nothing happening is the honest answer.
+/// A verb the review does not know changes nothing about the review -- no
+/// repaint, no status, no cursor -- and says so. `:View review <Tab>`
+/// offers these words, so a typo in one of them is a user asking for
+/// something view advertised, and silence would read as a dropped command.
 #[test]
-fn a_verb_the_review_does_not_know_changes_nothing() {
+fn a_verb_the_review_does_not_know_says_so_and_changes_nothing() {
     let mut m = live_review_model();
     m.dirty = false;
     let before = m.ai_panel().pending_diff.as_ref().unwrap().clone();
 
-    let effects = update(&mut m, review_msg("obliterate"));
+    let _ = update(&mut m, review_msg("obliterate"));
 
-    assert!(effects.is_empty(), "{effects:?}");
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("no such verb")),
+        "an unknown verb is answered rather than swallowed: {texts:?}"
+    );
     assert!(!m.dirty, "an unknown verb does not even cost a repaint");
     let after = m.ai_panel().pending_diff.as_ref().unwrap();
     assert_eq!(after.cursor, before.cursor);
@@ -9441,6 +9437,53 @@ fn a_verb_the_review_does_not_know_changes_nothing() {
             .map(|hunk| hunk.status)
             .collect::<Vec<_>>()
     );
+}
+
+/// A word no verb spells is answered whether or not anything is under
+/// review: the command completes the same eight words either way, so the
+/// answer to a typo cannot depend on state the user cannot see.
+#[test]
+fn an_unknown_verb_is_answered_even_with_nothing_under_review() {
+    let mut m = entered_ai_panel_model();
+    assert!(m.ai_panel().pending_diff.is_none(), "the premise");
+
+    let _ = update(&mut m, review_msg("obliterate"));
+
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("no such verb")),
+        "{texts:?}"
+    );
+}
+
+/// The review lives in the buffer, so closing the panel takes away the
+/// summary row and nothing else: the decoration is still drawn, the keys
+/// are still installed on the file, and every verb still answers.
+#[test]
+fn a_review_with_the_panel_closed_is_still_drawn_and_still_decided() {
+    let mut m = entered_ai_panel_model();
+    assert!(m.close_ai_panel(), "the premise: the panel was open");
+    assert!(!m.ai_panel_overlay_open());
+
+    open_review(&mut m);
+    assert!(
+        !m.ai_panel_overlay_open(),
+        "a proposal decorates the file rather than raising the panel"
+    );
+
+    let effects = update(&mut m, review_msg("accept"));
+
+    assert!(
+        matches!(
+            rpc_calls(&effects).as_slice(),
+            [
+                RpcCall::BufSetText { .. },
+                RpcCall::ReviewShow { focus: false, .. }
+            ]
+        ),
+        "a closed panel neither swallows the verb nor stops the repaint: {effects:?}"
+    );
+    assert!(!m.ai_panel_overlay_open(), "and it stays closed");
 }
 
 /// A review the user abandoned with decisions still owed is forgotten at

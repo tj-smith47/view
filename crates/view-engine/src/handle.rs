@@ -271,6 +271,21 @@ pub struct CheckTimeCall {
 /// allocates no notification channel at all; the two routing modes are
 /// mutually exclusive per connection.
 pub struct EngineHandle {
+    /// This connection's own msgpack-RPC channel id, as nvim's handshake
+    /// reported it, or `0` before that answer is in.
+    ///
+    /// Carried here rather than passed in per call because it is a fact
+    /// about the connection, not about any caller: the chunks that generate
+    /// an `rpcnotify` right-hand side need to name the channel the notify
+    /// must come back over, and a restart is a new connection whose id
+    /// nothing outside this crate has to remember to re-hand over.
+    ///
+    /// `pub(crate)`, like [`Self::hidden_bufs`] and for the same reason:
+    /// the methods that read it are the ones that generate Lua, and those
+    /// live in [`crate::nvim_api`]'s own `impl EngineHandle` block rather
+    /// than here, to keep this file's production line count under the
+    /// crate's god-file ceiling.
+    pub(crate) channel_id: u64,
     next_msgid: Arc<AtomicU32>,
     pending: Pending,
     closed: Arc<AtomicBool>,
@@ -327,6 +342,7 @@ struct AttachedBuf {
 impl Clone for EngineHandle {
     fn clone(&self) -> Self {
         Self {
+            channel_id: self.channel_id,
             next_msgid: Arc::clone(&self.next_msgid),
             pending: Arc::clone(&self.pending),
             closed: Arc::clone(&self.closed),
@@ -1015,6 +1031,7 @@ impl EngineHandle {
             close_and_drain(&reader_pending, &reader_settled);
         });
         Self {
+            channel_id: 0,
             next_msgid: Arc::new(AtomicU32::new(1)),
             pending,
             closed,

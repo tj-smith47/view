@@ -182,12 +182,22 @@ pub(super) fn on_buf_write_refused(
 /// for through a key the header was offering, answered with an identical
 /// screen and nothing else, reads as view having dropped the keystroke.
 ///
-/// A verb naming no review, and an unknown verb, are both inert. Neither
-/// can reach a user by accident -- the mappings that produce these are
-/// installed on the reviewed buffer and removed with it -- so the one way
-/// to see either is to have typed `:View review something` by hand, where
-/// nothing happening is the honest answer.
+/// A verb naming no review is inert: every key that produces one is
+/// installed on the reviewed buffer and removed with it, so the only way to
+/// reach that case is `:View review accept` typed with nothing under
+/// review, where nothing happening is the honest answer.
+///
+/// A verb the review does not know is different, and is answered: `:View
+/// review <Tab>` offers these words, so a typo in one of them is a user
+/// asking for something view advertised. It changes nothing else -- no
+/// status, no cursor, no repaint, not even the dirty flag -- because there
+/// is nothing about the review it could have changed.
 pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
+    if !VERBS.contains(&verb) {
+        return model
+            .engine
+            .record_native_notice(refusal_notice(Refusal::UnknownVerb), false);
+    }
     let target = model.ai_review_open_target;
     let Some(review) = model.ai_panel_mut().pending_diff.as_mut() else {
         return Vec::new();
@@ -233,6 +243,8 @@ pub(super) fn review_verb(model: &mut Model, verb: &str) -> Vec<Effect> {
             effects.extend(promote_queued(model));
             return effects;
         }
+        // unreachable: `VERBS` is checked above, and this match answers
+        // every word in it
         _ => return Vec::new(),
     };
     // Every verb answers, one way or the other: a refusal is carried out
@@ -314,6 +326,14 @@ pub(super) const PREV: &str = "prev";
 /// Close the review, deciding nothing further.
 pub(super) const LEAVE: &str = "leave";
 
+/// Every verb this dispatch answers, in the order `:View review <Tab>`
+/// offers them. The list a word is checked against before any state is
+/// touched, so an unknown one is told so rather than silently doing
+/// nothing.
+pub(super) const VERBS: [&str; 8] = [
+    ACCEPT, ACCEPT_ALL, REJECT, REJECT_ALL, REDIFF, NEXT, PREV, LEAVE,
+];
+
 /// Opens the proposal that was waiting behind the review that just ended,
 /// if there is one, and says in the transcript that it has the floor now.
 ///
@@ -361,6 +381,9 @@ fn refusal_notice(why: Refusal) -> String {
         Refusal::AnchorLost => {
             "Your own edits took this hunk's anchor with them -- reject it (<leader>hx) or \
              leave the review (<leader>hq)"
+        }
+        Refusal::UnknownVerb => {
+            "The review has no such verb -- :View review <Tab> offers the ones it answers"
         }
     }
     .to_string()

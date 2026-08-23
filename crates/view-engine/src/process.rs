@@ -909,6 +909,10 @@ impl Engine {
         let Some(child) = guard.0.take() else {
             return Err(EngineError::Io(std::io::Error::other("child slot empty")));
         };
+        // before the first clone leaves this function: every copy of the
+        // handle has to be able to name the channel a generated `rpcnotify`
+        // must come back over (see `EngineHandle::with_channel_id`)
+        let handle = handle.with_channel_id(api_info.channel_id);
         let heartbeat = HeartbeatWatch::default();
         spawn_prober(heartbeat.prober(), handle.clone());
         Ok(Self {

@@ -457,6 +457,21 @@ impl<E: EngineOps> Executor<E> {
                     },
                     RpcCall::BufAttach { buf, generation } => self.ops.buf_attach(buf, generation),
                     RpcCall::BufDetach { buf } => self.ops.buf_detach(buf),
+                    // Neither call correlates a reply, which is what lets
+                    // the loop emit them on the path that paints: the marks
+                    // are presentation over text nvim owns, so a draw that
+                    // fails to land is one repaint away from being right
+                    // again and nothing here waits to find out.
+                    RpcCall::ReviewShow {
+                        buf,
+                        marks,
+                        cursor_row,
+                        focus,
+                        open_target,
+                    } => self
+                        .ops
+                        .review_show(buf, &marks, cursor_row, focus, open_target),
+                    RpcCall::ReviewClear { buf } => self.ops.review_clear(buf),
                     // The second call whose outcome is not just ok-or-lost:
                     // a path the engine refuses outright (blank, relative,
                     // or ending in a separator) never reaches the wire, so
@@ -2448,6 +2463,58 @@ mod tests {
         let executor = Executor::new(&ops);
         let flow = executor.run(Effect::Rpc(RpcCall::OpenFile {
             path: "src/main.rs".into(),
+        }));
+        assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    /// The whole payload reaches the engine: the arm that dropped a field
+    /// would leave the review drawn from a stale one, and the arm that was
+    /// never written at all left `RpcCall`'s `#[non_exhaustive]` catch-all
+    /// swallowing the draw entirely.
+    #[test]
+    fn review_show_effect_maps_to_engine_ops_review_show() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::ReviewShow {
+            buf: BufferHandle(3),
+            marks: vec![view_core::msg::HunkMark {
+                row: 1,
+                end_row: 2,
+                anchor: 1,
+                added: vec!["B".to_string()],
+                stale: false,
+                current: true,
+                header: Some("hunk 1/1".to_string()),
+            }],
+            cursor_row: 1,
+            focus: true,
+            open_target: view_core::msg::ReviewOpenTarget::Split,
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "review_show(3,1,1,true,Split)");
+    }
+
+    #[test]
+    fn review_clear_effect_maps_to_engine_ops_review_clear() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::ReviewClear {
+            buf: BufferHandle(3),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "review_clear(3)");
+    }
+
+    /// A decoration is not a write, but the connection carrying it is the
+    /// same one every other call rides: a notify that cannot be sent is the
+    /// engine being gone, and reads as such here too.
+    #[test]
+    fn review_show_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::ReviewClear {
+            buf: BufferHandle(3),
         }));
         assert!(matches!(flow, Flow::EngineLost));
     }

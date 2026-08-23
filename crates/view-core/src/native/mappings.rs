@@ -169,6 +169,75 @@ pub fn command_only_forms() -> &'static [CommandForm] {
     &COMMAND_ONLY_FORMS
 }
 
+/// One key a review installs on the buffer it is drawn in, and the verb it
+/// invokes.
+///
+/// Separate from [`MappingSpec`] because the two are registered by different
+/// mechanisms with different lifetimes: a spec is a global, session-long
+/// mapping the user can turn off in `[native]`, while these are buffer-local
+/// and exist only for as long as the review does. The feature is not a field
+/// -- every row here is the review's, and a table of one feature spelling it
+/// per row is a table that can disagree with itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewKey {
+    /// The key in nvim notation. `<leader>` is left for nvim to expand, as
+    /// in [`MappingSpec::lhs`].
+    pub lhs: &'static str,
+    /// The verb `Msg::FeatureInvoke { feature: "review", .. }` carries when
+    /// this key is pressed, spelled as [`COMMAND_ONLY_FORMS`] spells it.
+    pub verb: &'static str,
+}
+
+/// The review's own keys, installed on the reviewed buffer while a review
+/// is open and removed with it.
+///
+/// `<leader>h*` is gitsigns' hunk prefix and `]c`/`[c` are vanilla nvim's
+/// own diff-mode change motions, so a switching user already has both in
+/// muscle memory. Single letters are deliberately refused: a reviewed
+/// buffer stays editable -- the whole stale-hunk machinery presumes the
+/// user types in it -- so claiming `a`/`x`/`q` there, even buffer-locally,
+/// would break the one contract everything else here is built on.
+///
+/// `reject_all` reaches no key on purpose: it decides the whole proposal in
+/// one keystroke with no undo of its own, and `:View review reject_all` is
+/// the deliberate way to ask for that.
+static REVIEW_KEYS: [ReviewKey; 7] = [
+    ReviewKey {
+        lhs: "<leader>ha",
+        verb: "accept",
+    },
+    ReviewKey {
+        lhs: "<leader>hA",
+        verb: "accept_all",
+    },
+    ReviewKey {
+        lhs: "<leader>hx",
+        verb: "reject",
+    },
+    ReviewKey {
+        lhs: "<leader>hR",
+        verb: "rediff",
+    },
+    ReviewKey {
+        lhs: "<leader>hq",
+        verb: "leave",
+    },
+    ReviewKey {
+        lhs: "]c",
+        verb: "next",
+    },
+    ReviewKey {
+        lhs: "[c",
+        verb: "prev",
+    },
+];
+
+/// Every key a review installs on the buffer it is reviewing.
+#[must_use]
+pub fn review_keys() -> &'static [ReviewKey] {
+    &REVIEW_KEYS
+}
+
 /// Whether `spec`'s tokens can be spelled verbatim inside the mapping the
 /// registration chunk generates for it.
 ///
@@ -481,6 +550,57 @@ mod tests {
         for form in command_only_forms() {
             assert!(is_token(form.feature), "{form:?}");
             assert!(is_token(form.verb), "{form:?}");
+        }
+    }
+
+    /// The buffer-local keys are set from these rows inside the same kind
+    /// of generated `rpcnotify` right-hand side the global registration
+    /// builds, and the verb they carry is matched by the review's dispatch:
+    /// a row naming a verb nothing answers is a key that does nothing.
+    #[test]
+    fn every_review_key_names_a_verb_the_command_also_offers() {
+        for key in review_keys() {
+            assert!(
+                command_only_forms()
+                    .iter()
+                    .any(|form| form.feature == "review" && form.verb == key.verb),
+                "{} invokes review {}, which no form offers",
+                key.lhs,
+                key.verb
+            );
+            assert!(is_token(key.verb), "{key:?}");
+            assert!(
+                !key.lhs.contains(['"', '\\', '\n', '\'']),
+                "{} carries a character the chunk that sets it cannot spell",
+                key.lhs
+            );
+        }
+    }
+
+    /// One key, one verb: a review that set the same key twice would leave
+    /// whichever row came last as the only one that answers.
+    #[test]
+    fn no_review_key_is_claimed_twice() {
+        for (i, key) in review_keys().iter().enumerate() {
+            for other in review_keys().iter().skip(i + 1) {
+                assert_ne!(key.lhs, other.lhs, "{} is set twice", key.lhs);
+                assert_ne!(key.verb, other.verb, "{} is reached twice", key.verb);
+            }
+        }
+    }
+
+    /// A review's keys are buffer-local and live only as long as the
+    /// review, so none of them may also be a session-long default: the
+    /// review would silently take the user's `<leader>ff` away for the
+    /// length of a decision and hand it back afterwards.
+    #[test]
+    fn no_review_key_shadows_a_default_key() {
+        for key in review_keys() {
+            assert!(
+                !default_maps().iter().any(|spec| spec.lhs == key.lhs),
+                "{} is both a default key and a review key",
+                key.lhs
+            );
         }
     }
 

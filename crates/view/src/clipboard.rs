@@ -963,6 +963,22 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn review_show(
+            &self,
+            _buf: view_core::msg::BufferHandle,
+            _marks: &[view_core::msg::HunkMark],
+            _cursor_row: u32,
+            _focus: bool,
+            _open_target: view_core::msg::ReviewOpenTarget,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn review_clear(
+            &self,
+            _buf: view_core::msg::BufferHandle,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn checktime(
             &self,
             _request_id: u64,

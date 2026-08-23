@@ -10,14 +10,16 @@ use crate::rpc::RpcError;
 use rmpv::Value;
 use std::path::PathBuf;
 use std::time::Duration;
-use view_core::msg::{BufferHandle, CheckTimeOutcome, Msg, OptionValue, TextEdit};
+use view_core::msg::{
+    BufferHandle, CheckTimeOutcome, HunkMark, Msg, OptionValue, ReviewOpenTarget, TextEdit,
+};
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, DiagnosticSeverity, QuickfixEntry,
     SelectionRead,
 };
 use view_core::native::ai_event::FsError;
 use view_core::native::mappings::{
-    command_only_forms, default_maps, is_spellable, MappingSpec, COMMAND,
+    command_only_forms, default_maps, is_spellable, review_keys, MappingSpec, COMMAND,
 };
 
 /// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
@@ -1660,6 +1662,139 @@ for _, item in ipairs(vim.fn.getqflist()) do
 end
 return out";
 
+/// The extmark namespace every inline-review decoration is set in, and the
+/// only namespace view ever writes to.
+///
+/// Public because it is the exclusion a reader of the reviewed buffer
+/// needs: the decoration is view's own presentation, not the user's text
+/// or marks, so anything comparing two engines' buffer state must skip it
+/// (see `view-oracle`'s `review` module). One name, resolved to an id by
+/// nvim itself on each side of both chunks below -- `nvim_create_namespace`
+/// returns the existing id for a name it has already seen, so the clear and
+/// the set always address the same namespace without view tracking an id.
+pub const REVIEW_NAMESPACE: &str = "view_review";
+
+/// [`REVIEW_NAMESPACE`]'s resolution, as the one Lua line both review
+/// chunks open with. A macro rather than a `const` for the reason
+/// [`hidden_canon_lua`] is one: `concat!` composes literals, not constants.
+macro_rules! review_ns_lua {
+    () => {
+        "local ns = vim.api.nvim_create_namespace('view_review')\n"
+    };
+}
+
+/// The lua chunk [`EngineHandle::review_show`] runs inside nvim, taking the
+/// buffer, the marks, the cursor row, whether to take the user there, where
+/// to put the file when no window has it, view's channel id, and the keys
+/// to install as its seven varargs. Constant by construction for the same
+/// reason as [`FEED_KEYS_CHUNK`]: no caller data is interpolated into the
+/// Lua source.
+///
+/// Total and idempotent, never incremental (see
+/// [`view_core::msg::RpcCall::ReviewShow`]): the namespace is cleared
+/// before anything is set, so what is on screen is a function of this one
+/// payload and view's state cannot drift from nvim's decoration.
+///
+/// The highlight groups are nvim's own diff groups rather than view's
+/// palette, so a theme the user already has colors the review without view
+/// mapping anything: `DiffDelete` on the rows a hunk replaces (`DiffChange`
+/// once the buffer has moved under it), `DiffAdd` on the lines it proposes,
+/// `DiffText` on the header and the current hunk's sign.
+///
+/// `strict = false` on every mark is load-bearing rather than defensive: a
+/// row this payload names can already be past the end of the buffer by the
+/// time the notify arrives (the user deleted lines while it was in flight),
+/// and a throw there would abandon the rest of the chunk -- including the
+/// keys, leaving a decorated buffer nothing can act on.
+///
+/// The right-hand side of each key is a readable
+/// `<Cmd>call rpcnotify(..)<CR>` string built with `string.format` inside
+/// the chunk, exactly as [`REGISTER_MAPPINGS_CHUNK`] builds its own and for
+/// the same reasons: `:map` and every plugin that introspects mappings show
+/// what view did, and the only interpolated tokens are
+/// [`review_keys`](view_core::native::mappings::review_keys)'s static
+/// `[a-z_]` verbs. Buffer-local, so the file under review is the only place
+/// these words mean anything.
+///
+/// The cursor is moved only when `focus` asks for it, and never past the
+/// end of a buffer the user has since shortened.
+const REVIEW_SHOW_CHUNK: &str = concat!(
+    "local buf, marks, cursor_row, focus, target, channel, keys = ...\n",
+    review_ns_lua!(),
+    "\
+if not vim.api.nvim_buf_is_valid(buf) then
+  return
+end
+vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+for _, m in ipairs(marks) do
+  if m.end_row > m.row then
+    vim.api.nvim_buf_set_extmark(buf, ns, m.row, 0, {
+      end_row = m.end_row,
+      line_hl_group = m.stale and 'DiffChange' or 'DiffDelete',
+      priority = 100,
+      strict = false,
+    })
+  end
+  local virt = {}
+  if m.header ~= nil then
+    virt[#virt + 1] = { { m.header, 'DiffText' } }
+  end
+  for _, line in ipairs(m.added) do
+    virt[#virt + 1] = { { '+' .. line, 'DiffAdd' } }
+  end
+  if #virt > 0 then
+    vim.api.nvim_buf_set_extmark(buf, ns, m.anchor, 0, {
+      virt_lines = virt,
+      virt_lines_above = m.end_row == m.row,
+      sign_text = m.current and '\u{25b6}' or nil,
+      sign_hl_group = 'DiffText',
+      priority = 100,
+      strict = false,
+    })
+  end
+end
+for _, k in ipairs(keys) do
+  vim.keymap.set('n', k.lhs, string.format(
+    \"<Cmd>call rpcnotify(%d, 'view_invoke', 'review', '%s')<CR>\", channel, k.verb),
+    { buffer = buf, silent = true, desc = 'view: review ' .. k.verb })
+end
+if focus then
+  local win = vim.fn.win_findbuf(buf)[1]
+  if win == nil then
+    if target == 'split' then
+      vim.cmd('split')
+    end
+    win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(win, buf)
+  end
+  vim.api.nvim_set_current_win(win)
+  local rows = vim.api.nvim_buf_line_count(buf)
+  vim.api.nvim_win_set_cursor(win, { math.max(1, math.min(cursor_row + 1, rows)), 0 })
+  vim.cmd('normal! zz')
+end"
+);
+
+/// The lua chunk [`EngineHandle::review_clear`] runs inside nvim, taking
+/// the buffer and the keys to remove as its two varargs. Constant by
+/// construction on [`REVIEW_SHOW_CHUNK`]'s own terms.
+///
+/// `pcall` around each delete rather than a check: a key this review never
+/// managed to set (the show that would have set it raced a buffer wipe) is
+/// not a failure, and a throw here would leave the keys after it installed
+/// on a buffer with no review behind them.
+const REVIEW_CLEAR_CHUNK: &str = concat!(
+    "local buf, keys = ...\n",
+    review_ns_lua!(),
+    "\
+if not vim.api.nvim_buf_is_valid(buf) then
+  return
+end
+vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+for _, k in ipairs(keys) do
+  pcall(vim.keymap.del, 'n', k.lhs, { buffer = buf })
+end"
+);
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -2998,6 +3133,128 @@ impl EngineHandle {
         self.notify("nvim_buf_detach", vec![Value::from(buf.0)])
     }
 
+    /// This connection carrying the channel id nvim's own handshake
+    /// answered with, for [`EngineHandle::channel_id`]'s readers.
+    ///
+    /// Consuming rather than a setter: the id is learned once, between the
+    /// handshake and the first clone the handle hands out
+    /// ([`Engine::spawn`](crate::process::Engine::spawn)), and taking `self`
+    /// is what makes "set it before anyone else holds a copy" the only
+    /// spelling available.
+    #[must_use]
+    pub fn with_channel_id(mut self, channel_id: u64) -> Self {
+        self.channel_id = channel_id;
+        self
+    }
+
+    /// The msgpack-RPC channel id nvim assigned this connection, or `0` on
+    /// a handle that never went through
+    /// [`with_channel_id`](Self::with_channel_id) -- not a channel any
+    /// notify can come back over, and unreachable on a spawned connection.
+    #[must_use]
+    pub fn channel_id(&self) -> u64 {
+        self.channel_id
+    }
+
+    /// Draws the whole open review inside `buf` via [`REVIEW_SHOW_CHUNK`]:
+    /// the rows each hunk replaces, the lines it proposes, and the review's
+    /// own buffer-local keys, plus the cursor when `focus` asks for it.
+    ///
+    /// A notify, not a request: nothing view holds depends on the answer.
+    /// The marks are presentation over text nvim owns and this call writes
+    /// none of it, so a decoration that fails to land is one repaint away
+    /// from being correct again -- and the paint loop that emits this must
+    /// never wait on a reply.
+    ///
+    /// `open_target` decides only the case where no window shows `buf` at
+    /// all; a file some window already has is always shown where it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn review_show(
+        &self,
+        buf: BufferHandle,
+        marks: &[HunkMark],
+        cursor_row: u32,
+        focus: bool,
+        open_target: ReviewOpenTarget,
+    ) -> Result<(), EngineError> {
+        let marks = marks
+            .iter()
+            .map(|mark| {
+                let mut fields = vec![
+                    (Value::from("row"), Value::from(mark.row)),
+                    (Value::from("end_row"), Value::from(mark.end_row)),
+                    (Value::from("anchor"), Value::from(mark.anchor)),
+                    (
+                        Value::from("added"),
+                        Value::Array(mark.added.iter().map(|l| Value::from(l.as_str())).collect()),
+                    ),
+                    (Value::from("stale"), Value::from(mark.stale)),
+                    (Value::from("current"), Value::from(mark.current)),
+                ];
+                // absent rather than nil: msgpack's nil decodes to `vim.NIL`
+                // in Lua, which is a truthy sentinel -- a header sent that
+                // way would draw the string "vim.NIL" above every hunk
+                if let Some(header) = &mark.header {
+                    fields.push((Value::from("header"), Value::from(header.as_str())));
+                }
+                Value::Map(fields)
+            })
+            .collect();
+        let keys = review_keys()
+            .iter()
+            .map(|key| {
+                Value::Map(vec![
+                    (Value::from("lhs"), Value::from(key.lhs)),
+                    (Value::from("verb"), Value::from(key.verb)),
+                ])
+            })
+            .collect();
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REVIEW_SHOW_CHUNK),
+                Value::Array(vec![
+                    Value::from(buf.0),
+                    Value::Array(marks),
+                    Value::from(cursor_row),
+                    Value::from(focus),
+                    Value::from(match open_target {
+                        ReviewOpenTarget::Current => "current",
+                        ReviewOpenTarget::Split => "split",
+                    }),
+                    Value::from(self.channel_id),
+                    Value::Array(keys),
+                ]),
+            ],
+        )
+    }
+
+    /// Takes the review's decoration and its buffer-local keys back off
+    /// `buf` via [`REVIEW_CLEAR_CHUNK`], on the same fire-and-forget terms
+    /// as [`review_show`](Self::review_show).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn review_clear(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        let keys = review_keys()
+            .iter()
+            .map(|key| Value::Map(vec![(Value::from("lhs"), Value::from(key.lhs))]))
+            .collect();
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REVIEW_CLEAR_CHUNK),
+                Value::Array(vec![Value::from(buf.0), Value::Array(keys)]),
+            ],
+        )
+    }
+
     /// Reads the current buffer's path and nvim-authoritative text via
     /// [`CURRENT_BUFFER_TEXT_CHUNK`], for the context an agent prompt carries.
     ///
@@ -3481,6 +3738,144 @@ mod tests {
                 "{source} must be read before the first key is set"
             );
         }
+    }
+
+    /// The whole review crosses as one chunk's arguments -- including the
+    /// channel the generated keys notify back over, which is the
+    /// connection's own rather than anything a caller had to remember to
+    /// pass -- and it crosses as a notification: a request here would put a
+    /// blocking call on the path that paints.
+    #[test]
+    fn review_show_sends_one_chunk_carrying_the_marks_the_channel_and_the_keys() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        let h = h.with_channel_id(9);
+        let marks = vec![
+            HunkMark {
+                row: 1,
+                end_row: 2,
+                anchor: 1,
+                added: vec!["B".to_string()],
+                stale: false,
+                current: true,
+                header: Some("hunk 1/2".to_string()),
+            },
+            HunkMark {
+                row: 6,
+                end_row: 6,
+                anchor: 6,
+                added: Vec::new(),
+                stale: true,
+                current: false,
+                header: None,
+            },
+        ];
+        h.review_show(BufferHandle(4), &marks, 1, true, ReviewOpenTarget::Split)
+            .unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(params[0], Value::from(REVIEW_SHOW_CHUNK));
+        let args = params[1]
+            .as_array()
+            .expect("the chunk's arguments must cross as an array");
+        assert_eq!(args[0], Value::from(4));
+        assert_eq!(args[2], Value::from(1), "the cursor row");
+        assert_eq!(args[3], Value::from(true), "the focus");
+        assert_eq!(args[4], Value::from("split"), "the open target");
+        assert_eq!(
+            args[5],
+            Value::from(9),
+            "the keys notify back over this connection's own channel"
+        );
+        let sent = args[1].as_array().expect("the marks cross as an array");
+        assert_eq!(sent.len(), 2);
+        let first = sent[0].as_map().expect("a mark is a map");
+        assert!(
+            first.contains(&(Value::from("header"), Value::from("hunk 1/2"))),
+            "{first:?}"
+        );
+        assert!(
+            first.contains(&(Value::from("added"), Value::Array(vec![Value::from("B")]))),
+            "{first:?}"
+        );
+        let second = sent[1].as_map().expect("a mark is a map");
+        assert!(
+            !second.iter().any(|(k, _)| k == &Value::from("header")),
+            "a hunk with no header sends no key at all -- msgpack nil reaches Lua as the \
+             truthy `vim.NIL`: {second:?}"
+        );
+        let keys = args[6].as_array().expect("the keys cross as an array");
+        assert_eq!(keys.len(), review_keys().len());
+        assert!(
+            keys.contains(&Value::Map(vec![
+                (Value::from("lhs"), Value::from("<leader>ha")),
+                (Value::from("verb"), Value::from("accept")),
+            ])),
+            "{keys:?}"
+        );
+    }
+
+    /// The clear names the same namespace the show sets in, and takes the
+    /// same keys back off: a buffer left holding either would answer for a
+    /// review that is gone.
+    #[test]
+    fn review_clear_sends_the_namespace_and_every_key_the_show_installed() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.review_clear(BufferHandle(4)).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(params[0], Value::from(REVIEW_CLEAR_CHUNK));
+        let args = params[1].as_array().expect("arguments cross as an array");
+        assert_eq!(args[0], Value::from(4));
+        let keys = args[1].as_array().expect("the keys cross as an array");
+        assert_eq!(keys.len(), review_keys().len());
+        for chunk in [REVIEW_SHOW_CHUNK, REVIEW_CLEAR_CHUNK] {
+            assert!(
+                chunk.contains(&format!("nvim_create_namespace('{REVIEW_NAMESPACE}')")),
+                "both chunks address the one namespace view ever writes to"
+            );
+            assert!(
+                chunk.contains("nvim_buf_clear_namespace"),
+                "the draw is total: what is on screen is this payload alone"
+            );
+        }
+    }
+
+    /// What the capture doc recorded and what the crate ships are the same
+    /// bytes, for both chunks. The doc is the source: it is the only
+    /// statement about this wire that a real nvim ever answered, so a
+    /// mismatch means the code drifted from the capture, never the reverse.
+    #[test]
+    fn the_review_chunks_match_their_capture_doc_byte_for_byte() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/inline-review-wire-capture.md"),
+        )
+        .expect("the capture doc must be readable");
+        let captured = |marker: &str| {
+            let after = doc
+                .split_once(marker)
+                .expect("the capture doc must carry a section per production chunk")
+                .1;
+            after
+                .split_once("```lua\n")
+                .expect("the production chunk must be a lua fence")
+                .1
+                .split_once("```")
+                .expect("the lua fence must be closed")
+                .0
+                .trim_end_matches('\n')
+                .to_owned()
+        };
+        assert_eq!(
+            captured("## Production chunk shape: review_show"),
+            REVIEW_SHOW_CHUNK,
+            "REVIEW_SHOW_CHUNK has drifted from docs/inline-review-wire-capture.md"
+        );
+        assert_eq!(
+            captured("## Production chunk shape: review_clear"),
+            REVIEW_CLEAR_CHUNK,
+            "REVIEW_CLEAR_CHUNK has drifted from docs/inline-review-wire-capture.md"
+        );
     }
 
     /// The channel id crosses as an argument, not interpolated, and the
