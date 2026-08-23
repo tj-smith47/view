@@ -263,6 +263,24 @@ must detect an out-of-class host and print an explicit `SKIPPED
 skip is visible. Refusing to invent baselines for uncontrolled hosts
 stays — the fix is skip-with-announcement, not measurement.
 
+## T14 — a paste lands in the focused native surface
+
+Found live 2026-08-23: the user could not paste the recorded-dogfood
+prompt into the AI composer. The input reader decodes bracketed paste
+into `Msg::Paste`, and update() routes it to `nvim_paste` under engine
+focus — but the `Focus::Native(_)` arm returns nothing, so a paste into
+the composer (or any native surface) vanishes without a trace.
+
+Fix: the focused composer takes the pasted text at its cursor —
+verbatim, one insertion, and a trailing newline must NOT submit (that
+prevention is bracketed paste's whole purpose). Wrap/cap accounting
+(T6) holds; submit-echo (T9) is unchanged. A native surface with a text
+input (picker filter) inserts sans newlines; one with none answers with
+a visible notice, never silence (the checklist rule: anything that ends
+in nothing on screen is a bug). Sweep leg: tmux `load-buffer` +
+`paste-buffer -p` into the focused composer, assert the text appears in
+the box and no submission happened.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
