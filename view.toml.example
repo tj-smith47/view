@@ -31,10 +31,13 @@ tree_width = 30            # default: 30 -- percent of the terminal width,
 # own window-resize chord for the terminals that swallow the arrows before
 # view sees them (macOS Terminal, Termius).
 #
-# Names are matched exactly, so a name view does not recognise is inert
-# rather than reported. A value it cannot read as keys at all is reported:
-# it leaves that one action on its defaults, and is never a reason view
-# refuses the file.
+# Names are case-sensitive: <S-Right>, not <S-right>. A notation that
+# cannot be a key -- an unknown modifier prefix, or a name that is neither
+# one character nor one of nvim's own (Left, CR, Esc, Tab, BS, Space, lt,
+# F1...) -- is reported, as is a value view cannot read as keys at all.
+# Either leaves that one action on its defaults, and neither is ever a
+# reason view refuses the file. A well-formed name this build never
+# receives is still simply inert.
 
 [keys]
 sidebar_wider = ["<S-Right>", "<C-w>>"]

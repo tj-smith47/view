@@ -142,8 +142,49 @@ impl ResizeKeys {
     }
 }
 
+/// The keys `view-tui`'s `encode_key` spells with a name rather than with
+/// the character itself, plus the `lt` it escapes a literal `<` as.
+///
+/// Restated here rather than shared: `view-core` cannot depend on
+/// `view-tui` (`scripts/audit-deps.sh`), and the cost of not stating it is
+/// what [`well_formed`] exists to stop. `view-tui`'s own tests run every
+/// notation its encoder emits back through [`ResizeKeys::rebind`], so a key
+/// this list forgets fails there rather than in a user's config.
+const NAMED_KEYS: [&str; 16] = [
+    "lt", "BS", "CR", "Esc", "Tab", "Up", "Down", "Left", "Right", "Home", "End", "PageUp",
+    "PageDown", "Del", "Insert", "Space",
+];
+
+/// The modifier prefixes a notation may open with, in any combination.
+const MODIFIERS: [&str; 4] = ["S-", "C-", "M-", "A-"];
+
+/// Whether `key` is a notation this build could ever be handed.
+///
+/// Shape only, never vocabulary: an unbracketed key is one character and is
+/// always well formed, and a `<...>` one is modifier prefixes followed by
+/// either a single character or a named key. What this refuses is the
+/// spelling that cannot be a key at all -- `<S-right>` for `<S-Right>`,
+/// `<Ctrl-w>` for `<C-w>` -- because such a spelling is not merely inert:
+/// it replaces the direction's defaults with a key nothing will ever send,
+/// leaving the user with no way to resize at all and nothing on screen
+/// saying why.
+fn well_formed(key: &str) -> bool {
+    let Some(inner) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) else {
+        return true;
+    };
+    let mut rest = inner;
+    while let Some(shorter) = MODIFIERS.iter().find_map(|m| rest.strip_prefix(m)) {
+        rest = shorter;
+    }
+    let function_key = rest
+        .strip_prefix('F')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    rest.chars().count() == 1 || NAMED_KEYS.contains(&rest) || function_key
+}
+
 /// The one or two keys `spelling` names, or `None` when it names none at
-/// all or more than a chord's two.
+/// all, more than a chord's two, or one this build could never be handed
+/// ([`well_formed`]).
 ///
 /// A bare `<` is read as the `<lt>` the encoder emits for it, so the chord
 /// a user writes the way nvim documents it (`<C-w><`) resolves to the same
@@ -169,6 +210,9 @@ fn split_keys(spelling: &str) -> Option<Binding> {
                 rest = &rest[head.len_utf8()..];
             }
         }
+    }
+    if !keys.iter().all(|key| well_formed(key)) {
+        return None;
     }
     let mut keys = keys.into_iter();
     let first = keys.next()?;
@@ -296,6 +340,60 @@ mod tests {
         let mut bare = ResizeKeys::default();
         assert!(bare.rebind(Direction::Narrower, &["<C-w><".to_string()]));
         assert_eq!(spelled, bare);
+    }
+
+    /// The typo that costs the most: a well-formed *looking* notation with
+    /// the wrong case is a key nothing sends, and taken at face value it
+    /// takes the direction's defaults with it. Refused, the notice fires
+    /// and the defaults stand.
+    #[test]
+    fn a_notation_that_cannot_be_a_key_keeps_the_defaults_and_is_reported() {
+        for typo in [
+            "<S-right>",
+            "<Ctrl-w>",
+            "<C-Rihgt>",
+            "<>",
+            "<S->",
+            "<leader>x",
+        ] {
+            let mut keys = ResizeKeys::default();
+            assert!(
+                !keys.rebind(Direction::Wider, &[typo.to_string()]),
+                "{typo} cannot be a key this build is handed"
+            );
+            assert_eq!(
+                keys.resolve(None, "<S-Right>"),
+                Some(Resolved::Step(Direction::Wider)),
+                "a refused spelling leaves {typo}'s direction on its defaults"
+            );
+        }
+    }
+
+    /// The other half: a shape check that refused real keys would be worse
+    /// than none at all.
+    #[test]
+    fn every_shape_a_key_really_takes_is_accepted() {
+        for spelling in [
+            "<S-Right>",
+            "<C-w>",
+            "<M-.>",
+            "<A-x>",
+            "<C-S-Left>",
+            "<lt>",
+            "<CR>",
+            "<Esc>",
+            "<Space>",
+            "<F12>",
+            "<PageDown>",
+            "g",
+            ">",
+        ] {
+            let mut keys = ResizeKeys::default();
+            assert!(
+                keys.rebind(Direction::Wider, &[spelling.to_string()]),
+                "{spelling} is a key this build can be handed"
+            );
+        }
     }
 
     #[test]

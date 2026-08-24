@@ -398,4 +398,57 @@ mod tests {
     fn residue_empty_input_yields_empty_output() {
         assert!(encode_residue_bytes(b"").is_empty());
     }
+
+    /// `[keys]` is checked for shape in `view-core`, which cannot depend on
+    /// this crate and so restates the vocabulary this encoder emits. That
+    /// restatement is welded here: every notation a real keystroke can
+    /// produce is fed back through the check, so a named key added above
+    /// and forgotten there fails as a test rather than as a user's binding
+    /// being refused for looking malformed.
+    #[test]
+    fn every_notation_this_encoder_emits_is_a_key_view_core_accepts() {
+        use view_core::native::keys::{Direction, ResizeKeys};
+
+        let codes = [
+            KeyCode::Char('a'),
+            KeyCode::Char('<'),
+            KeyCode::Char(' '),
+            KeyCode::Char('.'),
+            KeyCode::Backspace,
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Delete,
+            KeyCode::Insert,
+            KeyCode::F(1),
+            KeyCode::F(12),
+        ];
+        let mods = [
+            KeyModifiers::NONE,
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+        ];
+        for code in codes {
+            for m in mods {
+                let Some(notation) = encode_key(&key(code, m)) else {
+                    continue;
+                };
+                assert!(
+                    ResizeKeys::default().rebind(Direction::Wider, std::slice::from_ref(&notation)),
+                    "view-core refuses {notation}, which this encoder emits"
+                );
+            }
+        }
+    }
 }

@@ -246,13 +246,15 @@ struct KeysTable {
 /// with; `sidebar_narrower` has its own so the notice names the action the
 /// user has to go fix.
 const SIDEBAR_WIDER_NOTICE: &str =
-    "view: [keys] sidebar_wider must be a key notation, or a list of them, of at most \
-     two keys each (\"<C-w>>\") -- the sidebars widen on their default keys this run";
+    "view: [keys] sidebar_wider must be key notations spelled as nvim spells them, case \
+     included (\"<C-w>>\", \"<S-Right>\"), at most two keys each -- the sidebars widen on \
+     their default keys this run";
 
 /// The narrowing half of [`SIDEBAR_WIDER_NOTICE`].
 const SIDEBAR_NARROWER_NOTICE: &str =
-    "view: [keys] sidebar_narrower must be a key notation, or a list of them, of at most \
-     two keys each (\"<C-w><\") -- the sidebars narrow on their default keys this run";
+    "view: [keys] sidebar_narrower must be key notations spelled as nvim spells them, case \
+     included (\"<C-w><\", \"<S-Left>\"), at most two keys each -- the sidebars narrow on \
+     their default keys this run";
 
 /// The sidebar resize keys, and the notice each action whose value could
 /// not be read owes the user.

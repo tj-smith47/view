@@ -151,12 +151,18 @@ sidebar_wider = ["<S-Right>", "<C-w>>"]     # the defaults
 sidebar_narrower = ["<S-Left>", "<C-w><"]
 ```
 
-Spell a key the way nvim spells it. Names are case-sensitive and matched
-exactly: a name view does not recognise is simply never pressed -- it is
-accepted, and nothing tells you it is inert. What view does report is a
-value it cannot read *as* keys at all (not a string or a list of them, or
-more than two keys in one binding): that leaves the one action on its
-defaults and says so, and it never keeps your config from loading.
+Spell a key the way nvim spells it, case and all: `<S-Right>`, not
+`<S-right>`. A `<...>` notation that cannot be a key is reported -- a
+modifier prefix that is not `S-`, `C-`, `M-` or `A-`, or a name that is
+neither a single character nor one of nvim's own (`Left`, `Right`, `Up`,
+`Down`, `Home`, `End`, `PageUp`, `PageDown`, `CR`, `Esc`, `Tab`, `BS`,
+`Del`, `Insert`, `Space`, `lt`, `F1`...). So is a value view cannot read
+*as* keys at all: not a string or a list of them, or more than two keys in
+one binding. Either leaves that one action on its defaults and says so, and
+neither ever keeps your config from loading.
+
+What is still silent is a *well-formed* name this build never receives:
+it is accepted and simply never pressed.
 
 A chord's first key waits for exactly one more, and only inside the sidebar
 you armed it in. Press something that finishes no binding and it is handled
