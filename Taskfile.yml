@@ -300,8 +300,6 @@ tasks:
 
   release:check:
     desc: Dry-run the release — validate config and would-be artifacts, no tag, no publish
-    # placeholder until release:init lands .anodizer.yaml; its build and
-    # changelog blocks are what the dry-run resolves against
     cmd: anodizer check
 
   release:tag:
@@ -312,14 +310,10 @@ tasks:
     desc: The real release — build, sign, publish to GitHub Releases (runs the ci gate first)
     cmds:
       - task: ci
-      # placeholder; .anodizer.yaml's target, signing and release blocks
-      # drive what gets built and published
       - anodizer publish
 
   release:verify:
     desc: Verify the published artifacts and signatures against the cut release
-    # placeholder; verifies whatever release .anodizer.yaml describes once
-    # release:init scaffolds it
     cmd: anodizer verify
 
   mutate:
