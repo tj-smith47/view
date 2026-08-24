@@ -1021,7 +1021,7 @@ TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$REPO_ROOT/crates/view-core/src/update/ai
 # The prompt's own rows, built from the template that paints them and the
 # option names the stub offers -- so a reworded row or a dropped digit
 # fails here rather than leaving an assertion matching nothing.
-require_template "$PERMISSION_RS" '"  {key} {} ({})"' || exit 1
+require_template "$PERMISSION_RS" '"{}{key} {} ({})"' || exit 1
 PERMISSION_ROW_DENY='1 Deny (reject_once)'
 PERMISSION_ROW_ONCE='2 Allow Once (allow_once)'
 # The two rows whose answer outlives the question say what they cover and
