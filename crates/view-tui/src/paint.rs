@@ -1422,6 +1422,9 @@ fn paint_native_overlay(
     };
     let base = theme.chrome(group);
     let interior = ratatui_style(base);
+    // the one background an overlay must never paint (see the per-span
+    // resolve below), read once for the whole layer rather than per row
+    let buffer_bg = theme.normal().bg;
     let selected = ratatui_style(selection_style(theme, base));
     let frame = ratatui_style(ResolvedStyle {
         fg: Some(border_color(base)),
@@ -1514,7 +1517,6 @@ fn paint_native_overlay(
             // overlay must never paint, so a colorscheme that named it
             // deliberately is asking for the same hole and is answered the
             // same way.
-            let buffer_bg = theme.normal().bg;
             let resolve = |role: StyleRole| -> Style {
                 role.chrome_group().map_or(interior, |group| {
                     let style = theme.chrome(group);
