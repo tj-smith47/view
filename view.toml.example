@@ -31,8 +31,10 @@ tree_width = 30            # default: 30 -- percent of the terminal width,
 # own window-resize chord for the terminals that swallow the arrows before
 # view sees them (macOS Terminal, Termius).
 #
-# A key here is never a reason view refuses the file: an entry it cannot
-# read leaves that one action on its defaults and says so.
+# Names are matched exactly, so a name view does not recognise is inert
+# rather than reported. A value it cannot read as keys at all is reported:
+# it leaves that one action on its defaults, and is never a reason view
+# refuses the file.
 
 [keys]
 sidebar_wider = ["<S-Right>", "<C-w>>"]

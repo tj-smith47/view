@@ -122,15 +122,23 @@ impl ResizeKeys {
                 return Some(Resolved::Step(direction));
             }
         }
+        // A follower that finishes no chord is handled as if it had been
+        // typed alone, and these bindings are no exception to that: without
+        // this, the four keys the whole set exists for would be the one
+        // class a waiting prefix locks out, and a doubled first key (nvim
+        // muscle memory taps `<C-w>` twice) would drop the chord instead of
+        // re-arming it.
+        if pending.is_some() {
+            return self.resolve(None, notation);
+        }
         // Strictly after every completed binding above: a key bound both on
         // its own and as some chord's first press steps the sidebar rather
         // than waiting for a second key that may never be typed.
-        let opens_a_chord = self
-            .wider
+        self.wider
             .iter()
             .chain(&self.narrower)
-            .any(|(first, second)| second.is_some() && first == notation);
-        (pending.is_none() && opens_a_chord).then_some(Resolved::Pending)
+            .any(|(first, second)| second.is_some() && first == notation)
+            .then_some(Resolved::Pending)
     }
 }
 
@@ -252,6 +260,21 @@ mod tests {
             keys.resolve(None, "<C-w>"),
             Some(Resolved::Pending),
             "the widening chord still opens on the same key"
+        );
+    }
+
+    #[test]
+    fn a_follower_that_finishes_no_chord_is_read_as_if_it_stood_alone() {
+        let keys = ResizeKeys::default();
+        assert_eq!(
+            keys.resolve(Some("<C-w>"), "<S-Right>"),
+            Some(Resolved::Step(Direction::Wider)),
+            "the single-key binding is not locked out by a waiting prefix"
+        );
+        assert_eq!(
+            keys.resolve(Some("<C-w>"), "<C-w>"),
+            Some(Resolved::Pending),
+            "and a doubled first key re-arms rather than dropping the chord"
         );
     }
 

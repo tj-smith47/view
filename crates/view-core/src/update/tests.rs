@@ -4627,6 +4627,32 @@ fn a_follower_that_completes_nothing_falls_through_to_its_own_handling() {
     );
 }
 
+/// Focus can leave a sidebar with no key involved -- an arriving review
+/// hands the keyboard back to the buffer it is drawn in -- and a chord
+/// prefix armed before that must not outlive it: the next `>` typed into
+/// the composer is a prompt character, not a width.
+#[test]
+fn a_chord_prefix_does_not_survive_focus_leaving_the_sidebar() {
+    let mut m = scrollable_ai_panel_model(0);
+    let _ = update(&mut m, key("<C-w>"));
+
+    review::take_panel_focus_off(&mut m);
+    assert!(!m.ai_panel().focused, "the review took the keyboard back");
+
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(m.ai_panel().focused, "and the user came back to the panel");
+
+    let _ = update(&mut m, key(">"));
+    assert_eq!(m.ai_panel().input, ">", "typed, not spent on a width");
+    assert_eq!(ai_panel_width_pct(&m), 30);
+}
+
 /// What `[keys]` buys, at the one place the keys are read: a rebound
 /// action answers its own key and nothing else, and the action left alone
 /// keeps every default it had.

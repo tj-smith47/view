@@ -47,6 +47,22 @@ fn path_to_wire(path: &std::path::Path) -> String {
 /// the boundary as a returned [`Effect`] instead of being performed here.
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
+    // A chord prefix belongs to the sidebar it was armed in, and focus can
+    // leave one with no key involved at all -- a review landing hands the
+    // keyboard back to the buffer it is drawn in. Anything that reaches a
+    // sidebar again is itself a message dispatched while focus is still
+    // elsewhere, so dropping the prefix here is what keeps a `>` typed into
+    // a prompt minutes later from spending itself on a width instead. The
+    // `is_some` short-circuit keeps every keystroke that never armed one --
+    // which is nearly all of them -- to a single null check.
+    if model.pending_resize_chord.is_some()
+        && !matches!(
+            model.focused_overlay().map(|overlay| &overlay.kind),
+            Some(OverlayKind::Ai | OverlayKind::Tree(_))
+        )
+    {
+        model.pending_resize_chord = None;
+    }
     match msg {
         Msg::Key(Key { notation }) => {
             // ahead of every other keypress rule: the busy modal is the

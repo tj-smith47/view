@@ -151,10 +151,17 @@ sidebar_wider = ["<S-Right>", "<C-w>>"]     # the defaults
 sidebar_narrower = ["<S-Left>", "<C-w><"]
 ```
 
-Spell a key the way nvim spells it. A chord's first key waits for exactly
-one more: press something that finishes no binding and it is handled as if
-you had pressed it alone. An entry view cannot read leaves that one action
-on its defaults and says so -- it never keeps your config from loading.
+Spell a key the way nvim spells it. Names are case-sensitive and matched
+exactly: a name view does not recognise is simply never pressed -- it is
+accepted, and nothing tells you it is inert. What view does report is a
+value it cannot read *as* keys at all (not a string or a list of them, or
+more than two keys in one binding): that leaves the one action on its
+defaults and says so, and it never keeps your config from loading.
+
+A chord's first key waits for exactly one more, and only inside the sidebar
+you armed it in. Press something that finishes no binding and it is handled
+as if you had pressed it alone -- including another resize key, so a doubled
+`<C-w>` is still waiting on the same follower.
 
 A width holds between 15% and 70% and lasts the session. The width a
 session starts at is `view.toml`'s:
