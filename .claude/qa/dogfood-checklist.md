@@ -51,12 +51,65 @@ ground plus judgment calls a script can't make.
   raises a notice.
 - [ ] Typing in the prompt echoes instantly; input longer than the
   panel width keeps its cursor and tail visible.
+- [ ] Submit a prompt → its own marker spins until the agent's first
+  word, then stands back down to `❯`; a turn that ends without an
+  answer leaves the marker still, never spinning forever.
+
+## Composer
+
+- [ ] Type into the prompt → the caret is on the character you are
+  about to type, not parked at the panel edge; it stays there after a
+  `<BS>`, after the transcript grows under it, and after a resize.
+- [ ] Paste a multi-line block → the composer shows it as the lines it
+  was copied as, and the echoed prompt in the transcript breaks in the
+  same columns. A trailing newline leaves the caret on an empty last
+  row rather than submitting.
+- [ ] Paste something far longer than the panel → it still lands whole,
+  the newest rows are the visible ones, and typing after it is not
+  sluggish.
+
+## Permissions
+
+- [ ] Agent asks permission → the prompt lists its options numbered
+  `1`…`9` with `press a number, <Esc> cancels`; press the digit and the
+  turn continues, `<Esc>` cancels it visibly.
+- [ ] The digits answer the prompt **whatever** was focused a moment
+  ago — they are never swallowed by a composer or an overlay while a
+  question is pending, and the caret sits on the prompt, not the
+  composer, while it is.
+- [ ] Choose an *always* option → the next request of the same kind is
+  answered without asking again, and a new session asks again from
+  scratch.
+
+## Inline review
+
+- [ ] Agent proposes an edit → the diff is drawn **in the file's own
+  buffer** (`DiffDelete` on what goes, `DiffAdd` virtual lines for what
+  arrives), not in a modal. `[ai.review] open_target = "split"` opens
+  it beside what you were reading instead.
+- [ ] The header above the current hunk names its keys and is
+  **readable end to end** at 120 columns with the panel open —
+  including the way out, `<leader>hq leave`.
+- [ ] `<leader>ha` / `<leader>hA` / `<leader>hx`, `]c` / `[c`,
+  `<leader>hq` all act, and each one's outcome is a transcript line.
+  `:View review <Tab>` completes the same verbs; `:View review bogus`
+  is refused with a notice naming the real ones.
+- [ ] Type over a hunk → it goes stale and its header offers
+  `<leader>hR` instead of the accept; keep editing and even that goes.
+- [ ] After the review ends, any mapping of yours it displaced
+  (`]c`, `[c`, `<leader>h*`) does what it did before.
+
+## Leaving
+
+- [ ] `:q` / `:qa` → the shell prompt comes back on a clean terminal:
+  no leftover alt screen, cursor visible, echo on, `reset` not needed.
+- [ ] `kill -TERM` / `kill -HUP` the view process, and Ctrl+C at the
+  shell → the same clean terminal, and no nvim left behind.
 
 ## Known-silent suspects (outside the fixed surface — flag on sight)
 
 - [ ] Unmapped keys inside picker / tree / message-history overlays →
-  swallowed silently, or answered with a notice? (The AI review overlay
-  has the notice; siblings may lag.)
+  swallowed silently, or answered with a notice?
 - [ ] `<leader>ff` — view claims it over an existing Telescope mapping.
   Decide whether that's wanted; `native.picker = false` in view.toml
   hands it back.
