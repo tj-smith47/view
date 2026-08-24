@@ -35,6 +35,14 @@ Spec of record: `.claude/specs/2026-07-17-view-design.md`. Plans:
 `.claude/plans/INDEX.md`. On conflict, spec wins.
 
 Hard rules (in addition to global rules):
+- **Pushes land on `master` directly until the first version is tagged.** No
+  pull requests, no draft PRs, no integration branch gate: CI runs on pushes
+  to `master`, and a PR is a needless gate the user has had to remove more
+  than once. Land a feature branch with `git push origin <branch>:master`
+  (fast-forward; the branch stays for the session's own bookkeeping) and
+  obtain CI green yourself on that run — never hand "confirm green" to the
+  next session. The ask-only guard in `.claude/hooks/validate-commands.sh`
+  (singular standalone push command) is about command shape, not destination.
 - nvim owns all buffer text. No view subsystem holds authoritative text
   state. Buffer mutation happens only through `Effect::Rpc`.
 - The paint loop never awaits RPC. The RPC reader thread never blocks.
