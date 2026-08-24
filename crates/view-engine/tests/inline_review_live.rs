@@ -435,6 +435,65 @@ fn the_review_keys_are_buffer_local_and_leave_with_the_review() {
     assert!(s.decoration(buf).is_empty(), "{:?}", s.decoration(buf));
 }
 
+/// A review's keys land on mappings the user's own config already made --
+/// gitsigns claims `]c`, `[c` and `<leader>hR` buffer-locally in every file
+/// it attaches to -- and the migration contract is that those come back
+/// when the review ends. A right-hand-side mapping returns with its text,
+/// and a Lua-callback mapping returns still callable, which is the case
+/// that decides where the bookkeeping can live. The redraw in the middle is
+/// the trap: a second show must not save the review's own keys as if they
+/// were the user's.
+#[test]
+fn a_review_hands_back_the_buffer_local_maps_it_displaced() {
+    let s = start();
+    let buf = s.buffer();
+    s.show_in_current_window(buf);
+    s.lua(
+        "local buf = ...
+vim.keymap.set('n', ']c', ':echo \"gitsigns\"<CR>', { buffer = buf, desc = 'user next hunk' })
+vim.keymap.set('n', '\\\\hR', function() vim.g.view_test_hit = 'user' end, { buffer = buf })",
+        vec![rmpv::Value::from(buf.0)],
+    );
+
+    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
+
+    let during = s.buffer_keys(buf);
+    assert_eq!(
+        during.len(),
+        review_keys().len(),
+        "the review claims the user's keys rather than adding to them: {during:?}"
+    );
+    assert!(
+        during
+            .iter()
+            .any(|k| k.starts_with("]c -> ") && k.contains("'review', 'next'")),
+        "while the review is open its own verb answers: {during:?}"
+    );
+
+    s.engine.handle.review_clear(buf).unwrap();
+    s.barrier();
+
+    let after = s.buffer_keys(buf);
+    assert_eq!(
+        after.len(),
+        2,
+        "only the two the user made survive the review: {after:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|k| k.starts_with("]c -> ") && k.contains("gitsigns")),
+        "the displaced right-hand side is the user's again: {after:?}"
+    );
+    s.press("\\hR");
+    assert_eq!(
+        s.lua("return vim.g.view_test_hit", vec![]).as_str(),
+        Some("user"),
+        "a restored lua mapping is callable, not just listed"
+    );
+}
+
 /// Both calls are total and idempotent: showing twice leaves one review's
 /// worth of decoration, and clearing a buffer that was never shown is not
 /// an error.

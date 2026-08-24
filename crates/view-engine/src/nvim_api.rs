@@ -1731,6 +1731,22 @@ macro_rules! review_ns_lua {
 /// `[a-z_]` verbs. Buffer-local, so the file under review is the only place
 /// these words mean anything.
 ///
+/// A key view claims can already be the user's own: gitsigns takes `]c`,
+/// `[c` and `<leader>hR` buffer-locally in every file it attaches to, and a
+/// review that ended would otherwise leave those dead for the rest of the
+/// session -- the migration contract broken by the one feature that borrowed
+/// gitsigns' vocabulary. So the mapping each key displaces is kept, and
+/// [`REVIEW_CLEAR_CHUNK`] hands it back. The keymap list is read before and
+/// after the set rather than matched against `k.lhs`, because `<leader>` is
+/// expanded at set time and only nvim knows what it expanded to: the entries
+/// carrying view's own `desc` name the expanded left-hand sides, and
+/// whatever the earlier read held under those names is what this review
+/// took. The bookkeeping is a Lua global keyed by buffer rather than a
+/// buffer variable, since a mapping set from Lua carries a function in its
+/// `callback` field and `b:` holds only what msgpack can carry. Only a
+/// review's first show saves, or a redraw would save view's own keys over
+/// the user's.
+///
 /// The cursor is moved only when `focus` asks for it, and never past the
 /// end of a buffer the user has since shortened.
 const REVIEW_SHOW_CHUNK: &str = concat!(
@@ -1768,10 +1784,28 @@ for _, m in ipairs(marks) do
     })
   end
 end
+local displaced = _G.view_review_displaced or {}
+_G.view_review_displaced = displaced
+local before = nil
+if displaced[buf] == nil then
+  before = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+    before[m.lhs] = m
+  end
+end
 for _, k in ipairs(keys) do
   vim.keymap.set('n', k.lhs, string.format(
     \"<Cmd>call rpcnotify(%d, 'view_invoke', 'review', '%s')<CR>\", channel, k.verb),
     { buffer = buf, silent = true, desc = 'view: review ' .. k.verb })
+end
+if before ~= nil then
+  local taken = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+    if m.desc ~= nil and m.desc:find('view: review ', 1, true) == 1 and before[m.lhs] ~= nil then
+      taken[#taken + 1] = before[m.lhs]
+    end
+  end
+  displaced[buf] = taken
 end
 if focus then
   local win = vim.fn.win_findbuf(buf)[1]
@@ -1797,16 +1831,36 @@ end"
 /// managed to set (the show that would have set it raced a buffer wipe) is
 /// not a failure, and a throw here would leave the keys after it installed
 /// on a buffer with no review behind them.
+///
+/// What the show displaced goes back afterwards, from the dict
+/// `nvim_buf_get_keymap` returned: `mapset` is the only restore that carries
+/// a Lua callback back intact, and it acts on the current buffer, hence
+/// `nvim_buf_call`. The bookkeeping is released before the validity guard,
+/// so a buffer wiped mid-review leaves nothing for a later buffer reusing
+/// its handle to inherit.
 const REVIEW_CLEAR_CHUNK: &str = concat!(
     "local buf, keys = ...\n",
     review_ns_lua!(),
     "\
+local displaced = _G.view_review_displaced
+local restore = nil
+if displaced ~= nil then
+  restore = displaced[buf]
+  displaced[buf] = nil
+end
 if not vim.api.nvim_buf_is_valid(buf) then
   return
 end
 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
 for _, k in ipairs(keys) do
   pcall(vim.keymap.del, 'n', k.lhs, { buffer = buf })
+end
+if restore ~= nil then
+  vim.api.nvim_buf_call(buf, function()
+    for _, m in ipairs(restore) do
+      pcall(vim.fn.mapset, 'n', false, m)
+    end
+  end)
 end"
 );
 

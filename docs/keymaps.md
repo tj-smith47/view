@@ -108,9 +108,10 @@ verb with no key: it decides everything in one press and offers no undo of
 its own, so it is asked for by name.
 
 Every verb is also a `:View` form, which is what to map if you want the
-review on keys of your own -- a global mapping of yours is never touched,
-where a buffer-local one on a key the table above claims is replaced for as
-long as the review is open:
+review on keys of your own -- a global mapping of yours is never touched, and
+a buffer-local one on a key the table above claims (gitsigns puts one on
+`]c`, `[c` and `<leader>hR` in every file it attaches to) is given back when
+the review ends:
 
 ```vim
 nnoremap <silent> ga <Cmd>View review accept<CR>

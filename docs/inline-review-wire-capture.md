@@ -245,10 +245,28 @@ for _, m in ipairs(marks) do
     })
   end
 end
+local displaced = _G.view_review_displaced or {}
+_G.view_review_displaced = displaced
+local before = nil
+if displaced[buf] == nil then
+  before = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+    before[m.lhs] = m
+  end
+end
 for _, k in ipairs(keys) do
   vim.keymap.set('n', k.lhs, string.format(
     "<Cmd>call rpcnotify(%d, 'view_invoke', 'review', '%s')<CR>", channel, k.verb),
     { buffer = buf, silent = true, desc = 'view: review ' .. k.verb })
+end
+if before ~= nil then
+  local taken = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+    if m.desc ~= nil and m.desc:find('view: review ', 1, true) == 1 and before[m.lhs] ~= nil then
+      taken[#taken + 1] = before[m.lhs]
+    end
+  end
+  displaced[buf] = taken
 end
 if focus then
   local win = vim.fn.win_findbuf(buf)[1]
@@ -275,11 +293,24 @@ present-but-nil key would draw an empty header line on every hunk.
 ```lua
 local buf, keys = ...
 local ns = vim.api.nvim_create_namespace('view_review')
+local displaced = _G.view_review_displaced
+local restore = nil
+if displaced ~= nil then
+  restore = displaced[buf]
+  displaced[buf] = nil
+end
 if not vim.api.nvim_buf_is_valid(buf) then
   return
 end
 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
 for _, k in ipairs(keys) do
   pcall(vim.keymap.del, 'n', k.lhs, { buffer = buf })
+end
+if restore ~= nil then
+  vim.api.nvim_buf_call(buf, function()
+    for _, m in ipairs(restore) do
+      pcall(vim.fn.mapset, 'n', false, m)
+    end
+  end)
 end
 ```
