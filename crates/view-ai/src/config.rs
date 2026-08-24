@@ -685,18 +685,74 @@ agent = "claude-code"
         std::fs::remove_dir_all(&dir).expect("temp dir must be removable");
     }
 
+    /// A key no wire table will ever accept, used to make one refuse and
+    /// list what it does accept.
+    const PROBE_KEY: &str = "zzz_not_a_key";
+
+    /// Every field the wire table at `path` accepts, read out of serde's
+    /// own `deny_unknown_fields` refusal rather than copied: the structs
+    /// are the only list of these there is, and a second hand-written one
+    /// is what goes stale the day a field is added.
+    fn wire_fields(path: &str) -> Vec<String> {
+        let refusal = toml::from_str::<ConfigFile>(&format!("[{path}]\n{PROBE_KEY} = 0\n"))
+            .err()
+            .map_or_else(
+                || panic!("[{path}] must refuse an unknown key, and no longer does"),
+                |err| err.to_string(),
+            );
+        // "expected one of `a`, `b`" for a table with several fields,
+        // "expected `a`" for one with a single field -- both start here
+        let listed = refusal.split_once("expected ").map_or_else(
+            || panic!("serde's refusal no longer lists the fields it accepts: {refusal}"),
+            |(_, listed)| listed.to_string(),
+        );
+        listed
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Asserts `doc` sets every field the table at `path` accepts, and
+    /// recurses into each one that is itself a table.
+    fn assert_example_sets_every_field(doc: &toml::Value, path: &str) {
+        let fields = wire_fields(path);
+        assert!(
+            !fields.is_empty(),
+            "[{path}] accepts no fields, so this walk proves nothing"
+        );
+        for field in fields {
+            let full = format!("{path}.{field}");
+            let mut node = doc;
+            for key in full.split('.') {
+                node = node.get(key).unwrap_or_else(|| {
+                    panic!(
+                        "view.toml.example must spell {full}: every field the loader \
+                         reads is a field the shipped example documents"
+                    )
+                });
+            }
+            if node.is_table() {
+                assert_example_sets_every_field(doc, &full);
+            }
+        }
+    }
+
     #[test]
-    fn the_example_ai_block_round_trips() {
+    fn the_example_ai_block_round_trips_and_names_every_field() {
         const EXAMPLE_TOML: &str = include_str!("../../../view.toml.example");
         // the parse-to-defaults assertion below is satisfied by an absent
         // `[ai]` table too, so it alone cannot prove the block is live --
         // this pins presence first
         let doc: toml::Value =
             toml::from_str(EXAMPLE_TOML).expect("the shipped example must be valid TOML");
-        assert!(
-            doc.get("ai").is_some(),
-            "the shipped example must carry a live [ai] table, not just a commented-out stub"
-        );
+        // destructured rather than field-accessed: a second table this
+        // loader learns to read stops this test compiling until the walk
+        // below is told to cover it
+        let ConfigFile { ai: _ } =
+            toml::from_str(EXAMPLE_TOML).expect("the shipped example must parse as the wire shape");
+        assert_example_sets_every_field(&doc, "ai");
         let cfg = AiConfig::from_toml_str(EXAMPLE_TOML)
             .expect("view.toml.example's [ai] block must parse");
         assert_eq!(cfg, AiConfig::default());

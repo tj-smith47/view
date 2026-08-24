@@ -748,6 +748,10 @@ auto_restart = true        # false: surface a dead engine and wait for a manual 
 enabled = true
 agent = "claude-code"      # ACP agent id or ["cmd", "args…"]
 panel_width = 30           # agent panel's share of the terminal width, 15..70
+
+[ai.review]
+open_target = "current"    # current | split -- where a proposal's file opens
+                           # when no window already has it
 ```
 
 CLI flags mirror config (`--tier`, `--nvim-bin`); precedence: flags > env

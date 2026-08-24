@@ -573,7 +573,15 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 6] = ["native", "keys", "ui", "engine", "supervision", "ai"];
+    static SPECIFIED_TABLES: [&str; 7] = [
+        "native",
+        "keys",
+        "ui",
+        "engine",
+        "supervision",
+        "ai",
+        "ai.review",
+    ];
 
     /// Tables `SPECIFIED_TABLES` names that this crate's own `ViewFile`
     /// never reads, by design, but that a sibling crate's own loader does.
@@ -585,7 +593,7 @@ mod tests {
     /// commit that gives it a sibling reader, never a step ahead of that
     /// reader landing -- the same atomicity the fs capability flags are
     /// held to.
-    static SIBLING_READ_TABLES: [&str; 1] = ["ai"];
+    static SIBLING_READ_TABLES: [&str; 2] = ["ai", "ai.review"];
 
     /// Every top-level table **this crate's** loader reads, taken from
     /// [`ViewFile`]'s own rendered shape rather than restated.

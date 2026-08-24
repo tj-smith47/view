@@ -72,6 +72,17 @@ panel_width = 30           # default: 30 -- percent of the terminal width the
                            # terms as [native] tree_width, and resized for the
                            # session with the same keys, see [keys]
 
+# [ai.review] is how an agent's proposed change presents itself. The diff is
+# drawn in the file's own buffer, so the only choice is where that file goes
+# when no window already has it open.
+
+[ai.review]
+open_target = "current"    # default: "current" -- the window you are in, the
+                           # way the picker and the tree open a file.
+                           # "split" leaves what you were reading beside it.
+                           # Anything else opens in the current window and
+                           # says so.
+
 # The tables below are commented out because THIS BUILD DOES NOT READ THEM
 # yet. Uncommenting one is harmless -- view ignores tables it has no loader
 # for -- but it will not change anything either. They are listed so the
