@@ -234,7 +234,7 @@ and it scrolls, folds and wraps the way the rest of the buffer does. The
 buffer's text is untouched by any of it: nothing is written until you accept
 something. The `▶` on the current hunk needs a sign column to land in; with
 `signcolumn=no` it is simply absent, and the keys are still named. The header
-takes two rows rather than one so that it is: nvim's grid keeps its full width
+takes two rows rather than one because nvim's grid keeps its full width
 under the panel, so the panel covers the right of every header row, and a
 single-line hint would lose its tail -- the way out of the review first -- at
 the widths a laptop opens.

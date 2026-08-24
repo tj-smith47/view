@@ -574,3 +574,31 @@ Every box observed at the chain tip (e3ec6a8):
 Owed beyond this plan: the recorded long-session dogfood (unblocked by
 this stretch), then the push round that re-records the gh bench legs
 and flips them to --gate.
+
+### Exit record — 2026-08-24, third stretch (T19–T27)
+
+Every box observed at the wave tip (46a6c04):
+
+- T19–T27 landed through SDD loops (same ledger); each task closed after
+  its fix round and scoped re-review; final whole-branch review of
+  22b5de2..8ecafda returned zero blockers, one major (the real-adapter
+  conformance leg's marker needle, scrolled off by T24's own wrap), four
+  minors and two nits — all drained in one fix wave (8ecafda..46a6c04) and
+  re-reviewed clean. No ruling reversed.
+- Gates in the final review's own run at 8ecafda: `task ci` exit 0
+  (3400 tests), `task compat` exit 0 (30 scenarios, 1 config-gated skip),
+  `task acceptance:visual` 7/7, `task acceptance:acp` 8/8 stub legs,
+  supervision 6/6, remote-reconnect 4/4, remote-rtt SKIPPED (class
+  controlled-linux, host dev-linux). Fix-wave gates at 46a6c04: `task ci` exit 0 (3405 tests), visual sweep 7/7, ACP stub legs 8/8, and the real-adapter conformance leg exit 0 twice against the reinstalled release binary — the live smoke for this wave.
+- Journal appended with the T19–T27 story and the honest residuals.
+- Evidence gaps recorded for the next session, not hidden: no live leg
+  types the `<C-w>` chord; the pending-question caret and the transcript's
+  live reflow are pinned by surface/unit tests only; the standing-answer
+  store is driven against the stub, never the real adapter's request
+  shape; bench attestation for the AI rows arrives with the post-push gh
+  record legs (standing split), not a dev-linux number.
+
+Owed beyond this plan: the push (authorized, singular) and the next
+session's confirmation that CI goes green; the gh bench TOML → `--gate`
+flip on that green run; the adapter probe re-run on the next adapter
+bump; the typed line-break key for the composer, pitched.

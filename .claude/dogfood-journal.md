@@ -269,3 +269,72 @@ and a later request naming that kind is answered without asking -- visibly,
 as a transcript row. An adapter that honours the wire's own standing
 permission never sends that later request, and the store never fires. Re-run
 the probe on the next adapter bump; it takes ~40s.
+## 2026-08-24 — the second recording's harvest (T19–T27)
+
+The user recorded a second live session (an agent editing `Taskfile.yml`)
+and it went badly in ways the first harvest had not reached: permission
+prompts with no visible keys, an `a` that never stuck (re-prompted five
+times), popups painting behind the panel, a diff-review modal rejected
+outright, and a terminal left frozen after a blind quit. Nine findings
+became T19–T26; T24's review minted T27.
+
+The permission gate was the important one, and view was not the
+culprit. A clean-room Node probe (no view code) proved the pinned
+adapter lies: claude-code 0.69.0's bundled CLI accepts `allow_always`
+and re-prompts anyway, and acknowledges `session/set_mode →
+acceptEdits` and re-prompts anyway. So view now delivers standing
+permissions itself — rows read `1 Deny / 2 Allow Once / 3 Always Allow`,
+a session-scoped store keyed by the ACP `toolCall.kind` auto-answers
+later requests (allow and reject alike, one map so "granted and refused"
+is unrepresentable), every auto-answer prints a transcript line, and
+every outbound answer is logged with its request and option id. Grants
+die with the session. Owed on the next adapter bump: re-run the probe.
+
+The diff review moved into the file. The modal is deleted, not kept as
+a fallback: nvim renders hunks as extmarks and virtual lines through two
+idempotent RPC calls, the keys are buffer-local maps whose rhs is a
+`rpcnotify` back to view, and the keys a review borrows are saved and
+restored (gitsigns owned three of the seven). This is the foundation the
+agent-change-gallery charter builds on, not a competitor to it.
+
+The rest: a signal, a stalled write, or a blind quit all restore the
+terminal (no restart path can reach `qa!` any more, because `:qa!`
+deletes swap files); nvim's toasts, menus and cmdline paint above the
+panel, and the panel stops short of the tabline and statusline; the
+composer paints its caret and it follows key ownership (a pending
+question moves it onto the answering digit); a submitted prompt keeps
+its lines and its width, and its own marker spins until the agent
+answers; a pasted multi-line prompt keeps its lines in the composer and
+reaches the agent intact, with the composer and the transcript sharing
+one line-ending rule by construction; the sidebars resize with nvim's
+own `<C-w>>` / `<C-w><` chord (the `<S-Left>`/`<S-Right>` pair never
+reached view on macOS Terminal or Termius) and `[keys]` rebinds them.
+
+Two gates were found dead along the way and revived: the ACP
+conformance suite had been silently unrunnable for three commits (a
+guard named a source literal that had changed, and nothing in CI ran
+it) — its permission rows are now derived from source and legs 2–9 run
+as a merge-blocking CI job; and the mutation battery's re-run exposed
+eight rotted rows and one genuine survivor in the paint filter.
+
+Honest residuals, all bounded and documented in code: `[keys]` names
+are matched exactly and case-sensitively — a malformed one is reported
+and keeps the default, but a well-formed name this build never receives
+(`<F13>`) is simply inert; only a paste
+produces a multi-line prompt (`<CR>` still submits — a typed line-break
+key wants its own ruling); no caret movement inside a prompt; a single
+pasted line longer than the composer's window, after an earlier
+newline, wraps at a different phase in the transcript than the composer
+showed; the transcript's resize anchor clamps rather than tracking a
+byte offset.
+
+Thirty-six commits, every task review-approved after its fix round, the
+final whole-branch review run at the tip: 3400 tests, compat 30/30
+runnable legs, the visual sweep 7/7 and the stub-driven ACP conformance
+legs 8/8 against the rebuilt release binary, supervision 6/6 (SIGHUP,
+SIGTERM, `:qa`, termios byte-identical, no orphans). The one red gate
+that review found was the wave's own doing — the real-adapter leg
+looked for a marker that a 250-row wrapped reply had scrolled off — and
+its fix wave also split the review header so the leave key is visible
+at 120 columns, word-wraps the agent's prose, and shape-checks `[keys]`.
+Fix-wave gates at 46a6c04: `task ci` exit 0 (3405 tests), visual sweep 7/7, ACP stub legs 8/8, and the real-adapter conformance leg exit 0 twice against the reinstalled release binary — the live smoke for this wave.
