@@ -122,6 +122,59 @@ mod tests {
         assert!(due.is_some_and(|next| next > armed));
     }
 
+    /// Submitting is what starts the wait, so it is what arms the frame:
+    /// the gap this covers is the one before the agent's first event, which
+    /// is exactly the stretch in which no tool call exists to animate. One
+    /// clock for both -- the deadline the loop already folds in -- and the
+    /// prompt is driven through `update()` so the submit path itself is
+    /// load-bearing here.
+    #[test]
+    fn a_submitted_prompt_bounds_the_wait_before_any_tool_call_exists() {
+        let mut model = Model::with_term_size(80, 24);
+        model.ai_trusted = true;
+        let _ = update(
+            &mut model,
+            Msg::FeatureInvoke {
+                feature: "ai".to_string(),
+                verb: "open".to_string(),
+            },
+        );
+        model.ai_panel_mut().input = "fix the retry policy".to_string();
+        let _ = update(
+            &mut model,
+            Msg::Key(view_core::msg::Key {
+                notation: "<CR>".to_string(),
+            }),
+        );
+        assert_eq!(
+            model.ai_panel().transcript.len(),
+            1,
+            "the prompt is the only thing on screen, and nothing else is animating"
+        );
+        model.dirty = false;
+        let mut due = None;
+        let start = Instant::now();
+
+        expire(&mut model, &mut due, start);
+        let armed = due.expect("a prompt awaiting its answer arms the next frame");
+        assert!(!model.dirty, "arming a deadline paints nothing by itself");
+
+        let before = model
+            .ai_panel()
+            .transcript
+            .rows_from(Default::default(), 8, 60);
+        expire(&mut model, &mut due, armed);
+        assert!(model.dirty, "the frame that came due owes a paint");
+        assert_ne!(
+            model
+                .ai_panel()
+                .transcript
+                .rows_from(Default::default(), 8, 60),
+            before,
+            "and the prompt's own marker has moved"
+        );
+    }
+
     /// A closed panel is not showing anything: an agent running a
     /// three-minute tool call behind one must cost no wakeup, no repaint,
     /// and no frame -- the whole reason the deadline is read off the model

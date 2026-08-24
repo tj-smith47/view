@@ -4136,8 +4136,9 @@ fn submitting_a_prompt_returns_the_panel_to_the_newest_line() {
 
     assert_eq!(
         panel_transcript_texts(&m).last().unwrap(),
-        "❯ and another thing",
-        "the prompt itself is now the newest line, and the panel follows it"
+        "⠋ and another thing",
+        "the prompt itself is now the newest line, and the panel follows it, \
+         its marker already spinning for the turn it just started"
     );
 }
 
@@ -4161,7 +4162,7 @@ fn submitting_a_prompt_puts_it_in_the_transcript_and_still_sends_it() {
     );
     assert_eq!(
         panel_transcript_texts(&m),
-        vec!["❯ what changed here?"],
+        vec!["⠋ what changed here?"],
         "and the user can see what they asked"
     );
 
@@ -4175,8 +4176,9 @@ fn submitting_a_prompt_puts_it_in_the_transcript_and_still_sends_it() {
     );
     assert_eq!(
         panel_transcript_texts(&m),
-        vec!["❯ what changed here?"],
-        "an adapter replaying the prompt must not say it twice"
+        vec!["⠋ what changed here?"],
+        "an adapter replaying the prompt must not say it twice -- nor is a \
+         replay the agent answering, so the marker is still spinning"
     );
 }
 

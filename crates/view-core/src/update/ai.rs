@@ -45,6 +45,9 @@ use crate::native::ai_panel::{DiffReviewState, PermissionPrompt, StandingAnswer}
 /// different request, not an answer to the one the user is still looking
 /// at.
 pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
+    if answers_the_prompt(&event) && model.ai_panel_mut().transcript.agent_answered() {
+        model.dirty = true;
+    }
     match event {
         AiEvent::PermissionRequested {
             request_id,
@@ -346,6 +349,36 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
 /// What view says, in the transcript and in the toast behind a closed panel,
 /// when it answers a request from a standing answer rather than asking.
 ///
+/// Whether `event` is the agent putting its own content in front of the
+/// user -- which is what stands the submitted prompt's spinner back down
+/// (see [`crate::native::ai_panel::Transcript::agent_answered`]).
+///
+/// Asked ahead of the fold rather than repeated inside the arms that
+/// qualify, so no arm's own early `return` can skip it, and enumerated
+/// rather than defaulted to "any event": the agent working invisibly is not
+/// the agent answering. A filesystem request it makes of view, a usage
+/// update, or a session going ready puts nothing on screen, and stopping the
+/// spinner for one of those would take the only sign of life off the panel
+/// with nothing replacing it. A `from_agent: false` chunk is the adapter
+/// restating the user's own prompt, which is not the agent speaking either.
+///
+/// `TurnEnded` and `SessionCrashed` are absent because they stop it through
+/// [`crate::native::ai_panel::Transcript::end_turn`] instead, which stops
+/// every marker rather than only this one.
+fn answers_the_prompt(event: &AiEvent) -> bool {
+    matches!(
+        event,
+        AiEvent::MessageChunk {
+            from_agent: true,
+            ..
+        } | AiEvent::ThoughtChunk { .. }
+            | AiEvent::ToolCallUpdate { .. }
+            | AiEvent::PlanUpdated { .. }
+            | AiEvent::PermissionRequested { .. }
+            | AiEvent::DiffProposed { .. }
+    )
+}
+
 /// One wording for both surfaces so the toast and the record cannot drift,
 /// and it names the kind: "view answered for you" is only auditable if the
 /// user can tell which of their standing answers did it.
@@ -521,6 +554,129 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(model.ai_panel_mut().transcript.len(), 1);
         assert!(model.dirty);
+    }
+
+    /// An open panel with a prompt just submitted -- the spinner's own
+    /// state, armed at submit and looking for whatever stops it.
+    fn model_awaiting_the_agent() -> Model {
+        let mut model = model_with_open_panel();
+        model.ai_panel_mut().turn_in_flight = true;
+        model
+            .ai_panel_mut()
+            .transcript
+            .echo_user_prompt("fix the retry policy");
+        assert!(model.ai_panel().transcript.is_spinning());
+        model.dirty = false;
+        model
+    }
+
+    /// Every event that puts the agent's own content in front of the user
+    /// stands the submitted prompt's marker back down, whichever arm it
+    /// takes and whether or not that arm returns early. Enumerated as a
+    /// table rather than one test per variant because the property is the
+    /// same one for all of them, and a variant the gate forgets is a
+    /// spinner that runs behind a panel already full of answers.
+    #[test]
+    fn the_agents_first_event_stops_the_submitted_prompts_spinner() {
+        for event in [
+            AiEvent::MessageChunk {
+                message_id: Some("m1".to_string()),
+                text: "on it".to_string(),
+                from_agent: true,
+            },
+            AiEvent::ThoughtChunk {
+                message_id: Some("m1".to_string()),
+                text: "weighing it".to_string(),
+            },
+            AiEvent::ToolCallUpdate {
+                tool_call_id: "call_1".to_string(),
+                title: "Read file".to_string(),
+                status: ToolCallStatus::Pending,
+                content: None,
+            },
+            AiEvent::PlanUpdated {
+                entries: Vec::new(),
+            },
+            AiEvent::PermissionRequested {
+                request_id: 1,
+                tool_call_id: "call_1".to_string(),
+                title: None,
+                tool_kind: Some("edit".to_string()),
+                options: vec![allow_once("allow-once")],
+            },
+            AiEvent::DiffProposed {
+                request_id: 1,
+                path: std::path::PathBuf::from("src/lib.rs"),
+                old_text: Some("before\n".to_string()),
+                new_text: "after\n".to_string(),
+            },
+            // The one qualifying arm that returns before setting `dirty`
+            // itself (its proposal is a no-op against the file on disk), so
+            // the repaint that shows the marker standing down has to come
+            // from the gate.
+            AiEvent::DiffProposed {
+                request_id: 2,
+                path: std::path::PathBuf::from("src/lib.rs"),
+                old_text: Some("unchanged\n".to_string()),
+                new_text: "unchanged\n".to_string(),
+            },
+            AiEvent::TurnEnded {
+                stop_reason: crate::native::ai_event::StopReason::EndTurn,
+            },
+            AiEvent::SessionCrashed {
+                message: "agent exited".to_string(),
+            },
+        ] {
+            let mut model = model_awaiting_the_agent();
+            let label = format!("{event:?}");
+            let _ = update(&mut model, Msg::Ai(event));
+            assert!(
+                !model.ai_panel().transcript.is_spinning(),
+                "{label} left the prompt's marker spinning"
+            );
+            assert!(
+                model.dirty,
+                "{label} stopped the marker without asking for the repaint that shows it"
+            );
+        }
+    }
+
+    /// The other half of the matrix. An agent reading a file, spending
+    /// tokens, or coming back up has put nothing on screen, and a spinner
+    /// stopped there takes the only sign of life off the panel with nothing
+    /// replacing it. Nor is an adapter replaying the user's own prompt the
+    /// agent speaking.
+    #[test]
+    fn an_event_that_shows_the_user_nothing_leaves_the_spinner_running() {
+        for event in [
+            AiEvent::MessageChunk {
+                message_id: Some("wire-1".to_string()),
+                text: "fix the retry".to_string(),
+                from_agent: false,
+            },
+            AiEvent::UsageUpdated {
+                used: 10,
+                size: 100,
+                cost: None,
+            },
+            AiEvent::SessionReady {
+                session_id: "s1".to_string(),
+            },
+            AiEvent::FsReadRequested {
+                request_id: 1,
+                path: std::path::PathBuf::from("src/lib.rs"),
+                line: None,
+                limit: None,
+            },
+        ] {
+            let mut model = model_awaiting_the_agent();
+            let label = format!("{event:?}");
+            let _ = update(&mut model, Msg::Ai(event));
+            assert!(
+                model.ai_panel().transcript.is_spinning(),
+                "{label} stopped a spinner nothing had replaced"
+            );
+        }
     }
 
     fn allow_once(id: &str) -> crate::native::ai_event::PermissionOption {

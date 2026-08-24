@@ -353,6 +353,21 @@ fn main() {
                             serde_json::json!({ "stopReason": "end_turn" }),
                         );
                     }
+                    // Nothing at all until released: the window in which
+                    // the panel holds only the user's own prompt, which is
+                    // the stretch a thinking model spends before its first
+                    // event and the one the submitted prompt's own spinner
+                    // covers. No other mode leaves it open long enough to
+                    // read off a screen.
+                    "think" => {
+                        stall();
+                        chunk(&mut stdout, "agent_message_chunk", "thought about it");
+                        reply(
+                            &mut stdout,
+                            id,
+                            serde_json::json!({ "stopReason": "end_turn" }),
+                        );
+                    }
                     "tool-call" => {
                         // The two halves are separated by the resume file
                         // rather than sent together, so the non-terminal

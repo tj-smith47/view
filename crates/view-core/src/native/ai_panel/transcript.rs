@@ -256,6 +256,16 @@ pub struct Transcript {
     /// Which [`SPINNER_FRAMES`] entry an animating tool call currently
     /// paints.
     spinner_frame: usize,
+    /// The submitted prompt whose own marker is standing in for the agent
+    /// until the agent puts something on screen itself (see
+    /// [`Self::echo_user_prompt`]), or `None` once something has.
+    ///
+    /// An index rather than "the last entry", because the last entry moves:
+    /// an adapter that injects context of its own into the user's turn
+    /// appends behind the echo while the prompt is still unanswered, and the
+    /// marker that has to stand back down is the prompt's, not whatever
+    /// arrived after it.
+    awaiting_reply: Option<usize>,
 }
 
 /// The user's own prompt as this panel echoed it, and how much of it an
@@ -682,20 +692,65 @@ impl Transcript {
         self.animating.contains(&at).then_some(self.spinner_frame)
     }
 
-    /// Appends the prompt the user just submitted, under an id minted here.
+    /// Appends the prompt the user just submitted, under an id minted here,
+    /// and starts that entry's marker spinning.
     ///
     /// The panel says what the user said, itself, at the moment they said
     /// it: the wire is under no obligation to replay a prompt back (the ACP
     /// adapter view ships against never does), and a transcript that shows
     /// only the answers is a conversation with one side missing.
+    ///
+    /// The spinner starts here rather than at the agent's first tool call
+    /// because the gap this fills is the one before any of that: a prompt
+    /// sits alone on screen from submit until the agent's first event, which
+    /// on a thinking model is seconds, and an unmoving panel through that is
+    /// indistinguishable from a prompt that never left. It rides the marker
+    /// the echoed entry already owns -- the transcript's vocabulary is one
+    /// glyph per entry with [`MARK_INDENT`] under it on the rows the entry
+    /// wrapped onto, and a synthetic spinner row would be an entry with no
+    /// content, which that vocabulary has no marker for and which every
+    /// anchor, fold and index map here would then have to survive being
+    /// removed again. The prompt's own marker moving says the thing that is
+    /// true -- *this* is what is being answered -- and [`Self::agent_answered`]
+    /// puts [`USER_MARK`] back the moment it is.
     pub fn echo_user_prompt(&mut self, text: &str) {
+        // Only ever one prompt is unanswered: the composer refuses a second
+        // submit while a turn is in flight, so a prompt reaching here always
+        // follows a turn that ended -- but a marker that outlived its own
+        // turn would spin for the rest of the run, and standing the previous
+        // one down here is what makes that unrepresentable rather than
+        // conditional on a gate two crates away.
+        self.agent_answered();
         self.local_seq += 1;
         let id = format!("{LOCAL_ID_PREFIX}{}", self.local_seq);
         self.append_or_extend(Some(&id), text, TranscriptRole::User);
+        let at = self.entries.len() - 1;
         self.echo = Some(LocalEcho {
-            entry: self.entries.len() - 1,
+            entry: at,
             matched: 0,
         });
+        self.awaiting_reply = Some(at);
+        self.animating.insert(at);
+    }
+
+    /// Stands the submitted prompt's marker back down, because the agent has
+    /// now put something on screen itself. Reports whether it stopped
+    /// anything, so a caller with no other reason to repaint knows it has
+    /// one.
+    ///
+    /// Idempotent: every later event in the same turn finds nothing waiting.
+    pub fn agent_answered(&mut self) -> bool {
+        let Some(at) = self.awaiting_reply.take() else {
+            return false;
+        };
+        self.animating.remove(&at);
+        // Dropped rather than rewritten in place: the marker is going back
+        // to a different glyph, not on to the next frame, and this happens
+        // once per turn where a tick happens eight times a second.
+        if let Some(slot) = self.row_cache.get_mut().get_mut(at) {
+            *slot = None;
+        }
+        true
     }
 
     /// Folds one `from_agent: false` chunk, dropping it when it is the
@@ -761,8 +816,15 @@ impl Transcript {
     /// panel does not invent a result the agent never reported, it stops
     /// pretending the call is still moving, and the marker it settles on is
     /// the static one an unstarted call wears.
+    ///
+    /// A turn that ended before the agent ever spoke -- a refusal, a
+    /// cancel, a crash -- is the other way the submitted prompt's own
+    /// spinner stops, and the drain below is what stops it: nothing is
+    /// coming to answer that prompt, so its marker settles back to
+    /// [`USER_MARK`] here rather than spinning for the rest of the run.
     pub fn end_turn(&mut self) {
         self.echo = None;
+        self.awaiting_reply = None;
         let cache = self.row_cache.get_mut();
         for i in self.animating.drain() {
             cache[i] = None;
@@ -843,6 +905,12 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>, width: usize) -
                 TranscriptRole::Thought => (THOUGHT_MARK, StyleRole::AiThought),
                 TranscriptRole::Notice => (NOTICE_MARK, StyleRole::AiNotice),
             };
+            // A message animates in exactly one case -- the prompt awaiting
+            // the agent's first word (`Transcript::echo_user_prompt`) -- and
+            // it keeps its own voice's color while it does, the same way a
+            // running tool call keeps `AiToolRunning`: the glyph says
+            // "working", the color says whose row this is.
+            let mark = spinner.map_or(mark, |frame| SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]);
             paint.add(Span::new(mark, style), Some(style), &entry.text);
         }
         TranscriptEntryKind::ToolCall { status, result, .. } => {
@@ -1134,7 +1202,7 @@ mod tests {
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec![
-                "\u{276f} fix the parser",
+                "\u{280b} fix the parser",
                 "  ",
                 "  - it drops tabs",
                 "  - and CRs",
@@ -1242,7 +1310,7 @@ mod tests {
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec![
-                "\u{276f} fix the parser",
+                "\u{280b} fix the parser",
                 "  ",
                 "  - it drops tabs",
                 "  - and CRs",
@@ -1262,7 +1330,7 @@ mod tests {
 
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
-            vec!["\u{276f} done", "  "],
+            vec!["\u{280b} done", "  "],
             "the last newline ends the text, the one before it is a row"
         );
     }
@@ -1863,7 +1931,7 @@ mod tests {
         assert_eq!(transcript.len(), 1, "one prompt, said once");
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
-            vec!["\u{276f} fix the retry policy"]
+            vec!["\u{280b} fix the retry policy"]
         );
     }
 
@@ -1883,7 +1951,7 @@ mod tests {
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec![
-                "\u{276f} fix the retry policy",
+                "\u{280b} fix the retry policy",
                 "\u{276f} <context: 3 files>"
             ]
         );
@@ -1906,7 +1974,7 @@ mod tests {
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec![
-                "\u{276f} fix the retry policy",
+                "\u{280b} fix the retry policy",
                 "\u{276f} <ctx>retry policy"
             ],
             "the injected message must arrive whole, not with its tail eaten"
@@ -1926,7 +1994,7 @@ mod tests {
 
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
-            vec!["\u{276f} fix the retry policy", "\u{276f} <ctx>"],
+            vec!["\u{280b} fix the retry policy", "\u{276f} <ctx>"],
             "the replay is still recognised as the prompt already on screen"
         );
     }
@@ -2008,7 +2076,7 @@ mod tests {
         assert_eq!(transcript.len(), 2);
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
-            vec!["\u{276f} first", "\u{276f} second"]
+            vec!["\u{276f} first", "\u{280b} second"]
         );
     }
 
@@ -2166,6 +2234,146 @@ mod tests {
         assert!(
             transcript.is_spinning(),
             "a later call starts the spinner back up"
+        );
+    }
+
+    /// The dogfood report: submit a prompt to a thinking model and the panel
+    /// holds perfectly still until its first event, which is seconds of a
+    /// screen that cannot be told apart from a prompt that never left. The
+    /// prompt's own marker carries the spinner across exactly that gap.
+    #[test]
+    fn a_submitted_prompt_spins_before_the_agent_has_said_anything() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+
+        assert!(
+            transcript.is_spinning(),
+            "submit is what arms the caller's next frame, not the first tool call"
+        );
+        let opened = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+        assert_eq!(texts(&opened), vec!["\u{280b} fix the retry policy"]);
+
+        transcript.advance_spinner();
+        let ticked = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+        assert_ne!(
+            ticked[0][0].text, opened[0][0].text,
+            "the prompt's marker moves on the same tick a tool call's does"
+        );
+        assert_eq!(
+            ticked[0][0].role,
+            StyleRole::AiUser,
+            "and keeps the user's own voice while it moves"
+        );
+        assert_eq!(ticked[0][1], opened[0][1], "the prompt itself is untouched");
+
+        assert!(transcript.agent_answered(), "the first event stops it");
+        assert!(!transcript.is_spinning());
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec!["\u{276f} fix the retry policy"],
+            "and the prompt gets its own marker back"
+        );
+    }
+
+    /// The submitted prompt rides the tool-call spinner's mechanism, so it
+    /// owes the same bill: a tick rewrites one glyph in the cached rows and
+    /// re-renders nothing, however long the prompt that was pasted in.
+    #[test]
+    fn a_tick_on_an_unanswered_prompt_re_renders_nothing_at_all() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt(&"a long pasted prompt\n".repeat(200));
+        let before = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+
+        reset_render_entry_calls();
+        transcript.advance_spinner();
+        let after = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+
+        assert_eq!(
+            render_entry_calls(),
+            0,
+            "the tick rewrote the marker in place, so no entry re-rendered"
+        );
+        assert_ne!(after[0][0].text, before[0][0].text);
+        assert_eq!(
+            after[1..],
+            before[1..],
+            "and every row the prompt wrapped onto is untouched"
+        );
+    }
+
+    /// A turn can end before the agent ever speaks -- a refusal, a `<C-c>`,
+    /// an agent that died on the prompt -- and the prompt's marker must
+    /// settle with it rather than spinning, and asking the loop for a
+    /// wakeup, for the rest of the run.
+    #[test]
+    fn a_turn_that_ends_before_the_agent_speaks_stops_the_prompts_spinner() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+        assert!(transcript.is_spinning());
+
+        transcript.end_turn();
+
+        assert!(!transcript.is_spinning());
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec!["\u{276f} fix the retry policy"]
+        );
+        assert!(
+            !transcript.agent_answered(),
+            "and a late event finds nothing left to stop"
+        );
+    }
+
+    /// Every event after the first in one turn asks again, and the answer
+    /// is the same: the caller repaints on the one that actually stopped
+    /// something, not eight times a second because it asked.
+    #[test]
+    fn only_the_first_event_of_a_turn_stops_anything() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+
+        assert!(transcript.agent_answered());
+        assert!(!transcript.agent_answered());
+        assert!(!transcript.agent_answered());
+    }
+
+    /// An adapter that injects context of its own into the user's turn
+    /// appends behind the echo while the prompt is still unanswered, so the
+    /// prompt is no longer the newest entry -- and the marker that has to
+    /// stand back down is still the prompt's.
+    #[test]
+    fn the_marker_that_stops_is_the_prompts_and_not_the_newest_entrys() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the retry policy");
+        transcript.append_user_chunk(Some("wire-1"), "<context: 3 files>");
+
+        transcript.agent_answered();
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec![
+                "\u{276f} fix the retry policy",
+                "\u{276f} <context: 3 files>"
+            ]
+        );
+    }
+
+    /// Two prompts in one session must not leave two markers spinning: the
+    /// composer refuses a second submit mid-turn, but a marker that outlived
+    /// its turn would spin -- and keep the loop waking -- for the rest of
+    /// the run, so the second submit stands the first one down itself.
+    #[test]
+    fn a_second_prompt_leaves_no_marker_spinning_behind_it() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("first");
+        transcript.echo_user_prompt("second");
+
+        transcript.agent_answered();
+
+        assert!(!transcript.is_spinning(), "one prompt, one marker");
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec!["\u{276f} first", "\u{276f} second"]
         );
     }
 }

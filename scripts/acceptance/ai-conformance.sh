@@ -900,6 +900,47 @@ leg_filesystem_round_trip() {
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
+# The stretch before the agent's first event, which on a real thinking model
+# is seconds of a panel holding perfectly still -- the third dogfood report
+# could not tell it apart from a prompt that never left. Its own leg rather
+# than a block inside leg 2, because the stub gives every chunk one message
+# id and a turn added ahead of that leg's own folds into the entry its
+# assertions read.
+leg_prompt_awaiting_its_answer() {
+    CURRENT_LEG=9-prompt-awaiting-its-answer
+    local resume held others
+    start_session think "$STUB_ARGV" "$(mktemp -d)"
+    resume=$RESUME_FILE
+    rm -f "$resume"
+    open_panel "$WAIT_SECS"
+
+    # Held before the stub has sent anything at all, which is the one window
+    # where nothing else on screen could be the thing moving: the prompt is
+    # the only entry there is.
+    submit 'think'
+    wait_for_re "($SPINNER_ALTERNATION) think" "$WAIT_SECS" \
+        "the submitted prompt's own spinner" >/dev/null
+    held=$(pane | grep -oE "($SPINNER_ALTERNATION) think" | head -1 | awk '{print $1}')
+    [ -n "$held" ] || fail "the prompt's spinner frame left the screen before it could be read"
+    others=$(printf '%s' "$SPINNER_ALTERNATION" |
+        awk -v skip="$held" 'BEGIN { RS = "|" } $0 != skip { printf "%s%s", (n++ ? "|" : ""), $0 }')
+    # A second frame with nothing typed and nothing arriving: the same loop
+    # deadline the tool call's marker rides, reached from submit instead of
+    # from a call in flight.
+    wait_for_re "($others) think" "$WAIT_SECS" \
+        "the prompt's marker advancing before the agent has sent anything" >/dev/null
+
+    # ... and it stands back down on the agent's first word rather than
+    # spinning behind the answer it was waiting for.
+    touch "$resume"
+    wait_for "${AGENT_PREFIX}thought about it" "$WAIT_SECS" \
+        "the agent's first word" >/dev/null
+    wait_for "${USER_PREFIX}think" "$WAIT_SECS" \
+        "the prompt's marker standing back down" >/dev/null
+    pass "a submitted prompt animated from submit until the agent's first word"
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
 command -v tmux >/dev/null || {
     printf 'FAIL: tmux is required (this drives a real terminal session)\n' >&2
     exit 1
@@ -973,6 +1014,9 @@ THOUGHT_PREFIX=$(grep -oE 'TranscriptRole::Thought => \(?[A-Z_]+' "$TRANSCRIPT_R
     exit 1
 }
 THOUGHT_PREFIX=$(mark_str "$THOUGHT_PREFIX") || exit 1
+# The marker the user's own side wears once nothing is pending on it -- the
+# glyph the submitted prompt's spinner stands back down to.
+USER_PREFIX=$(arm_mark "TranscriptRole::User") || exit 1
 # Every frame an unresolved call's marker cycles through, as one alternation:
 # the frame on screen depends on when the screen was read, so the assertion
 # that a call is running has to accept any of them.
@@ -1149,7 +1193,7 @@ ROOTS+=("$ADAPTER_CACHE")
 # practical way to check that the leg is really the thing being asserted.
 LEGS=(leg_session_lifecycle leg_streaming_and_tool_status leg_diff_accept_and_reject
     leg_cancel_mid_turn leg_agent_crash leg_permission_overlap leg_filesystem_round_trip
-    leg_permission_keys_and_grant)
+    leg_permission_keys_and_grant leg_prompt_awaiting_its_answer)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

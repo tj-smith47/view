@@ -1806,8 +1806,9 @@ mod tests {
         let texts = transcript_texts(&state, TEN_ROW_PANEL);
         assert_eq!(
             texts.last().unwrap(),
-            "❯ what changed here?",
-            "a followed panel shows the prompt the moment it is submitted"
+            "⠋ what changed here?",
+            "a followed panel shows the prompt the moment it is submitted, \
+             under the spinner it wears until the agent answers"
         );
     }
 
