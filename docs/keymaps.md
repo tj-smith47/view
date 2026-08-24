@@ -122,6 +122,34 @@ out of a review whose buffer view can no longer write to at all.
 
 See [ai.md](ai.md) for what a review is and what each decision writes.
 
+## Writing a prompt of more than one line
+
+`<CR>` in the composer sends the prompt, so a line break is its own key:
+
+| key | does |
+| --- | --- |
+| `<S-CR>` | breaks the line, where the terminal reports the shift |
+| `<M-CR>` | breaks the line, everywhere else |
+| `<CR>` | sends the prompt |
+
+Both are bound because terminals disagree about Enter. Alt+Enter arrives as
+`ESC` + Enter from nearly every one of them; Shift+Enter arrives as a
+*shifted* Enter only where a keyboard protocol says so, and reaches view as
+a plain `<CR>` otherwise -- which is why it is a second binding and not the
+only one. A pasted line break needs no key at all: paste a multi-line prompt
+and it keeps its lines.
+
+The break the agent receives is the same `\n` either way, and the composer
+paints the text after it on a row of its own with the cursor on that row.
+
+```toml
+[keys]
+composer_newline = ["<S-CR>", "<M-CR>"]     # the defaults
+```
+
+Alt is `M-` above because that is what view's own encoder emits; `A-` is
+read as the same modifier, so either spelling binds the same key.
+
 ## Resizing the sidebars
 
 The file tree and the AI panel are sidebars, and the focused one resizes
@@ -150,6 +178,9 @@ list of them, and a binding may be a two-key chord:
 sidebar_wider = ["<S-Right>", "<C-w>>"]     # the defaults
 sidebar_narrower = ["<S-Left>", "<C-w><"]
 ```
+
+The same rules hold for every action `[keys]` carries, the composer's line
+break above included.
 
 Spell a key the way nvim spells it, case and all: `<S-Right>`, not
 `<S-right>`. A `<...>` notation that cannot be a key is reported -- a

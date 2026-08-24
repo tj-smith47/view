@@ -740,6 +740,7 @@ tree_width = 30            # tree sidebar's share of the terminal width, 15..70
 [keys]
 sidebar_wider = ["<S-Right>", "<C-w>>"]     # resize the focused sidebar; one
 sidebar_narrower = ["<S-Left>", "<C-w><"]   # notation or a list, chords of two
+composer_newline = ["<S-CR>", "<M-CR>"]     # break a line in the AI composer
 
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for a manual restart

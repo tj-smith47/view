@@ -136,9 +136,9 @@ impl NativeSession {
             model.dirty = true;
             effects.extend(model.engine.record_native_notice(notice.to_string(), false));
         }
-        model.resize_keys = resolved.keys.resize().clone();
+        model.key_bindings = resolved.keys.bindings().clone();
         // an entry that named no key leaves its own action on the defaults
-        // rather than failing the table (see `resolve_resize_keys`), so this
+        // rather than failing the table (see `resolve_key_bindings`), so this
         // is the only place it can be said out loud
         for notice in resolved.keys.notices() {
             model.dirty = true;
@@ -749,15 +749,20 @@ auto_restart = false
     /// reach the model, and an entry naming no key leaves its own action
     /// alone while telling the user.
     #[test]
-    fn load_carries_the_resize_keys_and_reports_one_it_could_not_read() {
-        use view_core::native::keys::{Direction, Resolved};
+    fn load_carries_the_key_bindings_and_reports_one_it_could_not_read() {
+        use view_core::native::keys::{Action, Direction, Resolved};
 
         let mut default = model();
         let _ = NativeSession::load(None, 7, &mut default);
         assert_eq!(
-            default.resize_keys.resolve(Some("<C-w>"), ">"),
-            Some(Resolved::Step(Direction::Wider)),
+            default.key_bindings.resolve(Some("<C-w>"), ">"),
+            Some(Resolved::Act(Action::Resize(Direction::Wider))),
             "an absent config is the shipped chord"
+        );
+        assert_eq!(
+            default.key_bindings.resolve(None, "<M-CR>"),
+            Some(Resolved::Act(Action::ComposerNewline)),
+            "and the composer's shipped line break"
         );
 
         let dir = view_test_support::ScratchDir::new("native-keys").unwrap();
@@ -767,6 +772,7 @@ auto_restart = false
             "[keys]
 sidebar_wider = \"<M-.>\"
 sidebar_narrower = 30
+composer_newline = \"<A-x>\"
 ",
         )
         .expect("a temp config must be writable");
@@ -775,13 +781,13 @@ sidebar_narrower = 30
         let (_session, effects) = NativeSession::load(Some(path), 7, &mut configured);
 
         assert_eq!(
-            configured.resize_keys.resolve(None, "<M-.>"),
-            Some(Resolved::Step(Direction::Wider)),
+            configured.key_bindings.resolve(None, "<M-.>"),
+            Some(Resolved::Act(Action::Resize(Direction::Wider))),
             "the readable action was rebound"
         );
         assert_eq!(
-            configured.resize_keys.resolve(None, "<S-Left>"),
-            Some(Resolved::Step(Direction::Narrower)),
+            configured.key_bindings.resolve(None, "<S-Left>"),
+            Some(Resolved::Act(Action::Resize(Direction::Narrower))),
             "the unreadable one kept its defaults"
         );
         assert!(
@@ -796,6 +802,11 @@ sidebar_narrower = 30
         assert!(
             !raised.contains("sidebar_wider"),
             "while the entry that read fine is not complained about: {raised}"
+        );
+        assert_eq!(
+            configured.key_bindings.resolve(None, "<M-x>"),
+            Some(Resolved::Act(Action::ComposerNewline)),
+            "and Alt reaches the same binding however the config spells it"
         );
     }
 }

@@ -20,7 +20,7 @@ use crate::native::ai_event::{
 };
 use crate::native::ai_panel::ReviewSync;
 use crate::native::geometry::OverlayBox;
-use crate::native::keys::Direction;
+use crate::native::keys::{Action, Direction};
 use crate::native::supervision::{
     ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
     ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION,
@@ -4672,8 +4672,8 @@ fn a_chord_prefix_does_not_survive_focus_leaving_the_sidebar() {
 fn a_rebound_action_replaces_only_its_own_default() {
     let mut m = scrollable_ai_panel_model(0);
     assert!(m
-        .resize_keys
-        .rebind(Direction::Wider, &["<M-.>".to_string()]));
+        .key_bindings
+        .rebind(Action::Resize(Direction::Wider), &["<M-.>".to_string()]));
 
     let _ = update(&mut m, key("<M-.>"));
     assert_eq!(ai_panel_width_pct(&m), 35, "the configured key widens");
@@ -4914,6 +4914,69 @@ fn enter_on_a_non_empty_composer_submits_a_prompt_and_clears_the_input() {
     assert_eq!(m.ai_panel().input, "", "the composer clears on submit");
     assert!(m.ai_panel().turn_in_flight);
     assert!(m.dirty);
+}
+
+/// The composer's other way to a multi-line prompt, now that a paste is not
+/// the only one: the bound key inserts the same `\n` a paste carries, the
+/// text after it paints on a row of its own with the caret on that row's
+/// first cell, and `<CR>` still sends the whole thing.
+#[test]
+fn a_typed_line_break_opens_a_row_and_enter_still_submits() {
+    let mut m = entered_ai_panel_model();
+    for ch in ["o", "n", "e"] {
+        let _ = update(&mut m, key(ch));
+    }
+    m.dirty = false;
+
+    let effects = update(&mut m, key("<M-CR>"));
+
+    assert!(effects.is_empty(), "a line break submits nothing");
+    assert!(m.dirty, "and the panel repaints for it");
+    assert_eq!(m.ai_panel().input, "one\n");
+    let view = m.ai_panel().view(24, 40);
+    assert_eq!(view.input, vec!["one".to_string(), String::new()]);
+    assert_eq!(
+        view.composer_cursor(),
+        (1, 0),
+        "the caret is on the first cell of the row the break opened"
+    );
+
+    for ch in ["t", "w", "o"] {
+        let _ = update(&mut m, key(ch));
+    }
+    let view = m.ai_panel().view(24, 40);
+    assert_eq!(view.input, vec!["one".to_string(), "two".to_string()]);
+
+    let effects = update(&mut m, key("<CR>"));
+    let [Effect::AiPromptSubmit { text }] = effects.as_slice() else {
+        panic!("expected one AiPromptSubmit, got {effects:?}");
+    };
+    assert_eq!(text, "one\ntwo", "the agent is sent the break as typed");
+    assert_eq!(m.ai_panel().input, "");
+}
+
+/// Shift+Enter is the same binding by default, and a permission prompt
+/// standing in front of the composer is not something a line break reaches
+/// past -- the composer is exactly what the prompt is standing in front of.
+#[test]
+fn shift_enter_breaks_the_line_too_and_neither_key_reaches_past_a_question() {
+    let mut m = entered_ai_panel_model();
+    let _ = update(&mut m, key("<S-CR>"));
+    assert_eq!(m.ai_panel().input, "\n");
+
+    let mut m = pending_permission_model();
+    m.ai_panel_mut().push_input("\n");
+    m.dirty = false;
+    for notation in ["<M-CR>", "<S-CR>"] {
+        let effects = update(&mut m, key(notation));
+        assert!(effects.is_empty(), "{notation} answers no request");
+        assert_eq!(
+            m.ai_panel().input,
+            "\n",
+            "{notation} types nothing under an unanswered question"
+        );
+    }
+    assert!(!m.dirty);
 }
 
 /// The cancel half of the same producer: `<C-c>` with nothing in flight has

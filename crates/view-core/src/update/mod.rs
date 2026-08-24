@@ -7,7 +7,7 @@ use crate::msg::{
 use crate::native::ai_event::{AiCommand, PermissionOptionKind, PermissionOutcome};
 use crate::native::ai_panel::{StandingAnswer, TranscriptScroll};
 use crate::native::diff::BufTextChangedEvent;
-use crate::native::keys::Resolved;
+use crate::native::keys::{Action, Resolved};
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 
@@ -55,13 +55,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // a prompt minutes later from spending itself on a width instead. The
     // `is_some` short-circuit keeps every keystroke that never armed one --
     // which is nearly all of them -- to a single null check.
-    if model.pending_resize_chord.is_some()
+    if model.pending_chord.is_some()
         && !matches!(
             model.focused_overlay().map(|overlay| &overlay.kind),
             Some(OverlayKind::Ai | OverlayKind::Tree(_))
         )
     {
-        model.pending_resize_chord = None;
+        model.pending_chord = None;
     }
     match msg {
         Msg::Key(Key { notation }) => {
@@ -887,8 +887,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 ///
 /// A closed list rather than "any `<...>` notation" on purpose. The
 /// composer's own named keys are edits like any other keystroke: `<CR>`
-/// starts a turn, `<BS>` and `<lt>` (nvim's escape for a literal `<`, see
-/// `keys::encode_key`) type into the prompt. Letting
+/// starts a turn, `<BS>`, `<lt>` (nvim's escape for a literal `<`, see
+/// `keys::encode_key`) and the bound line break type into the prompt.
+/// Letting
 /// those through because they are spelled with angle brackets would leave
 /// the composer editable behind a decision the user has not made yet --
 /// with `<CR>` able to start a second turn on top of the one whose
@@ -897,15 +898,20 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 ///
 /// Takes the model because one entry is conditional: `<C-d>` is two keys
 /// wearing one notation, and only the banner-dismissing one is a way out.
-/// Takes `resize` already resolved because the answer for a chord depends
+/// Takes `binding` already resolved because the answer for a chord depends
 /// on the prefix the previous keystroke left waiting, which is state this
 /// predicate must not consume.
-fn reaches_past_a_panel_owner(model: &Model, notation: &str, resize: Option<Resolved>) -> bool {
+fn reaches_past_a_panel_owner(model: &Model, notation: &str, binding: Option<Resolved>) -> bool {
     // A chord's first key is here too, though it moves nothing: the prefix
     // it leaves waiting is recorded before this gate either way, so what
     // reaching past buys it is only that it takes the same path as the
-    // press that completes it rather than a second, silent one.
-    if resize.is_some() {
+    // press that completes it rather than a second, silent one. The
+    // composer's own line break is not a way past anything: the composer is
+    // exactly what a panel owner is standing in front of.
+    if matches!(
+        binding,
+        Some(Resolved::Pending | Resolved::Act(Action::Resize(_)))
+    ) {
         return true;
     }
     match notation {
@@ -920,26 +926,26 @@ fn reaches_past_a_panel_owner(model: &Model, notation: &str, resize: Option<Reso
     }
 }
 
-/// What `notation` means to the focused sidebar's width, consuming
-/// whichever chord prefix the previous keystroke left waiting.
+/// What `notation` means to the focused surface, consuming whichever chord
+/// prefix the previous keystroke left waiting.
 ///
-/// The one place either sidebar resolves a resize from a key: the tree and
-/// the agent panel share one configured set ([`Model::resize_keys`]), and a
-/// second reading of it here or there is how one sidebar comes to answer a
-/// key the other ignores. The prefix is taken rather than read because a
-/// keystroke consumes it whatever it turns out to mean -- an unmatched
-/// follower falls through to its ordinary handling with nothing left
-/// pending behind it.
+/// The one place a key is resolved against the bindings: the tree, the
+/// agent panel and its composer share one configured set
+/// ([`Model::key_bindings`]), and a second reading of it here or there is
+/// how one surface comes to answer a key another ignores. The prefix is
+/// taken rather than read because a keystroke consumes it whatever it turns
+/// out to mean -- an unmatched follower falls through to its ordinary
+/// handling with nothing left pending behind it.
 ///
-/// Direction reads the way nvim's own `<C-w><` and `<C-w>>` do -- left
-/// narrows and right widens whichever edge the sidebar is pinned to --
-/// rather than following the moving edge, which would invert between the
+/// A resize's direction reads the way nvim's own `<C-w><` and `<C-w>>` do
+/// -- left narrows and right widens whichever edge the sidebar is pinned to
+/// -- rather than following the moving edge, which would invert between the
 /// tree and the panel.
-fn take_panel_resize(model: &mut Model, notation: &str) -> Option<Resolved> {
-    let pending = model.pending_resize_chord.take();
-    let resolved = model.resize_keys.resolve(pending.as_deref(), notation);
+fn take_binding(model: &mut Model, notation: &str) -> Option<Resolved> {
+    let pending = model.pending_chord.take();
+    let resolved = model.key_bindings.resolve(pending.as_deref(), notation);
     if resolved == Some(Resolved::Pending) {
-        model.pending_resize_chord = Some(notation.to_string());
+        model.pending_chord = Some(notation.to_string());
     }
     resolved
 }
@@ -1189,14 +1195,18 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             Some(OverlayKind::Tree(_)) => {
                 // Ahead of the tree's own keys and resolved through the one
                 // shared set, so neither sidebar can drift onto a key the
-                // other does not answer (see [`take_panel_resize`]).
-                match take_panel_resize(model, &notation) {
-                    Some(Resolved::Step(direction)) => {
+                // other does not answer (see [`take_binding`]).
+                match take_binding(model, &notation) {
+                    Some(Resolved::Act(Action::Resize(direction))) => {
                         if model.resize_tree(direction.widens()) {
                             model.dirty = true;
                         }
                         return Vec::new();
                     }
+                    // The composer's line break is the agent panel's alone,
+                    // and the tree answers it the way it answers any key no
+                    // binding of its own names.
+                    Some(Resolved::Act(Action::ComposerNewline)) => {}
                     // The chord's first key waits here rather than moving
                     // the selection or closing the sidebar; the follower
                     // that completes nothing falls straight through to the
@@ -1341,10 +1351,10 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             Some(OverlayKind::Ai) => {
                 // Resolved before the pending-permission gate below rather
                 // than inside the composer chain: the gate itself has to
-                // know whether this key is a resize before it decides what
+                // know what this key is bound to before it decides what
                 // reaches past it, and resolving twice would consume the
                 // chord prefix twice.
-                let resize = take_panel_resize(model, &notation);
+                let binding = take_binding(model, &notation);
                 if let Some(prompt) = model.ai_panel().pending_permission.clone() {
                     // <Esc> settles the request as `Cancelled` rather than
                     // any offered option -- the one answer that exists
@@ -1408,7 +1418,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     // swallowing `<C-c>` here would leave that contract with
                     // no key that reaches it.
                     //
-                    if !reaches_past_a_panel_owner(model, &notation, resize) {
+                    if !reaches_past_a_panel_owner(model, &notation, binding) {
                         return Vec::new();
                     }
                 }
@@ -1416,18 +1426,29 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 // not named below is swallowed rather than leaked to nvim --
                 // the whole point of having deliberately entered the panel
                 // is that the engine does not see these keystrokes.
-                if let Some(step) = resize {
-                    // First in the chain because these are the keys here
-                    // that every other state also honors (see
+                if let Some(bound) = binding {
+                    // First in the chain because the resize keys here are
+                    // the ones every other state also honors (see
                     // `reaches_past_a_panel_owner`): a reader who reaches for
                     // one with a question up gets the same notch they get
                     // with nothing pending. A chord's first key moves
                     // nothing and is swallowed, which is what keeps the
                     // composer from typing it while its follower is owed.
-                    if let Resolved::Step(direction) = step {
-                        if model.resize_ai_panel(direction.widens()) {
+                    match bound {
+                        Resolved::Act(Action::Resize(direction)) => {
+                            if model.resize_ai_panel(direction.widens()) {
+                                model.dirty = true;
+                            }
+                        }
+                        // The line break `<CR>` cannot be: that key sends
+                        // the prompt, so a prompt of more than one line is
+                        // typed with this one and arrives at the agent as
+                        // the same `\n` a paste would have carried.
+                        Resolved::Act(Action::ComposerNewline) => {
+                            model.ai_panel_mut().push_input("\n");
                             model.dirty = true;
                         }
+                        Resolved::Pending => {}
                     }
                 } else if notation == "<Esc>" {
                     // Relinquishes the keyboard (clears `focused`) without
@@ -1482,7 +1503,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     // the key that ends a turn, and this is the key that
                     // starts one.
                     if !panel.turn_in_flight && !panel.input.trim().is_empty() {
-                        let text = std::mem::take(&mut panel.input);
+                        let text = panel.take_input();
                         panel.turn_in_flight = true;
                         // The transcript's own copy of what was just asked,
                         // written here rather than waited for over the wire:
@@ -1505,14 +1526,14 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                         return vec![Effect::AiPromptSubmit { text }];
                     }
                 } else if notation == "<BS>" {
-                    if model.ai_panel_mut().input.pop().is_some() {
+                    if model.ai_panel_mut().pop_input() {
                         model.dirty = true;
                     }
                 } else if notation == "<lt>" {
                     // nvim's own escape for a literal `<`, the one
                     // printable character that cannot arrive as itself
                     // (see `keys::encode_key`'s own doc).
-                    model.ai_panel_mut().input.push('<');
+                    model.ai_panel_mut().push_input("<");
                     model.dirty = true;
                 } else if let Some(ch) = {
                     // Every other single character, including a literal
@@ -1522,7 +1543,9 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     let mut chars = notation.chars();
                     chars.next().filter(|_| chars.next().is_none())
                 } {
-                    model.ai_panel_mut().input.push(ch);
+                    model
+                        .ai_panel_mut()
+                        .push_input(ch.encode_utf8(&mut [0_u8; 4]));
                     model.dirty = true;
                 }
                 // Any other named key (`<Up>`, `<Tab>`, ...) has no

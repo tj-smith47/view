@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use view_core::native::geometry;
-use view_core::native::keys::{Direction, ResizeKeys};
+use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::registry;
 
 /// A resolved on/off answer for every feature in the registry.
@@ -231,7 +231,7 @@ impl Default for SupervisionConfig {
 /// than ignored, for the reason `[supervision]`'s own check states.
 ///
 /// The values stay untyped because a spelling this build cannot match must
-/// not fail the table (see [`resolve_resize_keys`]), and a typed field
+/// not fail the table (see [`resolve_key_bindings`]), and a typed field
 /// would make one a parse error instead.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +240,8 @@ struct KeysTable {
     sidebar_wider: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sidebar_narrower: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    composer_newline: Option<toml::Value>,
 }
 
 /// What a `sidebar_wider` naming no key this build can match is answered
@@ -256,22 +258,37 @@ const SIDEBAR_NARROWER_NOTICE: &str =
      included (\"<C-w><\", \"<S-Left>\"), at most two keys each -- the sidebars narrow on \
      their default keys this run";
 
-/// The sidebar resize keys, and the notice each action whose value could
-/// not be read owes the user.
+/// The composer's own, on the same terms as [`SIDEBAR_WIDER_NOTICE`].
+const COMPOSER_NEWLINE_NOTICE: &str =
+    "view: [keys] composer_newline must be key notations spelled as nvim spells them, case \
+     included (\"<S-CR>\", \"<M-CR>\"), at most two keys each -- the composer breaks a line \
+     on its default keys this run";
+
+/// The bindings every rebindable action answers to, and the notice each
+/// action whose value could not be read owes the user.
 ///
 /// A key never fails the table, for the reason `[native] tree_width`'s own
 /// resolution states, and each action falls back on its own: a mistyped
 /// `sidebar_wider` leaves a perfectly good `sidebar_narrower` alone rather
 /// than reverting both to defaults the user asked to replace.
-fn resolve_resize_keys(table: &KeysTable) -> (ResizeKeys, Vec<&'static str>) {
-    let mut keys = ResizeKeys::default();
+fn resolve_key_bindings(table: &KeysTable) -> (KeyBindings, Vec<&'static str>) {
+    let mut keys = KeyBindings::default();
     let mut notices = Vec::new();
-    for (value, direction, notice) in [
-        (&table.sidebar_wider, Direction::Wider, SIDEBAR_WIDER_NOTICE),
+    for (value, action, notice) in [
+        (
+            &table.sidebar_wider,
+            Action::Resize(Direction::Wider),
+            SIDEBAR_WIDER_NOTICE,
+        ),
         (
             &table.sidebar_narrower,
-            Direction::Narrower,
+            Action::Resize(Direction::Narrower),
             SIDEBAR_NARROWER_NOTICE,
+        ),
+        (
+            &table.composer_newline,
+            Action::ComposerNewline,
+            COMPOSER_NEWLINE_NOTICE,
         ),
     ] {
         let Some(value) = value.as_ref() else {
@@ -285,31 +302,31 @@ fn resolve_resize_keys(table: &KeysTable) -> (ResizeKeys, Vec<&'static str>) {
                 .collect::<Option<Vec<String>>>(),
             _ => None,
         };
-        if !spellings.is_some_and(|spellings| keys.rebind(direction, &spellings)) {
+        if !spellings.is_some_and(|spellings| keys.rebind(action, &spellings)) {
             notices.push(notice);
         }
     }
     (keys, notices)
 }
 
-/// How the sidebars resize.
+/// Which keys perform which action.
 #[must_use]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeysConfig {
-    resize: ResizeKeys,
+    bindings: KeyBindings,
     notices: Vec<&'static str>,
 }
 
 impl KeysConfig {
-    /// The keys that step either sidebar's width, defaults included for
-    /// every action `[keys]` left alone.
+    /// The keys each action answers to, defaults included for every action
+    /// `[keys]` left alone.
     #[must_use]
-    pub fn resize(&self) -> &ResizeKeys {
-        &self.resize
+    pub fn bindings(&self) -> &KeyBindings {
+        &self.bindings
     }
 
     /// One notice per action whose value named no key, or empty when the
-    /// table was absent or usable. See [`resolve_resize_keys`] for why such
+    /// table was absent or usable. See [`resolve_key_bindings`] for why such
     /// a value is a notice rather than the parse error it looks like.
     #[must_use]
     pub fn notices(&self) -> &[&'static str] {
@@ -354,13 +371,13 @@ impl ViewConfig {
         // makes every `Result<_, NativeConfigError>` in this module a
         // large-error return there (`clippy::result_large_err`)
         let file: ViewFile = toml::from_str(s).map_err(|e| NativeConfigError::Toml(Box::new(e)))?;
-        let (resize, notices) = resolve_resize_keys(&file.keys);
+        let (bindings, notices) = resolve_key_bindings(&file.keys);
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
                 auto_restart: file.supervision.auto_restart,
             },
-            keys: KeysConfig { resize, notices },
+            keys: KeysConfig { bindings, notices },
         })
     }
 
@@ -1003,13 +1020,13 @@ mod tests {
         assert_eq!(cfg.keys, KeysConfig::default());
         assert!(cfg.keys.notices().is_empty());
         assert_eq!(
-            cfg.keys.resize().resolve(None, "<S-Right>"),
-            Some(Resolved::Step(Direction::Wider)),
+            cfg.keys.bindings().resolve(None, "<S-Right>"),
+            Some(Resolved::Act(Action::Resize(Direction::Wider))),
             "the shifted arrow still widens"
         );
         assert_eq!(
-            cfg.keys.resize().resolve(Some("<C-w>"), ">"),
-            Some(Resolved::Step(Direction::Wider)),
+            cfg.keys.bindings().resolve(Some("<C-w>"), ">"),
+            Some(Resolved::Act(Action::Resize(Direction::Wider))),
             "and so does nvim's own chord"
         );
     }
@@ -1019,56 +1036,123 @@ mod tests {
         let cfg = ViewConfig::from_toml_str("[keys]\nsidebar_wider = \"<M-.>\"\n")
             .expect("a single notation must parse");
         assert!(cfg.keys.notices().is_empty());
-        let keys = cfg.keys.resize();
+        let keys = cfg.keys.bindings();
         assert_eq!(
             keys.resolve(None, "<M-.>"),
-            Some(Resolved::Step(Direction::Wider))
+            Some(Resolved::Act(Action::Resize(Direction::Wider)))
         );
         assert_eq!(keys.resolve(None, "<S-Right>"), None, "replaced, not added");
         assert_eq!(
             keys.resolve(None, "<S-Left>"),
-            Some(Resolved::Step(Direction::Narrower)),
+            Some(Resolved::Act(Action::Resize(Direction::Narrower))),
             "the action nobody named keeps its defaults"
         );
     }
 
+    /// Every action `[keys]` carries, and the default key each one answers
+    /// to. Walked by the tests below rather than named one at a time, so an
+    /// action added to [`KeysTable`] without a row here fails the
+    /// crosscheck instead of shipping untested.
+    const KEYS_ACTIONS: [(&str, &str); 3] = [
+        ("sidebar_wider", "<S-Right>"),
+        ("sidebar_narrower", "<S-Left>"),
+        ("composer_newline", "<M-CR>"),
+    ];
+
+    /// The population the walk above has to cover: every field of the
+    /// `[keys]` table, read off the serialized shape rather than restated.
+    #[test]
+    fn the_walked_actions_are_exactly_the_keys_table() {
+        let all = toml::Value::try_from(KeysTable {
+            sidebar_wider: Some("<S-Right>".into()),
+            sidebar_narrower: Some("<S-Left>".into()),
+            composer_newline: Some("<M-CR>".into()),
+        })
+        .expect("the keys table serializes");
+        let fields: BTreeSet<&str> = all
+            .as_table()
+            .map(|t| t.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let walked: BTreeSet<&str> = KEYS_ACTIONS.iter().map(|(field, _)| *field).collect();
+        assert_eq!(
+            fields, walked,
+            "every [keys] action must be walked by the tests below"
+        );
+
+        let example: ViewFile = toml::from_str(EXAMPLE_TOML).expect("the example parses");
+        let shown = toml::Value::try_from(example.keys).expect("the keys table serializes");
+        let shown: BTreeSet<&str> = shown
+            .as_table()
+            .map(|t| t.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            shown, walked,
+            "and every one of them is shown in view.toml.example"
+        );
+    }
+
     /// A key that names nothing must not revert the feature switches in the
-    /// file, nor the action beside it, which is what failing the table does.
+    /// file, nor the actions beside it, which is what failing the table
+    /// does. Every action, so the fallback is the table's rule and not one
+    /// action's.
     #[test]
     fn a_key_this_build_cannot_match_keeps_the_table_and_says_so() {
-        for written in [
-            "30",
-            "true",
-            "[\"<C-w>\", 3]",
-            "{ key = \"<C-w>>\" }",
-            "\"abc\"",
-        ] {
-            let cfg = ViewConfig::from_toml_str(&format!(
-                "[native]\npicker = false\n\n[keys]\nsidebar_wider = {written}\nsidebar_narrower = \"<M-,>\"\n"
-            ))
-            .unwrap_or_else(|e| panic!("sidebar_wider = {written} must not fail the table: {e}"));
+        for (field, _) in KEYS_ACTIONS {
+            for written in [
+                "30",
+                "true",
+                "[\"<C-w>\", 3]",
+                "{ key = \"<C-w>>\" }",
+                "\"abc\"",
+            ] {
+                let cfg = ViewConfig::from_toml_str(&format!(
+                    "[native]\npicker = false\n\n[keys]\n{field} = {written}\n"
+                ))
+                .unwrap_or_else(|e| panic!("{field} = {written} must not fail the table: {e}"));
+                assert!(
+                    !cfg.native.enabled("picker"),
+                    "{field} = {written} must not revert the switches beside it"
+                );
+                for (other, default_key) in KEYS_ACTIONS {
+                    assert!(
+                        cfg.keys.bindings().resolve(None, default_key).is_some(),
+                        "{field} = {written} left {other} without its default {default_key}"
+                    );
+                }
+                let notices = cfg.keys.notices();
+                assert_eq!(notices.len(), 1, "{field} = {written}: {notices:?}");
+                assert!(
+                    notices[0].contains(field),
+                    "the notice must name the key: {}",
+                    notices[0]
+                );
+            }
+        }
+    }
+
+    /// The rebind path over the same population: each action takes the key
+    /// its own entry names and leaves every other action alone.
+    #[test]
+    fn every_action_rebinds_on_its_own() {
+        for (field, _) in KEYS_ACTIONS {
+            let cfg = ViewConfig::from_toml_str(&format!("[keys]\n{field} = \"<M-.>\"\n"))
+                .unwrap_or_else(|e| panic!("{field} = \"<M-.>\" must parse: {e}"));
             assert!(
-                !cfg.native.enabled("picker"),
-                "sidebar_wider = {written} must not revert the switches beside it"
+                cfg.keys.notices().is_empty(),
+                "{field}: {:?}",
+                cfg.keys.notices()
             );
-            let keys = cfg.keys.resize();
-            assert_eq!(
-                keys.resolve(None, "<S-Right>"),
-                Some(Resolved::Step(Direction::Wider)),
-                "sidebar_wider = {written} falls back to its own defaults"
-            );
-            assert_eq!(
-                keys.resolve(None, "<M-,>"),
-                Some(Resolved::Step(Direction::Narrower)),
-                "sidebar_wider = {written} must not revert the action beside it"
-            );
-            let notices = cfg.keys.notices();
-            assert_eq!(notices.len(), 1, "sidebar_wider = {written}: {notices:?}");
             assert!(
-                notices[0].contains("sidebar_wider"),
-                "the notice must name the key: {}",
-                notices[0]
+                cfg.keys.bindings().resolve(None, "<M-.>").is_some(),
+                "{field} does not answer the key it was given"
             );
+            for (other, default_key) in KEYS_ACTIONS {
+                assert_eq!(
+                    cfg.keys.bindings().resolve(None, default_key).is_some(),
+                    other != field,
+                    "{field} rebound: {other}'s default {default_key} is wrong"
+                );
+            }
         }
     }
 

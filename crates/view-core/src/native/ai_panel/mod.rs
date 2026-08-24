@@ -84,6 +84,18 @@ pub struct AiPanelState {
     /// painted row is ordinary: [`Self::view`] wraps it (see
     /// [`composer_width`]), so this is never cut to what fits.
     pub input: String,
+    /// The byte offset of the last line break in [`Self::input`], or `None`
+    /// while it holds none -- the phase [`wrap_window`] opens its window on.
+    ///
+    /// Cached rather than searched for, because searching for it is a scan
+    /// of the whole input on every frame, which is the one cost the window
+    /// exists to refuse. It is maintained by the three methods that change
+    /// the composer's text ([`Self::push_input`], [`Self::pop_input`],
+    /// [`Self::take_input`]) at the cost of one write per keystroke, and
+    /// [`wrap_window`] checks that the offset still names a break before it
+    /// trusts it -- so a text written straight into the public field above
+    /// costs alignment, never correctness.
+    last_break: Option<usize>,
     /// A single slot by design, not a queue: ACP blocks the agent's own
     /// turn on the reply, so a conformant agent never has two outstanding
     /// at once, and a second arriving request is a protocol violation
@@ -231,6 +243,7 @@ impl AiPanelState {
             session_id: None,
             transcript: Transcript::new(),
             input: String::new(),
+            last_break: None,
             pending_permission: None,
             focused: false,
             turn_in_flight: false,
@@ -242,6 +255,43 @@ impl AiPanelState {
             standing_answers: BTreeMap::new(),
             transcript_top: None,
         }
+    }
+
+    /// Appends `text` to the composer, wherever it came from: one typed
+    /// character, the line break a composer-newline key inserts, or a whole
+    /// bracketed paste.
+    ///
+    /// Verbatim, control characters and all -- what a paste reads as is the
+    /// wrap's question, never this one -- and the last-break cache is
+    /// carried forward by scanning only the appended text.
+    pub fn push_input(&mut self, text: &str) {
+        if let Some(offset) = text.rfind(['\n', '\r']) {
+            self.last_break = Some(self.input.len() + offset);
+        }
+        self.input.push_str(text);
+    }
+
+    /// Removes the composer's last character, reporting whether there was
+    /// one to remove.
+    ///
+    /// Re-deriving the cache costs a scan back to the previous break --
+    /// one line's worth -- and only on the keystroke that removes a break,
+    /// which is the one keystroke that can invalidate it.
+    pub fn pop_input(&mut self) -> bool {
+        let Some(ch) = self.input.pop() else {
+            return false;
+        };
+        if ch == '\n' || ch == '\r' {
+            self.last_break = self.input.rfind(['\n', '\r']);
+        }
+        true
+    }
+
+    /// Takes the composed prompt, leaving the composer empty -- what
+    /// submitting one does.
+    pub fn take_input(&mut self) -> String {
+        self.last_break = None;
+        std::mem::take(&mut self.input)
     }
 
     /// Records `answer` as `tool_kind`'s standing answer, so a later request
@@ -387,7 +437,7 @@ impl AiPanelState {
         };
         let width = width.max(1);
         wrap(
-            wrap_window(&self.input, width, cap),
+            wrap_window(&self.input, width, cap, self.last_break),
             width,
             cap,
             Break::Cell,
@@ -695,34 +745,36 @@ fn char_cells(ch: char) -> usize {
 /// more than `keep` rows' worth of text -- one row spare, because the
 /// window may open in the middle of one.
 ///
-/// The window opens on a multiple of `width` bytes rather than at a fixed
-/// distance from the end, so that appending does not slide it and reflow
-/// rows the reader has already read.
+/// Its rows are the tail of the whole input's wrap, because it opens where
+/// that wrap opens a row: the start of the line the last break began
+/// (`last_break + 1`), plus a whole number of `width`-cell rows into it --
+/// a grid, never a fixed distance from the end, so appending a character
+/// does not slide the window and reflow a row the reader has already read.
 ///
-/// What it produces is what wrapping the whole input would have produced,
-/// for every input but one. A line break is a row boundary of the full
-/// wrap, and [`wrap`] resets a row at one, so every row after the first
-/// break in the window is on the column the whole input puts it on --
-/// which covers the last `keep` rows, the only ones this is read for,
-/// whenever a break falls in the window ahead of them. An input with no
-/// break at all is covered by the offset itself: for one-byte characters
-/// -- where a byte is a cell -- a multiple of `width` *is* a row boundary
-/// of such an input's wrap.
-///
-/// What is left is a single line spanning most of the window with a break
-/// somewhere before it. Aligning to *that* break means scanning back to it
-/// -- the whole input, on every frame, which is the cost this exists to
-/// refuse -- so its rows sit a constant column off from the full wrap's, as
-/// do a window's whose first row opens mid-character. Every character of
-/// the tail is still on screen in order in both, and the alternative is a
-/// frame whose cost the user sets with their clipboard.
-fn wrap_window(input: &str, width: usize, keep: usize) -> &str {
+/// `last_break` is [`AiPanelState::last_break`], checked against the text
+/// rather than trusted, so a stale offset costs alignment and never
+/// correctness: with none, the window falls back to a multiple of `width`
+/// from the start, which is a row boundary of an input that holds no break
+/// at all. It never opens later than the span above allows, so it always
+/// holds more rows than the panel paints. The one placement left over is a
+/// last line shorter than the window, which has to open ahead of that
+/// break: the rows before the first break inside the window align to the
+/// break before *them*, and finding that one is the whole-input scan this
+/// exists to refuse.
+fn wrap_window(input: &str, width: usize, keep: usize, last_break: Option<usize>) -> &str {
     let span = keep
         .saturating_add(1)
         .saturating_mul(width)
         .saturating_mul(BYTES_PER_CELL);
-    let mut start = input.len().saturating_sub(span);
-    start -= start % width;
+    let floor = input.len().saturating_sub(span);
+    let phase = last_break
+        .filter(|&at| matches!(input.as_bytes().get(at), Some(b'\n' | b'\r')))
+        .map_or(0, |at| at + 1);
+    let mut start = if phase <= floor {
+        phase + ((floor - phase) / width) * width
+    } else {
+        floor - floor % width
+    };
     // forward to a boundary, never back: a start inside a character would
     // panic the slice, and the row spare above is what pays for the shift
     while !input.is_char_boundary(start) {
@@ -1329,95 +1381,98 @@ mod tests {
     /// clipboard. A megabyte pasted into the composer is a megabyte walked
     /// on every frame if the wrap is handed all of it -- milliseconds, for
     /// rows nothing was ever going to draw -- so the wrap is handed the tail
-    /// the visible rows come out of instead.
+    /// the visible rows come out of instead, and the rows that come back
+    /// are the ones the whole input would have produced: a window opening
+    /// anywhere but a row boundary reflows every row the reader has already
+    /// read, and a prompt would change shape the moment it was sent.
+    ///
+    /// The three shapes the window has to open on a boundary of: no break
+    /// at all, where a multiple of the width is one; many breaks, where the
+    /// last of them moves every boundary off those multiples; and one line
+    /// longer than the window with a break before it, which is the shape
+    /// the window used to sit a column off on.
     #[test]
-    fn a_paste_larger_than_the_panel_is_wrapped_from_a_window_the_panel_could_paint() {
+    fn the_window_wraps_to_the_tail_of_the_whole_inputs_wrap() {
         let width = composer_width(WIDE_PANEL);
         let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
-        let pasted: String = (0..(1 << 20))
-            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
-            .collect();
-
-        let window = wrap_window(&pasted, width, cap);
-        assert!(
-            window.len() <= (cap + 2) * width * BYTES_PER_CELL,
-            "the walk is bounded by the rows the panel has, not by the {} \
-             bytes pasted: {} bytes",
-            pasted.len(),
-            window.len()
-        );
-
-        let mut state = AiPanelState::new();
-        state.input = pasted.clone();
-        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
-        assert_eq!(
-            rows,
-            wrap(&pasted, width, cap, Break::Cell),
-            "and the rows are exactly the ones the whole input would have \
-             produced -- a window opening anywhere but a row boundary \
-             reflows every row the reader has already read"
-        );
-        assert!(pasted.ends_with(&rows.concat()), "the tail is what shows");
-    }
-
-    /// The same window over text with line breaks in it, where the offset
-    /// it opens on is *not* a row boundary of the whole input's wrap: a
-    /// break moves every later boundary off the multiples of the width the
-    /// break-free case aligns to. The rows still come out the whole input's
-    /// own, because the first break inside the window puts every row after
-    /// itself back on the column the whole input gives it -- and the rows
-    /// this is read for are the last few, far past that break. Were they
-    /// not, a prompt would re-flow the moment it was sent.
-    #[test]
-    fn a_multi_line_paste_larger_than_the_panel_breaks_where_the_whole_input_does() {
-        let width = composer_width(WIDE_PANEL);
-        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
-        let mut pasted = String::new();
+        let letters = |n: usize| -> String {
+            (0..n)
+                .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+                .collect()
+        };
+        let mut many_lines = String::new();
         for i in 0..2_000 {
-            let _ = writeln!(pasted, "line {i} of a prompt pasted from somewhere else");
+            let _ = writeln!(
+                many_lines,
+                "line {i} of a prompt pasted from somewhere else"
+            );
         }
 
-        let mut state = AiPanelState::new();
-        state.input.clone_from(&pasted);
-        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        for (name, input) in [
+            ("a megabyte with no break in it", letters(1 << 20)),
+            ("two thousand short lines", many_lines),
+            (
+                "one line longer than the window, after a break",
+                format!("first\n{}", letters(1 << 14)),
+            ),
+        ] {
+            let mut state = AiPanelState::new();
+            state.push_input(&input);
 
-        assert_eq!(
-            rows,
-            wrap(&pasted, width, cap, Break::Cell),
-            "the rows are the whole input's own, column for column"
-        );
-        assert!(
-            wrap_window(&pasted, width, cap).len() <= (cap + 2) * width * BYTES_PER_CELL,
-            "and the walk is still bounded by the rows the panel has"
-        );
+            let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+
+            assert_eq!(
+                rows,
+                wrap(&input, width, cap, Break::Cell),
+                "{name}: the rows are the whole input's own, column for column"
+            );
+            let window = wrap_window(&input, width, cap, state.last_break);
+            assert!(
+                window.len() <= (cap + 2) * width * BYTES_PER_CELL,
+                "{name}: the walk is bounded by the rows the panel has, not \
+                 by the {} bytes composed: {} bytes",
+                input.len(),
+                window.len()
+            );
+        }
     }
 
-    /// The one class no bounded window can open on a row boundary of: a
-    /// single line longer than the window with a break before it, where the
-    /// boundary to align to is however far back that break is. The rows sit
-    /// a column off the whole input's there -- what is promised instead is
-    /// that the tail is all on screen, in order, and still capped.
+    /// The cache the window opens on, across every gesture that moves it: a
+    /// paste scans only what it pasted, a typed break lands at the end, a
+    /// backspace over a break re-derives the one before it, and a submitted
+    /// prompt leaves none.
     #[test]
-    fn a_single_line_longer_than_the_window_keeps_its_whole_tail_on_screen() {
-        let width = composer_width(WIDE_PANEL);
-        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
-        let one_line: String = (0..(1 << 14))
-            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
-            .collect();
+    fn the_last_break_follows_the_composers_text() {
         let mut state = AiPanelState::new();
-        state.input = format!("first\n{one_line}");
+        state.push_input("no break here");
+        assert_eq!(state.last_break, None);
 
-        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        state.push_input(" and\nthen one\nmore");
+        assert_eq!(state.last_break, state.input.rfind('\n'));
 
-        assert_eq!(rows.len(), cap, "the rows are capped: {}", rows.len());
-        assert!(
-            rows.iter().all(|row| row.chars().count() <= width),
-            "no row is wider than the panel paints: {rows:?}"
+        state.push_input("\n");
+        assert_eq!(
+            state.last_break,
+            Some(state.input.len() - 1),
+            "a typed break is the last one"
         );
-        assert!(
-            state.input.ends_with(&rows.concat()),
-            "and every character of the tail is on screen, in order"
+
+        assert!(state.pop_input());
+        assert_eq!(
+            state.last_break,
+            state.input.rfind('\n'),
+            "and removing it falls back to the break before it"
         );
+        let unchanged = state.last_break;
+        assert!(state.pop_input());
+        assert_eq!(
+            state.last_break, unchanged,
+            "a backspace over an ordinary character re-derives nothing"
+        );
+
+        assert!(!state.take_input().is_empty());
+        assert_eq!(state.last_break, None, "and a sent prompt leaves none");
+        assert!(!state.pop_input(), "an empty composer has nothing to pop");
     }
 
     /// The wrap boundary itself, where an off-by-one puts the cursor on a

@@ -55,7 +55,7 @@ pub(super) fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<E
         // is a question for the wrap that paints it (`AiPanelState`'s own,
         // which ends a row at each line break), never for the text held
         // here, so what the agent is sent stays exactly what was copied.
-        model.ai_panel_mut().input.push_str(text);
+        model.ai_panel_mut().push_input(text);
         model.dirty = true;
         return Vec::new();
     }

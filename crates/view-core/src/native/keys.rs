@@ -1,16 +1,18 @@
-//! Which keys resize the focused sidebar.
+//! Which keys view's own surfaces answer, and what each one does.
 //!
 //! The file tree and the agent panel are both sidebars and both answer the
-//! same bindings, so the set is resolved once here rather than matched on
-//! as a pair of constants inside each surface's own key arm. A binding is
-//! one key, or two: a chord's first key decides nothing on its own and the
-//! keystroke after it either completes a binding or is handled exactly as
-//! it would have been alone. Two keys is the ceiling, which is what keeps
-//! this a lookup rather than a keymap engine.
+//! same resize bindings, and the agent panel's composer answers one of its
+//! own, so the whole set is resolved once here rather than matched on as
+//! constants inside each surface's own key arm. A binding is one key, or
+//! two: a chord's first key decides nothing on its own and the keystroke
+//! after it either completes a binding or is handled exactly as it would
+//! have been alone. Two keys is the ceiling, which is what keeps this a
+//! lookup rather than a keymap engine.
 //!
 //! Every spelling here is the notation `view-tui`'s `encode_key` emits,
 //! since that is the only spelling the update loop ever sees: `<S-Right>`,
-//! `<C-w>`, `>`, and `<lt>` for a literal `<`.
+//! `<C-w>`, `>`, `<lt>` for a literal `<`, and `M-` for Alt, which is why
+//! [`split_keys`] reads a configured `A-` as the same modifier.
 
 /// One binding: a key, and the key that has to follow it for the binding
 /// to be a chord rather than a single press.
@@ -34,26 +36,42 @@ impl Direction {
     }
 }
 
-/// What a keystroke means to the focused sidebar.
+/// What a binding does when its keys are pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Step the focused sidebar's width one notch.
+    Resize(Direction),
+    /// Insert a line break into the agent panel's composer, where `<CR>`
+    /// sends the prompt instead.
+    ComposerNewline,
+}
+
+/// What a keystroke means to the surface that has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolved {
-    /// A whole binding: step the sidebar this way.
-    Step(Direction),
+    /// A whole binding: this action.
+    Act(Action),
     /// The first key of a chord. Nothing moves and nothing else claims the
     /// key; the keystroke after it decides.
     Pending,
 }
 
-/// The keys that resize whichever sidebar has the keyboard.
+/// The keys each rebindable action answers to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResizeKeys {
+pub struct KeyBindings {
     wider: Vec<Binding>,
     narrower: Vec<Binding>,
+    composer_newline: Vec<Binding>,
 }
 
-impl Default for ResizeKeys {
-    /// Two bindings per direction: a shifted arrow, and nvim's own
-    /// window-resize chord.
+impl Default for KeyBindings {
+    /// Two bindings per resize direction: a shifted arrow, and nvim's own
+    /// window-resize chord. Two for the composer's line break as well, and
+    /// for the same reason in a different form: Alt+Enter (`<M-CR>`)
+    /// arrives as `ESC CR` from nearly every terminal, while Shift+Enter
+    /// (`<S-CR>`) arrives only where a keyboard protocol reports the shift
+    /// -- so the pair covers both the terminals that can say it and the
+    /// ones that cannot.
     ///
     /// Two rather than one because a terminal that eats one still leaves
     /// the other -- macOS Terminal and Termius consume the shifted arrows
@@ -72,22 +90,22 @@ impl Default for ResizeKeys {
                 ("<S-Left>".to_string(), None),
                 ("<C-w>".to_string(), Some("<lt>".to_string())),
             ],
+            composer_newline: vec![("<S-CR>".to_string(), None), ("<M-CR>".to_string(), None)],
         }
     }
 }
 
-impl ResizeKeys {
-    /// Replaces the bindings for `direction` with the keys `spellings`
-    /// names, reporting whether every one of them was a key this build can
-    /// match.
+impl KeyBindings {
+    /// Replaces the bindings for `action` with the keys `spellings` names,
+    /// reporting whether every one of them was a key this build can match.
     ///
-    /// All or nothing per direction, and the defaults survive a refusal:
-    /// half an applied list would leave a user resizing with a set neither
-    /// their config nor this build's defaults describes. An empty list is
-    /// applied rather than refused -- it is the way to leave a direction
-    /// on no key at all.
+    /// All or nothing per action, and the defaults survive a refusal: half
+    /// an applied list would leave a user working with a set neither their
+    /// config nor this build's defaults describes. An empty list is
+    /// applied rather than refused -- it is the way to leave an action on
+    /// no key at all.
     #[must_use]
-    pub fn rebind(&mut self, direction: Direction, spellings: &[String]) -> bool {
+    pub fn rebind(&mut self, action: Action, spellings: &[String]) -> bool {
         let Some(bindings) = spellings
             .iter()
             .map(|spelling| split_keys(spelling))
@@ -95,11 +113,18 @@ impl ResizeKeys {
         else {
             return false;
         };
-        match direction {
-            Direction::Wider => self.wider = bindings,
-            Direction::Narrower => self.narrower = bindings,
-        }
+        *self.keys_for(action) = bindings;
         true
+    }
+
+    /// The binding list `action` resolves from, so a rebind and a resolve
+    /// cannot come to disagree about which list an action owns.
+    fn keys_for(&mut self, action: Action) -> &mut Vec<Binding> {
+        match action {
+            Action::Resize(Direction::Wider) => &mut self.wider,
+            Action::Resize(Direction::Narrower) => &mut self.narrower,
+            Action::ComposerNewline => &mut self.composer_newline,
+        }
     }
 
     /// What `notation` means, given the chord prefix `pending` that the
@@ -107,9 +132,10 @@ impl ResizeKeys {
     /// say nothing about.
     #[must_use]
     pub fn resolve(&self, pending: Option<&str>, notation: &str) -> Option<Resolved> {
-        for (direction, bindings) in [
-            (Direction::Wider, &self.wider),
-            (Direction::Narrower, &self.narrower),
+        for (action, bindings) in [
+            (Action::Resize(Direction::Wider), &self.wider),
+            (Action::Resize(Direction::Narrower), &self.narrower),
+            (Action::ComposerNewline, &self.composer_newline),
         ] {
             let hit = bindings
                 .iter()
@@ -119,7 +145,7 @@ impl ResizeKeys {
                     _ => false,
                 });
             if hit {
-                return Some(Resolved::Step(direction));
+                return Some(Resolved::Act(action));
             }
         }
         // A follower that finishes no chord is handled as if it had been
@@ -137,6 +163,7 @@ impl ResizeKeys {
         self.wider
             .iter()
             .chain(&self.narrower)
+            .chain(&self.composer_newline)
             .any(|(first, second)| second.is_some() && first == notation)
             .then_some(Resolved::Pending)
     }
@@ -148,7 +175,7 @@ impl ResizeKeys {
 /// Restated here rather than shared: `view-core` cannot depend on
 /// `view-tui` (`scripts/audit-deps.sh`), and the cost of not stating it is
 /// what [`well_formed`] exists to stop. `view-tui`'s own tests run every
-/// notation its encoder emits back through [`ResizeKeys::rebind`], so a key
+/// notation its encoder emits back through [`KeyBindings::rebind`], so a key
 /// this list forgets fails there rather than in a user's config.
 const NAMED_KEYS: [&str; 16] = [
     "lt", "BS", "CR", "Esc", "Tab", "Up", "Down", "Left", "Right", "Home", "End", "PageUp",
@@ -165,8 +192,8 @@ const MODIFIERS: [&str; 4] = ["S-", "C-", "M-", "A-"];
 /// either a single character or a named key. What this refuses is the
 /// spelling that cannot be a key at all -- `<S-right>` for `<S-Right>`,
 /// `<Ctrl-w>` for `<C-w>` -- because such a spelling is not merely inert:
-/// it replaces the direction's defaults with a key nothing will ever send,
-/// leaving the user with no way to resize at all and nothing on screen
+/// it replaces the action's defaults with a key nothing will ever send,
+/// leaving the user with no way to perform it at all and nothing on screen
 /// saying why.
 fn well_formed(key: &str) -> bool {
     let Some(inner) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) else {
@@ -188,7 +215,9 @@ fn well_formed(key: &str) -> bool {
 ///
 /// A bare `<` is read as the `<lt>` the encoder emits for it, so the chord
 /// a user writes the way nvim documents it (`<C-w><`) resolves to the same
-/// binding as its fully spelled form.
+/// binding as its fully spelled form. `A-` is read as the `M-` the encoder
+/// spells Alt with for the same reason: nvim accepts both, and the one
+/// this build never receives would otherwise bind a key nothing sends.
 fn split_keys(spelling: &str) -> Option<Binding> {
     let mut keys: Vec<String> = Vec::new();
     let mut rest = spelling;
@@ -198,7 +227,10 @@ fn split_keys(spelling: &str) -> Option<Binding> {
         }
         match (head == '<').then(|| rest.find('>')).flatten() {
             Some(end) => {
-                keys.push(rest[..=end].to_string());
+                // inside a `<...>` key, `A-` can only ever be the modifier:
+                // what follows the prefixes is one character or a named key,
+                // and no name holds a `-`
+                keys.push(rest[..=end].replace("A-", "M-"));
                 rest = &rest[end + 1..];
             }
             None => {
@@ -227,29 +259,69 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_shifted_arrows_and_nvims_own_window_chord() {
-        let keys = ResizeKeys::default();
+        let keys = KeyBindings::default();
         assert_eq!(
             keys.resolve(None, "<S-Right>"),
-            Some(Resolved::Step(Direction::Wider))
+            Some(Resolved::Act(Action::Resize(Direction::Wider)))
         );
         assert_eq!(
             keys.resolve(None, "<S-Left>"),
-            Some(Resolved::Step(Direction::Narrower))
+            Some(Resolved::Act(Action::Resize(Direction::Narrower)))
         );
         assert_eq!(keys.resolve(None, "<C-w>"), Some(Resolved::Pending));
         assert_eq!(
             keys.resolve(Some("<C-w>"), ">"),
-            Some(Resolved::Step(Direction::Wider))
+            Some(Resolved::Act(Action::Resize(Direction::Wider)))
         );
         assert_eq!(
             keys.resolve(Some("<C-w>"), "<lt>"),
-            Some(Resolved::Step(Direction::Narrower))
+            Some(Resolved::Act(Action::Resize(Direction::Narrower)))
+        );
+    }
+
+    /// Both spellings ship because a terminal reports at most one of them:
+    /// Alt+Enter reaches this build nearly everywhere, and Shift+Enter only
+    /// where a keyboard protocol disambiguates it.
+    #[test]
+    fn the_composers_line_break_answers_shift_and_alt_enter() {
+        let keys = KeyBindings::default();
+        for notation in ["<S-CR>", "<M-CR>"] {
+            assert_eq!(
+                keys.resolve(None, notation),
+                Some(Resolved::Act(Action::ComposerNewline)),
+                "{notation} breaks the composer's line"
+            );
+        }
+        assert_eq!(
+            keys.resolve(None, "<CR>"),
+            None,
+            "and the unmodified key is left to the composer's own submit"
+        );
+    }
+
+    /// nvim writes Alt either way and `view-tui`'s encoder emits only
+    /// `M-`, so a config spelled `A-` has to reach the same binding rather
+    /// than a key nothing sends.
+    #[test]
+    fn alt_is_one_modifier_however_the_config_spells_it() {
+        let mut keys = KeyBindings::default();
+        assert!(keys.rebind(Action::ComposerNewline, &["<A-CR>".to_string()]));
+        assert_eq!(
+            keys.resolve(None, "<M-CR>"),
+            Some(Resolved::Act(Action::ComposerNewline))
+        );
+        let mut chorded = KeyBindings::default();
+        assert!(chorded.rebind(Action::Resize(Direction::Wider), &["<C-A-x>".to_string()]));
+        assert_eq!(
+            chorded.resolve(None, "<C-M-x>"),
+            Some(Resolved::Act(Action::Resize(Direction::Wider))),
+            "a modifier pair keeps its order and its other prefixes"
         );
     }
 
     #[test]
     fn a_key_no_binding_names_resolves_to_nothing() {
-        let keys = ResizeKeys::default();
+        let keys = KeyBindings::default();
         assert_eq!(keys.resolve(None, "<Up>"), None);
         assert_eq!(
             keys.resolve(None, ">"),
@@ -261,43 +333,43 @@ mod tests {
 
     #[test]
     fn rebinding_one_direction_leaves_the_other_at_its_defaults() {
-        let mut keys = ResizeKeys::default();
-        assert!(keys.rebind(Direction::Wider, &["<M-.>".to_string()]));
+        let mut keys = KeyBindings::default();
+        assert!(keys.rebind(Action::Resize(Direction::Wider), &["<M-.>".to_string()]));
         assert_eq!(
             keys.resolve(None, "<M-.>"),
-            Some(Resolved::Step(Direction::Wider))
+            Some(Resolved::Act(Action::Resize(Direction::Wider)))
         );
         assert_eq!(keys.resolve(None, "<S-Right>"), None, "replaced, not added");
         assert_eq!(
             keys.resolve(None, "<S-Left>"),
-            Some(Resolved::Step(Direction::Narrower)),
+            Some(Resolved::Act(Action::Resize(Direction::Narrower))),
             "the direction nobody rebound is untouched"
         );
     }
 
     #[test]
     fn a_spelling_this_build_cannot_match_keeps_the_defaults() {
-        let mut keys = ResizeKeys::default();
+        let mut keys = KeyBindings::default();
         assert!(!keys.rebind(
-            Direction::Wider,
+            Action::Resize(Direction::Wider),
             &["<S-Right>".to_string(), "<C-w>abc".to_string()]
         ));
         assert_eq!(
             keys.resolve(None, "<S-Right>"),
-            Some(Resolved::Step(Direction::Wider)),
+            Some(Resolved::Act(Action::Resize(Direction::Wider))),
             "a refused list applies none of itself"
         );
-        assert!(!keys.rebind(Direction::Narrower, &[String::new()]));
+        assert!(!keys.rebind(Action::Resize(Direction::Narrower), &[String::new()]));
         assert_eq!(
             keys.resolve(None, "<S-Left>"),
-            Some(Resolved::Step(Direction::Narrower))
+            Some(Resolved::Act(Action::Resize(Direction::Narrower)))
         );
     }
 
     #[test]
     fn an_empty_list_leaves_a_direction_on_no_key() {
-        let mut keys = ResizeKeys::default();
-        assert!(keys.rebind(Direction::Narrower, &[]));
+        let mut keys = KeyBindings::default();
+        assert!(keys.rebind(Action::Resize(Direction::Narrower), &[]));
         assert_eq!(keys.resolve(None, "<S-Left>"), None);
         assert_eq!(keys.resolve(Some("<C-w>"), "<lt>"), None);
         assert_eq!(
@@ -309,10 +381,10 @@ mod tests {
 
     #[test]
     fn a_follower_that_finishes_no_chord_is_read_as_if_it_stood_alone() {
-        let keys = ResizeKeys::default();
+        let keys = KeyBindings::default();
         assert_eq!(
             keys.resolve(Some("<C-w>"), "<S-Right>"),
-            Some(Resolved::Step(Direction::Wider)),
+            Some(Resolved::Act(Action::Resize(Direction::Wider))),
             "the single-key binding is not locked out by a waiting prefix"
         );
         assert_eq!(
@@ -324,21 +396,24 @@ mod tests {
 
     #[test]
     fn a_single_key_binding_outranks_the_chord_spelled_on_the_same_key() {
-        let mut keys = ResizeKeys::default();
-        assert!(keys.rebind(Direction::Narrower, &["<C-w>".to_string()]));
+        let mut keys = KeyBindings::default();
+        assert!(keys.rebind(Action::Resize(Direction::Narrower), &["<C-w>".to_string()]));
         assert_eq!(
             keys.resolve(None, "<C-w>"),
-            Some(Resolved::Step(Direction::Narrower)),
+            Some(Resolved::Act(Action::Resize(Direction::Narrower))),
             "a key that would otherwise wait for a second press"
         );
     }
 
     #[test]
     fn a_bare_left_angle_is_the_same_key_as_its_spelled_form() {
-        let mut spelled = ResizeKeys::default();
-        assert!(spelled.rebind(Direction::Narrower, &["<C-w><lt>".to_string()]));
-        let mut bare = ResizeKeys::default();
-        assert!(bare.rebind(Direction::Narrower, &["<C-w><".to_string()]));
+        let mut spelled = KeyBindings::default();
+        assert!(spelled.rebind(
+            Action::Resize(Direction::Narrower),
+            &["<C-w><lt>".to_string()]
+        ));
+        let mut bare = KeyBindings::default();
+        assert!(bare.rebind(Action::Resize(Direction::Narrower), &["<C-w><".to_string()]));
         assert_eq!(spelled, bare);
     }
 
@@ -356,14 +431,14 @@ mod tests {
             "<S->",
             "<leader>x",
         ] {
-            let mut keys = ResizeKeys::default();
+            let mut keys = KeyBindings::default();
             assert!(
-                !keys.rebind(Direction::Wider, &[typo.to_string()]),
+                !keys.rebind(Action::Resize(Direction::Wider), &[typo.to_string()]),
                 "{typo} cannot be a key this build is handed"
             );
             assert_eq!(
                 keys.resolve(None, "<S-Right>"),
-                Some(Resolved::Step(Direction::Wider)),
+                Some(Resolved::Act(Action::Resize(Direction::Wider))),
                 "a refused spelling leaves {typo}'s direction on its defaults"
             );
         }
@@ -388,9 +463,9 @@ mod tests {
             "g",
             ">",
         ] {
-            let mut keys = ResizeKeys::default();
+            let mut keys = KeyBindings::default();
             assert!(
-                keys.rebind(Direction::Wider, &[spelling.to_string()]),
+                keys.rebind(Action::Resize(Direction::Wider), &[spelling.to_string()]),
                 "{spelling} is a key this build can be handed"
             );
         }

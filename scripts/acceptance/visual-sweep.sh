@@ -1376,6 +1376,37 @@ $end"
     fi
     pass "and the submitted prompt keeps that shape in the transcript (${echoed}s)"
 
+    # The other half of a multi-line prompt, and the one no paste can prove:
+    # a line break the user types. Alt+Enter is the default binding a
+    # terminal reports everywhere (Shift+Enter needs a keyboard protocol
+    # that says so), and `<CR>` has to keep sending rather than breaking.
+    local typed_top=TYPEDTOP typed_end=TYPEDEND
+    send_text "$typed_top"
+    send_key M-Enter
+    send_text "$typed_end"
+    echoed=$(wait_in_box "$typed_end" "$REACTION_SECS" "the typed second line")
+    assert_chrome 'the agent panel holding a typed multi-line prompt'
+    read -r top_row top_col _ _ <<<"$(text_span "$typed_top")"
+    read -r end_row end_col _ _ <<<"$(text_span "$typed_end")"
+    if [ -z "$top_row" ] || [ "$end_row" != "$((top_row + 1))" ]; then
+        fail "the typed lines are on rows '$top_row' and '$end_row': the line break did not open a composer row"
+        return 1
+    fi
+    if [ "$end_col" != "$top_col" ]; then
+        fail "the typed lines start at columns $top_col and $end_col, so the second is not under the first as one field"
+        return 1
+    fi
+    pass "a typed line break opens a composer row (${echoed}s)"
+
+    send_key Enter
+    echoed=$(wait_in_box "$user_mark $typed_top" "$REACTION_SECS" "the typed prompt in the transcript")
+    copies=$(box_text | grep -cF -- "$typed_end" || true)
+    if [ "$copies" != 1 ]; then
+        fail "the typed prompt's last line is on screen $copies times, so <CR> did not send what was typed"
+        return 1
+    fi
+    pass "and <CR> still sends it (${echoed}s)"
+
     dismiss ai
 
     # The other surface with a text input, and the one that cannot take a

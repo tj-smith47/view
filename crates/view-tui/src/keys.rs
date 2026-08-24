@@ -399,6 +399,32 @@ mod tests {
         assert!(encode_residue_bytes(b"").is_empty());
     }
 
+    /// The composer's default line break, welded to the encoder that has to
+    /// produce it: a modifier held on Enter is the whole binding, so the
+    /// notation this table spells it with is the notation `view-core` is
+    /// waiting for. Alt reaches this build from nearly every terminal;
+    /// Shift only where a keyboard protocol reports it, which is why both
+    /// are bound and why the unmodified key still sends the prompt.
+    #[test]
+    fn a_modified_enter_is_the_notation_the_composers_line_break_is_bound_to() {
+        use view_core::native::keys::{Action, KeyBindings, Resolved};
+
+        for m in [KeyModifiers::ALT, KeyModifiers::SHIFT] {
+            let notation = encode_key(&key(KeyCode::Enter, m)).expect("Enter encodes");
+            assert_eq!(
+                KeyBindings::default().resolve(None, &notation),
+                Some(Resolved::Act(Action::ComposerNewline)),
+                "{notation} is what a held modifier on Enter arrives as"
+            );
+        }
+        let plain = encode_key(&key(KeyCode::Enter, KeyModifiers::NONE)).expect("Enter encodes");
+        assert_eq!(
+            KeyBindings::default().resolve(None, &plain),
+            None,
+            "and {plain} is left to the composer's own submit"
+        );
+    }
+
     /// `[keys]` is checked for shape in `view-core`, which cannot depend on
     /// this crate and so restates the vocabulary this encoder emits. That
     /// restatement is welded here: every notation a real keystroke can
@@ -407,7 +433,7 @@ mod tests {
     /// being refused for looking malformed.
     #[test]
     fn every_notation_this_encoder_emits_is_a_key_view_core_accepts() {
-        use view_core::native::keys::{Direction, ResizeKeys};
+        use view_core::native::keys::{Action, Direction, KeyBindings};
 
         let codes = [
             KeyCode::Char('a'),
@@ -445,7 +471,10 @@ mod tests {
                     continue;
                 };
                 assert!(
-                    ResizeKeys::default().rebind(Direction::Wider, std::slice::from_ref(&notation)),
+                    KeyBindings::default().rebind(
+                        Action::Resize(Direction::Wider),
+                        std::slice::from_ref(&notation)
+                    ),
                     "view-core refuses {notation}, which this encoder emits"
                 );
             }
