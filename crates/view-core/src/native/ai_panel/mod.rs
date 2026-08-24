@@ -666,6 +666,13 @@ pub fn composer_cursor_of(rows: &[String]) -> (usize, usize) {
 /// One character's width in cells, the ASCII-doubling upper bound the
 /// composer both wraps and places its cursor with -- see [`wrap`] for why
 /// over-wide is the safe direction.
+///
+/// An upper bound, not the display width: accented Latin, Cyrillic and Greek
+/// each measure two where a terminal paints one, so a row of them breaks a
+/// few columns early. Nothing is lost or truncated by that -- the cost is
+/// unused columns at the frame's edge -- and it is the same measure the
+/// cursor is placed with, which is what keeps the caret on the column the
+/// panel painted to.
 fn char_cells(ch: char) -> usize {
     1 + usize::from(!ch.is_ascii())
 }
@@ -721,8 +728,18 @@ const BYTES_PER_CELL: usize = 4;
 /// gives up, for a composer that only ever appends and backspaces.
 ///
 /// The transcript breaks its own entries through this same call, so the two
-/// halves of the panel put their breaks in the same column and a prompt
-/// reads the same after it is sent as it did while it was being typed.
+/// halves of the panel measure text the same way and put a wrap break in the
+/// same column: a typed prompt reads the same after it is sent as it did
+/// while it was being typed.
+///
+/// A *pasted* line break is where the two halves still part. It is one cell
+/// of the composer's row here, deliberately (see
+/// `a_pasted_line_break_is_kept_and_measured_as_the_one_cell_it_paints_as`),
+/// because the composer only appends and backspaces and its caret column is
+/// read back off the row it painted; the transcript breaks the row on it.
+/// So a multi-line prompt is one shape in the composer and its own shape
+/// once sent -- the transcript's is the right one, and the composer owes the
+/// match.
 ///
 /// Cells are the ASCII-doubling upper bound this crate measures text with:
 /// one per ASCII character, two for anything else. Over-wide leaves a

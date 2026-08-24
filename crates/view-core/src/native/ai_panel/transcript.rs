@@ -52,6 +52,12 @@ const MARK_INDENT: &str = "  ";
 /// The columns [`MARK_INDENT`] and every marker above it take. Each marker
 /// is one glyph and the space after it, and every glyph among them is one
 /// display cell wide, so the two agree by construction.
+///
+/// Bytes stand in for columns here, which is exact only because the indent
+/// is ASCII. A marker's own glyph is not, and is not measured here for that
+/// reason -- it is asserted to be one cell by the sentence above and by the
+/// painted-frame tests in `view-surface`, since no `const fn` can measure a
+/// display cell.
 const MARK_COLS: usize = MARK_INDENT.len();
 
 /// The braille cycle a running tool call's marker animates through.
@@ -362,10 +368,14 @@ impl Transcript {
             }
             let entry_rows = cache[i]
                 .get_or_insert_with(|| render_entry(&self.entries[i], self.frame_at(i), width));
-            rows.extend(entry_rows.iter().skip(skip).cloned());
+            // Bounded before the clone, not after: one wrapped entry can be
+            // taller than the whole panel, and cloning all of it to throw
+            // the excess away would put the tallest entry's row count into
+            // every frame's cost instead of the viewport's.
+            let room = budget - rows.len();
+            rows.extend(entry_rows.iter().skip(skip).take(room).cloned());
             skip = 0;
         }
-        rows.truncate(budget);
         rows
     }
 
@@ -639,15 +649,30 @@ impl Transcript {
 
     /// Moves every animating marker on to the next spinner frame.
     ///
-    /// Only those entries drop their cached rows, so the frame a tick
-    /// repaints is the markers' own rows and nothing else on the panel --
-    /// and the work is the number of calls in flight, never the length of
-    /// the session.
+    /// A tick moves one glyph on an entry's first row, so it rewrites that
+    /// glyph in the cached rows rather than dropping the slot: an entry is
+    /// wrapped now, and re-rendering one would re-walk all of its text --
+    /// a whole [`ROW_PAINT_CEILING`] in the worst case -- every 80ms, to
+    /// paint a marker. The cost of a tick is the number of calls in flight,
+    /// never the length of the session and never the size of what a call
+    /// answered with.
+    ///
+    /// An entry with no cached rows is left alone: it renders from
+    /// [`Self::frame_at`] on its next paint, which reads the same counter.
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        let frame = SPINNER_FRAMES[self.spinner_frame];
         let cache = self.row_cache.get_mut();
         for &i in &self.animating {
-            cache[i] = None;
+            let mark = cache
+                .get_mut(i)
+                .and_then(|slot| slot.as_mut())
+                .and_then(|rows| rows.first_mut())
+                .and_then(|row| row.first_mut());
+            if let Some(mark) = mark {
+                mark.text.clear();
+                mark.text.push_str(frame);
+            }
         }
     }
 
@@ -895,11 +920,17 @@ impl EntryRows {
     /// Wrapped rather than clipped, and through
     /// [`super::wrap`](super::wrap) rather than a second measure of its
     /// own: a prompt is composed against that wrap, so anything else here
-    /// would reflow the user's own text the moment they sent it. Trailing
-    /// newlines come off because an entry is a log line and not a terminal
-    /// -- an agent ending its reply with one owes no blank row -- while
-    /// newlines inside it are the shape the writer gave the text and are
-    /// kept, blank lines and all.
+    /// would reflow the user's own text the moment they sent it. The *one*
+    /// line ending closing the text comes off because an entry is a log line
+    /// and not a terminal -- an agent ending its reply with one owes no
+    /// blank row -- while every other break is the shape the writer gave the
+    /// text and is kept, blank lines and all, including the blank row a
+    /// second trailing newline asks for.
+    ///
+    /// All three endings break a line: `\n`, `\r\n`, and a lone `\r`. The
+    /// last one is not a line ending in a file, but it is what a terminal
+    /// hands a paste through tmux's own buffer, and this is a paste's first
+    /// reader.
     fn add(&mut self, mark: Span, body_style: Option<StyleRole>, text: &str) {
         if self.cut {
             return;
@@ -914,30 +945,46 @@ impl EntryRows {
             return;
         }
         let opened = self.rows.len();
-        for line in capped.trim_end_matches(['\n', '\r']).split('\n') {
-            // `usize::MAX` keeps every row: the wrap's tail-keeping cut
-            // exists for a composer whose newest row is the interesting
-            // one, and a log read oldest first wants the opposite end.
-            for row in wrap(line.trim_end_matches('\r'), self.body, usize::MAX) {
-                let lead = if self.rows.len() == opened {
-                    mark.clone()
-                } else {
-                    Span::plain(MARK_INDENT)
-                };
-                let body = match body_style {
-                    Some(role) => Span::new(row, role),
-                    None => Span::plain(row),
-                };
-                self.rows.push(vec![lead, body]);
+        let closed = capped
+            .strip_suffix("\r\n")
+            .or_else(|| capped.strip_suffix('\n'))
+            .or_else(|| capped.strip_suffix('\r'))
+            .unwrap_or(capped);
+        for chunk in closed.split('\n') {
+            // The `\r` of a `\r\n` belongs to the break the split just made,
+            // so it comes off before the lone-`\r` breaks are taken.
+            let chunk = chunk.strip_suffix('\r').unwrap_or(chunk);
+            for line in chunk.split('\r') {
+                // `usize::MAX` keeps every row: the wrap's tail-keeping cut
+                // exists for a composer whose newest row is the interesting
+                // one, and a log read oldest first wants the opposite end.
+                for row in wrap(line, self.body, usize::MAX) {
+                    let lead = if self.rows.len() == opened {
+                        mark.clone()
+                    } else {
+                        Span::plain(MARK_INDENT)
+                    };
+                    let body = match body_style {
+                        Some(role) => Span::new(row, role),
+                        None => Span::plain(row),
+                    };
+                    self.rows.push(vec![lead, body]);
+                }
             }
         }
     }
 
     /// The entry's rows, closed with [`ENTRY_CUT`] when the ceiling stopped
     /// it short.
+    ///
+    /// The notice is a continuation row like any other -- lead then body --
+    /// so it aligns under the entry it closes instead of starting a column
+    /// to the left of it, and so every row this module emits has the same
+    /// two spans.
     fn finish(mut self) -> Vec<Vec<Span>> {
         if self.cut {
-            self.rows.push(vec![Span::plain(ENTRY_CUT)]);
+            self.rows
+                .push(vec![Span::plain(MARK_INDENT), Span::plain(ENTRY_CUT)]);
         }
         self.rows
     }
@@ -1013,7 +1060,7 @@ mod tests {
         assert_eq!(painted.len(), 8_190, "cut back to the char boundary");
         assert!(pasted.starts_with(painted.as_str()));
         assert_eq!(
-            rows.last().map(|row| row[0].text.as_str()),
+            rows.last().map(|row| row[1].text.as_str()),
             Some(ENTRY_CUT),
             "an entry that stops mid-paste must say so, or it reads as all \
              there was"
@@ -1040,7 +1087,7 @@ mod tests {
             "one entry painted {} rows",
             rows.len()
         );
-        assert_eq!(rows.last().map(|row| row[0].text.as_str()), Some(ENTRY_CUT));
+        assert_eq!(rows.last().map(|row| row[1].text.as_str()), Some(ENTRY_CUT));
     }
 
     /// The budget running out exactly on a result line's last byte is still
@@ -1061,7 +1108,7 @@ mod tests {
 
         let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
 
-        assert_eq!(rows.last().map(|row| row[0].text.as_str()), Some(ENTRY_CUT));
+        assert_eq!(rows.last().map(|row| row[1].text.as_str()), Some(ENTRY_CUT));
         assert!(
             !body(&rows).contains("dropped"),
             "the line past the ceiling is not painted"
@@ -1179,6 +1226,139 @@ mod tests {
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec!["\u{276f} first", "  second"]
+        );
+    }
+
+    /// A lone carriage return is a line break too. It is not one in a file,
+    /// but it is what a terminal delivers for a paste through tmux's own
+    /// buffer -- the dogfood gesture -- and left unbroken it survives into
+    /// the row for the frame to paint as a space, which is the exact
+    /// collapse this wrap exists to end.
+    #[test]
+    fn a_lone_carriage_return_breaks_the_line_too() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the parser\r\r- it drops tabs\r- and CRs\r");
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec![
+                "\u{276f} fix the parser",
+                "  ",
+                "  - it drops tabs",
+                "  - and CRs",
+            ],
+            "a CR-delimited paste reads exactly as its LF twin does"
+        );
+    }
+
+    /// Only the one line ending closing the text comes off. A writer who
+    /// ended their prompt on a blank line meant the blank line -- dropping
+    /// every trailing break is the same shape loss as dropping the ones
+    /// inside.
+    #[test]
+    fn a_blank_line_the_writer_ended_on_keeps_its_row() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("done\n\n");
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec!["\u{276f} done", "  "],
+            "the last newline ends the text, the one before it is a row"
+        );
+    }
+
+    /// A frame clones the rows it paints and no more. One wrapped entry can
+    /// be taller than the whole panel, so cloning an entry whole and cutting
+    /// afterwards would put the tallest entry on screen into every frame's
+    /// cost -- thousands of rows to paint twenty.
+    #[test]
+    fn a_frame_clones_no_more_rows_than_its_window_paints() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(None, &"line\n".repeat(500), TranscriptRole::Agent);
+
+        let window = 20;
+        let rows = transcript.rows_from(TranscriptAnchor::default(), window, WIDE);
+
+        assert_eq!(
+            rows.len(),
+            window,
+            "the entry is 500 rows tall and the window is {window}: what \
+             comes back is the window's rows, cut before the clone and not \
+             after it"
+        );
+    }
+
+    /// The notice closing a cut entry is a row like the entry's own: lead
+    /// then body, so it lines up under the text it closes instead of
+    /// starting a column to its left.
+    #[test]
+    fn the_cut_notice_lines_up_under_the_entry_it_closes() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(
+            None,
+            &"z".repeat(ROW_PAINT_CEILING + 1),
+            TranscriptRole::User,
+        );
+
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+        let last = rows.last().expect("a cut entry paints rows");
+
+        assert_eq!(
+            texts(std::slice::from_ref(last)),
+            vec![format!("{MARK_INDENT}{ENTRY_CUT}")]
+        );
+        assert_eq!(last.len(), 2, "every row this module emits is two spans");
+    }
+
+    /// A spinner tick moves one glyph, and must cost one glyph. The spinner
+    /// is the one thing on the panel that repaints on a timer: it must not
+    /// re-render the entries it is not animating, and -- now that an entry
+    /// is wrapped, a whole ceiling of text in the worst case -- it must not
+    /// re-render the one it *is* animating either, eight times a second, to
+    /// move a marker.
+    #[test]
+    fn a_spinner_tick_re_renders_nothing_at_all() {
+        let mut transcript = Transcript::new();
+        for i in 0..20 {
+            transcript.append_or_extend(Some(&format!("m{i}")), "chatter", TranscriptRole::Agent);
+        }
+        transcript.upsert_tool_call(
+            "t1".to_string(),
+            "reading".to_string(),
+            ToolCallStatus::InProgress,
+            Some((0..400).map(|i| format!("line {i}")).collect()),
+        );
+        let before = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+
+        reset_render_entry_calls();
+        transcript.advance_spinner();
+        let after = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+
+        // one row per chatter entry, so the call's title row follows them
+        let title = 20;
+
+        assert_eq!(
+            render_entry_calls(),
+            0,
+            "the tick rewrote the marker in place, so no entry re-rendered"
+        );
+        assert_ne!(
+            after[title][0].text, before[title][0].text,
+            "the marker moved on to the next frame"
+        );
+        assert_eq!(
+            after[title][0].role, before[title][0].role,
+            "and kept the role its status paints it with"
+        );
+        assert_eq!(
+            after[..title],
+            before[..title],
+            "the entries the tick is not animating are untouched"
+        );
+        assert_eq!(
+            after[title + 1..],
+            before[title + 1..],
+            "and so is every row of the animating entry but its marker"
         );
     }
 
@@ -1829,35 +2009,6 @@ mod tests {
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec!["\u{276f} first", "\u{276f} second"]
-        );
-    }
-
-    /// The spinner is the one thing on the panel that repaints on a timer,
-    /// so it must cost exactly the entries that are spinning: a tick that
-    /// dropped every cached row would turn a running tool call into a
-    /// whole-transcript re-render eight times a second.
-    #[test]
-    fn a_spinner_tick_re_renders_only_the_calls_still_running() {
-        let mut transcript = Transcript::new();
-        for i in 0..20 {
-            transcript.append_or_extend(Some(&format!("m{i}")), "chatter", TranscriptRole::Agent);
-        }
-        transcript.upsert_tool_call(
-            "call_1".to_string(),
-            "Read file".to_string(),
-            ToolCallStatus::InProgress,
-            None,
-        );
-        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
-
-        reset_render_entry_calls();
-        transcript.advance_spinner();
-        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
-
-        assert_eq!(
-            render_entry_calls(),
-            1,
-            "a tick must re-render the running call and nothing else"
         );
     }
 

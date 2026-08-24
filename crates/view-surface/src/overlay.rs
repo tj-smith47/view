@@ -239,6 +239,12 @@ const MIN_PREVIEW_SPLIT_WIDTH: u16 = 20;
 /// Their width is [`LIST_MARKER_COLS`], which is what a feature wrapping its
 /// own rows breaks at -- welded by the assertions below rather than left as
 /// two literals a later edit could widen without the wrap hearing about it.
+///
+/// The weld counts bytes, because `unicode_width` is not a `const fn` and
+/// bytes is the only measure a compile-time assertion has. It is exact while
+/// these markers stay ASCII, and errs toward failing to build on a marker
+/// that is one cell but several bytes -- the safe direction for a proxy: a
+/// compile error naming this line, never a wrap silently two columns wrong.
 const SELECTED_MARK: &str = "> ";
 const UNSELECTED_MARK: &str = "  ";
 const _: () = assert!(SELECTED_MARK.len() == LIST_MARKER_COLS as usize);
