@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::wrap;
+use super::{wrap, Break};
 use crate::native::ai_event::{PlanEntry, PlanEntryStatus, ToolCallStatus};
 use crate::native::views::{Span, StyleRole};
 
@@ -933,7 +933,22 @@ thread_local! {
 fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>, width: usize) -> Vec<Vec<Span>> {
     #[cfg(test)]
     RENDER_ENTRY_CALLS.with(|calls| calls.set(calls.get() + 1));
-    let mut paint = EntryRows::new(width);
+    // Prose the user did not type reads as prose: a word-aware break costs
+    // nothing the design protects, because only the echoed prompt owes the
+    // composer a matching break (see [`super::wrap`]). Titles, result
+    // lines and plan tasks stay on the cell break -- they are as often a
+    // path or a command as a sentence, and a break moved off the cell in
+    // one of those is a break in the middle of a token that has to be read
+    // exactly.
+    let breaks = match &entry.kind {
+        TranscriptEntryKind::Message {
+            role: TranscriptRole::User,
+            ..
+        } => Break::Cell,
+        TranscriptEntryKind::Message { .. } | TranscriptEntryKind::Review => Break::Word,
+        TranscriptEntryKind::ToolCall { .. } | TranscriptEntryKind::Plan { .. } => Break::Cell,
+    };
+    let mut paint = EntryRows::new(width, breaks);
     match &entry.kind {
         TranscriptEntryKind::Message { role, .. } => {
             let (mark, style) = match role {
@@ -999,6 +1014,8 @@ struct EntryRows {
     left: usize,
     /// Cells one row has for text after its marker.
     body: usize,
+    /// Where a row that runs out of those cells breaks.
+    breaks: Break,
     /// Whether the ceiling has already cut this entry short, which stops
     /// every later piece of it and is what [`Self::finish`] closes the
     /// entry with a notice for.
@@ -1006,10 +1023,11 @@ struct EntryRows {
 }
 
 impl EntryRows {
-    fn new(width: usize) -> Self {
+    fn new(width: usize, breaks: Break) -> Self {
         Self {
             rows: Vec::new(),
             left: ROW_PAINT_CEILING,
+            breaks,
             // A panel too narrow for even one cell of text would otherwise
             // open a row per character; the floor spends a column the frame
             // clips anyway rather than the entry's whole row budget.
@@ -1034,7 +1052,9 @@ impl EntryRows {
     ///
     /// Which characters end a line is [`super::wrap`]'s answer, not a
     /// second one taken here: the composer breaks a prompt on exactly those
-    /// and the entry echoing it has to break on the same.
+    /// and the entry echoing it has to break on the same. Where a row too
+    /// long for its width breaks is [`Self::breaks`]'s answer, decided per
+    /// entry in [`render_entry`].
     fn add(&mut self, mark: Span, body_style: Option<StyleRole>, text: &str) {
         if self.cut {
             return;
@@ -1057,7 +1077,7 @@ impl EntryRows {
         // `usize::MAX` keeps every row: the wrap's tail-keeping cut exists
         // for a composer whose newest row is the interesting one, and a log
         // read oldest first wants the opposite end.
-        for row in wrap(closed, self.body, usize::MAX) {
+        for row in wrap(closed, self.body, usize::MAX, self.breaks) {
             let lead = if self.rows.len() == opened {
                 mark.clone()
             } else {
@@ -1285,7 +1305,56 @@ mod tests {
         assert_eq!(
             texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, 12)),
             vec!["\u{25cf} abcdefghij", "  klmnopqrst", "  uvwxyz"],
-            "the break is the composer's own cell wrap, not a word wrap"
+            "a stretch with no space in it has nowhere to break but the cell"
+        );
+    }
+
+    /// The agent's prose is prose: it breaks between words, because it has
+    /// no composer twin whose break it has to land in the same column as.
+    /// A word wider than the row still breaks at the cell -- there is
+    /// nowhere else to put it -- and picks up again on the row after.
+    #[test]
+    fn an_agents_prose_breaks_between_words_and_a_long_word_still_at_the_cell() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(
+            None,
+            "the key is in a supercalifragilistic tin",
+            TranscriptRole::Agent,
+        );
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, 12)),
+            vec![
+                "\u{25cf} the key is",
+                "  in a",
+                "  supercalif",
+                "  ragilistic",
+                "  tin",
+            ]
+        );
+    }
+
+    /// The echoed prompt is the one entry that owes the composer a matching
+    /// break: the user typed it against the composer's own cell wrap, and a
+    /// word-aware break here would reflow their text the moment they sent
+    /// it.
+    #[test]
+    fn the_echoed_prompt_still_breaks_where_the_composer_broke_it() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(
+            None,
+            "the key is in a supercalifragilistic tin",
+            TranscriptRole::User,
+        );
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, 12)),
+            vec![
+                "\u{276f} the key is",
+                "   in a supe",
+                "  rcalifragi",
+                "  listic tin",
+            ]
         );
     }
 

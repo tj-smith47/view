@@ -386,7 +386,12 @@ impl AiPanelState {
             self.composer_cap(panel_height)
         };
         let width = width.max(1);
-        wrap(wrap_window(&self.input, width, cap), width, cap)
+        wrap(
+            wrap_window(&self.input, width, cap),
+            width,
+            cap,
+            Break::Cell,
+        )
     }
 
     /// Where the next character typed will land: an index into the rows
@@ -730,19 +735,33 @@ fn wrap_window(input: &str, width: usize, keep: usize) -> &str {
 /// one terminal cell of composer text can cost -- see [`wrap_window`].
 const BYTES_PER_CELL: usize = 4;
 
+/// Where a row that runs out of width breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Break {
+    /// At the cell the width runs out on, the way a terminal wraps a long
+    /// line.
+    Cell,
+    /// At the last space before it, moving the partial word down with the
+    /// break. A stretch with no space in it still breaks at the cell --
+    /// there is nowhere else to put it.
+    Word,
+}
+
 /// The last `keep` of the rows `input` breaks into at `width` cells each,
 /// in order, always at least one row.
 ///
-/// Breaks at the cell rather than at a word boundary, the way a terminal
-/// wraps a long line. The row and column the next character lands on are
-/// then derivable from what has been typed alone, and no keystroke reflows
-/// a row the user has already read -- both of which a greedy word wrap
-/// gives up, for a composer that only ever appends and backspaces.
+/// [`Break::Cell`] for the composer, the way a terminal wraps a long line:
+/// the row and column the next character lands on are then derivable from
+/// what has been typed alone, and no keystroke reflows a row the user has
+/// already read -- both of which a greedy word wrap gives up, for a
+/// composer that only ever appends and backspaces.
 ///
-/// The transcript breaks its own entries through this same call, so the two
-/// halves of the panel measure text the same way and put a wrap break in the
-/// same column: a typed prompt reads the same after it is sent as it did
-/// while it was being typed.
+/// The transcript echoes the user's own prompt through the same
+/// [`Break::Cell`], so the two halves of the panel measure that text the
+/// same way and put a wrap break in the same column: a typed prompt reads
+/// the same after it is sent as it did while it was being typed. Prose the
+/// user never typed has no composer twin to stay in step with, so it takes
+/// [`Break::Word`] and reads as prose.
 ///
 /// A line break ends a row wherever it falls, so a pasted multi-line prompt
 /// reads in the composer as the lines it was copied as, and reads the same
@@ -763,7 +782,7 @@ const BYTES_PER_CELL: usize = 4;
 /// instead of one per row it would have had. It still walks the whole
 /// input, because where the breaks fall is what decides which rows the
 /// last ones are.
-fn wrap(input: &str, width: usize, keep: usize) -> Vec<String> {
+fn wrap(input: &str, width: usize, keep: usize, breaks: Break) -> Vec<String> {
     let mut rows: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     rows.push_back(String::new());
     let mut used = 0_usize;
@@ -782,8 +801,23 @@ fn wrap(input: &str, width: usize, keep: usize) -> Vec<String> {
         // `used > 0` keeps a glyph wider than the whole row on a row of its
         // own instead of opening an empty one ahead of it
         if used > 0 && used + cells > width {
+            // a space landing on the break *is* the break: kept, it would
+            // open the next row on whitespace the reader cannot see and
+            // cannot delete
+            if breaks == Break::Word && ch == ' ' {
+                open_row(&mut rows, keep);
+                used = 0;
+                continue;
+            }
+            let carried = (breaks == Break::Word)
+                .then(|| rows.back_mut().and_then(take_partial_word))
+                .flatten();
             open_row(&mut rows, keep);
             used = 0;
+            if let (Some(word), Some(row)) = (carried, rows.back_mut()) {
+                used = word.chars().map(char_cells).sum();
+                row.push_str(&word);
+            }
         }
         if let Some(row) = rows.back_mut() {
             row.push(ch);
@@ -791,6 +825,19 @@ fn wrap(input: &str, width: usize, keep: usize) -> Vec<String> {
         used += cells;
     }
     rows.into()
+}
+
+/// Takes the unfinished word off the end of `row`, or `None` when the row
+/// is one word with nowhere to break -- which is the case that falls back
+/// to the cell break.
+///
+/// The space goes with it: it is the break, and left behind it would be a
+/// cell of trailing whitespace on a row nothing else can reach.
+fn take_partial_word(row: &mut String) -> Option<String> {
+    let space = row.rfind(' ')?;
+    let word = (space + 1 < row.len()).then(|| row.split_off(space + 1))?;
+    row.pop();
+    Some(word)
 }
 
 /// Opens [`wrap`]'s next row, reusing the string of the row falling off the
@@ -1305,7 +1352,7 @@ mod tests {
         let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
         assert_eq!(
             rows,
-            wrap(&pasted, width, cap),
+            wrap(&pasted, width, cap, Break::Cell),
             "and the rows are exactly the ones the whole input would have \
              produced -- a window opening anywhere but a row boundary \
              reflows every row the reader has already read"
@@ -1336,7 +1383,7 @@ mod tests {
 
         assert_eq!(
             rows,
-            wrap(&pasted, width, cap),
+            wrap(&pasted, width, cap, Break::Cell),
             "the rows are the whole input's own, column for column"
         );
         assert!(
