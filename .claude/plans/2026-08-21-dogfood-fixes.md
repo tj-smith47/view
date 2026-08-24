@@ -503,6 +503,34 @@ own cells" rule unchanged, the welded test rewritten to the new shape;
 paste retains newlines end to end and the T24 transcript wrap renders
 them.
 
+## T28 — the composer takes a typed line break, and its window follows the last one
+
+Two residuals T27 left on the record, ruled work rather than questions
+(2026-08-24): only a paste can produce a multi-line prompt, and the
+composer's wrap window is exact for every input except one line that
+spans most of the window after an earlier break.
+
+Fix, first half: a typed line break. `<S-CR>` and `<A-CR>` insert `\n`
+into the composer; `<CR>` stays submit. The pair is a `[keys]` knob
+(`composer_newline`, string or list, defaults `["<S-CR>", "<A-CR>"]`)
+resolved through the machinery T26 built — same shape check, same
+per-action fallback and notice, same docs rows in `docs/keymaps.md` and
+`view.toml.example`. Both defaults ship because terminals disagree:
+`<S-CR>` needs a keyboard protocol that reports shift on Enter, `<A-CR>`
+arrives as `ESC CR` nearly everywhere. The transcript echo and the agent
+receive the break exactly as a pasted one would arrive.
+
+Fix, second half: `wrap_window` opens on the phase of the last break.
+The panel state caches the byte offset of the last line break in `input`
+(set on paste — a scan of the pasted text only — and on a typed break;
+on backspace over a break it is re-derived by `rfind` over the text
+before it, one line's worth); `wrap_window` aligns its start to
+`last_break + 1 + k * width` instead of `k * width`, so its rows are the
+tail of the full wrap for every input. The three-class doc collapses to
+one sentence. Per-paint cost unchanged: one cached offset, no scan.
+Battery rows for both halves; the sweep's paste leg gains a typed-break
+assertion.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
