@@ -175,11 +175,12 @@ jobs:
   # plain in one `capture-pane -e`, so a suite that is green on all of them
   # is not evidence the screen was right.
   #
-  # Only the visual leg of `task acceptance`, not the target: the other legs
-  # want agent credentials or a controlled host for their thresholds, and
-  # this one wants tmux and about a minute. Linux only -- what it asserts is
-  # the escape sequences view emits, which are the terminal's dialect and
-  # not the platform's.
+  # Only the visual leg of `task acceptance`, not the target: the remaining
+  # legs of that target want agent credentials or a controlled host for
+  # their thresholds, and this one wants tmux and about a minute. (The ACP
+  # legs the stub agent drives want neither, and have their own job below.)
+  # Linux only -- what it asserts is the escape sequences view emits, which
+  # are the terminal's dialect and not the platform's.
   visual:
     runs-on: ubuntu-latest
     # a cold cargo build on a cache miss dominates; the sweep itself is ~1 min
@@ -218,6 +219,57 @@ jobs:
 
       - name: Run overlay-chrome visual sweep
         run: task acceptance:visual
+
+  # The ACP conformance legs the local stub agent drives. Its own job rather
+  # than more steps on `visual`: they assert different layers (that one reads
+  # the escape sequences view emits, this one drives a whole agent session
+  # through a real terminal), and a failure should name which.
+  #
+  # Merge-blocking because the alternative was tried and failed: this suite
+  # sat dead for three commits behind a setup guard that named a source
+  # literal someone had changed, and nothing noticed until it was run by
+  # hand. Leg 1 is the only one that reaches the network (it provisions the
+  # pinned adapter the way a first-run user does) and is the only one left
+  # out; the script prints the leg it skipped rather than leaving the gap to
+  # be inferred from the count.
+  acp-conformance:
+    runs-on: ubuntu-latest
+    # a cold cargo build on a cache miss dominates; the eight legs are ~3 min
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install neovim (linux)
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      - name: Run stub-driven ACP conformance legs
+        run: task acceptance:acp
 
   # The differential oracle corpus is merge-blocking on both tier-1
   # platforms (spec section 14: linux + macos tier-1; Windows is tier-2,

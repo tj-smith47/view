@@ -362,6 +362,12 @@ fn main() {
                     "think" => {
                         stall();
                         chunk(&mut stdout, "agent_message_chunk", "thought about it");
+                        // Held a second time, so the turn is provably still
+                        // open while the panel shows the first word: a
+                        // client that stood its prompt marker down here can
+                        // only have done it because the agent spoke, since
+                        // no turn has ended for it to have done it on.
+                        stall_until_gone();
                         reply(
                             &mut stdout,
                             id,
@@ -561,6 +567,20 @@ fn stall() {
     let resume = std::env::args().nth(1).unwrap_or_default();
     loop {
         if !resume.is_empty() && std::path::Path::new(&resume).exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// The mirror of [`stall`]: stops until the file named by the first
+/// argument is *gone*, so one prompt can be held twice against one file --
+/// released by creating it, held again until it is removed. Holds forever
+/// when no file was named, exactly as [`stall`] does.
+fn stall_until_gone() {
+    let resume = std::env::args().nth(1).unwrap_or_default();
+    loop {
+        if !resume.is_empty() && !std::path::Path::new(&resume).exists() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));

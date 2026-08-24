@@ -24,7 +24,8 @@ use view_core::native::ai_panel::SPINNER_INTERVAL;
 /// speculation's expiry is: `view-core` has no clock, and the wall time an
 /// animation runs on cannot live in a pure fold.
 ///
-/// Costs nothing at all on a session with no tool call in flight, and
+/// Costs nothing at all on a session with nothing animating -- no prompt
+/// awaiting its first agent event and no tool call in flight -- and
 /// nothing beyond one comparison on a session whose panel is closed: an
 /// agent working behind a closed sidebar is not animating anything a user
 /// can see, so it neither wakes this loop nor paints. The frame it resumes
@@ -63,7 +64,9 @@ mod tests {
     use view_core::update::update;
 
     /// A model with the agent panel open and one tool call in flight --
-    /// the one state the spinner's deadline exists for.
+    /// one of the two states the spinner's deadline exists for, the other
+    /// being a submitted prompt the agent has not answered
+    /// (`a_submitted_prompt_bounds_the_wait_before_any_tool_call_exists`).
     fn spinning_model() -> Model {
         let mut model = Model::with_term_size(80, 24);
         model.ai_trusted = true;

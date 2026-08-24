@@ -36,7 +36,7 @@ const TOOL_FAILED_MARK: &str = "\u{2717} ";
 /// call's twin -- something the agent has not done, is doing, or has done
 /// -- so the two share the marker vocabulary at either end, and this is
 /// the one state a task can be in that a tool call cannot: under way, but
-/// not a call this panel is animating a spinner for.
+/// not something this panel is animating a spinner for.
 const PLAN_ACTIVE_MARK: &str = "\u{25b8} ";
 
 /// The indent standing under an entry's marker on every row that entry
@@ -60,7 +60,10 @@ const MARK_INDENT: &str = "  ";
 /// display cell.
 const MARK_COLS: usize = MARK_INDENT.len();
 
-/// The braille cycle a running tool call's marker animates through.
+/// The braille cycle an animating marker moves through: a tool call the
+/// wire has not resolved, and the submitted prompt no agent event has
+/// answered yet. One cycle for both, because both say the same thing --
+/// something is working and has not finished.
 const SPINNER_FRAMES: [&str; 8] = [
     "\u{280b} ",
     "\u{2819} ",
@@ -246,15 +249,23 @@ pub struct Transcript {
     local_seq: u64,
     /// Which entries are animating: the one authority on that, held rather
     /// than derived from entry status, so that the renderer and the tick
-    /// agree by construction. A call the wire left unresolved when its turn
-    /// ended stays `InProgress` -- the panel invents no result the agent
-    /// never reported -- but it leaves this set, so it neither animates nor
-    /// resumes animating behind a later call. Membership rather than a
-    /// count, so the tick's work is the number of markers moving instead of
-    /// the length of the session.
+    /// agree by construction.
+    ///
+    /// Two kinds of entry join it -- a tool call the wire says is
+    /// `InProgress`, and the submitted prompt no agent event has answered
+    /// yet ([`Self::awaiting_reply`]) -- and neither is derivable from what
+    /// the entry holds, which is the whole reason this is a set and not a
+    /// predicate. A call the wire left unresolved when its turn ended stays
+    /// `InProgress` -- the panel invents no result the agent never reported
+    /// -- but it leaves this set, so it neither animates nor resumes
+    /// animating behind a later call.
+    ///
+    /// Membership rather than a count, so the tick's work is the number of
+    /// markers moving instead of the length of the session.
     animating: HashSet<usize>,
-    /// Which [`SPINNER_FRAMES`] entry an animating tool call currently
-    /// paints.
+    /// Which [`SPINNER_FRAMES`] entry every animating marker currently
+    /// paints. One counter for all of them, so two markers moving at once
+    /// move together rather than beating against each other.
     spinner_frame: usize,
     /// The submitted prompt whose own marker is standing in for the agent
     /// until the agent puts something on screen itself (see
@@ -297,20 +308,40 @@ struct LocalEcho {
 /// same events must compare equal whether or not either has ever been
 /// painted; deriving `PartialEq` across every field would make painting a
 /// transcript change what it compares equal to, which is not an identity
-/// any caller should be able to observe. The spinner's frame and the set
-/// of markers it is moving are excluded on the same terms -- which eighth
-/// of a second a running call's glyph is on says nothing about what the
-/// transcript holds -- while the pending local echo is included, because
-/// whether a replay
-/// would be absorbed or appended is a real difference between two
-/// transcripts.
+/// any caller should be able to observe.
+///
+/// Everything the spinner runs on is excluded on those same terms: the
+/// frame counter, the set of markers it is moving, and which entry is
+/// waiting on the agent. Which eighth of a second a marker's glyph is on,
+/// and whether the answer to a prompt has arrived yet, say nothing about
+/// what the transcript holds. The pending local echo is the one piece of
+/// mid-turn state that *is* included, because whether a replay would be
+/// absorbed or appended is a real difference between two transcripts.
+///
+/// The destructure below is the mechanism, not this paragraph: every field
+/// is named, so adding one to [`Transcript`] fails to compile here until it
+/// is deliberately placed on one side of the line, rather than being
+/// excluded by the silence a positive list would have excluded it with.
 impl PartialEq for Transcript {
     fn eq(&self, other: &Self) -> bool {
-        self.entries == other.entries
-            && self.tool_call_index == other.tool_call_index
-            && self.message_index == other.message_index
-            && self.plan_index == other.plan_index
-            && self.echo == other.echo
+        let Self {
+            entries,
+            tool_call_index,
+            message_index,
+            plan_index,
+            echo,
+            row_cache: _,
+            cache_width: _,
+            local_seq: _,
+            animating: _,
+            spinner_frame: _,
+            awaiting_reply: _,
+        } = self;
+        *entries == other.entries
+            && *tool_call_index == other.tool_call_index
+            && *message_index == other.message_index
+            && *plan_index == other.plan_index
+            && *echo == other.echo
     }
 }
 
@@ -663,9 +694,10 @@ impl Transcript {
     /// glyph in the cached rows rather than dropping the slot: an entry is
     /// wrapped now, and re-rendering one would re-walk all of its text --
     /// a whole [`ROW_PAINT_CEILING`] in the worst case -- every 80ms, to
-    /// paint a marker. The cost of a tick is the number of calls in flight,
-    /// never the length of the session and never the size of what a call
-    /// answered with.
+    /// paint a marker. The cost of a tick is the size of [`Self::animating`],
+    /// never the length of the session and never the size of what an entry
+    /// holds -- a prompt pasted whole or a call answering with ten thousand
+    /// result lines each cost the one glyph their marker is.
     ///
     /// An entry with no cached rows is left alone: it renders from
     /// [`Self::frame_at`] on its next paint, which reads the same counter.
@@ -885,8 +917,13 @@ thread_local! {
 /// task per plan entry -- each of them as many rows as its own text and the
 /// panel's width work out to. `spinner` is the frame this entry's marker is
 /// currently on ([`Transcript::advance_spinner`]), or `None` for an entry
-/// that is not animating -- including a call the wire left unresolved,
-/// whose marker holds still rather than claiming work nobody is doing.
+/// that is not animating -- including a call the wire left unresolved and a
+/// prompt whose turn ended without an answer, whose markers hold still
+/// rather than claiming work nobody is doing.
+///
+/// `Some` reaches two arms: a tool call the wire says is `InProgress`, and
+/// the message holding the submitted prompt. Both take their glyph from the
+/// same [`SPINNER_FRAMES`] cycle and keep the style their own row is in.
 ///
 /// Every entry opens with a marker glyph in its own span, and the row's
 /// meaning is carried by color and that glyph rather than by a word: a

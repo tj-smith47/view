@@ -171,6 +171,16 @@ tasks:
     # legs want all three, which is how a standing gate comes to be skipped.
     cmd: bash scripts/acceptance/visual-sweep.sh {{.CLI_ARGS}}
 
+  acceptance:acp:
+    desc: The ACP conformance legs that need no network or credentials (legs 2-9, driven by the local stub agent; needs tmux and the pinned nvim)
+    # its own target for the reason `acceptance:visual` is one, plus a
+    # sharper one: this suite went dead for three commits because a guard
+    # named a source literal that had changed, and nothing ran it. Only leg
+    # 1 provisions the real adapter over the network, so every other leg is
+    # runnable on a CI box -- and a gate that is runnable and not run is a
+    # gate that drifts. The script names the leg it is skipping.
+    cmd: bash scripts/acceptance/ai-conformance.sh 2 3 4 5 6 7 8 9
+
   bench:
     desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
     # the ship guard on the no-speculate arm refuses an optimized build that

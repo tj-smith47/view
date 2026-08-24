@@ -45,6 +45,13 @@ use crate::native::ai_panel::{DiffReviewState, PermissionPrompt, StandingAnswer}
 /// different request, not an answer to the one the user is still looking
 /// at.
 pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
+    // Unconditional on what is on screen, matching every fold below it: the
+    // panel is session state, not overlay state. This adds no frame a
+    // closed panel would not already have been given -- every event that
+    // reaches `agent_answered` either sets `dirty` for its own fold or
+    // raises a notice that owes a paint of its own, which is what
+    // `a_marker_standing_down_behind_a_closed_panel_needs_no_gate_of_its_own`
+    // holds still.
     if answers_the_prompt(&event) && model.ai_panel_mut().transcript.agent_answered() {
         model.dirty = true;
     }
@@ -346,9 +353,6 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
     Vec::new()
 }
 
-/// What view says, in the transcript and in the toast behind a closed panel,
-/// when it answers a request from a standing answer rather than asking.
-///
 /// Whether `event` is the agent putting its own content in front of the
 /// user -- which is what stands the submitted prompt's spinner back down
 /// (see [`crate::native::ai_panel::Transcript::agent_answered`]).
@@ -379,6 +383,9 @@ fn answers_the_prompt(event: &AiEvent) -> bool {
     )
 }
 
+/// What view says, in the transcript and in the toast behind a closed panel,
+/// when it answers a request from a standing answer rather than asking.
+///
 /// One wording for both surfaces so the toast and the record cannot drift,
 /// and it names the kind: "view answered for you" is only auditable if the
 /// user can tell which of their standing answers did it.
@@ -677,6 +684,47 @@ mod tests {
                 "{label} stopped a spinner nothing had replaced"
             );
         }
+    }
+
+    /// The stand-down costs a closed panel no frame of its own, so it needs
+    /// no visibility gate: the fold happens behind a closed sidebar (the
+    /// panel is session state), and the frame it rides was already owed.
+    ///
+    /// Held still by the hardest case there is -- the one qualifying event
+    /// whose own arm sets no `dirty` at all, a proposal that turns out to
+    /// change nothing. Even there the paint is owed, because the arm
+    /// answers with a notice, and a notice is a surface of its own. A gate
+    /// here would be a branch no input can distinguish.
+    #[test]
+    fn a_marker_standing_down_behind_a_closed_panel_needs_no_gate_of_its_own() {
+        let mut model = model_awaiting_the_agent();
+        let _ = update(
+            &mut model,
+            Msg::FeatureInvoke {
+                feature: "ai".to_string(),
+                verb: "close".to_string(),
+            },
+        );
+        model.dirty = false;
+
+        let _ = update(
+            &mut model,
+            Msg::Ai(AiEvent::DiffProposed {
+                request_id: 2,
+                path: std::path::PathBuf::from("src/lib.rs"),
+                old_text: Some("unchanged\n".to_string()),
+                new_text: "unchanged\n".to_string(),
+            }),
+        );
+
+        assert!(
+            !model.ai_panel().transcript.is_spinning(),
+            "the fold still happens behind a closed panel"
+        );
+        assert!(
+            model.dirty,
+            "and the frame it would have gated was owed to the notice anyway"
+        );
     }
 
     fn allow_once(id: &str) -> crate::native::ai_event::PermissionOption {

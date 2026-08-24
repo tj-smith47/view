@@ -931,13 +931,25 @@ leg_prompt_awaiting_its_answer() {
         "the prompt's marker advancing before the agent has sent anything" >/dev/null
 
     # ... and it stands back down on the agent's first word rather than
-    # spinning behind the answer it was waiting for.
+    # spinning behind the answer it was waiting for. The stub holds the turn
+    # open again after that word, which is what makes the stand-down
+    # attributable: a marker back at its own glyph while no turn has ended
+    # cannot have been settled by the turn ending.
     touch "$resume"
     wait_for "${AGENT_PREFIX}thought about it" "$WAIT_SECS" \
         "the agent's first word" >/dev/null
     wait_for "${USER_PREFIX}think" "$WAIT_SECS" \
         "the prompt's marker standing back down" >/dev/null
-    pass "a submitted prompt animated from submit until the agent's first word"
+    if grep -qE 'ai TurnEnded' "$ROOT/view.log" 2>/dev/null; then
+        fail "the turn ended before the stand-down could be told apart from end_turn's own"
+        return 1
+    fi
+    pass "a submitted prompt animated from submit until the agent's first word, and no further"
+
+    # Released, so the leg leaves a finished turn behind rather than a
+    # session the stub is still holding.
+    rm -f "$resume"
+    wait_for_log 'ai TurnEnded' "$WAIT_SECS" "the held turn ending" >/dev/null
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
@@ -1062,20 +1074,60 @@ TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$REPO_ROOT/crates/view-core/src/update/ai
     printf 'FAIL: the AI trust prompt is not built from a literal any more\n' >&2
     exit 1
 }
-# The prompt's own rows, built from the template that paints them and the
-# option names the stub offers -- so a reworded row or a dropped digit
-# fails here rather than leaving an assertion matching nothing.
-require_template "$PERMISSION_RS" '"{}{key} {} ({})"' || exit 1
-PERMISSION_ROW_DENY='1 Deny (reject_once)'
-PERMISSION_ROW_ONCE='2 Allow Once (allow_once)'
+# The prompt's own rows, rendered from the template that paints them rather
+# than copied out of it: a hand-copied row is a second definition of the
+# same string, and the two drifted apart once already -- the template gained
+# its indent as a `{}` placeholder, every leg of this script died in setup,
+# and nothing failed until someone ran it by hand. Derived, a reworded row
+# changes these assertions with it, and a template this cannot fill fails
+# loudly below.
+permission_row() {
+    local key="$1" name="$2" note="$3" fmt
+    # The first `{key}` template in production code -- `awk` stops at the
+    # test module rather than `head -1` trusting source order.
+    fmt=$(awk '
+        /#\[cfg\(test\)\]/ { exit }
+        match($0, /"[^"]*\{key\}[^"]*"/) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+    ' "$PERMISSION_RS")
+    if [ -z "$fmt" ]; then
+        printf 'FAIL: %s builds no option row from a {key} template any more\n' \
+            "$PERMISSION_RS" >&2
+        return 1
+    fi
+    # The leading `{}` is the indent; every assertion here reads past it,
+    # matching the row as a substring that starts at the digit.
+    fmt=${fmt#'{}'}
+    fmt=${fmt/'{key}'/$key}
+    fmt=${fmt/'{}'/$name}
+    fmt=${fmt/'{}'/$note}
+    # A placeholder left over is a template that grew a field this script
+    # does not know how to fill: fail rather than assert a row with a `{}`
+    # in it that no screen will ever show.
+    case "$fmt" in
+        *'{'*)
+            printf 'FAIL: %s option row template %s has a field this script cannot fill\n' \
+                "$PERMISSION_RS" "$fmt" >&2
+            return 1
+            ;;
+    esac
+    printf '%s' "$fmt"
+}
+# The notes are the wire's own kind spellings, pinned separately in the stub
+# options guarded below.
+PERMISSION_ROW_DENY=$(permission_row 1 Deny reject_once) || exit 1
+PERMISSION_ROW_ONCE=$(permission_row 2 'Allow Once' allow_once) || exit 1
 # The two rows whose answer outlives the question say what they cover and
 # how long for, off the request's own tool kind. Asserted as a prefix: at
 # this width the row is a few columns wider than the panel's interior, the
 # same truncation `REVIEW_KEY_HINT` is read through.
 require_template "$PERMISSION_RS" '"all {tool} this session"' || exit 1
 require_template "$PERMISSION_RS" '"no {tool} this session"' || exit 1
-PERMISSION_ROW_ALWAYS='3 Always Allow (all edit this'
-PERMISSION_ROW_NEVER='3 Always Reject (no execute'
+# Short enough that both rows' prefixes are inside the panel at this width.
+PERMISSION_ROW_COLS=27
+PERMISSION_ROW_ALWAYS=$(permission_row 3 'Always Allow' 'all edit this session') || exit 1
+PERMISSION_ROW_ALWAYS=${PERMISSION_ROW_ALWAYS:0:$PERMISSION_ROW_COLS}
+PERMISSION_ROW_NEVER=$(permission_row 3 'Always Reject' 'no execute this session') || exit 1
+PERMISSION_ROW_NEVER=${PERMISSION_ROW_NEVER:0:$PERMISSION_ROW_COLS}
 for stub_option in \
     '{ "optionId": "reject-once", "name": "Deny", "kind": "reject_once" }' \
     '{ "optionId": "allow-once", "name": "Allow Once", "kind": "allow_once" }' \
@@ -1207,6 +1259,16 @@ else
         selected+=("$leg")
     done
 fi
+# A subset says what it did not cover, by name, before it runs. A partial
+# run that reads like a full one is how a repair came to be signed off
+# against legs that never touched its subject: the count at the end says
+# how many passed, and this says which ones were never asked.
+for leg in "${LEGS[@]}"; do
+    case " ${selected[*]} " in
+    *" $leg "*) ;;
+    *) printf 'SKIP: %s -- not selected for this run\n' "$leg" ;;
+    esac
+done
 for leg in "${selected[@]}"; do "$leg"; done
 
 printf 'ai conformance: %s of %s legs green\n' "${#selected[@]}" "${#LEGS[@]}"
