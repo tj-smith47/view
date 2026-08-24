@@ -490,6 +490,19 @@ survives common terminals (decide from what nvim itself binds by
 default so the migration contract holds); docs/keymaps.md rows update
 with the config knob.
 
+## T27 — the composer takes a multi-line prompt
+
+Found in T24's review (MINOR-3): the transcript now keeps a prompt's
+shape, but the composer cannot produce one — `sanitized` flattens a
+pasted multi-line prompt to spaces before submit, so parity holds only
+for typed single-line prompts. The composer's in-row newline handling
+is a tested contract welded to `composer_cursor_of`. Fix: composer
+`wrap` breaks on `\n` (pairing `\r\n` / lone `\r` the way
+`EntryRows::add` does), `composer_cursor_of` keeps its "last row, its
+own cells" rule unchanged, the welded test rewritten to the new shape;
+paste retains newlines end to end and the T24 transcript wrap renders
+them.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
