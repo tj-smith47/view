@@ -152,7 +152,8 @@ impl PermissionPrompt {
             };
             vec![Span::new(
                 format!(
-                    "  {key} {} ({})",
+                    "{}{key} {} ({})",
+                    " ".repeat(OPTION_INDENT),
                     option.name,
                     self.option_note(option.kind)
                 ),
@@ -161,6 +162,23 @@ impl PermissionPrompt {
         }));
         rows.push(vec![Span::new(KEY_HINT, StyleRole::AiPermissionAsk)]);
         rows
+    }
+
+    /// The cell the keyboard is waiting at, as a `(row, column)` offset into
+    /// [`Self::render_rows`]'s own rows: the first option's digit, or the
+    /// question's own first cell when the agent offered no options and
+    /// `<Esc>` is the only answer left.
+    ///
+    /// Lives beside the rows it indexes because it is the same layout
+    /// decision: an indent or a leading row counted twice is a caret one
+    /// cell off the key it names.
+    #[must_use]
+    pub fn answer_cell(&self) -> (usize, usize) {
+        if self.options.is_empty() {
+            (0, 0)
+        } else {
+            (1, OPTION_INDENT)
+        }
     }
 
     /// What the parenthesis after an option's own name says it does.
@@ -191,6 +209,10 @@ impl PermissionPrompt {
 /// settles the request as cancelled and exists even when every option
 /// offered was an allow.
 pub(crate) const KEY_HINT: &str = "press a number, <Esc> cancels";
+
+/// The cells an option row is indented by before its own digit, so the
+/// options read as a list under the question rather than as more question.
+const OPTION_INDENT: usize = 2;
 
 /// What stands where a digit would for an option past the ninth, which no
 /// key reaches.

@@ -967,6 +967,37 @@ fn a_maximally_short_ai_panel_keeps_the_crash_banner_over_the_rule() {
     );
 }
 
+/// The counted header and the built one must agree row for row: the caret's
+/// row is resolved from the count, and the panel is laid out from the build,
+/// so a row group that reaches one and not the other puts the caret on a row
+/// the panel never drew.
+#[test]
+fn the_counted_ai_header_is_as_long_as_the_built_one_for_every_row_group() {
+    use view_core::native::views::AiPanelView;
+
+    let plain = AiPanelView::new("AI Agent");
+    let empty_composer = AiPanelView::new("AI Agent").with_input_rows(Vec::new());
+    let everything = AiPanelView::new("AI Agent")
+        .with_input_rows(vec!["one".to_string(), "two".to_string()])
+        .with_usage(vec![Span::plain("context 10/100".to_string())])
+        .with_review(vec![vec![Span::plain("src/main.rs hunk 1/2".to_string())]])
+        .with_pending_permission(vec![
+            vec![Span::plain("Permission requested".to_string())],
+            vec![Span::plain("  1 Allow (allow_once)".to_string())],
+        ])
+        .with_local_error(vec![vec![Span::plain(
+            "Error: the agent exited".to_string(),
+        )]]);
+
+    for view in [plain, empty_composer, everything] {
+        assert_eq!(
+            ai_header_len(&view),
+            ai_header(&view).len(),
+            "the counted header must be the built header's own length"
+        );
+    }
+}
+
 /// The caret's row is counted through the same header the panel was drawn
 /// from, so the accounting row above the composer moves the caret down with
 /// the text it moved: a caret counted from the frame's top edge instead
@@ -986,7 +1017,7 @@ fn the_caret_lands_on_the_composer_row_beneath_the_accounting_row() {
         &LayerKind::Ai(view.clone()),
         BorderSet::ASCII,
     );
-    let (row, col) = ai_caret(&view, width, height, (0, 5)).expect("the panel has cells");
+    let (row, col) = ai_caret(&view, width, height).expect("the panel has cells");
     let text = line_text(&framed.lines[usize::from(row)]);
 
     assert!(
@@ -1022,7 +1053,7 @@ fn a_panel_too_short_to_paint_the_composer_keeps_the_caret_inside_its_frame() {
         BorderSet::ASCII,
     );
     let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
-    let (row, col) = ai_caret(&view, width, height, (0, 12)).expect("the panel has cells");
+    let (row, col) = ai_caret(&view, width, height).expect("the panel has cells");
 
     assert!(
         !text.iter().any(|line| line.contains("draft prompt")),
@@ -1041,8 +1072,8 @@ fn a_panel_too_short_to_paint_the_composer_keeps_the_caret_inside_its_frame() {
 fn a_panel_with_no_cells_names_no_caret() {
     use view_core::native::views::AiPanelView;
     let view = AiPanelView::new("AI Agent").with_input("hello");
-    assert_eq!(ai_caret(&view, 0, 10, (0, 5)), None);
-    assert_eq!(ai_caret(&view, 40, 0, (0, 5)), None);
+    assert_eq!(ai_caret(&view, 0, 10), None);
+    assert_eq!(ai_caret(&view, 40, 0), None);
 }
 
 #[test]

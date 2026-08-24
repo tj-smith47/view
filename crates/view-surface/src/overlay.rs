@@ -577,9 +577,14 @@ struct HeaderFit {
 /// has to name the row this arithmetic put the composer on. Two copies of
 /// it is a caret that walks off its own text on exactly the panels short
 /// enough for the truncation to bite.
-fn header_fit(header: &[Line], rule: bool, budget: usize) -> HeaderFit {
-    let rest_len = header.len().saturating_sub(1);
-    let last = !header.is_empty() && budget >= 1;
+///
+/// Takes the header's row count rather than its rows: the count is all this
+/// reads, and [`ai_caret`] runs on every frame the user is typing on --
+/// building a header there only to measure it would clone the panel's chrome
+/// spans per keystroke.
+fn header_fit(header_len: usize, rule: bool, budget: usize) -> HeaderFit {
+    let rest_len = header_len.saturating_sub(1);
+    let last = header_len >= 1 && budget >= 1;
     let rule = rule && budget > usize::from(last);
     let slots_used = usize::from(last) + usize::from(rule);
     HeaderFit {
@@ -618,7 +623,7 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
     let budget = usize::from(height);
     if body.header_keep_tail {
-        let kept = header_fit(&body.header, body.rule, budget);
+        let kept = header_fit(body.header.len(), body.rule, budget);
         let (last, rest) = body
             .header
             .split_last()
@@ -867,11 +872,10 @@ const AI_RULE: bool = true;
 /// panel will ever answer, so it outranks a review the user can still scroll
 /// to and a request whose agent is already gone.
 ///
-/// Its own function so [`ai_caret`] can count the rows standing above the
-/// composer -- which is what decides the row the caret lands on -- without
-/// building the whole body for them. A body clones the transcript window
-/// too, and the frames that ask this question are exactly the frames the
-/// user is typing on.
+/// Its own function because [`ai_header_len`] counts exactly these groups
+/// and `ai_panel_header_len_counts_what_ai_header_builds` holds the two to
+/// each other -- a row group added here and not there is a caret one row off
+/// the text it belongs to.
 fn ai_header(view: &AiPanelView) -> Vec<Line> {
     let mut header: Vec<Line> = view.usage.iter().cloned().map(Line::Text).collect();
     header.extend(composer_lines(&view.input));
@@ -879,6 +883,30 @@ fn ai_header(view: &AiPanelView) -> Vec<Line> {
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
     header.extend(view.local_error.iter().cloned().map(Line::Text));
     header
+}
+
+/// How many rows [`ai_header`] yields, counted rather than built.
+///
+/// [`ai_caret`] runs on every frame the panel owns input, and the only thing
+/// it reads off the header is its length; assembling one there would clone
+/// every chrome span the panel is showing once per keystroke.
+///
+/// Held to [`ai_header`] by a test rather than by construction, which is the
+/// honest statement of the arrangement: the two must agree, and the test is
+/// what fails when a future row group reaches one and not the other.
+fn ai_header_len(view: &AiPanelView) -> usize {
+    view.usage
+        .len()
+        .saturating_add(composer_row_count(&view.input))
+        .saturating_add(view.review.len())
+        .saturating_add(view.pending_permission.len())
+        .saturating_add(view.local_error.len())
+}
+
+/// How many rows [`composer_lines`] paints for `rows`: its own, or the one
+/// empty prompt line it draws for a view carrying none.
+fn composer_row_count(rows: &[String]) -> usize {
+    rows.len().max(1)
 }
 
 /// The composer's rows, the prompt mark on the first and an indent of the
@@ -912,29 +940,26 @@ fn composer_lines(rows: &[String]) -> Vec<Line> {
         .collect()
 }
 
-/// Where the agent panel's composer caret lands inside the panel's own
-/// rect, given `cursor` -- the insertion point
-/// `AiPanelState::composer_cursor` resolved against that same rect, as a
-/// composer row index and a column in cells across it.
+/// Where the agent panel's caret lands inside the panel's own rect: at the
+/// composer's insertion point, or -- while a permission question is pending
+/// -- on the digit that answers it (see [`ai_caret_target`]).
 ///
-/// Resolved through the same [`ai_header`] and the same [`header_fit`]
-/// [`rows`] laid the panel out with, never against a second reading of the
-/// panel's chrome: which row the composer is painted on depends on the
-/// accounting row, the review summary, a pending question and the crash
-/// banner all being counted exactly as they were drawn.
+/// Resolved through the same [`header_fit`] [`rows`] laid the panel out
+/// with, and against the same painted view: which row the caret is on
+/// depends on the accounting row, the review summary, a pending question and
+/// the crash banner all being counted exactly as they were drawn.
 ///
 /// `None` only for a rect with no cells at all. A panel too short to have
-/// painted the composer's own row still owns the keyboard, so the caret
-/// stays inside it -- on its first interior cell, since the composer is
-/// above every row such a panel kept and no cell on screen holds the text
-/// the caret is in -- rather than falling back to the engine grid, where it
-/// would tell the user their keys are the editor's.
-pub(crate) fn ai_caret(
-    view: &AiPanelView,
-    width: u16,
-    height: u16,
-    cursor: (usize, usize),
-) -> Option<(u16, u16)> {
+/// painted the caret's own row still owns the keyboard, so the caret stays
+/// inside it -- on its first interior cell, since the row it belongs to is
+/// above every row such a panel kept -- rather than falling back to the
+/// engine grid, where it would tell the user their keys are the editor's.
+/// That is reachable, not theoretical: the panel's height is the terminal's
+/// less the tabline and the statusline rows, so a four-row pane with both on
+/// leaves the frame its two border rows and no interior at all, and its
+/// first interior cell is then the frame's own bottom edge -- a real cell, which is what `CursorSpec`
+/// requires, and inside the surface that holds the keys.
+pub(crate) fn ai_caret(view: &AiPanelView, width: u16, height: u16) -> Option<(u16, u16)> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -944,23 +969,53 @@ pub(crate) fn ai_caret(
         height - 2
     };
     let (row_off, col_off) = interior_origin(width, height);
-    let prompt_cols = u16::try_from(view_core::native::ai_panel::PROMPT_COLS).unwrap_or(2);
-    let col = u16::try_from(cursor.1)
+    let (index, cells) = ai_caret_target(view);
+    let col = u16::try_from(cells)
         .unwrap_or(u16::MAX)
         .saturating_add(col_off)
-        .saturating_add(prompt_cols)
         .min(width.saturating_sub(1));
-    let header = ai_header(view);
-    // the composer's rows follow the accounting row in the panel's own
-    // header, so the caret's row is that many rows into it
-    let index = view.usage.len().saturating_add(cursor.0);
-    let Some(row) = header_fit(&header, AI_RULE, usize::from(interior))
-        .row_of(index, header.len())
+    let header_len = ai_header_len(view);
+    let Some(row) = header_fit(header_len, AI_RULE, usize::from(interior))
+        .row_of(index, header_len)
         .and_then(|row| u16::try_from(row).ok())
     else {
         return Some((row_off, col_off));
     };
     Some((row.saturating_add(row_off), col))
+}
+
+/// Which of [`ai_header`]'s rows the caret belongs on, and how far into that
+/// row in cells.
+///
+/// Two answers, because the panel has two states that take keys. With
+/// nothing pending it is the composer's insertion point, past the prompt
+/// mark [`composer_lines`] painted.
+///
+/// While a permission question stands it is that question's own answer cell
+/// instead -- `AiPanelView::permission_answer`, which the prompt that built
+/// those rows named. The composer refuses every printable until the question
+/// is answered (`update::route_key` swallows them so the prompt cannot be
+/// typed past), so a caret left on it -- wearing the bar an editor uses to
+/// say *type here* -- would invite exactly the keystrokes the panel is about
+/// to eat. Static, like the confirm prompt's own caret
+/// ([`crate::prompt_cursor`]), because no key moves it: one press ends the
+/// question.
+fn ai_caret_target(view: &AiPanelView) -> (usize, usize) {
+    use view_core::native::ai_panel::PROMPT_COLS;
+
+    let above_composer = view.usage.len();
+    if view.pending_permission.is_empty() {
+        let (row, cells) = view.composer_cursor();
+        return (
+            above_composer.saturating_add(row),
+            PROMPT_COLS.saturating_add(cells),
+        );
+    }
+    let (row, cells) = view.permission_answer;
+    let question = above_composer
+        .saturating_add(composer_row_count(&view.input))
+        .saturating_add(view.review.len());
+    (question.saturating_add(row), cells)
 }
 
 /// One palette row: the command's name, plus its binding as a second

@@ -677,6 +677,11 @@ pub struct AiPanelView {
     /// when nothing is pending, which is what tells `view-surface`'s own
     /// `ai_body` there is nothing extra to draw above the transcript.
     pub pending_permission: Vec<Vec<Span>>,
+    /// Where the keyboard waits inside [`Self::pending_permission`], as a
+    /// `(row, column)` offset into those rows -- the first option's digit,
+    /// or the question's own head when there is no option to press. Meaning
+    /// nothing while `pending_permission` is empty.
+    pub permission_answer: (usize, usize),
     /// The panel-local crash banner's own row, when the session it belongs
     /// to has one -- see `AiPanelState::local_error`'s own doc for why this
     /// is never a transient toast. Empty when nothing crashed, on the same
@@ -731,6 +736,15 @@ impl AiPanelView {
         }
     }
 
+    /// The same panel answering its pending question at `cell`.
+    #[must_use]
+    pub fn with_permission_answer(self, cell: (usize, usize)) -> Self {
+        Self {
+            permission_answer: cell,
+            ..self
+        }
+    }
+
     /// The same panel showing `rows` as its panel-local crash banner.
     #[must_use]
     pub fn with_local_error(self, rows: Vec<Vec<Span>>) -> Self {
@@ -756,6 +770,20 @@ impl AiPanelView {
             review: rows,
             ..self
         }
+    }
+
+    /// Where the next character typed lands in the composer rows this view
+    /// carries -- see
+    /// [`composer_cursor_of`](crate::native::ai_panel::composer_cursor_of),
+    /// which is its one definition.
+    ///
+    /// Asked of the painted view rather than of the state, so the caret a
+    /// frame places and the rows that frame painted are one derivation: a
+    /// second wrap of the same input is a second chance to disagree about
+    /// which row the last character is on.
+    #[must_use]
+    pub fn composer_cursor(&self) -> (usize, usize) {
+        crate::native::ai_panel::composer_cursor_of(&self.input)
     }
 }
 

@@ -567,20 +567,32 @@ assert_caret_after() {
     pass "$what: the caret stands one cell past '$text' (row $row col $((col + ${#text})))"
 }
 
-# Fails unless the pane's caret is outside every framed box on its own row,
-# which is where nvim's grid is: the buffer keeps the caret whenever the
-# panel is not the thing keys reach.
+# Fails unless the pane's caret is visible and left of the framed box on its
+# own row, which is where nvim's grid is: the buffer keeps the caret whenever
+# the panel is not the thing keys reach.
+#
+# A row with no box edge on it cannot answer the question -- "outside the box"
+# and "the box is not here" read the same -- so that is a failure too, and the
+# caller is pointed at a row the panel actually spans.
 assert_caret_outside_a_box() {
-    local what="$1" row col edge
+    local what="$1" row col flag edge
     settle
-    read -r row col _ <<<"$(caret_cell)"
+    read -r row col flag <<<"$(caret_cell)"
+    [ "$flag" = 1 ] || {
+        fail "$what: the caret is hidden (flag '$flag'), so the user is shown no insertion point at all"
+        return 1
+    }
     edge=$(LC_ALL=C awk -F'\t' -v r="$row" \
         '$1 == r && $6 == "\342\224\202" { print $2; exit }' "$CELLS")
-    if [ -n "$edge" ] && [ "$col" -gt "$edge" ]; then
+    [ -n "$edge" ] || {
+        fail "$what: no framed box edge on row $row, so this row proves nothing about which surface holds the caret"
+        return 1
+    }
+    [ "$col" -lt "$edge" ] || {
         fail "$what: the caret is at row $row col $col, right of the box edge at col $edge, so it is parked in an overlay that does not have the keys"
         return 1
-    fi
-    pass "$what: the caret is at row $row col $col, left of every framed box on its row"
+    }
+    pass "$what: the caret is at row $row col $col, left of the framed box on its row (col $edge)"
 }
 
 assert_chrome() {
@@ -966,6 +978,25 @@ leg_entry_points() {
     done <<BARE
 $DEFAULT_VERBS
 BARE
+
+    # The picker's query is a text field like the panel's composer, so the
+    # same claim has to hold on a real terminal: keys typed into an open
+    # picker land in its query, and the caret is at that query's insertion
+    # point rather than on the buffer behind the box.
+    local picker_verb picker_marker
+    picker_verb=$(printf '%s\n' "$DEFAULT_VERBS" | awk '$1 == "picker" { print $2 }')
+    [ -n "$picker_verb" ] || {
+        fail 'no picker entry point in DEFAULT_MAPS any more, so there is no query field to check'
+        return 1
+    }
+    picker_marker=$(marker_for picker "$picker_verb") || return 1
+    mark
+    command_line ':View picker'
+    wait_in_box "$picker_marker" "$WAIT_SECS" 'the picker :View picker resolves to' >/dev/null
+    send_text QRY
+    wait_in_box 'QRY' "$REACTION_SECS" 'a keystroke in the picker query' >/dev/null
+    assert_caret_after QRY 'the picker query' || return 1
+    dismiss picker
 
     while read -r feature lhs verb; do
         key=$(tmux_key "$lhs") || return 1

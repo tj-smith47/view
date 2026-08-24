@@ -393,21 +393,6 @@ impl AiPanelState {
     /// [`Self::view`] paints as the composer, and a column across that row
     /// in cells.
     ///
-    /// The one definition of the composer's insertion point, and where
-    /// `view-surface` puts the real terminal caret while the panel owns
-    /// input: the row is always the last composer row -- the one the wrap's
-    /// tail-keeping cut can never drop -- and the column is always inside
-    /// the width that row was wrapped to.
-    #[must_use]
-    pub fn composer_cursor(&self, panel_height: usize, panel_width: usize) -> (usize, usize) {
-        let rows = self.composer_rows(panel_height, panel_width);
-        let column = rows
-            .last()
-            .map(|row| row.chars().map(char_cells).sum())
-            .unwrap_or_default();
-        (rows.len().saturating_sub(1), column)
-    }
-
     /// Moves the transcript window for one scroll key, reporting whether it
     /// moved -- which is what the caller marks the model dirty on.
     ///
@@ -571,6 +556,7 @@ impl AiPanelState {
                     rows.push(vec![Span::plain(ENTER_HINT)]);
                 }
                 view.with_pending_permission(rows)
+                    .with_permission_answer(prompt.answer_cell())
             }
             None => view,
         }
@@ -621,6 +607,32 @@ pub const PROMPT_COLS: usize = 2;
 pub fn composer_width(panel_width: usize) -> usize {
     let panel = u16::try_from(panel_width).unwrap_or(u16::MAX);
     usize::from(interior_text_width(panel)).saturating_sub(PROMPT_COLS)
+}
+
+/// Where the next character typed lands in `rows` -- already-wrapped
+/// composer rows -- as an index into them and a column across that row in
+/// cells.
+///
+/// The one definition of the composer's insertion point, and what
+/// `view-surface` places the real terminal caret at while the panel owns
+/// input. The row is always the last one (the composer only appends and
+/// backspaces, and the wrap's tail-keeping cut can never drop that row), the
+/// column is always inside the width that row was wrapped to, and empty rows
+/// answer the first cell -- the position the panel's own empty prompt line
+/// is painted at.
+///
+/// Takes the rows rather than the state so a frame can ask it of the rows it
+/// actually painted ([`crate::native::views::AiPanelView::composer_cursor`]),
+/// instead of re-wrapping the input a second time and placing a caret from a
+/// derivation the painted panel never saw. A caller holding the state asks
+/// [`AiPanelState::composer_rows`] for those rows first.
+#[must_use]
+pub fn composer_cursor_of(rows: &[String]) -> (usize, usize) {
+    let column = rows
+        .last()
+        .map(|row| row.chars().map(char_cells).sum())
+        .unwrap_or_default();
+    (rows.len().saturating_sub(1), column)
 }
 
 /// One character's width in cells, the ASCII-doubling upper bound the
@@ -1023,7 +1035,7 @@ mod tests {
             "the last row holds the tail: {rows:?}"
         );
         assert_eq!(
-            state.composer_cursor(ROOM, WIDE_PANEL),
+            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
             (3, 7),
             "the cursor is past the tail"
         );
@@ -1046,7 +1058,7 @@ mod tests {
             "a line break neither breaks the row nor is dropped from it"
         );
         assert_eq!(
-            state.composer_cursor(ROOM, WIDE_PANEL),
+            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
             (0, 5),
             "the break occupies exactly one column between the two halves"
         );
@@ -1055,9 +1067,15 @@ mod tests {
         // with the break as its last cell is still one row, and the
         // character after it opens the next
         state.input = format!("{}\n", "x".repeat(width - 1));
-        assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (0, width));
+        assert_eq!(
+            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
+            (0, width)
+        );
         state.input.push('y');
-        assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (1, 1));
+        assert_eq!(
+            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
+            (1, 1)
+        );
     }
 
     /// One paint costs what the panel can paint, never what was on the
@@ -1104,18 +1122,21 @@ mod tests {
         let mut state = AiPanelState::new();
 
         state.input = "x".repeat(width - 1);
-        assert_eq!(state.composer_cursor(ROOM, WIDE_PANEL), (0, width - 1));
+        assert_eq!(
+            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
+            (0, width - 1)
+        );
 
         state.input = "x".repeat(width);
         assert_eq!(
-            state.composer_cursor(ROOM, WIDE_PANEL),
+            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
             (0, width),
             "a row exactly full is still one row"
         );
 
         state.input = "x".repeat(width + 1);
         assert_eq!(
-            state.composer_cursor(ROOM, WIDE_PANEL),
+            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
             (1, 1),
             "the character past it opens the next row"
         );
