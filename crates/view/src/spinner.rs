@@ -105,11 +105,17 @@ mod tests {
         assert!(!model.dirty, "a frame not yet due must not repaint");
         assert_eq!(due, Some(armed), "and must not move the deadline");
 
-        let before = model.ai_panel().transcript.rows_from(Default::default(), 8);
+        let before = model
+            .ai_panel()
+            .transcript
+            .rows_from(Default::default(), 8, 60);
         expire(&mut model, &mut due, armed);
         assert!(model.dirty, "the frame that came due owes a paint");
         assert_ne!(
-            model.ai_panel().transcript.rows_from(Default::default(), 8),
+            model
+                .ai_panel()
+                .transcript
+                .rows_from(Default::default(), 8, 60),
             before,
             "and the marker it painted has moved"
         );

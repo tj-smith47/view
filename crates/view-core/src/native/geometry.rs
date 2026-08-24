@@ -36,6 +36,22 @@ pub const fn interior_text_width(width: u16) -> u16 {
     width - 2 - pad
 }
 
+/// The columns a framed overlay's item rows spend on their own selection
+/// marker before whatever the feature painted into the row.
+///
+/// Every item row `view-surface` lays out opens with one -- `"> "` on the
+/// selected row, a blank of the same width on the rest -- so the cells a
+/// feature's own row content actually gets are [`interior_text_width`] less
+/// these. A feature that wraps its rows itself (the AI panel's transcript)
+/// breaks at that narrower width; header rows carry no marker and break at
+/// the full interior.
+///
+/// Lives here for the same reason [`interior_text_width`] does: the framing
+/// paints it and a feature wraps against it, and a second copy of the number
+/// is how a row comes to be wrapped two cells wider than the frame will
+/// paint -- which loses the last two characters of every wrapped row.
+pub const LIST_MARKER_COLS: u16 = 2;
+
 /// Which terminal edge an overlay is pinned to when it is smaller than the
 /// terminal. The axis an anchor says nothing about stays centered, so a
 /// left-anchored sidebar is flush left and vertically centered.

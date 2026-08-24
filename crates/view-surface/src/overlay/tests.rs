@@ -705,6 +705,46 @@ fn a_painted_ai_panel_wraps_a_long_prompt_and_keeps_its_tail() {
     }
 }
 
+/// The transcript half of that same complaint: a prompt longer than the
+/// panel is wide reads back whole after it is sent, not as one row cut at
+/// the frame's edge.
+///
+/// Painted across a range of widths for the reason the composer's twin
+/// above is, and this is the layer that has to assert it: the transcript is
+/// laid out as the frame's *item* rows, which open with a selection marker
+/// the wrap has to leave room for ([`LIST_MARKER_COLS`]), and a wrap that
+/// counted the whole interior lost the last two characters of every row
+/// with nothing in `view-core`'s own tests able to see it.
+#[test]
+fn a_painted_ai_panel_wraps_a_submitted_prompt_and_keeps_every_character() {
+    use view_core::native::ai_panel::AiPanelState;
+    for width in [20_u16, 40, 60, 120] {
+        let sent: String = (0..usize::from(width) * 3)
+            .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
+            .collect();
+        let mut state = AiPanelState::new();
+        state.transcript.echo_user_prompt(&sent);
+
+        let kind = LayerKind::Ai(state.view(24, usize::from(width)));
+        let text: Vec<String> = rows(width, 24, &kind, BorderSet::ASCII)
+            .lines
+            .iter()
+            .map(|line| line_text(line))
+            .collect();
+
+        // the top edge carries the title, whose own letters are not sent
+        let painted: String = text
+            .iter()
+            .skip(1)
+            .flat_map(|line| line.chars().filter(char::is_ascii_lowercase))
+            .collect();
+        assert_eq!(
+            painted, sent,
+            "a {width}-wide panel painted every character sent: {text:?}"
+        );
+    }
+}
+
 /// The prompt mark this module paints and the columns `view-core` wraps the
 /// composer to are the same two cells. They are named in different crates
 /// (the wrap needs the number, the paint needs the glyph), and a pair that

@@ -19,6 +19,7 @@
 
 use unicode_width::UnicodeWidthChar;
 use view_core::model::Tier;
+use view_core::native::geometry::LIST_MARKER_COLS;
 use view_core::native::views::{
     AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView,
     StyleRole, TreeRow, TreeView,
@@ -230,6 +231,18 @@ pub(crate) fn interior_origin(width: u16, height: u16) -> (u16, u16) {
 /// the single results column it had before a preview existed rather than
 /// painting an illegible pane.
 const MIN_PREVIEW_SPLIT_WIDTH: u16 = 20;
+
+/// The marker opening the selected item row, and the blank of the same
+/// width every other item row opens with, so a list's content starts at one
+/// column whether or not the row is the selected one.
+///
+/// Their width is [`LIST_MARKER_COLS`], which is what a feature wrapping its
+/// own rows breaks at -- welded by the assertions below rather than left as
+/// two literals a later edit could widen without the wrap hearing about it.
+const SELECTED_MARK: &str = "> ";
+const UNSELECTED_MARK: &str = "  ";
+const _: () = assert!(SELECTED_MARK.len() == LIST_MARKER_COLS as usize);
+const _: () = assert!(UNSELECTED_MARK.len() == LIST_MARKER_COLS as usize);
 
 /// Cuts `kind`'s interior into exactly `height` rows of exactly `width`
 /// cells, the same total [`rows`] guarantees for its own caller: a picker
@@ -658,9 +671,9 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     };
     for (offset, item) in body.items.iter().skip(first).take(item_rows).enumerate() {
         let marker = if selected == Some(first + offset) {
-            "> "
+            SELECTED_MARK
         } else {
-            "  "
+            UNSELECTED_MARK
         };
         lines.push(fit(&marked(item, marker), width, borders));
     }

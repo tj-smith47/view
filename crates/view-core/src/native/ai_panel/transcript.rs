@@ -3,10 +3,11 @@
 //! growing one row per wire chunk, and the per-entry render cache that
 //! keeps a paint proportional to what changed since the last one.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use super::wrap;
 use crate::native::ai_event::{PlanEntry, PlanEntryStatus, ToolCallStatus};
 use crate::native::views::{Span, StyleRole};
 
@@ -37,6 +38,21 @@ const TOOL_FAILED_MARK: &str = "\u{2717} ";
 /// the one state a task can be in that a tool call cannot: under way, but
 /// not a call this panel is animating a spinner for.
 const PLAN_ACTIVE_MARK: &str = "\u{25b8} ";
+
+/// The indent standing under an entry's marker on every row that entry
+/// wrapped onto, so a wrapped entry reads as one item rather than as a new
+/// one per row -- the convention a wrapped composer prompt already follows
+/// (`view-surface`'s `composer_lines`, indenting by `super::PROMPT_COLS`).
+///
+/// It is also the lead a tool call's result lines carry, which is why it is
+/// the indent and not a second copy of the marker: a continuation row that
+/// repeated the glyph would read as another entry.
+const MARK_INDENT: &str = "  ";
+
+/// The columns [`MARK_INDENT`] and every marker above it take. Each marker
+/// is one glyph and the space after it, and every glyph among them is one
+/// display cell wide, so the two agree by construction.
+const MARK_COLS: usize = MARK_INDENT.len();
 
 /// The braille cycle a running tool call's marker animates through.
 const SPINNER_FRAMES: [&str; 8] = [
@@ -207,6 +223,14 @@ pub struct Transcript {
     message_index: HashMap<String, usize>,
     plan_index: Option<usize>,
     row_cache: RefCell<Vec<Option<Vec<Vec<Span>>>>>,
+    /// The row width every slot in `row_cache` was wrapped to. A panel that
+    /// changed width breaks its rows in a different column, so a slot
+    /// cached at the old one holds text at the wrong place and a row count
+    /// no anchor arithmetic should be done against; `reflow` drops the lot
+    /// on the first read at a new width. One width for the whole cache
+    /// rather than one per slot: every entry is wrapped to the same panel,
+    /// so a mismatch is never partial.
+    cache_width: Cell<usize>,
     /// The prompt this panel echoed locally that a replaying adapter may
     /// still restate over the wire (see [`Transcript::echo_user_prompt`]).
     echo: Option<LocalEcho>,
@@ -316,17 +340,28 @@ impl Transcript {
     /// length -- and starting at an anchor rather than at row zero is what
     /// keeps that true for a panel showing the newest rows, which is every
     /// panel that has not been scrolled.
+    ///
+    /// `width` is the cells one row has (`super::transcript_width`), which
+    /// every entry is wrapped to -- so how many rows an entry is depends on
+    /// the panel, and the anchor arithmetic below has to be asked at the
+    /// same width the paint will use.
     #[must_use]
-    pub fn rows_from(&self, anchor: TranscriptAnchor, budget: usize) -> Vec<Vec<Span>> {
+    pub fn rows_from(
+        &self,
+        anchor: TranscriptAnchor,
+        budget: usize,
+        width: usize,
+    ) -> Vec<Vec<Span>> {
         let mut cache = self.row_cache.borrow_mut();
+        self.reflow(&mut cache, width);
         let mut rows = Vec::new();
         let mut skip = anchor.row;
         for i in anchor.entry..self.entries.len() {
             if rows.len() >= budget {
                 break;
             }
-            let entry_rows =
-                cache[i].get_or_insert_with(|| render_entry(&self.entries[i], self.frame_at(i)));
+            let entry_rows = cache[i]
+                .get_or_insert_with(|| render_entry(&self.entries[i], self.frame_at(i), width));
             rows.extend(entry_rows.iter().skip(skip).cloned());
             skip = 0;
         }
@@ -334,18 +369,66 @@ impl Transcript {
         rows
     }
 
+    /// Empties every cache slot when `width` is not the width they hold rows
+    /// for, so a resized panel renders its entries again at the column it
+    /// now breaks at instead of painting yesterday's wrap.
+    fn reflow(&self, cache: &mut [Option<Vec<Vec<Span>>>], width: usize) {
+        if self.cache_width.get() == width {
+            return;
+        }
+        self.cache_width.set(width);
+        for slot in cache.iter_mut() {
+            *slot = None;
+        }
+    }
+
+    /// `anchor` with its row brought back inside its entry at `width`.
+    ///
+    /// An anchor holds a row count, and how many rows an entry is depends on
+    /// the width it wrapped to -- so a window held across a resize can name
+    /// a row its own entry no longer has, which is the one way an anchor
+    /// comes to break the invariant [`TranscriptAnchor`] documents. It is
+    /// clamped onto that entry rather than spilled forward onto whatever
+    /// entry the old count now reaches: the reader was reading *this*
+    /// entry, and a resize is not a scroll.
+    ///
+    /// An anchor past the last entry is left alone -- that is the one
+    /// anchor the invariant admits.
+    #[must_use]
+    pub fn normalized(&self, anchor: TranscriptAnchor, width: usize) -> TranscriptAnchor {
+        let mut cache = self.row_cache.borrow_mut();
+        self.reflow(&mut cache, width);
+        let Some(slot) = cache.get_mut(anchor.entry) else {
+            return anchor;
+        };
+        let rows = slot
+            .get_or_insert_with(|| {
+                render_entry(
+                    &self.entries[anchor.entry],
+                    self.frame_at(anchor.entry),
+                    width,
+                )
+            })
+            .len();
+        TranscriptAnchor {
+            entry: anchor.entry,
+            row: anchor.row.min(rows.saturating_sub(1)),
+        }
+    }
+
     /// The anchor a window `viewport` rows tall starts at when its last row
     /// is the transcript's newest -- what a panel following the tail paints
     /// from, recomputed per frame so that a chunk streaming in moves the
     /// window rather than scrolling out from under it.
     #[must_use]
-    pub fn tail_anchor(&self, viewport: usize) -> TranscriptAnchor {
+    pub fn tail_anchor(&self, viewport: usize, width: usize) -> TranscriptAnchor {
         self.scrolled_back(
             TranscriptAnchor {
                 entry: self.entries.len(),
                 row: 0,
             },
             viewport,
+            width,
         )
     }
 
@@ -356,8 +439,14 @@ impl Transcript {
     /// the cost is the distance asked for, not the session's length, so a
     /// keypress in an hours-long session costs a screenful of work.
     #[must_use]
-    pub fn scrolled_back(&self, anchor: TranscriptAnchor, rows: usize) -> TranscriptAnchor {
+    pub fn scrolled_back(
+        &self,
+        anchor: TranscriptAnchor,
+        rows: usize,
+        width: usize,
+    ) -> TranscriptAnchor {
         let mut cache = self.row_cache.borrow_mut();
+        self.reflow(&mut cache, width);
         let mut left = rows;
         let mut entry = anchor.entry.min(self.entries.len());
         let mut row = anchor.row;
@@ -374,7 +463,9 @@ impl Transcript {
             }
             entry -= 1;
             row = cache[entry]
-                .get_or_insert_with(|| render_entry(&self.entries[entry], self.frame_at(entry)))
+                .get_or_insert_with(|| {
+                    render_entry(&self.entries[entry], self.frame_at(entry), width)
+                })
                 .len();
         }
         TranscriptAnchor { entry, row }
@@ -385,14 +476,22 @@ impl Transcript {
     /// compared against to tell a window that has caught up with the tail
     /// from one still held behind it.
     #[must_use]
-    pub fn scrolled_forward(&self, anchor: TranscriptAnchor, rows: usize) -> TranscriptAnchor {
+    pub fn scrolled_forward(
+        &self,
+        anchor: TranscriptAnchor,
+        rows: usize,
+        width: usize,
+    ) -> TranscriptAnchor {
         let mut cache = self.row_cache.borrow_mut();
+        self.reflow(&mut cache, width);
         let mut left = rows;
         let mut entry = anchor.entry;
         let mut row = anchor.row;
         while left > 0 && entry < self.entries.len() {
             let below = cache[entry]
-                .get_or_insert_with(|| render_entry(&self.entries[entry], self.frame_at(entry)))
+                .get_or_insert_with(|| {
+                    render_entry(&self.entries[entry], self.frame_at(entry), width)
+                })
                 .len()
                 .saturating_sub(row);
             if below > left {
@@ -694,21 +793,23 @@ thread_local! {
     static RENDER_ENTRY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// One transcript entry's rendered rows: a single line for a message, a
-/// title line plus one line per result item for a tool call, or one line
-/// per task for a plan. `spinner` is the frame this entry's marker is
+/// One transcript entry's rendered rows, wrapped to a `width`-cell row: a
+/// message's text, a tool call's title followed by its result lines, or one
+/// task per plan entry -- each of them as many rows as its own text and the
+/// panel's width work out to. `spinner` is the frame this entry's marker is
 /// currently on ([`Transcript::advance_spinner`]), or `None` for an entry
 /// that is not animating -- including a call the wire left unresolved,
 /// whose marker holds still rather than claiming work nobody is doing.
 ///
-/// Every row opens with a marker glyph in its own span, and the row's
+/// Every entry opens with a marker glyph in its own span, and the row's
 /// meaning is carried by color and that glyph rather than by a word: a
 /// panel that spells out who is speaking spends the start of every line
 /// restating what a reader learns once, and the transcript is the one
 /// surface here where the content is the point.
-fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span>> {
+fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>, width: usize) -> Vec<Vec<Span>> {
     #[cfg(test)]
     RENDER_ENTRY_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let mut paint = EntryRows::new(width);
     match &entry.kind {
         TranscriptEntryKind::Message { role, .. } => {
             let (mark, style) = match role {
@@ -717,10 +818,7 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span
                 TranscriptRole::Thought => (THOUGHT_MARK, StyleRole::AiThought),
                 TranscriptRole::Notice => (NOTICE_MARK, StyleRole::AiNotice),
             };
-            vec![vec![
-                Span::new(mark, style),
-                Span::new(paintable(&entry.text), style),
-            ]]
+            paint.add(Span::new(mark, style), Some(style), &entry.text);
         }
         TranscriptEntryKind::ToolCall { status, result, .. } => {
             let (mark, style) = match status {
@@ -734,54 +832,139 @@ fn render_entry(entry: &TranscriptEntry, spinner: Option<usize>) -> Vec<Vec<Span
                 ToolCallStatus::Completed => (TOOL_DONE_MARK, StyleRole::AiToolDone),
                 ToolCallStatus::Failed => (TOOL_FAILED_MARK, StyleRole::AiToolFailed),
             };
-            let mut rows = vec![vec![
-                Span::new(mark, style),
-                Span::plain(paintable(&entry.text)),
-            ]];
-            rows.extend(
-                result
-                    .iter()
-                    .map(|line| vec![Span::plain(format!("  {}", paintable(line)))]),
-            );
-            rows
+            paint.add(Span::new(mark, style), None, &entry.text);
+            for line in result {
+                paint.add(Span::plain(MARK_INDENT), None, line);
+            }
         }
-        TranscriptEntryKind::Review => vec![vec![
+        TranscriptEntryKind::Review => paint.add(
             Span::new(REVIEW_MARK, StyleRole::AiNotice),
-            Span::new(paintable(&entry.text), StyleRole::AiNotice),
-        ]],
-        TranscriptEntryKind::Plan { entries } => entries
-            .iter()
-            .map(|e| {
+            Some(StyleRole::AiNotice),
+            &entry.text,
+        ),
+        TranscriptEntryKind::Plan { entries } => {
+            for e in entries {
                 let (mark, style) = match e.status {
                     PlanEntryStatus::Pending => (TOOL_PENDING_MARK, StyleRole::AiToolRunning),
                     PlanEntryStatus::InProgress => (PLAN_ACTIVE_MARK, StyleRole::AiAgent),
                     PlanEntryStatus::Completed => (TOOL_DONE_MARK, StyleRole::AiToolDone),
                 };
-                vec![Span::new(mark, style), Span::plain(paintable(&e.content))]
-            })
-            .collect(),
+                paint.add(Span::new(mark, style), None, &e.content);
+            }
+        }
+    }
+    paint.finish()
+}
+
+/// One entry's rows as they are built, and what is left of the entry's own
+/// [`ROW_PAINT_CEILING`] byte budget.
+///
+/// The budget spans the whole entry rather than each piece of text in it,
+/// because the entry is what the cache holds and what an anchor counts rows
+/// of: a tool call answering with ten thousand result lines is one entry,
+/// and a per-line cut would leave it painting ten thousand rows.
+struct EntryRows {
+    rows: Vec<Vec<Span>>,
+    /// Bytes of text the entry may still render.
+    left: usize,
+    /// Cells one row has for text after its marker.
+    body: usize,
+    /// Whether the ceiling has already cut this entry short, which stops
+    /// every later piece of it and is what [`Self::finish`] closes the
+    /// entry with a notice for.
+    cut: bool,
+}
+
+impl EntryRows {
+    fn new(width: usize) -> Self {
+        Self {
+            rows: Vec::new(),
+            left: ROW_PAINT_CEILING,
+            // A panel too narrow for even one cell of text would otherwise
+            // open a row per character; the floor spends a column the frame
+            // clips anyway rather than the entry's whole row budget.
+            body: width.saturating_sub(MARK_COLS).max(1),
+            cut: false,
+        }
+    }
+
+    /// Adds `text` under `mark`, breaking it at its own newlines and then at
+    /// the row's width, with [`MARK_INDENT`] standing under `mark` on every
+    /// row after the first.
+    ///
+    /// Wrapped rather than clipped, and through
+    /// [`super::wrap`](super::wrap) rather than a second measure of its
+    /// own: a prompt is composed against that wrap, so anything else here
+    /// would reflow the user's own text the moment they sent it. Trailing
+    /// newlines come off because an entry is a log line and not a terminal
+    /// -- an agent ending its reply with one owes no blank row -- while
+    /// newlines inside it are the shape the writer gave the text and are
+    /// kept, blank lines and all.
+    fn add(&mut self, mark: Span, body_style: Option<StyleRole>, text: &str) {
+        if self.cut {
+            return;
+        }
+        let capped = cut_to(text, self.left);
+        self.left -= capped.len();
+        self.cut = capped.len() < text.len();
+        // Nothing of this piece survived the cut, so it gets no marker row
+        // of its own -- an entry ends on its last readable row and then the
+        // notice, not on an empty marker.
+        if capped.is_empty() && !text.is_empty() {
+            return;
+        }
+        let opened = self.rows.len();
+        for line in capped.trim_end_matches(['\n', '\r']).split('\n') {
+            // `usize::MAX` keeps every row: the wrap's tail-keeping cut
+            // exists for a composer whose newest row is the interesting
+            // one, and a log read oldest first wants the opposite end.
+            for row in wrap(line.trim_end_matches('\r'), self.body, usize::MAX) {
+                let lead = if self.rows.len() == opened {
+                    mark.clone()
+                } else {
+                    Span::plain(MARK_INDENT)
+                };
+                let body = match body_style {
+                    Some(role) => Span::new(row, role),
+                    None => Span::plain(row),
+                };
+                self.rows.push(vec![lead, body]);
+            }
+        }
+    }
+
+    /// The entry's rows, closed with [`ENTRY_CUT`] when the ceiling stopped
+    /// it short.
+    fn finish(mut self) -> Vec<Vec<Span>> {
+        if self.cut {
+            self.rows.push(vec![Span::plain(ENTRY_CUT)]);
+        }
+        self.rows
     }
 }
 
-/// The most of one line a rendered row carries, in bytes, cut at a char
+/// The row closing an entry the ceiling cut, so an entry that stops
+/// mid-sentence reads as cut rather than as all there was.
+const ENTRY_CUT: &str = "-- cut here, the rest of this entry is too long to paint --";
+
+/// The most of one entry's text that renders, in bytes, cut at a char
 /// boundary.
 ///
-/// A transcript row is never wrapped and never scrolled sideways: the
-/// overlay clips it to the panel's width, so anything past a terminal's
-/// widest row can never be seen. Carrying it anyway is not free -- every
-/// cached row is cloned out of the cache on each frame, so one submitted
-/// megabyte (a paste into the composer is the easy way to make one) costs a
-/// megabyte of memcpy per paint. The ceiling is bytes rather than cells
-/// because it exists to bound copying; at four bytes per char it still
-/// leaves two thousand columns, wider than a terminal is.
+/// An entry is wrapped, so every byte it holds does reach a row and the
+/// ceiling is what stops one entry becoming a session's worth of them: a
+/// submitted megabyte (a paste into the composer is the easy way to make
+/// one) would otherwise be tens of thousands of rendered rows, rebuilt
+/// whole every time a chunk folds into that entry. Bytes rather than rows
+/// because it also bounds the wrap's own walk, and one byte is at most one
+/// row -- so this ceiling is a row ceiling too.
 const ROW_PAINT_CEILING: usize = 8 << 10;
 
-/// `text` cut to [`ROW_PAINT_CEILING`] at a char boundary.
-fn paintable(text: &str) -> &str {
-    if text.len() <= ROW_PAINT_CEILING {
+/// `text` cut to `max` bytes at a char boundary.
+fn cut_to(text: &str, max: usize) -> &str {
+    if text.len() <= max {
         return text;
     }
-    let mut end = ROW_PAINT_CEILING;
+    let mut end = max;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -799,21 +982,204 @@ mod tests {
     /// whose subject is what renders rather than how much of it does.
     const ROOM: usize = 1_000;
 
-    /// A submitted paste puts a line longer than any terminal in the
-    /// transcript, and that row is cloned out of the cache on every frame:
-    /// what it carries stops at what a row could ever paint, on a char
-    /// boundary, and the cut is a suffix rather than a reflow.
+    /// A row wide enough that none of the short lines these tests write
+    /// wrap, so a test naming the rows it expects gets one per line. The
+    /// wrap itself is the subject of the tests that name their own width.
+    const WIDE: usize = 60;
+
+    /// Every body span of `rows` run back together -- the text an entry
+    /// painted, with its markers and indents taken back off.
+    fn body(rows: &[Vec<Span>]) -> String {
+        rows.iter()
+            .filter_map(|row| row.get(1))
+            .map(|span| span.text.as_str())
+            .collect()
+    }
+
+    /// A submitted paste puts more text in one entry than a panel could
+    /// ever paint, and every row of it is cloned out of the cache on each
+    /// frame: what the entry carries stops at the ceiling, on a char
+    /// boundary, and the cut is a suffix -- the opening of what was pasted,
+    /// which is where a reader starts.
     #[test]
-    fn a_line_longer_than_any_terminal_carries_only_what_a_row_could_paint() {
+    fn a_paste_longer_than_the_ceiling_carries_only_what_the_ceiling_allows() {
         let mut transcript = Transcript::new();
         let pasted = "\u{2026}".repeat(ROW_PAINT_CEILING);
         transcript.append_or_extend(None, &pasted, TranscriptRole::User);
 
-        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM);
-        let painted = &rows[0][1].text;
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+        let painted = body(&rows[..rows.len() - 1]);
 
         assert_eq!(painted.len(), 8_190, "cut back to the char boundary");
         assert!(pasted.starts_with(painted.as_str()));
+        assert_eq!(
+            rows.last().map(|row| row[0].text.as_str()),
+            Some(ENTRY_CUT),
+            "an entry that stops mid-paste must say so, or it reads as all \
+             there was"
+        );
+    }
+
+    /// The ceiling is the whole entry's, not each piece of text in it: a
+    /// tool call answering with more result lines than a session could read
+    /// is one entry, and an anchor counts its rows.
+    #[test]
+    fn a_tool_call_answering_with_a_file_stops_at_the_entrys_own_ceiling() {
+        let mut transcript = Transcript::new();
+        transcript.upsert_tool_call(
+            "t1".to_string(),
+            "cat".to_string(),
+            ToolCallStatus::Completed,
+            Some((0..10_000).map(|i| format!("line {i}")).collect()),
+        );
+
+        let rows = transcript.rows_from(TranscriptAnchor::default(), usize::MAX, WIDE);
+
+        assert!(
+            rows.len() <= ROW_PAINT_CEILING,
+            "one entry painted {} rows",
+            rows.len()
+        );
+        assert_eq!(rows.last().map(|row| row[0].text.as_str()), Some(ENTRY_CUT));
+    }
+
+    /// The budget running out exactly on a result line's last byte is still
+    /// a cut: the line after it has nowhere to go, and an entry that closed
+    /// on an empty marker row instead would show a line it never painted.
+    #[test]
+    fn a_result_line_that_lands_exactly_on_the_ceiling_still_reads_as_cut() {
+        let mut transcript = Transcript::new();
+        transcript.upsert_tool_call(
+            "t1".to_string(),
+            "x".to_string(),
+            ToolCallStatus::Completed,
+            Some(vec![
+                "a".repeat(ROW_PAINT_CEILING - 1),
+                "dropped".to_string(),
+            ]),
+        );
+
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
+
+        assert_eq!(rows.last().map(|row| row[0].text.as_str()), Some(ENTRY_CUT));
+        assert!(
+            !body(&rows).contains("dropped"),
+            "the line past the ceiling is not painted"
+        );
+        assert!(
+            rows[rows.len() - 2][1].text.starts_with('a'),
+            "the cut closes the last row that had text, not an empty marker: \
+             {:?}",
+            rows[rows.len() - 2]
+        );
+    }
+
+    /// The reproduced complaint: a prompt written over several lines came
+    /// back as one row with its newlines flattened to spaces and everything
+    /// past the panel's width gone. It keeps its own shape instead --
+    /// blank lines and all, since a blank line between paragraphs is text
+    /// the writer wrote.
+    #[test]
+    fn a_multi_line_prompt_keeps_its_own_lines() {
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt("fix the parser\n\n- it drops tabs\n- and CRs\n");
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec![
+                "\u{276f} fix the parser",
+                "  ",
+                "  - it drops tabs",
+                "  - and CRs",
+            ],
+            "the trailing newline owes no row of its own, the blank line \
+             between the paragraphs does"
+        );
+    }
+
+    /// A line past the row's width wraps rather than being clipped, and the
+    /// rows it wraps onto stand under the marker's own indent -- one entry,
+    /// not a new one per row.
+    #[test]
+    fn a_line_past_the_rows_width_wraps_under_the_marker() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(None, "abcdefghijklmnopqrstuvwxyz", TranscriptRole::Agent);
+
+        // 12 = MARK_COLS plus the ten cells a body row is left with
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, 12)),
+            vec!["\u{25cf} abcdefghij", "  klmnopqrst", "  uvwxyz"],
+            "the break is the composer's own cell wrap, not a word wrap"
+        );
+    }
+
+    /// A panel resized mid-session re-wraps what is already on screen: rows
+    /// cached at the old width break in a column the frame no longer has.
+    #[test]
+    fn a_narrowed_panel_rewraps_the_rows_it_already_rendered() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(None, "abcdefghijkl", TranscriptRole::Agent);
+
+        assert_eq!(
+            transcript
+                .rows_from(TranscriptAnchor::default(), ROOM, WIDE)
+                .len(),
+            1
+        );
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, 8)),
+            vec!["\u{25cf} abcdef", "  ghijkl"],
+            "a cached row is text at a column the narrowed panel no longer \
+             paints"
+        );
+    }
+
+    /// An anchor taken while the panel was narrow holds a row count its own
+    /// entry no longer has once the panel is widened. It is clamped back
+    /// onto that entry, so the window still opens on the entry the reader
+    /// was reading -- an anchor naming a row nothing renders would drop the
+    /// entry from the window instead.
+    #[test]
+    fn an_anchor_held_across_a_resize_is_clamped_onto_its_own_entry() {
+        let mut transcript = Transcript::new();
+        for i in 0..4 {
+            transcript.append_or_extend(
+                Some(&format!("m{i}")),
+                "abcdefghijkl",
+                TranscriptRole::Agent,
+            );
+        }
+        // 8 cells a row leaves 6 for text, so each entry is two rows there
+        // and one at WIDE
+        let narrow = TranscriptAnchor { entry: 2, row: 1 };
+        assert_eq!(transcript.normalized(narrow, 8), narrow, "already inside");
+
+        assert_eq!(
+            transcript.normalized(narrow, WIDE),
+            TranscriptAnchor { entry: 2, row: 0 },
+            "the reader stays on the entry they were reading, at its first \
+             row -- a resize is not a scroll"
+        );
+        assert_eq!(
+            transcript.normalized(TranscriptAnchor { entry: 4, row: 0 }, WIDE),
+            TranscriptAnchor { entry: 4, row: 0 },
+            "the one anchor past the last entry is the invariant's own \
+             exception and is left alone"
+        );
+    }
+
+    /// A carriage return at a line's end is the writer's line ending, not a
+    /// cell of its own: left in, the frame paints it as a trailing space and
+    /// the row measures one cell wider than the text it shows.
+    #[test]
+    fn a_crlf_line_ending_costs_no_cell_of_its_own() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(None, "first\r\nsecond\r\n", TranscriptRole::User);
+
+        assert_eq!(
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
+            vec!["\u{276f} first", "  second"]
+        );
     }
 
     /// One agent reply's rendered row, marker span and all.
@@ -831,7 +1197,7 @@ mod tests {
         transcript.append_or_extend(Some("m1"), "the answer", TranscriptRole::Agent);
 
         assert_eq!(
-            transcript.rows_from(TranscriptAnchor::default(), ROOM),
+            transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE),
             vec![
                 vec![
                     Span::new(THOUGHT_MARK, StyleRole::AiThought),
@@ -1041,7 +1407,7 @@ mod tests {
         );
         assert_eq!(
             transcript
-                .rows_from(TranscriptAnchor::default(), ROOM)
+                .rows_from(TranscriptAnchor::default(), ROOM, WIDE)
                 .len(),
             2,
             "the title/status row plus the one result row must both still \
@@ -1122,7 +1488,7 @@ mod tests {
     #[test]
     fn the_tail_window_ends_on_the_newest_row() {
         let transcript = long_transcript(50);
-        let rows = transcript.rows_from(transcript.tail_anchor(5), 5);
+        let rows = transcript.rows_from(transcript.tail_anchor(5, WIDE), 5, WIDE);
 
         assert_eq!(
             texts(&rows),
@@ -1150,7 +1516,7 @@ mod tests {
             Some((0..9).map(|i| format!("hit {i}")).collect()),
         );
 
-        let rows = transcript.rows_from(transcript.tail_anchor(3), 3);
+        let rows = transcript.rows_from(transcript.tail_anchor(3, WIDE), 3, WIDE);
 
         assert_eq!(texts(&rows), vec!["  hit 6", "  hit 7", "  hit 8"]);
     }
@@ -1162,11 +1528,14 @@ mod tests {
     #[test]
     fn scrolling_back_then_forward_returns_to_the_same_row() {
         let transcript = long_transcript(50);
-        let tail = transcript.tail_anchor(10);
+        let tail = transcript.tail_anchor(10, WIDE);
 
-        let back = transcript.scrolled_back(tail, 17);
-        assert_eq!(texts(&transcript.rows_from(back, 1)), vec!["● line 23"]);
-        assert_eq!(transcript.scrolled_forward(back, 17), tail);
+        let back = transcript.scrolled_back(tail, 17, WIDE);
+        assert_eq!(
+            texts(&transcript.rows_from(back, 1, WIDE)),
+            vec!["● line 23"]
+        );
+        assert_eq!(transcript.scrolled_forward(back, 17, WIDE), tail);
     }
 
     /// Neither walk runs off its end: a page up from the first row and a
@@ -1177,13 +1546,13 @@ mod tests {
         let transcript = long_transcript(4);
         let start = TranscriptAnchor::default();
 
-        assert_eq!(transcript.scrolled_back(start, 1_000), start);
+        assert_eq!(transcript.scrolled_back(start, 1_000, WIDE), start);
         assert_eq!(
-            transcript.scrolled_forward(start, 1_000),
+            transcript.scrolled_forward(start, 1_000, WIDE),
             TranscriptAnchor { entry: 4, row: 0 }
         );
         assert_eq!(
-            transcript.tail_anchor(1_000),
+            transcript.tail_anchor(1_000, WIDE),
             start,
             "a transcript shorter than the window starts at its first row"
         );
@@ -1198,7 +1567,7 @@ mod tests {
 
         reset_render_entry_calls();
         let window = 20;
-        let rows = transcript.rows_from(transcript.tail_anchor(window), window);
+        let rows = transcript.rows_from(transcript.tail_anchor(window, WIDE), window, WIDE);
 
         assert_eq!(rows.len(), window);
         assert!(
@@ -1230,7 +1599,7 @@ mod tests {
         transcript.append_or_extend(Some("m2"), "two", TranscriptRole::Agent);
 
         reset_render_entry_calls();
-        let first_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let first_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
         assert_eq!(first_pass.len(), 2);
         assert_eq!(
             render_entry_calls(),
@@ -1239,7 +1608,7 @@ mod tests {
         );
 
         reset_render_entry_calls();
-        let repeat_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let repeat_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
         assert_eq!(repeat_pass, first_pass);
         assert_eq!(
             render_entry_calls(),
@@ -1250,7 +1619,7 @@ mod tests {
 
         transcript.append_or_extend(Some("m2"), " more", TranscriptRole::Agent);
         reset_render_entry_calls();
-        let second_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let second_pass = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
         assert_eq!(
             second_pass[0], first_pass[0],
             "the untouched entry's cached row must be reused byte for byte"
@@ -1280,7 +1649,7 @@ mod tests {
 
         reset_render_entry_calls();
         let window = 20;
-        let rows = transcript.rows_from(TranscriptAnchor::default(), window);
+        let rows = transcript.rows_from(TranscriptAnchor::default(), window, WIDE);
 
         assert_eq!(
             rows.len(),
@@ -1313,7 +1682,7 @@ mod tests {
 
         assert_eq!(transcript.len(), 1, "one prompt, said once");
         assert_eq!(
-            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec!["\u{276f} fix the retry policy"]
         );
     }
@@ -1332,7 +1701,7 @@ mod tests {
 
         assert_eq!(transcript.len(), 2);
         assert_eq!(
-            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec![
                 "\u{276f} fix the retry policy",
                 "\u{276f} <context: 3 files>"
@@ -1355,7 +1724,7 @@ mod tests {
         transcript.append_user_chunk(Some("wire-2"), "retry policy");
 
         assert_eq!(
-            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec![
                 "\u{276f} fix the retry policy",
                 "\u{276f} <ctx>retry policy"
@@ -1376,7 +1745,7 @@ mod tests {
         transcript.append_user_chunk(Some("wire-2"), "fix the retry policy");
 
         assert_eq!(
-            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec!["\u{276f} fix the retry policy", "\u{276f} <ctx>"],
             "the replay is still recognised as the prompt already on screen"
         );
@@ -1406,7 +1775,7 @@ mod tests {
             },
         ]);
 
-        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
         assert_eq!(
             rows,
             vec![
@@ -1458,7 +1827,7 @@ mod tests {
 
         assert_eq!(transcript.len(), 2);
         assert_eq!(
-            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM)),
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE)),
             vec!["\u{276f} first", "\u{276f} second"]
         );
     }
@@ -1479,11 +1848,11 @@ mod tests {
             ToolCallStatus::InProgress,
             None,
         );
-        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
 
         reset_render_entry_calls();
         transcript.advance_spinner();
-        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let _ = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
 
         assert_eq!(
             render_entry_calls(),
@@ -1526,7 +1895,7 @@ mod tests {
             None,
         );
         transcript.end_turn();
-        let settled = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let settled = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
         assert_eq!(
             texts(&settled),
             vec!["\u{b7} Run tests"],
@@ -1542,7 +1911,7 @@ mod tests {
         transcript.advance_spinner();
         transcript.advance_spinner();
 
-        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let rows = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
         assert_eq!(
             rows[0], settled[0],
             "the abandoned call's row must not have moved"
@@ -1577,10 +1946,10 @@ mod tests {
         );
 
         assert!(transcript.is_spinning());
-        let before = transcript.rows_from(TranscriptAnchor::default(), ROOM);
+        let before = transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE);
         transcript.advance_spinner();
         assert_ne!(
-            transcript.rows_from(TranscriptAnchor::default(), ROOM),
+            transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE),
             before
         );
     }

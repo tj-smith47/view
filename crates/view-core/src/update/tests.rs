@@ -4037,8 +4037,16 @@ fn scrollable_ai_panel_model(lines: usize) -> Model {
 /// The panel's transcript rows as a reader would see them, painted at the
 /// panel's own resolved height.
 fn panel_transcript_texts(m: &Model) -> Vec<String> {
+    panel_transcript_texts_at(m, 60)
+}
+
+/// [`panel_transcript_texts`] on a panel of a named width, for a test whose
+/// subject is a whole sentence an entry carries: an entry wraps to the
+/// panel, so a sentence longer than 60 columns arrives as several rows
+/// unless the panel is wide enough to hold it on one.
+fn panel_transcript_texts_at(m: &Model, panel_width: usize) -> Vec<String> {
     m.ai_panel()
-        .view(24, 60)
+        .view(24, panel_width)
         .rows
         .into_iter()
         .map(|row| row.into_iter().map(|span| span.text).collect())
@@ -9559,7 +9567,7 @@ fn closing_a_review_with_hunks_left_discards_the_proposal_at_the_session() {
         )),
         "expected the proposal discarded at the driver, got {effects:?}"
     );
-    let rows = panel_transcript_texts(&m);
+    let rows = panel_transcript_texts_at(&m, 120);
     assert!(
         rows.iter()
             .any(|line| line.contains("discarded the proposal")

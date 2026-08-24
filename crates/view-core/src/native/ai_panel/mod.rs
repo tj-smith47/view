@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use super::geometry::interior_text_width;
+use super::geometry::{interior_text_width, LIST_MARKER_COLS};
 use super::views::{AiPanelView, Span};
 
 mod permission;
@@ -408,15 +408,16 @@ impl AiPanelState {
         panel_width: usize,
     ) -> bool {
         let viewport = self.transcript_viewport(panel_height, panel_width);
+        let width = transcript_width(panel_width);
         let page = viewport.saturating_sub(MARKER_ROWS);
         let distance = match scroll {
             TranscriptScroll::PageBack | TranscriptScroll::PageForward => page,
             TranscriptScroll::HalfPageBack | TranscriptScroll::HalfPageForward => page.div_ceil(2),
         };
-        let (from, tail) = self.window(viewport);
+        let (from, tail) = self.window(viewport, width);
         let next = match scroll {
             TranscriptScroll::PageBack | TranscriptScroll::HalfPageBack => {
-                self.transcript.scrolled_back(from, distance)
+                self.transcript.scrolled_back(from, distance, width)
             }
             // Nothing forward of the tail to reach. The assignment is what
             // retires an anchor the panel has since grown past: nothing
@@ -425,7 +426,7 @@ impl AiPanelState {
                 self.transcript_top = None;
                 return false;
             }
-            _ => self.transcript.scrolled_forward(from, distance),
+            _ => self.transcript.scrolled_forward(from, distance, width),
         };
         self.settle(next, tail)
     }
@@ -448,10 +449,16 @@ impl AiPanelState {
     /// over nothing. Every reader of [`Self::transcript_top`] goes through
     /// here, so paint and scroll cannot disagree about which state the
     /// panel is in.
-    fn window(&self, viewport: usize) -> (TranscriptAnchor, TranscriptAnchor) {
-        let tail = self.transcript.tail_anchor(viewport);
+    ///
+    /// `width` is re-checked for the same reason the viewport is: an entry
+    /// wraps to the panel's width, so a terminal made narrower turns one
+    /// entry into more rows and moves the tail just as growing it taller
+    /// does.
+    fn window(&self, viewport: usize, width: usize) -> (TranscriptAnchor, TranscriptAnchor) {
+        let tail = self.transcript.tail_anchor(viewport, width);
         (
             self.transcript_top
+                .map(|top| self.transcript.normalized(top, width))
                 .filter(|top| *top < tail)
                 .unwrap_or(tail),
             tail,
@@ -506,17 +513,18 @@ impl AiPanelState {
     pub fn view(&self, panel_height: usize, panel_width: usize) -> AiPanelView {
         let composer = self.composer_rows(panel_height, panel_width);
         let visible_rows = self.transcript_rows(panel_height, composer.len());
-        let (start, tail) = self.window(visible_rows);
+        let width = transcript_width(panel_width);
+        let (start, tail) = self.window(visible_rows, width);
         let rows = if start == tail {
-            self.transcript.rows_from(tail, visible_rows)
+            self.transcript.rows_from(tail, visible_rows, width)
         } else {
             // The marker spends a row of the window rather than sitting
             // above it: it is the last row, where a reader looking for the
             // newest line looks, and it lands in the same tail the overlay
             // keeps when the panel is shorter than this budget.
-            let mut rows = self
-                .transcript
-                .rows_from(start, visible_rows.saturating_sub(MARKER_ROWS));
+            let mut rows =
+                self.transcript
+                    .rows_from(start, visible_rows.saturating_sub(MARKER_ROWS), width);
             rows.push(vec![Span::plain(MORE_BELOW)]);
             rows
         };
@@ -609,6 +617,26 @@ pub fn composer_width(panel_width: usize) -> usize {
     usize::from(interior_text_width(panel)).saturating_sub(PROMPT_COLS)
 }
 
+/// The cells one transcript row has, on a panel `panel_width` terminal
+/// columns wide: the framed interior (see [`interior_text_width`]) less the
+/// columns the framing's own item marker takes ([`LIST_MARKER_COLS`]) --
+/// the transcript is painted as a list's items, and every item row opens
+/// with one.
+///
+/// The transcript's own entry marker is spent out of what is left rather
+/// than taken off here, because that marker is part of the row the
+/// transcript renders, not chrome the frame adds around it.
+///
+/// ```
+/// use view_core::native::ai_panel::transcript_width;
+/// assert_eq!(transcript_width(60), 54);
+/// ```
+#[must_use]
+pub fn transcript_width(panel_width: usize) -> usize {
+    let panel = u16::try_from(panel_width).unwrap_or(u16::MAX);
+    usize::from(interior_text_width(panel).saturating_sub(LIST_MARKER_COLS))
+}
+
 /// Where the next character typed lands in `rows` -- already-wrapped
 /// composer rows -- as an index into them and a column across that row in
 /// cells.
@@ -691,6 +719,10 @@ const BYTES_PER_CELL: usize = 4;
 /// then derivable from what has been typed alone, and no keystroke reflows
 /// a row the user has already read -- both of which a greedy word wrap
 /// gives up, for a composer that only ever appends and backspaces.
+///
+/// The transcript breaks its own entries through this same call, so the two
+/// halves of the panel put their breaks in the same column and a prompt
+/// reads the same after it is sent as it did while it was being typed.
 ///
 /// Cells are the ASCII-doubling upper bound this crate measures text with:
 /// one per ASCII character, two for anything else. Over-wide leaves a
@@ -785,6 +817,10 @@ mod tests {
     /// their composer, so the row budget they name is the one they get.
     const WIDE_PANEL: usize = 60;
 
+    /// A panel narrow enough that a `line NN` entry wraps onto two rows, so
+    /// a window held at this width names a row [`WIDE_PANEL`] does not have.
+    const NARROW_PANEL: usize = 10;
+
     /// A panel holding `lines` one-row agent messages, `line 0` upward.
     fn panel_with_lines(lines: usize) -> AiPanelState {
         let mut state = AiPanelState::new();
@@ -799,8 +835,16 @@ mod tests {
     }
 
     fn transcript_texts(state: &AiPanelState, panel_height: usize) -> Vec<String> {
+        transcript_texts_at(state, panel_height, WIDE_PANEL)
+    }
+
+    fn transcript_texts_at(
+        state: &AiPanelState,
+        panel_height: usize,
+        panel_width: usize,
+    ) -> Vec<String> {
         state
-            .view(panel_height, WIDE_PANEL)
+            .view(panel_height, panel_width)
             .rows
             .into_iter()
             .map(|row| row.into_iter().map(|span| span.text).collect())
@@ -845,6 +889,48 @@ mod tests {
             transcript_texts(&state, TEN_ROW_PANEL),
             held,
             "twenty appended lines must not move a window the user is holding"
+        );
+    }
+
+    /// A window held while the panel was narrow opens on the entry the
+    /// reader was reading once the panel is widened. The row it held names
+    /// a place in a wrap the wider panel does not have, and a window that
+    /// took that count literally would drop the entry off its own top --
+    /// scrolling the reader without a scroll key.
+    #[test]
+    fn a_window_held_on_a_narrow_panel_keeps_its_entry_when_the_panel_widens() {
+        let mut state = panel_with_lines(50);
+        // far enough back that the window is still behind the row the
+        // wider panel's own tail starts at -- a window that has caught up
+        // with the tail follows again and would pass this whatever it held
+        for _ in 0..8 {
+            assert!(state.scroll_transcript(
+                TranscriptScroll::PageBack,
+                TEN_ROW_PANEL,
+                NARROW_PANEL
+            ));
+        }
+
+        // four cells of text a row, so the narrow window opens part way
+        // down an entry and its first row is that entry's tail fragment --
+        // which is the end of the line the widened window must open on
+        let narrow = transcript_texts_at(&state, TEN_ROW_PANEL, NARROW_PANEL);
+        let tail: String = narrow
+            .iter()
+            .take_while(|row| !row.starts_with('\u{25cf}'))
+            .map(|row| row.trim())
+            .collect();
+        let widened = transcript_texts(&state, TEN_ROW_PANEL);
+
+        assert!(
+            !tail.is_empty(),
+            "the narrow window must open part way down an entry for this to \
+             have a subject: {narrow:?}"
+        );
+        assert!(
+            widened.first().is_some_and(|row| row.ends_with(&tail)),
+            "the widened window opens on the entry the narrow one did: \
+             {narrow:?} became {widened:?}"
         );
     }
 
@@ -1708,15 +1794,49 @@ mod tests {
         );
     }
 
-    /// The echo goes through the transcript's own width path, so a prompt
-    /// longer than the panel is clipped to the panel the way every other
-    /// row is rather than dragging the frame open.
+    /// The reported defect's other half: a prompt longer than the panel is
+    /// wide kept only the columns one row had and dropped the rest, so a
+    /// user who wrote a paragraph could never read back what they sent. It
+    /// wraps to the panel instead -- every character on screen, no row past
+    /// the frame's interior, and none of it dragging the frame open.
     #[test]
-    fn a_long_echoed_prompt_is_cut_to_the_panels_width_like_any_other_row() {
+    fn a_long_echoed_prompt_wraps_inside_the_panel_rather_than_losing_its_tail() {
         let mut state = AiPanelState::new();
-        state.transcript.echo_user_prompt(&"word ".repeat(60));
+        let prompt = "word ".repeat(60);
+        state.transcript.echo_user_prompt(&prompt);
 
-        let rows = crate::native::ai_panel::AiPanelState::view(&state, ROOM, 24).rows;
-        assert_eq!(rows.len(), 1, "one entry is one row, however long it is");
+        let rows = state.view(ROOM, 24).rows;
+        // asked of the framing's own arithmetic rather than of the panel's
+        // reading of it, so the bound stands independent of what the panel
+        // decided a row's width was
+        let interior = usize::from(interior_text_width(24) - LIST_MARKER_COLS);
+
+        assert!(rows.len() > 1, "a prompt past one row wraps onto more");
+        for row in &rows {
+            // The marker glyph and the space after it are one display cell
+            // each -- the columns the wrapped rows' own indent stands in --
+            // so the row fits exactly when its body does. The body is
+            // measured the way it was wrapped, which is the ASCII-doubling
+            // upper bound `char_cells` is.
+            let cells: usize = row
+                .get(1)
+                .into_iter()
+                .flat_map(|span| span.text.chars())
+                .map(char_cells)
+                .sum();
+            assert!(
+                cells + PROMPT_COLS <= interior,
+                "a row past the frame's interior: {row:?}"
+            );
+        }
+        let painted: String = rows
+            .iter()
+            .filter_map(|row| row.get(1))
+            .map(|span| span.text.as_str())
+            .collect();
+        assert_eq!(
+            painted, prompt,
+            "every character the user sent is on screen"
+        );
     }
 }
