@@ -646,8 +646,8 @@ pub fn transcript_width(panel_width: usize) -> usize {
 /// input. The row is always the last one (the composer only appends and
 /// backspaces, and the wrap's tail-keeping cut can never drop that row), the
 /// column is always inside the width that row was wrapped to, and empty rows
-/// answer the first cell -- the position the panel's own empty prompt line
-/// is painted at.
+/// answer the first cell -- where the panel's own empty prompt line is
+/// painted, and where a prompt ending on a line break leaves the caret.
 ///
 /// Takes the rows rather than the state so a frame can ask it of the rows it
 /// actually painted ([`crate::native::views::AiPanelView::composer_cursor`]),
@@ -699,6 +699,12 @@ fn char_cells(ch: char) -> usize {
 /// move a later break a column off from where the full wrap would have put
 /// it; every character of the tail is still on screen in order, and the
 /// alternative is a frame whose cost the user sets with their clipboard.
+///
+/// A line break in the window ends a row early, which only ever makes the
+/// window hold *more* rows than the width alone would have -- never fewer
+/// than the `keep` the caller asked for -- and the first break in it puts
+/// every row after itself back on exactly the column the full wrap would
+/// have.
 fn wrap_window(input: &str, width: usize, keep: usize) -> &str {
     let span = keep
         .saturating_add(1)
@@ -732,14 +738,13 @@ const BYTES_PER_CELL: usize = 4;
 /// same column: a typed prompt reads the same after it is sent as it did
 /// while it was being typed.
 ///
-/// A *pasted* line break is where the two halves still part. It is one cell
-/// of the composer's row here, deliberately (see
-/// `a_pasted_line_break_is_kept_and_measured_as_the_one_cell_it_paints_as`),
-/// because the composer only appends and backspaces and its caret column is
-/// read back off the row it painted; the transcript breaks the row on it.
-/// So a multi-line prompt is one shape in the composer and its own shape
-/// once sent -- the transcript's is the right one, and the composer owes the
-/// match.
+/// A line break ends a row wherever it falls, so a pasted multi-line prompt
+/// reads in the composer as the lines it was copied as, and reads the same
+/// again once sent. All three endings break: `\n`, `\r\n` as the one break
+/// it is, and a lone `\r` -- which is not a line ending in a file but is
+/// what a terminal hands a paste through tmux's own buffer. The break is the
+/// row's end and never a cell of it, so a text ending on one ends on an
+/// empty row, which is where the next character goes.
 ///
 /// Cells are the ASCII-doubling upper bound this crate measures text with:
 /// one per ASCII character, two for anything else. Over-wide leaves a
@@ -756,18 +761,22 @@ fn wrap(input: &str, width: usize, keep: usize) -> Vec<String> {
     let mut rows: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     rows.push_back(String::new());
     let mut used = 0_usize;
-    for ch in input.chars() {
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\n' || ch == '\r' {
+            // the `\n` of a `\r\n` is the same break as its `\r`
+            if ch == '\r' {
+                let _ = chars.next_if_eq(&'\n');
+            }
+            open_row(&mut rows, keep);
+            used = 0;
+            continue;
+        }
         let cells = char_cells(ch);
         // `used > 0` keeps a glyph wider than the whole row on a row of its
         // own instead of opening an empty one ahead of it
         if used > 0 && used + cells > width {
-            let mut next = if rows.len() >= keep {
-                rows.pop_front().unwrap_or_default()
-            } else {
-                String::new()
-            };
-            next.clear();
-            rows.push_back(next);
+            open_row(&mut rows, keep);
             used = 0;
         }
         if let Some(row) = rows.back_mut() {
@@ -776,6 +785,20 @@ fn wrap(input: &str, width: usize, keep: usize) -> Vec<String> {
         used += cells;
     }
     rows.into()
+}
+
+/// Opens [`wrap`]'s next row, reusing the string of the row falling off the
+/// top once `keep` of them are held -- the allocation bound `wrap`'s own doc
+/// promises, in the one place both a width break and a line break go
+/// through.
+fn open_row(rows: &mut std::collections::VecDeque<String>, keep: usize) {
+    let mut next = if rows.len() >= keep {
+        rows.pop_front().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    next.clear();
+    rows.push_back(next);
 }
 
 /// The held window's last row, standing in for the newest rows it is
@@ -816,6 +839,8 @@ const DISMISS_VERB_HINT: &str = "Run :View ai dismiss to clear";
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::fmt::Write as _;
 
     use super::super::ai_event::ToolCallStatus;
     use super::super::views::{Span, StyleRole};
@@ -1144,41 +1169,107 @@ mod tests {
         );
     }
 
-    /// A pasted line break is kept in the composer's text and measured as
-    /// the one cell `view-surface` paints it as, so the wrap, the cap and
-    /// the cursor all agree with the screen. A break given a row of its own
-    /// here, or measured as nothing at all, would put the cursor on a column
-    /// the panel never painted to.
+    /// A pasted line break ends the composer's row, so a multi-line prompt
+    /// reads as the lines it was copied as -- and reads the same again in
+    /// the transcript once it is sent. All three endings break, and a
+    /// `\r\n` breaks once.
     #[test]
-    fn a_pasted_line_break_is_kept_and_measured_as_the_one_cell_it_paints_as() {
-        let width = composer_width(WIDE_PANEL);
+    fn a_pasted_line_break_ends_the_composers_row() {
+        let rows = |input: &str| {
+            let mut state = AiPanelState::new();
+            state.input = input.to_string();
+            state.view(ROOM, WIDE_PANEL).input
+        };
+
+        for (name, input) in [
+            ("a bare newline", "ab\ncd"),
+            ("a carriage return and newline", "ab\r\ncd"),
+            ("a lone carriage return", "ab\rcd"),
+        ] {
+            assert_eq!(
+                rows(input),
+                vec!["ab".to_string(), "cd".to_string()],
+                "{name} breaks the row once"
+            );
+        }
+        assert_eq!(
+            rows("ab\n\ncd"),
+            vec!["ab".to_string(), String::new(), "cd".to_string()],
+            "the blank line between two paragraphs keeps its row"
+        );
+    }
+
+    /// The composer is where the next character goes, so a text ending on a
+    /// line break ends on the empty row that character opens -- and the
+    /// caret is on its first cell, not left on the line above.
+    #[test]
+    fn a_prompt_ending_on_a_line_break_puts_the_caret_on_the_empty_row_below() {
         let mut state = AiPanelState::new();
-        state.input = "ab\ncd".to_string();
+        state.input = "ab\n".to_string();
 
         assert_eq!(
             state.view(ROOM, WIDE_PANEL).input,
-            vec!["ab\ncd".to_string()],
-            "a line break neither breaks the row nor is dropped from it"
+            vec!["ab".to_string(), String::new()]
         );
         assert_eq!(
             composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
-            (0, 5),
-            "the break occupies exactly one column between the two halves"
+            (1, 0)
         );
 
-        // the boundary the measurement decides: a row filled to the width
-        // with the break as its last cell is still one row, and the
-        // character after it opens the next
-        state.input = format!("{}\n", "x".repeat(width - 1));
+        state.input.push('c');
         assert_eq!(
             composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
-            (0, width)
+            (1, 1),
+            "and the character lands on that row"
         );
-        state.input.push('y');
+    }
+
+    /// A prompt of many short lines takes rows the same way a prompt of one
+    /// long line does: the composer keeps the last of them and never grows
+    /// past the share of the panel it may take, whichever kind of break
+    /// made the rows.
+    #[test]
+    fn a_multi_line_prompt_is_capped_at_the_composers_share_of_the_panel() {
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let mut state = AiPanelState::new();
+        state.input = (0..cap * 4).fold(String::new(), |mut acc, i| {
+            let _ = writeln!(acc, "line {i}");
+            acc
+        });
+
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+
+        assert_eq!(rows.len(), cap, "the composer keeps its cap: {rows:?}");
         assert_eq!(
-            composer_cursor_of(&state.composer_rows(ROOM, WIDE_PANEL)),
-            (1, 1)
+            rows.first().map(String::as_str),
+            Some(format!("line {}", cap * 4 - cap + 1).as_str()),
+            "and the rows it kept are the newest ones: {rows:?}"
         );
+        assert_eq!(
+            composer_cursor_of(&state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL)),
+            (cap - 1, 0),
+            "with the caret on the empty row the trailing break opened"
+        );
+        assert!(
+            state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL) >= cap,
+            "and the transcript still has at least as many rows as the \
+             composer took"
+        );
+    }
+
+    /// A line break is the row's end and never a cell of it, so the width a
+    /// row is broken at is the width the panel paints -- a break carried as
+    /// a cell would have the cursor a column past every line.
+    #[test]
+    fn a_line_break_costs_the_row_no_column() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = AiPanelState::new();
+        state.input = format!("{}\ny", "x".repeat(width));
+
+        let rows = state.composer_rows(ROOM, WIDE_PANEL);
+
+        assert_eq!(rows, vec!["x".repeat(width), "y".to_string()]);
+        assert_eq!(composer_cursor_of(&rows), (1, 1));
     }
 
     /// One paint costs what the panel can paint, never what was on the

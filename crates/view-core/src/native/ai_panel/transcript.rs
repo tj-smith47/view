@@ -1032,10 +1032,9 @@ impl EntryRows {
     /// text and is kept, blank lines and all, including the blank row a
     /// second trailing newline asks for.
     ///
-    /// All three endings break a line: `\n`, `\r\n`, and a lone `\r`. The
-    /// last one is not a line ending in a file, but it is what a terminal
-    /// hands a paste through tmux's own buffer, and this is a paste's first
-    /// reader.
+    /// Which characters end a line is [`super::wrap`]'s answer, not a
+    /// second one taken here: the composer breaks a prompt on exactly those
+    /// and the entry echoing it has to break on the same.
     fn add(&mut self, mark: Span, body_style: Option<StyleRole>, text: &str) {
         if self.cut {
             return;
@@ -1055,27 +1054,20 @@ impl EntryRows {
             .or_else(|| capped.strip_suffix('\n'))
             .or_else(|| capped.strip_suffix('\r'))
             .unwrap_or(capped);
-        for chunk in closed.split('\n') {
-            // The `\r` of a `\r\n` belongs to the break the split just made,
-            // so it comes off before the lone-`\r` breaks are taken.
-            let chunk = chunk.strip_suffix('\r').unwrap_or(chunk);
-            for line in chunk.split('\r') {
-                // `usize::MAX` keeps every row: the wrap's tail-keeping cut
-                // exists for a composer whose newest row is the interesting
-                // one, and a log read oldest first wants the opposite end.
-                for row in wrap(line, self.body, usize::MAX) {
-                    let lead = if self.rows.len() == opened {
-                        mark.clone()
-                    } else {
-                        Span::plain(MARK_INDENT)
-                    };
-                    let body = match body_style {
-                        Some(role) => Span::new(row, role),
-                        None => Span::plain(row),
-                    };
-                    self.rows.push(vec![lead, body]);
-                }
-            }
+        // `usize::MAX` keeps every row: the wrap's tail-keeping cut exists
+        // for a composer whose newest row is the interesting one, and a log
+        // read oldest first wants the opposite end.
+        for row in wrap(closed, self.body, usize::MAX) {
+            let lead = if self.rows.len() == opened {
+                mark.clone()
+            } else {
+                Span::plain(MARK_INDENT)
+            };
+            let body = match body_style {
+                Some(role) => Span::new(row, role),
+                None => Span::plain(row),
+            };
+            self.rows.push(vec![lead, body]);
         }
     }
 

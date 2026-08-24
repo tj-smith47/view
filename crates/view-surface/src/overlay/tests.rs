@@ -949,28 +949,72 @@ fn a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first() {
     );
 }
 
-/// A pasted line break is stored in the composer as it was copied, so the
-/// prompt the agent is sent is the text the user pasted -- which makes this
-/// the place the break becomes the single space `view-core` already
-/// measured it as when it wrapped the row and placed the cursor. A control
-/// character surviving into the row instead would move the terminal's own
-/// cursor out of the frame the panel just drew, and the composer would be
-/// painting to a column nothing else agrees on.
+/// A pasted line break is stored in the composer as it was copied and ends
+/// a row when the panel wraps it, so a multi-line prompt paints as the
+/// lines it was pasted as -- under the indent that keeps them reading as
+/// one field. Painted from the panel's own rows rather than from a row
+/// built here, because the shape under test is the one the wrap produces.
+/// No control character may reach the terminal either way: one surviving
+/// into a row would move the terminal's own cursor out of the frame the
+/// panel just drew.
 #[test]
-fn a_pasted_line_break_paints_as_the_one_space_the_composer_measured() {
+fn a_pasted_multi_line_prompt_paints_a_row_per_line() {
+    use view_core::native::ai_panel::AiPanelState;
     use view_core::native::views::AiPanelView;
-    let kind = LayerKind::Ai(AiPanelView::new("AI Agent").with_input("first\nsecond"));
+    let mut state = AiPanelState::new();
+    state.input = "first\nsecond".to_string();
+    let kind =
+        LayerKind::Ai(AiPanelView::new("AI Agent").with_input_rows(state.view(10, 40).input));
 
-    let framed = rows(40, 6, &kind, BorderSet::ASCII);
+    let framed = rows(40, 10, &kind, BorderSet::ASCII);
     let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
 
     assert!(
-        text.iter().any(|line| line.contains("> first second")),
-        "the break paints as one space between the halves it separates: {text:?}"
+        text.iter().any(|line| line.contains("> first")),
+        "the first line keeps the prompt mark: {text:?}"
+    );
+    assert!(
+        text.iter()
+            .any(|line| line.contains("  second") && !line.contains('>')),
+        "the second reads under it, indented rather than re-marked: {text:?}"
     );
     assert!(
         text.iter().all(|line| !line.chars().any(char::is_control)),
         "no control character reaches the terminal: {text:?}"
+    );
+}
+
+/// The caret follows a multi-line prompt down: the row it lands on is the
+/// composer's last, counted through the same header the panel was drawn
+/// from. A caret placed from the composer's first row instead would sit on
+/// the line above the one being typed the moment a prompt has two.
+#[test]
+fn the_caret_lands_on_the_last_row_of_a_multi_line_prompt() {
+    use view_core::native::ai_panel::AiPanelState;
+    use view_core::native::views::AiPanelView;
+    let (width, height) = (40, 10);
+    let mut state = AiPanelState::new();
+    state.input = "first\nsecond".to_string();
+    let view = AiPanelView::new("AI Agent")
+        .with_input_rows(state.view(usize::from(height), usize::from(width)).input);
+
+    let framed = rows(
+        width,
+        height,
+        &LayerKind::Ai(view.clone()),
+        BorderSet::ASCII,
+    );
+    let (row, col) = ai_caret(&view, width, height).expect("the panel has cells");
+    let text = line_text(&framed.lines[usize::from(row)]);
+
+    assert!(
+        text.contains("second"),
+        "the caret must be on the prompt's last row: {text:?}"
+    );
+    assert_eq!(
+        text.chars().take(usize::from(col)).collect::<String>(),
+        "|   second",
+        "the caret stands one cell past the last character painted"
     );
 }
 

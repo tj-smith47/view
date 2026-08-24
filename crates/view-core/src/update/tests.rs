@@ -912,6 +912,8 @@ fn a_pasted_key_notation_is_text_and_not_the_key_it_names() {
 /// editing -- while the panel's own `<CR>` still sends it afterwards.
 #[test]
 fn a_pasted_trailing_newline_leaves_the_prompt_in_the_composer() {
+    const PANEL_HEIGHT: usize = 16;
+    const PANEL_WIDTH: usize = 60;
     let mut m = entered_ai_panel_model();
 
     let effects = update(&mut m, Msg::Paste("first line\nsecond line\n".into()));
@@ -920,6 +922,16 @@ fn a_pasted_trailing_newline_leaves_the_prompt_in_the_composer() {
         m.ai_panel().input,
         "first line\nsecond line\n",
         "the text is kept verbatim, its line breaks included"
+    );
+    assert_eq!(
+        m.ai_panel().view(PANEL_HEIGHT, PANEL_WIDTH).input,
+        vec![
+            "first line".to_string(),
+            "second line".to_string(),
+            String::new()
+        ],
+        "and it reads in the composer as the lines it was copied as, the \
+         trailing break opening the row the next character goes on"
     );
     assert!(effects.is_empty(), "nothing was sent: {effects:?}");
     assert!(!m.ai_panel().turn_in_flight);

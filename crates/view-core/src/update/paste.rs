@@ -51,14 +51,10 @@ pub(super) fn paste_into_focused_surface(model: &mut Model, text: &str) -> Vec<E
         _ => false,
     };
     if panel_has_the_keyboard && !model.ai_panel().an_owner_holds_the_keys() {
-        // Verbatim, control characters and all: the composer is one logical
-        // line -- `AiPanelState`'s wrap gives a line break no meaning of its
-        // own -- but every painted row is control-sanitized by
-        // `view-surface`, so a pasted newline shows as the single space the
-        // wrap and the composer cursor already measure it as. Storing it as
-        // typed keeps the prompt the agent is sent the text that was copied,
-        // line breaks included, without the panel's row accounting and what
-        // is on screen disagreeing.
+        // Verbatim, control characters and all: the shape a paste reads in
+        // is a question for the wrap that paints it (`AiPanelState`'s own,
+        // which ends a row at each line break), never for the text held
+        // here, so what the agent is sent stays exactly what was copied.
         model.ai_panel_mut().input.push_str(text);
         model.dirty = true;
         return Vec::new();
