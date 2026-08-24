@@ -70,6 +70,11 @@ NVIM_API_RS=$REPO_ROOT/crates/view-engine/src/nvim_api.rs
 # instead (each such assertion says so where it stands).
 COLS=140
 ROWS=44
+# The width the review's own way out has to survive: nvim's grid keeps its
+# full width under the panel, so the panel covers the right 30% of every
+# header row, and this is the narrowest terminal the header is asserted
+# readable end to end in.
+NARROW_COLS=120
 # How often the screen is read. Charged in full to every measurement, so it
 # is small next to the tightest window asserted (2.5s).
 POLL=0.25
@@ -419,7 +424,7 @@ assert_file_is() {
 
 leg_session_lifecycle() {
     CURRENT_LEG=1-session-lifecycle
-    local took chunks
+    local took chunks prompt echoed tail_word
     start_session lifecycle default "$ADAPTER_CACHE"
     open_panel "$WAIT_SECS"
     # A session starts on the first command, never on the panel opening, so
@@ -434,7 +439,8 @@ leg_session_lifecycle() {
     # chunk), while one that takes seconds to generate cannot.
     printf 'The mailbox key lives in the blue tin on the third shelf.\n' \
         >"$ROOT/notes.txt"
-    submit 'Read notes.txt in this directory, then write me a detailed answer of at least eight full sentences that says where the mailbox key is, what container it is kept in, which shelf that container sits on, and how someone unfamiliar with the house would go about finding it.'
+    prompt='Read notes.txt in this directory, then write me a detailed answer of at least eight full sentences that says where the mailbox key is, what container it is kept in, which shelf that container sits on, and how someone unfamiliar with the house would go about finding it.'
+    submit "$prompt"
     # Before anything else: the wait itself is announced. A first run that
     # downloads and installs an agent while the panel sits silent is
     # indistinguishable from a feature that does not work.
@@ -467,10 +473,31 @@ leg_session_lifecycle() {
         fail "the real agent's reply arrived in $chunks chunk(s); a streamed turn is more than one"
         return 1
     fi
-    if ! wait_for "$AGENT_PREFIX" "$WAIT_SECS" "the real agent's reply in the panel" >/dev/null; then
+    # A word of the agent's own last chunks, read out of the log rather
+    # than chosen here -- a model's words are its own, and this leg pins
+    # none of them; it only asks that whatever arrived is what is drawn.
+    # Words the prompt already used are dropped, so the echo of the
+    # question cannot answer for the reply.
+    #
+    # The marker alone cannot: the panel follows the tail, and a reply
+    # hundreds of rows long has scrolled its own opening row -- marker and
+    # all -- off the top by the time it finishes. That is the panel doing
+    # exactly what a transcript should. So the needle is any row of the
+    # entry, and the marker is one of them, for the short reply that still
+    # fits whole.
+    echoed=$(printf '%s' "$prompt" | grep -oE '[A-Za-z]{5,}' | sort -u)
+    tail_word=$(grep -E 'ai MessageChunk .* from_agent: true' "$ROOT/view.log" |
+        tail -2 | sed -E 's/.*text: "(.*)".*/\1/' | grep -oE '[A-Za-z]{5,}' |
+        grep -vxF "$echoed" | tail -1)
+    if [ -z "$tail_word" ]; then
+        fail 'the real agent ended its reply on no word of its own to look for'
         return 1
     fi
-    pass "a real streamed reply reached the panel in $chunks chunks"
+    if ! wait_for_re "$AGENT_PREFIX|$tail_word" "$WAIT_SECS" \
+        "the real agent's reply in the panel" >/dev/null; then
+        return 1
+    fi
+    pass "a real streamed reply reached the panel in $chunks chunks, ending in '$tail_word'"
 
     assert_tool_call_went_non_terminal_then_terminal || return 1
     pass 'a real tool call was observed non-terminal, then terminal'
@@ -621,6 +648,16 @@ gamma' 'an abandoned review changed the buffer'
         "the agent's proposed line, drawn in the file" >/dev/null
     wait_in_buffer "$REVIEW_KEY_HINT" "$WAIT_SECS" \
         "the current hunk's own header, at the hunk rather than in the panel" >/dev/null
+    # Narrowed, because the header's width is the whole risk: the panel
+    # covers the right of every row it is drawn on, and a header on one
+    # line loses its tail there -- the way out first, which is the one key
+    # a reader who wants no part of the proposal needs.
+    tmux resize-window -t "$SESSION" -x "$NARROW_COLS" -y "$ROWS"
+    wait_in_buffer "$REVIEW_LEAVE_HINT" "$WAIT_SECS" \
+        "the review's way out, still readable at $NARROW_COLS columns" >/dev/null
+    tmux resize-window -t "$SESSION" -x "$COLS" -y "$ROWS"
+    wait_in_buffer "$REVIEW_KEY_HINT" "$WAIT_SECS" \
+        "the header back at $COLS columns" >/dev/null
     # The buffer's own text is still the buffer's own text: the proposal is
     # decoration until it is accepted, and a review that had already written
     # itself into the file would show `BETA` here with nothing left to
@@ -978,6 +1015,10 @@ REVIEW_KEY_HINT=${REVIEW_KEY_HINT:0:20}
     printf 'FAIL: the review key hint read empty from %s\n' "$REVIEW_RS" >&2
     exit 1
 }
+# The one key that has to be readable whatever the terminal's width: a
+# review whose way out is under the panel is a state the user cannot leave
+# without knowing a key nothing on screen names.
+REVIEW_LEAVE_HINT=$(const_str "$REVIEW_RS" LEAVE_HINT) || exit 1
 # What a proposed line looks like where the review draws it: the stub's own
 # `newText` behind the prefix the decoration chunk puts in front of every
 # virtual line. Both halves are guarded rather than derived -- the templates
@@ -992,6 +1033,7 @@ PROPOSED_GAMMA='+GAMMA'
 # The keys the review installs on the buffer, read and shape-checked out of
 # the table the maps are generated from, so a reworded key fails here rather
 # than being typed at a buffer that no longer answers it.
+# shellcheck disable=SC2034 # read by `review_key`, which lives in artifacts.sh
 REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
 # The marker the review's own transcript lines carry. Every review ends
 # with one, and what it says is how the review ended -- which is the one
