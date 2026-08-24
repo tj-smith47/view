@@ -136,6 +136,18 @@ pub struct Model {
     /// same terms as [`Model::ai_panel_width_pct`]: seeded from
     /// `[native] tree_width` and stepped by the sidebar's resize keys.
     pub tree_width_pct: u16,
+    /// Which keys step either sidebar's width, seeded once at startup from
+    /// `[keys]`. One set for both sidebars, so neither can answer a key the
+    /// other ignores.
+    pub resize_keys: crate::native::keys::ResizeKeys,
+    /// The first key of a resize chord, waiting on the keystroke that
+    /// decides what it meant, or `None` while none is part way through.
+    ///
+    /// Consumed by the very next key a focused sidebar handles, whatever
+    /// that key turns out to mean: a prefix that outlived the keystroke
+    /// after it would silently re-point some later, unrelated press at a
+    /// resize.
+    pub(crate) pending_resize_chord: Option<String>,
     /// Supervision's memory of the current wedge episode -- which wedge the
     /// user has already been offered a modal for, so a dismissed one stays
     /// dismissed while the banner behind it keeps re-asserting; see
@@ -241,6 +253,8 @@ impl Model {
             ai_panel_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
             ai_review_open_target: crate::msg::ReviewOpenTarget::default(),
             tree_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            resize_keys: crate::native::keys::ResizeKeys::default(),
+            pending_resize_chord: None,
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
             ai_panel: crate::native::ai_panel::AiPanelState::new(),

@@ -123,15 +123,19 @@ The focused panel resizes where it stands, 5% of the terminal per press:
 
 | key | does |
 | --- | --- |
-| `<S-Right>` | one notch wider |
-| `<S-Left>` | one notch narrower |
+| `<S-Right>` or `<C-w>>` | one notch wider |
+| `<S-Left>` or `<C-w><` | one notch narrower |
 
 The width holds between 15% and 70% and lasts the session -- close the panel
-and reopen it and it comes back the width you left it at. Both are named
-keys the composer cannot type, so a half-written prompt survives a resize,
-and unlike the scroll keys they work while a permission request is up: a
-width decides nothing the question owns, and a summary too narrow to read
-is exactly when you want it.
+and reopen it and it comes back the width you left it at. None of them is a
+key the composer can type, so a half-written prompt survives a resize: the
+chord's `>` goes to the width rather than the prompt only while `<C-w>` is
+waiting on it. Unlike the scroll keys they work while a permission request
+is up: a width decides nothing the question owns, and a summary too narrow
+to read is exactly when you want it.
+
+The file tree resizes with the same keys, and `[keys]` rebinds them for
+both -- see [keymaps.md](keymaps.md).
 
 The width a session *starts* at is `view.toml`'s, and the file tree has the
 same key beside it:

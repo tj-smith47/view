@@ -136,6 +136,18 @@ impl NativeSession {
             model.dirty = true;
             effects.extend(model.engine.record_native_notice(notice.to_string(), false));
         }
+        model.resize_keys = resolved.keys.resize().clone();
+        // an entry that named no key leaves its own action on the defaults
+        // rather than failing the table (see `resolve_resize_keys`), so this
+        // is the only place it can be said out loud
+        for notice in resolved.keys.notices() {
+            model.dirty = true;
+            effects.extend(
+                model
+                    .engine
+                    .record_native_notice((*notice).to_string(), false),
+            );
+        }
         model.supervision.auto_restart = resolved.supervision.auto_restart;
         // `ui_attach` already ran, at the raw terminal height, before this
         // config was even read (see `main.rs`'s call ordering), so nvim's
@@ -730,6 +742,60 @@ auto_restart = false
         assert!(
             off.palette_enabled,
             "a supervision-only config must leave every native feature on"
+        );
+    }
+
+    /// The `[keys]` table crossing the same load: the resolved bindings
+    /// reach the model, and an entry naming no key leaves its own action
+    /// alone while telling the user.
+    #[test]
+    fn load_carries_the_resize_keys_and_reports_one_it_could_not_read() {
+        use view_core::native::keys::{Direction, Resolved};
+
+        let mut default = model();
+        let _ = NativeSession::load(None, 7, &mut default);
+        assert_eq!(
+            default.resize_keys.resolve(Some("<C-w>"), ">"),
+            Some(Resolved::Step(Direction::Wider)),
+            "an absent config is the shipped chord"
+        );
+
+        let dir = view_test_support::ScratchDir::new("native-keys").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(
+            &path,
+            "[keys]
+sidebar_wider = \"<M-.>\"
+sidebar_narrower = 30
+",
+        )
+        .expect("a temp config must be writable");
+
+        let mut configured = model();
+        let (_session, effects) = NativeSession::load(Some(path), 7, &mut configured);
+
+        assert_eq!(
+            configured.resize_keys.resolve(None, "<M-.>"),
+            Some(Resolved::Step(Direction::Wider)),
+            "the readable action was rebound"
+        );
+        assert_eq!(
+            configured.resize_keys.resolve(None, "<S-Left>"),
+            Some(Resolved::Step(Direction::Narrower)),
+            "the unreadable one kept its defaults"
+        );
+        assert!(
+            !effects.is_empty(),
+            "the notice is raised through an effect"
+        );
+        let raised = format!("{:?}", configured.engine.messages.entries);
+        assert!(
+            raised.contains("sidebar_narrower"),
+            "and the user is told which entry was dropped: {raised}"
+        );
+        assert!(
+            !raised.contains("sidebar_wider"),
+            "while the entry that read fine is not complained about: {raised}"
         );
     }
 }

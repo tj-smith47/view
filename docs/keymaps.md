@@ -125,17 +125,36 @@ See [ai.md](ai.md) for what a review is and what each decision writes.
 ## Resizing the sidebars
 
 The file tree and the AI panel are sidebars, and the focused one resizes
-with the same pair, 5% of the terminal per press:
+with the same keys, 5% of the terminal per press:
 
 | key | does |
 | --- | --- |
 | `<S-Right>` | one notch wider |
+| `<C-w>>` | one notch wider |
 | `<S-Left>` | one notch narrower |
+| `<C-w><` | one notch narrower |
 
-Direction reads the way `<C-w><` and `<C-w>>` do -- right widens, left
-narrows -- whichever edge the sidebar is pinned to. These are view's own
-keys inside its own surfaces, not nvim mappings, so they take nothing from
-your config and appear in no `:map` listing.
+Direction reads the way `<C-w><` and `<C-w>>` do in nvim -- right widens,
+left narrows -- whichever edge the sidebar is pinned to. Two bindings per
+direction because macOS Terminal and Termius keep the shifted arrows for
+themselves and view never sees them; the chord reaches through both, and it
+is the one you already resize an nvim window with.
+
+These are view's own keys inside its own surfaces, not nvim mappings, so
+they take nothing from your config and appear in no `:map` listing -- but
+they are yours to change. `[keys]` takes one key notation per action, or a
+list of them, and a binding may be a two-key chord:
+
+```toml
+[keys]
+sidebar_wider = ["<S-Right>", "<C-w>>"]     # the defaults
+sidebar_narrower = ["<S-Left>", "<C-w><"]
+```
+
+Spell a key the way nvim spells it. A chord's first key waits for exactly
+one more: press something that finishes no binding and it is handled as if
+you had pressed it alone. An entry view cannot read leaves that one action
+on its defaults and says so -- it never keeps your config from loading.
 
 A width holds between 15% and 70% and lasts the session. The width a
 session starts at is `view.toml`'s:

@@ -737,6 +737,10 @@ notifications = true
 palette = true
 tree_width = 30            # tree sidebar's share of the terminal width, 15..70
 
+[keys]
+sidebar_wider = ["<S-Right>", "<C-w>>"]     # resize the focused sidebar; one
+sidebar_narrower = ["<S-Left>", "<C-w><"]   # notation or a list, chords of two
+
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for a manual restart
 

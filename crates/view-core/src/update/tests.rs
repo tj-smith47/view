@@ -20,6 +20,7 @@ use crate::native::ai_event::{
 };
 use crate::native::ai_panel::ReviewSync;
 use crate::native::geometry::OverlayBox;
+use crate::native::keys::Direction;
 use crate::native::supervision::{
     ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
     ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION,
@@ -4438,6 +4439,13 @@ fn a_resize_key_is_honored_in_every_state_that_owns_the_panels_keys() {
     );
     assert_eq!(ai_panel_width_pct(&pending), 25);
     assert!(pending.ai_panel().pending_permission.is_some());
+    // both halves of the chord, not only the press that moves the width: a
+    // first key swallowed by the question would leave the second one
+    // meaning nothing
+    let _ = update(&mut pending, key("<C-w>"));
+    let _ = update(&mut pending, key(">"));
+    assert_eq!(ai_panel_width_pct(&pending), 30, "the chord reaches it too");
+    assert!(pending.ai_panel().pending_permission.is_some());
 
     let mut banner = scrollable_ai_panel_model(0);
     banner.ai_panel_mut().local_error = Some("the agent exited".to_string());
@@ -4558,6 +4566,96 @@ fn the_tree_opens_at_the_configured_width() {
         },
     );
     assert_eq!(tree_width_pct(&m), 20);
+}
+
+/// The migration contract for a terminal that eats the shifted arrows
+/// (macOS Terminal, Termius): the same chord that resizes an nvim window
+/// resizes a sidebar, on both sidebars.
+#[test]
+fn both_sidebars_resize_with_nvims_own_window_chord() {
+    let mut panel = scrollable_ai_panel_model(0);
+    let effects = update(&mut panel, key("<C-w>"));
+    assert!(effects.is_empty(), "the first key decides nothing yet");
+    assert_eq!(ai_panel_width_pct(&panel), 30, "and moves nothing yet");
+    assert_eq!(
+        panel.ai_panel().input,
+        "",
+        "nor does the composer type the key it is waiting on"
+    );
+
+    let _ = update(&mut panel, key(">"));
+    assert_eq!(ai_panel_width_pct(&panel), 35, "one notch wider");
+    assert_eq!(panel.ai_panel().input, "", "and the '>' was not typed");
+
+    let _ = update(&mut panel, key("<C-w>"));
+    let _ = update(&mut panel, key("<lt>"));
+    assert_eq!(ai_panel_width_pct(&panel), 30, "and back the other way");
+
+    let mut tree = tree_sidebar_model();
+    let _ = update(&mut tree, key("<C-w>"));
+    let _ = update(&mut tree, key(">"));
+    assert_eq!(tree_width_pct(&tree), 35);
+    let _ = update(&mut tree, key("<C-w>"));
+    let _ = update(&mut tree, key("<lt>"));
+    assert_eq!(tree_width_pct(&tree), 30);
+}
+
+/// A chord is at most two keys deep and holds nothing open: a follower that
+/// completes no binding is handled exactly as it would have been typed
+/// alone, and the prefix is gone either way.
+#[test]
+fn a_follower_that_completes_nothing_falls_through_to_its_own_handling() {
+    let mut panel = scrollable_ai_panel_model(0);
+    let _ = update(&mut panel, key("<C-w>"));
+    let _ = update(&mut panel, key("a"));
+    assert_eq!(panel.ai_panel().input, "a", "typed into the composer");
+    assert_eq!(ai_panel_width_pct(&panel), 30, "and nothing resized");
+
+    let _ = update(&mut panel, key(">"));
+    assert_eq!(
+        panel.ai_panel().input,
+        "a>",
+        "the prefix did not outlive the key after it"
+    );
+
+    let mut tree = tree_sidebar_model();
+    let _ = update(&mut tree, key("<C-w>"));
+    let effects = update(&mut tree, key("<Esc>"));
+    assert!(
+        matches!(effects.as_slice(), [Effect::TreeClose]),
+        "the sidebar closed on the key it always closes on: {effects:?}"
+    );
+}
+
+/// What `[keys]` buys, at the one place the keys are read: a rebound
+/// action answers its own key and nothing else, and the action left alone
+/// keeps every default it had.
+#[test]
+fn a_rebound_action_replaces_only_its_own_default() {
+    let mut m = scrollable_ai_panel_model(0);
+    assert!(m
+        .resize_keys
+        .rebind(Direction::Wider, &["<M-.>".to_string()]));
+
+    let _ = update(&mut m, key("<M-.>"));
+    assert_eq!(ai_panel_width_pct(&m), 35, "the configured key widens");
+
+    let _ = update(&mut m, key("<S-Right>"));
+    assert_eq!(
+        ai_panel_width_pct(&m),
+        35,
+        "and the default it replaced no longer does"
+    );
+
+    let _ = update(&mut m, key("<S-Left>"));
+    assert_eq!(
+        ai_panel_width_pct(&m),
+        30,
+        "while the action nobody rebound keeps both of its defaults"
+    );
+    let _ = update(&mut m, key("<C-w>"));
+    let _ = update(&mut m, key("<lt>"));
+    assert_eq!(ai_panel_width_pct(&m), 25);
 }
 
 /// Entering the panel makes `model.focus()` name it for real, the same way

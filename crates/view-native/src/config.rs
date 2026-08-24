@@ -1,6 +1,7 @@
 //! The tables of `view.toml` this build reads: `[native]`, which native
-//! features a user has turned off, and `[supervision]`, how far view may go
-//! on its own to recover a failed engine.
+//! features a user has turned off, `[supervision]`, how far view may go
+//! on its own to recover a failed engine, and `[keys]`, which keys resize
+//! the sidebars.
 //!
 //! An absent or empty file is the full experience, so every resolution path
 //! that finds nothing to read answers `all_enabled()` rather than failing.
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use view_core::native::geometry;
+use view_core::native::keys::{Direction, ResizeKeys};
 use view_core::native::registry;
 
 /// A resolved on/off answer for every feature in the registry.
@@ -54,6 +56,8 @@ struct ViewFile {
     native: NativeTable,
     #[serde(default)]
     supervision: SupervisionTable,
+    #[serde(default)]
+    keys: KeysTable,
 }
 
 /// The `[native]` table's wire shape: the feature switches, whose key set is
@@ -222,6 +226,95 @@ impl Default for SupervisionConfig {
     }
 }
 
+/// The `[keys]` table's wire shape: one entry per rebindable action, each
+/// either a key notation or a list of them. Unknown keys are refused rather
+/// than ignored, for the reason `[supervision]`'s own check states.
+///
+/// The values stay untyped because a spelling this build cannot match must
+/// not fail the table (see [`resolve_resize_keys`]), and a typed field
+/// would make one a parse error instead.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KeysTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_wider: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_narrower: Option<toml::Value>,
+}
+
+/// What a `sidebar_wider` naming no key this build can match is answered
+/// with; `sidebar_narrower` has its own so the notice names the action the
+/// user has to go fix.
+const SIDEBAR_WIDER_NOTICE: &str =
+    "view: [keys] sidebar_wider must be a key notation, or a list of them, of at most \
+     two keys each (\"<C-w>>\") -- the sidebars widen on their default keys this run";
+
+/// The narrowing half of [`SIDEBAR_WIDER_NOTICE`].
+const SIDEBAR_NARROWER_NOTICE: &str =
+    "view: [keys] sidebar_narrower must be a key notation, or a list of them, of at most \
+     two keys each (\"<C-w><\") -- the sidebars narrow on their default keys this run";
+
+/// The sidebar resize keys, and the notice each action whose value could
+/// not be read owes the user.
+///
+/// A key never fails the table, for the reason `[native] tree_width`'s own
+/// resolution states, and each action falls back on its own: a mistyped
+/// `sidebar_wider` leaves a perfectly good `sidebar_narrower` alone rather
+/// than reverting both to defaults the user asked to replace.
+fn resolve_resize_keys(table: &KeysTable) -> (ResizeKeys, Vec<&'static str>) {
+    let mut keys = ResizeKeys::default();
+    let mut notices = Vec::new();
+    for (value, direction, notice) in [
+        (&table.sidebar_wider, Direction::Wider, SIDEBAR_WIDER_NOTICE),
+        (
+            &table.sidebar_narrower,
+            Direction::Narrower,
+            SIDEBAR_NARROWER_NOTICE,
+        ),
+    ] {
+        let Some(value) = value.as_ref() else {
+            continue;
+        };
+        let spellings = match value {
+            toml::Value::String(one) => Some(vec![one.clone()]),
+            toml::Value::Array(many) => many
+                .iter()
+                .map(|entry| entry.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>(),
+            _ => None,
+        };
+        if !spellings.is_some_and(|spellings| keys.rebind(direction, &spellings)) {
+            notices.push(notice);
+        }
+    }
+    (keys, notices)
+}
+
+/// How the sidebars resize.
+#[must_use]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeysConfig {
+    resize: ResizeKeys,
+    notices: Vec<&'static str>,
+}
+
+impl KeysConfig {
+    /// The keys that step either sidebar's width, defaults included for
+    /// every action `[keys]` left alone.
+    #[must_use]
+    pub fn resize(&self) -> &ResizeKeys {
+        &self.resize
+    }
+
+    /// One notice per action whose value named no key, or empty when the
+    /// table was absent or usable. See [`resolve_resize_keys`] for why such
+    /// a value is a notice rather than the parse error it looks like.
+    #[must_use]
+    pub fn notices(&self) -> &[&'static str] {
+        &self.notices
+    }
+}
+
 /// Everything `view.toml` resolves to for this build, parsed in one pass.
 ///
 /// One read and one parse, not one per table: two loaders over the same file
@@ -233,6 +326,8 @@ pub struct ViewConfig {
     pub native: NativeConfig,
     /// The `[supervision]` table's resolved answers.
     pub supervision: SupervisionConfig,
+    /// The `[keys]` table's resolved answers.
+    pub keys: KeysConfig,
 }
 
 impl ViewConfig {
@@ -242,6 +337,7 @@ impl ViewConfig {
         Self {
             native: NativeConfig::all_enabled(),
             supervision: SupervisionConfig::default(),
+            keys: KeysConfig::default(),
         }
     }
 
@@ -256,11 +352,13 @@ impl ViewConfig {
         // makes every `Result<_, NativeConfigError>` in this module a
         // large-error return there (`clippy::result_large_err`)
         let file: ViewFile = toml::from_str(s).map_err(|e| NativeConfigError::Toml(Box::new(e)))?;
+        let (resize, notices) = resolve_resize_keys(&file.keys);
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
                 auto_restart: file.supervision.auto_restart,
             },
+            keys: KeysConfig { resize, notices },
         })
     }
 
@@ -460,6 +558,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use view_core::native::keys::Resolved;
 
     /// The shipped example config, embedded at compile time rather than read
     /// through a `../..` walk from `CARGO_MANIFEST_DIR`: a moved or renamed
@@ -474,7 +573,7 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 5] = ["native", "ui", "engine", "supervision", "ai"];
+    static SPECIFIED_TABLES: [&str; 6] = ["native", "keys", "ui", "engine", "supervision", "ai"];
 
     /// Tables `SPECIFIED_TABLES` names that this crate's own `ViewFile`
     /// never reads, by design, but that a sibling crate's own loader does.
@@ -888,6 +987,92 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_keys_table_is_the_shipped_defaults() {
+        let cfg = ViewConfig::from_toml_str("[native]\npicker = false\n")
+            .expect("a file with no keys table must parse");
+        assert_eq!(cfg.keys, KeysConfig::default());
+        assert!(cfg.keys.notices().is_empty());
+        assert_eq!(
+            cfg.keys.resize().resolve(None, "<S-Right>"),
+            Some(Resolved::Step(Direction::Wider)),
+            "the shifted arrow still widens"
+        );
+        assert_eq!(
+            cfg.keys.resize().resolve(Some("<C-w>"), ">"),
+            Some(Resolved::Step(Direction::Wider)),
+            "and so does nvim's own chord"
+        );
+    }
+
+    #[test]
+    fn one_rebound_action_leaves_the_other_on_its_defaults() {
+        let cfg = ViewConfig::from_toml_str("[keys]\nsidebar_wider = \"<M-.>\"\n")
+            .expect("a single notation must parse");
+        assert!(cfg.keys.notices().is_empty());
+        let keys = cfg.keys.resize();
+        assert_eq!(
+            keys.resolve(None, "<M-.>"),
+            Some(Resolved::Step(Direction::Wider))
+        );
+        assert_eq!(keys.resolve(None, "<S-Right>"), None, "replaced, not added");
+        assert_eq!(
+            keys.resolve(None, "<S-Left>"),
+            Some(Resolved::Step(Direction::Narrower)),
+            "the action nobody named keeps its defaults"
+        );
+    }
+
+    /// A key that names nothing must not revert the feature switches in the
+    /// file, nor the action beside it, which is what failing the table does.
+    #[test]
+    fn a_key_this_build_cannot_match_keeps_the_table_and_says_so() {
+        for written in [
+            "30",
+            "true",
+            "[\"<C-w>\", 3]",
+            "{ key = \"<C-w>>\" }",
+            "\"abc\"",
+        ] {
+            let cfg = ViewConfig::from_toml_str(&format!(
+                "[native]\npicker = false\n\n[keys]\nsidebar_wider = {written}\nsidebar_narrower = \"<M-,>\"\n"
+            ))
+            .unwrap_or_else(|e| panic!("sidebar_wider = {written} must not fail the table: {e}"));
+            assert!(
+                !cfg.native.enabled("picker"),
+                "sidebar_wider = {written} must not revert the switches beside it"
+            );
+            let keys = cfg.keys.resize();
+            assert_eq!(
+                keys.resolve(None, "<S-Right>"),
+                Some(Resolved::Step(Direction::Wider)),
+                "sidebar_wider = {written} falls back to its own defaults"
+            );
+            assert_eq!(
+                keys.resolve(None, "<M-,>"),
+                Some(Resolved::Step(Direction::Narrower)),
+                "sidebar_wider = {written} must not revert the action beside it"
+            );
+            let notices = cfg.keys.notices();
+            assert_eq!(notices.len(), 1, "sidebar_wider = {written}: {notices:?}");
+            assert!(
+                notices[0].contains("sidebar_wider"),
+                "the notice must name the key: {}",
+                notices[0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_misspelled_keys_entry_is_refused_by_name() {
+        let err = ViewConfig::from_toml_str("[keys]\nsidebar_widr = \"<C-w>>\"\n")
+            .expect_err("a key that names no action must be refused");
+        assert!(
+            format!("{err}").contains("sidebar_widr"),
+            "the error must name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
     fn supervision_auto_restart_can_be_turned_off() {
         let cfg = ViewConfig::from_toml_str("[supervision]\nauto_restart = false\n")
             .expect("the documented switch must parse");
@@ -923,6 +1108,16 @@ mod tests {
     fn the_example_configs_supervision_block_is_the_shipped_default() {
         let cfg = ViewConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");
         assert_eq!(cfg.supervision, SupervisionConfig::default());
+    }
+
+    /// The example spells both defaults out rather than leaving the table
+    /// empty, so a user copying it keeps exactly what an untouched build
+    /// gives them -- including the bare `<` the encoder itself spells
+    /// `<lt>`.
+    #[test]
+    fn the_example_configs_keys_block_is_the_shipped_default() {
+        let cfg = ViewConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");
+        assert_eq!(cfg.keys, KeysConfig::default());
     }
 
     #[test]

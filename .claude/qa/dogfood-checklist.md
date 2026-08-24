@@ -43,9 +43,12 @@ ground plus judgment calls a script can't make.
   not a hang.
 - [ ] Close the panel while an agent is mid-turn → a visible signal the
   session is still alive; reopening shows progress.
-- [ ] `<S-Left>` / `<S-Right>` resize the focused panel/tree; width
-  survives close/reopen within the session; a terminal resize with
-  panel + tree open doesn't corrupt geometry.
+- [ ] `<S-Left>` / `<S-Right>` and `<C-w><` / `<C-w>>` both resize the
+  focused panel/tree; width survives close/reopen within the session; a
+  terminal resize with panel + tree open doesn't corrupt geometry.
+- [ ] `[keys] sidebar_wider` / `sidebar_narrower` in `view.toml` rebind
+  them; an unreadable entry leaves that action on its defaults and
+  raises a notice.
 - [ ] Typing in the prompt echoes instantly; input longer than the
   panel width keeps its cursor and tail visible.
 

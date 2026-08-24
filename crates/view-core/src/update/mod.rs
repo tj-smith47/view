@@ -7,6 +7,7 @@ use crate::msg::{
 use crate::native::ai_event::{AiCommand, PermissionOptionKind, PermissionOutcome};
 use crate::native::ai_panel::{StandingAnswer, TranscriptScroll};
 use crate::native::diff::BufTextChangedEvent;
+use crate::native::keys::Resolved;
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 
@@ -880,8 +881,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 ///
 /// Takes the model because one entry is conditional: `<C-d>` is two keys
 /// wearing one notation, and only the banner-dismissing one is a way out.
-fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
-    if panel_resize_widens(notation).is_some() {
+/// Takes `resize` already resolved because the answer for a chord depends
+/// on the prefix the previous keystroke left waiting, which is state this
+/// predicate must not consume.
+fn reaches_past_a_panel_owner(model: &Model, notation: &str, resize: Option<Resolved>) -> bool {
+    // A chord's first key is here too, though it moves nothing: the prefix
+    // it leaves waiting is recorded before this gate either way, so what
+    // reaching past buys it is only that it takes the same path as the
+    // press that completes it rather than a second, silent one.
+    if resize.is_some() {
         return true;
     }
     match notation {
@@ -896,36 +904,29 @@ fn reaches_past_a_panel_owner(model: &Model, notation: &str) -> bool {
     }
 }
 
-/// Whether `notation` widens (`Some(true)`) or narrows (`Some(false)`) the
-/// focused sidebar, or is no resize key at all.
+/// What `notation` means to the focused sidebar's width, consuming
+/// whichever chord prefix the previous keystroke left waiting.
 ///
-/// Shift plus an arrow rather than the `<` and `>` the vocabulary would
-/// otherwise suggest: the agent panel's composer owns every printable
-/// character, so `<` has to stay a `<` typed into a prompt. Named
-/// notations are what the composer cannot type (the same property the
-/// scroll keys in [`ai_scroll_for`] are chosen for), and this pair is
-/// claimed by no other state -- not the tree's `<Up>`/`<Down>`, not the
-/// terminal's own chords, and not a window manager's, which is what rules
-/// out `<C-Left>`/`<C-Right>` and `<M-,>`.
+/// The one place either sidebar resolves a resize from a key: the tree and
+/// the agent panel share one configured set ([`Model::resize_keys`]), and a
+/// second reading of it here or there is how one sidebar comes to answer a
+/// key the other ignores. The prefix is taken rather than read because a
+/// keystroke consumes it whatever it turns out to mean -- an unmatched
+/// follower falls through to its ordinary handling with nothing left
+/// pending behind it.
+///
 /// Direction reads the way nvim's own `<C-w><` and `<C-w>>` do -- left
 /// narrows and right widens whichever edge the sidebar is pinned to --
 /// rather than following the moving edge, which would invert between the
 /// tree and the panel.
-fn panel_resize_widens(notation: &str) -> Option<bool> {
-    match notation {
-        RESIZE_NARROWER => Some(false),
-        RESIZE_WIDER => Some(true),
-        _ => None,
+fn take_panel_resize(model: &mut Model, notation: &str) -> Option<Resolved> {
+    let pending = model.pending_resize_chord.take();
+    let resolved = model.resize_keys.resolve(pending.as_deref(), notation);
+    if resolved == Some(Resolved::Pending) {
+        model.pending_resize_chord = Some(notation.to_string());
     }
+    resolved
 }
-
-/// The key that narrows the focused sidebar. A constant because the tree's
-/// own key arm matches on it as a pattern, and two spellings of one key
-/// would let one sidebar answer what the other ignores.
-const RESIZE_NARROWER: &str = "<S-Left>";
-
-/// The key that widens the focused sidebar; see [`RESIZE_NARROWER`].
-const RESIZE_WIDER: &str = "<S-Right>";
 
 /// nvim's own name for normal mode in the `mode_change` event.
 ///
@@ -1169,138 +1170,147 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // instead, since a bound `&mut TreeState` here would
             // keep `model` borrowed across the `model.pop_focused_overlay()`
             // and `model.close_tree()` calls the <CR>/<Esc> arms need
-            Some(OverlayKind::Tree(_)) => match notation.as_str() {
-                // The same pair the agent panel resizes with, spelled with
-                // the same two constants so neither sidebar can drift onto a
-                // key the other does not answer (see
-                // [`panel_resize_widens`]).
-                RESIZE_NARROWER | RESIZE_WIDER => {
-                    if model.resize_tree(notation == RESIZE_WIDER) {
+            Some(OverlayKind::Tree(_)) => {
+                // Ahead of the tree's own keys and resolved through the one
+                // shared set, so neither sidebar can drift onto a key the
+                // other does not answer (see [`take_panel_resize`]).
+                match take_panel_resize(model, &notation) {
+                    Some(Resolved::Step(direction)) => {
+                        if model.resize_tree(direction.widens()) {
+                            model.dirty = true;
+                        }
+                        return Vec::new();
+                    }
+                    // The chord's first key waits here rather than moving
+                    // the selection or closing the sidebar; the follower
+                    // that completes nothing falls straight through to the
+                    // arms below on its own next pass.
+                    Some(Resolved::Pending) => return Vec::new(),
+                    None => {}
+                }
+                match notation.as_str() {
+                    "<Esc>" => {
+                        model.pop_focused_overlay();
                         model.dirty = true;
+                        vec![Effect::TreeClose]
                     }
-                    Vec::new()
-                }
-                "<Esc>" => {
-                    model.pop_focused_overlay();
-                    model.dirty = true;
-                    vec![Effect::TreeClose]
-                }
-                "<Down>" => {
-                    if let Some(t) = model.tree_mut() {
-                        t.move_selection(1);
+                    "<Down>" => {
+                        if let Some(t) = model.tree_mut() {
+                            t.move_selection(1);
+                        }
+                        model.dirty = true;
+                        Vec::new()
                     }
-                    model.dirty = true;
-                    Vec::new()
-                }
-                "<Up>" => {
-                    if let Some(t) = model.tree_mut() {
-                        t.move_selection(-1);
+                    "<Up>" => {
+                        if let Some(t) = model.tree_mut() {
+                            t.move_selection(-1);
+                        }
+                        model.dirty = true;
+                        Vec::new()
                     }
-                    model.dirty = true;
-                    Vec::new()
-                }
-                // a directory toggles in place; a leaf's path is
-                // opened through RPC (nvim owns the buffer this
-                // creates) and the sidebar closes on the same
-                // keypress, matching a picker selection's own
-                // close-on-open behavior
-                "<CR>" => {
-                    let to_open = model.tree_mut().and_then(|t| {
-                        let entry = t.selected_entry()?;
-                        if entry.is_dir {
-                            if let Some(idx) = t.view().selected {
-                                t.toggle_expand(idx);
+                    // a directory toggles in place; a leaf's path is
+                    // opened through RPC (nvim owns the buffer this
+                    // creates) and the sidebar closes on the same
+                    // keypress, matching a picker selection's own
+                    // close-on-open behavior
+                    "<CR>" => {
+                        let to_open = model.tree_mut().and_then(|t| {
+                            let entry = t.selected_entry()?;
+                            if entry.is_dir {
+                                if let Some(idx) = t.view().selected {
+                                    t.toggle_expand(idx);
+                                }
+                                None
+                            } else {
+                                t.selected_path()
                             }
-                            None
-                        } else {
-                            t.selected_path()
+                        });
+                        model.dirty = true;
+                        match to_open {
+                            Some(path) => {
+                                model.pop_focused_overlay();
+                                vec![Effect::Rpc(RpcCall::OpenFile {
+                                    path: path_to_wire(&path),
+                                })]
+                            }
+                            None => Vec::new(),
                         }
-                    });
-                    model.dirty = true;
-                    match to_open {
-                        Some(path) => {
-                            model.pop_focused_overlay();
-                            vec![Effect::Rpc(RpcCall::OpenFile {
-                                path: path_to_wire(&path),
-                            })]
+                    }
+                    // opens the blocked-engine Prompt overlay through
+                    // the entry's own RpcCall (`vim.fn.input` primed
+                    // with a `kind = "confirm"` `nvim_echo`, see
+                    // `RpcCall::TreeCreatePrompt`'s doc) rather than any
+                    // new local input state: the reply routes back as
+                    // `Msg::TreeCreatePromptReply` and resolves the
+                    // actual file write from there, once nvim has
+                    // answered. Any selection, including none at all
+                    // (an empty tree), can create -- `TreeCreatePromptReply`
+                    // resolves the target directory from whatever is
+                    // selected at reply time (see its arm below), since
+                    // nothing about the tree's selection can move while
+                    // this prompt holds focus.
+                    "a" => {
+                        let Some(t) = model.tree_mut() else {
+                            return Vec::new();
+                        };
+                        let generation = t.generation();
+                        vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
+                    }
+                    // renaming a directory has no backing effect --
+                    // `RpcCall::RenameFile` and the `Effect::Tree*File`
+                    // pair are file-only by their own doc contracts --
+                    // so a directory selection is a silent no-op here
+                    // rather than opening a prompt whose answer nothing
+                    // could act on.
+                    "r" => {
+                        let Some(t) = model.tree_mut() else {
+                            return Vec::new();
+                        };
+                        let Some(entry) = t.selected_entry() else {
+                            return Vec::new();
+                        };
+                        if entry.is_dir {
+                            return Vec::new();
                         }
-                        None => Vec::new(),
+                        let current_name = entry
+                            .path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let Some(old_path) = t.selected_path() else {
+                            return Vec::new();
+                        };
+                        let generation = t.generation();
+                        vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
+                            generation,
+                            old_path: path_to_wire(&old_path),
+                            current_name,
+                        })]
                     }
-                }
-                // opens the blocked-engine Prompt overlay through
-                // the entry's own RpcCall (`vim.fn.input` primed
-                // with a `kind = "confirm"` `nvim_echo`, see
-                // `RpcCall::TreeCreatePrompt`'s doc) rather than any
-                // new local input state: the reply routes back as
-                // `Msg::TreeCreatePromptReply` and resolves the
-                // actual file write from there, once nvim has
-                // answered. Any selection, including none at all
-                // (an empty tree), can create -- `TreeCreatePromptReply`
-                // resolves the target directory from whatever is
-                // selected at reply time (see its arm below), since
-                // nothing about the tree's selection can move while
-                // this prompt holds focus.
-                "a" => {
-                    let Some(t) = model.tree_mut() else {
-                        return Vec::new();
-                    };
-                    let generation = t.generation();
-                    vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
-                }
-                // renaming a directory has no backing effect --
-                // `RpcCall::RenameFile` and the `Effect::Tree*File`
-                // pair are file-only by their own doc contracts --
-                // so a directory selection is a silent no-op here
-                // rather than opening a prompt whose answer nothing
-                // could act on.
-                "r" => {
-                    let Some(t) = model.tree_mut() else {
-                        return Vec::new();
-                    };
-                    let Some(entry) = t.selected_entry() else {
-                        return Vec::new();
-                    };
-                    if entry.is_dir {
-                        return Vec::new();
+                    // same file-only restriction as "r", for the same
+                    // reason.
+                    "d" => {
+                        let Some(t) = model.tree_mut() else {
+                            return Vec::new();
+                        };
+                        let Some(entry) = t.selected_entry() else {
+                            return Vec::new();
+                        };
+                        if entry.is_dir {
+                            return Vec::new();
+                        }
+                        let Some(path) = t.selected_path() else {
+                            return Vec::new();
+                        };
+                        let generation = t.generation();
+                        vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
+                            generation,
+                            path: path_to_wire(&path),
+                        })]
                     }
-                    let current_name = entry
-                        .path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let Some(old_path) = t.selected_path() else {
-                        return Vec::new();
-                    };
-                    let generation = t.generation();
-                    vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
-                        generation,
-                        old_path: path_to_wire(&old_path),
-                        current_name,
-                    })]
+                    _ => Vec::new(),
                 }
-                // same file-only restriction as "r", for the same
-                // reason.
-                "d" => {
-                    let Some(t) = model.tree_mut() else {
-                        return Vec::new();
-                    };
-                    let Some(entry) = t.selected_entry() else {
-                        return Vec::new();
-                    };
-                    if entry.is_dir {
-                        return Vec::new();
-                    }
-                    let Some(path) = t.selected_path() else {
-                        return Vec::new();
-                    };
-                    let generation = t.generation();
-                    vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
-                        generation,
-                        path: path_to_wire(&path),
-                    })]
-                }
-                _ => Vec::new(),
-            },
+            }
             // A pending permission request blocks the issuing agent's own
             // turn until answered; its digits and <Esc> reach it here
             // because `model.focus()` only ever names this overlay once
@@ -1313,6 +1323,12 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // nvim through this same `match`'s `Focus::Engine` arm
             // untouched.
             Some(OverlayKind::Ai) => {
+                // Resolved before the pending-permission gate below rather
+                // than inside the composer chain: the gate itself has to
+                // know whether this key is a resize before it decides what
+                // reaches past it, and resolving twice would consume the
+                // chord prefix twice.
+                let resize = take_panel_resize(model, &notation);
                 if let Some(prompt) = model.ai_panel().pending_permission.clone() {
                     // <Esc> settles the request as `Cancelled` rather than
                     // any offered option -- the one answer that exists
@@ -1376,7 +1392,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                     // swallowing `<C-c>` here would leave that contract with
                     // no key that reaches it.
                     //
-                    if !reaches_past_a_panel_owner(model, &notation) {
+                    if !reaches_past_a_panel_owner(model, &notation, resize) {
                         return Vec::new();
                     }
                 }
@@ -1384,14 +1400,18 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 // not named below is swallowed rather than leaked to nvim --
                 // the whole point of having deliberately entered the panel
                 // is that the engine does not see these keystrokes.
-                if let Some(widen) = panel_resize_widens(&notation) {
-                    // First in the chain because it is the one key here that
-                    // every other state also honors (see
+                if let Some(step) = resize {
+                    // First in the chain because these are the keys here
+                    // that every other state also honors (see
                     // `reaches_past_a_panel_owner`): a reader who reaches for
-                    // it with a question up gets the same notch they get with
-                    // nothing pending.
-                    if model.resize_ai_panel(widen) {
-                        model.dirty = true;
+                    // one with a question up gets the same notch they get
+                    // with nothing pending. A chord's first key moves
+                    // nothing and is swallowed, which is what keeps the
+                    // composer from typing it while its follower is owed.
+                    if let Resolved::Step(direction) = step {
+                        if model.resize_ai_panel(direction.widens()) {
+                            model.dirty = true;
+                        }
                     }
                 } else if notation == "<Esc>" {
                     // Relinquishes the keyboard (clears `focused`) without

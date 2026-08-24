@@ -10,6 +10,7 @@ pub mod ai_panel;
 pub mod ai_registry;
 pub mod diff;
 pub mod geometry;
+pub mod keys;
 pub mod mappings;
 pub mod palette;
 pub mod picker;

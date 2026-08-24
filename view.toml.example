@@ -8,8 +8,8 @@
 # never edits your config, and your plugins keep loading either way.
 #
 # tree_width is the one key here that is not a switch: the share of the
-# terminal width the file tree opens at. <S-Left> and <S-Right> resize the
-# focused tree by 5% for the session; this is where a width that should
+# terminal width the file tree opens at. The resize keys under [keys] step
+# the focused tree by 5% for the session; this is where a width that should
 # outlive the session goes.
 
 [native]
@@ -23,6 +23,20 @@ tree_width = 30            # default: 30 -- percent of the terminal width,
                            # range opens at the nearest end, and anything that
                            # is not a whole number opens at 30 with a notice.
                            # A width is never a reason view refuses the file
+
+# [keys] rebinds the two keys that resize whichever sidebar -- the file tree
+# or the AI panel -- has the keyboard. Each action takes one key notation or
+# a list of them, spelled the way nvim spells keys, and a binding may be a
+# two-key chord. Both defaults are listed below: a shifted arrow, and nvim's
+# own window-resize chord for the terminals that swallow the arrows before
+# view sees them (macOS Terminal, Termius).
+#
+# A key here is never a reason view refuses the file: an entry it cannot
+# read leaves that one action on its defaults and says so.
+
+[keys]
+sidebar_wider = ["<S-Right>", "<C-w>>"]
+sidebar_narrower = ["<S-Left>", "<C-w><"]
 
 # [supervision] decides how far view goes on its own when the engine fails.
 # Detection is always on: a wedged or dead engine raises a notice and, past
@@ -54,7 +68,7 @@ agent = "claude-code"      # default: "claude-code" -- the one adapter this
 panel_width = 30           # default: 30 -- percent of the terminal width the
                            # panel opens at, on the same clamp-never-refuse
                            # terms as [native] tree_width, and resized for the
-                           # session with the same <S-Left> / <S-Right>
+                           # session with the same keys, see [keys]
 
 # The tables below are commented out because THIS BUILD DOES NOT READ THEM
 # yet. Uncommenting one is harmless -- view ignores tables it has no loader

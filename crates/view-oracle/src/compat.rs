@@ -1458,6 +1458,16 @@ mod tests {
         );
     }
 
+    /// The resize chord a terminal that eats the shifted arrows leaves
+    /// reachable. Both halves are already ordinary cases here -- Ctrl plus
+    /// a letter, then a literal character -- and this pins that a scenario
+    /// can type the whole binding as one string.
+    #[test]
+    fn resolve_send_keys_translates_the_sidebar_resize_chord() {
+        assert_eq!(resolve_send_keys("<C-w>>").unwrap(), b"\x17>".to_vec());
+        assert_eq!(resolve_send_keys("<C-w><lt>").unwrap(), b"\x17<".to_vec());
+    }
+
     #[test]
     fn resolve_send_keys_translates_bar_and_bslash_to_their_literal_bytes() {
         assert_eq!(resolve_send_keys("<Bar>").unwrap(), b"|".to_vec());
