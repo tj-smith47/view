@@ -1322,15 +1322,21 @@ leg_panel_paste() {
     fi
     pass "a bracketed paste lands in the composer and sends nothing (${echoed}s)"
 
+    # Sent, so what follows starts from an empty composer rather than from
+    # whatever this block left in it.
+    local user_mark
+    # the transcript's own mark for a prompt the user sent, built here
+    # rather than written as a literal so the file stays ASCII
+    user_mark=$(printf '\u276f')
+    send_key Enter
+    wait_in_box "$user_mark $mark" "$WAIT_SECS" "the sent prompt in the transcript" >/dev/null
+
     # The dogfood complaint's other half: a pasted multi-line prompt read as
     # one condensed row. Its lines have to stand on rows of their own, in
     # the composer and again in the transcript that echoes them -- and the
     # caret has to be on the row the next character goes on, which a
     # trailing newline makes the empty one below the last line.
-    local top=PASTETOP end=PASTEEND top_row top_col end_row end_col caret user_mark mark_row
-    # the transcript's own mark for a prompt the user sent, built here
-    # rather than written as a literal so the file stays ASCII
-    user_mark=$(printf '\u276f')
+    local top=PASTETOP end=PASTEEND top_row top_col end_row end_col caret
     paste_into_pane "$top
 $end"
     echoed=$(wait_in_box "$end" "$REACTION_SECS" "the pasted prompt's last line")
@@ -1352,17 +1358,15 @@ $end"
     fi
     pass "a pasted multi-line prompt keeps a row per line with the caret below the last (${echoed}s)"
 
-    # The composer still holds the single-line paste from above, so what is
-    # sent here is all three lines: the entry's mark opens the first and the
-    # rest read indented under it, on rows of their own.
+    # Sent: the entry's own mark opens the first line and the second reads
+    # indented under it, on a row of its own.
     send_key Enter
-    echoed=$(wait_in_box "$user_mark $mark" "$REACTION_SECS" "the submitted prompt in the transcript")
+    echoed=$(wait_in_box "$user_mark $top" "$REACTION_SECS" "the submitted prompt in the transcript")
     assert_chrome 'the agent panel echoing a multi-line prompt'
-    read -r mark_row _ _ _ <<<"$(text_span "$mark")"
     read -r top_row _ _ _ <<<"$(text_span "$top")"
     read -r end_row _ _ _ <<<"$(text_span "$end")"
-    if [ "$top_row" != "$((mark_row + 1))" ] || [ "$end_row" != "$((top_row + 1))" ]; then
-        fail "the echoed prompt reads on rows '$mark_row', '$top_row' and '$end_row': what was sent lost the shape it was pasted with"
+    if [ "$end_row" != "$((top_row + 1))" ]; then
+        fail "the echoed prompt reads on rows '$top_row' and '$end_row': what was sent lost the shape it was pasted with"
         return 1
     fi
     copies=$(box_text | grep -cF -- "$end" || true)

@@ -1241,6 +1241,38 @@ mod tests {
         );
     }
 
+    /// The composer and the entry that echoes it break the same text into
+    /// the same rows, which is the whole reason both go through one wrap: a
+    /// prompt that re-broke the moment it was sent would move under the
+    /// reader between the two halves of the panel. Compared at the width
+    /// where a composer row holds what an entry's body row does, and on
+    /// text that does not end on a break -- the one line ending an entry
+    /// drops, because a log line owes no blank row.
+    #[test]
+    fn an_entrys_rows_are_the_composers_rows_for_the_same_text() {
+        let text = "fix the parser\n\n- it drops tabs, and a good deal more \
+                    besides, well past one row\n- and CRs";
+        let body = WIDE - MARK_COLS;
+        let panel = (1..=200)
+            .find(|w| crate::native::ai_panel::composer_width(*w) == body)
+            .expect("some panel width gives the composer an entry body's width");
+
+        let mut state = crate::native::ai_panel::AiPanelState::new();
+        state.input = text.to_string();
+        let composer = state.view(ROOM, panel).input;
+
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt(text);
+        let entry: Vec<String> =
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE))
+                .iter()
+                .map(|row| row.chars().skip(MARK_COLS).collect())
+                .collect();
+
+        assert!(composer.len() > 3, "the text has to wrap to prove anything");
+        assert_eq!(composer, entry);
+    }
+
     /// A line past the row's width wraps rather than being clipped, and the
     /// rows it wraps onto stand under the marker's own indent -- one entry,
     /// not a new one per row.

@@ -692,19 +692,25 @@ fn char_cells(ch: char) -> usize {
 ///
 /// The window opens on a multiple of `width` bytes rather than at a fixed
 /// distance from the end, so that appending does not slide it and reflow
-/// rows the reader has already read. For text of one-byte characters --
-/// where a byte is a cell -- such an offset is a row boundary of the full
-/// wrap, so what this produces is exactly what wrapping the whole input
-/// would have produced. Multi-byte characters in the window's first row can
-/// move a later break a column off from where the full wrap would have put
-/// it; every character of the tail is still on screen in order, and the
-/// alternative is a frame whose cost the user sets with their clipboard.
+/// rows the reader has already read.
 ///
-/// A line break in the window ends a row early, which only ever makes the
-/// window hold *more* rows than the width alone would have -- never fewer
-/// than the `keep` the caller asked for -- and the first break in it puts
-/// every row after itself back on exactly the column the full wrap would
-/// have.
+/// What it produces is what wrapping the whole input would have produced,
+/// for every input but one. A line break is a row boundary of the full
+/// wrap, and [`wrap`] resets a row at one, so every row after the first
+/// break in the window is on the column the whole input puts it on --
+/// which covers the last `keep` rows, the only ones this is read for,
+/// whenever a break falls in the window ahead of them. An input with no
+/// break at all is covered by the offset itself: for one-byte characters
+/// -- where a byte is a cell -- a multiple of `width` *is* a row boundary
+/// of such an input's wrap.
+///
+/// What is left is a single line spanning most of the window with a break
+/// somewhere before it. Aligning to *that* break means scanning back to it
+/// -- the whole input, on every frame, which is the cost this exists to
+/// refuse -- so its rows sit a constant column off from the full wrap's, as
+/// do a window's whose first row opens mid-character. Every character of
+/// the tail is still on screen in order in both, and the alternative is a
+/// frame whose cost the user sets with their clipboard.
 fn wrap_window(input: &str, width: usize, keep: usize) -> &str {
     let span = keep
         .saturating_add(1)
@@ -1305,6 +1311,66 @@ mod tests {
              reflows every row the reader has already read"
         );
         assert!(pasted.ends_with(&rows.concat()), "the tail is what shows");
+    }
+
+    /// The same window over text with line breaks in it, where the offset
+    /// it opens on is *not* a row boundary of the whole input's wrap: a
+    /// break moves every later boundary off the multiples of the width the
+    /// break-free case aligns to. The rows still come out the whole input's
+    /// own, because the first break inside the window puts every row after
+    /// itself back on the column the whole input gives it -- and the rows
+    /// this is read for are the last few, far past that break. Were they
+    /// not, a prompt would re-flow the moment it was sent.
+    #[test]
+    fn a_multi_line_paste_larger_than_the_panel_breaks_where_the_whole_input_does() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let mut pasted = String::new();
+        for i in 0..2_000 {
+            let _ = writeln!(pasted, "line {i} of a prompt pasted from somewhere else");
+        }
+
+        let mut state = AiPanelState::new();
+        state.input.clone_from(&pasted);
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+
+        assert_eq!(
+            rows,
+            wrap(&pasted, width, cap),
+            "the rows are the whole input's own, column for column"
+        );
+        assert!(
+            wrap_window(&pasted, width, cap).len() <= (cap + 2) * width * BYTES_PER_CELL,
+            "and the walk is still bounded by the rows the panel has"
+        );
+    }
+
+    /// The one class no bounded window can open on a row boundary of: a
+    /// single line longer than the window with a break before it, where the
+    /// boundary to align to is however far back that break is. The rows sit
+    /// a column off the whole input's there -- what is promised instead is
+    /// that the tail is all on screen, in order, and still capped.
+    #[test]
+    fn a_single_line_longer_than_the_window_keeps_its_whole_tail_on_screen() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let one_line: String = (0..(1 << 14))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let mut state = AiPanelState::new();
+        state.input = format!("first\n{one_line}");
+
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+
+        assert_eq!(rows.len(), cap, "the rows are capped: {}", rows.len());
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= width),
+            "no row is wider than the panel paints: {rows:?}"
+        );
+        assert!(
+            state.input.ends_with(&rows.concat()),
+            "and every character of the tail is on screen, in order"
+        );
     }
 
     /// The wrap boundary itself, where an off-by-one puts the cursor on a
