@@ -555,8 +555,9 @@ impl DiffReviewState {
     ///
     /// The second copy of the key hint on purpose -- the first is the
     /// header [`Self::marks`] puts at the hunk itself, where the decision
-    /// is made. This one costs two rows and survives the user scrolling
-    /// the buffer away from every hunk.
+    /// is made. This one survives the user scrolling the buffer away from
+    /// every hunk, and is split over the same rows the header is for the
+    /// same reason: the panel is the narrowest surface here.
     #[must_use]
     pub fn summary_rows(&self) -> Vec<Vec<Span>> {
         let open = self.hunks.iter().filter(|h| h.status.is_open()).count();
@@ -568,8 +569,10 @@ impl DiffReviewState {
         ))]];
         if let Some(notice) = self.sync.notice() {
             rows.push(vec![Span::plain(notice.to_string())]);
+            rows.push(vec![Span::plain(LEAVE_HINT)]);
         } else {
             rows.push(vec![Span::plain(KEY_HINT)]);
+            rows.push(vec![Span::plain(NAV_HINT)]);
         }
         rows
     }
@@ -602,19 +605,29 @@ impl DiffReviewState {
                     added: hunk.new_lines.clone(),
                     stale: hunk.status == HunkStatus::Stale,
                     current: index == self.cursor,
-                    header: (index == self.cursor).then(|| self.header(index)),
+                    header: if index == self.cursor {
+                        self.header(index)
+                    } else {
+                        Vec::new()
+                    },
                 }
             })
             .collect()
     }
 
-    /// The current hunk's header: where the user is in the review, and
+    /// The current hunk's header: where the user is in the review, then
     /// either the keys that decide this hunk or the reason nothing here
-    /// can be decided any more.
-    fn header(&self, index: usize) -> String {
+    /// can be decided any more, and last the keys that leave it.
+    ///
+    /// Two rows rather than one -- see [`HunkMark::header`] for the width
+    /// this is about. The split is by kind, so which row a key is on does
+    /// not move with the hunk's state: what decides *this* hunk on the
+    /// first, what moves between hunks and out of the review on the
+    /// second.
+    fn header(&self, index: usize) -> Vec<String> {
         let position = format!("hunk {}/{}", index + 1, self.hunks.len());
         if let Some(notice) = self.sync.notice() {
-            return format!("{position} -- {notice} -- {LEAVE_HINT}");
+            return vec![format!("{position} -- {notice}"), LEAVE_HINT.to_string()];
         }
         let hunk = self.hunks.get(index);
         let stale = hunk.is_some_and(|hunk| hunk.status == HunkStatus::Stale);
@@ -632,7 +645,7 @@ impl DiffReviewState {
             (true, true) => STALE_KEY_HINT,
             (true, false) => UNANCHORED_KEY_HINT,
         };
-        format!("{position} -- {keys}")
+        vec![format!("{position} -- {keys}"), NAV_HINT.to_string()]
     }
 
     /// The call that draws this review in its buffer, or `None` for a
@@ -731,23 +744,27 @@ fn count(hunks: &[Hunk], status: HunkStatus) -> usize {
 ///
 /// One line rather than a continuation on purpose: `ai-conformance.sh`
 /// reads this constant out of the source to know what to look for on
-/// screen, and its reader takes the value from a single `const` line.
-const KEY_HINT: &str = "<leader>ha accept  <leader>hA accept all  <leader>hx reject  ]c next  [c prev  <leader>hq leave";
+/// screen, and its reader takes the value from a single `const` line. The
+/// same holds for every hint beside it.
+const KEY_HINT: &str = "<leader>ha accept  <leader>hA accept all  <leader>hx reject";
 
 /// [`KEY_HINT`] for a hunk the buffer has moved under: re-diff in place of
 /// the accept that would be refused.
-const STALE_KEY_HINT: &str =
-    "stale -- <leader>hR re-diff  <leader>hx reject  ]c next  [c prev  <leader>hq leave";
+const STALE_KEY_HINT: &str = "stale -- <leader>hR re-diff  <leader>hx reject";
 
 /// [`STALE_KEY_HINT`] for a stale hunk whose anchor the user's own later
 /// edits have taken with them: `re_diff` refuses that hunk for good, so the
 /// header stops naming the key rather than offering one whose only answer
 /// is a refusal notice.
-const UNANCHORED_KEY_HINT: &str =
-    "stale, anchor gone -- <leader>hx reject  ]c next  [c prev  <leader>hq leave";
+const UNANCHORED_KEY_HINT: &str = "stale, anchor gone -- <leader>hx reject";
+
+/// The row under every [`KEY_HINT`] variant: moving between hunks and
+/// leaving, which no hunk's own state can take away.
+const NAV_HINT: &str = "]c next  [c prev  <leader>hq leave";
 
 /// The one key a review whose buffer can no longer be trusted still has,
-/// appended to the sync notice that says why nothing else is on offer.
+/// standing in for [`NAV_HINT`] under the sync notice that says why nothing
+/// else is on offer.
 const LEAVE_HINT: &str = "<leader>hq leave";
 
 #[cfg(test)]
@@ -1125,6 +1142,11 @@ mod tests {
             vec![Span::plain("Review /tmp/a.rs -- hunk 1/2, 2 open")]
         );
         assert_eq!(rows[1], vec![Span::plain(KEY_HINT)]);
+        assert_eq!(
+            rows[2],
+            vec![Span::plain(NAV_HINT)],
+            "the panel is narrower than the buffer, so its copy is split too"
+        );
     }
 
     /// The hints are what the user reads; `review_keys()` is what the
@@ -1133,7 +1155,13 @@ mod tests {
     /// the same failure seen from either side.
     #[test]
     fn the_hints_name_exactly_the_keys_a_review_installs() {
-        let hints = [KEY_HINT, STALE_KEY_HINT, UNANCHORED_KEY_HINT, LEAVE_HINT];
+        let hints = [
+            KEY_HINT,
+            STALE_KEY_HINT,
+            UNANCHORED_KEY_HINT,
+            NAV_HINT,
+            LEAVE_HINT,
+        ];
         let installed = crate::native::mappings::review_keys();
         for key in installed {
             assert!(
@@ -1179,13 +1207,18 @@ mod tests {
         assert_eq!(marks[0].added, vec!["B".to_string()]);
         assert!(!marks[0].stale);
         assert!(marks[0].current);
-        let header = marks[0].header.clone().expect("the current hunk's header");
-        assert!(header.starts_with("hunk 1/2 --"), "{header}");
-        assert!(header.contains("<leader>ha accept"), "{header}");
-        assert!(header.contains("]c next"), "{header}");
-        assert!(header.contains("<leader>hq leave"), "{header}");
+        let header = marks[0].header.clone();
+        assert_eq!(
+            header.len(),
+            2,
+            "the hint is split over rows so the panel cannot cover its tail: {header:?}"
+        );
+        assert!(header[0].starts_with("hunk 1/2 --"), "{header:?}");
+        assert!(header[0].contains("<leader>ha accept"), "{header:?}");
+        assert!(header[1].contains("]c next"), "{header:?}");
+        assert!(header[1].contains("<leader>hq leave"), "{header:?}");
         assert!(
-            !marks[1].current && marks[1].header.is_none(),
+            !marks[1].current && marks[1].header.is_empty(),
             "one copy of the keys, at the decision being made: {marks:?}"
         );
     }
@@ -1235,7 +1268,7 @@ mod tests {
         state.hunks[0].status = HunkStatus::Stale;
         let marks = state.marks();
         assert!(marks[0].stale);
-        let header = marks[0].header.clone().expect("the current hunk's header");
+        let header = marks[0].header.join("\n");
         assert!(header.contains("<leader>hR re-diff"), "{header}");
         assert!(!header.contains("<leader>ha accept"), "{header}");
     }
@@ -1246,10 +1279,7 @@ mod tests {
     fn a_broken_review_replaces_the_keys_with_the_reason_and_the_way_out() {
         let mut state = review();
         state.sync = ReviewSync::Detached;
-        let header = state.marks()[0]
-            .header
-            .clone()
-            .expect("the current hunk's header");
+        let header = state.marks()[0].header.join("\n");
         assert!(header.contains("edit stream ended"), "{header}");
         assert!(header.contains(LEAVE_HINT), "{header}");
     }
@@ -1322,10 +1352,7 @@ mod tests {
         let mut state = review();
         state.hunks[0].status = HunkStatus::Stale;
         state.hunks[0].anchor_intact = false;
-        let header = state.marks()[0]
-            .header
-            .clone()
-            .expect("the current hunk's header");
+        let header = state.marks()[0].header.join("\n");
         assert!(!header.contains("<leader>hR"), "{header}");
         assert!(header.contains("<leader>hx reject"), "{header}");
         assert!(header.contains("<leader>hq leave"), "{header}");

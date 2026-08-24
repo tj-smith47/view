@@ -2484,7 +2484,7 @@ mod tests {
                 added: vec!["B".to_string()],
                 stale: false,
                 current: true,
-                header: Some("hunk 1/1".to_string()),
+                header: vec!["hunk 1/1".to_string()],
             }],
             cursor_row: 1,
             focus: true,

@@ -1767,8 +1767,8 @@ for _, m in ipairs(marks) do
     })
   end
   local virt = {}
-  if m.header ~= nil then
-    virt[#virt + 1] = { { m.header, 'DiffText' } }
+  for _, line in ipairs(m.header or {}) do
+    virt[#virt + 1] = { { line, 'DiffText' } }
   end
   for _, line in ipairs(m.added) do
     virt[#virt + 1] = { { '+' .. line, 'DiffAdd' } }
@@ -3256,10 +3256,11 @@ impl EngineHandle {
                     (Value::from("current"), Value::from(mark.current)),
                 ];
                 // absent rather than nil: msgpack's nil decodes to `vim.NIL`
-                // in Lua, which is a truthy sentinel -- a header sent that
-                // way would draw the string "vim.NIL" above every hunk
-                if let Some(header) = &mark.header {
-                    fields.push((Value::from("header"), Value::from(header.as_str())));
+                // in Lua, which `ipairs` cannot walk -- a header sent that
+                // way would throw inside the chunk that draws every hunk
+                if !mark.header.is_empty() {
+                    let rows = mark.header.iter().map(|l| Value::from(l.as_str()));
+                    fields.push((Value::from("header"), Value::Array(rows.collect())));
                 }
                 Value::Map(fields)
             })
@@ -3817,7 +3818,7 @@ mod tests {
                 added: vec!["B".to_string()],
                 stale: false,
                 current: true,
-                header: Some("hunk 1/2".to_string()),
+                header: vec!["hunk 1/2".to_string(), "]c next".to_string()],
             },
             HunkMark {
                 row: 6,
@@ -3826,7 +3827,7 @@ mod tests {
                 added: Vec::new(),
                 stale: true,
                 current: false,
-                header: None,
+                header: Vec::new(),
             },
         ];
         h.review_show(BufferHandle(4), &marks, 1, true, ReviewOpenTarget::Split)
@@ -3850,8 +3851,11 @@ mod tests {
         assert_eq!(sent.len(), 2);
         let first = sent[0].as_map().expect("a mark is a map");
         assert!(
-            first.contains(&(Value::from("header"), Value::from("hunk 1/2"))),
-            "{first:?}"
+            first.contains(&(
+                Value::from("header"),
+                Value::Array(vec![Value::from("hunk 1/2"), Value::from("]c next")]),
+            )),
+            "every header row crosses, in order: {first:?}"
         );
         assert!(
             first.contains(&(Value::from("added"), Value::Array(vec![Value::from("B")]))),
@@ -3860,8 +3864,8 @@ mod tests {
         let second = sent[1].as_map().expect("a mark is a map");
         assert!(
             !second.iter().any(|(k, _)| k == &Value::from("header")),
-            "a hunk with no header sends no key at all -- msgpack nil reaches Lua as the \
-             truthy `vim.NIL`: {second:?}"
+            "a hunk with no header sends no key at all -- msgpack nil reaches Lua as \
+             `vim.NIL`, which `ipairs` cannot walk: {second:?}"
         );
         let keys = args[6].as_array().expect("the keys cross as an array");
         assert_eq!(keys.len(), review_keys().len());

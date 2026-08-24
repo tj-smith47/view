@@ -219,7 +219,8 @@ it would put there, and puts your cursor on the first hunk.
 ```
   alpha
 ▶ beta                                    <- what the agent would remove
-  hunk 1/1 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject …
+  hunk 1/1 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject
+  ]c next  [c prev  <leader>hq leave      <- the keys, on the hunk itself
   +BETA                                   <- what it would put there
   gamma
 ```
@@ -232,7 +233,11 @@ your colorscheme's own diff colors, in the window the file is already in,
 and it scrolls, folds and wraps the way the rest of the buffer does. The
 buffer's text is untouched by any of it: nothing is written until you accept
 something. The `▶` on the current hunk needs a sign column to land in; with
-`signcolumn=no` it is simply absent, and the header still names every key.
+`signcolumn=no` it is simply absent, and the keys are still named. The header
+takes two rows rather than one so that it is: nvim's grid keeps its full width
+under the panel, so the panel covers the right of every header row, and a
+single-line hint would lose its tail -- the way out of the review first -- at
+the widths a laptop opens.
 
 The reviewed buffer stays an ordinary editable buffer -- every nvim key
 still does what it always did -- so the review's own vocabulary is mapped

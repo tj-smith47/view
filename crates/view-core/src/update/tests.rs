@@ -9075,10 +9075,7 @@ fn a_second_edit_that_takes_a_stale_hunks_anchor_repaints_without_the_re_diff_ke
                 !focus,
                 "a fold repaints under the reader, it does not move them"
             );
-            marks[0]
-                .header
-                .clone()
-                .expect("the cursor's hunk carries the header")
+            marks[0].header.join("\n")
         }
         other => panic!("the fold that unanchors a hunk must redraw it, got {other:?}"),
     };

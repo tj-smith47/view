@@ -157,16 +157,17 @@ return out",
     }
 }
 
-/// A replacement of one row, carrying the header the current hunk draws.
-fn replacement(row: u32, added: &[&str], header: Option<&str>) -> HunkMark {
+/// A replacement of one row, carrying the header rows the current hunk
+/// draws.
+fn replacement(row: u32, added: &[&str], header: &[&str]) -> HunkMark {
     HunkMark {
         row,
         end_row: row + 1,
         anchor: row,
         added: added.iter().map(|l| (*l).to_string()).collect(),
         stale: false,
-        current: header.is_some(),
-        header: header.map(str::to_owned),
+        current: !header.is_empty(),
+        header: header.iter().map(|l| (*l).to_string()).collect(),
     }
 }
 
@@ -182,8 +183,12 @@ fn a_shown_review_decorates_the_rows_it_replaces_and_nothing_else() {
     s.show(
         buf,
         &[
-            replacement(1, &["TWO"], Some("hunk 1/2 -- <leader>ha accept")),
-            replacement(5, &["SIX"], None),
+            replacement(
+                1,
+                &["TWO"],
+                &["hunk 1/2 -- <leader>ha accept", "]c next  <leader>hq leave"],
+            ),
+            replacement(5, &["SIX"], &[]),
         ],
         1,
         false,
@@ -200,8 +205,10 @@ fn a_shown_review_decorates_the_rows_it_replaces_and_nothing_else() {
         "the replaced row is highlighted where it really is: {marks:?}"
     );
     assert_eq!(
-        marks[1], "1:nil:nil:\u{25b6} :false:hunk 1/2 -- <leader>ha accept/DiffText|+TWO/DiffAdd",
-        "the current hunk carries the header, the sign, and the proposed line: {marks:?}"
+        marks[1],
+        "1:nil:nil:\u{25b6} :false:hunk 1/2 -- <leader>ha accept/DiffText|\
+         ]c next  <leader>hq leave/DiffText|+TWO/DiffAdd",
+        "the current hunk carries every header row, the sign, and the proposed line: {marks:?}"
     );
     assert_eq!(marks[2], "5:5:DiffDelete:nil:nil:");
     assert_eq!(
@@ -221,7 +228,7 @@ fn the_deletion_highlight_stops_at_the_last_row_the_hunk_replaces() {
     let buf = s.buffer();
     s.show_in_current_window(buf);
 
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
 
     // screen rows, not buffer rows: the header and the proposed line are
     // drawn between the replaced row and the row that follows it
@@ -262,17 +269,12 @@ fn a_wiped_buffer_is_neither_drawn_nor_an_error() {
         vec![rmpv::Value::from(buf.0)],
     );
 
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, true);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, true);
     s.engine.handle.review_clear(buf).unwrap();
     s.barrier();
 
     let live = s.buffer();
-    s.show(
-        live,
-        &[replacement(1, &["TWO"], Some("hunk 1/1"))],
-        1,
-        false,
-    );
+    s.show(live, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
     assert_eq!(
         s.decoration(live).len(),
         2,
@@ -297,7 +299,7 @@ fn a_pure_insertion_draws_above_the_row_and_highlights_nothing() {
             added: vec!["inserted".to_string()],
             stale: false,
             current: false,
-            header: None,
+            header: Vec::new(),
         }],
         3,
         false,
@@ -317,7 +319,7 @@ fn a_stale_hunk_is_drawn_in_the_change_group() {
     let s = start();
     let buf = s.buffer();
 
-    let mut mark = replacement(1, &["TWO"], None);
+    let mut mark = replacement(1, &["TWO"], &[]);
     mark.stale = true;
     s.show(buf, &[mark], 1, false);
 
@@ -347,7 +349,7 @@ fn decorating_a_buffer_changes_neither_its_text_nor_its_modified_flag() {
     };
     let before = state(&s);
 
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, true);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, true);
 
     assert_eq!(
         state(&s),
@@ -364,7 +366,7 @@ fn decorating_a_buffer_changes_neither_its_text_nor_its_modified_flag() {
 fn an_edit_above_a_hunk_carries_its_decoration_down_with_it() {
     let s = start();
     let buf = s.buffer();
-    s.show(buf, &[replacement(4, &["FIVE"], None)], 4, false);
+    s.show(buf, &[replacement(4, &["FIVE"], &[])], 4, false);
 
     s.lua(
         "vim.api.nvim_buf_set_lines(..., 0, 0, false, { 'inserted', 'inserted' })",
@@ -391,12 +393,7 @@ fn a_mark_past_the_end_of_a_shrunk_buffer_still_installs_the_keys() {
         "vim.api.nvim_buf_set_lines(..., 1, -1, false, {})",
         vec![rmpv::Value::from(buf.0)],
     );
-    s.show(
-        buf,
-        &[replacement(40, &["late"], Some("hunk 1/1"))],
-        40,
-        false,
-    );
+    s.show(buf, &[replacement(40, &["late"], &["hunk 1/1"])], 40, false);
 
     assert_eq!(
         s.buffer_keys(buf).len(),
@@ -414,7 +411,7 @@ fn the_review_keys_are_buffer_local_and_leave_with_the_review() {
     let buf = s.buffer();
     let other = s.buffer();
 
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
 
     let keys = s.buffer_keys(buf);
     assert_eq!(keys.len(), review_keys().len(), "{keys:?}");
@@ -455,8 +452,8 @@ vim.keymap.set('n', '\\\\hR', function() vim.g.view_test_hit = 'user' end, { buf
         vec![rmpv::Value::from(buf.0)],
     );
 
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
 
     let during = s.buffer_keys(buf);
     assert_eq!(
@@ -502,8 +499,8 @@ fn a_second_show_replaces_the_first_and_a_clear_without_one_is_harmless() {
     let s = start();
     let buf = s.buffer();
 
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/2"))], 1, false);
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/2"))], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/2"])], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/2"])], 1, false);
 
     assert_eq!(
         s.decoration(buf).len(),
@@ -525,7 +522,7 @@ fn pressing_a_review_key_in_the_buffer_invokes_the_verb() {
     let s = start();
     let buf = s.buffer();
     s.show_in_current_window(buf);
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, false);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
 
     s.press("\\ha");
 
@@ -551,7 +548,7 @@ fn focus_takes_the_cursor_to_the_hunk_and_a_repaint_leaves_it_alone() {
     let buf = s.buffer();
     s.show_in_current_window(buf);
 
-    s.show(buf, &[replacement(4, &["FIVE"], Some("hunk 1/1"))], 4, true);
+    s.show(buf, &[replacement(4, &["FIVE"], &["hunk 1/1"])], 4, true);
     assert_eq!(
         s.lua("return vim.api.nvim_win_get_cursor(0)[1]", vec![]),
         rmpv::Value::from(5),
@@ -559,12 +556,7 @@ fn focus_takes_the_cursor_to_the_hunk_and_a_repaint_leaves_it_alone() {
     );
 
     s.lua("vim.api.nvim_win_set_cursor(0, { 1, 0 })", vec![]);
-    s.show(
-        buf,
-        &[replacement(4, &["FIVE"], Some("hunk 1/1"))],
-        4,
-        false,
-    );
+    s.show(buf, &[replacement(4, &["FIVE"], &["hunk 1/1"])], 4, false);
     assert_eq!(
         s.lua("return vim.api.nvim_win_get_cursor(0)[1]", vec![]),
         rmpv::Value::from(1),
@@ -580,7 +572,7 @@ fn an_unopened_file_lands_in_the_current_window() {
     let buf = s.buffer();
     let windows_before = s.lua("return #vim.api.nvim_list_wins()", vec![]);
 
-    s.show(buf, &[replacement(1, &["TWO"], Some("hunk 1/1"))], 1, true);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, true);
 
     assert_eq!(
         s.lua("return vim.api.nvim_get_current_buf()", vec![]),
@@ -605,7 +597,7 @@ fn open_target_split_leaves_the_users_own_file_beside_the_proposal() {
         .handle
         .review_show(
             buf,
-            &[replacement(1, &["TWO"], Some("hunk 1/1"))],
+            &[replacement(1, &["TWO"], &["hunk 1/1"])],
             1,
             true,
             ReviewOpenTarget::Split,
@@ -650,7 +642,7 @@ fn a_file_a_window_already_shows_is_never_moved_or_split() {
         .handle
         .review_show(
             buf,
-            &[replacement(1, &["TWO"], Some("hunk 1/1"))],
+            &[replacement(1, &["TWO"], &["hunk 1/1"])],
             1,
             true,
             ReviewOpenTarget::Split,

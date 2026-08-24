@@ -1383,11 +1383,18 @@ pub struct HunkMark {
     pub stale: bool,
     /// Whether the review's cursor is on this hunk.
     pub current: bool,
-    /// The line drawn above the current hunk's added lines: which hunk of
-    /// how many this is, and the keys that decide it (or the reason the
-    /// review can no longer be acted on). `None` on every other hunk --
-    /// one copy on screen, at the decision the user is making.
-    pub header: Option<String>,
+    /// The lines drawn above the current hunk's added lines: which hunk
+    /// of how many this is with the keys that decide it (or the reason the
+    /// review can no longer be acted on), then the keys that move between
+    /// hunks and leave. Empty on every other hunk -- one copy on screen,
+    /// at the decision the user is making.
+    ///
+    /// Several rows rather than one because nvim's grid keeps its full
+    /// width under the panel: the panel covers the right third of every
+    /// header row, so a hint that fits on one line in a wide terminal
+    /// loses its tail -- the way out of the review first -- at the width a
+    /// laptop opens.
+    pub header: Vec<String>,
 }
 
 /// Where a proposal's file is shown when no window already has it open.

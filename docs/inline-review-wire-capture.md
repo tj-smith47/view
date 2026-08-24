@@ -49,7 +49,7 @@ session's differs; nothing in the chunk hard-codes it.
 ## 1. A three-hunk review, shown
 
 The payload: a replacement of row 1 (`two` -> `TWO`) which is the current hunk
-and so carries the header, a pure insertion before row 3, and a stale
+and so carries the header rows, a pure insertion before row 3, and a stale
 replacement of row 5 that proposes nothing. `cursor_row = 1`, `focus = true`,
 `open_target = 'current'`.
 
@@ -57,7 +57,7 @@ Read back as `row:end_row:line_hl_group:sign_text:virt_lines_above:virt|lines`:
 
 ```
 MARK 1:1:DiffDelete:nil:nil:
-MARK 1:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  ]c next  <leader>hq leave/DiffText|+TWO/DiffAdd
+MARK 1:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject/DiffText|]c next  [c prev  <leader>hq leave/DiffText|+TWO/DiffAdd
 MARK 3:nil:nil:nil:true:+inserted/DiffAdd
 MARK 5:5:DiffChange:nil:nil:
 ```
@@ -70,7 +70,9 @@ second kind, and it is the one mark with `virt_lines_above = true`: it replaces
 no row, so its lines are drawn above the row it inserts before rather than
 under the rows it would replace. The header and the `▶` sign appear on the
 current hunk alone, which is what makes "which hunk am I about to accept"
-answerable without the panel.
+answerable without the panel. The header is two virtual lines, not one: nvim's
+grid keeps its full width under view's panel, so a hint on a single line loses
+its tail -- `<leader>hq leave` first -- at the widths a laptop opens.
 
 The groups are nvim's own `DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText`: every
 colorscheme a migrating user already has defines them, so a proposal is legible
@@ -129,15 +131,16 @@ row  attr  screen
  1     0   |  one|
  2    23   |▶ two|            DiffDelete   the row the hunk replaces
  3    24   |  hunk 1/3 ...|   DiffText     header, a virtual line
- 4    21   |  +TWO|           DiffAdd      the proposal, a virtual line
- 5     0   |  three|                       untouched, and painted as such
- 6    21   |  +inserted|      DiffAdd      the insertion, drawn above its row
- 7     0   |  four|
- 8     0   |  five|
- 9    22   |  six|            DiffChange   the stale hunk
+ 4    24   |  ]c next ...|    DiffText     the header's second virtual line
+ 5    21   |  +TWO|           DiffAdd      the proposal, a virtual line
+ 6     0   |  three|                       untouched, and painted as such
+ 7    21   |  +inserted|      DiffAdd      the insertion, drawn above its row
+ 8     0   |  four|
+ 9     0   |  five|
+10    22   |  six|            DiffChange   the stale hunk
 ```
 
-Row 5 is the assertion that matters: the row after a hunk carries the same
+Row 6 is the assertion that matters: the row after a hunk carries the same
 attribute as an untouched row. Nothing but a rendered read answers it -- this is
 the exact cell the half-open/inclusive mismatch paints, and the extmark
 attributes above look correct in both versions.
@@ -146,7 +149,7 @@ attributes above look correct in both versions.
 
 ```
 MARK 3:3:DiffDelete:nil:nil:
-MARK 3:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  ]c next  <leader>hq leave/DiffText|+TWO/DiffAdd
+MARK 3:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject/DiffText|]c next  [c prev  <leader>hq leave/DiffText|+TWO/DiffAdd
 MARK 5:nil:nil:nil:true:+inserted/DiffAdd
 MARK 7:7:DiffChange:nil:nil:
 ```
@@ -228,8 +231,8 @@ for _, m in ipairs(marks) do
     })
   end
   local virt = {}
-  if m.header ~= nil then
-    virt[#virt + 1] = { { m.header, 'DiffText' } }
+  for _, line in ipairs(m.header or {}) do
+    virt[#virt + 1] = { { line, 'DiffText' } }
   end
   for _, line in ipairs(m.added) do
     virt[#virt + 1] = { { '+' .. line, 'DiffAdd' } }
@@ -285,8 +288,8 @@ end
 ```
 
 `m.header` is omitted from the payload rather than sent as nil for a hunk that
-carries no header: msgpack nil decodes to `vim.NIL`, which is truthy, so a
-present-but-nil key would draw an empty header line on every hunk.
+carries no header: msgpack nil decodes to `vim.NIL`, which `ipairs` cannot walk,
+so a present-but-nil key would throw inside the loop that draws every hunk.
 
 ## Production chunk shape: review_clear
 
