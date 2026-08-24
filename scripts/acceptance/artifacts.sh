@@ -162,3 +162,62 @@ ensure_artifact() {
         return 1
     }
 }
+
+# A key in nvim notation as a terminal must type it, with `<leader>`
+# expanded to nvim's own default -- which every fixture here leaves alone.
+#
+# A notation this cannot spell fails loudly rather than being skipped: an
+# entry point nothing drives is the hole the legs that press keys exist to
+# close.
+tmux_key() {
+    local lhs="$1" typed="${1/<leader>/\\}"
+    case "$typed" in
+    *'<'* | *'>'*)
+        printf 'FAIL: %s carries a key notation this script cannot type; teach tmux_key to spell it\n' "$lhs" >&2
+        return 1
+        ;;
+    esac
+    printf '%s' "$typed"
+}
+
+# The review's own keys as `lhs verb` lines, out of the table the maps are
+# generated from.
+#
+#   REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
+#
+# Checked against the array's own declared length, because the reader
+# recognizes the fields by name and in the order they are written: a renamed
+# or reordered field would leave it silently short, and a leg that pressed
+# nothing for the verb it dropped would report green.
+review_keys_of() {
+    local mappings_rs="$1" table declared read_count
+    REVIEW_KEYS_SOURCE=$mappings_rs
+    table=$(awk '
+        /^static REVIEW_KEYS/ { inside = 1 }
+        inside && /lhs: "/  { l = $0; sub(/.*lhs: "/, "", l); sub(/".*/, "", l) }
+        inside && /verb: "/ { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v); print l, v }
+        inside && /^\];/ { exit }
+    ' "$mappings_rs")
+    declared=$(grep -oE '^static REVIEW_KEYS: \[ReviewKey; [0-9]+\]' "$mappings_rs" |
+        grep -oE '[0-9]+')
+    read_count=$(printf '%s\n' "$table" | grep -c . || true)
+    if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
+        printf 'FAIL: %s declares %s review keys and this read %s of them; the table has changed shape\n' \
+            "$mappings_rs" "${declared:-no}" "$read_count" >&2
+        return 1
+    fi
+    printf '%s\n' "$table"
+}
+
+# The key one review verb is pressed with, spelled for a terminal, out of
+# the `REVIEW_KEYS` the caller read with `review_keys_of` -- which is also
+# what names the file in the failure below.
+review_key() {
+    local verb="$1" lhs
+    lhs=$(printf '%s\n' "$REVIEW_KEYS" | awk -v v="$verb" '$2 == v { print $1 }')
+    [ -n "$lhs" ] || {
+        printf 'FAIL: no review key invokes %s in %s any more\n' "$verb" "$REVIEW_KEYS_SOURCE" >&2
+        return 1
+    }
+    tmux_key "$lhs"
+}

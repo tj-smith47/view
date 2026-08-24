@@ -332,37 +332,6 @@ review_verb() {
     send_key Enter
 }
 
-# One review verb through the key the review installs on the buffer for it,
-# typed at the buffer as a user types it.
-#
-# The key is read from the table the maps are generated from, and
-# `<leader>` is expanded to nvim's own default, which the no-plugins fixture
-# leaves alone -- so a reworded key fails here rather than being sent to a
-# buffer that no longer answers it.
-review_key() {
-    local verb="$1" lhs typed
-    lhs=$(awk -v want="$verb" '
-        /^static REVIEW_KEYS/ { inside = 1 }
-        inside && /lhs: "/  { l = $0; sub(/.*lhs: "/, "", l); sub(/".*/, "", l) }
-        inside && /verb: "/ { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v)
-                              if (v == want) { print l; exit } }
-        inside && /^\];/ { exit }
-    ' "$MAPPINGS_RS")
-    if [ -z "$lhs" ]; then
-        printf 'FAIL: no review key invokes %s in %s any more\n' "$verb" "$MAPPINGS_RS" >&2
-        return 1
-    fi
-    typed=${lhs/<leader>/\\}
-    case "$typed" in
-    *'<'* | *'>'*)
-        printf 'FAIL: the %s review key (%s) carries a notation this script cannot type\n' \
-            "$verb" "$lhs" >&2
-        return 1
-        ;;
-    esac
-    send_text "$typed"
-}
-
 # One session against `agent`, which is either the literal `default` (the
 # `[ai]` table left out entirely, so the pinned adapter is provisioned the
 # way a first-run user gets it) or a command line for the `[ai] agent` key.
@@ -610,9 +579,15 @@ leg_streaming_and_tool_status() {
 }
 
 leg_diff_accept_and_reject() {
+    local key
     CURRENT_LEG=3-diff-accept-and-reject
     start_session diff "$STUB_ARGV" "$(mktemp -d)"
     open_panel "$WAIT_SECS"
+    # before the first in-buffer read, not after it: `buffer_region` finds
+    # the buffer by cutting at the panel's own left border, so a border this
+    # script could not find would leave every wait below reading the whole
+    # pane and passing on text drawn in the panel
+    assert_panel_is_framed || return 1
 
     # Abandoned first, and restated afterwards. The session deduplicates a
     # diff it has already raised, so the second review below can only open
@@ -626,7 +601,6 @@ leg_diff_accept_and_reject() {
     submit 'propose'
     wait_in_buffer "$PROPOSED_BETA" "$WAIT_SECS" \
         "the abandoned proposal's own line, drawn in the file" >/dev/null
-    assert_panel_is_framed || return 1
     review_verb leave
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing unanswered" >/dev/null
     refute "$PROPOSED_BETA" 'an abandoned review left its proposal drawn in the file'
@@ -658,7 +632,8 @@ gamma' 'an abandoned review changed the buffer'
     # the same call that draws the marks, so a key typed at the buffer is
     # the only assertion that both halves of the decoration arrived: what is
     # visible, and what answers.
-    review_key accept || return 1
+    key=$(review_key accept) || return 1
+    send_text "$key"
     # The review closing on its last open hunk, and then its own count of
     # what it decided: the file assertion below proves the bytes, and this
     # proves they were written by an accept rather than by anything else
@@ -678,7 +653,8 @@ gamma' 'the accepted hunk was not written byte for byte'
     submit 'propose2'
     wait_in_buffer "$PROPOSED_GAMMA" "$WAIT_SECS" \
         "the second proposal's own line, drawn in the file" >/dev/null
-    review_key reject || return 1
+    key=$(review_key reject) || return 1
+    send_text "$key"
     until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing on the reject" >/dev/null
     wait_for "${REVIEW_MARK}accepted 0 and rejected 1 hunks" "$WAIT_SECS" \
         "the rejected review's own account of itself" >/dev/null
@@ -960,6 +936,10 @@ require_template "$STUB_RS" '("alpha\nBETA\ngamma\n", "alpha\nBETA\nGAMMA\n")' |
 require_template "$NVIM_API_RS" "virt[#virt + 1] = { { '+' .. line, 'DiffAdd' } }" || exit 1
 PROPOSED_BETA='+BETA'
 PROPOSED_GAMMA='+GAMMA'
+# The keys the review installs on the buffer, read and shape-checked out of
+# the table the maps are generated from, so a reworded key fails here rather
+# than being typed at a buffer that no longer answers it.
+REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
 # The marker the review's own transcript lines carry. Every review ends
 # with one, and what it says is how the review ended -- which is the one
 # reading of a decision that comes from the review itself rather than from

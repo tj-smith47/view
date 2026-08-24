@@ -666,11 +666,17 @@ FLOAT_BG=$(fixture_bg NormalFloat) || exit 1
 DIFF_ADD_BG=$(fixture_bg DiffAdd) || exit 1
 DIFF_DELETE_BG=$(fixture_bg DiffDelete) || exit 1
 DIFF_TEXT_BG=$(fixture_bg DiffText) || exit 1
+# read for the gate below rather than for a leg: it is what a stale hunk
+# paints with and what `StyleRole::GitModified` resolves to in the tree
+# float, so a fixture that let it collide with another group would be found
+# by whichever leg reads it next rather than here
+DIFF_CHANGE_BG=$(fixture_bg DiffChange) || exit 1
 # Every one of them distinct from every other: two that shared a value would
 # leave a bleed through an overlay indistinguishable from correct paint, and
 # a proposed line indistinguishable from the row it replaces.
 printf '%s\n' "Normal $NORMAL_BG" "CursorLine $CURSORLINE_BG" "NormalFloat $FLOAT_BG" \
-    "DiffAdd $DIFF_ADD_BG" "DiffDelete $DIFF_DELETE_BG" "DiffText $DIFF_TEXT_BG" |
+    "DiffAdd $DIFF_ADD_BG" "DiffDelete $DIFF_DELETE_BG" "DiffText $DIFF_TEXT_BG" \
+    "DiffChange $DIFF_CHANGE_BG" |
     awk -v scheme="$COLORSCHEME" '
         { if ($2 in owner) { printf "FAIL: %s gives %s and %s the same background (%s), so this sweep cannot tell them apart\n", scheme, owner[$2], $1, $2 > "/dev/stderr"; bad = 1 }
           owner[$2] = $1 }
@@ -809,34 +815,10 @@ if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
         "$MAPPINGS_RS" "${declared:-no}" "$read_count" >&2
     exit 1
 fi
-# Every key a review installs on the buffer it draws in, read the same way
-# and checked the same way as the defaults above: a table that changed shape
-# under this reader would leave the leg pressing nothing.
-REVIEW_KEYS=$(awk '
-    /^static REVIEW_KEYS/ { inside = 1 }
-    inside && /lhs: "/  { l = $0; sub(/.*lhs: "/, "", l); sub(/".*/, "", l) }
-    inside && /verb: "/ { v = $0; sub(/.*verb: "/, "", v); sub(/".*/, "", v); print l, v }
-    inside && /^\];/ { exit }
-' "$MAPPINGS_RS")
-declared=$(grep -oE '^static REVIEW_KEYS: \[ReviewKey; [0-9]+\]' "$MAPPINGS_RS" |
-    grep -oE '[0-9]+')
-read_count=$(printf '%s\n' "$REVIEW_KEYS" | grep -c . || true)
-if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
-    printf 'FAIL: %s declares %s review keys and this read %s of them; the table has changed shape\n' \
-        "$MAPPINGS_RS" "${declared:-no}" "$read_count" >&2
-    exit 1
-fi
-
-# The key one review verb is pressed with, as tmux must spell it.
-review_key() {
-    local verb="$1" lhs
-    lhs=$(printf '%s\n' "$REVIEW_KEYS" | awk -v v="$verb" '$2 == v { print $1 }')
-    [ -n "$lhs" ] || {
-        printf 'FAIL: no review key invokes %s in %s any more\n' "$verb" "$MAPPINGS_RS" >&2
-        return 1
-    }
-    tmux_key "$lhs"
-}
+# Every key a review installs on the buffer it draws in, read and shape-checked
+# the same way as the defaults above (`review_keys_of`, artifacts.sh).
+# shellcheck disable=SC2034 # read by `review_key`, which lives in artifacts.sh
+REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
 
 # The features in registration order with the verb a bare `:View <feature>`
 # resolves to. That form is a separate entry point from the key, and the
@@ -844,21 +826,6 @@ review_key() {
 # is the feature's first `default_maps()` entry (crates/view-core/src/update/mod.rs),
 # which is this table's first row for it.
 DEFAULT_VERBS=$(printf '%s\n' "$ENTRY_POINTS" | awk '!seen[$1]++ { print $1, $3 }')
-
-# nvim's own leader, which the fixture leaves at the default, as tmux must
-# spell the key. A notation this cannot type fails loudly rather than being
-# skipped: an entry point nothing drives is the hole this leg exists to
-# close.
-tmux_key() {
-    local lhs="$1" typed="${1/<leader>/\\}"
-    case "$typed" in
-    *'<'* | *'>'*)
-        printf 'FAIL: %s carries a key notation this script cannot type; teach tmux_key to spell it\n' "$lhs" >&2
-        return 1
-        ;;
-    esac
-    printf '%s' "$typed"
-}
 
 printf 'view acceptance: visual sweep (%s, %s, %sx%s)\n' \
     "${VIEW_BIN#"$REPO_ROOT/"}" "$(nvim --version | head -1)" "$COLS" "$ROWS"
@@ -1297,7 +1264,7 @@ leg_panel_paste() {
 # where the code is, in the colorscheme's diff colors.
 leg_inline_review() {
     CURRENT_LEG=inline-review
-    local proposed='+BETA' replaced='beta' header='hunk 1/1' key span leftmost
+    local proposed='+BETA' replaced='beta' header='hunk 1/1' key
     start_session review 'visual sweep seed line'
     # The file the stub's `propose` offers edits to, seeded with what its own
     # `oldText` claims it holds. Deliberately not the file the session
@@ -1309,7 +1276,10 @@ leg_inline_review() {
     wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
     send_text 'y'
     wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
-    command_line 'propose'
+    # the composer, not the `:` line `command_line` is named for: the panel
+    # has focus here and the prompt is what it takes
+    send_text 'propose'
+    send_key Enter
     wait_for "$proposed" "$WAIT_SECS" "the agent's proposed line" >/dev/null
 
     # The proposed line and the header naming the keys are virtual lines --
@@ -1335,6 +1305,7 @@ leg_inline_review() {
     # with. A namespace that outlived its review would leave a proposal
     # painted over the text it had already become.
     key=$(review_key accept) || return 1
+    mark
     send_text "$key"
     wait_change "$REACTION_SECS" "the accepted hunk" >/dev/null
     settle

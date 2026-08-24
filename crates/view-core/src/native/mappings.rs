@@ -188,8 +188,8 @@ pub struct ReviewKey {
     pub verb: &'static str,
     /// What pressing it does, as the docs pages say it. Carried in the table
     /// rather than written into the pages because the same sentence is on
-    /// two of them ([`render_review_table`]), and two hand-written copies of
-    /// one key's meaning are two copies that drift.
+    /// two of them, rendered from here, and two hand-written copies of one
+    /// key's meaning are two copies that drift.
     pub does: &'static str,
 }
 
@@ -327,8 +327,11 @@ pub fn render_table() -> String {
 /// `reject_all` is absent because it reaches no key -- see [`REVIEW_KEYS`]
 /// for why -- and a docs table of keys is not the place to advertise a form
 /// that has none.
-#[must_use]
-pub fn render_review_table() -> String {
+///
+/// Test-only, and private with it: the pages carry the rendered table, and
+/// the test below is the only thing that needs to render it again.
+#[cfg(test)]
+fn render_review_table() -> String {
     let mut out = String::from("| key | does | command |\n| --- | --- | --- |\n");
     for key in review_keys() {
         out.push_str(&format!(
@@ -638,6 +641,11 @@ mod tests {
     /// Both pages a user learns the review from carry the same generated
     /// table, so a key that changed shape here fails the build rather than
     /// leaving one page right and the other one lying.
+    ///
+    /// The default-key table on `docs/keymaps.md` is pinned from view-native
+    /// instead (`the_keys_page_renders_the_table_this_build_registers`),
+    /// where the registration it renders lives: one page, two tables, each
+    /// checked beside the thing that generates it.
     #[test]
     fn both_docs_pages_render_the_review_keys_this_build_installs() {
         let table = render_review_table();

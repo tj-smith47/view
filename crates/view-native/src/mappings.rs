@@ -90,6 +90,11 @@ mod tests {
     /// something nobody told them about. Asserted from the crate that owns
     /// the config example's own drift check, for the same reason: neither
     /// consumer-facing file may drift from what the build actually does.
+    ///
+    /// One of two tests pinning that page: view-core's
+    /// `both_docs_pages_render_the_review_keys_this_build_installs` pins the
+    /// review-key table on it, since that table is generated where the
+    /// review keys live.
     #[test]
     fn the_keys_page_renders_the_table_this_build_registers() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
