@@ -393,11 +393,11 @@ impl AiPanelState {
     /// [`Self::view`] paints as the composer, and a column across that row
     /// in cells.
     ///
-    /// The one definition of the composer's insertion point. The panel
-    /// places no terminal caret of its own, so this is what "the cursor is
-    /// on screen" means here: the row is always the last composer row --
-    /// the one the wrap's tail-keeping cut can never drop -- and the column
-    /// is always inside the width that row was wrapped to.
+    /// The one definition of the composer's insertion point, and where
+    /// `view-surface` puts the real terminal caret while the panel owns
+    /// input: the row is always the last composer row -- the one the wrap's
+    /// tail-keeping cut can never drop -- and the column is always inside
+    /// the width that row was wrapped to.
     #[must_use]
     pub fn composer_cursor(&self, panel_height: usize, panel_width: usize) -> (usize, usize) {
         let rows = self.composer_rows(panel_height, panel_width);

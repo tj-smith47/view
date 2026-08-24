@@ -967,6 +967,84 @@ fn a_maximally_short_ai_panel_keeps_the_crash_banner_over_the_rule() {
     );
 }
 
+/// The caret's row is counted through the same header the panel was drawn
+/// from, so the accounting row above the composer moves the caret down with
+/// the text it moved: a caret counted from the frame's top edge instead
+/// would sit on the accounting row itself the moment a session reports its
+/// first usage.
+#[test]
+fn the_caret_lands_on_the_composer_row_beneath_the_accounting_row() {
+    use view_core::native::views::AiPanelView;
+    let view = AiPanelView::new("AI Agent")
+        .with_input("hello")
+        .with_usage(vec![Span::plain("context 10/100".to_string())]);
+    let (width, height) = (40, 10);
+
+    let framed = rows(
+        width,
+        height,
+        &LayerKind::Ai(view.clone()),
+        BorderSet::ASCII,
+    );
+    let (row, col) = ai_caret(&view, width, height, (0, 5)).expect("the panel has cells");
+    let text = line_text(&framed.lines[usize::from(row)]);
+
+    assert!(
+        text.contains("> hello"),
+        "the caret must be on the composer's own row: {text:?}"
+    );
+    assert_eq!(
+        text.chars().take(usize::from(col)).collect::<String>(),
+        "| > hello",
+        "the caret stands one cell past the last character painted"
+    );
+}
+
+/// A panel too short to paint the composer at all still owns the keyboard,
+/// so its caret stays inside its own frame. Falling back to the engine's
+/// grid cursor there would put the caret on the buffer while every
+/// keystroke went to the panel, which is the exact confusion a caret exists
+/// to settle.
+#[test]
+fn a_panel_too_short_to_paint_the_composer_keeps_the_caret_inside_its_frame() {
+    use view_core::native::views::AiPanelView;
+    let view = AiPanelView::new("AI Agent")
+        .with_input("draft prompt")
+        .with_local_error(vec![vec![Span::plain(
+            "Error: the agent exited".to_string(),
+        )]]);
+    let (width, height) = (50, 4);
+
+    let framed = rows(
+        width,
+        height,
+        &LayerKind::Ai(view.clone()),
+        BorderSet::ASCII,
+    );
+    let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+    let (row, col) = ai_caret(&view, width, height, (0, 12)).expect("the panel has cells");
+
+    assert!(
+        !text.iter().any(|line| line.contains("draft prompt")),
+        "this height is the one where the composer's row was cut: {text:?}"
+    );
+    assert_eq!(
+        (row, col),
+        interior_origin(width, height),
+        "a cut composer parks the caret on the panel's first interior cell"
+    );
+}
+
+/// A rect with no cells has nowhere to put a caret, and a caret named on it
+/// would be a position no painter can honour.
+#[test]
+fn a_panel_with_no_cells_names_no_caret() {
+    use view_core::native::views::AiPanelView;
+    let view = AiPanelView::new("AI Agent").with_input("hello");
+    assert_eq!(ai_caret(&view, 0, 10, (0, 5)), None);
+    assert_eq!(ai_caret(&view, 40, 0, (0, 5)), None);
+}
+
 #[test]
 fn a_tier_maps_to_exactly_one_border_charset() {
     assert_eq!(BorderSet::for_tier(Tier::Full), BorderSet::ROUNDED);

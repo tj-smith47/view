@@ -153,7 +153,8 @@ impl SurfaceCache {
         self.frames = self.frames.wrapping_add(1);
         if self.frame.as_ref().is_some_and(|f| f.inputs.matches(model)) {
             if let Some(frame) = self.frame.as_mut() {
-                frame.surface.cursor = cursor_spec(model, frame.inputs.offset);
+                let cursor = cursor_spec(model, frame.inputs.offset, &frame.surface.layers);
+                frame.surface.cursor = cursor;
                 if frame.inputs.statusline_rows > 0 {
                     refresh_statusline(&mut frame.surface, model, frame.inputs.grid.0);
                 }

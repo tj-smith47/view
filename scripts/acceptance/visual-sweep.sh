@@ -537,6 +537,52 @@ settle() {
     return 0
 }
 
+# The pane's own cursor: the row, the column, and whether the terminal is
+# showing it -- "row col flag".
+#
+# Read from tmux rather than from a capture because it is the one thing a
+# capture cannot answer: the hardware caret is terminal state, not a cell,
+# and the defect this exists for (a composer with no insertion point, the
+# caret left behind in nvim's grid while every key landed in the panel) is
+# invisible in every screen dump of it.
+caret_cell() { tmux display -p -t "$SESSION" '#{cursor_y} #{cursor_x} #{cursor_flag}'; }
+
+# Fails unless the pane's caret is visible and standing one cell past
+# `text` -- the insertion point, where the next character lands.
+assert_caret_after() {
+    local text="$1" what="$2" span row col got want
+    settle
+    span=$(text_span "$text")
+    [ -n "$span" ] || {
+        fail "$what: '$text' is not on screen at all, so there is no insertion point to check"
+        return 1
+    }
+    read -r row col _ _ <<<"$span"
+    want="$row $((col + ${#text})) 1"
+    got=$(caret_cell)
+    [ "$got" = "$want" ] || {
+        fail "$what: the terminal's caret reads '$got' (row col visible), not '$want' -- one cell past '$text'"
+        return 1
+    }
+    pass "$what: the caret stands one cell past '$text' (row $row col $((col + ${#text})))"
+}
+
+# Fails unless the pane's caret is outside every framed box on its own row,
+# which is where nvim's grid is: the buffer keeps the caret whenever the
+# panel is not the thing keys reach.
+assert_caret_outside_a_box() {
+    local what="$1" row col edge
+    settle
+    read -r row col _ <<<"$(caret_cell)"
+    edge=$(LC_ALL=C awk -F'\t' -v r="$row" \
+        '$1 == r && $6 == "\342\224\202" { print $2; exit }' "$CELLS")
+    if [ -n "$edge" ] && [ "$col" -gt "$edge" ]; then
+        fail "$what: the caret is at row $row col $col, right of the box edge at col $edge, so it is parked in an overlay that does not have the keys"
+        return 1
+    fi
+    pass "$what: the caret is at row $row col $col, left of every framed box on its row"
+}
+
 assert_chrome() {
     local what="$1" findings
     settle
@@ -1089,6 +1135,14 @@ leg_panel_typing() {
     done
     assert_chrome 'the agent panel mid-typing'
 
+    # The insertion point itself. The panel had no visible caret at all when
+    # this was found live: `composer_cursor` knew where the next character
+    # went and nothing placed the terminal's own cursor there, so the caret
+    # stayed in nvim's grid while every keystroke landed here. Nothing in a
+    # screen dump can see that, which is why it is asserted against tmux's
+    # own cursor rather than against cells.
+    assert_caret_after 'ALPHABRAVOCHARLIE' 'the composer holding three bursts' || return 1
+
     # Past the composer's own width by a wide margin, whichever share of the
     # terminal the panel currently takes. The tail is what must still be on
     # screen: the cursor is at the end of the input, and a composer that
@@ -1099,6 +1153,9 @@ leg_panel_typing() {
     echoed=$(wait_in_box "$tail_mark" "$WAIT_SECS" "the tail of a prompt longer than the panel is wide")
     assert_chrome 'the agent panel holding a wrapped prompt'
     pass "a $((${#typed} + ${#tail_mark}))-character prompt keeps its tail on screen (${echoed}s)"
+    # the caret follows the wrap onto the row the tail was kept on, which is
+    # the row the next character is painted on
+    assert_caret_after "$tail_mark" 'the composer holding a wrapped prompt' || return 1
 
     # Out of the panel and back in on the key that put the user there. The
     # defect this exists for was a dead end: Escape leaves the composer
@@ -1130,6 +1187,10 @@ leg_panel_typing() {
         return 1
     fi
     pass "Escape leaves the panel framed and un-entered ('$PANEL_TITLE')"
+    # and the caret leaves with the keyboard: an un-entered panel routes
+    # every key to nvim, so a caret still sitting on its composer would be
+    # pointing at a field that takes nothing
+    assert_caret_outside_a_box 'the panel Escape left un-entered' || return 1
 
     mark
     send_text "$ai_key"
@@ -1140,6 +1201,8 @@ leg_panel_typing() {
     wait_in_box 'REENTERED' "$REACTION_SECS" "a keystroke in the re-entered composer" >/dev/null
     assert_chrome 'the re-entered agent panel'
     pass "the toggle re-enters an escaped-out-of panel and its composer takes keys again (${echoed}s)"
+    # both halves of the round trip: the caret comes back with the keyboard
+    assert_caret_after REENTERED 'the re-entered composer' || return 1
 
     dismiss ai
     end_session

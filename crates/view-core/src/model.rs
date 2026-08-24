@@ -424,7 +424,16 @@ impl Model {
         }
     }
 
-    fn focused_overlay(&self) -> Option<&Overlay> {
+    /// The overlay [`Self::focus`] names, or `None` while the engine owns
+    /// the keyboard.
+    ///
+    /// The kind-carrying form of [`Self::focus`], for a caller that has to
+    /// know *which* feature holds the keys rather than merely that some
+    /// overlay does -- `view-surface` places the real terminal caret in the
+    /// surface that owns input, and an `OverlayId` alone cannot say which
+    /// surface that is.
+    #[must_use]
+    pub fn focused_overlay(&self) -> Option<&Overlay> {
         let ai_entered = self.ai_panel.focused;
         self.overlays
             .iter()

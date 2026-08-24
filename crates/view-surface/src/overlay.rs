@@ -556,6 +556,55 @@ struct Body {
     rule: bool,
 }
 
+/// How a `header_keep_tail` body's rows were spent against a row budget:
+/// how many of the header rows above its last one were kept (always the
+/// tail of them), and whether the last header row and the rule each got a
+/// slot of their own.
+struct HeaderFit {
+    rest: usize,
+    last: bool,
+    rule: bool,
+}
+
+/// Priority order, most important first: the single most-recently pushed
+/// header row (the crash banner, or the last permission option), then the
+/// rule, then the rest of the header from most recent to least. The rule
+/// sits between those two tiers rather than outranking the row it separates
+/// from context -- see [`Body::rule`] -- so it is spent from the same
+/// `budget` the header content shares, one slot at a time, in that order.
+///
+/// Its own function rather than [`lay_out`]'s locals, because [`ai_caret`]
+/// has to name the row this arithmetic put the composer on. Two copies of
+/// it is a caret that walks off its own text on exactly the panels short
+/// enough for the truncation to bite.
+fn header_fit(header: &[Line], rule: bool, budget: usize) -> HeaderFit {
+    let rest_len = header.len().saturating_sub(1);
+    let last = !header.is_empty() && budget >= 1;
+    let rule = rule && budget > usize::from(last);
+    let slots_used = usize::from(last) + usize::from(rule);
+    HeaderFit {
+        rest: budget.saturating_sub(slots_used).min(rest_len),
+        last,
+        rule,
+    }
+}
+
+impl HeaderFit {
+    /// Which of the rows [`lay_out`] painted holds header line `index` of a
+    /// `header_len`-line header, or `None` when the truncation dropped that
+    /// line entirely.
+    fn row_of(&self, index: usize, header_len: usize) -> Option<usize> {
+        if index + 1 >= header_len {
+            return self.last.then_some(self.rest);
+        }
+        // `then`, never `then_some`: the row a truncation dropped is exactly
+        // the one whose subtraction underflows, and `then_some` evaluates
+        // its argument before the test that rules it out
+        let rest_start = header_len - 1 - self.rest;
+        (index >= rest_start).then(|| index - rest_start)
+    }
+}
+
 /// Cuts `body` down to exactly `height` rows of exactly `width` cells: the
 /// header first (see [`Body::rule`] for where its own row fits into that),
 /// then a window over the items that keeps the selection on screen.
@@ -569,29 +618,18 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
     let budget = usize::from(height);
     if body.header_keep_tail {
-        // Priority order, most important first: the single most-recently
-        // pushed header row (the crash banner, or the last permission
-        // option), then the rule, then the rest of the header from most
-        // recent to least. The rule sits between those two tiers rather
-        // than outranking the row it separates from context -- see
-        // [`Body::rule`] -- so it is spent from the same `budget` the
-        // header content shares, one slot at a time, in that order.
+        let kept = header_fit(&body.header, body.rule, budget);
         let (last, rest) = body
             .header
             .split_last()
             .map_or((None, &[][..]), |(last, rest)| (Some(last), rest));
-        let last_shown = last.is_some() && budget >= 1;
-        let rule_shown = body.rule && budget > usize::from(last_shown);
-        let slots_used = usize::from(last_shown) + usize::from(rule_shown);
-        let rest_budget = budget.saturating_sub(slots_used).min(rest.len());
-        let rest_start = rest.len() - rest_budget;
-        for line in &rest[rest_start..] {
+        for line in &rest[rest.len() - kept.rest..] {
             lines.push(fit(line, width, borders));
         }
-        if let Some(last) = last.filter(|_| last_shown) {
+        if let Some(last) = last.filter(|_| kept.last) {
             lines.push(fit(last, width, borders));
         }
-        if rule_shown {
+        if kept.rule {
             lines.push(fit(&Line::Rule, width, borders));
         }
     } else {
@@ -792,26 +830,9 @@ fn palette_body(view: &PaletteView) -> Body {
 /// together, and this ordering is what a future case where they did would
 /// fall back to.
 fn ai_body(view: &AiPanelView) -> Body {
-    // Header order is truncation order, because `header_keep_tail` keeps
-    // the tail: the first row here is the first sacrificed and the last is
-    // the last standing. Session accounting first (it answers a question
-    // nobody is currently blocked on), then the composer's rows (context --
-    // what the user is typing survives in the state whether or not it is
-    // painted, and the row the cursor is on is the last of them, so a
-    // truncated composer still shows where typing lands), then the
-    // review's own summary, then a pending permission's question and
-    // options, and the crash banner last of all. A dead session is the one
-    // thing that explains why nothing else on this panel will ever answer,
-    // so it outranks a review the user can still scroll to and a request
-    // whose agent is already gone.
-    let mut header: Vec<Line> = view.usage.iter().cloned().map(Line::Text).collect();
-    header.extend(composer_lines(&view.input));
-    header.extend(view.review.iter().cloned().map(Line::Text));
-    header.extend(view.pending_permission.iter().cloned().map(Line::Text));
-    header.extend(view.local_error.iter().cloned().map(Line::Text));
     Body {
         title: view.title.clone(),
-        header,
+        header: ai_header(view),
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: None,
         // the crash banner, the pending permission's options and the
@@ -820,8 +841,44 @@ fn ai_body(view: &AiPanelView) -> Body {
         // question and composer line under truncation
         header_keep_tail: true,
         items_keep_tail: true,
-        rule: true,
+        rule: AI_RULE,
     }
+}
+
+/// Whether the panel draws the rule between its header and its transcript.
+///
+/// Named rather than written at both call sites because it costs a row of
+/// the same budget the header rows compete for (see [`Body::rule`]), so
+/// [`ai_caret`] cannot say which row the composer landed on without it.
+const AI_RULE: bool = true;
+
+/// The always-shown rows the panel puts above its transcript, in the order
+/// [`lay_out`] sacrifices them in.
+///
+/// Header order is truncation order, because `header_keep_tail` keeps the
+/// tail: the first row here is the first sacrificed and the last is the last
+/// standing. Session accounting first (it answers a question nobody is
+/// currently blocked on), then the composer's rows (context -- what the user
+/// is typing survives in the state whether or not it is painted, and the row
+/// the cursor is on is the last of them, so a truncated composer still shows
+/// where typing lands), then the review's own summary, then a pending
+/// permission's question and options, and the crash banner last of all. A
+/// dead session is the one thing that explains why nothing else on this
+/// panel will ever answer, so it outranks a review the user can still scroll
+/// to and a request whose agent is already gone.
+///
+/// Its own function so [`ai_caret`] can count the rows standing above the
+/// composer -- which is what decides the row the caret lands on -- without
+/// building the whole body for them. A body clones the transcript window
+/// too, and the frames that ask this question are exactly the frames the
+/// user is typing on.
+fn ai_header(view: &AiPanelView) -> Vec<Line> {
+    let mut header: Vec<Line> = view.usage.iter().cloned().map(Line::Text).collect();
+    header.extend(composer_lines(&view.input));
+    header.extend(view.review.iter().cloned().map(Line::Text));
+    header.extend(view.pending_permission.iter().cloned().map(Line::Text));
+    header.extend(view.local_error.iter().cloned().map(Line::Text));
+    header
 }
 
 /// The composer's rows, the prompt mark on the first and an indent of the
@@ -853,6 +910,57 @@ fn composer_lines(rows: &[String]) -> Vec<Line> {
             Line::Text(plain_spans(format!("{lead}{row}")))
         })
         .collect()
+}
+
+/// Where the agent panel's composer caret lands inside the panel's own
+/// rect, given `cursor` -- the insertion point
+/// `AiPanelState::composer_cursor` resolved against that same rect, as a
+/// composer row index and a column in cells across it.
+///
+/// Resolved through the same [`ai_header`] and the same [`header_fit`]
+/// [`rows`] laid the panel out with, never against a second reading of the
+/// panel's chrome: which row the composer is painted on depends on the
+/// accounting row, the review summary, a pending question and the crash
+/// banner all being counted exactly as they were drawn.
+///
+/// `None` only for a rect with no cells at all. A panel too short to have
+/// painted the composer's own row still owns the keyboard, so the caret
+/// stays inside it -- on its first interior cell, since the composer is
+/// above every row such a panel kept and no cell on screen holds the text
+/// the caret is in -- rather than falling back to the engine grid, where it
+/// would tell the user their keys are the editor's.
+pub(crate) fn ai_caret(
+    view: &AiPanelView,
+    width: u16,
+    height: u16,
+    cursor: (usize, usize),
+) -> Option<(u16, u16)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let interior = if width < 2 || height < 2 {
+        height
+    } else {
+        height - 2
+    };
+    let (row_off, col_off) = interior_origin(width, height);
+    let prompt_cols = u16::try_from(view_core::native::ai_panel::PROMPT_COLS).unwrap_or(2);
+    let col = u16::try_from(cursor.1)
+        .unwrap_or(u16::MAX)
+        .saturating_add(col_off)
+        .saturating_add(prompt_cols)
+        .min(width.saturating_sub(1));
+    let header = ai_header(view);
+    // the composer's rows follow the accounting row in the panel's own
+    // header, so the caret's row is that many rows into it
+    let index = view.usage.len().saturating_add(cursor.0);
+    let Some(row) = header_fit(&header, AI_RULE, usize::from(interior))
+        .row_of(index, header.len())
+        .and_then(|row| u16::try_from(row).ok())
+    else {
+        return Some((row_off, col_off));
+    };
+    Some((row.saturating_add(row_off), col))
 }
 
 /// One palette row: the command's name, plus its binding as a second

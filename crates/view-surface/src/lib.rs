@@ -562,10 +562,8 @@ pub fn render(model: &Model) -> Surface {
         }
     }
 
-    Surface {
-        layers,
-        cursor: cursor_spec(model, offset),
-    }
+    let cursor = cursor_spec(model, offset, &layers);
+    Surface { layers, cursor }
 }
 
 /// The widest of the given (already-selected-as-visible) physical lines, in
@@ -851,10 +849,25 @@ fn cmdline_cursor_col(cmdline: &CmdlineState) -> u16 {
 /// position is stale while the command line owns input). `None` when the
 /// grid has no cells to place it in (a freshly started `Model` before the
 /// first resize).
-fn cursor_spec(model: &Model, offset: u16) -> Option<CursorSpec> {
+///
+/// Takes the frame's own `layers` so the agent panel's caret lands on the
+/// row this frame painted its composer on, rather than on a second resolve
+/// of the panel's rect and a second render of its view.
+fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpec> {
     let (width, height) = model.engine.grid().size();
     if width == 0 || height == 0 {
         return None;
+    }
+    // ahead of every branch below, because it is the only one that answers
+    // where the keys are actually going: with the panel holding them, the
+    // engine's own grid cursor -- and a cmdline left open behind the panel
+    // -- is stale state about an editor nobody is typing into.
+    if let Some((row, col)) = ai_cursor(model, layers) {
+        return Some(CursorSpec {
+            row,
+            col,
+            shape: COMPOSER_SHAPE,
+        });
     }
     let shape = shape_from_mode(model);
     let prompt_open = matches!(
@@ -941,6 +954,56 @@ fn palette_cursor(model: &Model, offset: u16, cmdline: &CmdlineState) -> (u16, u
         .saturating_add(cmdline_cursor_col(cmdline))
         .min(rect.col.saturating_add(rect.width).saturating_sub(1));
     (row, col)
+}
+
+/// The shape the agent panel's composer caret takes: a bar, the one nvim
+/// itself asks for in insert mode, at the same quarter-cell width its own
+/// `ver25` default uses.
+///
+/// Fixed rather than read from the engine's mode, unlike every other branch
+/// of [`cursor_spec`]: the composer is a text field being typed into
+/// whatever mode the buffer beneath it happens to be left in, and inheriting
+/// that mode's shape paints a normal-mode block over an insertion point.
+const COMPOSER_SHAPE: CursorShape = CursorShape::Vertical(25);
+
+/// The agent panel's own insertion point, in terminal space, on every frame
+/// the panel is the thing keys reach -- and `None` on every other, which is
+/// every frame the caret belongs to nvim's grid.
+///
+/// Ownership, not visibility. An open but un-entered panel routes every key
+/// to nvim (`<leader>ai` is what enters it), and a caret parked on its
+/// composer there says the opposite of what the keyboard does.
+/// [`Model::focused_overlay`] is the same question `update::route_key`
+/// routes by -- the panel's own focus flag, and nothing above it on the
+/// stack outranking it -- so the caret cannot name an owner the keys do not.
+///
+/// A pending permission prompt is deliberately inside that answer rather
+/// than a case of its own: it holds the panel's keys
+/// (`AiPanelState::an_owner_holds_the_keys`), the composer is still the only
+/// insertion point the panel has, and what the caret has to say there is
+/// that the keyboard is not the editor's. An open diff review is
+/// deliberately outside it by the same rule: its keys are buffer-local nvim
+/// mappings, so a review with the panel un-entered leaves the caret on the
+/// buffer under review, which is exactly where those keys go.
+///
+/// Adds no `offset` of its own: the layer's rect came from
+/// [`Model::overlay_rect`], which has already put the chrome rows into it.
+fn ai_cursor(model: &Model, layers: &[Layer]) -> Option<(u16, u16)> {
+    if !matches!(
+        model.focused_overlay().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Ai)
+    ) {
+        return None;
+    }
+    let (rect, view) = layers.iter().find_map(|layer| match &layer.kind {
+        LayerKind::Ai(view) => Some((layer.rect, view)),
+        _ => None,
+    })?;
+    let cursor = model
+        .ai_panel()
+        .composer_cursor(usize::from(rect.height), usize::from(rect.width));
+    let (row, col) = overlay::ai_caret(view, rect.width, rect.height, cursor)?;
+    Some((rect.row.saturating_add(row), rect.col.saturating_add(col)))
 }
 
 /// The confirm-prompt's own cursor position: on the second header row
@@ -1762,6 +1825,297 @@ mod tests {
         assert!(
             panel < popupmenu,
             "a completion menu must outrank the panel"
+        );
+    }
+
+    /// A model whose grid fills the terminal, with the agent panel open as
+    /// the runtime opens it (right-pinned, full height) and `typed` already
+    /// on its composer. The grid cursor is put somewhere no panel row can be
+    /// mistaken for, so a caret that stayed with the engine is visible as
+    /// exactly that.
+    fn model_with_panel(typed: &str) -> Model {
+        use view_core::native::geometry::{Anchor, OverlayBox};
+
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 3, col: 7 });
+        model.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Right),
+            OverlayKind::Ai,
+        );
+        model.ai_panel_mut().input = typed.to_string();
+        model
+    }
+
+    /// The cell the caret is on, and the text of the row it is on, read off
+    /// the panel layer the same frame painted -- so an assertion about the
+    /// caret is an assertion about painted cells rather than about the
+    /// arithmetic that produced them.
+    fn caret_row_text(surface: &Surface) -> (CursorSpec, String) {
+        let cursor = surface.cursor.expect("the frame must place a caret");
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Ai(_)))
+            .expect("the panel overlay is open");
+        let rows = overlay::rows(
+            layer.rect.width,
+            layer.rect.height,
+            &layer.kind,
+            layer.borders.expect("a native overlay carries a charset"),
+        );
+        let row = usize::from(cursor.row - layer.rect.row);
+        (cursor, overlay::line_text(&rows.lines[row]))
+    }
+
+    /// The composer is where the panel's keys land, so it is where the real
+    /// terminal caret has to be: on the row the prompt was painted on, one
+    /// cell past its last character, wearing the bar shape an insertion
+    /// point wears rather than the buffer's own leftover mode shape.
+    #[test]
+    fn the_caret_stands_at_the_composers_insertion_point_while_the_panel_owns_input() {
+        let mut model = model_with_panel("hello");
+        model.ai_panel_mut().focused = true;
+
+        let surface = render(&model);
+        let (cursor, row) = caret_row_text(&surface);
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Ai(_)))
+            .expect("the panel overlay is open");
+        let col = usize::from(cursor.col - layer.rect.col);
+
+        assert!(
+            row.contains("> hello"),
+            "the caret's row must be the composer's own: {row:?}"
+        );
+        assert!(
+            row.chars()
+                .take(col)
+                .collect::<String>()
+                .ends_with("> hello"),
+            "the caret must stand one cell past the last character typed: {row:?}"
+        );
+        assert_eq!(
+            cursor.shape,
+            CursorShape::Vertical(25),
+            "an insertion point wears the bar nvim's own insert mode asks for, \
+             never the block the buffer beneath was left in"
+        );
+    }
+
+    /// The panel is non-modal: open is not entered, and every key reaches
+    /// nvim while it is not. A caret on the composer there points at a field
+    /// that takes nothing.
+    #[test]
+    fn an_open_but_unentered_panel_leaves_the_caret_on_the_engine_grid() {
+        let model = model_with_panel("hello");
+
+        assert_eq!(
+            render(&model).cursor,
+            Some(CursorSpec {
+                row: 3,
+                col: 7,
+                shape: CursorShape::Block,
+            }),
+            "an un-entered panel must leave the caret where nvim's own cursor is"
+        );
+    }
+
+    /// A pending question holds the panel's keys -- the digits answering it
+    /// never reach the composer -- but they are still the panel's, not the
+    /// editor's, and the caret has to say so.
+    #[test]
+    fn a_pending_permission_keeps_the_caret_in_the_panel() {
+        use view_core::native::ai_event::{PermissionOption, PermissionOptionKind};
+        use view_core::native::ai_panel::PermissionPrompt;
+
+        let mut model = model_with_panel("hello");
+        model.ai_panel_mut().focused = true;
+        model.ai_panel_mut().pending_permission = Some(PermissionPrompt::new(
+            1,
+            "call-1",
+            Some("Write file".to_string()),
+            Some("edit".to_string()),
+            vec![PermissionOption {
+                option_id: "allow".to_string(),
+                name: "Allow".to_string(),
+                kind: PermissionOptionKind::AllowOnce,
+            }],
+        ));
+
+        let (cursor, row) = caret_row_text(&render(&model));
+
+        assert!(
+            row.contains("> hello"),
+            "a question blocking the composer must not move the caret out of it: {row:?}"
+        );
+        assert_eq!(cursor.shape, CursorShape::Vertical(25));
+    }
+
+    /// A review's keys are buffer-local nvim mappings on the file under
+    /// review, so the caret belongs in that buffer -- the panel beside it is
+    /// open and un-entered like any other.
+    #[test]
+    fn a_review_pending_in_the_buffer_leaves_the_caret_on_the_engine_grid() {
+        use view_core::native::ai_panel::DiffReviewState;
+
+        let mut model = model_with_panel("hello");
+        model.ai_panel_mut().focused = false;
+        model.ai_panel_mut().pending_diff = Some(DiffReviewState::new(
+            1,
+            std::path::PathBuf::from("src/main.rs"),
+            1,
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            render(&model).cursor.map(|c| (c.row, c.col)),
+            Some((3, 7)),
+            "review keys are the buffer's, so the caret stays on the buffer"
+        );
+    }
+
+    /// The trust prompt the first `:View ai` raises, and every other
+    /// focus-taking overlay above the panel: the keys are theirs while they
+    /// are open, so the caret is theirs too.
+    #[test]
+    fn a_prompt_over_the_entered_panel_takes_the_caret_back_from_the_composer() {
+        let mut model = model_with_panel("hello");
+        model.ai_panel_mut().focused = true;
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, "Trust this project?".into())],
+                replace_last: false,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![],
+                pos: 0,
+                firstc: String::new(),
+                prompt: "[Y]es, (N)o: ".into(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+        let cursor = surface.cursor.expect("the prompt must place a caret");
+        let panel = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Ai(_)))
+            .expect("the panel is still open beneath the prompt");
+        let inside = cursor.row >= panel.rect.row
+            && cursor.col >= panel.rect.col
+            && cursor.col < panel.rect.col + panel.rect.width;
+
+        assert!(
+            !inside,
+            "a prompt over the panel owns the keys, so the caret must not be in the panel"
+        );
+        assert_ne!(cursor.shape, COMPOSER_SHAPE);
+    }
+
+    /// A cmdline left open behind the panel is state about an editor nobody
+    /// is typing into: the panel took the keyboard after it opened, and a
+    /// caret that tracked its `pos` would sit on the bottom grid row while
+    /// the characters landed in the composer.
+    #[test]
+    fn a_cmdline_open_behind_the_entered_panel_does_not_take_the_caret() {
+        let mut model = model_with_panel("hello");
+        model.ai_panel_mut().focused = true;
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "set nu".into())],
+                pos: 6,
+                firstc: ":".into(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let (_, row) = caret_row_text(&render(&model));
+
+        assert!(
+            row.contains("> hello"),
+            "the panel holds the keys, so the caret stays on its composer: {row:?}"
+        );
+    }
+
+    /// The busy modal answers its own two keys and lets every other one
+    /// through (see `Model::takes_focus`), so an entered panel underneath it
+    /// is still what typing reaches.
+    #[test]
+    fn a_busy_modal_over_the_entered_panel_leaves_the_caret_in_the_composer() {
+        use std::time::Duration;
+        use view_core::native::supervision::{EngineBusyState, SinceStamp, WedgeKind};
+
+        let mut model = model_with_panel("hello");
+        model.ai_panel_mut().focused = true;
+        model.push_overlay(
+            view_core::native::geometry::OverlayBox::new(50, 30),
+            OverlayKind::EngineBusy(EngineBusyState::new(
+                WedgeKind::ReadSide,
+                SinceStamp::new(Duration::from_secs(31)),
+            )),
+        );
+
+        let (_, row) = caret_row_text(&render(&model));
+
+        assert!(
+            row.contains("> hello"),
+            "the busy modal takes no keys, so the caret stays in the composer: {row:?}"
+        );
+    }
+
+    /// The composer wraps, and the caret follows the wrap: a prompt past the
+    /// panel's width puts it on the last row painted, one cell past the tail
+    /// the wrap kept.
+    #[test]
+    fn a_wrapped_prompt_puts_the_caret_on_its_last_row() {
+        let typed = "wordword ".repeat(12);
+        let mut model = model_with_panel(&typed);
+        model.ai_panel_mut().focused = true;
+
+        let surface = render(&model);
+        let (cursor, row) = caret_row_text(&surface);
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Ai(_)))
+            .expect("the panel overlay is open");
+        let LayerKind::Ai(view) = &layer.kind else {
+            unreachable!()
+        };
+        let tail = view
+            .input
+            .last()
+            .expect("the composer painted rows")
+            .clone();
+
+        assert!(
+            view.input.len() > 1,
+            "the prompt must be long enough to have wrapped"
+        );
+        assert!(
+            row.contains(tail.trim_end()),
+            "the caret must be on the composer's last row: {row:?}"
+        );
+        assert_eq!(
+            cursor.row - layer.rect.row,
+            u16::try_from(view.input.len()).unwrap(),
+            "one row per composer row, below the frame's own top edge"
         );
     }
 
