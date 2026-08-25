@@ -113,17 +113,75 @@ keystroke, and how budgets are enforced in CI, lives in
 
 ## Roadmap
 
+The goal is one terminal binary for anything you can view: a file, another
+machine's tree, an image, a website, a video. Rows marked ★ need code
+outside the Neovim process, so no plugin can provide them.
+
+view is the product of bringing together the best features and ideas
+throughout the open-source community: [Omarchy](https://omarchy.org) and
+[Hyprland](https://hypr.land), for familiar window tiling navigation and
+a single config that propagates everywhere;
+[qutebrowser](https://qutebrowser.org), a browser driven by vim motions;
+[tmux](https://github.com/tmux/tmux), sessions that outlive a connection;
+[herdr](https://github.com/herdrdev/herdr), a fleet of agents as an
+attention queue; Zed's [Agent Client Protocol](https://agentclientprotocol.com),
+the seam an agent plugs into; [kitty](https://sw.kovidgoyal.net/kitty/),
+the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
+
+### Shipped
+
 - [x] Embedded engine, RPC seam, input and redraw paths
 - [x] Command line, messages, popup menu, tabline, cursor shapes
 - [x] Terminal capability tiers (kitty/ghostty class down to 16-color)
 - [x] Differential oracle, fuzz harness, compat suite, benchmark matrix
 - [x] **Native UI**: picker, file tree, statusline, command palette,
-      notifications, theming
+      notifications, theme derived live from your colorscheme
 - [x] Clipboard provider and full CLI passthrough (`+42`, `-R`, `-O`,
       `ls | view -`)
-- [x] **AI**: agent panel, ACP client, context providers, in-editor diff
-      review
-- [ ] Multigrid, `view doctor`, Windows as a supported tier, v0.1
+- [x] **AI**: agent panel, ACP client, context providers, diff review in
+      the file itself
+- [x] ★ **Engine supervision.** A hung or crashed Neovim is interrupted or
+      restarted with buffers rehydrated from swap; the UI never blanks.
+- [x] ★ **Remote editing.** `view --remote host:path`: engine over SSH,
+      paint and input local, keystrokes echoed ahead of the round trip,
+      OSC 52 clipboard.
+
+### Landing before v0.1
+
+- [ ] ★ **Session DVR.** Scrub, branch, and export the session's keystream
+      and frames.
+- [ ] ★ **Key introspector.** `:View keys`: which mapping fired, whose it
+      was, what it displaced.
+- [ ] ★ **Image viewing.** Kitty graphics on capable terminals, half-block
+      cells elsewhere; picker preview and tree hover included.
+- [ ] ★ **Media handoff.** `view talk.mp4`, or a video picked in the tree,
+      hands the terminal to `mpv` and takes it back on exit.
+- [ ] **Migration integrity.** Capability probing that survives SSH and
+      tmux, a register of which plugin still owns which surface,
+      `vim.notify` through view's notifications, a compat suite that fails
+      on migration defects.
+- [ ] **Multigrid.** One grid per window: chrome between splits, redraws
+      scoped to the window that changed.
+- [ ] **`view doctor`.** Terminal, tier and why, tmux passthrough, `mpv`
+      on the path, a repro invocation to paste into an issue.
+- [ ] **Config surface.** `[ui]` (tier, theme) and `[engine]` (own nvim,
+      `NVIM_APPNAME`) go live; anything derivable stays optional.
+- [ ] **Windows as a supported tier.** ConPTY-validated, with its own
+      budgets, oracle and compat legs in CI.
+
+### After v0.1
+
+- [ ] **Workspace arc (v0.2).** Tiled panes for N content surfaces, a
+      qutebrowser-style pane over CDP, mpv composited in a pane.
+- [ ] ★ **Agent-fleet attention.** Agent tabs with status (working,
+      blocked on you, done) as an attention queue inside the editor.
+- [ ] **Detach and reconnect.** tmux-style persistence for the remote
+      engine: drop the link, reattach where you left off.
+- [ ] **Theme-switcher interop.** An Omarchy-style switcher that retargets
+      your colorscheme carries view with it; no view config to rewrite.
+- [ ] **Native rendering, behind the oracle.** Viewport highlighting and
+      LSP UI move to view's side one subsystem at a time, each only after
+      the differential oracle proves parity over a committed corpus.
 
 ## Building from source
 
