@@ -161,12 +161,12 @@ The window view holds the protocol open for is the one nvim holds it open
 for when you run nvim directly in kitty, ghostty or WezTerm. Every exit view
 takes for itself pops it before leaving the alternate screen: quitting,
 `:cq`, a panic, an error during startup, and the first
-`SIGHUP`/`SIGTERM`/`SIGINT`, which view folds into its own teardown. Three
+`SIGHUP`/`SIGTERM`/`SIGINT`, which view folds into its own teardown. Four
 endings cannot pop it, because no view code runs at all -- a *second* fatal
 signal (view's escape hatch for a session that will not die otherwise, which
-leaves from the signal handler), `SIGKILL`, and an abort. Those strand raw
-mode and the alternate screen too, so `reset` is the repair; to put only the
-keyboard back, `printf '\e[<u'` pops the protocol on its own.
+leaves from the signal handler), `SIGQUIT`, `SIGKILL`, and an abort. Those
+strand raw mode and the alternate screen too, so `reset` is the repair; to
+put only the keyboard back, `printf '\e[<u'` pops the protocol on its own.
 
 A pasted line break needs no key at all: paste a multi-line prompt and it
 keeps its lines.
