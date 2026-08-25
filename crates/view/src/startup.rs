@@ -20,7 +20,10 @@
 //! sends) is resolved once a consumer of `msg_tx` is guaranteed to exist.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{Receiver, RecvError, SyncSender};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use view_core::events::UiEvent;
@@ -148,15 +151,29 @@ pub enum AttachFailure {
 /// doc comment for why that ordering is load-bearing, not incidental, and
 /// [`EngineHandle::register_bridge`](view_engine::handle::EngineHandle::register_bridge)'s
 /// for the one difference between the two),
-/// attaches at `width`x`height`, and forwards the capability-probe's
-/// leftover `residue` bytes. Deliberately does not call
+/// attaches at the size `size` reports, and forwards the
+/// capability-probe's leftover `residue` bytes. Deliberately does not call
 /// [`Engine::start_pump`]: only `main.rs` does, once the buffered
 /// pre-attach window has been fully replayed (see
 /// [`attach_in_background`]'s doc comment for why).
+///
+/// The size arrives through a callback, taking the spawned child's pid,
+/// rather than as two arguments, because the caller does not have it yet
+/// when the child should start: `nvim --embed` performs no startup at all
+/// until a UI attaches, so the terminal handshake that resolves the size
+/// is work the child's own startup can run underneath instead of behind
+/// (see `main.rs`'s call ordering). Only the attach needs a terminal.
+///
+/// A `None` size means that handshake failed and no attach will ever
+/// happen. The child is killed and reaped here, before returning, so a
+/// process that could not take the terminal cannot leave an nvim running
+/// behind it; the failure is reported as [`AttachFailure::Attach`], which
+/// is what it is -- a child that started and never got attached -- though
+/// the one caller that can reach it is already returning the terminal's
+/// own error instead.
 fn spawn_and_attach(
     cfg: EngineConfig,
-    width: u16,
-    height: u16,
+    size: impl FnOnce(u32) -> Option<(u16, u16)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     // read before `Engine::spawn` consumes `cfg` by value: there is no
@@ -166,7 +183,7 @@ fn spawn_and_attach(
     crate::vlog::log_with("engine", || {
         format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
     });
-    register_and_attach(engine, stdin_relay, width, height, residue)
+    register_and_attach(engine, stdin_relay, size, residue)
 }
 
 /// Replaces a failed engine with a fresh one and brings it through the same
@@ -211,17 +228,23 @@ pub(crate) fn restart_and_attach(
             engine.pid()
         )
     });
-    register_and_attach(engine, stdin_relay, width, height, Vec::new)
+    register_and_attach(engine, stdin_relay, |_| Some((width, height)), Vec::new)
 }
 
 /// The half of [`spawn_and_attach`] that runs against a child that is
 /// already up: the `VimEnter` autocmd, the `view_bridge` group, the attach
 /// itself, and the terminal handshake's leftover bytes.
+///
+/// `size` is asked as late as it can be -- after both registrations, which
+/// need a channel id and no terminal at all, and immediately before the
+/// one call that does need it. On the startup path that callback is a wait
+/// on the terminal handshake, so everything above it is work nvim performs
+/// while the frontend is still resolving what kind of terminal it is
+/// talking to.
 fn register_and_attach(
     engine: Engine,
     stdin_relay: bool,
-    width: u16,
-    height: u16,
+    size: impl FnOnce(u32) -> Option<(u16, u16)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     engine
@@ -234,6 +257,14 @@ fn register_and_attach(
         .register_bridge(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
     crate::vlog::log("engine", "registered view_bridge autocmd group");
+    let Some((width, height)) = size(engine.pid()) else {
+        crate::vlog::log("engine", "no terminal size ever came; killing the child");
+        // `Engine`'s own `Drop` is the kill and the reap (see its impl):
+        // dropping it here is what performs them, and returning without it
+        // is what leaves the stray nvim behind
+        drop(engine);
+        return Err(AttachFailure::Attach(EngineError::Closed));
+    };
     if stdin_relay {
         engine
             .handle
@@ -263,10 +294,20 @@ fn register_and_attach(
     Ok(engine)
 }
 
+/// What [`attach_in_background`]'s thread waits for before it attaches:
+/// the runtime loop's sender (its one use of it is the `EngineReady`
+/// marker) and the terminal size `ui_attach` needs. Neither exists until
+/// `Term::init` has returned, and the child's own startup depends on
+/// neither, which is why the thread starts without them.
+type AttachStart = (crate::wake::LoopSender, u16, u16);
+
 /// Runs [`spawn_and_attach`] on a background thread so a slow-starting
-/// nvim can never delay [`paint_shell_frame`], and returns a receiver that
-/// yields its result exactly once, success or failure. The same background
-/// thread also sends `Msg::EngineReady` down `msg_tx` right after, so
+/// nvim can never delay [`paint_shell_frame`], and returns the
+/// [`AttachGuard`] that owns it: the child starts immediately, the
+/// terminal size reaches it later through [`AttachGuard::attach_at`], and
+/// its result is read exactly once, success or failure, through
+/// [`AttachGuard::engine_result`]. The same background thread then sends
+/// `Msg::EngineReady` down the sender `attach_at` handed it, so
 /// [`drain_pre_attach`]'s blocking loop wakes deterministically instead of
 /// polling, with no timer and no poll.
 ///
@@ -292,27 +333,133 @@ fn register_and_attach(
 /// correct rather than merely lucky: there is no other kind of message this
 /// loop could ever see before `EngineReady`, besides `Msg::Key` and
 /// `Msg::Resized` from the input thread.
-pub fn attach_in_background(
-    cfg: EngineConfig,
-    width: u16,
-    height: u16,
-    residue_rx: Receiver<Vec<u8>>,
-    msg_tx: crate::wake::LoopSender,
-) -> Receiver<Result<Engine, AttachFailure>> {
+pub fn attach_in_background(cfg: EngineConfig, residue_rx: Receiver<Vec<u8>>) -> AttachGuard {
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        // a sender dropped without ever sending (a caller that failed
-        // between here and its own probe) reads as "nothing was typed",
-        // which is what an empty residue already means
-        let result = spawn_and_attach(cfg, width, height, || residue_rx.recv().unwrap_or_default());
+    let (start_tx, start_rx) = std::sync::mpsc::sync_channel(1);
+    let pid = Arc::new(AtomicU32::new(0));
+    let spawned = Arc::clone(&pid);
+    let attach = std::thread::spawn(move || {
+        let mut started: Option<crate::wake::LoopSender> = None;
+        let result = spawn_and_attach(
+            cfg,
+            |pid| {
+                spawned.store(pid, Ordering::SeqCst);
+                let (msg_tx, width, height) = start_rx.recv().ok()?;
+                started = Some(msg_tx);
+                Some((width, height))
+            },
+            // a sender dropped without ever sending (a caller that failed
+            // between here and its own probe) reads as "nothing was typed",
+            // which is what an empty residue already means
+            || residue_rx.recv().unwrap_or_default(),
+        );
+        // a spawn that failed before the size was ever asked for still owes
+        // `main.rs` its report, and the sender it is reported over is the
+        // one that arrives with that size: this waits for it rather than
+        // dropping the failure. Nothing arrives at all only when the
+        // terminal itself never came up -- and then `main.rs` is already
+        // returning that error, with no loop left to wake.
+        let Some(msg_tx) = started.or_else(|| start_rx.recv().ok().map(|(msg_tx, ..)| msg_tx))
+        else {
+            return;
+        };
         let _ = result_tx.send(result);
         // sent unconditionally, success or failure: drain_pre_attach must
-        // wake up either way, so main.rs can move on to read engine_rx and
+        // wake up either way, so main.rs can move on to read the result and
         // report the failure instead of blocking forever on an attach that
         // will never come
         let _ = msg_tx.send(Msg::EngineReady);
     });
-    result_rx
+    AttachGuard {
+        start_tx: Some(start_tx),
+        attach: Some(attach),
+        engine_rx: result_rx,
+        pid,
+        armed: true,
+    }
+}
+
+/// Owns the background attach, and the nvim it spawned, until the caller
+/// has the attach's result in hand.
+///
+/// Every `?` between the spawn and that result -- `Term::init` itself, the
+/// shell frame, the probe's second window, opening the input handle -- is
+/// an exit from a process that has a live `nvim --embed` child and no
+/// remaining path to it: nothing downstream ever attaches, and nothing
+/// left in the process knows the child exists. This guard is what makes
+/// that unrepresentable rather than a list of call sites to remember: its
+/// [`Drop`] kills and reaps whatever the attach produced, so a new early
+/// return added between those two points is safe by construction.
+pub struct AttachGuard {
+    /// Dropping this is what tells the attach thread no size is coming.
+    start_tx: Option<SyncSender<AttachStart>>,
+    attach: Option<JoinHandle<()>>,
+    engine_rx: Receiver<Result<Engine, AttachFailure>>,
+    /// The spawned child, `0` until it exists; see [`Self::pid`].
+    pid: Arc<AtomicU32>,
+    armed: bool,
+}
+
+impl AttachGuard {
+    /// Hands the attach the terminal size it has been waiting on, and the
+    /// loop sender it announces itself over, releasing it to run
+    /// `ui_attach`.
+    pub fn attach_at(&self, msg_tx: crate::wake::LoopSender, width: u16, height: u16) {
+        // a receiver already gone means the attach thread ended early, and
+        // the failure it ended with is already in `engine_rx` for
+        // `engine_result` to report
+        let _ = self
+            .start_tx
+            .as_ref()
+            .map(|start_tx| start_tx.send((msg_tx, width, height)));
+    }
+
+    /// Blocks for the attach's result and disarms: from here the caller
+    /// owns the engine, and dropping this guard does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecvError`] if the attach thread ended without producing
+    /// a result at all.
+    pub fn engine_result(&mut self) -> Result<Result<Engine, AttachFailure>, RecvError> {
+        let result = self.engine_rx.recv();
+        self.armed = false;
+        result
+    }
+
+    /// The `nvim` this attach spawned, once it exists -- `None` before the
+    /// spawn, and for a spawn that never got a process at all.
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        match self.pid.load(Ordering::SeqCst) {
+            0 => None,
+            pid => Some(pid),
+        }
+    }
+}
+
+impl Drop for AttachGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.start_tx.take();
+        // the thread is what owns the engine until it sends it, so the join
+        // is what makes "there is nothing left running" true rather than
+        // eventually true
+        if let Some(attach) = self.attach.take() {
+            let _ = attach.join();
+        }
+        // `Engine`'s own `Drop` is the kill and the reap: taking the result
+        // out of the channel and letting it fall here is what runs them
+        let killed = self.engine_rx.try_recv().is_ok();
+        crate::vlog::log_with("engine", || {
+            format!(
+                "attach abandoned before its result was read (pid={:?} attached={killed})",
+                self.pid()
+            )
+        });
+    }
 }
 
 /// The pre-attach window's buffered input, for [`run_cutover`] to replay
@@ -753,7 +900,7 @@ mod tests {
         let cfg = EngineConfig::isolated()
             .with_arg("-")
             .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap());
-        let mut engine = spawn_and_attach(cfg, 80, 24, Vec::new).unwrap();
+        let mut engine = spawn_and_attach(cfg, |_| Some((80, 24)), Vec::new).unwrap();
 
         assert_eq!(
             engine.handle.eval_str("getline(1)").unwrap(),
@@ -765,6 +912,75 @@ mod tests {
         );
         let _ = engine.wait_exit();
         std::fs::remove_file(&content).ok();
+    }
+
+    /// A process that cannot bring its terminal up still spawned an nvim
+    /// first, and the moment it returns that error there is nothing left
+    /// holding the child: no attach will ever happen, no handle survives
+    /// the return, and the editor stays resident until the user finds it.
+    /// This is the half of that the attach thread owns -- a size that never
+    /// arrives at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_size_that_never_arrives_leaves_no_nvim_behind() {
+        let mut spawned = 0;
+        let failed = spawn_and_attach(
+            EngineConfig::isolated(),
+            |pid| {
+                spawned = pid;
+                None
+            },
+            Vec::new,
+        );
+
+        assert!(
+            failed.is_err(),
+            "an attach that never got a terminal size cannot report success"
+        );
+        assert!(spawned != 0, "the child was never spawned at all");
+        assert_reaped(spawned);
+    }
+
+    /// The other half: the size did arrive, the attach ran, and the caller
+    /// failed somewhere between the two (`paint_shell_frame`,
+    /// `finish_probe`, `InputSource::open` -- every `?` `main` takes while
+    /// the guard is armed). The engine is sitting in the result channel at
+    /// that point, owned by nobody the caller can still reach.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_guard_before_its_result_leaves_no_nvim_behind() {
+        let (raw_tx, msg_rx) = std::sync::mpsc::sync_channel(MSG_CHANNEL_CAPACITY);
+        let msg_tx =
+            crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
+        // dropped at once: this startup never ran a capability probe, and
+        // an unanswered residue channel reads as "nothing was typed"
+        let (_, residue_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+
+        let guard = attach_in_background(EngineConfig::isolated(), residue_rx);
+        guard.attach_at(msg_tx, 80, 24);
+        assert!(
+            matches!(msg_rx.recv().unwrap(), Msg::EngineReady),
+            "the attach thread announces itself once, with EngineReady"
+        );
+        let pid = guard.pid().expect("the attach spawned a child");
+
+        drop(guard);
+
+        assert_reaped(pid);
+    }
+
+    /// Killed *and* reaped: a zombie is still a child this process left
+    /// behind, and `/proc` keeps the entry until the parent waits.
+    #[cfg(unix)]
+    fn assert_reaped(pid: u32) {
+        #[cfg(target_os = "linux")]
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "pid {pid} is still around: startup left an nvim running with \
+             nothing in the process able to reach it"
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
     }
 
     /// Pins what makes the capability probe's second window free: the
@@ -785,11 +1001,15 @@ mod tests {
         let start = Instant::now();
         let asked_after = Arc::new(AtomicU64::new(0));
         let recorder = Arc::clone(&asked_after);
-        let mut engine = spawn_and_attach(EngineConfig::isolated(), 80, 24, move || {
-            let elapsed = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-            recorder.store(elapsed, Ordering::SeqCst);
-            Vec::new()
-        })
+        let mut engine = spawn_and_attach(
+            EngineConfig::isolated(),
+            |_| Some((80, 24)),
+            move || {
+                let elapsed = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                recorder.store(elapsed, Ordering::SeqCst);
+                Vec::new()
+            },
+        )
         .unwrap();
         let attached_after = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
         let asked_after = asked_after.load(Ordering::SeqCst);

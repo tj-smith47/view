@@ -727,6 +727,22 @@ fn main() -> Result<()> {
         eprintln!("view: {NO_TERMINAL_NOTICE}");
     }
 
+    // ahead of `Term::init` rather than after it: `nvim --embed` runs no
+    // startup at all -- no `init.lua`, no file opened -- until a UI
+    // attaches, so everything this thread does before the attach thread
+    // reaches `ui_attach` is prepended whole to when the opened buffer
+    // reaches the screen. `Term::init` is the longest of those prefixes --
+    // the capability probe's first window is up to `tiers::PROBE_DEADLINE`,
+    // and over ssh a terminal answering across the network spends it -- and
+    // the child needs no terminal to come up: only the attach needs the
+    // size, and that reaches the thread through `attach_at` below.
+    //
+    // The guard, not the call, is what makes this safe: from here to
+    // `engine_result` this process owns a live nvim it has no other handle
+    // on, so every `?` in between must kill it (see `AttachGuard`).
+    let (residue_tx, residue_rx) = mpsc::sync_channel(1);
+    let mut attach = startup::attach_in_background(cfg, residue_rx);
+
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
     let (width, height) = term.size()?;
@@ -746,12 +762,9 @@ fn main() -> Result<()> {
     model.content_painted = false;
 
     // ahead of the trust, config and theme reads below rather than after
-    // them: `nvim --embed` runs no startup at all -- no `init.lua`, no file
-    // opened -- until a UI attaches, so every read this thread performs
-    // before the attach thread reaches `ui_attach` is prepended whole to
-    // when the opened buffer reaches the screen. Spawning here costs the
-    // shell frame one thread creation and hands the child that entire
-    // prefix.
+    // them, for the same reason the spawn is ahead of `Term::init`: until
+    // the attach thread has the size, the child it started is still sitting
+    // in front of its own `init.lua`.
     let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
     let term_size = view_tui::terminal::TermSizeCell::default();
     #[cfg(unix)]
@@ -764,18 +777,17 @@ fn main() -> Result<()> {
         view_tui::terminal::spawn_input_thread(raw_tx.clone(), term_size.clone());
         wake::LoopSender::new(raw_tx)
     };
-    // the residue reaches the attach through this channel rather than as a
-    // value: it is not known yet at the point the thread starts (the
-    // probe's second window is still open), and the thread only needs it at
-    // its very last step, after `ui_attach` has returned.
+    // released here, at the first point both halves exist, rather than
+    // anywhere below: everything between this line and the shell frame is
+    // work the child's own startup now runs underneath.
     //
-    // What that costs a terminal which never answers the fence at all: the
-    // attach's last step blocks on the residue, so editable content lands at
-    // `max(PROBE_HARD_CAP, attach)` rather than at the attach alone -- the
-    // full cap, on a host where the attach is an order of magnitude shorter
-    // than it. First paint is unaffected either way; it happens below.
-    let (residue_tx, residue_rx) = mpsc::sync_channel(1);
-    let engine_rx = startup::attach_in_background(cfg, width, height, residue_rx, msg_tx.clone());
+    // What the residue channel costs a terminal that never answers the
+    // fence at all: the attach's last step blocks on it, so editable
+    // content lands at `max(PROBE_HARD_CAP, attach)` rather than at the
+    // attach alone -- the full cap, on a host where the attach is an order
+    // of magnitude shorter than it. First paint is unaffected either way;
+    // it happens below.
+    attach.attach_at(msg_tx.clone(), width, height);
 
     // resolved before the engine exists because the theme cache is keyed on
     // it, so cold start can already paint last session's colors before nvim
@@ -899,8 +911,8 @@ fn main() -> Result<()> {
         &mut input_source,
         &term_size,
     );
-    let attach_result = engine_rx
-        .recv()
+    let attach_result = attach
+        .engine_result()
         .context("engine attach thread ended without a result")?;
     match &attach_result {
         Ok(engine) => vlog::log_with("engine", || {
@@ -1101,34 +1113,87 @@ mod tests {
     use clap::CommandFactory;
     use std::ffi::OsString;
 
-    /// `nvim --embed` sources nothing and opens nothing until a UI
-    /// attaches, so every read `main` performs before the attach thread is
-    /// started is prepended whole to the engine's own startup and lands in
-    /// `first_paint`'s marker. Measured on dev-linux at 200 spawns: moving
-    /// the spawn ahead of the trust, config and theme reads took the fork
-    /// from 1.79ms to 1.43ms after process start (p50) and the opened
-    /// buffer's own paint from 15.20ms to 14.80ms, for +0.03ms on the shell
-    /// frame. Nothing but a source-order check can hold that: the reads
-    /// still have to happen before the shell frame is rendered, so a
-    /// reviewer moving one back above the spawn breaks no other test.
-    #[test]
-    fn the_engine_spawn_precedes_every_startup_read_that_only_this_process_needs() {
+    /// Everything `main` does before the attach thread is started, and
+    /// only this process needs, prepended to nvim's own startup.
+    fn startup_body() -> &'static str {
         let source = include_str!("main.rs");
-        let body = source
+        source
             .split_once("#[cfg(test)]")
-            .map_or(source, |(body, _)| body);
-        let spawn = body
-            .find("startup::attach_in_background(")
-            .expect("main must start the engine attach");
-        for later in [
-            "view_ai::TrustStore::load()",
-            "theme_cache::load(path)",
-            "startup::paint_shell_frame(",
+            .map_or(source, |(body, _)| body)
+    }
+
+    fn offset_of(marker: &str) -> usize {
+        startup_body()
+            .find(marker)
+            .expect("startup no longer performs this step at all")
+    }
+
+    /// `nvim --embed` sources nothing and opens nothing until a UI
+    /// attaches, so everything `main` performs before the attach thread is
+    /// started is prepended whole to the engine's own startup and lands in
+    /// `first_paint`'s marker -- the terminal capability handshake above
+    /// all, whose first window runs to `tiers::PROBE_DEADLINE` and which a
+    /// terminal answering across an ssh hop spends in full.
+    ///
+    /// Two boundaries rather than a list of reads: `Term::init` opens the
+    /// terminal half of startup and `pre_executor_effects` opens the half
+    /// where this process reads its own state (trust store, config, theme
+    /// cache, and whatever is added next to them), so a read added to
+    /// either half is behind the spawn by construction instead of by a
+    /// reviewer noticing. Nothing but a source-order check can hold this:
+    /// every one of those reads still has to happen before the shell frame
+    /// is rendered, so hoisting one above the spawn breaks no other test.
+    ///
+    /// Measured on dev-linux, two alternating pairs of 200 cold spawns,
+    /// uninstrumented builds from one source path and one target dir:
+    /// `first_paint.minimal` marker p50 16.03/16.86ms with the spawn after
+    /// the handshake, 15.11/14.77ms with it before, for a shell frame that
+    /// did not move (3.24/3.33ms against 3.34/3.25ms). A terminal that
+    /// never answers the probe at all gains nothing and loses nothing
+    /// (404.25ms against 404.19ms): its content is held by the probe's own
+    /// second window, not by anything nvim is doing.
+    #[test]
+    fn the_engine_spawn_precedes_both_halves_of_the_startup_only_this_process_needs() {
+        let spawn = offset_of("startup::attach_in_background(");
+        for (half, cost) in [
+            ("Term::init(", "the terminal capability handshake"),
+            (
+                "let mut pre_executor_effects",
+                "this process reading its own trust, config and theme state",
+            ),
         ] {
-            let at = body.find(later).expect("startup read still performed");
             assert!(
-                spawn < at,
-                "{later} runs before the engine spawn, so nvim's whole startup waits on it"
+                spawn < offset_of(half),
+                "`{half}` runs before the engine spawn, so nvim's whole \
+                 startup waits on {cost}"
+            );
+        }
+    }
+
+    /// The window the spawn opened: between it and `engine_result` this
+    /// process holds a live `nvim --embed` and no other handle on it, so
+    /// every fallible step in between exits leaving a stray editor behind
+    /// unless `AttachGuard` is still alive to kill it. Each of these is a
+    /// `?`; the guard is what makes a new one safe by construction, and
+    /// this is what catches the reordering that would put one outside it.
+    #[test]
+    fn every_fallible_startup_step_runs_inside_the_attach_guards_window() {
+        let spawn = offset_of("startup::attach_in_background(");
+        let result = offset_of("attach\n        .engine_result()");
+        for step in [
+            "Term::init(",
+            "term.size()?",
+            "startup::paint_shell_frame(",
+            ".finish_probe()",
+            "InputSource::open",
+            "startup::drain_pre_attach(",
+        ] {
+            let at = offset_of(step);
+            assert!(
+                spawn < at && at < result,
+                "`{step}` runs outside the attach guard's window, so failing \
+                 there leaves the spawned nvim running with nothing left to \
+                 kill it"
             );
         }
     }
