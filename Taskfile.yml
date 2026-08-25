@@ -203,16 +203,16 @@ tasks:
       - cargo build --release -p view
       # separate target dir so the instrumented build can never overwrite
       # the plain binary the e2e rows measure
-      - cargo build --release -p view --features bench-taps --target-dir target/taps
+      - cargo build --release -p view --features bench-taps --target-dir "${CARGO_TARGET_DIR:-target}/taps"
       # the echo rows' arm, in a third target dir for the same reason: it
       # predicts nothing, so those rows keep timing the engine round trip
       # they are defined as rather than the predicted paint the shipped
       # binary answers a keystroke with first (see Bins::echo_bins)
-      - cargo build --release -p view --features bench-no-speculate --target-dir target/nospec
+      - cargo build --release -p view --features bench-no-speculate --target-dir "${CARGO_TARGET_DIR:-target}/nospec"
       # the echo_path decomposition splits the echo row's own interval, so
       # it runs that row's arm with the tap channel added; a fourth target
       # dir for the same reason as the third
-      - cargo build --release -p view --features bench-taps,bench-no-speculate --target-dir target/taps-nospec
+      - cargo build --release -p view --features bench-taps,bench-no-speculate --target-dir "${CARGO_TARGET_DIR:-target}/taps-nospec"
       # the agent the AI rows measure a live turn against: a fixture that
       # streams on a cadence the row controls, so the rows need no network,
       # no credentials and no pinned adapter to put a turn in flight. Its
@@ -220,7 +220,7 @@ tasks:
       # is the one build here that enables a feature on a crate the
       # measured binaries link, and a shared dir would rebuild view-ai
       # under and out of `test-support` around every bench run
-      - cargo build --release -p view-ai --features test-support --bin view-ai-stub-agent --target-dir target/stub-agent
+      - cargo build --release -p view-ai --features test-support --bin view-ai-stub-agent --target-dir "${CARGO_TARGET_DIR:-target}/stub-agent"
       # the exit code is echoed as this target's own final log line, on
       # every path (pass, gate breach, refusal), so a tee'd gate log is
       # self-describing without a reader having to interpret the bench
@@ -258,15 +258,15 @@ tasks:
       # one target dir per arm: the counterfactual binary must never be able
       # to overwrite the one the other arm measures, and a shared dir would
       # rebuild both on every feature flip
-      - cargo build --release -p view --features bench-taps --target-dir target/taps
-      - cargo build --release -p view --features bench-taps,bench-no-heartbeat --target-dir target/taps-no-heartbeat
+      - cargo build --release -p view --features bench-taps --target-dir "${CARGO_TARGET_DIR:-target}/taps"
+      - cargo build --release -p view --features bench-taps,bench-no-heartbeat --target-dir "${CARGO_TARGET_DIR:-target}/taps-no-heartbeat"
       # the echo row's two arms. Its boundary is the typed glyph on screen,
       # which a predicting build answers before the engine does, so measuring
       # the heartbeat's cost there means measuring it on the pair of builds
       # that predict nothing -- otherwise both arms time the same painted
       # glyph and the campaign reports a difference it never measured
-      - cargo build --release -p view --features bench-no-speculate --target-dir target/nospec
-      - cargo build --release -p view --features bench-no-speculate,bench-no-heartbeat --target-dir target/nospec-no-heartbeat
+      - cargo build --release -p view --features bench-no-speculate --target-dir "${CARGO_TARGET_DIR:-target}/nospec"
+      - cargo build --release -p view --features bench-no-speculate,bench-no-heartbeat --target-dir "${CARGO_TARGET_DIR:-target}/nospec-no-heartbeat"
       - cargo build --release -p view-harness --bin bench
       - cargo test -p view-harness --release --test heartbeat_cost -- --ignored --nocapture
 

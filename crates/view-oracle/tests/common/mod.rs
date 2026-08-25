@@ -59,12 +59,7 @@ fn build_view_bin() -> PathBuf {
     } else {
         "release"
     };
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); // crates/
-    path.pop(); // workspace root
-    path.push("target");
-    path.push(profile_dir);
-    path.push("view");
+    let path = view_oracle::target_root().join(profile_dir).join("view");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = std::process::Command::new(cargo)
         .args(["build", "-p", "view"])

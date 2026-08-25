@@ -69,7 +69,7 @@ use view_harness::budgets;
 use view_harness::builds::{self, scenarios_reading, view_bin_flag, VIEW_BIN_FLAGS};
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixture_source_dir, lockfile_cache_key,
-    verify_nvim_matches_pin, workspace_root, USER_FIXTURE,
+    target_root, verify_nvim_matches_pin, workspace_root, USER_FIXTURE,
 };
 
 /// Every measurable cell of the matrix, in run order.
@@ -861,7 +861,7 @@ fn resolve_view_bin(cli: &Cli) -> Result<PathBuf> {
     let path = cli
         .view_bin
         .clone()
-        .unwrap_or_else(|| workspace_root().join("target").join("release").join("view"));
+        .unwrap_or_else(|| target_root().join("release").join("view"));
     if !path.exists() {
         bail!(
             "view binary {} does not exist; run via `task bench` (which builds it) or pass --view-bin",
@@ -907,24 +907,17 @@ fn main() -> Result<()> {
     let bins = Bins {
         view: resolve_view_bin(&cli)?,
         #[cfg(unix)]
-        taps_view: cli.taps_view_bin.clone().unwrap_or_else(|| {
-            workspace_root()
-                .join("target")
-                .join("taps")
-                .join("release")
-                .join("view")
-        }),
-        nospec_view: cli.nospec_view_bin.clone().unwrap_or_else(|| {
-            workspace_root()
-                .join("target")
-                .join("nospec")
-                .join("release")
-                .join("view")
-        }),
+        taps_view: cli
+            .taps_view_bin
+            .clone()
+            .unwrap_or_else(|| target_root().join("taps").join("release").join("view")),
+        nospec_view: cli
+            .nospec_view_bin
+            .clone()
+            .unwrap_or_else(|| target_root().join("nospec").join("release").join("view")),
         #[cfg(unix)]
         taps_nospec_view: cli.taps_nospec_view_bin.clone().unwrap_or_else(|| {
-            workspace_root()
-                .join("target")
+            target_root()
                 .join("taps-nospec")
                 .join("release")
                 .join("view")

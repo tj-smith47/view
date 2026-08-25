@@ -31,14 +31,14 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # one does
 skip_unless_class remote-rtt controlled-linux
 
-RTT_ACCEPTANCE_BIN=${RTT_ACCEPTANCE_BIN:-$REPO_ROOT/target/release/rtt-acceptance}
-TAPS_VIEW_BIN=${TAPS_VIEW_BIN:-$REPO_ROOT/target/taps/release/view}
+RTT_ACCEPTANCE_BIN=${RTT_ACCEPTANCE_BIN:-$TARGET_ROOT/release/rtt-acceptance}
+TAPS_VIEW_BIN=${TAPS_VIEW_BIN:-$TARGET_ROOT/taps/release/view}
 NVIM_BIN=${NVIM_BIN:-nvim}
 
-ensure_artifact "$RTT_ACCEPTANCE_BIN" "$REPO_ROOT/target/release/rtt-acceptance" \
+ensure_artifact "$RTT_ACCEPTANCE_BIN" "$TARGET_ROOT/release/rtt-acceptance" \
     cargo build --release -p view-harness --bin rtt-acceptance || exit 1
-ensure_artifact "$TAPS_VIEW_BIN" "$REPO_ROOT/target/taps/release/view" \
-    cargo build --release -p view --features bench-taps --target-dir target/taps || exit 1
+ensure_artifact "$TAPS_VIEW_BIN" "$TARGET_ROOT/taps/release/view" \
+    cargo build --release -p view --features bench-taps --target-dir "$TARGET_ROOT/taps" || exit 1
 command -v "$NVIM_BIN" >/dev/null 2>&1 || {
     printf 'FAIL: no nvim on PATH as %s (set NVIM_BIN)\n' "$NVIM_BIN" >&2
     exit 1

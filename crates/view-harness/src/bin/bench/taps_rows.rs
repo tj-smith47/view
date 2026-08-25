@@ -294,8 +294,7 @@ pub(crate) fn ai_row(scenario: &str) -> bool {
 /// row controls, on every host, with no network and no credentials. The
 /// real adapter's own conformance is `scripts/acceptance/ai-conformance.sh`.
 pub(crate) fn stub_agent_bin() -> Result<PathBuf> {
-    let path = workspace_root()
-        .join("target")
+    let path = target_root()
         .join("stub-agent")
         .join("release")
         .join("view-ai-stub-agent");
@@ -303,7 +302,7 @@ pub(crate) fn stub_agent_bin() -> Result<PathBuf> {
         path.exists(),
         "the AI rows measure against the stub agent at {}, which is not built; `task bench` \
          builds it, so a hand-run bench binary needs `cargo build --release -p view-ai \
-         --features test-support --bin view-ai-stub-agent --target-dir target/stub-agent` \
+         --features test-support --bin view-ai-stub-agent --target-dir <cargo target dir>/stub-agent` \
          first",
         path.display()
     );

@@ -17,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use portable_pty::CommandBuilder;
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
-    scratch_root, verify_nvim_matches_pin, workspace_root,
+    scratch_root, target_root, verify_nvim_matches_pin, workspace_root,
 };
 use view_harness::results::{write_results, ResultsFile, ScenarioResult, ScenarioStatus};
 use view_harness::scenario::{self, ScenarioFile, ScenarioStateEntry};
@@ -86,10 +86,7 @@ fn ensure_view_bin() -> Result<PathBuf> {
     } else {
         "release"
     };
-    let path = workspace_root()
-        .join("target")
-        .join(profile_dir)
-        .join("view");
+    let path = target_root().join(profile_dir).join("view");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = std::process::Command::new(&cargo)
         .args(["build", "-p", "view"])

@@ -49,6 +49,139 @@ dump_dir() {
     mktemp -d "$parent/$prefix-XXXXXX"
 }
 
+# Where cargo puts what it builds for this tree.
+#
+# `CARGO_TARGET_DIR` is how a build is redirected out of the checkout --
+# which is what an isolated export of the tree is measured from, so a
+# harness that spelled `$REPO_ROOT/target` refuses every leg on the one
+# procedure the A/B and bisect recipes are run under. A relative value is
+# resolved against the repo, the way cargo itself resolves it.
+#
+# The variable rather than `cargo metadata`: a `build.target-dir` in a cargo
+# config file is the one redirection this does not see, and reading it costs
+# a subprocess on every leg of every script here.
+target_root() {
+    case "${CARGO_TARGET_DIR:-}" in
+    "") printf '%s/target\n' "$REPO_ROOT" ;;
+    /*) printf '%s\n' "$CARGO_TARGET_DIR" ;;
+    *) printf '%s/%s\n' "$REPO_ROOT" "$CARGO_TARGET_DIR" ;;
+    esac
+}
+
+# The target directory against a known answer, in both directions, on every
+# run: a locator stuck on the checkout's own `target` is invisible on the
+# host that has no `CARGO_TARGET_DIR` set, which is every host but the one
+# the redirection exists for.
+check_target_root() {
+    local out
+    out=$(CARGO_TARGET_DIR=/somewhere/else target_root)
+    if [ "$out" != /somewhere/else ]; then
+        printf 'FAIL: a declared CARGO_TARGET_DIR is not where the harness looks (said: %s)\n' "$out" >&2
+        exit 1
+    fi
+    out=$(CARGO_TARGET_DIR=elsewhere target_root)
+    if [ "$out" != "$REPO_ROOT/elsewhere" ]; then
+        printf 'FAIL: a relative CARGO_TARGET_DIR is not resolved against the repo (said: %s)\n' "$out" >&2
+        exit 1
+    fi
+    out=$(CARGO_TARGET_DIR= target_root)
+    if [ "$out" != "$REPO_ROOT/target" ]; then
+        printf 'FAIL: with nothing declared the harness must look in the target directory the tree owns (said: %s)\n' "$out" >&2
+        exit 1
+    fi
+}
+check_target_root
+TARGET_ROOT=$(target_root)
+
+# Every `view` a run has started, reaped by pid when it ends.
+VIEW_PIDS=()
+
+# Records the `view` behind a tmux session's pane and answers its pid.
+#
+#   VIEW_PID=$(watch_view "$SESSION") || return 1
+#
+# The pane command is `view` itself in most legs and a shell that runs view
+# in the exit legs, so both shapes are looked for. Taken while the session
+# is known good rather than in the cleanup: a leg that ends its own session
+# takes the last chance to read the pid with it.
+watch_view() {
+    local session="$1" pane_pid pid
+    pane_pid=$(tmux list-panes -t "$session" -F '#{pane_pid}' 2>/dev/null | head -1)
+    if [ -z "$pane_pid" ]; then
+        printf 'FAIL: tmux session %s has no pane to read a pid from\n' "$session" >&2
+        return 1
+    fi
+    if [ "$(ps -o comm= -p "$pane_pid" 2>/dev/null | tr -d ' ')" = view ]; then
+        pid=$pane_pid
+    else
+        pid=$(pgrep -P "$pane_pid" -x view | head -1 || true)
+    fi
+    if [ -z "$pid" ]; then
+        printf 'FAIL: the pane of %s is neither view nor a shell with a view child\n' "$session" >&2
+        return 1
+    fi
+    VIEW_PIDS+=("$pid")
+    printf '%s\n' "$pid"
+}
+
+# Kills every `view` this run started and refuses to let the run end while
+# one is still alive. Called from each script's cleanup, before the sessions
+# are killed.
+#
+# `tmux kill-session` delivers a SIGHUP and returns; a view that has stopped
+# honouring signals -- the state several legs induce on purpose -- outlives
+# the run holding its scratch root, and a removal that overtakes it walks
+# past directories it then re-creates. The survivor check is an assertion
+# rather than a wait because an orphan reaching here is the harness failing
+# to notice the very leak it exists to catch.
+#
+# Nothing outside a bash cleanup can pin one: what stands in for a pin is
+# that this is the check the run performs on itself, on every exit path.
+reap_views() {
+    local pid alive
+    for pid in ${VIEW_PIDS[@]+"${VIEW_PIDS[@]}"}; do
+        # continued before it is killed: a stopped process reaped by nothing
+        # outlives the run holding its address space
+        kill -CONT "$pid" 2>/dev/null || true
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        alive=""
+        for pid in ${VIEW_PIDS[@]+"${VIEW_PIDS[@]}"}; do
+            kill -0 "$pid" 2>/dev/null && alive="$alive $pid"
+        done
+        [ -z "$alive" ] && return 0
+        sleep 0.2
+    done
+    printf 'FAIL: view survived this run (pid%s), so a leg left an orphan holding its scratch root\n' \
+        "$alive" >&2
+    return 1
+}
+
+# The reaper against a known answer, on every run: one that killed nothing
+# would let every orphan through while the run reported green, and the check
+# it runs on itself would pass by finding nothing.
+#
+# The victim is started from a shell that exits immediately, so it is
+# reparented rather than left a zombie of this one -- which `kill -0`
+# answers for as though it were alive, exactly the way a real orphan is not.
+check_reaper() {
+    local victim
+    victim=$(sh -c 'sleep 30 >/dev/null 2>&1 & echo $!')
+    VIEW_PIDS=("$victim")
+    if ! reap_views; then
+        printf 'FAIL: the reaper could not reap a live process\n' >&2
+        exit 1
+    fi
+    if kill -0 "$victim" 2>/dev/null; then
+        printf 'FAIL: the reaper reported a clean run with its victim still alive\n' >&2
+        kill -9 "$victim" 2>/dev/null || true
+        exit 1
+    fi
+    VIEW_PIDS=()
+}
+check_reaper
+
 # This host's machine-class name, in `budgets.toml`'s vocabulary.
 #
 # Derived the way the harness's own campaigns derive it

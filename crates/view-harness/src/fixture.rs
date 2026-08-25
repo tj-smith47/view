@@ -63,6 +63,12 @@ pub enum FixtureError {
     SlowKnob { value: String },
 }
 
+/// Where cargo puts what it builds for this tree, which is where every
+/// binary a harness spawns is looked for. Re-exported from `view-oracle`
+/// so the compat runner, the bench binary and the acceptance tests all
+/// resolve it one way.
+pub use view_oracle::target_root;
+
 /// Resolved from this crate's own manifest dir rather than the caller's
 /// cwd: `task` targets always run from the repo root today, but a direct
 /// `cargo run -p view-harness` invocation from a subdirectory must not

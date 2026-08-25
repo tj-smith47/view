@@ -33,8 +33,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # shellcheck source=scripts/acceptance/artifacts.sh
 . "$SCRIPT_DIR/artifacts.sh"
-VIEW_BIN=${VIEW_BIN:-$REPO_ROOT/target/release/view}
-STUB_BIN=${STUB_BIN:-$REPO_ROOT/target/release/view-ai-stub-agent}
+VIEW_BIN=${VIEW_BIN:-$TARGET_ROOT/release/view}
+STUB_BIN=${STUB_BIN:-$TARGET_ROOT/release/view-ai-stub-agent}
 FIXTURE=$SCRIPT_DIR/fixtures/themed
 COLORSCHEME=$FIXTURE/nvim/colors/view-dracula.lua
 MAPPINGS_RS=$REPO_ROOT/crates/view-core/src/native/mappings.rs
@@ -84,15 +84,9 @@ BEFORE=$WORK/before.txt
 cleanup() {
     local code=$?
     local session root
+    reap_views || code=1
     for session in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         tmux kill-session -t "$session" 2>/dev/null || true
-    done
-    # `tmux kill-session` returns before the pane's own process is gone, and
-    # a removal that overtakes a still-live `view` walks past directories it
-    # then re-creates
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -f "$VIEW_BIN" >/dev/null 2>&1 || break
-        sleep 0.2
     done
     for root in ${ROOTS[@]+"${ROOTS[@]}"}; do
         [ -n "$root" ] && rm -rf "$root"
@@ -654,6 +648,7 @@ start_session() {
              $VIEW_BIN $ROOT/scratch.txt"
 
     wait_for "$seed" "$WAIT_SECS" "the seeded buffer" >/dev/null || return 1
+    watch_view "$SESSION" >/dev/null || return 1
     # anchored on the ruler rather than on any buffer text, which was
     # already on screen before the motion and so would report the cursor
     # moved whether it had or not
@@ -703,9 +698,9 @@ if [ -n "$selftest" ]; then
     exit 1
 fi
 
-ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
+ensure_artifact "$VIEW_BIN" "$TARGET_ROOT/release/view" \
     cargo build --release -p view || exit 1
-ensure_artifact "$STUB_BIN" "$REPO_ROOT/target/release/view-ai-stub-agent" \
+ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     cargo build --release -p view-ai --features test-support --bin view-ai-stub-agent || exit 1
 [ -d "$FIXTURE" ] || {
     printf 'FAIL: the themed fixture is missing at %s\n' "$FIXTURE" >&2
@@ -929,6 +924,7 @@ tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$warm_root" \
          TERM=xterm-256color COLORTERM=truecolor \
          $VIEW_BIN $warm_root/scratch.txt"
 wait_for 'warm the theme cache' "$WAIT_SECS" "the warming session's buffer" >/dev/null
+watch_view "$SESSION" >/dev/null
 # Every assertion below compares a decimal triple, which only a truecolor
 # server ever emits. One that stores indexed colors instead answers `48;5;N`
 # for every cell, no background matches the fixture's, and the run fails on

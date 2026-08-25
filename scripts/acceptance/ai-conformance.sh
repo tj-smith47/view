@@ -52,8 +52,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # shellcheck source=scripts/acceptance/artifacts.sh
 . "$SCRIPT_DIR/artifacts.sh"
-VIEW_BIN=${VIEW_BIN:-$REPO_ROOT/target/release/view}
-STUB_BIN=${STUB_BIN:-$REPO_ROOT/target/release/view-ai-stub-agent}
+VIEW_BIN=${VIEW_BIN:-$TARGET_ROOT/release/view}
+STUB_BIN=${STUB_BIN:-$TARGET_ROOT/release/view-ai-stub-agent}
 FIXTURE=$REPO_ROOT/compat/fixtures/minimal
 PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
 REVIEW_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/review.rs
@@ -105,16 +105,9 @@ DUMP_DIR=$(dump_dir view-ai-conformance)
 cleanup() {
     local code=$?
     local session root
+    reap_views || code=1
     for session in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         tmux kill-session -t "$session" 2>/dev/null || true
-    done
-    # `tmux kill-session` returns before the pane's own process is gone, and
-    # a removal that overtakes a still-live `view` walks past directories it
-    # then re-creates -- which is how a "cleaned up" root survives the run
-    # holding an empty state directory.
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        pgrep -f "$VIEW_BIN" >/dev/null 2>&1 || break
-        sleep 0.2
     done
     rm -f "$RESUME_FILE"
     for root in ${ROOTS[@]+"${ROOTS[@]}"}; do
@@ -375,6 +368,7 @@ start_session() {
              $VIEW_BIN $ROOT/view-ai-stub-diff.txt"
 
     wait_for 'alpha' "$WAIT_SECS" "the seeded buffer" >/dev/null
+    watch_view "$SESSION" >/dev/null
 }
 
 # Opens the panel and answers the trust gate, leaving the panel entered --
@@ -994,9 +988,9 @@ command -v tmux >/dev/null || {
     printf 'FAIL: tmux is required (this drives a real terminal session)\n' >&2
     exit 1
 }
-ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
+ensure_artifact "$VIEW_BIN" "$TARGET_ROOT/release/view" \
     cargo build --release -p view || exit 1
-ensure_artifact "$STUB_BIN" "$REPO_ROOT/target/release/view-ai-stub-agent" \
+ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     cargo build --release -p view-ai --features test-support --bin view-ai-stub-agent || exit 1
 [ -d "$FIXTURE" ] || {
     printf 'FAIL: the no-plugins fixture is missing at %s\n' "$FIXTURE" >&2

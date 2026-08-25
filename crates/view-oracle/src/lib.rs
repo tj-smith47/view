@@ -94,6 +94,48 @@ pub use pty::{
 };
 pub use reference::ReferenceSession;
 
+/// The workspace root this crate was built from, resolved from its own
+/// manifest rather than from a caller's working directory.
+#[must_use]
+pub fn workspace_root() -> std::path::PathBuf {
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop(); // crates/
+    path.pop(); // workspace root
+    path
+}
+
+/// Where cargo puts what it builds for this tree, which is where every
+/// harness here looks for a binary it is about to spawn.
+///
+/// `CARGO_TARGET_DIR` is how a build is redirected out of the checkout, and
+/// that is exactly how an isolated export of the tree is built and measured
+/// -- the shape a bisect and an A/B pair are run in. A harness that spelled
+/// `<root>/target` instead spawns a binary that is not there and fails
+/// every leg for a reason that has nothing to do with the code under test.
+/// A relative value is resolved against the workspace root, the way cargo
+/// resolves it.
+///
+/// The variable rather than `cargo metadata`: a `build.target-dir` in a
+/// cargo config file is the one redirection this does not see, and reading
+/// it costs a subprocess on every harness start. Scratch directories stay
+/// on [`workspace_root`] on purpose -- what those want is a disk-backed
+/// directory this tree owns, not wherever cargo was told to write.
+#[must_use]
+pub fn target_root() -> std::path::PathBuf {
+    declared_target_root(std::env::var_os("CARGO_TARGET_DIR"), &workspace_root())
+}
+
+fn declared_target_root(
+    declared: Option<std::ffi::OsString>,
+    root: &std::path::Path,
+) -> std::path::PathBuf {
+    match declared.filter(|dir| !dir.is_empty()) {
+        Some(dir) if std::path::Path::new(&dir).is_absolute() => std::path::PathBuf::from(dir),
+        Some(dir) => root.join(dir),
+        None => root.join("target"),
+    }
+}
+
 /// Forwards every [`Effect::Rpc`] in `effects` to `handle`, mirroring the
 /// production runtime's `Executor::run` dispatch
 /// (`crates/view/src/runtime.rs`) for the subset of [`RpcCall`] variants a
@@ -720,6 +762,44 @@ mod tests {
     use view_core::native::ai_panel::DiffReviewState;
     use view_core::native::diff::hunk;
     use view_core::native::diff::HunkStatus;
+
+    #[test]
+    fn a_declared_target_dir_is_where_a_harness_looks_for_what_cargo_built() {
+        let root = std::path::Path::new("/tree");
+        assert_eq!(
+            declared_target_root(Some("/elsewhere/target".into()), root),
+            PathBuf::from("/elsewhere/target"),
+            "an absolute CARGO_TARGET_DIR is the answer as it stands"
+        );
+        assert_eq!(
+            declared_target_root(Some("build".into()), root),
+            PathBuf::from("/tree/build"),
+            "a relative one resolves against the tree, the way cargo resolves it"
+        );
+        for nothing in [None, Some(std::ffi::OsString::new())] {
+            assert_eq!(
+                declared_target_root(nothing, root),
+                PathBuf::from("/tree/target"),
+                "with nothing declared it is the tree's own target directory"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_root_holds_the_binary_this_test_is_running_from() {
+        // the end of the same claim the case above makes about the string:
+        // this test binary was built by cargo into the directory the
+        // locator has to name, whichever way this run redirected it
+        let exe = std::env::current_exe().expect("a running test has a path");
+        let root = target_root();
+        assert!(
+            exe.starts_with(&root),
+            "this test binary is {}, which is not under the {} a harness \
+             would spawn view from",
+            exe.display(),
+            root.display()
+        );
+    }
 
     #[test]
     fn session_fed_a_scripted_redraw_and_flush_yields_the_known_screen_text() {

@@ -20,8 +20,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # shellcheck source=scripts/acceptance/artifacts.sh
 . "$SCRIPT_DIR/artifacts.sh"
-VIEW_BIN=${VIEW_BIN:-$REPO_ROOT/target/release/view}
-STUB_BIN=${STUB_BIN:-$REPO_ROOT/target/release/view-ai-stub-agent}
+VIEW_BIN=${VIEW_BIN:-$TARGET_ROOT/release/view}
+STUB_BIN=${STUB_BIN:-$TARGET_ROOT/release/view-ai-stub-agent}
 FIXTURE=$REPO_ROOT/compat/fixtures/minimal
 SUPERVISION_RS=$REPO_ROOT/crates/view-core/src/native/supervision.rs
 HEARTBEAT_RS=$REPO_ROOT/crates/view-engine/src/heartbeat.rs
@@ -73,6 +73,7 @@ DUMP_DIR=$(dump_dir view-acceptance)
 cleanup() {
     local code=$?
     local pid session root
+    reap_views || code=1
     for pid in ${NVIM_PIDS[@]+"${NVIM_PIDS[@]}"}; do
         # continued before it is killed: the write-side leg leaves its
         # engine stopped, and a stopped process reaped by nothing outlives
@@ -117,6 +118,13 @@ fail() {
     if [ -n "${ROOT:-}" ] && [ -f "$ROOT/view.log" ]; then
         cp "$ROOT/view.log" "$DUMP_DIR/$CURRENT_LEG.log" 2>/dev/null || true
         printf '      view log:  %s\n' "$DUMP_DIR/$CURRENT_LEG.log" >&2
+    fi
+    # the byte stream the exit legs assert on, which the leg's root takes
+    # with it on the way out: without it a reader of a failed restore-burst
+    # match has the verdict and none of the bytes that produced it
+    if [ -n "${ROOT:-}" ] && [ -f "$ROOT/pane.raw" ]; then
+        cp "$ROOT/pane.raw" "$DUMP_DIR/$CURRENT_LEG.raw" 2>/dev/null || true
+        printf '      pane bytes: %s\n' "$DUMP_DIR/$CURRENT_LEG.raw" >&2
     fi
     return 1
 }
@@ -248,7 +256,7 @@ start_session() {
              $VIEW_BIN $ROOT/scratch.txt"
 
     wait_for "$seed" 30 "the seeded buffer" >/dev/null || return 1
-    VIEW_PID=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}')
+    VIEW_PID=$(watch_view "$SESSION") || return 1
     read_engine_pid || return 1
 }
 
@@ -313,7 +321,7 @@ assert_restart_recovered() {
     tmux send-keys -t "$SESSION" -l "o$live"
     tmux send-keys -t "$SESSION" Escape
     wait_for "$live" 15 "typed text after the restart" >/dev/null || return 1
-    VIEW_PID=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}')
+    VIEW_PID=$(watch_view "$SESSION") || return 1
     read_engine_pid || return 1
 }
 
@@ -369,11 +377,7 @@ EOF
     wait_for "$EXIT_SEED" 30 "the seeded buffer" >/dev/null || return 1
     # the pane runs the shell above, so view is its child rather than the
     # pane process itself
-    VIEW_PID=$(pgrep -P "$(tmux list-panes -t "$SESSION" -F '#{pane_pid}')" -x view | head -1)
-    [ -n "$VIEW_PID" ] || {
-        fail "the exit session's shell has no view child"
-        return 1
-    }
+    VIEW_PID=$(watch_view "$SESSION") || return 1
     read_engine_pid || return 1
 }
 
@@ -439,8 +443,12 @@ assert_exit_was_clean() {
     # proves nothing about the teardown. Only `restore_bytes` closes a sync
     # bracket, resets the shape and shows the caret back to back, so this
     # match fails the moment any of the three leaves it.
-    grep -qU $'\033\[?2026l\033\[0 q\033\[?25h' "$ROOT/pane.raw" || {
-        fail "the restore burst (sync-bracket close, caret shape reset, caret show) never reached the pty as one sequence"
+    grep -qU $'\033\[<u' "$ROOT/pane.raw" || {
+        fail "the kitty keyboard protocol was never popped, so a terminal that entered it keeps sending view's key encoding to the shell"
+        return 1
+    }
+    grep -qU $'\033\[?2026l\033\[<u\033\[0 q\033\[?25h' "$ROOT/pane.raw" || {
+        fail "the restore burst (sync-bracket close, kitty keyboard pop, caret shape reset, caret show) never reached the pty as one sequence"
         return 1
     }
 
@@ -471,9 +479,9 @@ for tool in tmux awk sed grep pgrep; do
         exit 1
     }
 done
-ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
+ensure_artifact "$VIEW_BIN" "$TARGET_ROOT/release/view" \
     cargo build --release -p view || exit 1
-ensure_artifact "$STUB_BIN" "$REPO_ROOT/target/release/view-ai-stub-agent" \
+ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     cargo build --release -p view-ai --features test-support --bin view-ai-stub-agent || exit 1
 [ -d "$FIXTURE" ] || {
     printf 'FAIL: the no-plugins fixture is missing at %s\n' "$FIXTURE" >&2

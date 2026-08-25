@@ -27,7 +27,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # shellcheck source=scripts/acceptance/artifacts.sh
 . "$SCRIPT_DIR/artifacts.sh"
-VIEW_BIN=${VIEW_BIN:-$REPO_ROOT/target/release/view}
+VIEW_BIN=${VIEW_BIN:-$TARGET_ROOT/release/view}
 FIXTURE=$REPO_ROOT/compat/fixtures/minimal
 FIXTURES=$REPO_ROOT/scripts/test-fixtures
 SUPERVISION_RS=$REPO_ROOT/crates/view-core/src/native/supervision.rs
@@ -60,6 +60,7 @@ DUMP_DIR=$(dump_dir view-reconnect)
 
 cleanup() {
     local code=$? session root
+    reap_views || code=1
     for session in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         tmux kill-session -t "$session" 2>/dev/null || true
     done
@@ -281,7 +282,7 @@ start_session() {
              $VIEW_BIN --remote view-test-host:$ROOT/scratch.txt"
 
     wait_for 'acceptance seed line' 30 "the remote buffer" >/dev/null || return 1
-    VIEW_PID=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}')
+    VIEW_PID=$(watch_view "$SESSION") || return 1
     read_client_pid || return 1
 }
 
@@ -327,7 +328,7 @@ for tool in tmux awk sed grep pgrep pkill python3; do
         exit 1
     }
 done
-ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
+ensure_artifact "$VIEW_BIN" "$TARGET_ROOT/release/view" \
     cargo build --release -p view || exit 1
 [ -d "$FIXTURE" ] || {
     printf 'FAIL: the no-plugins fixture is missing at %s\n' "$FIXTURE" >&2

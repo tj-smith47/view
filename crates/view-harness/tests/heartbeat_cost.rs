@@ -31,7 +31,7 @@ use std::process::Command;
 
 use view_harness::baselines::{declared_headroom, load_headroom, CellId, Headroom};
 use view_harness::builds::{view_bin_flag, NOSPEC_VIEW_BIN, TAPS_VIEW_BIN};
-use view_harness::fixture::workspace_root;
+use view_harness::fixture::{target_root, workspace_root};
 
 /// The rows this campaign measures, in run order.
 ///
@@ -145,8 +145,7 @@ fn view_bin_name() -> &'static str {
 }
 
 fn bench_bin() -> PathBuf {
-    workspace_root()
-        .join("target")
+    target_root()
         .join("release")
         .join(if cfg!(windows) { "bench.exe" } else { "bench" })
 }

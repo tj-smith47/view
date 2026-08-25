@@ -22,7 +22,7 @@ use view_bench::scenarios::{first_paint, Protocol};
 use view_bench::session::{NvimSpec, SpawnSpec, ViewSpec};
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, generate_user_fixture, generate_user_fixture_with_stall,
-    lockfile_cache_key, scratch_root, workspace_root, USER_FIXTURE, USER_FIXTURE_STALL_MS,
+    lockfile_cache_key, scratch_root, target_root, USER_FIXTURE, USER_FIXTURE_STALL_MS,
     USER_FIXTURE_STALL_RECEIPT,
 };
 
@@ -79,7 +79,7 @@ fn the_first_paint_row_reaches_the_opened_file_through_the_generated_login() {
         "the shared plugin cache must be populated (task compat) before the generated login \
          can be built from it",
     );
-    let view_bin = workspace_root().join("target").join("debug").join("view");
+    let view_bin = target_root().join("debug").join("view");
     assert!(
         view_bin.exists(),
         "{} is missing; build it first (cargo build -p view)",

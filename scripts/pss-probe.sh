@@ -18,15 +18,17 @@
 #
 #   bash scripts/pss-probe.sh [binary] [file-to-open]
 #
-# Defaults to target/release/view opening README.md at 120x40. Prints the
-# host load, the commit and the binary's size in the header, because a PSS
-# reading is only comparable against another reading that names all three.
+# Defaults to the release `view` cargo built (`CARGO_TARGET_DIR` moves it,
+# the way it moves what the acceptance scripts measure) opening README.md at
+# 120x40. Prints the host load, the commit and the binary's size in the
+# header, because a PSS reading is only comparable against another reading
+# that names all three.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-binary="${1:-target/release/view}"
+binary="${1:-${CARGO_TARGET_DIR:-target}/release/view}"
 open_file="${2:-README.md}"
 cols="${PSS_PROBE_COLS:-120}"
 rows="${PSS_PROBE_ROWS:-40}"

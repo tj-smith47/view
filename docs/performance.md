@@ -177,6 +177,35 @@ to 13.9 µs p50 with the input-thread/runtime-loop unification
 (spec:97-99's 2026-08-09 adjudication) -- this decomposition's ~644 µs
 total predates that change and reads high.*
 
+## Bisecting, and A/B on the quiet host
+
+A paired measurement -- the same scenario against the binary from two
+revisions -- is built by `scripts/ab-build.sh`, never by hand:
+
+```
+$ bash scripts/ab-build.sh 6ed8bc9 f63f7d0
+before: ~/.cache/view-ab/before/target/release/view
+after:  ~/.cache/view-ab/after/target/release/view
+$ VIEW_BIN=~/.cache/view-ab/before/target/release/view task bench -- \
+      --scenario echo --fixture minimal
+```
+
+Each side is exported with `git archive` into its own tree and built with
+its own `CARGO_TARGET_DIR`, and the script refuses to hand back two
+byte-identical binaries. Both rules come from one incident: a pair built
+through a single shared target dir compiled nothing on the second build --
+cargo's dep-info still named the first tree's files, all of them fresh --
+and the run reported a null result that was really the same binary measured
+twice.
+
+A bisect is the same loop with one revision per step (`git archive <sha>`
+into a scratch tree, one target dir of its own, then the bench cell), which
+is how the gh-runner regression window was narrowed to a single pair of
+revisions.
+
+Everything under "How we measure" still applies: the host has to be quiet,
+and its class has to be declared.
+
 ## How budgets are enforced
 
 Budgets are recorded per machine class and regression-gated: a change that
