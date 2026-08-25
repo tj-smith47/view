@@ -1060,18 +1060,21 @@ impl EngineModel {
         self.hl.mark_dirty();
     }
 
-    /// Drops the three `_show`/`_hide` overlay states, for a connection
-    /// being replaced.
+    /// Drops the three overlay states an engine owns, for a connection being
+    /// replaced.
     ///
-    /// Each of them is retracted by the engine that raised it and by nothing
-    /// else, so an engine that dies with one open never sends the `_hide`
-    /// half: the command line a user was typing at the moment the engine was
-    /// killed stays painted on the last row over the replacement's own first
-    /// frame, which reads as an editor that lost its prompt. The grid needs
-    /// no equivalent -- a fresh attach redraws every cell of it -- and
-    /// neither `mode` nor `messages` does: the replacement announces its
-    /// modes on attach, and the message log is scrollback rather than a
-    /// point-in-time overlay.
+    /// Each one is raised by the engine and taken down only by the same
+    /// engine -- `cmdline` and `popupmenu` by their `_hide` events,
+    /// `tabline` by the next `tabline_update` -- so an engine that dies with
+    /// one raised takes down nothing: the command line a user was typing at
+    /// the moment the engine was killed stays painted on the last row over
+    /// the replacement's own first frame, which reads as an editor that lost
+    /// its prompt. A replacement re-establishes all three from its own state
+    /// on attach, so dropping them costs a frame of nothing rather than a
+    /// frame of the dead engine. The grid needs no equivalent -- a fresh
+    /// attach redraws every cell of it -- and neither `mode` nor `messages`
+    /// does: the replacement announces its modes on attach, and the message
+    /// log is scrollback rather than a point-in-time overlay.
     pub fn forget_overlays(&mut self) {
         self.cmdline = None;
         self.popupmenu = None;
