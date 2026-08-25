@@ -1597,6 +1597,55 @@ mod tests {
         }
     }
 
+    /// The adapter release the `allow_always` probe was last run against,
+    /// and what it answered.
+    ///
+    /// `scripts/acp-allow-always-probe.mjs` drove 0.69.0 over a real wire
+    /// with real credentials and was re-prompted for all four Edit calls
+    /// after answering the adapter's own `allow_always` option id verbatim:
+    /// the release does not honor the grant, which is why view carries the
+    /// standing-answer store in `crate::acp::permission`. The store is dead
+    /// weight -- and its auto-answer a second grant the user did not give --
+    /// the day an adapter starts honoring it, so the pin may not move
+    /// without the probe moving with it.
+    const PROBED_VERSION: &str = "0.69.0";
+    const PROBED_HONORS_ALLOW_ALWAYS: bool = false;
+
+    #[test]
+    fn the_pinned_adapter_is_the_one_the_allow_always_probe_answered_for() {
+        let pinned = pinned_version("claude-code").expect("this build pins claude-code");
+        assert_eq!(
+            pinned, PROBED_VERSION,
+            "the claude-code pin moved to {pinned} and nothing has probed it: re-run the probe \
+             (`node scripts/acp-allow-always-probe.mjs`) against {pinned}, then set \
+             PROBED_VERSION and PROBED_HONORS_ALLOW_ALWAYS here from its verdict. If \
+             `honors_allow_always` came back true, view's standing-answer store \
+             (crates/view-ai/src/acp/permission.rs) now auto-answers a request the adapter \
+             would have answered itself and must be retired in the same commit."
+        );
+    }
+
+    /// The other half of the pin assertion, and a compile error rather than
+    /// a test failure because the store this guards is shipped code: a probe
+    /// verdict of `honors_allow_always: true` means view's standing-answer
+    /// store auto-answers a request the adapter would have granted itself,
+    /// which is a second grant the user never gave.
+    const _: () = assert!(
+        !PROBED_HONORS_ALLOW_ALWAYS,
+        "the probe recorded the pinned adapter as honoring allow_always: retire the \
+         standing-answer store in crates/view-ai/src/acp/permission.rs rather than \
+         relaxing this"
+    );
+
+    /// The probe named above has to be runnable by the session the assertion
+    /// above sends to run it, and it once lived outside the tree.
+    #[test]
+    fn the_probe_the_pin_assertion_names_is_in_the_tree() {
+        let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/acp-allow-always-probe.mjs");
+        assert!(probe.is_file(), "{} is missing", probe.display());
+    }
+
     #[test]
     fn an_adapter_is_ready_only_once_its_extraction_is_complete() {
         let pin = test_pin(String::new(), "");
