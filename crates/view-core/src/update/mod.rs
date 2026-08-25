@@ -215,6 +215,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 height: grid_height,
             })]
         }
+        Msg::CapsUpgraded(caps) => {
+            // an upgrade is only ever sent for capabilities that actually
+            // changed, and the frame already on screen was painted at the
+            // ones it replaces -- borders, palette and the synchronized
+            // bracket all read off these
+            model.caps = caps;
+            model.dirty = true;
+            Vec::new()
+        }
         Msg::HlProbeReply { generation, fg, bg } => {
             // guards the write, not just the read: without this, a
             // reordered stale reply (an older generation's probe answered

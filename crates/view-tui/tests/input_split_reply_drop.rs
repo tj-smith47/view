@@ -1,4 +1,4 @@
-//! `InputSource::open_guarded` against a terminal whose late reply arrives
+//! `InputSource::open_listening` against a terminal whose late reply arrives
 //! in pieces, with a keystroke ahead of it.
 //!
 //! Segmentation is what an ssh hop adds to the shape the sibling
@@ -24,6 +24,7 @@
 
 mod common;
 
+use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
@@ -41,7 +42,7 @@ fn a_keystroke_ahead_of_a_split_reply_does_not_hand_the_rest_of_it_to_crossterm(
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_guarded().unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
 
     rustix::io::write(&master, KEY_THEN_PARTIAL_REPLY).unwrap();
     assert!(
@@ -66,9 +67,10 @@ fn a_keystroke_ahead_of_a_split_reply_does_not_hand_the_rest_of_it_to_crossterm(
     let mut after = Vec::new();
     input.drain(&size, |msg| after.push(msg));
     assert!(
-        after.is_empty(),
-        "the tail of the split reply must be swept, not decoded into \
-         `;`, `1`, `$` and `y` keystrokes: {after:?}"
+        matches!(after.as_slice(), [Msg::CapsUpgraded(caps)] if caps.sync),
+        "the tail of the split reply must complete the answer -- reaching the \
+         session as the capability it reports, never decoded into `;`, `1`, \
+         `$` and `y` keystrokes: {after:?}"
     );
 
     // the guard must have handed the terminal back working, not wedged

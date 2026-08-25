@@ -113,6 +113,16 @@ pub enum Msg {
         width: u16,
         height: u16,
     },
+    /// The terminal admitted to a capability after the startup probe had
+    /// already handed the tty over: a reply that arrived late (an ssh hop,
+    /// a multiplexer) and was recognized on the input path instead.
+    ///
+    /// The frame on screen was painted at the capabilities this one
+    /// supersedes, so the fold repaints. The terminal-side half of the
+    /// upgrade -- the keyboard-protocol push, the shadow's forced full
+    /// repaint -- is the frontend's, and follows `Model::caps` on that
+    /// repaint rather than needing a seam of its own.
+    CapsUpgraded(crate::model::TermCaps),
     /// A terminal bracketed-paste payload, decoded by the input reader from
     /// crossterm's `Event::Paste`.
     Paste(String),

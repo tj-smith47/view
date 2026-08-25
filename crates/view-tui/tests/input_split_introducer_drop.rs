@@ -1,4 +1,4 @@
-//! `InputSource::open_guarded` against a reply split at its introducer,
+//! `InputSource::open_listening` against a reply split at its introducer,
 //! after the user has already typed.
 //!
 //! `ESC [` is the one thing on this fd that is equally the terminal's and
@@ -22,6 +22,7 @@
 
 mod common;
 
+use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
@@ -44,7 +45,7 @@ fn an_introducer_split_from_its_reply_costs_neither_the_reply_nor_the_typing() {
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_guarded().unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
     let size = TermSizeCell::default();
 
     let write = |bytes: &[u8]| {

@@ -718,6 +718,14 @@ impl PreAttach {
                 self.resize = Some((width, height));
                 false
             }
+            // applied to the model here for the same reason a resize is:
+            // the overflow repaint above and the first content frame both
+            // paint at the model's capabilities, and this window is the one
+            // place a late answer has no loop to reach
+            Msg::CapsUpgraded(caps) => {
+                model.caps = caps;
+                false
+            }
             Msg::EngineReady => true,
             // structurally unreachable before EngineReady (see
             // attach_in_background's doc comment); kept for the same
@@ -975,7 +983,7 @@ mod tests {
     /// The other half, at the point it is most dangerous: the size did
     /// arrive, `ui_attach` succeeded, and the caller failed before it could
     /// hand over the probe's residue -- `paint_shell_frame` writing into a
-    /// pty that has gone away, or `finish_probe` itself. The attach thread
+    /// pty that has gone away, or `settle_probe` itself. The attach thread
     /// is parked in the residue wait at that moment, so the guard's `Drop`
     /// returns only if it disconnects that channel too: a residue sender
     /// living anywhere else outlives the guard, and this hangs forever
@@ -1133,6 +1141,28 @@ mod tests {
         ring.push(key("x"));
         assert_eq!(ring.drain().len(), 1);
         assert!(ring.drain().is_empty());
+    }
+
+    /// A terminal that answers while nvim is still attaching answers into
+    /// this window, which has no loop to hand the upgrade to: the tier has
+    /// to land on the model here or the session paints the rest of its life
+    /// at the one the probe settled for.
+    #[test]
+    fn a_capability_answer_inside_the_attach_window_still_reaches_the_model() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(MSG_CHANNEL_CAPACITY);
+        let full = view_core::model::TermCaps::from_probe(true, true, true);
+        tx.send(Msg::CapsUpgraded(full)).unwrap();
+        tx.send(Msg::EngineReady).unwrap();
+
+        let mut model = Model::with_term_size(80, 24);
+        let _ = drain_pre_attach_with(&rx, &mut model, |_| {});
+
+        assert_eq!(
+            model.caps, full,
+            "the answer arrived before the loop existed and was dropped with \
+             the window, so every frame after the cutover paints at the tier \
+             the probe gave up on"
+        );
     }
 
     #[test]

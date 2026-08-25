@@ -1,4 +1,4 @@
-//! `InputSource::open_guarded` against a real terminal that answers
+//! `InputSource::open_listening` against a real terminal that answers
 //! the startup capability probe after the probe has stopped listening.
 //!
 //! The shape under test is what an ssh hop makes ordinary: the probe writes
@@ -8,7 +8,9 @@
 //! an event nor to an error, so it stays in that parser's buffer and every
 //! later byte is appended to it -- the reply does not just arrive as
 //! garbage, it swallows the keystrokes behind it. The guard reads those
-//! bytes first and drops them.
+//! bytes first, keeps them off the key path, and reports what they
+//! answered: this burst is a full-tier terminal, and the session that
+//! painted its first frames at `Basic` has to hear so.
 //!
 //! A pty this test owns, put on descriptor 0 before crossterm's
 //! process-wide reader binds to anything, is what makes that reachable.
@@ -25,6 +27,7 @@
 
 mod common;
 
+use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
@@ -47,7 +50,7 @@ fn a_reply_arriving_after_the_probe_gave_up_never_reaches_the_engine() {
     // opened while the queue is empty, so crossterm's reader binds to this
     // terminal without consuming any of the burst written below
     // exactly what `main` opens for a probe whose fence never came
-    let mut input = InputSource::open_guarded().unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
 
     rustix::io::write(&master, LATE_BATCH_THEN_KEY).unwrap();
     assert!(
@@ -59,10 +62,15 @@ fn a_reply_arriving_after_the_probe_gave_up_never_reaches_the_engine() {
     let mut drained = Vec::new();
     input.drain(&size, |msg| drained.push(msg));
     assert!(
-        matches!(drained.as_slice(), [Msg::Key(key)] if key.notation == "a"),
-        "every capability reply in the burst must be dropped and the one \
-         keystroke behind them delivered, with no literal `P`, `$`, `r` or \
-         digit from the DCS answer among them: {drained:?}"
+        matches!(
+            drained.as_slice(),
+            [Msg::CapsUpgraded(caps), Msg::Key(key)]
+                if *caps == TermCaps::from_probe(true, true, true) && key.notation == "a"
+        ),
+        "the burst must leave the key path carrying one keystroke and no \
+         literal `P`, `$`, `r` or digit from the DCS answer, and must reach \
+         the loop as the full tier every one of its answers proves -- the \
+         upgrade the probe stopped waiting for: {drained:?}"
     );
 
     // the keystroke after the guard has handed the terminal back: it must

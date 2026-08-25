@@ -1870,7 +1870,7 @@ pub enum MouseCapture {
 /// `tier` is coarse UX vocabulary; the probed bits are what gates behavior
 /// (BSU/ESU gates on `caps.sync`, never on tier alone).
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TermCaps {
     pub tier: Tier,
     pub sync: bool,

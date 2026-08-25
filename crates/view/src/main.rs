@@ -753,9 +753,10 @@ fn main() -> Result<()> {
     // `Source::Files` with no root override searches from here
     let mut model =
         Model::with_term_size(width, height).with_cwd(std::env::current_dir().unwrap_or_default());
-    // what the probe's first window resolved; a terminal slower than that
-    // window revises this upward at `term.finish_probe()` below, which runs
-    // once the engine attach is already in flight
+    // what the probe's first window resolved, and what every frame is
+    // painted at until the terminal says otherwise: a terminal slower than
+    // that window revises this upward through `Msg::CapsUpgraded`, on
+    // whatever frame its answer reaches the input path
     model.caps = term.caps();
     // opts into startup's placeholder shell (statusline bar plus a static
     // "waiting for nvim" indicator) instead of Model's ordinary
@@ -783,12 +784,11 @@ fn main() -> Result<()> {
     // anywhere below: everything between this line and the shell frame is
     // work the child's own startup now runs underneath.
     //
-    // What the residue channel costs a terminal that never answers the
-    // fence at all: the attach's last step blocks on it, so editable
-    // content lands at `max(PROBE_HARD_CAP, attach)` rather than at the
-    // attach alone -- the full cap, on a host where the attach is an order
-    // of magnitude shorter than it. First paint is unaffected either way;
-    // it happens below.
+    // What the residue channel costs: nothing but the shell frame's own
+    // paint. The attach's last step blocks on it, and it is handed over the
+    // moment that frame is up (see `settle_probe` below), so editable
+    // content lands at the attach's own cost on every terminal -- including
+    // one that never answers the fence at all.
     attach.attach_at(msg_tx.clone(), width, height);
 
     // resolved before the engine exists because the theme cache is keyed on
@@ -872,14 +872,15 @@ fn main() -> Result<()> {
     startup::paint_shell_frame(&mut term, &model, process_start)
         .context("failed to paint the startup shell frame")?;
 
-    // the capability probe's second window is waited out behind the engine
-    // spawn, not in front: the attach thread's own work (fork/exec nvim,
-    // register, `ui_attach`) is what the wait overlaps, so a terminal that
-    // answers a network round trip late costs this startup nothing it was
-    // not already spending
+    // the probe stops owning the terminal here, with whatever it has heard
+    // by now and no wait for the rest: the tier decides how a frame is
+    // painted, never whether it can be, so nothing below -- the residue the
+    // attach's last step blocks on, the attach, the first content -- is
+    // held for a terminal that answers a network round trip late. What it
+    // still owes arrives on the input path instead (`open_listening`).
     let probe = term
-        .finish_probe()
-        .context("failed to finish terminal capability detection")?;
+        .settle_probe()
+        .context("failed to take the terminal capability probe off the terminal")?;
     attach.send_residue(probe.residue);
     model.caps = probe.caps;
     vlog::log_with("startup", || {
@@ -897,9 +898,11 @@ fn main() -> Result<()> {
     let mut input_source = if probe.fence_seen {
         view_tui::input::InputSource::open()
     } else {
-        // the terminal never answered the fence, so it may still answer
-        // everything else: those replies must not reach crossterm's parser
-        view_tui::input::InputSource::open_guarded()
+        // the terminal has not answered the fence, so it may still answer
+        // everything: those replies must not reach crossterm's parser, and
+        // what they resolve to is this session's tier -- handed to the loop
+        // as `Msg::CapsUpgraded` rather than waited for here
+        view_tui::input::InputSource::open_listening(model.caps)
     }
     .context("failed to open the pollable terminal input handle")?;
     #[cfg(not(unix))]
@@ -1157,8 +1160,10 @@ mod tests {
     /// the handshake, 15.11/14.77ms with it before, for a shell frame that
     /// did not move (3.24/3.33ms against 3.34/3.25ms). A terminal that
     /// never answers the probe at all gains nothing and loses nothing
-    /// (404.25ms against 404.19ms): its content is held by the probe's own
-    /// second window, not by anything nvim is doing.
+    /// (404.25ms against 404.19ms): its content was held by the probe's own
+    /// second window, not by anything nvim is doing -- a wait `settle_probe`
+    /// has since removed, which is what leaves this ordering measurable at
+    /// all on such a terminal.
     #[test]
     fn the_engine_spawn_precedes_both_halves_of_the_startup_only_this_process_needs() {
         let spawn = offset_of("startup::attach_in_background(");
@@ -1191,7 +1196,7 @@ mod tests {
             "Term::init(",
             "term.size()?",
             "startup::paint_shell_frame(",
-            ".finish_probe()",
+            ".settle_probe()",
             "InputSource::open",
             "startup::drain_pre_attach(",
         ] {

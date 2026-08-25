@@ -22,6 +22,7 @@ use std::io::IsTerminal;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 #[cfg(unix)]
 use std::time::Duration;
+use view_core::model::TermCaps;
 use view_core::msg::{Key, Msg};
 
 /// The descriptor terminal input arrives on, mirroring crossterm's own
@@ -225,22 +226,28 @@ pub struct InputSource {
     fatal_read: OwnedFd,
     fatal_signal: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     dead: bool,
-    /// Armed only when the startup capability probe gave up without its
-    /// DA1 fence, i.e. only when the terminal may still owe a reply. See
-    /// [`InputSource::open_guarded`].
+    /// Armed only when the startup capability probe handed the terminal
+    /// over without its DA1 fence, i.e. only when the terminal may still
+    /// owe a reply. See [`InputSource::open_listening`].
     guard: Option<LateReplyGuard>,
-    /// Keystrokes the guard decoded out of a swept read, waiting for the
-    /// next [`drain`](InputSource::drain) to hand them over.
-    guard_keys: std::collections::VecDeque<Msg>,
+    /// What the guard decoded out of a swept read -- keystrokes, and the
+    /// capability upgrade a recognized answer resolves to -- waiting for
+    /// the next [`drain`](InputSource::drain) to hand them over.
+    guard_msgs: std::collections::VecDeque<Msg>,
 }
 
-/// The state behind [`InputSource::open_guarded`]: how long the terminal is
-/// still allowed to answer, and the bytes of a reply it has so far only
-/// half delivered.
+/// The state behind [`InputSource::open_listening`]: how long the terminal is
+/// still allowed to answer, the bytes of a reply it has so far only half
+/// delivered, and the capabilities its answers have resolved to.
 #[cfg(unix)]
 struct LateReplyGuard {
     until: std::time::Instant,
     buf: Vec<u8>,
+    /// Everything the probe's own window settled on, plus every later
+    /// answer folded into it. Held so a sweep can tell a reply that
+    /// changes the session's capabilities from one that only restates
+    /// them.
+    caps: TermCaps,
 }
 
 /// The signals that must end the session through view's own teardown
@@ -269,12 +276,14 @@ impl InputSource {
     /// Returns the underlying `std::io::Error` if the terminal fd or the
     /// signal pipe cannot be set up.
     pub fn open() -> std::io::Result<Self> {
-        Self::open_with(false)
+        Self::open_with(None)
     }
 
     /// [`open`](Self::open) with the late-reply guard armed, for a startup
-    /// whose capability probe stopped listening without ever seeing its DA1
-    /// fence (`ProbeOutcome::fence_seen` false).
+    /// whose capability probe handed the terminal over without ever seeing
+    /// its DA1 fence (`ProbeOutcome::fence_seen` false). `settled` is what
+    /// that probe resolved, which is the floor every later answer is folded
+    /// onto.
     ///
     /// A terminal answers queries in the order it received them and the
     /// fence is asked last, so a fence that arrived proves nothing is still
@@ -291,7 +300,13 @@ impl InputSource {
     /// While armed, ready bytes are read here first and matched against the
     /// four grammars the query batch can be answered with
     /// ([`scan_replies`](crate::tiers::scan_replies)). A run that completes
-    /// one is the terminal's and is dropped. A run that is still a live
+    /// one is the terminal's: its bytes are kept off the key path, and what
+    /// it answered is folded into `settled` and handed to the loop as
+    /// [`Msg::CapsUpgraded`](view_core::msg::Msg::CapsUpgraded) whenever
+    /// that changes the session's capabilities. This is what lets the probe
+    /// stop waiting: the answer it would have blocked the first frame for
+    /// arrives here instead, and upgrades a session that is already
+    /// editable. A run that is still a live
     /// prefix of one waits for the read that finishes it. The first byte
     /// that leaves every grammar ends the answer there: everything from
     /// that byte on is the user's and is decoded
@@ -342,11 +357,11 @@ impl InputSource {
     ///
     /// Returns the underlying `std::io::Error` if the terminal fd or the
     /// signal pipe cannot be set up.
-    pub fn open_guarded() -> std::io::Result<Self> {
-        Self::open_with(true)
+    pub fn open_listening(settled: TermCaps) -> std::io::Result<Self> {
+        Self::open_with(Some(settled))
     }
 
-    fn open_with(guard_late_replies: bool) -> std::io::Result<Self> {
+    fn open_with(guard_late_replies: Option<TermCaps>) -> std::io::Result<Self> {
         let tty = TtyFd::open()?;
         let (winch_read, winch_write) = new_signal_pipe()?;
         signal_hook::low_level::pipe::register(signal_hook::consts::SIGWINCH, winch_write)?;
@@ -403,12 +418,13 @@ impl InputSource {
             fatal_signal,
             dead: false,
             guard: None,
-            guard_keys: std::collections::VecDeque::new(),
+            guard_msgs: std::collections::VecDeque::new(),
         };
-        if guard_late_replies {
+        if let Some(caps) = guard_late_replies {
             source.guard = Some(LateReplyGuard {
                 until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
                 buf: Vec::new(),
+                caps,
             });
             // ahead of the crossterm touch below, which reads: the guard
             // has to own the terminal from this handle's first byte
@@ -418,9 +434,10 @@ impl InputSource {
         Ok(source)
     }
 
-    /// Reads and discards whatever the terminal still owes the capability
-    /// probe, before crossterm can see it. A no-op unless armed, which is
-    /// the whole cost on every session whose terminal answered the fence.
+    /// Reads whatever the terminal still owes the capability probe before
+    /// crossterm can see it, keeping its bytes off the key path and its
+    /// answer as a capability upgrade. A no-op unless armed, which is the
+    /// whole cost on every session whose terminal answered the fence.
     fn sweep_late_replies(&mut self) {
         let Some(mut guard) = self.guard.take() else {
             return;
@@ -440,6 +457,15 @@ impl InputSource {
             guard.buf.extend_from_slice(&chunk);
         }
         let mut replies = crate::tiers::scan_replies(&guard.buf);
+        // the answer's payload, not only its bytes: this is the whole
+        // reason the probe may hand the terminal over before the fence --
+        // what it would have waited for is recognized here instead, and
+        // reaches the loop as the one message that upgrades the tier
+        let upgraded = replies.upgraded(guard.caps);
+        if upgraded != guard.caps {
+            guard.caps = upgraded;
+            self.guard_msgs.push_back(Msg::CapsUpgraded(upgraded));
+        }
         let typed = crate::keys::decode_residue(&replies.residue);
         // a keypress whose own sequence is still arriving waits for the
         // read that finishes it, exactly as a half-arrived answer does:
@@ -454,7 +480,7 @@ impl InputSource {
         };
         replies.consumed -= unfinished;
         guard.buf.drain(..replies.consumed);
-        self.guard_keys.extend(typed.msgs);
+        self.guard_msgs.extend(typed.msgs);
         // only the fence ends the filtering: everything else the terminal
         // owes is still owed, whatever else has happened on the fd since
         if replies.da1 {
@@ -471,7 +497,7 @@ impl InputSource {
     /// arriving when this runs has run out of reads to arrive in, so it is
     /// dropped rather than typed as the fragment it is.
     fn queue_residue(&mut self, bytes: &[u8]) {
-        self.guard_keys
+        self.guard_msgs
             .extend(crate::keys::decode_residue(bytes).msgs);
     }
 
@@ -578,7 +604,7 @@ impl InputSource {
             return false;
         }
         self.sweep_late_replies();
-        if !self.guard_keys.is_empty() {
+        if !self.guard_msgs.is_empty() {
             return true;
         }
         for _ in 0..BUFFERED_POLL_LIMIT {
@@ -608,7 +634,7 @@ impl InputSource {
         let mut scratch = [0_u8; 64];
         while matches!(rustix::io::read(&self.winch_read, &mut scratch), Ok(n) if n > 0) {}
         self.sweep_late_replies();
-        for msg in self.guard_keys.drain(..) {
+        for msg in self.guard_msgs.drain(..) {
             sink(msg);
         }
         loop {

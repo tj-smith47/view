@@ -1738,6 +1738,31 @@ fn a_clipboard_write_whose_payload_is_not_decodable_is_dropped_whole() {
 }
 
 #[test]
+fn a_late_capability_answer_repaints_at_the_tier_it_resolved() {
+    let mut m = model();
+    m.caps = crate::model::TermCaps::from_probe(false, false, false);
+    m.dirty = false;
+    let full = crate::model::TermCaps::from_probe(true, true, true);
+    let effects = update(&mut m, Msg::CapsUpgraded(full));
+    assert_eq!(
+        m.caps, full,
+        "the capabilities the terminal finally answered for are the ones every \
+         later frame is painted at"
+    );
+    assert!(
+        m.dirty,
+        "the frame on screen was painted at the capabilities this answer \
+         supersedes -- borders, palette and the synchronized bracket all read \
+         off them -- so nothing but a repaint puts the session at the tier it \
+         just resolved"
+    );
+    assert!(
+        effects.is_empty(),
+        "a terminal capability is nothing to ask the engine about: {effects:?}"
+    );
+}
+
+#[test]
 fn resize_marks_the_model_dirty_so_the_new_area_is_actually_painted() {
     let mut m = model();
     m.dirty = false;

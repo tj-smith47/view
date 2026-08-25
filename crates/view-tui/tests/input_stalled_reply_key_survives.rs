@@ -1,4 +1,4 @@
-//! `InputSource::open_guarded` against a private-mode answer the terminal
+//! `InputSource::open_listening` against a private-mode answer the terminal
 //! stopped halfway through, with the user typing onto the end of it.
 //!
 //! `ESC [ ? 2026` sitting in the guard's buffer takes the next byte as its
@@ -21,6 +21,7 @@
 
 mod common;
 
+use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
@@ -32,7 +33,7 @@ fn a_key_typed_onto_a_stalled_answer_arrives_and_answers_nothing() {
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_guarded().unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
     let size = TermSizeCell::default();
 
     let write = |bytes: &[u8]| {

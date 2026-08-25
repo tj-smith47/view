@@ -2853,6 +2853,11 @@ fn the_terminals_answers_decide_which_tier_the_child_paints_at() {
     for (policy, want_sync) in [
         (QueryPolicy::AnswerDa1, false),
         (QueryPolicy::AnswerFullTier, true),
+        // the whole late-answer chain in one assertion: the reply reaches a
+        // session that is already painting, is recognized on the input path
+        // rather than by the probe, and reaches this frame as the bracket
+        // only a synchronized-output terminal gets
+        (QueryPolicy::AnswerFullTierLate, true),
     ] {
         let mut session = build_view_pty(&[], shared_isolation(), policy);
         // before any drain: recording captures from the next drain onward,
@@ -2862,6 +2867,7 @@ fn the_terminals_answers_decide_which_tier_the_child_paints_at() {
             session.wait_for("~", Duration::from_secs(5)),
             "view never painted a buffer under {policy:?}"
         );
+        settle_late_answer(policy);
 
         session.send(b"itier probe").unwrap();
         session.send(b"\x1b:wq\r").unwrap();
@@ -2889,6 +2895,41 @@ fn the_terminals_answers_decide_which_tier_the_child_paints_at() {
 /// only one of them, and a bench that arranges neither reports a row at a
 /// tier its child never reached.
 fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
+    let log = startup_log(policy, colorterm);
+    // the LAST such line, not the first: a terminal that answers after the
+    // probe has handed the tty over is upgraded mid-session, and the line
+    // written at the settle records only what it had heard by then
+    let tier = log
+        .lines()
+        .filter_map(|line| line.split("caps tier=").nth(1))
+        .filter_map(|after| after.split_whitespace().next())
+        .next_back()
+        .map(str::to_string);
+    assert!(
+        tier.is_some(),
+        "no startup line in VIEW_LOG; the log was:\n{log}"
+    );
+    tier.unwrap_or_default()
+}
+
+/// Waits out the delay [`QueryPolicy::AnswerFullTierLate`] holds its replies
+/// back by, for a leg whose subject is what the child does with them.
+///
+/// Content no longer waits for the probe, so a session under that policy is
+/// editable well before its terminal has answered anything: a test that
+/// quit on the painted buffer would be reading the child's patience rather
+/// than its answer. Three times the delay, because what is being waited for
+/// is one pty write plus the child's own wakeup, not a bound on either.
+fn settle_late_answer(policy: QueryPolicy) {
+    if policy == QueryPolicy::AnswerFullTierLate {
+        std::thread::sleep(view_oracle::LATE_ANSWER_DELAY * 3);
+    }
+}
+
+/// One `view` session's own `VIEW_LOG`, taken from a child that started
+/// under `policy` with `colorterm` in its environment, painted its buffer
+/// and quit.
+fn startup_log(policy: QueryPolicy, colorterm: Option<&str>) -> String {
     let paths = common::ScratchPaths::new("smoke-tier");
     let log_path = paths.isolated_home.join("view.log");
 
@@ -2914,20 +2955,11 @@ fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
         session.wait_for("~", Duration::from_secs(5)),
         "view never painted a buffer under {policy:?} / COLORTERM={colorterm:?}"
     );
+    settle_late_answer(policy);
     session.send(b"\x1b:q!\r").unwrap();
     let _ = session.wait();
 
-    let log = std::fs::read_to_string(&log_path).unwrap();
-    let tier = log
-        .lines()
-        .find_map(|line| line.split("caps tier=").nth(1))
-        .and_then(|after| after.split_whitespace().next())
-        .map(str::to_string);
-    assert!(
-        tier.is_some(),
-        "no startup line in VIEW_LOG; the log was:\n{log}"
-    );
-    tier.unwrap_or_default()
+    std::fs::read_to_string(&log_path).unwrap()
 }
 
 /// Pins the condition the budget rows are stated at, against the child's own
@@ -2961,6 +2993,51 @@ fn either_the_terminals_answer_or_colorterm_reaches_the_full_tier() {
         "Full",
         "the configuration `BenchSession::spawn` and the bench environment \
          set together is what the budget rows name"
+    );
+}
+
+/// The `mono_ms` stamp on the first `VIEW_LOG` line carrying `needle`.
+///
+/// Every stamp comes off the child's own monotonic clock, started before it
+/// did anything else (`vlog::init`), so a difference between two of them
+/// measures the child's sequence and not the host's patience with it.
+fn log_ms(log: &str, needle: &str) -> u128 {
+    log.lines()
+        .find(|line| line.contains(needle))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or_else(|| panic!("no {needle:?} line in VIEW_LOG; the log was:\n{log}"))
+}
+
+/// The terminal that answers nothing, and the thing it must not be allowed
+/// to hold: the session itself.
+///
+/// The tier decides how a frame is painted, never whether it can be, so a
+/// terminal still owed replies is painted for at the capabilities resolved
+/// so far and upgraded if it ever answers. When `main` waited the probe's
+/// second window out instead, everything behind it -- the residue handoff
+/// the attach's last step blocks on, and with it the first content -- was
+/// held for the full hard cap: 400ms of empty editor on any terminal that
+/// swallows DA1 (an ssh hop, a multiplexer), for a decision no frame was
+/// waiting on.
+///
+/// Both stamps are the child's own, so this fails on the sequence rather
+/// than on a slow host: the gap it asserts against is a quarter of the cap
+/// a waiting `main` would have spent in full.
+#[test]
+fn a_terminal_that_answers_nothing_never_holds_the_session_behind_its_probe() {
+    let log = startup_log(QueryPolicy::Silent, None);
+    let shell = log_ms(&log, "shell frame painted");
+    let settled = log_ms(&log, "caps tier=");
+    let bound = (common::PROBE_HARD_CAP / 4).as_millis();
+    assert!(
+        settled.saturating_sub(shell) < bound,
+        "the probe was still holding the startup sequence {}ms after the \
+         shell frame painted, against a bound of {bound}ms: every step after \
+         it -- the residue the attach blocks on, the attach, the first \
+         content -- waits exactly that long on a terminal that never \
+         answers. The log was:\n{log}",
+        settled.saturating_sub(shell)
     );
 }
 

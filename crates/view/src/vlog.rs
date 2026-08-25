@@ -129,6 +129,17 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
                 format!("down code={:?} by_signal={}", exit.code, exit.by_signal)
             });
         }
+        // the second `caps tier=` line a session can write, and the one that
+        // records what it settled on: the line at startup states only what
+        // the probe had heard before it handed the terminal over
+        Msg::CapsUpgraded(caps) => {
+            log_with("startup", || {
+                format!(
+                    "caps tier={:?} sync={} truecolor={} kitty_kbd={} answered late",
+                    caps.tier, caps.sync, caps.truecolor, caps.kitty_kbd
+                )
+            });
+        }
         Msg::FeatureInvoke { feature, verb } => {
             log_with("native", || format!("invoke feature={feature} verb={verb}"));
         }

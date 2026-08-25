@@ -96,7 +96,7 @@ pub struct ProbeOutcome {
     /// Whether the DA1 fence arrived. False means the terminal is still
     /// owed replies the probe stopped waiting for, and the caller must keep
     /// them off the input path (see
-    /// [`InputSource::open_guarded`](crate::input::InputSource::open_guarded)).
+    /// [`InputSource::open_listening`](crate::input::InputSource::open_listening)).
     pub fence_seen: bool,
 }
 
@@ -319,6 +319,22 @@ pub(crate) struct Replies {
     /// Everything past it is a reply the terminal has only half delivered,
     /// which the next chunk completes.
     pub(crate) consumed: usize,
+}
+
+impl Replies {
+    /// `known` plus everything this scan proves on top of it.
+    ///
+    /// Only ever adds: a capability the terminal already answered for is
+    /// not withdrawn by a later read that says nothing about it, and
+    /// `known` carries the `COLORTERM` reading that no reply can restate
+    /// (see [`truecolor_from_colorterm`]).
+    pub(crate) fn upgraded(&self, known: TermCaps) -> TermCaps {
+        TermCaps::from_probe(
+            known.sync || self.sync,
+            known.truecolor || self.truecolor_reply,
+            known.kitty_kbd || self.kitty,
+        )
+    }
 }
 
 /// Whether what [`scan_replies`] left unaccounted for can only be the
@@ -665,8 +681,10 @@ const PROBE_SOURCE_LABEL: &str = "assumed";
 /// [`log_caps`]'s label for a probe whose fence has not arrived yet. This
 /// line is written before the alternate screen goes up and can therefore
 /// never be revised on screen, so it says outright that the answer is not
-/// final; the session's own `VIEW_LOG` startup line, written once
-/// [`Probe::finish`] has run, is the record of what the session settled on.
+/// final; the last `caps tier=` line in the session's own `VIEW_LOG` is the
+/// record of what it settled on -- a reply the input path recognizes after
+/// the frame is already up writes another one (see
+/// [`Term::settle_probe`](crate::terminal::Term::settle_probe)).
 const PROBE_PENDING_LABEL: &str = "probed, still listening";
 
 #[cfg(unix)]

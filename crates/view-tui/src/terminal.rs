@@ -103,7 +103,8 @@ impl TerminalGuard {
     /// Pushes the kitty keyboard protocol on its own, for a terminal that
     /// only admitted to speaking it after
     /// [`finish_entering_alt_screen`](Self::finish_entering_alt_screen) had
-    /// already run without it (see [`Term::finish_probe`]).
+    /// already run without it (see [`Term::settle_probe`], and
+    /// [`Term::draw_surface`] for an answer that arrives after it).
     ///
     /// The pop in [`restore_bytes`] needs no matching change: it is written
     /// unconditionally on every exit path, and a pop against an empty stack
@@ -361,8 +362,8 @@ pub struct Term {
     /// detection probe.
     caps: TermCaps,
     /// The capability probe still in flight, if the terminal was given a
-    /// batch to answer at all. [`Term::finish_probe`] waits out whatever it
-    /// is still owed and takes it; a `--tier` override leaves it `None`.
+    /// batch to answer at all. [`Term::settle_probe`] takes whatever it has
+    /// heard by then; a `--tier` override leaves it `None`.
     probe: Option<tiers::Probe<'static>>,
 }
 
@@ -409,17 +410,21 @@ impl Term {
         self.caps
     }
 
-    /// Ends the capability probe [`Term::init`] left in flight, returning
-    /// the capabilities it finally resolved, its residue, and whether the
-    /// terminal ever answered the DA1 fence.
+    /// Takes the capability probe [`Term::init`] left in flight off the
+    /// terminal, returning what it has resolved so far, its residue, and
+    /// whether the terminal ever answered the DA1 fence.
     ///
-    /// Call this with other work already in the air: everything past
-    /// [`PROBE_DEADLINE`](crate::tiers::PROBE_DEADLINE) is spent waiting on
-    /// a terminal, so a caller that runs it after starting the engine
-    /// attach pays for a slow terminal out of time the process was
-    /// spending on the attach anyway. A terminal that answered the fence in
-    /// the first window (every terminal on the same machine as the process)
-    /// makes this return without waiting at all.
+    /// **Never waits.** The tier decides how a frame is painted, not
+    /// whether it can be: a terminal that has not answered yet is painted
+    /// for at the conservative capabilities resolved so far, and the
+    /// caller opens
+    /// [`InputSource::open_listening`](crate::input::InputSource::open_listening)
+    /// on a false `fence_seen` so a reply still in flight is recognized on
+    /// the input path and delivered as
+    /// [`Msg::CapsUpgraded`](view_core::msg::Msg::CapsUpgraded) instead.
+    /// Waiting here is what put an ssh session's first content behind
+    /// [`PROBE_HARD_CAP`](crate::tiers::PROBE_HARD_CAP) -- 400ms of empty
+    /// editor for a decision no frame needs to be blocked on.
     ///
     /// Callable exactly once per [`Term::init`] with a meaningful result --
     /// a second call reports the settled capabilities, no residue and no
@@ -435,9 +440,9 @@ impl Term {
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if a terminal that only
-    /// admitted to the kitty keyboard protocol in the second window cannot
-    /// be sent the protocol's push.
-    pub fn finish_probe(&mut self) -> std::io::Result<tiers::ProbeOutcome> {
+    /// admitted to the kitty keyboard protocol inside the probe's first
+    /// window cannot be sent the protocol's push.
+    pub fn settle_probe(&mut self) -> std::io::Result<tiers::ProbeOutcome> {
         let Some(probe) = self.probe.take() else {
             return Ok(tiers::ProbeOutcome {
                 caps: self.caps,
@@ -445,23 +450,38 @@ impl Term {
                 fence_seen: true,
             });
         };
-        let outcome = probe.finish(tiers::PROBE_HARD_CAP);
+        // zero, not a budget: every byte the terminal has already sent is
+        // in the probe's own buffer, and every byte it has not is the
+        // guarded input path's to recognize
+        let outcome = probe.finish(std::time::Duration::ZERO);
+        self.adopt_caps(outcome.caps)?;
+        Ok(outcome)
+    }
+
+    /// Takes `caps` as this terminal's own: the keyboard-protocol push the
+    /// alternate screen may have gone up without, and the full repaint a
+    /// tier change owes the frame already on screen.
+    ///
+    /// Both callers are upgrades of the same decision -- the probe's settle
+    /// and, for an answer that arrived after it,
+    /// [`draw_surface`](Self::draw_surface) following `Model::caps`.
+    fn adopt_caps(&mut self, caps: TermCaps) -> std::io::Result<()> {
         // a decision that arrives after the alternate screen is already up
         // still owes the terminal the push `finish_entering_alt_screen`
         // skipped, or `keys::encode_key` spends the session unable to tell
         // `<S-CR>` from `<CR>` on a terminal that can
-        if cfg!(unix) && outcome.caps.kitty_kbd && !self.caps.kitty_kbd {
+        if cfg!(unix) && caps.kitty_kbd && !self.caps.kitty_kbd {
             self.guard.push_kitty_keyboard()?;
         }
-        if outcome.caps.tier != self.caps.tier {
-            // the shell frame on screen was painted at the old tier, in the
-            // old border charset and palette; leaving the next frame free to
+        if caps.tier != self.caps.tier {
+            // the frame on screen was painted at the old tier, in the old
+            // border charset and palette; leaving the next frame free to
             // clip its damage to the rows that changed would leave the rest
             // of that frame styled for a tier this session is no longer at
             self.last_offset = None;
         }
-        self.caps = outcome.caps;
-        Ok(outcome)
+        self.caps = caps;
+        Ok(())
     }
 
     /// Current terminal size in `(width, height)` cells.
@@ -522,6 +542,15 @@ impl Term {
         #[cfg(all(unix, feature = "bench-taps"))]
         if surface.carries_speculation() {
             crate::tap::tap(crate::tap::TAG_SPECULATED_PAINT);
+        }
+        // capabilities the terminal only admitted to after the probe handed
+        // it over reach this type the same way `mouse_on` does -- off the
+        // model, on the frame that first carries them -- so the upgrade
+        // needs no second paint path and no seam for a caller to forget.
+        // One struct compare per frame in the steady state, where the two
+        // are equal from the settle onward
+        if self.caps != model.caps {
+            self.adopt_caps(model.caps)?;
         }
         let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
         if self.last_mouse_reporting != Some(model.engine.mouse_on) {
