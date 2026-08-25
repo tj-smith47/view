@@ -2921,7 +2921,10 @@ fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
 /// than its answer. Three times the delay, because what is being waited for
 /// is one pty write plus the child's own wakeup, not a bound on either.
 fn settle_late_answer(policy: QueryPolicy) {
-    if policy == QueryPolicy::AnswerFullTierLate {
+    if matches!(
+        policy,
+        QueryPolicy::AnswerFullTierLate | QueryPolicy::AnswerFullTierBarelyLate
+    ) {
         std::thread::sleep(view_oracle::LATE_ANSWER_DELAY * 3);
     }
 }
@@ -3059,5 +3062,31 @@ fn a_terminal_a_round_trip_away_still_reaches_the_full_tier() {
          the tier it settles on must be the one the terminal answered for, \
          whichever side of the attach the answer lands on",
         view_oracle::LATE_ANSWER_DELAY
+    );
+}
+
+/// The tier a child reports when the answer lands in the window between its
+/// probe and its engine attach.
+///
+/// The child has two places to absorb the same message there -- the
+/// pre-attach accumulator, before its runtime loop exists, and the loop
+/// itself -- and only the second one is the ordinary path. Which one takes
+/// it is a race between one pty write and one nvim attach, and on a host
+/// that attaches promptly the loop wins outright: the pre-attach window is
+/// under a millisecond wide, so no fixed delay can aim at it. This asserts
+/// what must hold on either side of that race instead of pinning the side:
+/// the last `caps tier=` line the child writes is the answered tier. An
+/// accumulator that applied the upgrade to the model but never logged it
+/// leaves that line stating a tier the session is not at, which this reads
+/// as `Basic` on any host slow enough to land there.
+#[test]
+fn an_answer_landing_between_the_probe_and_the_attach_is_still_the_tier_reported() {
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerFullTierBarelyLate, None),
+        "Full",
+        "a reply {:?} behind the query misses the probe's window and reaches \
+         a session that is already painting; wherever it is absorbed, the \
+         child's own record of what it settled at must name it",
+        view_oracle::BARELY_LATE_ANSWER_DELAY
     );
 }

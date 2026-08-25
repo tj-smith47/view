@@ -228,7 +228,7 @@ pub struct InputSource {
     dead: bool,
     /// Armed only when the startup capability probe handed the terminal
     /// over without its DA1 fence, i.e. only when the terminal may still
-    /// owe a reply. See [`InputSource::open_listening`].
+    /// owe a reply. See [`InputSource::open_after_probe`].
     guard: Option<LateReplyGuard>,
     /// What the guard decoded out of a swept read -- keystrokes, and the
     /// capability upgrade a recognized answer resolves to -- waiting for
@@ -236,7 +236,7 @@ pub struct InputSource {
     guard_msgs: std::collections::VecDeque<Msg>,
 }
 
-/// The state behind [`InputSource::open_listening`]: how long the terminal is
+/// The state behind [`InputSource::open_after_probe`]: how long the terminal is
 /// still allowed to answer, the bytes of a reply it has so far only half
 /// delivered, and the capabilities its answers have resolved to.
 #[cfg(unix)]
@@ -279,15 +279,25 @@ impl InputSource {
         Self::open_with(None)
     }
 
-    /// [`open`](Self::open) with the late-reply guard armed, for a startup
-    /// whose capability probe handed the terminal over without ever seeing
-    /// its DA1 fence (`ProbeOutcome::fence_seen` false). `settled` is what
-    /// that probe resolved, which is the floor every later answer is folded
-    /// onto, and `partial_reply` is
-    /// [`ProbeOutcome::partial_reply`](crate::tiers::ProbeOutcome::partial_reply)
-    /// -- the head of an answer that was still arriving at the settle,
-    /// carried across the handover so the read that brings its tail
-    /// completes an answer rather than scanning a headless one.
+    /// [`open`](Self::open) for a startup handing the terminal over from its
+    /// capability probe, with the late-reply guard armed if and only if that
+    /// terminal may still say something the probe asked for.
+    ///
+    /// The three arguments are the whole of
+    /// [`ProbeOutcome`](crate::tiers::ProbeOutcome) that concerns the input
+    /// path: `settled` is what the probe resolved, the floor every later
+    /// answer is folded onto; `fence_seen` is whether the DA1 fence arrived;
+    /// `partial_reply` is the head of an answer that was still arriving at
+    /// the settle, carried across the handover so the read that brings its
+    /// tail completes an answer rather than scanning a headless one.
+    ///
+    /// Either one outstanding thing arms the guard, and the caller is not
+    /// asked which: the fence is answered last, so a missing fence means
+    /// every earlier reply may still be owed -- but a terminal that answered
+    /// out of order can leave a half-delivered reply behind a fence that did
+    /// arrive, and that tail reaches crossterm's parser exactly as damagingly.
+    /// A branch in the caller is a branch that gets one of those two cases
+    /// wrong.
     ///
     /// A terminal answers queries in the order it received them and the
     /// fence is asked last, so a fence that arrived proves nothing is still
@@ -364,7 +374,14 @@ impl InputSource {
     ///
     /// Returns the underlying `std::io::Error` if the terminal fd or the
     /// signal pipe cannot be set up.
-    pub fn open_listening(settled: TermCaps, partial_reply: Vec<u8>) -> std::io::Result<Self> {
+    pub fn open_after_probe(
+        settled: TermCaps,
+        fence_seen: bool,
+        partial_reply: Vec<u8>,
+    ) -> std::io::Result<Self> {
+        if fence_seen && partial_reply.is_empty() {
+            return Self::open_with(None);
+        }
         Self::open_with(Some((settled, partial_reply)))
     }
 

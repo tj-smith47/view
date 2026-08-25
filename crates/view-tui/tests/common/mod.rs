@@ -46,3 +46,36 @@ pub fn wait_readable(fd: std::os::fd::BorrowedFd<'_>) -> bool {
     };
     matches!(rustix::event::poll(&mut fds, Some(&timeout)), Ok(n) if n > 0)
 }
+
+/// A [`ReplySource`](view_tui::tiers::ReplySource) over descriptor 0, for a
+/// test driving a real [`Probe`](view_tui::tiers::Probe) against the pty
+/// [`stdin_pty`] put there.
+///
+/// Polls before it reads because that slave is in raw mode with `VMIN=1`,
+/// so a read with nothing queued would block past the probe's own window.
+#[allow(dead_code)]
+pub struct SlaveSource;
+
+#[allow(dead_code)]
+impl view_tui::tiers::ReplySource for SlaveSource {
+    fn next_chunk(&mut self, budget: std::time::Duration) -> Option<Vec<u8>> {
+        use std::os::fd::AsFd;
+        let stdin = std::io::stdin();
+        let mut fds = [rustix::event::PollFd::from_borrowed_fd(
+            stdin.as_fd(),
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: i64::try_from(budget.as_nanos()).unwrap_or(i64::MAX),
+        };
+        if !matches!(rustix::event::poll(&mut fds, Some(&timeout)), Ok(n) if n > 0) {
+            return Some(Vec::new());
+        }
+        let mut buf = [0_u8; 256];
+        match rustix::io::read(stdin.as_fd(), &mut buf) {
+            Ok(n) => Some(buf[..n].to_vec()),
+            Err(_) => None,
+        }
+    }
+}

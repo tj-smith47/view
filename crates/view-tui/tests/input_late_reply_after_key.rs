@@ -1,4 +1,4 @@
-//! `InputSource::open_listening` against a terminal whose reply lands whole,
+//! `InputSource::open_after_probe` against a terminal whose reply lands whole,
 //! in its own read, after the user has already typed.
 //!
 //! The ordering the two sibling tests do not reach, and the likely one on a
@@ -36,7 +36,7 @@ fn a_reply_that_lands_whole_after_the_first_keystroke_still_answers_the_probe() 
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
 
     rustix::io::write(&master, b"a").unwrap();
     assert!(

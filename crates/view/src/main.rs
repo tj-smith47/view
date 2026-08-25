@@ -877,7 +877,7 @@ fn main() -> Result<()> {
     // painted, never whether it can be, so nothing below -- the residue the
     // attach's last step blocks on, the attach, the first content -- is
     // held for a terminal that answers a network round trip late. What it
-    // still owes arrives on the input path instead (`open_listening`).
+    // still owes arrives on the input path instead (`open_after_probe`).
     let probe = term
         .settle_probe()
         .context("failed to take the terminal capability probe off the terminal")?;
@@ -903,16 +903,18 @@ fn main() -> Result<()> {
     // strictly before the pre-attach wait: two readers of one tty cannot
     // both have the first bytes, and until this exists it is the probe that
     // is capturing what the user types (see `ProbeOutcome::residue`).
+    //
+    // Whether anything the terminal still owes has to be kept off
+    // crossterm's parser is the callee's to decide, from the same two
+    // fields it would be decided from here: a missing fence, or a reply cut
+    // in half by the settle. Whatever the terminal does answer reaches the
+    // loop as `Msg::CapsUpgraded` rather than being waited for.
     #[cfg(unix)]
-    let mut input_source = if probe.fence_seen {
-        view_tui::input::InputSource::open()
-    } else {
-        // the terminal has not answered the fence, so it may still answer
-        // everything: those replies must not reach crossterm's parser, and
-        // what they resolve to is this session's tier -- handed to the loop
-        // as `Msg::CapsUpgraded` rather than waited for here
-        view_tui::input::InputSource::open_listening(model.caps, probe.partial_reply)
-    }
+    let mut input_source = view_tui::input::InputSource::open_after_probe(
+        model.caps,
+        probe.fence_seen,
+        probe.partial_reply,
+    )
     .context("failed to open the pollable terminal input handle")?;
     #[cfg(not(unix))]
     let mut input_source = ();

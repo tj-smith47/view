@@ -63,6 +63,19 @@ pub enum QueryPolicy {
     /// first probe window has already closed and the tier it derives is
     /// whatever it does about replies that arrive late.
     AnswerFullTierLate,
+    /// Answer the whole probe batch after [`BARELY_LATE_ANSWER_DELAY`]: past
+    /// the child's first probe window, but by the smallest margin that still
+    /// misses it.
+    ///
+    /// That margin is the region a round-trip-late policy jumps over, and
+    /// the one where a child has two different places to absorb the same
+    /// answer -- its pre-attach accumulator or its runtime loop. Which of
+    /// them takes it is a race this policy cannot decide: a host whose nvim
+    /// attaches promptly closes the pre-attach window within a millisecond
+    /// of the probe settling, so the loop wins and the accumulator is
+    /// reached only when the attach is slow. What must hold on either side
+    /// is the same, and is what the leg using this asserts.
+    AnswerFullTierBarelyLate,
     /// Answer nothing, modelling a terminal that ignores every query.
     Silent,
 }
@@ -72,6 +85,11 @@ pub enum QueryPolicy {
 /// the hard cap it waits out behind the engine spawn, so the leg tests the
 /// upgrade path rather than either boundary.
 pub const LATE_ANSWER_DELAY: Duration = Duration::from_millis(200);
+
+/// How long [`QueryPolicy::AnswerFullTierBarelyLate`] holds its replies
+/// back: just past `view`'s own first probe window (50ms), so the answer
+/// misses the probe by the smallest margin a fixed delay can express.
+pub const BARELY_LATE_ANSWER_DELAY: Duration = Duration::from_millis(60);
 
 /// A capability query a probing child writes, paired with the reply a
 /// terminal possessing that capability answers with.
@@ -112,7 +130,9 @@ impl QueryPolicy {
     pub(crate) fn answers(self) -> &'static [Answer] {
         match self {
             Self::AnswerDa1 => DA1_ONLY,
-            Self::AnswerFullTier | Self::AnswerFullTierLate => FULL_TIER,
+            Self::AnswerFullTier | Self::AnswerFullTierLate | Self::AnswerFullTierBarelyLate => {
+                FULL_TIER
+            }
             Self::Silent => &[],
         }
     }
@@ -122,6 +142,7 @@ impl QueryPolicy {
     pub(crate) fn answer_delay(self) -> Duration {
         match self {
             Self::AnswerFullTierLate => LATE_ANSWER_DELAY,
+            Self::AnswerFullTierBarelyLate => BARELY_LATE_ANSWER_DELAY,
             _ => Duration::ZERO,
         }
     }

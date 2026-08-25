@@ -1,4 +1,4 @@
-//! `InputSource::open_listening` against a real terminal that answers
+//! `InputSource::open_after_probe` against a real terminal that answers
 //! the startup capability probe after the probe has stopped listening.
 //!
 //! The shape under test is what an ssh hop makes ordinary: the probe writes
@@ -50,7 +50,7 @@ fn a_reply_arriving_after_the_probe_gave_up_never_reaches_the_engine() {
     // opened while the queue is empty, so crossterm's reader binds to this
     // terminal without consuming any of the burst written below
     // exactly what `main` opens for a probe whose fence never came
-    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
 
     rustix::io::write(&master, LATE_BATCH_THEN_KEY).unwrap();
     assert!(

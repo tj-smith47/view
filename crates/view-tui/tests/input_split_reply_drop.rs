@@ -1,4 +1,4 @@
-//! `InputSource::open_listening` against a terminal whose late reply arrives
+//! `InputSource::open_after_probe` against a terminal whose late reply arrives
 //! in pieces, with a keystroke ahead of it.
 //!
 //! Segmentation is what an ssh hop adds to the shape the sibling
@@ -42,7 +42,7 @@ fn a_keystroke_ahead_of_a_split_reply_does_not_hand_the_rest_of_it_to_crossterm(
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
 
     rustix::io::write(&master, KEY_THEN_PARTIAL_REPLY).unwrap();
     assert!(

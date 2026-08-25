@@ -96,18 +96,29 @@ pub struct ProbeOutcome {
     /// Whether the DA1 fence arrived. False means the terminal is still
     /// owed replies the probe stopped waiting for, and the caller must keep
     /// them off the input path (see
-    /// [`InputSource::open_listening`](crate::input::InputSource::open_listening)).
+    /// [`InputSource::open_after_probe`](crate::input::InputSource::open_after_probe)).
     pub fence_seen: bool,
-    /// The live prefix of an answer that was still arriving when the probe
-    /// stopped reading: the terminal's bytes, not the user's, so they are
-    /// neither residue nor keys.
+    /// The buffer tail the scan stopped on: a run that is still a live
+    /// prefix of some answer grammar, so it is neither resolved nor
+    /// residue.
+    ///
+    /// Whose bytes those are is not decided here and cannot be. `ESC [ ?`
+    /// is the head of a DECRPM answer and is also what a user typing
+    /// `Escape`, `[`, `?` produces, so this carries a half-arrived answer
+    /// and a half-typed keypress under the same shape. Both want the same
+    /// treatment -- wait for the read that finishes the run -- which is why
+    /// the field is one field.
     ///
     /// The settle takes no wait at all, which puts this seam at the first
     /// probe window rather than at the hard cap -- exactly where a reply a
     /// network round trip away is mid-flight. Handed to
-    /// [`InputSource::open_listening`](crate::input::InputSource::open_listening)
-    /// so the read that completes the answer completes it, instead of
-    /// scanning a tail with no head and typing it into the buffer.
+    /// [`InputSource::open_after_probe`](crate::input::InputSource::open_after_probe),
+    /// which seeds the guard with it so the read that completes an answer
+    /// completes it rather than scanning a tail with no head. What is never
+    /// completed is separated there, at the guard's expiry, by
+    /// `is_terminal_only_remainder`: what could still have been a keypress
+    /// goes to the key decoder, what is provably the terminal's own is
+    /// dropped rather than typed into the buffer.
     pub partial_reply: Vec<u8>,
 }
 

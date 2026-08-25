@@ -418,7 +418,7 @@ impl Term {
     /// whether it can be: a terminal that has not answered yet is painted
     /// for at the conservative capabilities resolved so far, and the
     /// caller opens
-    /// [`InputSource::open_listening`](crate::input::InputSource::open_listening)
+    /// [`InputSource::open_after_probe`](crate::input::InputSource::open_after_probe)
     /// on a false `fence_seen` so a reply still in flight is recognized on
     /// the input path and delivered as
     /// [`Msg::CapsUpgraded`](view_core::msg::Msg::CapsUpgraded) instead.

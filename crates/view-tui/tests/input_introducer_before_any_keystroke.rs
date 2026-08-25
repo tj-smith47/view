@@ -1,4 +1,4 @@
-//! `InputSource::open_listening` against an `ESC [` that arrives before the
+//! `InputSource::open_after_probe` against an `ESC [` that arrives before the
 //! user has typed anything at all.
 //!
 //! The guard's grace is not something a keystroke switches on: an
@@ -30,7 +30,7 @@ fn an_introducer_ahead_of_the_first_keystroke_costs_only_its_two_bytes() {
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
     let size = TermSizeCell::default();
 
     let write = |bytes: &[u8]| {
