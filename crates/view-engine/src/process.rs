@@ -2195,7 +2195,14 @@ fn map_get(v: &Value, key: &str) -> Option<Value> {
     crate::wire::map_find(pairs, key).cloned()
 }
 
-#[cfg(all(test, unix))]
+/// `target_os = "linux"`, not `unix`: `ETXTBSY` on `execve` is a Linux
+/// kernel behaviour (`deny_write_access` in `do_open_execat`, applied to
+/// `#!` scripts too), and XNU does not implement it -- on macOS the spawn
+/// below succeeds, so the control test's premise is false there and the
+/// retry test passes only vacuously. The retry path itself is correct on
+/// every platform for the same reason: an error that never occurs never
+/// retries.
+#[cfg(all(test, target_os = "linux"))]
 mod busy_text_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
