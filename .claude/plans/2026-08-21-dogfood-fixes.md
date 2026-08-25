@@ -678,6 +678,48 @@ runs on dev-linux (record the load and the measured time in the report), and
 still fails when the fallback is broken (a mutation row that lengthens
 `PROBE_DEADLINE` past the derived budget, or skips the fallback tier).
 
+## T34 — the cold first paint got slower, and nobody noticed
+
+The T32 harvest (`.claude/measurements/2026-08-25-gh-runner-headroom.md`)
+shows view's own cold `first_paint` marker p50 on gh-linux moving from
+15.2 to 21.9 ms (runs of 08-03/04) to 25.9 to 27.4 ms (08-21/24) while nvim's
+sat flat at 121 to 128 ms: about +55% in view, between `6ed8bc9` and
+`f63f7d0`, 358 commits. Today's readings sit under the recorded bar by less
+than 1%, so the next gh-linux leg may exit 3 on this metric, correctly. This
+is also the most likely cause of the "waiting for nvim" placeholder the user
+now sees at startup. A regression between two commits with a flat control is
+never a perf revisit; it is a bug with a bisect.
+
+Narrow first from the CI bench jobs already harvested (every master run in
+the window has a gh-linux first_paint reading), then bisect the remaining
+span on the coordinated quiet dev-linux host with the `first_paint/minimal`
+cell only, three trials per step. Name the commit, explain the mechanism
+(what the startup path does now that it did not do before, in the spawn,
+attach, probe, or paint sequence), fix it at the root, and show the marker
+back inside its pre-regression band on the same host. Every bisect step's
+load and reading go in the report.
+
+Evidence: the quiet-host `first_paint/minimal` marker p50 at HEAD is within
+the pre-regression band; the culprit commit's mechanism is stated with
+file:line; a pinning test or budget row makes the same regression trip a
+controlled-class gate next time.
+
+## T35 — a headroom entry can name a fixture
+
+`declared_factor`, `headroom_for`, `declared_headroom` and
+`require_headroom_bound` scope a headroom key to a scenario
+(`"scenario.metric"`) or the host. gh-macos `echo/heavy` spreads 33.4%
+half-width against `echo/minimal`'s 3.2%, so an honest heavy factor would
+loosen minimal's bar from 1.378 to 2.095; its stale bar was deleted at
+`741ad03` and masks nothing today, but it cannot be reseated until the key
+can say `"echo.heavy.ratio_p50"`. Add the optional fixture level: a
+three-part key wins over the scenario key, which wins over the host key;
+`require_headroom_bound` binds a fixture-scoped entry to exactly that cell;
+the loader rejects a key whose fixture the baseline does not measure with
+the same message shape the scenario case uses. Tests walk all three
+precedences and the rejection. No sidecar entry changes in this task; the
+gh-macos reseat is its own record run afterwards.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
