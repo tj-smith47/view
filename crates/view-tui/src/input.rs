@@ -104,6 +104,32 @@ pub fn adopt_terminal_stdin() -> bool {
         .is_ok_and(|tty| rustix::stdio::dup2_stdin(&tty).is_ok())
 }
 
+/// Reads whatever the terminal has ready right now, or `None` when it has
+/// nothing (or the read failed).
+///
+/// The readiness poll is what makes this safe to call on the raw-mode
+/// terminal at all: `cfmakeraw` leaves `VMIN=1`, so a read issued against
+/// an empty queue blocks until a key is pressed. Asking `poll(2)` with a
+/// zero timeout first turns that into "read only what is already there".
+#[cfg(unix)]
+fn read_ready(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {
+    use rustix::event::{PollFd, PollFlags};
+
+    let mut fds = [PollFd::from_borrowed_fd(fd, PollFlags::IN)];
+    let ready = matches!(
+        rustix::event::poll(&mut fds, Some(&rustix::event::Timespec::default())),
+        Ok(n) if n > 0
+    );
+    if !ready {
+        return None;
+    }
+    let mut buf = [0_u8; 256];
+    match rustix::io::read(fd, &mut buf) {
+        Ok(0) | Err(_) => None,
+        Ok(n) => Some(buf[..n].to_vec()),
+    }
+}
+
 /// One non-blocking drain's outcome, telling the caller whether the
 /// terminal side of the poll set is still trustworthy.
 #[cfg(unix)]
@@ -198,6 +224,22 @@ pub struct InputSource {
     fatal_read: OwnedFd,
     fatal_signal: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     dead: bool,
+    /// Armed only when the startup capability probe gave up without its
+    /// DA1 fence, i.e. only when the terminal may still owe a reply. See
+    /// [`InputSource::open_guarded`].
+    guard: Option<LateReplyGuard>,
+    /// Keystrokes the guard decoded out of a swept read, waiting for the
+    /// next [`drain`](InputSource::drain) to hand them over.
+    guard_keys: std::collections::VecDeque<Msg>,
+}
+
+/// The state behind [`InputSource::open_guarded`]: how long the terminal is
+/// still allowed to answer, and the bytes of a reply it has so far only
+/// half delivered.
+#[cfg(unix)]
+struct LateReplyGuard {
+    until: std::time::Instant,
+    buf: Vec<u8>,
 }
 
 /// The signals that must end the session through view's own teardown
@@ -226,6 +268,48 @@ impl InputSource {
     /// Returns the underlying `std::io::Error` if the terminal fd or the
     /// signal pipe cannot be set up.
     pub fn open() -> std::io::Result<Self> {
+        Self::open_with(false)
+    }
+
+    /// [`open`](Self::open) with the late-reply guard armed, for a startup
+    /// whose capability probe stopped listening without ever seeing its DA1
+    /// fence (`ProbeOutcome::fence_seen` false).
+    ///
+    /// A terminal answers queries in the order it received them and the
+    /// fence is asked last, so a fence that arrived proves nothing is still
+    /// in flight and plain [`open`](Self::open) is right. A fence that never
+    /// arrived proves the opposite, and a reply landing after the probe has
+    /// handed the terminal over is not harmless: crossterm's parser holds an
+    /// unrecognized private-mode sequence (`ESC [ ? 2026 ; 1 $ y` is one --
+    /// it resolves neither to an event nor to an error) in its buffer and
+    /// appends every later byte to it, so the reply does not merely arrive
+    /// as garbage, it swallows every keystroke behind it until one happens
+    /// to complete a sequence it recognizes. A DCS answer is worse still: it
+    /// decodes into a run of literal keys typed into the buffer.
+    ///
+    /// While armed, ready bytes are read here first, complete replies of
+    /// either shape are dropped, and anything else is decoded as residue
+    /// (see [`encode_residue_bytes`](crate::keys::encode_residue_bytes)) and
+    /// handed over as keys. The guard disarms the moment the fence arrives
+    /// or the user types -- either one proves the terminal is done answering
+    /// or that waiting further costs more than it saves -- and in any case
+    /// once [`PROBE_HARD_CAP`](crate::tiers::PROBE_HARD_CAP) has passed
+    /// again.
+    ///
+    /// A separate constructor rather than a call after `open`, because
+    /// `open` itself lets crossterm's reader touch the terminal: a reply
+    /// landing in that gap would reach the parser this exists to keep it
+    /// away from.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if the terminal fd or the
+    /// signal pipe cannot be set up.
+    pub fn open_guarded() -> std::io::Result<Self> {
+        Self::open_with(true)
+    }
+
+    fn open_with(guard_late_replies: bool) -> std::io::Result<Self> {
         let tty = TtyFd::open()?;
         let (winch_read, winch_write) = new_signal_pipe()?;
         signal_hook::low_level::pipe::register(signal_hook::consts::SIGWINCH, winch_write)?;
@@ -274,14 +358,51 @@ impl InputSource {
             signal_hook::flag::register(signal, std::sync::Arc::clone(&repeat))?;
             signal_hook::low_level::pipe::register(signal, fatal_write.try_clone()?)?;
         }
-        let _ = crossterm::event::poll(Duration::ZERO);
-        Ok(Self {
+        let mut source = Self {
             tty,
             winch_read,
             fatal_read,
             fatal_signal,
             dead: false,
-        })
+            guard: None,
+            guard_keys: std::collections::VecDeque::new(),
+        };
+        if guard_late_replies {
+            source.guard = Some(LateReplyGuard {
+                until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
+                buf: Vec::new(),
+            });
+            // ahead of the crossterm touch below, which reads: the guard
+            // has to own the terminal from this handle's first byte
+            source.sweep_late_replies();
+        }
+        let _ = crossterm::event::poll(Duration::ZERO);
+        Ok(source)
+    }
+
+    /// Reads and discards whatever the terminal still owes the capability
+    /// probe, before crossterm can see it. A no-op unless armed, which is
+    /// the whole cost on every session whose terminal answered the fence.
+    fn sweep_late_replies(&mut self) {
+        let Some(mut guard) = self.guard.take() else {
+            return;
+        };
+        if std::time::Instant::now() >= guard.until {
+            return;
+        }
+        while let Some(chunk) = read_ready(self.tty.as_fd()) {
+            guard.buf.extend_from_slice(&chunk);
+        }
+        let replies = crate::tiers::scan_replies(&guard.buf);
+        guard.buf.drain(..replies.consumed);
+        self.guard_keys.extend(
+            crate::keys::encode_residue_bytes(&replies.residue)
+                .into_iter()
+                .map(|notation| Msg::Key(Key { notation })),
+        );
+        if !replies.da1 && replies.residue.is_empty() {
+            self.guard = Some(guard);
+        }
     }
 
     /// The terminal read fd, for readiness polling only.
@@ -376,10 +497,19 @@ impl InputSource {
     /// replies one at a time, up to `BUFFERED_POLL_LIMIT`, which is what
     /// makes the answer describe the whole buffer rather than its first
     /// entry.
-    #[must_use]
-    pub fn has_buffered(&self) -> bool {
+    ///
+    /// Runs the late-reply guard's sweep first when one is armed, for the
+    /// same reason [`drain`](Self::drain) does: this is the call the runtime
+    /// loop makes before every sleep, and it lets crossterm read, so a
+    /// terminal's late answer would otherwise reach crossterm's parser here
+    /// rather than through the drain.
+    pub fn has_buffered(&mut self) -> bool {
         if self.dead {
             return false;
+        }
+        self.sweep_late_replies();
+        if !self.guard_keys.is_empty() {
+            return true;
         }
         for _ in 0..BUFFERED_POLL_LIMIT {
             match crossterm::event::poll(Duration::ZERO) {
@@ -407,6 +537,10 @@ impl InputSource {
     pub fn drain(&mut self, size: &TermSizeCell, mut sink: impl FnMut(Msg)) -> DrainOutcome {
         let mut scratch = [0_u8; 64];
         while matches!(rustix::io::read(&self.winch_read, &mut scratch), Ok(n) if n > 0) {}
+        self.sweep_late_replies();
+        for msg in self.guard_keys.drain(..) {
+            sink(msg);
+        }
         loop {
             match crossterm::event::poll(Duration::ZERO) {
                 Ok(true) => {}

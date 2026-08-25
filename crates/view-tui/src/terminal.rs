@@ -100,6 +100,26 @@ impl TerminalGuard {
         enter_bytes(&mut std::io::stdout(), cfg!(unix) && kitty_kbd)
     }
 
+    /// Pushes the kitty keyboard protocol on its own, for a terminal that
+    /// only admitted to speaking it after
+    /// [`finish_entering_alt_screen`](Self::finish_entering_alt_screen) had
+    /// already run without it (see [`Term::finish_probe`]).
+    ///
+    /// The pop in [`restore_bytes`] needs no matching change: it is written
+    /// unconditionally on every exit path, and a pop against an empty stack
+    /// is a no-op, so a push that lands late is still popped exactly once
+    /// and a decision that never became a push pops nothing that exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if the push cannot be
+    /// written.
+    pub fn push_kitty_keyboard(&self) -> std::io::Result<()> {
+        let mut out = std::io::stdout();
+        out.write_all(KITTY_KBD_PUSH)?;
+        out.flush()
+    }
+
     /// Restores the terminal immediately rather than waiting for [`Drop`].
     ///
     /// For exit paths that bypass destructors (`std::process::exit`).
@@ -340,11 +360,10 @@ pub struct Term {
     /// to the caller without re-running the (stdin-consuming, one-shot)
     /// detection probe.
     caps: TermCaps,
-    /// Bytes the capability probe read that were not part of a recognized
-    /// reply -- almost always keystrokes the user typed before or during
-    /// the probe window. [`Term::take_residue`] hands this to the caller
-    /// exactly once so nothing typed at startup is silently lost.
-    residue: Vec<u8>,
+    /// The capability probe still in flight, if the terminal was given a
+    /// batch to answer at all. [`Term::finish_probe`] waits out whatever it
+    /// is still owed and takes it; a `--tier` override leaves it `None`.
+    probe: Option<tiers::Probe<'static>>,
 }
 
 impl Term {
@@ -366,7 +385,7 @@ impl Term {
     /// the backend terminal cannot be built.
     pub fn init(tier_override: Option<Tier>) -> std::io::Result<Self> {
         let guard = TerminalGuard::enter_raw_mode()?;
-        let (caps, residue) = tiers::resolve(tier_override)?;
+        let (caps, probe) = tiers::resolve(tier_override)?;
         guard.finish_entering_alt_screen(caps.kitty_kbd)?;
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
         let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
@@ -379,7 +398,7 @@ impl Term {
             shadow: Shadow::new(),
             last_offset: None,
             caps,
-            residue,
+            probe,
         })
     }
 
@@ -390,19 +409,59 @@ impl Term {
         self.caps
     }
 
-    /// Takes ownership of the capability probe's residue bytes, leaving an
-    /// empty buffer behind. Callable exactly once per [`Term::init`] with a
-    /// meaningful result -- a second call returns an empty `Vec`, which is
-    /// correct rather than surprising, since there is nothing left to take.
+    /// Ends the capability probe [`Term::init`] left in flight, returning
+    /// the capabilities it finally resolved, its residue, and whether the
+    /// terminal ever answered the DA1 fence.
+    ///
+    /// Call this with other work already in the air: everything past
+    /// [`PROBE_DEADLINE`](crate::tiers::PROBE_DEADLINE) is spent waiting on
+    /// a terminal, so a caller that runs it after starting the engine
+    /// attach pays for a slow terminal out of time the process was
+    /// spending on the attach anyway. A terminal that answered the fence in
+    /// the first window (every terminal on the same machine as the process)
+    /// makes this return without waiting at all.
+    ///
+    /// Callable exactly once per [`Term::init`] with a meaningful result --
+    /// a second call reports the settled capabilities, no residue and no
+    /// pending fence, which is correct rather than surprising, since there
+    /// is nothing left to take.
     ///
     /// The caller (`main.rs`, right after `ui_attach`) is expected to
-    /// translate this into nvim input notation (see
+    /// translate the residue into nvim input notation (see
     /// [`encode_residue_bytes`](crate::keys::encode_residue_bytes)) and
     /// forward it before the runtime loop starts, so a keystroke queued
     /// ahead of or during the startup probe is never silently dropped.
-    #[must_use]
-    pub fn take_residue(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.residue)
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if a terminal that only
+    /// admitted to the kitty keyboard protocol in the second window cannot
+    /// be sent the protocol's push.
+    pub fn finish_probe(&mut self) -> std::io::Result<tiers::ProbeOutcome> {
+        let Some(probe) = self.probe.take() else {
+            return Ok(tiers::ProbeOutcome {
+                caps: self.caps,
+                residue: Vec::new(),
+                fence_seen: true,
+            });
+        };
+        let outcome = probe.finish(tiers::PROBE_HARD_CAP);
+        // a decision that arrives after the alternate screen is already up
+        // still owes the terminal the push `finish_entering_alt_screen`
+        // skipped, or `keys::encode_key` spends the session unable to tell
+        // `<S-CR>` from `<CR>` on a terminal that can
+        if cfg!(unix) && outcome.caps.kitty_kbd && !self.caps.kitty_kbd {
+            self.guard.push_kitty_keyboard()?;
+        }
+        if outcome.caps.tier != self.caps.tier {
+            // the shell frame on screen was painted at the old tier, in the
+            // old border charset and palette; leaving the next frame free to
+            // clip its damage to the rows that changed would leave the rest
+            // of that frame styled for a tier this session is no longer at
+            self.last_offset = None;
+        }
+        self.caps = outcome.caps;
+        Ok(outcome)
     }
 
     /// Current terminal size in `(width, height)` cells.

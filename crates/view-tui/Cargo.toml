@@ -43,6 +43,10 @@ rustix = { version = "1", default-features = false, features = [
     "termios",
     "pipe",
     "stdio",
+    # the zero-timeout readiness poll the late-reply guard issues before
+    # each raw read (src/input.rs): raw mode leaves VMIN=1, so a read with
+    # nothing ready blocks until a key is pressed
+    "event",
 ] }
 # The SIGWINCH self-pipe behind `input::InputSource` (see that module's
 # docs): a resize is a signal, not a tty byte, so the runtime loop's fd

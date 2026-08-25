@@ -730,19 +730,15 @@ fn main() -> Result<()> {
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
     let (width, height) = term.size()?;
-    let residue = term.take_residue();
 
     // the cwd is resolved once at startup, before any picker ever opens:
     // `Source::Files` with no root override searches from here
     let mut model =
         Model::with_term_size(width, height).with_cwd(std::env::current_dir().unwrap_or_default());
+    // what the probe's first window resolved; a terminal slower than that
+    // window revises this upward at `term.finish_probe()` below, which runs
+    // once the engine attach is already in flight
     model.caps = term.caps();
-    vlog::log_with("startup", || {
-        format!(
-            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} term={width}x{height}",
-            VERSION, model.caps.tier, model.caps.sync, model.caps.truecolor, model.caps.kitty_kbd
-        )
-    });
     // opts into startup's placeholder shell (statusline bar plus a static
     // "waiting for nvim" indicator) instead of Model's ordinary
     // already-running default; update() flips this back to true for good
@@ -830,19 +826,8 @@ fn main() -> Result<()> {
     startup::paint_shell_frame(&mut term, &model, process_start)
         .context("failed to paint the startup shell frame")?;
 
-    // created here, not inside runtime::run: input capture has to be live
-    // immediately after the shell paints, well before the engine exists,
-    // or anything typed during attach would be lost. On unix that means
-    // opening the pollable input handle (keys wait in the kernel's tty
-    // queue until the pre-attach wait drains them inline); off unix it
-    // means starting the input thread against a channel that exists.
     let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
     let term_size = view_tui::terminal::TermSizeCell::default();
-    #[cfg(unix)]
-    let mut input_source = view_tui::input::InputSource::open()
-        .context("failed to open the pollable terminal input handle")?;
-    #[cfg(not(unix))]
-    let mut input_source = ();
     #[cfg(unix)]
     let msg_tx = wake::LoopSender::with_waker(
         raw_tx,
@@ -854,7 +839,44 @@ fn main() -> Result<()> {
         wake::LoopSender::new(raw_tx)
     };
 
-    let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());
+    // the engine spawn goes first and the capability probe's second window
+    // is waited out behind it, not in front: the attach thread's own work
+    // (fork/exec nvim, register, `ui_attach`) is what the wait overlaps, so
+    // a terminal that answers a network round trip late costs this startup
+    // nothing it was not already spending. The residue reaches the attach
+    // through this channel for the same reason -- it is not known yet at
+    // the point the thread starts, and the thread only needs it at its very
+    // last step, after `ui_attach` has returned.
+    let (residue_tx, residue_rx) = mpsc::sync_channel(1);
+    let engine_rx = startup::attach_in_background(cfg, width, height, residue_rx, msg_tx.clone());
+    let probe = term
+        .finish_probe()
+        .context("failed to finish terminal capability detection")?;
+    let _ = residue_tx.send(probe.residue);
+    model.caps = probe.caps;
+    vlog::log_with("startup", || {
+        format!(
+            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} term={width}x{height}",
+            VERSION, model.caps.tier, model.caps.sync, model.caps.truecolor, model.caps.kitty_kbd
+        )
+    });
+
+    // strictly after the probe has stopped reading the terminal, and
+    // strictly before the pre-attach wait: two readers of one tty cannot
+    // both have the first bytes, and until this exists it is the probe that
+    // is capturing what the user types (see `ProbeOutcome::residue`).
+    #[cfg(unix)]
+    let mut input_source = if probe.fence_seen {
+        view_tui::input::InputSource::open()
+    } else {
+        // the terminal never answered the fence, so it may still answer
+        // everything else: those replies must not reach crossterm's parser
+        view_tui::input::InputSource::open_guarded()
+    }
+    .context("failed to open the pollable terminal input handle")?;
+    #[cfg(not(unix))]
+    let mut input_source = ();
+
     let drained = startup::drain_pre_attach(
         &msg_rx,
         &msg_tx,

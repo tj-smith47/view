@@ -57,9 +57,21 @@ pub enum QueryPolicy {
     /// the tier its rows were promised at, and a session that silently
     /// downgraded the child would time less work than the row claims.
     AnswerFullTier,
+    /// Answer the whole probe batch, but only after [`LATE_ANSWER_DELAY`],
+    /// modelling the terminal at the far end of an ssh hop: every reply is
+    /// a network round trip behind the query, so it lands after the child's
+    /// first probe window has already closed and the tier it derives is
+    /// whatever it does about replies that arrive late.
+    AnswerFullTierLate,
     /// Answer nothing, modelling a terminal that ignores every query.
     Silent,
 }
+
+/// How long [`QueryPolicy::AnswerFullTierLate`] holds its replies back:
+/// comfortably past `view`'s own first probe window and comfortably inside
+/// the hard cap it waits out behind the engine spawn, so the leg tests the
+/// upgrade path rather than either boundary.
+pub const LATE_ANSWER_DELAY: Duration = Duration::from_millis(200);
 
 /// A capability query a probing child writes, paired with the reply a
 /// terminal possessing that capability answers with.
@@ -85,16 +97,32 @@ const SYNC: Answer = (b"\x1b[?2026$p", b"\x1b[?2026;1$y");
 /// disambiguating key encoding.
 const KITTY: Answer = (b"\x1b[?u", b"\x1b[?1u");
 
+/// The DECRQSS readback of the SGR state, and the reply of a terminal that
+/// kept the 24-bit background the query set. A child that sees this knows
+/// the terminal renders truecolor without being told so by `COLORTERM`,
+/// which is the only way to know it inside an ssh login whose client does
+/// not forward that variable.
+const TRUECOLOR: Answer = (b"\x1bP$qm\x1b\\", b"\x1bP1$r0;48;2;1;2;3m\x1b\\");
+
 const DA1_ONLY: &[Answer] = &[DA1];
-const FULL_TIER: &[Answer] = &[SYNC, KITTY, DA1];
+const FULL_TIER: &[Answer] = &[SYNC, KITTY, TRUECOLOR, DA1];
 
 impl QueryPolicy {
     /// The query/reply pairs a session under this policy answers.
     pub(crate) fn answers(self) -> &'static [Answer] {
         match self {
             Self::AnswerDa1 => DA1_ONLY,
-            Self::AnswerFullTier => FULL_TIER,
+            Self::AnswerFullTier | Self::AnswerFullTierLate => FULL_TIER,
             Self::Silent => &[],
+        }
+    }
+
+    /// How long a session under this policy waits before writing the
+    /// replies it owes.
+    pub(crate) fn answer_delay(self) -> Duration {
+        match self {
+            Self::AnswerFullTierLate => LATE_ANSWER_DELAY,
+            _ => Duration::ZERO,
         }
     }
 }
@@ -194,8 +222,15 @@ fn spawn_reader(
     } else {
         let (reply_tx, reply_rx) = mpsc::channel::<Vec<u8>>();
         let writer = Arc::clone(writer);
+        let delay = policy.answer_delay();
         std::thread::spawn(move || {
             while let Ok(bytes) = reply_rx.recv() {
+                // on this thread rather than the reader's, which is why the
+                // two are separate at all: a delayed reply must not delay
+                // the drain of what the child is painting meanwhile
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
                 // poison is recovered rather than propagated: what this
                 // mutex guards is a `Box<dyn Write>` over a file
                 // descriptor, which holds no invariant a panicking

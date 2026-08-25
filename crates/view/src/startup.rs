@@ -157,7 +157,7 @@ fn spawn_and_attach(
     cfg: EngineConfig,
     width: u16,
     height: u16,
-    residue: Vec<u8>,
+    residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     // read before `Engine::spawn` consumes `cfg` by value: there is no
     // config left to ask afterward, and the choice below depends on it
@@ -211,7 +211,7 @@ pub(crate) fn restart_and_attach(
             engine.pid()
         )
     });
-    register_and_attach(engine, stdin_relay, width, height, Vec::new())
+    register_and_attach(engine, stdin_relay, width, height, Vec::new)
 }
 
 /// The half of [`spawn_and_attach`] that runs against a child that is
@@ -222,7 +222,7 @@ fn register_and_attach(
     stdin_relay: bool,
     width: u16,
     height: u16,
-    residue: Vec<u8>,
+    residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     engine
         .handle
@@ -247,6 +247,12 @@ fn register_and_attach(
             .map_err(AttachFailure::Attach)?;
         crate::vlog::log("engine", "ui_attach returned ok");
     }
+    // resolved here rather than at the call site, and here rather than
+    // anywhere earlier in this function: on the startup path this waits on
+    // a channel the capability probe fills, and every line above is work
+    // that must not be held up for a terminal's reply (see
+    // `attach_in_background`)
+    let residue = residue();
     // best-effort, matching this project's original startup ordering: a
     // write failure here means the connection is already gone, which the
     // caller discovers through the engine's own EngineDown path moments
@@ -290,12 +296,15 @@ pub fn attach_in_background(
     cfg: EngineConfig,
     width: u16,
     height: u16,
-    residue: Vec<u8>,
+    residue_rx: Receiver<Vec<u8>>,
     msg_tx: crate::wake::LoopSender,
 ) -> Receiver<Result<Engine, AttachFailure>> {
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = spawn_and_attach(cfg, width, height, residue);
+        // a sender dropped without ever sending (a caller that failed
+        // between here and its own probe) reads as "nothing was typed",
+        // which is what an empty residue already means
+        let result = spawn_and_attach(cfg, width, height, || residue_rx.recv().unwrap_or_default());
         let _ = result_tx.send(result);
         // sent unconditionally, success or failure: drain_pre_attach must
         // wake up either way, so main.rs can move on to read engine_rx and
@@ -744,7 +753,7 @@ mod tests {
         let cfg = EngineConfig::isolated()
             .with_arg("-")
             .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap());
-        let mut engine = spawn_and_attach(cfg, 80, 24, Vec::new()).unwrap();
+        let mut engine = spawn_and_attach(cfg, 80, 24, Vec::new).unwrap();
 
         assert_eq!(
             engine.handle.eval_str("getline(1)").unwrap(),
@@ -756,6 +765,42 @@ mod tests {
         );
         let _ = engine.wait_exit();
         std::fs::remove_file(&content).ok();
+    }
+
+    /// Pins what makes the capability probe's second window free: the
+    /// attach asks for the probe's residue only once its own work is done.
+    ///
+    /// `main` hands this thread a channel and then spends the wait for a
+    /// slow terminal's replies on its own thread, so the two run at the
+    /// same time. That only holds while the residue is read at the very end
+    /// -- move the read up to the top of `spawn_and_attach` and the engine
+    /// spawn stops overlapping the wait and starts queueing behind it, with
+    /// nothing failing to say so.
+    #[cfg(unix)]
+    #[test]
+    fn the_attach_asks_for_the_probe_residue_only_after_its_own_work() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let start = Instant::now();
+        let asked_after = Arc::new(AtomicU64::new(0));
+        let recorder = Arc::clone(&asked_after);
+        let mut engine = spawn_and_attach(EngineConfig::isolated(), 80, 24, move || {
+            let elapsed = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+            recorder.store(elapsed, Ordering::SeqCst);
+            Vec::new()
+        })
+        .unwrap();
+        let attached_after = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let asked_after = asked_after.load(Ordering::SeqCst);
+
+        assert!(
+            asked_after * 2 >= attached_after,
+            "the residue was asked for {asked_after}us into an attach that \
+             took {attached_after}us: everything before that point is time \
+             the caller's own probe wait no longer overlaps"
+        );
+        let _ = engine.wait_exit();
     }
 
     #[test]

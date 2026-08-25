@@ -2890,14 +2890,15 @@ fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
 }
 
 /// Pins the condition the budget rows are stated at, against the child's own
-/// report of it.
+/// report of it, and with it the two inputs that each reach the full tier
+/// alone.
 ///
-/// Both inputs are load-bearing and each fails silently on its own: a probe
-/// reply this pty withholds and an environment variable it forgets produce
-/// the same screen as the full tier, so nothing but this assertion stands
-/// between a row that says `tier full` and a child that painted at `Basic`.
+/// Each input fails silently by itself: a probe reply this pty withholds and
+/// an environment variable it forgets produce the same screen as the full
+/// tier, so nothing but this assertion stands between a row that says
+/// `tier full` and a child that painted at `Basic`.
 #[test]
-fn the_bench_configuration_is_the_only_one_that_reaches_the_full_tier() {
+fn either_the_terminals_answer_or_colorterm_reaches_the_full_tier() {
     assert_eq!(
         derived_tier(QueryPolicy::AnswerDa1, None),
         "Basic",
@@ -2905,9 +2906,9 @@ fn the_bench_configuration_is_the_only_one_that_reaches_the_full_tier() {
     );
     assert_eq!(
         derived_tier(QueryPolicy::AnswerFullTier, None),
-        "Basic",
-        "answering the whole probe batch is not enough on its own: COLORTERM \
-         is the sole input to the truecolor bit that Full also requires"
+        "Full",
+        "the ssh shape: no COLORTERM reaches the child, and the terminal's \
+         own answer about 24-bit color is the whole basis for the tier"
     );
     assert_eq!(
         derived_tier(QueryPolicy::AnswerDa1, Some("truecolor")),
@@ -2919,5 +2920,25 @@ fn the_bench_configuration_is_the_only_one_that_reaches_the_full_tier() {
         "Full",
         "the configuration `BenchSession::spawn` and the bench environment \
          set together is what the budget rows name"
+    );
+}
+
+/// The ssh shape with the round trip that comes with it: no `COLORTERM`, and
+/// every reply landing after the child's first probe window has closed.
+///
+/// This is the failure the whole two-window probe exists for. A child that
+/// stops listening when its first window closes reads exactly the same
+/// silence a terminal that answers nothing does, and spends the session at
+/// `Basic` -- ASCII borders and the legacy palette -- on a terminal that
+/// renders everything.
+#[test]
+fn a_terminal_a_round_trip_away_still_reaches_the_full_tier() {
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerFullTierLate, None),
+        "Full",
+        "replies delayed by {:?} arrive after the first probe window and \
+         before the hard cap the child waits out behind its engine spawn; \
+         the tier it settles on must be the one the terminal answered for",
+        view_oracle::LATE_ANSWER_DELAY
     );
 }

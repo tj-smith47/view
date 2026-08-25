@@ -68,7 +68,7 @@ fn has_buffered_reports_a_key_parsed_behind_a_dropped_capability_reply() {
          keystroke, not a different event: {drained:?}"
     );
 
-    report_empty_queue_cost(&input);
+    report_empty_queue_cost(&mut input);
 
     drop(input);
     // the poll deadline is unbounded when nothing is ready, and a master
@@ -91,7 +91,7 @@ fn has_buffered_reports_a_key_parsed_behind_a_dropped_capability_reply() {
 /// VIEW_HAS_BUFFERED_ITERS=200000 cargo test -p view-tui --release \
 ///     --test input_buffered_reply -- --nocapture
 /// ```
-fn report_empty_queue_cost(input: &InputSource) {
+fn report_empty_queue_cost(input: &mut InputSource) {
     let Some(iters) = std::env::var("VIEW_HAS_BUFFERED_ITERS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())

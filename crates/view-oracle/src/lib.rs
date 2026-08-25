@@ -90,6 +90,7 @@ pub use parity::{
 };
 pub use pty::{
     kill_process_group, make_hermetic, PtySession, QueryPolicy, QueryResponder, SpawnEnv,
+    LATE_ANSWER_DELAY,
 };
 pub use reference::ReferenceSession;
 
