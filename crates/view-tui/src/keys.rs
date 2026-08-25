@@ -92,9 +92,10 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// [`crossterm::event::read`] already owns for every keystroke after
 /// startup. Printable ASCII passes through as literal characters (matching
 /// [`encode_key`]'s plain-char case, including `<` becoming `<lt>`);
-/// `\r`/`\n` map to `<CR>`, `\t` to `<Tab>`, `0x7f` to `<BS>`, and the
-/// remaining C0 controls to the `<C-...>` chord they spell
-/// ([`plain_key`]). A run of continuous non-ASCII bytes (`0x80..`) is decoded as one
+/// `\r` maps to `<CR>`, `\t` to `<Tab>`, `0x7f` to `<BS>`, and the
+/// remaining C0 controls to the `<C-...>` chord they spell -- `\n`
+/// included, because the terminal is in raw mode and `Enter` sends `\r`
+/// there ([`plain_key`]). A run of continuous non-ASCII bytes (`0x80..`) is decoded as one
 /// UTF-8 str and forwarded char-by-char if valid, dropped if not (a
 /// mid-codepoint chunk boundary can produce invalid UTF-8 here, and
 /// guessing at a replacement is worse than dropping a still-rare case).
@@ -131,7 +132,10 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 ///
 /// `ESC` and a printable in the same run are Alt and that key, which is
 /// how crossterm reads them for the rest of the session. A lone trailing
-/// `ESC` is the Escape key and maps to `<Esc>`.
+/// `ESC` is the Escape key and maps to `<Esc>`: crossterm holds one only
+/// while the fd still has bytes to give it, and the caller here has
+/// already drained the fd to `EAGAIN`, so the two answers differ only for
+/// a chord whose second byte was still in flight at that moment.
 #[must_use]
 pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
     decode_residue(residue)
@@ -347,9 +351,14 @@ fn kitty_key(fields: &[Vec<u32>]) -> Option<(KeyCode, KeyModifiers)> {
 /// bytes are not one (yet).
 ///
 /// A terminator that has not arrived reads as `None` rather than as an
-/// unfinished sequence on purpose: `ESC P` and `ESC ]` are Alt+Shift+P and
-/// Alt+`]`, and holding every one of them against a string that may never
-/// come would cost a keypress to save a report.
+/// unfinished sequence, so `ESC P` and `ESC ]` alone are the Alt+Shift+P
+/// and Alt+`]` they also are. What decides between the two readings is
+/// which mistake is worse and which case is real: an unrequested report
+/// arriving in the window is ordinary, and typing its body into the buffer
+/// runs it as normal-mode commands, while the reading this loses -- a user
+/// typing `Alt+]`, then text, then `Ctrl+G`, all inside one read -- is not
+/// something a keyboard produces. A whole terminated string in one run is
+/// therefore the report, whatever else it could have spelled.
 fn string_sequence_len(run: &[u8]) -> Option<usize> {
     if !matches!(run.get(1)?, b'P' | b']' | b'^' | b'_' | b'X') {
         return None;
@@ -385,7 +394,11 @@ fn alt_key(run: &[u8]) -> Option<(usize, Option<Msg>)> {
 /// `Esc`, `Backspace` -- keep that name instead.
 fn plain_key(byte: u8) -> Option<(KeyCode, KeyModifiers)> {
     let code = match byte {
-        b'\r' | b'\n' => KeyCode::Enter,
+        // raw mode is what makes this a chord table rather than a line
+        // discipline's: `Enter` sends `\r` here, so `\n` is the `Ctrl`+`j`
+        // it also is, which is the same reading crossterm takes with the
+        // mode on
+        b'\r' => KeyCode::Enter,
         b'\t' => KeyCode::Tab,
         0x1b => KeyCode::Esc,
         0x7f => KeyCode::Backspace,
@@ -739,7 +752,8 @@ mod tests {
     #[test]
     fn residue_cr_lf_tab_backspace_map_to_named_tokens() {
         assert_eq!(encode_residue_bytes(b"\r"), vec!["<CR>"]);
-        assert_eq!(encode_residue_bytes(b"\n"), vec!["<CR>"]);
+        // raw mode: `Enter` is `\r`, and `\n` is the chord that sends it
+        assert_eq!(encode_residue_bytes(b"\n"), vec!["<C-j>"]);
         assert_eq!(encode_residue_bytes(b"\t"), vec!["<Tab>"]);
         assert_eq!(encode_residue_bytes(b"\x7f"), vec!["<BS>"]);
     }
@@ -874,9 +888,19 @@ mod tests {
             );
         }
         // without a terminator the same two bytes are the Alt chord they
-        // also are, and holding them back would cost the keypress
+        // also are
         assert_eq!(encode_residue_bytes(b"\x1bP"), vec!["<M-P>"]);
         assert_eq!(encode_residue_bytes(b"\x1b]"), vec!["<M-]>"]);
+    }
+
+    #[test]
+    fn residue_a_terminated_string_is_the_report_whatever_it_could_spell() {
+        // the ceiling of the rule above, stated: these bytes are also
+        // `Alt+]`, `1`, `2`, `Ctrl+G`, and in one read they are read as
+        // the report. A terminal sending one unasked is ordinary; a
+        // keyboard producing that run inside a single read is not, and
+        // typing a report's body runs it as normal-mode commands
+        assert!(encode_residue_bytes(b"\x1b]12\x07").is_empty());
     }
 
     #[test]
