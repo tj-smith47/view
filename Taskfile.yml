@@ -138,6 +138,15 @@ tasks:
     # never contend for the same machine
     cmd: cargo test -p view-harness --test supersede_heavy -- --ignored --test-threads=1
 
+  user-fixture:
+    desc: Generate the first-paint matrix's login-shaped `user` fixture from the compat plugin cache and drive a real session over it (needs the compat plugin cache; run after task compat)
+    # ignored by default in `task test` for the same reason the supersede
+    # leg is: it needs the shared plugin cache populated, which a cold host
+    # fills by cloning the pinned stack from the network. Serialized because
+    # the knob one of its cases sets is process-wide
+    deps: [build]
+    cmd: cargo test -p view-harness --test user_fixture -- --ignored --test-threads=1
+
   acceptance:
     desc: Engine-supervision, overlay-chrome visual sweep, remote-reconnect and ACP-agent conformance against a real terminal session, then the RTT-injection proof that speculative echo hides transport latency (~8 min; needs tmux, and node/npm plus agent credentials for the agent leg; the RTT leg announces a skip off controlled-linux -- CLASS=controlled-linux task acceptance takes it on a quiet host)
     # its own target rather than a step of `task ci`, on the same terms as

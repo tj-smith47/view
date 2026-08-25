@@ -1,0 +1,5 @@
+crates/view-harness/src/fixture.rs	ml:    if slow_ms > 0 {\n        spec.push_str(	    if false {\n        spec.push_str(	-p view-harness --lib fixture::
+crates/view-harness/src/fixture.rs	.map_err(|_| FixtureError::SlowKnob { value: raw })	.or(Ok(0))	-p view-harness --lib fixture::
+crates/view-harness/src/fixture.rs	ml:    if name == USER_FIXTURE {\n        return generate_user_fixture();\n    }		-p view-harness --bin bench every_matrix_fixture
+crates/view-harness/src/fixture.rs	        TREESITTER_HIGHLIGHT_LUA	        ""	-p view-harness --lib fixture::
+crates/view-harness/src/fixture.rs	      vim.notify = function() end	      local _ = 0	-p view-harness --lib fixture::

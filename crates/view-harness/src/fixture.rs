@@ -39,6 +39,28 @@ pub enum FixtureError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("writing generated fixture file {path}: {source}")]
+    Generate {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error(
+        "the shared plugin cache at {path} holds no installed plugin, so the generated \
+         {USER_FIXTURE:?} fixture would measure a login with an empty plugin set; populate it \
+         first with `task compat` or any bench cell on the `heavy` fixture, which install the \
+         pinned stack there"
+    )]
+    EmptyPluginCache { path: PathBuf },
+    #[error(
+        "the plugin cache at {path} holds the entry {name:?}, whose name is not a plain plugin \
+         directory name; the generated {USER_FIXTURE:?} fixture writes each name into a Lua \
+         spec and will not quote an arbitrary one"
+    )]
+    UnnamablePlugin { path: PathBuf, name: String },
+    #[error(
+        "{USER_FIXTURE_SLOW_MS_ENV} is set to {value:?}, which is not a whole millisecond count"
+    )]
+    SlowKnob { value: String },
 }
 
 /// Resolved from this crate's own manifest dir rather than the caller's
@@ -181,6 +203,381 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), FixtureError> {
     Ok(())
 }
 
+/// The one bench fixture that is generated at run time instead of
+/// committed: a login-shaped lazy.nvim config over whatever plugin set the
+/// shared compat cache already holds.
+///
+/// Committed as a name only, never as content. The plugin set it loads is
+/// the cache's, so committing the fixture would mean committing either the
+/// plugin sources or a second copy of the `heavy` fixture's lockfile that
+/// could drift from the cache the bench actually points `XDG_DATA_HOME` at.
+pub const USER_FIXTURE: &str = "user";
+
+/// Environment override that plants a deliberate stall in the generated
+/// `user` fixture's init, in milliseconds.
+///
+/// The gate this fixture arms is "a real login's attach window got worse".
+/// Proving a gate can fire needs a slowdown the gate has never seen, and a
+/// slowdown compiled into the fixture would be one every run pays. A knob
+/// read from the environment lets one run wear it and no other.
+pub const USER_FIXTURE_SLOW_MS_ENV: &str = "VIEW_BENCH_USER_FIXTURE_SLOW_MS";
+
+/// File the stall plugin writes into the session's own state home, naming
+/// the millisecond count it waited. A stall that lengthens the attach
+/// window and one whose spec entry the plugin manager silently dropped are
+/// indistinguishable from outside the process; this is what tells them
+/// apart.
+pub const USER_FIXTURE_STALL_RECEIPT: &str = "view-bench-stall";
+
+/// The fixture whose committed `lazy-lock.json` keys the plugin cache the
+/// generated `user` fixture is built from. Naming it here rather than
+/// duplicating the lockfile keeps one cache directory shared by the compat
+/// driver, the `heavy` bench cells and this fixture: a second lockfile
+/// would key a second cache and quietly double both the clone cost and the
+/// plugin set under measurement.
+const USER_FIXTURE_PLUGIN_SOURCE: &str = "heavy";
+
+/// Where the named fixture's config tree is read from: the committed
+/// directory for every fixture but [`USER_FIXTURE`], which is generated
+/// (or regenerated) here and handed back from `target/`.
+///
+/// Every consumer that copies a fixture into a hermetic config home goes
+/// through this rather than joining [`fixtures_root`] itself, so a
+/// generated fixture is reachable everywhere a committed one is instead of
+/// only from the one call site that knew about it.
+///
+/// # Errors
+///
+/// Returns whatever [`generate_user_fixture`] returns for the generated
+/// fixture; never fails for a committed one (a missing directory is the
+/// caller's own error to raise, with its own wording).
+pub fn fixture_source_dir(name: &str) -> Result<PathBuf, FixtureError> {
+    if name == USER_FIXTURE {
+        return generate_user_fixture();
+    }
+    Ok(fixtures_root().join(name))
+}
+
+/// Milliseconds the generated fixture's test-only plugin should stall for,
+/// from [`USER_FIXTURE_SLOW_MS_ENV`]; `0` (the default) plants no plugin at
+/// all.
+///
+/// # Errors
+///
+/// Returns [`FixtureError::SlowKnob`] when the variable is set to something
+/// that is not a millisecond count. A typo must not read as "no slowdown"
+/// and hand back a run that silently measured the unmodified fixture.
+fn user_fixture_slow_ms() -> Result<u64, FixtureError> {
+    parse_slow_ms(std::env::var(USER_FIXTURE_SLOW_MS_ENV).ok())
+}
+
+/// The knob's parse, split from the environment read so a test can pin the
+/// refusal without mutating a process-wide variable other tests read.
+fn parse_slow_ms(raw: Option<String>) -> Result<u64, FixtureError> {
+    let Some(raw) = raw else { return Ok(0) };
+    if raw.trim().is_empty() {
+        return Ok(0);
+    }
+    raw.trim()
+        .parse()
+        .map_err(|_| FixtureError::SlowKnob { value: raw })
+}
+
+/// Plugin directory names installed in `lazy_dir`, sorted, with the plugin
+/// manager itself left out (it is bootstrapped by path, not declared as a
+/// spec entry).
+fn cached_plugin_names(lazy_dir: &Path) -> Result<Vec<String>, FixtureError> {
+    let entries = std::fs::read_dir(lazy_dir).map_err(|_| FixtureError::EmptyPluginCache {
+        path: lazy_dir.to_path_buf(),
+    })?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| FixtureError::Copy {
+            path: lazy_dir.to_path_buf(),
+            source,
+        })?;
+        if !entry
+            .file_type()
+            .map_err(|source| FixtureError::Copy {
+                path: entry.path(),
+                source,
+            })?
+            .is_dir()
+        {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "lazy.nvim" {
+            continue;
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err(FixtureError::UnnamablePlugin {
+                path: lazy_dir.to_path_buf(),
+                name,
+            });
+        }
+        names.push(name);
+    }
+    if names.is_empty() {
+        return Err(FixtureError::EmptyPluginCache {
+            path: lazy_dir.to_path_buf(),
+        });
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The generated fixture's `init.lua`, over the plugin names the cache
+/// holds.
+///
+/// Pure so the shape a bench run measures can be pinned by a test without
+/// a populated cache or a spawned editor: everything host-specific reaches
+/// the file through `vim.fn.stdpath`, resolved inside the measured process
+/// against the hermetic homes the bench sets, never through a path baked
+/// in here. That also survives the per-side copy -- an absolute path
+/// written at generation time would still point at this source tree while
+/// the editor reads a copy of it.
+fn render_user_init(plugins: &[String], slow_ms: u64) -> String {
+    let mut spec = String::new();
+    for name in plugins {
+        spec.push_str(&format!("    plugin({name:?}),\n"));
+    }
+    if slow_ms > 0 {
+        spec.push_str(
+            "    { dir = vim.fn.stdpath(\"config\") .. \"/slow-init\", lazy = false },\n",
+        );
+    }
+    // highlighting the opened buffer is the single largest cost a login
+    // pays between attach and the frame that finally shows the file, and
+    // the plugin's own setup() does not enable it -- its `configs` module
+    // does. Emitted only when the cache actually holds the plugin, because
+    // the cache's set is what this fixture is
+    let treesitter = if plugins.iter().any(|name| name == "nvim-treesitter") {
+        TREESITTER_HIGHLIGHT_LUA
+    } else {
+        ""
+    };
+    format!(
+        r#"-- Generated by view-harness for the bench matrix's `user` fixture; the
+-- next run rewrites it, so editing this copy changes nothing.
+--
+-- A login, not a compat fixture. The committed `heavy` fixture hands
+-- lazy.nvim a spec it resolves and partly defers; this one names every
+-- plugin the shared cache holds as a local `dir` entry with lazy = false,
+-- so the whole stack is loaded and set up before the opened file can
+-- paint. That window is what the startup shell sits in front of, and what
+-- a real config makes a user wait through.
+--
+-- install.missing is off: the cache is the only plugin source here, and a
+-- measurement that could reach the network mid-run measures the network.
+
+if vim.env.VIEW_COMPAT_SOCK then
+  vim.fn.serverstart(vim.env.VIEW_COMPAT_SOCK)
+end
+
+vim.g.mapleader = " "
+vim.g.maplocalleader = "\\"
+
+require("config.options")
+require("config.keymaps")
+require("config.autocmds")
+
+local lazyroot = vim.fn.stdpath("data") .. "/lazy/"
+vim.opt.rtp:prepend(lazyroot .. "lazy.nvim")
+
+-- setup() is called for the plugins whose main module is named after their
+-- repository, which is most of them and is what a login pays for. pcall'd,
+-- and with notifications held, because the spec is whatever the cache
+-- holds: a plugin that has no such module, or that greets or scolds the
+-- caller at require time (mini.nvim does), must still cost its load time
+-- rather than put a message on screen that the content marker would then
+-- wait behind -- and it would land on only one arm of the pair, since view
+-- externalizes messages and bare nvim draws them over the buffer.
+local function plugin(name)
+  return {{
+    dir = lazyroot .. name,
+    lazy = false,
+    config = function()
+      local notify = vim.notify
+      vim.notify = function() end
+      pcall(function()
+        require((name:gsub("%.nvim$", ""):gsub("%.lua$", ""))).setup({{}})
+      end)
+      vim.notify = notify
+    end,
+  }}
+end
+
+require("lazy").setup({{
+  spec = {{
+{spec}  }},
+  -- the state home, not the config copy: lazy rewrites its lockfile in
+  -- place, and the bench verifies every per-side fixture copy is still
+  -- byte-identical to its source once the run is over
+  lockfile = vim.fn.stdpath("state") .. "/lazy-lock.json",
+  install = {{ missing = false }},
+  checker = {{ enabled = false }},
+  change_detection = {{ enabled = false }},
+  ui = {{ border = "none" }},
+}})
+
+pcall(vim.cmd.colorscheme, "habamax")
+{treesitter}"#
+    )
+}
+
+/// The highlight enable a login writes once its treesitter plugin is
+/// installed. Kept out of the generic per-plugin `setup({})` pass because
+/// the module that enables highlighting is not the one named after the
+/// repository.
+const TREESITTER_HIGHLIGHT_LUA: &str = r#"
+pcall(function()
+  require("nvim-treesitter.configs").setup({
+    ensure_installed = {},
+    sync_install = false,
+    auto_install = false,
+    highlight = { enable = true },
+  })
+end)
+"#;
+
+/// Options a login sets before its plugins load.
+const USER_OPTIONS_LUA: &str = r#"local o = vim.opt
+o.number = true
+o.relativenumber = true
+o.signcolumn = "yes"
+o.cursorline = true
+o.termguicolors = true
+o.expandtab = true
+o.shiftwidth = 2
+o.tabstop = 2
+o.smartindent = true
+o.ignorecase = true
+o.smartcase = true
+o.undofile = true
+o.updatetime = 200
+o.scrolloff = 4
+o.splitright = true
+o.splitbelow = true
+o.completeopt = "menu,menuone,noselect"
+"#;
+
+/// Leader mappings a login installs at startup.
+const USER_KEYMAPS_LUA: &str = r#"local map = vim.keymap.set
+map("n", "<leader>w", "<cmd>write<cr>", { desc = "write" })
+map("n", "<leader>q", "<cmd>quit<cr>", { desc = "quit" })
+map("n", "<leader>h", "<cmd>nohlsearch<cr>", { desc = "clear search" })
+map("n", "<C-h>", "<C-w>h", { desc = "window left" })
+map("n", "<C-l>", "<C-w>l", { desc = "window right" })
+"#;
+
+/// Autocommands a login installs at startup.
+const USER_AUTOCMDS_LUA: &str = r#"vim.api.nvim_create_autocmd("TextYankPost", {
+  callback = function()
+    pcall(function()
+      vim.hl.on_yank({ timeout = 120 })
+    end)
+  end,
+})
+
+vim.api.nvim_create_autocmd("BufReadPost", {
+  callback = function(args)
+    local mark = vim.api.nvim_buf_get_mark(args.buf, '"')
+    if mark[1] > 0 and mark[1] <= vim.api.nvim_buf_line_count(args.buf) then
+      pcall(vim.api.nvim_win_set_cursor, 0, mark)
+    end
+  end,
+})
+"#;
+
+/// Writes the generated `user` fixture under `target/` and hands back its
+/// directory.
+///
+/// Its `lazy-lock.json` is a byte copy of the source fixture's, which is
+/// what makes the two share one cache directory: the bench keys
+/// `XDG_DATA_HOME` off the lockfile's own hash, so a copy resolves to the
+/// already-installed plugin set instead of cloning a second one.
+///
+/// Idempotent rather than torn down and rebuilt: two sides of one pair
+/// resolve their fixture directory independently, and a rebuild between
+/// them would delete the tree the first side is still reading. The one
+/// conditional file (the stall plugin) is removed explicitly when the knob
+/// is off, so a run without it can never inherit the previous run's.
+///
+/// # Errors
+///
+/// Returns [`FixtureError::EmptyPluginCache`] when the shared cache holds
+/// no installed plugin, [`FixtureError::SlowKnob`] for an unparsable stall
+/// knob, and [`FixtureError::Generate`] / [`FixtureError::Copy`] for any
+/// file the fixture could not be written from or to.
+pub fn generate_user_fixture() -> Result<PathBuf, FixtureError> {
+    generate_user_fixture_with_stall(user_fixture_slow_ms()?)
+}
+
+/// [`generate_user_fixture`] with the stall named outright instead of read
+/// from the environment, so a caller proving the stall loads does not have
+/// to mutate a process-wide variable to ask for one.
+///
+/// # Errors
+///
+/// The same as [`generate_user_fixture`], less the knob's own parse.
+pub fn generate_user_fixture_with_stall(slow_ms: u64) -> Result<PathBuf, FixtureError> {
+    let template = fixtures_root().join(USER_FIXTURE_PLUGIN_SOURCE);
+    let lockfile = template.join("nvim").join("lazy-lock.json");
+    let lock_bytes = std::fs::read(&lockfile).map_err(|source| FixtureError::Copy {
+        path: lockfile.clone(),
+        source,
+    })?;
+    let lazy_dir = cache_root()
+        .join(lockfile_cache_key(&lock_bytes))
+        .join("nvim")
+        .join("lazy");
+    let plugins = cached_plugin_names(&lazy_dir)?;
+
+    let dest = scratch_root("bench-fixtures").join(USER_FIXTURE);
+    let nvim = dest.join("nvim");
+    let config = nvim.join("lua").join("config");
+    write_generated(&nvim.join("init.lua"), render_user_init(&plugins, slow_ms))?;
+    write_generated(&nvim.join("lazy-lock.json"), lock_bytes)?;
+    write_generated(&config.join("options.lua"), USER_OPTIONS_LUA)?;
+    write_generated(&config.join("keymaps.lua"), USER_KEYMAPS_LUA)?;
+    write_generated(&config.join("autocmds.lua"), USER_AUTOCMDS_LUA)?;
+    let stall = nvim.join("slow-init");
+    if slow_ms > 0 {
+        write_generated(
+            &stall.join("plugin").join("stall.lua"),
+            // the receipt file is what separates "the stall ran" from "the
+            // spec entry was quietly ignored": both look like a fast run
+            // from outside, and only one of them is a proof
+            format!(
+                "local dir = vim.fn.stdpath(\"state\")\n\
+                 vim.fn.mkdir(dir, \"p\")\n\
+                 vim.fn.writefile({{ \"{slow_ms}\" }}, dir .. \"/{USER_FIXTURE_STALL_RECEIPT}\")\n\
+                 vim.wait({slow_ms})\n"
+            ),
+        )?;
+    } else {
+        let _ = std::fs::remove_dir_all(&stall);
+    }
+    copy_dir_recursive(&template.join("view"), &dest.join("view"))?;
+    Ok(dest)
+}
+
+/// Writes one generated fixture file, creating its parent directories.
+fn write_generated(path: &Path, content: impl AsRef<[u8]>) -> Result<(), FixtureError> {
+    let ctx = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| FixtureError::Generate { path, source }
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(ctx(parent))?;
+    }
+    std::fs::write(path, content).map_err(ctx(path))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -194,6 +591,129 @@ mod tests {
     #[test]
     fn lockfile_cache_key_differs_for_different_bytes() {
         assert_ne!(lockfile_cache_key(b"abc"), lockfile_cache_key(b"abd"));
+    }
+
+    /// Every plugin the cache holds must reach the spec: a name silently
+    /// dropped turns the login the row measures into a smaller one, and
+    /// the number still records as "a real config".
+    #[test]
+    fn the_generated_init_names_every_cached_plugin() {
+        let plugins = vec![
+            "lualine.nvim".to_string(),
+            "nvim-tree.lua".to_string(),
+            "plenary.nvim".to_string(),
+        ];
+        let init = render_user_init(&plugins, 0);
+        for name in &plugins {
+            assert!(
+                init.contains(&format!("plugin({name:?})")),
+                "{name} is missing from the generated spec:\n{init}"
+            );
+        }
+        assert!(
+            init.contains("install = { missing = false }"),
+            "the generated login must never clone mid-measurement:\n{init}"
+        );
+        assert!(
+            !init.contains("/opt/") && !init.contains("compat/.cache"),
+            "every path must resolve through stdpath inside the measured \
+             process, never a host path baked in here:\n{init}"
+        );
+        assert!(
+            init.contains("vim.notify = function() end"),
+            "a plugin that greets at require time would otherwise leave a \
+             message where the content marker has to appear:\n{init}"
+        );
+        assert!(
+            !init.contains("nvim-treesitter.configs"),
+            "highlighting must be enabled only when the cache holds the \
+             plugin that provides it:\n{init}"
+        );
+        let with_treesitter = render_user_init(&["nvim-treesitter".to_string()], 0);
+        assert!(
+            with_treesitter.contains("highlight = { enable = true }"),
+            "a login with treesitter installed highlights the file it \
+             opens, which is the largest cost in its attach \
+             window:\n{with_treesitter}"
+        );
+    }
+
+    /// The stall is opt-in and arrives as its own plugin directory, so an
+    /// ordinary run measures the unmodified login and the proof run
+    /// measures one extra loaded plugin.
+    #[test]
+    fn the_stall_plugin_is_absent_until_the_knob_asks_for_it() {
+        let plugins = vec!["lualine.nvim".to_string()];
+        assert!(
+            !render_user_init(&plugins, 0).contains("slow-init"),
+            "an unset knob must generate the login as it ships"
+        );
+        let slowed = render_user_init(&plugins, 50);
+        assert!(
+            slowed.contains(r#"{ dir = vim.fn.stdpath("config") .. "/slow-init", lazy = false }"#),
+            "the stall must load as a plugin of the fixture's own copy:\n{slowed}"
+        );
+    }
+
+    /// A knob nobody can parse must refuse rather than read as zero: a run
+    /// that silently measured the unmodified fixture would be reported as
+    /// the slowed one.
+    #[test]
+    fn an_unparsable_stall_knob_refuses_instead_of_defaulting_to_none() {
+        assert_eq!(parse_slow_ms(None).unwrap(), 0);
+        assert_eq!(parse_slow_ms(Some("  ".to_string())).unwrap(), 0);
+        assert_eq!(parse_slow_ms(Some(" 50 ".to_string())).unwrap(), 50);
+        let err = parse_slow_ms(Some("50ms".to_string())).unwrap_err();
+        assert!(
+            matches!(err, FixtureError::SlowKnob { ref value } if value == "50ms"),
+            "expected a refusal naming the value, got {err:?}"
+        );
+    }
+
+    /// The generated fixture is only a fixture because it resolves to the
+    /// same plugin install the `heavy` cells and the compat driver already
+    /// share: the bench keys `XDG_DATA_HOME` off the lockfile's hash, so a
+    /// lockfile that differed by one byte would key an empty second cache
+    /// and the row would measure a login with no plugins in it.
+    ///
+    /// Both outcomes are asserted because the cache is populated by a
+    /// compat or bench run, not by the test suite: on a tree that has
+    /// never run one, the generator must say so rather than hand back a
+    /// plugin-free login.
+    #[test]
+    fn the_generated_fixture_either_shares_the_plugin_cache_or_says_it_is_empty() {
+        let lockfile = fixtures_root()
+            .join(USER_FIXTURE_PLUGIN_SOURCE)
+            .join("nvim")
+            .join("lazy-lock.json");
+        let expected = std::fs::read(&lockfile).expect("the plugin-source fixture has a lockfile");
+        match generate_user_fixture() {
+            Ok(dir) => {
+                let generated = std::fs::read(dir.join("nvim").join("lazy-lock.json")).unwrap();
+                assert_eq!(
+                    lockfile_cache_key(&generated),
+                    lockfile_cache_key(&expected),
+                    "the generated fixture must key the same plugin cache directory"
+                );
+                let init = std::fs::read_to_string(dir.join("nvim").join("init.lua")).unwrap();
+                assert!(
+                    init.contains("plugin("),
+                    "a generated login with no plugin spec is not a login:\n{init}"
+                );
+                assert!(
+                    dir.join("view").join("view.toml").exists(),
+                    "the fixture must carry the view config every other fixture does"
+                );
+                assert!(
+                    !dir.join("nvim").join("slow-init").exists(),
+                    "a run with no knob set must not inherit an earlier run's stall"
+                );
+            }
+            Err(err) => assert!(
+                matches!(err, FixtureError::EmptyPluginCache { .. }),
+                "an unpopulated cache must say so; got {err:?}"
+            ),
+        }
     }
 
     #[test]

@@ -68,8 +68,8 @@ use view_harness::baselines::{self, CellId, CellMetrics};
 use view_harness::budgets;
 use view_harness::builds::{self, scenarios_reading, view_bin_flag, VIEW_BIN_FLAGS};
 use view_harness::fixture::{
-    cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
-    verify_nvim_matches_pin, workspace_root,
+    cache_root, copy_dir_recursive, current_engine_pin, fixture_source_dir, lockfile_cache_key,
+    verify_nvim_matches_pin, workspace_root, USER_FIXTURE,
 };
 
 /// Every measurable cell of the matrix, in run order.
@@ -83,6 +83,12 @@ const MATRIX: &[(&str, &str)] = &[
     ("scroll", "heavy"),
     ("first_paint", "minimal"),
     ("first_paint", "heavy"),
+    // the login-shaped third leg: the same plugin set as `heavy`, loaded
+    // the way a real config loads it (see `fixture::USER_FIXTURE`). Cold
+    // absolutes gate on a controlled class and record everywhere else, so
+    // adding it arms a bar on the classes that can witness one without
+    // turning a shared runner's spread into a red gate
+    ("first_paint", USER_FIXTURE),
     ("memory", "minimal"),
     ("remote_memory", "minimal"),
     ("flood", "minimal"),
@@ -637,13 +643,13 @@ impl Bins {
     }
 }
 
-/// Confirms the per-side fixture config copies still match the committed
+/// Confirms the per-side fixture config copies still match their source
 /// fixture byte for byte after a run that reuses one copy across many
 /// cold spawns: "untouched fixture" is part of the cold definition, and a
 /// plugin manager rewriting its lockfile mid-run would silently change
 /// what later samples measured.
 fn verify_fixture_copies_untouched(world: &CellWorld, fixture: &str) -> Result<()> {
-    let source = fixtures_root().join(fixture);
+    let source = fixture_source_dir(fixture)?;
     for side_tag in ["view", "nvim"] {
         let copy = world.hermetic_dir.join(side_tag).join("xdg_config_home");
         for entry in walk_files(&source)? {
@@ -2090,6 +2096,44 @@ mod tests {
                 1,
                 "a run whose only finding is {name} would print it and exit 0"
             );
+        }
+    }
+
+    /// Walks the fixture population rather than the cell the change added:
+    /// every fixture any matrix cell names must resolve to a config tree
+    /// the hermetic world can copy, whether it is committed or generated.
+    /// A cell naming a fixture nobody wrote fails the whole run at cell
+    /// setup, which is a late and expensive way to learn about a typo.
+    ///
+    /// The generated fixture is allowed to answer "the plugin cache is
+    /// empty" instead: it is built from a cache a compat or bench run
+    /// fills, and a tree that has never run one has nothing to build from.
+    #[test]
+    fn every_matrix_fixture_resolves_to_a_config_tree() {
+        let mut fixtures: Vec<&str> = MATRIX
+            .iter()
+            .chain(DIAGNOSTIC_MATRIX)
+            .map(|(_, fixture)| *fixture)
+            .collect();
+        fixtures.sort_unstable();
+        fixtures.dedup();
+        assert!(fixtures.contains(&USER_FIXTURE));
+        for fixture in fixtures {
+            match fixture_source_dir(fixture) {
+                Ok(dir) => assert!(
+                    dir.join("nvim").join("init.lua").exists(),
+                    "fixture {fixture:?} resolved to {}, which holds no nvim/init.lua",
+                    dir.display()
+                ),
+                Err(err) => assert!(
+                    fixture == USER_FIXTURE
+                        && matches!(
+                            err,
+                            view_harness::fixture::FixtureError::EmptyPluginCache { .. }
+                        ),
+                    "fixture {fixture:?} failed to resolve: {err}"
+                ),
+            }
         }
     }
 

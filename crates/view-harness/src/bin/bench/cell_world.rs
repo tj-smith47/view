@@ -41,7 +41,7 @@ impl CellWorld {
             .with_context(|| format!("creating {}", hermetic_dir.display()))?;
         let world = Self { hermetic_dir };
 
-        let fixture_dir = fixtures_root().join(fixture);
+        let fixture_dir = fixture_source_dir(fixture)?;
         if !fixture_dir.join("nvim").join("init.lua").exists() {
             bail!(
                 "fixture {fixture:?} has no {}/nvim/init.lua",
@@ -67,7 +67,7 @@ impl CellWorld {
         let side_dir = self.hermetic_dir.join(side_tag);
         std::fs::create_dir_all(&side_dir)
             .with_context(|| format!("creating {}", side_dir.display()))?;
-        let fixture_dir = fixtures_root().join(fixture);
+        let fixture_dir = fixture_source_dir(fixture)?;
 
         let xdg_config_home = side_dir.join("xdg_config_home");
         copy_dir_recursive(&fixture_dir, &xdg_config_home)
@@ -165,11 +165,11 @@ impl SideSetup {
     }
 }
 
-/// Settle bound before sampling starts: the heavy fixture's first-ever
-/// run may clone plugins into the shared cache, which dwarfs any paint
-/// settle; a warm cache settles in a couple of seconds.
+/// Settle bound before sampling starts: the plugin-carrying fixtures'
+/// first-ever run may clone plugins into the shared cache, which dwarfs
+/// any paint settle; a warm cache settles in a couple of seconds.
 pub(crate) fn settle_deadline(fixture: &str) -> Duration {
-    if fixture == "heavy" {
+    if matches!(fixture, "heavy" | USER_FIXTURE) {
         Duration::from_secs(300)
     } else {
         Duration::from_secs(30)

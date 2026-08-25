@@ -17,6 +17,26 @@ harness verifies the binary on `PATH` actually reports that version before
 recording anything. Plugin-heavy cells use a committed lazy.nvim fixture
 with 14 plugins pinned by its `lazy-lock.json`, driven through a real pty.
 
+### The three first-paint configs
+
+Cold start is measured against three named fixtures, and every first-paint
+number below says which one it belongs to:
+
+| fixture | what it is |
+|---|---|
+| `minimal` | no plugins at all: nvim's own startup and nothing else |
+| `heavy` | the committed 14-plugin lazy.nvim stack, loaded as that fixture's spec asks |
+| `user` | a login: the same pinned plugin set, every plugin loaded and set up at startup, plus the options, keymaps, autocmds, colorscheme and treesitter highlighting a real config carries |
+
+The `user` fixture is generated at run time from the plugin cache the
+harness already keeps, never committed: its plugin set *is* whatever that
+cache holds, and it shares the cache with `heavy` by carrying the same
+lockfile, so a run installs nothing. It exists because the two committed
+fixtures bracket cold start from below: a real config is what decides how
+long view's startup shell sits on screen saying it is waiting for Neovim,
+and until this fixture existed no recorded bar moved when that window got
+longer.
+
 ## Current numbers
 
 Recorded baselines on a shared Linux dev host:
@@ -24,14 +44,19 @@ Recorded baselines on a shared Linux dev host:
 | What | view | bare Neovim | |
 |---|---|---|---|
 | UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins (p99) | **25.2 ms** | 130.3 ms | **5.2x faster** |
-| First paint, cold, 14-plugin lazy.nvim stack (p99) | **79.3 ms** | 164.3 ms | **2.1x faster** |
+| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | 130.3 ms | **5.2x faster** |
+| First paint, cold, 14-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 164.3 ms | **2.1x faster** |
+| First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded | |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower |
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
 | Sustained scroll, 100k lines, 14-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
+
+The `user` row is measured by the same code as the two above it and lands
+with the next recorded baseline; it is listed empty rather than omitted so
+its absence is visible.
 
 The first row is unpaired on purpose: view paints its shell before it has
 even started the Neovim child, so bare Neovim has no comparable event. It
