@@ -307,7 +307,10 @@ impl InputSource {
     /// stop waiting: the answer it would have blocked the first frame for
     /// arrives here instead, and upgrades a session that is already
     /// editable. A run that is still a live
-    /// prefix of one waits for the read that finishes it. The first byte
+    /// prefix of one waits for the read that finishes it, and so does a
+    /// keypress whose own sequence is half arrived, whether or not the
+    /// terminal put bytes of its own behind it in the same read. The first
+    /// byte
     /// that leaves every grammar ends the answer there: everything from
     /// that byte on is the user's and is decoded
     /// ([`decode_residue`](crate::keys::decode_residue)) into the keys it
@@ -471,15 +474,14 @@ impl InputSource {
         // read that finishes it, exactly as a half-arrived answer does:
         // decoded now it would be dropped down to its `ESC [`, and its tail
         // would reach the next read alone and type an arrow's `A` into the
-        // buffer as a literal key. Only a tail that runs to the end of the
-        // buffer can still grow, so only that one is kept
-        let unfinished = if replies.consumed == guard.buf.len() {
-            typed.unfinished
-        } else {
-            0
-        };
-        replies.consumed -= unfinished;
+        // buffer as a literal key. It is put back in front of whatever the
+        // scan held on to rather than rewound over, because an answer
+        // between the two is consumed here and must not be scanned twice
+        let held = replies
+            .residue
+            .split_off(replies.residue.len() - typed.unfinished);
         guard.buf.drain(..replies.consumed);
+        guard.buf.splice(..0, held);
         self.guard_msgs.extend(typed.msgs);
         // only the fence ends the filtering: everything else the terminal
         // owes is still owed, whatever else has happened on the fd since

@@ -103,12 +103,24 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// is what a DECCKM application-cursor mode inherited from the spawning
 /// shell encodes arrows as, e.g. `ESC O A` for Up). One the tables below
 /// name decodes into the key it is, through the same [`encode_key`] every
-/// keystroke after startup goes through. One they do not is dropped down to
-/// its two-byte introducer, so the `ESC [` goes and everything typed behind
-/// it survives: forwarding an undecoded fragment byte by byte would inject
-/// garbage nvim then has to live with (`ESC O A` read as literal `O`+`A`
-/// opens a line and inserts text), while keeping the whole buffer back
-/// costs every key typed behind two bytes that were never a sequence.
+/// keystroke after startup goes through.
+///
+/// One they do not splits by whether it carries parameters. A run with
+/// them is the terminal reporting something (a mouse position, a focus
+/// change, a cursor position, a key this table is too old for) and is
+/// consumed whole, exactly as crossterm's parser consumes what it cannot
+/// name: typing `<lt>0;24;10M` out of an SGR mouse report is nine
+/// keystrokes nobody pressed. A run without them is the other reading of
+/// those two bytes -- an `<Esc>` and then someone typing -- so only the
+/// introducer goes and the keys behind it survive. Both are better than
+/// dropping the buffer from the `ESC` onward, which costs every key typed
+/// behind two bytes that were never a sequence.
+///
+/// A string sequence (`ESC P`, `ESC ]`, `ESC ^`, `ESC _`, `ESC X`) is a
+/// report too and is consumed through its terminator -- but only once the
+/// terminator has arrived: those same two bytes are Alt+Shift+P and
+/// Alt+`]`, which cannot be held back waiting for a string that may never
+/// come.
 ///
 /// A sequence whose final byte has not arrived is unfinished rather than
 /// unknown, and the difference is a whole keystroke: dropped now, its tail
@@ -116,8 +128,9 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// [`decode_residue`] reports the length of such a tail so a caller that
 /// can wait for the rest does; this entry point cannot and drops it.
 ///
-/// A bare `ESC` not followed by `[` or `O` is unambiguous and maps to
-/// `<Esc>`.
+/// `ESC` and a printable in the same run are Alt and that key, which is
+/// how crossterm reads them for the rest of the session. A lone trailing
+/// `ESC` is the Escape key and maps to `<Esc>`.
 #[must_use]
 pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
     decode_residue(residue)
@@ -140,6 +153,13 @@ pub(crate) struct ResidueDecode {
     /// How many bytes at the end of the run are the opening of a sequence
     /// whose final byte -- or, for a bracketed paste, whose closer -- has
     /// not arrived. Zero unless the run ends mid-sequence.
+    ///
+    /// A caller that runs out of time with one of these in hand drops it,
+    /// and for a paste that means the whole paste rather than part of it:
+    /// half a paste delivered is text truncated silently, and the bytes
+    /// behind the cut reach the next reader as literal keys, which in
+    /// normal mode are commands. Losing it whole is the answer that cannot
+    /// corrupt a buffer.
     pub(crate) unfinished: usize,
 }
 
@@ -156,7 +176,13 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
                         msgs.extend(msg);
                         i += len;
                     }
-                    Escape::Unknown => i += ESCAPE_INTRODUCER_LEN,
+                    Escape::Unknown { len, parameterised } => {
+                        i += if parameterised {
+                            len
+                        } else {
+                            ESCAPE_INTRODUCER_LEN
+                        };
+                    }
                     Escape::Unfinished => {
                         return ResidueDecode {
                             msgs,
@@ -166,8 +192,15 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
                 }
             }
             0x1b => {
-                msgs.push(key_msg("<Esc>"));
-                i += 1;
+                if let Some(len) = string_sequence_len(&residue[i..]) {
+                    i += len;
+                } else if let Some((len, msg)) = alt_key(&residue[i..]) {
+                    msgs.extend(msg);
+                    i += len;
+                } else {
+                    msgs.push(key_msg("<Esc>"));
+                    i += 1;
+                }
             }
             b'\r' | b'\n' => {
                 msgs.push(key_msg("<CR>"));
@@ -219,6 +252,11 @@ const ESCAPE_INTRODUCER_LEN: usize = 2;
 /// is from the moment view enters the alternate screen, before the
 /// capability probe has finished.
 const PASTE_OPEN_PARAMS: &[u8] = b"200";
+
+/// The spec's string terminator. `BEL` is the other one terminals write,
+/// and both end a report here for the same reason they do in the
+/// capability probe's own scan.
+const STRING_TERMINATOR: &[u8] = b"\x1b\\";
 const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 
 /// How the residue decoder reads one `ESC [` / `ESC O` run.
@@ -226,8 +264,10 @@ enum Escape {
     /// A complete sequence `len` bytes long, and the message it is (`None`
     /// for one with no nvim equivalent, which is consumed all the same).
     Decoded { len: usize, msg: Option<Msg> },
-    /// Complete, and nothing this decoder's tables name.
-    Unknown,
+    /// Complete, and nothing this decoder's tables name. `parameterised`
+    /// is what tells a terminal's report (consume all `len` bytes) from an
+    /// `<Esc>` with typing behind it (consume the introducer only).
+    Unknown { len: usize, parameterised: bool },
     /// Its final byte, or its paste closer, has not arrived.
     Unfinished,
 }
@@ -240,7 +280,12 @@ fn escape_sequence(run: &[u8]) -> Escape {
         };
         return match cursor_key(final_byte) {
             Some(code) => decoded(3, code, KeyModifiers::NONE),
-            None => Escape::Unknown,
+            // SS3 carries no parameters, so an unnamed one reads as the
+            // `<Esc>` `O` it equally is
+            None => Escape::Unknown {
+                len: 3,
+                parameterised: false,
+            },
         };
     }
     csi_sequence(run)
@@ -262,23 +307,95 @@ fn csi_sequence(run: &[u8]) -> Escape {
         return paste(run, len);
     }
     let fields = param_fields(params);
-    let modifier = modifiers(fields.get(1).copied());
+    let modifier = modifiers(field(&fields, 1));
+    let unnamed = Escape::Unknown {
+        len,
+        parameterised: !fields.is_empty(),
+    };
     match final_byte {
         b'~' => match tilde_key(&fields) {
             Some((code, mods)) => decoded(len, code, mods),
-            None => Escape::Unknown,
+            None => unnamed,
         },
         // the kitty keyboard protocol's own form, which a terminal keeps
-        // speaking for as long as some earlier process left it pushed
-        b'u' => match fields.first().copied().and_then(char_key) {
-            Some(code) => decoded(len, code, modifier),
-            None => Escape::Unknown,
+        // speaking for as long as some earlier process left it pushed. Its
+        // modifier field carries the event type as a sub-parameter, and a
+        // release is not a keypress
+        b'u' => match kitty_key(&fields) {
+            Some((code, mods)) => Escape::Decoded {
+                len,
+                msg: encode_key(&KeyEvent::new_with_kind(code, mods, event_kind(&fields)))
+                    .map(key_msg),
+            },
+            None => unnamed,
         },
+        // a focus report, which `event_to_msg` also drops for crossterm's
+        // own events -- and which typed through would insert at the line
+        // start or open a line above
+        b'I' | b'O' if fields.is_empty() => Escape::Decoded { len, msg: None },
+        // `CSI R` with parameters is a cursor-position report; without
+        // them it is the F3 this table and crossterm's both name
+        b'R' if !fields.is_empty() => Escape::Decoded { len, msg: None },
         _ => match cursor_key(final_byte) {
             Some(code) => decoded(len, code, modifier),
-            None => Escape::Unknown,
+            None => unnamed,
         },
     }
+}
+
+/// The kitty protocol's `base:shifted` alternate-key pair: with `Shift`
+/// held a terminal reports both what the key is and what it typed, and
+/// the one that reaches the buffer is the second. Crossterm resolves the
+/// pair the same way, dropping the modifier the terminal has already
+/// applied so `Shift`+`a` does not arrive as `<S-a>`.
+fn kitty_key(fields: &[Vec<u32>]) -> Option<(KeyCode, KeyModifiers)> {
+    let mods = modifiers(field(fields, 1));
+    match fields.first()?.get(1) {
+        Some(&shifted) if mods.contains(KeyModifiers::SHIFT) => {
+            Some((char_key(shifted)?, mods.difference(KeyModifiers::SHIFT)))
+        }
+        _ => Some((char_key(field(fields, 0)?)?, mods)),
+    }
+}
+
+/// The string sequences a terminal reports with -- DCS, OSC, SOS, PM, APC
+/// -- as the length of one, terminator included, or `None` when these
+/// bytes are not one (yet).
+///
+/// A terminator that has not arrived reads as `None` rather than as an
+/// unfinished sequence on purpose: `ESC P` and `ESC ]` are Alt+Shift+P and
+/// Alt+`]`, and holding every one of them against a string that may never
+/// come would cost a keypress to save a report.
+fn string_sequence_len(run: &[u8]) -> Option<usize> {
+    if !matches!(run.get(1)?, b'P' | b']' | b'^' | b'_' | b'X') {
+        return None;
+    }
+    let body = run.get(2..)?;
+    let st = body
+        .windows(STRING_TERMINATOR.len())
+        .position(|window| window == STRING_TERMINATOR)
+        .map(|at| at + STRING_TERMINATOR.len());
+    let bel = body.iter().position(|&byte| byte == 0x07).map(|at| at + 1);
+    Some(2 + [st, bel].into_iter().flatten().min()?)
+}
+
+/// `ESC` and one key in the same run: crossterm reads that as the key with
+/// Alt held (its parser recurses on the byte after the `ESC` and ors the
+/// modifier in), so a `<M-...>` mapping resolves the same inside this
+/// window as outside it. `None` for a run that is a lone `ESC`, or one
+/// whose next byte no single key produces.
+fn alt_key(run: &[u8]) -> Option<(usize, Option<Msg>)> {
+    let code = match *run.get(1)? {
+        b'\r' | b'\n' => KeyCode::Enter,
+        b'\t' => KeyCode::Tab,
+        0x7f | 0x08 => KeyCode::Backspace,
+        byte if (0x20..=0x7e).contains(&byte) => KeyCode::Char(byte as char),
+        _ => return None,
+    };
+    Some((
+        2,
+        encode_key(&KeyEvent::new(code, KeyModifiers::ALT)).map(key_msg),
+    ))
 }
 
 fn decoded(len: usize, code: KeyCode, mods: KeyModifiers) -> Escape {
@@ -303,22 +420,51 @@ fn paste(run: &[u8], body_at: usize) -> Escape {
     }
 }
 
-/// The numeric parameters of a CSI, with an omitted or unreadable one as
-/// `0` -- a value none of the tables below accepts, so it resolves to the
-/// same "not a key this decoder names" as any other unknown.
-fn param_fields(params: &[u8]) -> Vec<u32> {
+/// The numeric parameters of a CSI, each split into its sub-parameters,
+/// with an omitted or unreadable one as `0` -- a value none of the tables
+/// below accepts, so it resolves to the same "not a key this decoder
+/// names" as any other unknown.
+///
+/// Sub-parameters are not decoration: the kitty protocol spells an
+/// alternate key as `base:shifted` and an event type as `mods:event`, and
+/// a parser that splits on `;` alone reads the whole field as unparseable
+/// and types the `:` into the buffer.
+fn param_fields(params: &[u8]) -> Vec<Vec<u32>> {
     if params.is_empty() {
         return Vec::new();
     }
     params
         .split(|&byte| byte == b';')
         .map(|field| {
-            std::str::from_utf8(field)
-                .ok()
-                .and_then(|digits| digits.parse().ok())
-                .unwrap_or(0)
+            field
+                .split(|&byte| byte == b':')
+                .map(|sub| {
+                    std::str::from_utf8(sub)
+                        .ok()
+                        .and_then(|digits| digits.parse().ok())
+                        .unwrap_or(0)
+                })
+                .collect()
         })
         .collect()
+}
+
+/// Parameter `at`, as the first of its sub-parameters -- the base key of a
+/// kitty `base:shifted` pair, and the plain value of every other field.
+fn field(fields: &[Vec<u32>], at: usize) -> Option<u32> {
+    fields.get(at)?.first().copied()
+}
+
+/// The kitty event type, carried as the modifier field's second
+/// sub-parameter: 1 press, 2 repeat, 3 release. [`encode_key`] is what
+/// then drops a release, so this decode and crossterm's agree on which
+/// events become keys.
+fn event_kind(fields: &[Vec<u32>]) -> KeyEventKind {
+    match fields.get(1).and_then(|field| field.get(1)) {
+        Some(2) => KeyEventKind::Repeat,
+        Some(3) => KeyEventKind::Release,
+        _ => KeyEventKind::Press,
+    }
 }
 
 /// xterm's modifier parameter: a bitfield offset by one, so an absent
@@ -360,12 +506,12 @@ fn cursor_key(final_byte: u8) -> Option<KeyCode> {
 /// A `~`-terminated CSI: the keypad and function keys, plus xterm's
 /// `modifyOtherKeys` form (`CSI 27 ; mods ; code ~`), which spells an
 /// ordinary key whose modifiers the legacy encoding could not carry.
-fn tilde_key(fields: &[u32]) -> Option<(KeyCode, KeyModifiers)> {
-    if let [27, mods, code] = fields {
-        return Some((char_key(*code)?, modifiers(Some(*mods))));
+fn tilde_key(fields: &[Vec<u32>]) -> Option<(KeyCode, KeyModifiers)> {
+    if fields.len() == 3 && field(fields, 0) == Some(27) {
+        return Some((char_key(field(fields, 2)?)?, modifiers(field(fields, 1))));
     }
-    let code = keypad_key(*fields.first()?)?;
-    Some((code, modifiers(fields.get(1).copied())))
+    let code = keypad_key(field(fields, 0)?)?;
+    Some((code, modifiers(field(fields, 1))))
 }
 
 fn keypad_key(code: u32) -> Option<KeyCode> {
@@ -379,6 +525,8 @@ fn keypad_key(code: u32) -> Option<KeyCode> {
         11..=15 => KeyCode::F(u8::try_from(code - 10).ok()?),
         17..=21 => KeyCode::F(u8::try_from(code - 11).ok()?),
         23..=26 => KeyCode::F(u8::try_from(code - 12).ok()?),
+        28..=29 => KeyCode::F(u8::try_from(code - 15).ok()?),
+        31..=34 => KeyCode::F(u8::try_from(code - 17).ok()?),
         _ => return None,
     })
 }
@@ -594,7 +742,13 @@ mod tests {
     #[test]
     fn residue_bare_esc_not_followed_by_bracket_maps_to_esc_token() {
         assert_eq!(encode_residue_bytes(b"\x1b"), vec!["<Esc>"]);
-        assert_eq!(encode_residue_bytes(b"\x1bx"), vec!["<Esc>", "x"]);
+        // `ESC` and a key in one run is that key with Alt held, which is
+        // how crossterm reads the pair everywhere else in the session
+        assert_eq!(encode_residue_bytes(b"\x1bx"), vec!["<M-x>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b\r"), vec!["<M-CR>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b<"), vec!["<M-lt>"]);
+        // and the `ESC` that ends a run is still the Escape key
+        assert_eq!(encode_residue_bytes(b"ok\x1b"), vec!["o", "k", "<Esc>"]);
     }
 
     #[test]
@@ -645,16 +799,62 @@ mod tests {
         assert_eq!(encode_residue_bytes(b"\x1b[27u"), vec!["<Esc>"]);
         // xterm's modifyOtherKeys spelling of the same kind of key
         assert_eq!(encode_residue_bytes(b"\x1b[27;5;13~"), vec!["<C-CR>"]);
+        // an alternate-key pair reports both the key and what it typed,
+        // and the buffer gets what it typed
+        assert_eq!(encode_residue_bytes(b"\x1b[97:65;2u"), vec!["A"]);
+        // a release is not a keypress, and its event type says so
+        assert!(encode_residue_bytes(b"\x1b[97;5:3u").is_empty());
+        assert_eq!(encode_residue_bytes(b"\x1b[97;5:1u"), vec!["<C-a>"]);
+        // the function-key rows above F12, which the same terminals send
+        assert_eq!(encode_residue_bytes(b"\x1b[28~"), vec!["<F13>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b[34~"), vec!["<F17>"]);
     }
 
     #[test]
-    fn residue_a_terminal_report_lands_as_an_unmapped_key_not_as_its_digits() {
+    fn residue_a_terminal_report_is_consumed_rather_than_typed() {
         // `CSI R` answers "where is the cursor" and shares its final byte
-        // with F3. Both readings are wrong for one of the two, and this is
-        // the harmless one: an unmapped function key rather than `40R`
-        // typed into a normal-mode buffer, where it replaces forty
-        // characters
-        assert_eq!(encode_residue_bytes(b"\x1b[1;40R"), vec!["<C-S-M-F3>"]);
+        // with F3. Its parameters are what tell the two apart: a report
+        // carries them, the key does not
+        assert!(encode_residue_bytes(b"\x1b[1;40R").is_empty());
+        assert_eq!(encode_residue_bytes(b"\x1b[R"), vec!["<F3>"]);
+        for report in [
+            // an SGR mouse press, which typed through is nine keystrokes
+            b"\x1b[<0;24;10M".as_slice(),
+            // focus in and out, which `event_to_msg` drops for crossterm's
+            // own events too
+            b"\x1b[I".as_slice(),
+            b"\x1b[O".as_slice(),
+            // a key no table here names, in a form that cannot be anything
+            // but a sequence
+            b"\x1b[3;2;9^".as_slice(),
+        ] {
+            assert!(
+                encode_residue_bytes(report).is_empty(),
+                "{report:?} must not reach the buffer"
+            );
+        }
+        // and the keys behind one still do
+        assert_eq!(encode_residue_bytes(b"\x1b[<0;24;10Mok"), vec!["o", "k"]);
+    }
+
+    #[test]
+    fn residue_a_string_report_is_consumed_only_once_its_terminator_lands() {
+        // DCS, OSC and APC answers: consumed whole, keys behind them kept
+        for report in [
+            b"\x1bP1$r0m\x1b\\ok".as_slice(),
+            b"\x1b]11;rgb:1f1f/1f1f/1f1f\x07ok".as_slice(),
+            b"\x1b_Gi=1;OK\x1b\\ok".as_slice(),
+        ] {
+            assert_eq!(
+                encode_residue_bytes(report),
+                vec!["o", "k"],
+                "{report:?} must be consumed whole"
+            );
+        }
+        // without a terminator the same two bytes are the Alt chord they
+        // also are, and holding them back would cost the keypress
+        assert_eq!(encode_residue_bytes(b"\x1bP"), vec!["<M-P>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b]"), vec!["<M-]>"]);
     }
 
     #[test]
