@@ -1129,15 +1129,57 @@ mod tests {
         let (_, body) = source
             .split_once("\nfn main() -> Result<()> {")
             .expect("main.rs still defines fn main");
-        let body = body.split_once("\n}\n").map_or(body, |(body, _)| body);
-        // without the comment lines a marker can only ever resolve to code:
-        // every step below is named in the prose around its own call site
-        // too, and a pin that measured the mention rather than the call
-        // would keep passing with the call moved out of the window
-        body.lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
+        code_only(body.split_once("\n}\n").map_or(body, |(body, _)| body))
+    }
+
+    /// `source` with every comment gone -- `/* … */` spans and the `//`
+    /// tail of every line, not only lines that open with one -- so a
+    /// marker can resolve to code and nothing else. Every step the pins
+    /// below name is named in the prose around its own call site too, and
+    /// a pin measuring the mention rather than the call keeps passing with
+    /// the call moved out of the window.
+    ///
+    /// Quote-blind, deliberately: `fn main` holds no string containing a
+    /// comment introducer (only comments containing quotes, which go
+    /// whole), and the failure mode of stripping too much is loud rather
+    /// than silent. Deleting text never reorders what is left, so an
+    /// over-strip can only make a marker missing -- which `offset_of`
+    /// reports -- never make one compare in the wrong order.
+    fn code_only(source: &str) -> String {
+        let mut spanless = String::with_capacity(source.len());
+        let mut rest = source;
+        while let Some((before, after)) = rest.split_once("/*") {
+            spanless.push_str(before);
+            rest = after.split_once("*/").map_or("", |(_, after)| after);
+        }
+        spanless.push_str(rest);
+        spanless
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The pins locate a step by its text, and prose quotes those steps
+    /// constantly; this is what keeps the two apart.
+    #[test]
+    fn a_step_named_only_in_a_comment_is_not_a_step_the_pins_can_find() {
+        let body = "    let probe = term\n        .other_call(); // .settle_probe() in prose\n\
+                    /* .engine_result() spanning\n   two lines */\n    let x = 1;\n";
+        let code = code_only(body);
+
+        for buried in [".settle_probe()", ".engine_result()"] {
+            assert!(
+                !code.contains(buried),
+                "`{buried}` survived in a comment, so a pin naming it can \
+                 measure prose instead of the call it guards"
+            );
+        }
+        assert!(
+            code.contains(".other_call();") && code.contains("let x = 1;"),
+            "the code around the comments has to survive, or every pin \
+             reads as \"this step is gone\""
+        );
     }
 
     fn offset_of(marker: &str) -> usize {
