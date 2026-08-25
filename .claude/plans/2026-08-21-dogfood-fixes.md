@@ -608,6 +608,52 @@ then `view <file>` from this ssh login (the user's session shape) comes
 up Full, `VIEW_LOG` caps line quoted in the report. Latency statement
 required (startup path).
 
+## T31 — first paint gains a user-shaped fixture
+
+The `first_paint` row measures `minimal` and `heavy` fixtures that view
+ships. A real login (lazy.nvim plus the plugins the compat cache already
+holds) attaches later than either, and nothing gates it: the shell shows
+"waiting for nvim" for as long as the user's own init takes, and no bar
+moves. Add a `user` fixture to `first_paint` built from the compat cache's
+plugin set (the fixture is generated at bench time from the cache, never
+committed as plugin sources), record it on the controlled classes, and let
+the shared classes carry it record-only like the other cold absolutes. The
+row's docs state which fixture each number belongs to. Evidence: the bench
+report lists `first_paint.user` next to `minimal`/`heavy` with its own
+`shell_visible_cold_ms` and `marker_cold_ms`; a deliberately slowed init in
+the fixture (a `vim.wait(50)` in a test-only plugin) trips the controlled
+gate and nothing else.
+
+## T32 — the gh record leg tolerates the runner's own spread
+
+The gh-linux bench leg exited 3 on `scroll.ratio_p50` 2.54 against the
+recorded 1.97, and the same commit on the coordinated quiet dev-linux host
+measured 1.620 against that class's 1.605 bar (+1%) with the nvim-vs-nvim
+control on the gh run moved +18%: the runner, not the code. The mechanism:
+`plan_record` marks a held metric as a masked regression when
+`value > headroom.bar(recorded)`, and the gh classes have no
+`<class>.headroom.toml`, so every metric there is judged by the compiled
+default (`ratio_p50` 1.25) that the runner's spread exceeds.
+
+Give `gh-linux` and `gh-macos` a headroom sidecar sized the way
+`dev-linux.headroom.toml` sizes its entries: replicates, median, half-width,
+worst excursion over the recorded value, the 2x half-width rule, and a
+provenance comment per entry. The replicates are the bench legs already run
+on master and on this branch's CI: harvest every `scroll.ratio_p50` (and the
+other gated ratios the same legs measured) from the last runs' logs per
+class rather than spending new runner time. Scope entries to the scenario
+where the spread is the scenario's, host-wide where it is the host's, as
+the dev-linux file does. The record leg keeps exiting 3 past the sized
+factor: a breach beyond the class's own spread is still a finding.
+
+A unit test in `baselines` pins the case: the gh-linux sidecar loaded, a
+`plan_record` over recorded 1.97 and measured 2.54 for `scroll.ratio_p50`
+reports no masked regression, and measured `1.97 x factor + epsilon` does.
+`scripts/check-budget-drift.sh` (or its equivalent) reads the new files.
+Evidence: the next master bench run's gh-linux and gh-macos legs exit 0 with
+the same code that exited 3, or exit 3 with a reading the sidecar's
+provenance says is outside the runner's band.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
