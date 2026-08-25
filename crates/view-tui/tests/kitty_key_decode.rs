@@ -28,6 +28,8 @@ const SHIFT_ENTER_THEN_CTRL_I: &[u8] = b"\x1b[13;2u\x1b[105;5u";
 
 #[test]
 fn csi_u_keys_reach_nvim_notation_as_shift_enter_and_ctrl_i() {
+    // this test's failure mode is a block, not a wrong answer
+    let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
     let mut input = InputSource::open().unwrap();
 

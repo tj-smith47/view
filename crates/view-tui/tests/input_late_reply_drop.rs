@@ -14,6 +14,12 @@
 //! process-wide reader binds to anything, is what makes that reachable.
 //! Descriptor 0 is process state, so this file deliberately holds one test.
 
+//!
+//! One wall clock this cannot scale: every phase has to land inside
+//! `PROBE_HARD_CAP` of arming the guard, or the guard expires mid-test.
+//! The phases are writes and reads rather than sleeps, so the margin is
+//! three orders of magnitude -- but a host that stalls this process for
+//! 400ms between two of them fails the test without the code being wrong.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -34,6 +40,8 @@ const LATE_BATCH_THEN_KEY: &[u8] =
 fn a_reply_arriving_after_the_probe_gave_up_never_reaches_the_engine() {
     use std::os::fd::AsFd;
 
+    // this test's failure mode is a block, not a wrong answer
+    let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
 
     // opened while the queue is empty, so crossterm's reader binds to this

@@ -245,7 +245,15 @@ struct LateReplyGuard {
     /// kept back to see what follows them. Cleared by the first keystroke
     /// that comes through; the filtering itself outlives it.
     hold: bool,
+    /// Whether the last sweep ended holding an ambiguous introducer that
+    /// the next read must either complete into a reply or lose.
+    kept_introducer: bool,
 }
+
+/// The length of `ESC [`: the one remainder shape that is equally the
+/// opening of a keypress, and so the only one ever dropped on its own.
+#[cfg(unix)]
+const CSI_INTRODUCER_LEN: usize = 2;
 
 /// The signals that must end the session through view's own teardown
 /// rather than where they land.
@@ -308,13 +316,29 @@ impl InputSource {
     ///
     /// *Holding* is the half that costs. A trailing `ESC [` is either a
     /// reply the terminal has begun or the first two bytes of an arrow key,
-    /// and keeping it back to find out means keeping back everything typed
-    /// behind it -- the residue encoder drops a buffer from an ambiguous
-    /// `ESC [` onward, so a held prefix takes the next keystrokes with it.
-    /// The first keystroke through the guard ends that: from then on an
-    /// ambiguous remainder is handed over at once and only the two shapes a
-    /// keyboard cannot produce (a private-mode CSI, a DCS -- what
-    /// `tiers::is_terminal_only_remainder` recognizes) are still waited on.
+    /// and keeping it back means keeping back everything typed behind it:
+    /// the residue decoder discards a buffer from an ambiguous `ESC [`
+    /// onward, so a kept introducer takes the next keystrokes with it. Once
+    /// the user has typed, an introducer gets exactly one more read to
+    /// become a reply; if it does not, those two bytes alone are dropped --
+    /// the decoder would have discarded them either way -- and everything
+    /// behind them is decoded as the keys it is. The shapes a keyboard
+    /// cannot produce (a private-mode CSI, the batch's own DCS answer: what
+    /// `tiers::is_terminal_only_remainder` recognizes) are waited on for as
+    /// long as the guard lives.
+    ///
+    /// Nothing of the user's is dropped unseen. When the fence lands or the
+    /// cap expires, whatever is still buffered goes to that same decoder --
+    /// unless it is provably the terminal's own half-arrived answer, which
+    /// is dropped, because replaying that would type the answer into the
+    /// buffer.
+    ///
+    /// One shape stays out of reach: a reply split immediately after its
+    /// `ESC`. A lone trailing `ESC` is residue by policy -- it is the
+    /// Escape key -- so a `[ ? 2 0 2 6 ; 1 $ y` tail arrives with no
+    /// introducer in front of it and reads as literal keys. Closing that
+    /// would mean holding every Escape for a read, which is the one key
+    /// that cannot afford it.
     ///
     /// A separate constructor rather than a call after `open`, because
     /// `open` itself lets crossterm's reader touch the terminal: a reply
@@ -393,6 +417,7 @@ impl InputSource {
                 until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
                 buf: Vec::new(),
                 hold: true,
+                kept_introducer: false,
             });
             // ahead of the crossterm touch below, which reads: the guard
             // has to own the terminal from this handle's first byte
@@ -410,35 +435,60 @@ impl InputSource {
             return;
         };
         if std::time::Instant::now() >= guard.until {
+            // out of time is not proof of anything about bytes that could
+            // still be a keypress, so those go to the decoder rather than
+            // dying with the guard. What is provably the terminal's own
+            // half-arrived answer does die here: replaying it as keys would
+            // type the answer into the buffer
+            if !crate::tiers::is_terminal_only_remainder(&guard.buf) {
+                self.queue_residue(&guard.buf);
+            }
             return;
         }
         while let Some(chunk) = read_ready(self.tty.as_fd()) {
             guard.buf.extend_from_slice(&chunk);
         }
+        // an introducer kept over a read that did not complete it into a
+        // reply is not one. Only those two bytes go: the decoder discards a
+        // buffer from an ambiguous `ESC [` onward, so leaving them in front
+        // would take every key typed behind them with them
+        if guard.kept_introducer
+            && guard.buf.len() > CSI_INTRODUCER_LEN
+            && !crate::tiers::is_terminal_only_remainder(&guard.buf)
+        {
+            guard.buf.drain(..CSI_INTRODUCER_LEN);
+        }
         let replies = crate::tiers::scan_replies(&guard.buf);
         guard.buf.drain(..replies.consumed);
-        let mut forward = replies.residue;
-        // read before the keystroke below clears the hold: an ambiguous
-        // remainder that arrived in the same read as the keystroke is still
-        // kept, because the rest of it has not arrived yet and the typed
-        // byte ahead of it is already on its way out
-        let hand_back_ambiguous = !guard.hold;
-        if !forward.is_empty() {
+        if !replies.residue.is_empty() {
             guard.hold = false;
         }
-        if hand_back_ambiguous && !crate::tiers::is_terminal_only_remainder(&guard.buf) {
-            forward.append(&mut guard.buf);
+        // the hold is what a keystroke ends, and it ends by degrees: an
+        // ambiguous remainder still gets the one read that would prove it a
+        // reply, and no more
+        guard.kept_introducer = !guard.hold
+            && !guard.buf.is_empty()
+            && !crate::tiers::is_terminal_only_remainder(&guard.buf);
+        self.queue_residue(&replies.residue);
+        // only the fence ends the filtering: everything else the terminal
+        // owes is still owed, whatever else has happened on the fd since
+        if replies.da1 {
+            if !crate::tiers::is_terminal_only_remainder(&guard.buf) {
+                self.queue_residue(&guard.buf);
+            }
+        } else {
+            self.guard = Some(guard);
         }
+    }
+
+    /// Queues `bytes` as the keys they decode to, for a caller that has
+    /// read them off the terminal ahead of crossterm.
+    fn queue_residue(&mut self, bytes: &[u8]) {
         self.guard_keys.extend(
-            crate::keys::encode_residue_bytes(&forward)
+            crate::keys::encode_residue_bytes(bytes)
                 .into_iter()
                 .map(|notation| Msg::Key(Key { notation })),
         );
-        // only the fence ends the filtering: everything else the terminal
-        // owes is still owed, whatever else has happened on the fd since
-        if !replies.da1 {
-            self.guard = Some(guard);
-        }
     }
 
     /// The terminal read fd, for readiness polling only.

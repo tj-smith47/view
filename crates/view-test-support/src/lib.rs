@@ -287,6 +287,55 @@ pub fn host_deadline(base: Duration) -> Duration {
     HostBudget::host_only(base).total()
 }
 
+/// How long a test may make no progress at all before its own process ends
+/// it, before [`watchdog`] scales it for the host's load.
+///
+/// Generous on purpose: this bounds a wedge, not a runtime. A test that has
+/// not reached its own end in this long is not a slow test, it is one
+/// blocked on something that will never arrive -- a read on a descriptor
+/// whose bytes another parser already took, a lock nobody releases.
+const WEDGE_BOUND: Duration = Duration::from_secs(20);
+
+/// Disarms the watchdog that produced it when dropped. Bind it (`let
+/// _watchdog = ...`) for the length of the test rather than discarding it.
+pub struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Ends the process, non-zero, if the test that armed this has not finished
+/// within [`WEDGE_BOUND`] scaled by the load this run started under.
+///
+/// For the tests whose own failure mode is a block rather than a wrong
+/// answer: a drain that never returns reports nothing at all, and the suite
+/// stalls until whatever outer timeout is watching it, which is minutes of
+/// nothing instead of one named failure.
+///
+/// It aborts rather than panics because a panic on this thread is not the
+/// test's panic: the blocked thread stays blocked and the harness still
+/// never finishes. Aborting is the only exit a wedged process can be given
+/// from the outside, and it is what makes the wedge a reported failure.
+#[must_use]
+pub fn watchdog() -> Watchdog {
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let armed = std::sync::Arc::clone(&done);
+    let bound = host_deadline(WEDGE_BOUND);
+    std::thread::spawn(move || {
+        std::thread::sleep(bound);
+        if !armed.load(Ordering::Relaxed) {
+            eprintln!(
+                "no progress in {bound:?}: a test that blocks reports \
+                 nothing, so this ends the process instead"
+            );
+            std::process::abort();
+        }
+    });
+    Watchdog(done)
+}
+
 /// What a 1-minute load average of `load` multiplies the host's share by.
 ///
 /// Contention, not raw runnable count: a load of four is idle on a

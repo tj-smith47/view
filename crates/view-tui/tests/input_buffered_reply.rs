@@ -36,6 +36,8 @@ const REPLY_THEN_KEY: &[u8] = b"\x1b[?62;1;6ca";
 fn has_buffered_reports_a_key_parsed_behind_a_dropped_capability_reply() {
     use std::os::fd::AsFd;
 
+    // this test's failure mode is a block, not a wrong answer
+    let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
 
     // opened while the queue is empty, so crossterm's reader binds to this

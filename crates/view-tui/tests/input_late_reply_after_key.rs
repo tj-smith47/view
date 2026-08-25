@@ -9,6 +9,12 @@
 //!
 //! Descriptor 0 is process state, so this file holds one test.
 
+//!
+//! One wall clock this cannot scale: every phase has to land inside
+//! `PROBE_HARD_CAP` of arming the guard, or the guard expires mid-test.
+//! The phases are writes and reads rather than sleeps, so the margin is
+//! three orders of magnitude -- but a host that stalls this process for
+//! 400ms between two of them fails the test without the code being wrong.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -25,6 +31,8 @@ const WHOLE_LATE_REPLY: &[u8] = b"\x1b[?2026;1$y";
 fn a_reply_that_lands_whole_after_the_first_keystroke_is_still_dropped() {
     use std::os::fd::AsFd;
 
+    // this test's failure mode is a block, not a wrong answer
+    let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
     let mut input = InputSource::open_guarded().unwrap();
 
