@@ -77,7 +77,9 @@ fi
 # for that exchange: created by hand after the peer session (cfgd-*) says
 # "go", removed when it is told "released". Its age caps a forgotten lock.
 QUIET_LOCK="$HOME/.cache/view-quiet-host.lock"
-if printf %s "$FLAT" | grep -qE '\btask\b[^|;&]*\b(bench|bench-micro|perf-audit|heartbeat-ab)\b'; then
+# anchored to the task name: a path such as crates/view-bench/... inside a
+# `task commit PATHS=` list is not a measurement
+if printf %s "$FLAT" | grep -qE '\btask\b[[:space:]]+(bench|bench-micro|perf-audit|heartbeat-ab)([[:space:]]|$)'; then
   if [[ ! -f "$QUIET_LOCK" ]] || (( $(date +%s) - $(stat -c %Y "$QUIET_LOCK") > 7200 )); then
     echo "BLOCKED: quiet-host measurement without coordination. Message the peer session (ListAgents → cfgd-*) to hold heavy cargo work, wait for its \"go\", then \`touch $QUIET_LOCK\` and re-run; \`rm\` the lock and tell the peer \"released\" when done. A lock older than 2h is stale." >&2
     exit 2

@@ -79,6 +79,11 @@ check() {
 block_push() { check 2 'push requires' "$1" "$2"; }
 block_commit() { check 2 'commit via' "$1" "$2"; }
 allow() { check 0 '' "$1" "$2"; }
+# the quiet-host guard reads its lock under $HOME, so an empty HOME is a host
+# with no coordination receipt
+block_bench() { HOME="$NOLOCK_HOME" check 2 'quiet-host' "$1" "$2"; }
+NOLOCK_HOME="$(mktemp -d "${TMPDIR:-/tmp}/validate-commands-home.XXXXXX")"
+trap 'rm -rf "$NOLOCK_HOME"' EXIT
 
 # ---------------------------------------------------------------------------
 # must pass through to the interactive ask: a singular, standalone push.
@@ -172,6 +177,11 @@ allow 'version' 'git --version'
 allow 'a proxied read-only git call' 'rtk git status'
 allow 'an unrelated command' 'cargo test --workspace'
 allow 'the ci gate' 'task ci'
+allow 'a commit naming a path under view-bench' 'task commit PATHS="crates/view-bench/baselines/gh-linux.headroom.toml" -- -m "fix: x"'
+allow 'a quick commit naming a bench doc' 'task commit:quick PATHS="docs/bench-micro.md" -- -m "docs: x"'
+block_bench 'a measurement without the quiet-host lock' 'task bench -- --scenario scroll'
+block_bench 'a micro measurement without the lock' 'task bench-micro'
+block_bench 'a perf audit chained after a build' 'task build && task perf-audit'
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
