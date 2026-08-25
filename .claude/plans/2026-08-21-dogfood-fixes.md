@@ -531,6 +531,83 @@ one sentence. Per-paint cost unchanged: one cached offset, no scan.
 Battery rows for both halves; the sweep's paste leg gains a typed-break
 assertion.
 
+## T29 — the full tier turns the kitty keyboard protocol on
+
+`<S-CR>` in T28's default list never fires: `crates/view-tui/src/tiers.rs`
+asks the terminal whether it speaks the kitty keyboard protocol, records
+the answer in `caps.kitty_kbd`, and nothing ever enables it — no
+`PushKeyboardEnhancementFlags` exists in the workspace. In legacy mode
+Enter, Shift+Enter and Ctrl+Enter are the same byte, Ctrl+I is Tab and
+Esc is an Alt prefix. Spec §7 says the `full` tier *assumes* the protocol,
+and nvim run directly in kitty/ghostty/wezterm pushes it itself, so a
+migrating user already lives with disambiguated keys; view not pushing
+them is the deviation (ruled 2026-08-24: option A).
+
+Fix: after `EnterAlternateScreen`, when `caps.kitty_kbd` is true (the
+probe said yes, or `--tier full` asserted it), push exactly the flag nvim
+pushes — verify against the pinned nvim's `src/nvim/tui/tui.c` and record
+the finding in the report; the expectation is `DISAMBIGUATE_ESCAPE_CODES`
+alone (`CSI > 1 u`). Pop it (`CSI < u`) in `restore_bytes` *before*
+`LeaveAlternateScreen`, on every restore path — enumerate the callers of
+`restore_bytes`/`restore_now` (normal exit, `:cq`, panic hook, the
+supervision restart, suspend if view has one) and prove each pops. No
+push on `cfg(not(unix))` (the probe never runs there). `encode_key` needs
+no change: it already spells `<S-CR>`, `<C-I>`, `<M-x>`.
+
+Evidence: a unit test that the enter byte stream contains `CSI > 1 u`
+iff `kitty_kbd` and the restore stream pops it before leaving the alt
+screen; a decode test feeding `CSI 13;2u` and `CSI 105;5u` through the
+input path and asserting `<S-CR>` / `<C-I>` reach the key notation; the
+differential oracle's key legs unchanged (legacy-mode bytes still decode
+the same). Docs: `docs/keymaps.md` and `view.toml.example` say
+`<S-CR>` works on the `full` tier and `<M-CR>` everywhere; the tier page
+under `docs/` (find it) gains the protocol row. Latency statement: none
+on paint or dispatch (one write at enter, one at leave).
+
+## T30 — tier detection survives ssh
+
+`view file` on this host comes up Basic — ASCII borders, the legacy
+palette — because `crates/view-tui/src/tiers.rs:107` derives truecolor
+from `COLORTERM` alone and the variable is empty in an ssh login unless
+the client sends it and the emulator sets it (Terminal.app never does).
+`from_probe` needs truecolor for Standard and Full, so an empty variable
+overrides whatever the sync/kitty probes said. A second, independent
+failure: `PROBE_DEADLINE` is 50 ms, a LAN assumption — over a WAN hop the
+DA1 fence lands after the deadline and `sync`/`kitty_kbd` stay false.
+nvim has neither problem: it also asks the terminal (a DECRQSS readback
+of an SGR truecolor set, verify in the pinned nvim's `tui.c`) and applies
+replies when they arrive.
+
+Fix, first half: truecolor is `COLORTERM` (unchanged precedence) *or* the
+terminal saying so. Add to the same query batch, before the DA1 fence:
+`ESC [ 48;2;1;2;3 m  ESC P $ q m ESC \  ESC [ 0 m`. `scan_csi_replies`
+learns the DECRQSS reply (`ESC P 1 $ r … m ESC \`) and reports truecolor
+when the echoed SGR carries the three components in order, with either
+`;` or `:` separators (terminals differ). The reply is a DCS, not a CSI:
+the residue rule (nothing but the terminal answers a private query) holds
+for it, so it is consumed, never forwarded. No terminfo lookup: DECRQSS
+covers every terminal that renders truecolor and adds no dependency.
+
+Fix, second half: the deadline is a hard cap of 400 ms, but it must not
+lengthen startup. The probe currently runs serially before the engine
+spawn (`crates/view/src/main.rs:733` → `:857`); overlap it with
+`attach_in_background` so the fence is awaited while the engine is
+starting, and the residue reaches the attach through a channel rather
+than a parameter. A complete private-mode reply that still arrives after
+the cap must be dropped by the input path, never reach nvim as
+keystrokes — close that hazard in the same change. Startup bench
+(`crates/view-bench`'s cold-start measure): the critical path must not
+grow; state the before/after numbers.
+
+Evidence: unit tests for the DECRQSS grammar (`;` form, `:` form,
+absent → false, `COLORTERM` still wins, truncated DCS dropped); a `detect`
+test with a source that answers 120 ms late reaching Full; the
+late-reply drop test on the input side; `task ci`; the visual sweep's
+tier leg run with `COLORTERM` unset; and the real proof — `task install`
+then `view <file>` from this ssh login (the user's session shape) comes
+up Full, `VIEW_LOG` caps line quoted in the report. Latency statement
+required (startup path).
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
