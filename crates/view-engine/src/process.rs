@@ -2222,7 +2222,7 @@ const KILLED_AT_SPAWN_WINDOW: Duration = Duration::from_millis(500);
 #[cfg(unix)]
 fn killed_at_spawn(child: &mut Child, spawned_at: Instant) -> bool {
     use std::os::unix::process::ExitStatusExt as _;
-    // raw signal number: SIGKILL is 9 on every unix view builds for
+    // the raw number, not a libc constant: view-engine has no libc dependency
     const SIGKILL: i32 = 9;
     const REAP_GRACE: Duration = Duration::from_millis(100);
     spawned_at.elapsed() < KILLED_AT_SPAWN_WINDOW
