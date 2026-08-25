@@ -2,3 +2,6 @@ crates/view/src/bridge.rs	ml:            Msg::HlProbeReply { .. } => Trigger::Ap
 crates/view/src/bridge.rs	ml:            Trigger::Applied => {\n                let (settled, effects) = self.persist(model);	            Trigger::Applied => {\n                if self.pending != Pending::Open { return Vec::new(); }\n                let (settled, effects) = self.persist(model);	-p view --bin view bridge::
 crates/view/src/bridge.rs	            _ if self.pending != Pending::Open => Trigger::None,		-p view --bin view bridge::
 crates/view/src/bridge.rs	                if settled == Settled::Yes {	                if settled == Settled::No {	-p view --bin view bridge::
+crates/view/src/bridge.rs	ml:        if self.written == Some(theme) {\n            return (Settled::Yes, Vec::new());\n        }\n		-p view --bin view bridge::
+crates/view-engine/src/process.rs	                return Err(if killed {	                return Err(if false {	-p view-engine --lib busy_text_kill
+crates/view-engine/src/process.rs	ml:            Ok(Some(status)) if status.signal() == Some(SIGKILL)\n        )	            Ok(Some(_))\n        )	-p view-engine --lib busy_text_kill

@@ -793,6 +793,46 @@ impl Drop for ChildGuard {
     }
 }
 
+/// Why one spawn attempt failed, split by whether repeating it can change
+/// the answer.
+///
+/// The distinction exists for one condition only: an editor started in the
+/// moment an installer is still writing the binary. Linux refuses that exec
+/// outright and [`spawn_past_busy_text`] retries the refusal; macOS lets the
+/// exec through and the kernel kills the image instead, so the same race
+/// arrives here, as a handshake nothing can answer.
+enum SpawnAttempt {
+    /// A failure a second attempt cannot get past: a missing binary, a
+    /// refused config, a child that started and then failed the handshake
+    /// on its own terms.
+    Fatal(EngineError),
+    /// The child was killed by the kernel before it could answer, inside
+    /// the window an exec-time kill lands in (see [`killed_at_spawn`]).
+    KilledAtSpawn(EngineError),
+}
+
+impl SpawnAttempt {
+    /// The error to report once no attempt is left: both variants carry the
+    /// failure the caller would have seen without any retry at all.
+    fn into_error(self) -> EngineError {
+        match self {
+            Self::Fatal(err) | Self::KilledAtSpawn(err) => err,
+        }
+    }
+}
+
+impl From<EngineError> for SpawnAttempt {
+    fn from(err: EngineError) -> Self {
+        Self::Fatal(err)
+    }
+}
+
+impl From<std::io::Error> for SpawnAttempt {
+    fn from(err: std::io::Error) -> Self {
+        Self::Fatal(EngineError::Io(err))
+    }
+}
+
 impl Engine {
     /// Spawns `nvim --embed` per `cfg` and performs the `nvim_get_api_info`
     /// handshake. The child carries the swap-prompt autocommand every spawn
@@ -806,6 +846,14 @@ impl Engine {
     /// engine does not answer within `cfg.handshake_timeout`). On any error
     /// after a successful process spawn, the child is killed and reaped
     /// before the error is returned; no zombie survives a failed `spawn`.
+    ///
+    /// A child the kernel kills before it can answer -- an editor started in
+    /// the moment an installer is still writing the binary, which macOS
+    /// presents as a successful exec and an immediate `SIGKILL` rather than
+    /// as the `ETXTBSY` Linux refuses the exec with -- is respawned up to
+    /// [`BUSY_TEXT_ATTEMPTS`] times before its handshake failure is
+    /// reported. See [`killed_at_spawn`] for what separates that from a
+    /// death worth reporting.
     ///
     /// A remote `cfg` returns `EngineError::Io` before anything is prepared
     /// or started when it carries a setting a remote spawn cannot honour (a
@@ -825,12 +873,27 @@ impl Engine {
     /// changes.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
         refuse_incoherent_remote(&cfg)?;
-        let remote = cfg.remote.is_some();
         if cfg.hermetic && cfg.remote.is_none() {
             crate::env::prepare_empty_search_path()?;
             crate::env::prepare_hermetic_home()?;
         }
-        let mut command = build_command(&cfg)?;
+        for attempt in 1..BUSY_TEXT_ATTEMPTS {
+            match Self::spawn_once(&cfg) {
+                Err(SpawnAttempt::KilledAtSpawn(_)) => {
+                    std::thread::sleep(BUSY_TEXT_BACKOFF * attempt);
+                }
+                outcome => return outcome.map_err(SpawnAttempt::into_error),
+            }
+        }
+        Self::spawn_once(&cfg).map_err(SpawnAttempt::into_error)
+    }
+
+    /// One spawn-and-handshake attempt, reporting whether the failure it
+    /// returns is one a second attempt can get past (see
+    /// [`SpawnAttempt`]).
+    fn spawn_once(cfg: &EngineConfig) -> Result<Self, SpawnAttempt> {
+        let remote = cfg.remote.is_some();
+        let mut command = build_command(cfg)?;
         // read back off the `Command` that is about to be spawned rather than
         // re-derived from `cfg`: a second derivation is free to drift from
         // what the child actually receives, and the whole point of exposing
@@ -849,6 +912,7 @@ impl Engine {
             command.stdin(Stdio::from(theirs));
             ours
         };
+        let spawned_at = Instant::now();
         let mut guard = ChildGuard(Some(spawn_past_busy_text(&mut command)?));
         // the child's own ends are the child's from here on. A `Command`
         // holds any handle it was configured with until it is dropped, so on
@@ -898,16 +962,29 @@ impl Engine {
         };
         #[cfg(not(any(unix, windows)))]
         let handle = EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump));
-        let api_info = decode_api_info(handle.request_timeout(
-            "nvim_get_api_info",
-            vec![],
-            cfg.handshake_timeout,
-        )?)?;
+        let api_info =
+            match handle.request_timeout("nvim_get_api_info", vec![], cfg.handshake_timeout) {
+                Ok(reply) => decode_api_info(reply)?,
+                Err(err) => {
+                    // unreachable else: nothing clears guard.0 before this point
+                    let killed = guard
+                        .0
+                        .as_mut()
+                        .is_some_and(|child| killed_at_spawn(child, spawned_at));
+                    return Err(if killed {
+                        SpawnAttempt::KilledAtSpawn(err)
+                    } else {
+                        SpawnAttempt::Fatal(err)
+                    });
+                }
+            };
         // handshake succeeded: disarm the guard and hand the child to the
         // long-lived Engine, which now owns reaping it via its own Drop
         // unreachable else: nothing clears guard.0 before this point
         let Some(child) = guard.0.take() else {
-            return Err(EngineError::Io(std::io::Error::other("child slot empty")));
+            return Err(SpawnAttempt::Fatal(EngineError::Io(std::io::Error::other(
+                "child slot empty",
+            ))));
         };
         // before the first clone leaves this function: every copy of the
         // handle has to be able to name the channel a generated `rpcnotify`
@@ -2088,18 +2165,78 @@ fn relay_stdin_fd(source: std::os::fd::RawFd) -> std::io::Result<()> {
 /// Bounded rather than patient: a file genuinely held open for writing must
 /// still surface as an error, and no caller may be held on a spawn that
 /// never returns.
+///
+/// This is only the half of the race that `ETXTBSY` reports. macOS does not
+/// refuse the exec at all -- it kills the image afterwards -- so on that
+/// platform the same writer arrives at the handshake instead, and
+/// [`killed_at_spawn`] is what retries it.
 fn spawn_past_busy_text(command: &mut Command) -> std::io::Result<Child> {
-    const ATTEMPTS: u32 = 6;
-    const BACKOFF: Duration = Duration::from_millis(10);
-    for attempt in 1..ATTEMPTS {
+    for attempt in 1..BUSY_TEXT_ATTEMPTS {
         match command.spawn() {
             Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(BACKOFF * attempt);
+                std::thread::sleep(BUSY_TEXT_BACKOFF * attempt);
             }
             outcome => return outcome,
         }
     }
     command.spawn()
+}
+
+/// How many spawns the installer race is given before its failure is
+/// reported as the program's own, and how long the wait between them grows
+/// by. Shared by both halves of the race, because it is one window: the
+/// exec Linux refuses ([`spawn_past_busy_text`]) and the image macOS kills
+/// ([`killed_at_spawn`]) are the same writer holding the same descriptor.
+const BUSY_TEXT_ATTEMPTS: u32 = 6;
+const BUSY_TEXT_BACKOFF: Duration = Duration::from_millis(10);
+
+/// How long after an exec a death is still the kernel's own doing rather
+/// than something that happened to a running editor. Measured on macOS
+/// 26.2/arm64: a binary this host has already run, re-exec'd while a writer
+/// holds it, is `SIGKILL`ed 0.3 ms after the spawn returns, and one written
+/// under a live process dies as promptly. Bounded rather than open-ended so
+/// a child `SIGKILL`ed late (an out-of-memory kill during a slow handshake,
+/// a session torn down by hand) is reported, not respawned six times.
+const KILLED_AT_SPAWN_WINDOW: Duration = Duration::from_millis(500);
+
+/// Whether `child` is a spawn the installer race killed: exec succeeded and
+/// the kernel killed the image before it could answer the handshake.
+///
+/// macOS is where this happens. An open write descriptor never makes
+/// `execve` fail there, so the retry `spawn_past_busy_text` performs
+/// against Linux's `ETXTBSY` has nothing to catch; what the kernel does
+/// instead is let the exec through and then kill the image whose text the
+/// writer invalidated, and the race reaches the handshake as a connection
+/// that closed before it opened. Measured on macOS 26.2/arm64 against a
+/// copy of the real editor: an `nvim` the host had already run, spawned
+/// while an installer holds it, dies `SIGKILL` every time; released at
+/// 60 ms, the second attempt handshakes.
+///
+/// Bounded, never a plain `wait`: a child that is merely slow to answer
+/// must stay the handshake's problem, and this is asked on the thread the
+/// spawn is blocking. The grace is not zero because the death is read
+/// through two kernel facts that land in that order -- the pipe EOF the
+/// handshake failed on, then the status a `waitpid` can see -- so a single
+/// poll answers "still running" for a child that is already gone, and did
+/// so reproducibly under a loaded test suite.
+#[cfg(unix)]
+fn killed_at_spawn(child: &mut Child, spawned_at: Instant) -> bool {
+    use std::os::unix::process::ExitStatusExt as _;
+    // raw signal number: SIGKILL is 9 on every unix view builds for
+    const SIGKILL: i32 = 9;
+    const REAP_GRACE: Duration = Duration::from_millis(100);
+    spawned_at.elapsed() < KILLED_AT_SPAWN_WINDOW
+        && matches!(
+            wait_for_exit(child, REAP_GRACE),
+            Ok(Some(status)) if status.signal() == Some(SIGKILL)
+        )
+}
+
+/// Non-Unix: there is no signal to read, and no platform here allows an
+/// exec of a file that is open for writing in the first place.
+#[cfg(not(unix))]
+fn killed_at_spawn(_child: &mut Child, _spawned_at: Instant) -> bool {
+    false
 }
 
 /// Polls `child` until it has exited or `timeout` elapses; `None` means it
@@ -2195,13 +2332,18 @@ fn map_get(v: &Value, key: &str) -> Option<Value> {
     crate::wire::map_find(pairs, key).cloned()
 }
 
-/// `target_os = "linux"`, not `unix`: `ETXTBSY` on `execve` is a Linux
-/// kernel behaviour (`deny_write_access` in `do_open_execat`, applied to
-/// `#!` scripts too), and XNU does not implement it -- on macOS the spawn
-/// below succeeds, so the control test's premise is false there and the
-/// retry test passes only vacuously. The retry path itself is correct on
-/// every platform for the same reason: an error that never occurs never
-/// retries.
+/// `target_os = "linux"`, not `unix`: refusing the exec is what Linux does
+/// with a file someone holds open for writing (`deny_write_access` in
+/// `do_open_execat`, applied to `#!` scripts too), and macOS does something
+/// else with it. `execve(2)` documents `ETXTBSY` there too, but measured on
+/// macOS 26.2/arm64 no spawn raises it: the `#!` script these tests use
+/// runs to completion with a writer holding it. So the control test's
+/// premise is false on macOS and the retry test would pass vacuously.
+///
+/// The retry path itself stays compiled everywhere, and the macOS shape has
+/// its own mechanism rather than a note: [`killed_at_spawn`] retries the
+/// spawn whose child the kernel killed, pinned by
+/// `busy_text_kill_tests` below.
 #[cfg(all(test, target_os = "linux"))]
 mod busy_text_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2249,6 +2391,105 @@ mod busy_text_tests {
         let mut child = spawn_past_busy_text(&mut Command::new(&program))
             .expect("a program whose writer let go is a program that runs");
         assert!(child.wait().unwrap().success());
+    }
+}
+
+/// The macOS half of the installer race, pinned on any unix: what
+/// [`killed_at_spawn`] answers is "the kernel killed this child before it
+/// could answer", and a child that kills itself the same way is
+/// indistinguishable from one XNU killed -- so the mechanism can be proven
+/// on the platform CI runs the suite on, rather than only on the one where
+/// the race occurs.
+#[cfg(all(test, unix))]
+mod busy_text_kill_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A stand-in `nvim` that `SIGKILL`s itself on its first `kills`
+    /// invocations and then becomes the real editor, counting every
+    /// invocation into `counter`. That is the shape of the race: the
+    /// spawns that land while the writer still holds the binary die, and
+    /// the one after it lets go runs.
+    fn flaky_nvim(dir: &std::path::Path, kills: u32, real_nvim: &str) -> std::path::PathBuf {
+        let wrapper = dir.join("nvim-killed-at-spawn");
+        let counter = dir.join("attempts");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\
+                 n=$(cat {counter} 2>/dev/null || echo 0)\n\
+                 n=$((n+1))\n\
+                 echo $n > {counter}\n\
+                 [ \"$n\" -le {kills} ] && kill -9 $$\n\
+                 exec {real_nvim} \"$@\"\n",
+                counter = counter.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wrapper
+    }
+
+    fn attempts(dir: &std::path::Path) -> u32 {
+        std::fs::read_to_string(dir.join("attempts"))
+            .map(|s| s.trim().parse().unwrap())
+            .unwrap_or(0)
+    }
+
+    fn real_nvim() -> String {
+        let out = Command::new("sh")
+            .args(["-c", "command -v nvim"])
+            .output()
+            .unwrap();
+        let path = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert!(!path.is_empty(), "the suite needs nvim on PATH");
+        path
+    }
+
+    #[test]
+    fn a_child_the_kernel_kills_at_spawn_is_respawned_until_the_writer_lets_go() {
+        let dir = view_test_support::ScratchDir::new("killed-at-spawn-retry").unwrap();
+        let wrapper = flaky_nvim(&dir, 2, &real_nvim());
+
+        let engine = Engine::spawn(EngineConfig::isolated().with_nvim_bin(&wrapper))
+            .expect("a child the kernel killed at spawn is a spawn to repeat, not a broken editor");
+
+        assert!(engine.api_info.channel_id >= 1);
+        assert_eq!(
+            attempts(&dir),
+            3,
+            "two deaths, then the editor that ran: the retry must be what produced this engine"
+        );
+    }
+
+    #[test]
+    fn a_child_that_exits_on_its_own_terms_is_reported_after_one_attempt() {
+        let dir = view_test_support::ScratchDir::new("killed-at-spawn-control").unwrap();
+        let counter = dir.join("attempts");
+        let wrapper = dir.join("nvim-exits");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nn=$(cat {c} 2>/dev/null || echo 0)\necho $((n+1)) > {c}\nexit 1\n",
+                c = counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let failed = Engine::spawn(
+            EngineConfig::isolated()
+                .with_nvim_bin(&wrapper)
+                .with_handshake_timeout(Duration::from_secs(2)),
+        );
+
+        assert!(failed.is_err(), "a child that exits 1 has no engine in it");
+        assert_eq!(
+            attempts(&dir),
+            1,
+            "an ordinary death is the program's answer, and repeating the question changes nothing"
+        );
     }
 }
 

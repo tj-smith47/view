@@ -39,8 +39,16 @@ echo "-- mirroring tracked tree to $host:~/repos/view-ci --" | tee -a "$log_file
 # which plain `*` skips -- without it a tracked dotfile removed from a later
 # commit would silently survive the wipe and leak into subsequent builds
 # (zsh globs never generate `.` or `..`, so the recursive rm stays safe).
+#
+# `git init -q` every run, not once: what CI checks out is a repository, and
+# `ignore::WalkBuilder` reads a `.gitignore` only inside one (`require_git`),
+# so a mirror without `.git` answers differently from the thing it mirrors --
+# `view-native a_gitignored_file_is_not_listed` is the first member of that
+# class, not the whole of it. Every run, because the `(D)` wipe above takes
+# the previous run's `.git` with it. Nothing is staged or recorded into it:
+# the directory is all `require_git` asks for.
 if ! git archive HEAD |
-  ssh "$host" 'zsh -lc "mkdir -p ~/repos/view-ci && rm -rf ~/repos/view-ci/*(ND) && tar -x -C ~/repos/view-ci"' \
+  ssh "$host" 'zsh -lc "mkdir -p ~/repos/view-ci && rm -rf ~/repos/view-ci/*(ND) && tar -x -C ~/repos/view-ci && git -C ~/repos/view-ci init -q"' \
     >>"$log_file" 2>&1; then
   echo "MBP BUILD LEG FAIL: could not mirror the tree to $host (host unreachable, or the remote mkdir/rm/tar failed)" |
     tee -a "$log_file" >&2

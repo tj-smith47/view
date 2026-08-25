@@ -43,6 +43,41 @@ check_workflow() {
     fail=1
   fi
 }
-check_workflow .github/workflows/ci.yml 16
-check_workflow .github/workflows/bench.yml 3
+# The read floor for one workflow, empty for a file nobody pinned one to.
+# A ratchet per file: bump it when a workflow gains an install step, never
+# lower it.
+floor_for() {
+  case "$1" in
+    .github/workflows/ci.yml) echo 16 ;;
+    .github/workflows/bench.yml) echo 3 ;;
+    *) echo "" ;;
+  esac
+}
+# Which workflows to check is derived, not listed: a third one that installs
+# the engine is checked the moment it exists, rather than the next time
+# somebody remembers this file. The markers are every shape an install can
+# take -- the pin read a correct one performs, and the download, package
+# manager and setup action a wrong one would.
+# `tr`: one space-separated line, so the membership test below can match a
+# name in it
+installers="$(grep -lE 'ENGINE_PIN=\$\(cat \.engine-pin\)|neovim/releases/download|(brew|choco|apt|apt-get) install neovim|uses:.*setup-(neo)?vim' \
+  .github/workflows/*.yml | tr '\n' ' ' || true)"
+for workflow in $installers; do
+  floor="$(floor_for "$workflow")"
+  if [ -z "$floor" ]; then
+    echo "PIN FAIL: $workflow installs nvim with no read floor of its own (add one to floor_for)"
+    fail=1
+    floor=1
+  fi
+  check_workflow "$workflow" "$floor"
+done
+# and the other direction: a workflow that carried a floor and no longer
+# installs anything (renamed, deleted, or quietly stripped of its install
+# steps) is a gate that stopped gating
+for workflow in .github/workflows/ci.yml .github/workflows/bench.yml; do
+  case " $installers " in
+    *" $workflow "*) ;;
+    *) echo "PIN FAIL: $workflow not found, or it no longer installs nvim"; fail=1 ;;
+  esac
+done
 exit $fail

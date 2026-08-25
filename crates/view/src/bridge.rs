@@ -33,6 +33,18 @@
 //! traffic -- which is what keeps that unconditional edge off the paint
 //! path, and it is the last edge any scheme that moves the default
 //! background produces, so the theme it writes is the applied one.
+//!
+//! One window is inverted rather than closed by that, and it is worth
+//! knowing before reading the crash case as fully covered. A session whose
+//! config selects a scheme confirms nvim's *default* palette first, and
+//! that probe reply is a write edge like any other -- so for the few
+//! hundred milliseconds until the scheme's own colors settle, the cache
+//! holds the default theme over the good one the previous session left.
+//! A crash inside that window costs the user their cached theme for one
+//! launch. Nothing here can avoid it: at that point no view code knows a
+//! scheme is coming. It is strictly shorter than the window it replaced,
+//! where the wrong theme stood for the whole session and only the exit
+//! path repaired it.
 
 use std::path::{Path, PathBuf};
 
@@ -687,6 +699,48 @@ mod tests {
         let cached = cached.expect("the confirmed probe must have cached the derived theme");
         assert_eq!(cached.bg, Some(0x0028_2a36));
         assert_eq!(cached.fg, Some(0x00f8_f8f2));
+    }
+
+    /// The write bound, now that the announcement is no longer the only
+    /// door in. Every `default_colors_set` opens a probe, and every probe
+    /// reply is a write edge -- a plugin re-asserting the same palette, a
+    /// scheme reloaded, a background re-set on focus all repeat one -- so
+    /// the only thing between that stream and a synchronous TOML write per
+    /// message on the loop thread is the theme this bridge last wrote.
+    #[test]
+    fn a_probe_reply_that_settles_the_theme_already_written_writes_nothing() {
+        let path = scratch("unchanged-probe");
+        let mut bridge = bridge_writing_to(&path);
+        let mut model = Model::with_term_size(80, 24);
+
+        dispatch(
+            &mut bridge,
+            &mut model,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: Some(0x00f8_f8f2),
+                bg: Some(0x0028_2a36),
+                sp: None,
+            }]),
+        );
+        let generation = model.engine.hl().probe_generation();
+        let reply = Msg::HlProbeReply {
+            generation,
+            fg: Some(0x00f8_f8f2),
+            bg: Some(0x0028_2a36),
+        };
+        dispatch(&mut bridge, &mut model, reply.clone());
+        assert!(path.exists(), "the confirmed probe must have written once");
+
+        // removed rather than compared: a second write of identical content
+        // leaves a byte-identical file, so the file's absence is the only
+        // thing that can tell "wrote again" from "did not"
+        std::fs::remove_file(&path).expect("the written cache must be removable");
+        dispatch(&mut bridge, &mut model, reply);
+
+        assert!(
+            !path.exists(),
+            "a probe reply carrying the theme already written must not reach the disk"
+        );
     }
 
     /// The arrival order that left a session's cache holding a theme its

@@ -221,17 +221,20 @@ jobs:
         run: task acceptance:visual
 
       # a failing sweep keeps its pane dumps, the VIEW_LOG of the leg that
-      # failed and the theme state it was reading under the runner's own
-      # /tmp, which goes away with the job -- without this the only evidence
-      # of a failure is its one-line message
+      # failed and a copy of the theme state it was reading under the
+      # runner's own /tmp, which goes away with the job -- without this the
+      # only evidence of a failure is its one-line message.
+      # One path, not two: the sweep's `cleanup` removes every root it made,
+      # the state home included, on every exit -- so the dump directory
+      # `fail` copies the state into is the only tree that still exists when
+      # this step runs, and a second entry for the state home would upload
+      # nothing while reading as though it covered it.
       - name: Upload visual sweep evidence
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: visual-evidence
-          path: |
-            /tmp/view-visual-sweep-*
-            /tmp/view-visual-state-*
+          path: /tmp/view-visual-sweep-*
           if-no-files-found: warn
 
   # The ACP conformance legs the local stub agent drives. Its own job rather
