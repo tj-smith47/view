@@ -341,12 +341,18 @@ pub(crate) struct Restarted {
 pub(crate) fn restart_engine(
     engine: &mut Engine,
     respawn: &dyn Fn() -> view_engine::EngineConfig,
-    model: &Model,
+    model: &mut Model,
     channels: &LoopChannels,
     route: &crate::clipboard::ReplyRoute<EngineHandle>,
     ai_context_route: &crate::ai_context_worker::OpsRoute<EngineHandle>,
 ) -> Result<Restarted, crate::startup::AttachFailure> {
     let (width, height) = model.grid_target();
+    // before the spawn rather than after the attach: the overlays belong to
+    // the connection being torn down on the next line, and a failed attempt
+    // leaves the caller painting with the dead engine's grid, which has no
+    // command line of its own to correct one left behind
+    // ([`EngineModel::forget_overlays`])
+    model.engine.forget_overlays();
     let mut engine = crate::startup::restart_and_attach(engine, respawn(), width, height)?;
     let (pump, cutover) = engine.start_pump(channels.msg.clone());
     let pending_redraw = if cutover.redraw_pending {
@@ -793,15 +799,38 @@ mod tests {
         );
 
         let mut model = Model::with_term_size(80, 24);
+        // the state a user typing `:preserve` at the moment of the crash
+        // leaves behind: the dead engine owed a `cmdline_hide` it can no
+        // longer send, so the row is the replacement's to reclaim
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::CmdlineShow {
+                content: vec![(0, "preserve".to_string())],
+                pos: 8,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            }]),
+        );
+        assert!(
+            model.engine.cmdline.is_some(),
+            "the seed must actually put a command line on the model, or the assertion below is vacuous"
+        );
         let fresh = restart_engine(
             &mut engine,
             &respawn,
-            &model,
+            &mut model,
             &channels,
             &route,
             &ai_context_route,
         )
         .expect("a crashed engine must be replaceable");
+        assert!(
+            model.engine.cmdline.is_none(),
+            "a restart must drop the dead engine's command line: nothing retracts it, \
+             so it survives onto the replacement's first frame"
+        );
 
         // the AI worker the restart's executor answers through must be the
         // very same one `channels.ai` already held, not a fresh clone --
@@ -923,12 +952,12 @@ mod tests {
         let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
         let respawn =
             || view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim");
-        let model = Model::with_term_size(80, 24);
+        let mut model = Model::with_term_size(80, 24);
 
         let failed = restart_engine(
             &mut engine,
             &respawn,
-            &model,
+            &mut model,
             &channels,
             &route,
             &ai_context_route,
@@ -1179,7 +1208,7 @@ mod tests {
 
         // every attempt from here on meets a client that refuses
         let respawn = || remote_through("fake-ssh-reject");
-        let model = Model::with_term_size(80, 24);
+        let mut model = Model::with_term_size(80, 24);
         let mut schedule = ReconnectSchedule::new(
             TEST_BACKOFF_BASE,
             view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS,
@@ -1195,7 +1224,7 @@ mod tests {
             let failed = restart_engine(
                 &mut engine,
                 &respawn,
-                &model,
+                &mut model,
                 &channels,
                 &route,
                 &ai_context_route,
@@ -1267,7 +1296,7 @@ mod tests {
         let failed = restart_engine(
             &mut engine,
             &respawn,
-            &model,
+            &mut model,
             &channels,
             &route,
             &ai_context_route,

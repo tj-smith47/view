@@ -1060,6 +1060,24 @@ impl EngineModel {
         self.hl.mark_dirty();
     }
 
+    /// Drops the three `_show`/`_hide` overlay states, for a connection
+    /// being replaced.
+    ///
+    /// Each of them is retracted by the engine that raised it and by nothing
+    /// else, so an engine that dies with one open never sends the `_hide`
+    /// half: the command line a user was typing at the moment the engine was
+    /// killed stays painted on the last row over the replacement's own first
+    /// frame, which reads as an editor that lost its prompt. The grid needs
+    /// no equivalent -- a fresh attach redraws every cell of it -- and
+    /// neither `mode` nor `messages` does: the replacement announces its
+    /// modes on attach, and the message log is scrollback rather than a
+    /// point-in-time overlay.
+    pub fn forget_overlays(&mut self) {
+        self.cmdline = None;
+        self.popupmenu = None;
+        self.tabline = None;
+    }
+
     /// The one place a [`MessageEntry`] is created that also classifies it
     /// (`native::toast::route`), records it to scrollback
     /// (`toast_history`), and schedules its transient-toast expiry.

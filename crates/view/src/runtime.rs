@@ -1700,7 +1700,7 @@ pub fn run(
             match restart_engine(
                 &mut engine,
                 respawn,
-                &model,
+                &mut model,
                 &channels,
                 &clipboard_route,
                 &ai_context_route,
