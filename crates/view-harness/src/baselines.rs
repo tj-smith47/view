@@ -321,36 +321,47 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
     controlled.then_some(shape)
 }
 
-/// The gate policy for `scenario`'s `metric`, preferring `table`'s measured
+/// The gate policy for `cell`'s `metric`, preferring `table`'s measured
 /// headroom for this class over the default for the metric's kind.
 ///
-/// A `"scenario.metric"` entry wins over a bare `"metric"` entry, because
-/// the same statistic name carries a different run-to-run spread in
-/// different scenarios: on dev-macos the scroll replicates resolve the
-/// bar-relevant spread of `ratio_p50` to a few percent, while the echo
-/// replicates put the same name's spread an order of magnitude wider, and
-/// one factor cannot be honest about both. A bare entry stays the host-wide characterization
-/// for every scenario without a qualified one.
+/// Three key scopes, narrowest winning: `"scenario.fixture.metric"`, then
+/// `"scenario.metric"`, then a bare `"metric"`. The same statistic name
+/// carries a different run-to-run spread in different scenarios -- on
+/// dev-macos the scroll replicates resolve the bar-relevant spread of
+/// `ratio_p50` to a few percent while the echo replicates put it an order
+/// of magnitude wider -- and it splits again between fixtures of one
+/// scenario: gh-macos resolves `echo/minimal`'s `ratio_p50` to a 3.2%
+/// half-width against `echo/heavy`'s 33.4%, so a scenario-wide factor sized
+/// honestly for heavy would loosen minimal's bar from 1.378 to 2.095. Each
+/// level stays the characterization for every cell below it without one of
+/// its own.
 ///
 /// An override only resizes an allowance that already exists: a metric the
 /// class does not gate at all stays ungated, because that exemption is about
 /// whether the number means anything here, not about how far it moves.
+///
+/// The cell arrives as one [`CellId`] rather than as its two names side by
+/// side, for the reason [`BaselineFile::cell`] gives: named the other way
+/// round every scoped lookup misses, the compiled default silently applies,
+/// and the sidecar reads as though a measured allowance were in force.
 #[must_use]
 pub fn headroom_for(
     table: &HeadroomTable,
-    scenario: &str,
+    cell: &CellId,
     metric: &str,
     controlled: bool,
 ) -> Option<Headroom> {
     let policy = gate_headroom(metric, controlled)?;
-    Some(declared_factor(table, scenario, metric).map_or(policy, |factor| resized(policy, factor)))
+    Some(declared_factor(table, cell, metric).map_or(policy, |factor| resized(policy, factor)))
 }
 
-/// The factor `table` states for `scenario`'s `metric`, with a
-/// `"scenario.metric"` entry winning over a bare `"metric"` one.
-fn declared_factor(table: &HeadroomTable, scenario: &str, metric: &str) -> Option<f64> {
+/// The factor `table` states for `cell`'s `metric` under the scope
+/// precedence [`headroom_for`] documents.
+fn declared_factor(table: &HeadroomTable, cell: &CellId, metric: &str) -> Option<f64> {
+    let (scenario, fixture) = (&cell.scenario, &cell.fixture);
     table
-        .get(&format!("{scenario}.{metric}"))
+        .get(&format!("{scenario}.{fixture}.{metric}"))
+        .or_else(|| table.get(&format!("{scenario}.{metric}")))
         .or_else(|| table.get(metric))
         .copied()
 }
@@ -364,8 +375,8 @@ fn resized(policy: Headroom, factor: f64) -> Headroom {
     }
 }
 
-/// The run-to-run spread this class has published for `scenario`'s
-/// `metric`, or `None` where it has published none.
+/// The run-to-run spread this class has published for `cell`'s `metric`,
+/// or `None` where it has published none.
 ///
 /// This answers a different question than [`headroom_for`], and the two are
 /// not interchangeable:
@@ -409,8 +420,8 @@ fn resized(policy: Headroom, factor: f64) -> Headroom {
 /// delta still gets its floor rather than a proportional allowance that
 /// would invert below zero.
 #[must_use]
-pub fn declared_headroom(table: &HeadroomTable, scenario: &str, metric: &str) -> Option<Headroom> {
-    let factor = declared_factor(table, scenario, metric)?;
+pub fn declared_headroom(table: &HeadroomTable, cell: &CellId, metric: &str) -> Option<Headroom> {
+    let factor = declared_factor(table, cell, metric)?;
     Some(resized(gate_headroom(metric, true)?, factor))
 }
 
@@ -708,12 +719,15 @@ pub enum BaselineError {
 /// [headroom]
 /// ratio_p50 = 1.06
 /// "scroll.ratio_p50" = 1.12
+/// "echo.heavy.ratio_p50" = 1.35
 /// ```
 ///
 /// A bare key characterizes the statistic host-wide; a quoted
-/// `"scenario.metric"` key scopes it to one scenario and wins there (see
-/// [`headroom_for`]). The quotes are TOML syntax, not decoration: unquoted,
-/// the dot would open a nested table and the file would fail to load.
+/// `"scenario.metric"` key scopes it to one scenario and a quoted
+/// `"scenario.fixture.metric"` key to one cell, each winning over the
+/// wider scope (see [`headroom_for`]). The quotes are TOML syntax, not
+/// decoration: unquoted, the dots would open nested tables and the file
+/// would fail to load.
 pub type HeadroomTable = BTreeMap<String, f64>;
 
 /// The deserialization shape of the sidecar documented on
@@ -801,19 +815,26 @@ pub fn require_headroom_bound(
     table_path: &Path,
 ) -> Result<(), BaselineError> {
     for key in table.keys() {
-        // a dotted key scopes the entry to one scenario, so it binds only
-        // if that scenario's own cells record the metric; a bare key binds
-        // through any cell
-        let bound = match key.split_once('.') {
-            Some((scenario, metric)) => baseline
-                .cells
-                .get(scenario)
-                .is_some_and(|fixtures| fixtures.values().any(|cell| cell.contains_key(metric))),
-            None => baseline
+        // a dotted key scopes the entry, so it binds only through the cells
+        // its own scope names: a bare key through any cell, a scenario key
+        // through that scenario's cells, a fixture key through that one cell
+        let parts: Vec<&str> = key.split('.').collect();
+        let bound = match parts[..] {
+            [metric] => baseline
                 .cells
                 .values()
                 .flat_map(BTreeMap::values)
-                .any(|cell| cell.contains_key(key)),
+                .any(|cell| cell.contains_key(metric)),
+            [scenario, metric] => baseline
+                .cells
+                .get(scenario)
+                .is_some_and(|fixtures| fixtures.values().any(|cell| cell.contains_key(metric))),
+            [scenario, fixture, metric] => baseline
+                .cell(&CellId::new(scenario, fixture))
+                .is_some_and(|cell| cell.contains_key(metric)),
+            // no scope this deep exists to bind through, so the entry is
+            // unbound for the same reason a misspelled metric is
+            _ => false,
         };
         if !bound {
             return Err(BaselineError::UnknownHeadroomMetric {
@@ -931,9 +952,7 @@ pub fn gate_cell(
         let Some(&measured_value) = measured.metrics.get(metric) else {
             continue;
         };
-        let Some(headroom) =
-            headroom_for(headroom_table, &measured.id.scenario, metric, controlled)
-        else {
+        let Some(headroom) = headroom_for(headroom_table, &measured.id, metric, controlled) else {
             continue;
         };
         let bar = headroom.bar(*recorded_value);
@@ -1218,7 +1237,7 @@ pub enum RatchetOutcome {
 pub fn ratchet_cell(
     existing: Option<&CellMetrics>,
     measured: &CellMetrics,
-    scenario: &str,
+    id: &CellId,
     controlled: bool,
     headroom: &HeadroomTable,
 ) -> (CellMetrics, Vec<RatchetOutcome>) {
@@ -1228,8 +1247,8 @@ pub fn ratchet_cell(
         // resolved off the table before the gate allowance shadows it: the
         // guard reads the published spread, never the compiled default a
         // gate allowance falls back to
-        let declared = declared_headroom(headroom, scenario, metric);
-        let headroom = headroom_for(headroom, scenario, metric, controlled);
+        let declared = declared_headroom(headroom, id, metric);
+        let headroom = headroom_for(headroom, id, metric, controlled);
         // most metrics are a latency, a ratio or a size and cannot be zero
         // or below without the run having gone wrong; the signed paired
         // delta reaches negative exactly when view beats nvim, so it is
@@ -1386,13 +1405,8 @@ pub fn plan_record(
     let mut cells = Vec::new();
     for cell in measured {
         let existing_cell = reference.and_then(|file| file.cell(&cell.id));
-        let (ratcheted, outcomes) = ratchet_cell(
-            existing_cell,
-            &cell.metrics,
-            &cell.id.scenario,
-            controlled,
-            headroom,
-        );
+        let (ratcheted, outcomes) =
+            ratchet_cell(existing_cell, &cell.metrics, &cell.id, controlled, headroom);
         file.upsert_cell(&cell.id, ratcheted);
         cells.push(CellRatchet {
             scenario: cell.id.scenario.clone(),
@@ -1631,6 +1645,24 @@ mod tests {
         )
     }
 
+    /// One cell of `scenario`, for the cases whose subject is the metric
+    /// rule or a wider key scope than the fixture level.
+    fn cell(scenario: &str) -> CellId {
+        CellId::new(scenario, "minimal")
+    }
+
+    /// [`super::ratchet_cell`] against one fixture of `scenario`, for the
+    /// same reason.
+    fn ratchet_cell(
+        existing: Option<&CellMetrics>,
+        measured: &CellMetrics,
+        scenario: &str,
+        controlled: bool,
+        headroom: &HeadroomTable,
+    ) -> (CellMetrics, Vec<RatchetOutcome>) {
+        super::ratchet_cell(existing, measured, &cell(scenario), controlled, headroom)
+    }
+
     fn metrics(pairs: &[(&str, f64)]) -> CellMetrics {
         pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
     }
@@ -1710,7 +1742,7 @@ mod tests {
         let survived = load_headroom(&sidecar, "dev-linux").unwrap();
         assert_eq!(survived.get("ratio_p50"), Some(&1.06));
         assert_eq!(
-            headroom_for(&survived, "echo", "ratio_p50", false),
+            headroom_for(&survived, &cell("echo"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06))
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1816,7 +1848,7 @@ mod tests {
         };
 
         assert_eq!(
-            declared_factor(&table, "scroll", "ratio_p50"),
+            declared_factor(&table, &cell("scroll"), "ratio_p50"),
             Some(1.42),
             "the campaign sized this factor at 1.42; a sidecar edit moves the number here too, \
              so neither a shrink that re-breaches the leg nor an inflation the draws never \
@@ -1835,7 +1867,7 @@ mod tests {
             "the class's measured spread accepts {measured} over a recorded {recorded}"
         );
 
-        let bar = headroom_for(&table, "scroll", "ratio_p50", false)
+        let bar = headroom_for(&table, &cell("scroll"), "ratio_p50", false)
             .expect("ratio_p50 gates on a shared class")
             .bar(recorded);
         assert_eq!(
@@ -1903,6 +1935,22 @@ mod tests {
             require_headroom_bound(&table, &file, &sidecar),
             Err(BaselineError::UnknownHeadroomMetric { .. })
         ));
+
+        // and a fixture-scoped entry binds through that one cell, so a key
+        // naming a fixture this baseline does not measure is refused the
+        // same way and reads the same way in the message
+        write("[headroom]\n\"echo.minimal.ratio_p50\" = 1.06\n");
+        let table = load_headroom(&sidecar, "dev-linux").unwrap();
+        assert!(require_headroom_bound(&table, &file, &sidecar).is_ok());
+
+        write("[headroom]\n\"echo.heavy.ratio_p50\" = 1.35\n");
+        let table = load_headroom(&sidecar, "dev-linux").unwrap();
+        let err = require_headroom_bound(&table, &file, &sidecar).unwrap_err();
+        assert!(
+            matches!(err, BaselineError::UnknownHeadroomMetric { .. })
+                && err.to_string().contains("echo.heavy.ratio_p50"),
+            "the refusal must name the whole unbound key: {err}"
+        );
 
         std::fs::remove_file(&sidecar).unwrap();
         assert!(
@@ -2278,21 +2326,21 @@ mod tests {
         .collect();
 
         assert_eq!(
-            headroom_for(&table, "echo", "ratio_p50", false),
+            headroom_for(&table, &cell("echo"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06))
         );
         assert_eq!(
-            headroom_for(&table, "echo", "marker_ratio_p50", false),
+            headroom_for(&table, &cell("echo"), "marker_ratio_p50", false),
             Some(Headroom::Proportional(RATIO_HEADROOM)),
             "a metric with no entry keeps the default"
         );
         assert_eq!(
-            headroom_for(&table, "echo", "view_p99_ms", false),
+            headroom_for(&table, &cell("echo"), "view_p99_ms", false),
             None,
             "a shared-class tail stays ungated however well its spread is known"
         );
         assert_eq!(
-            headroom_for(&table, "echo", "view_p99_ms", true),
+            headroom_for(&table, &cell("echo"), "view_p99_ms", true),
             Some(Headroom::Proportional(1.10))
         );
     }
@@ -2314,18 +2362,60 @@ mod tests {
         .collect();
 
         assert_eq!(
-            headroom_for(&table, "scroll", "ratio_p50", false),
+            headroom_for(&table, &cell("scroll"), "ratio_p50", false),
             Some(Headroom::Proportional(1.12))
         );
         assert_eq!(
-            headroom_for(&table, "echo", "ratio_p50", false),
+            headroom_for(&table, &cell("echo"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06)),
             "the bare entry stays the host-wide characterization"
         );
         assert_eq!(
-            headroom_for(&table, "flood", "ratio_p50", false),
+            headroom_for(&table, &cell("flood"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06)),
             "a qualified entry must not leak outside its scenario"
+        );
+    }
+
+    /// The narrowest key wins: `"scenario.fixture.metric"` over
+    /// `"scenario.metric"` over the bare name. Two fixtures of one scenario
+    /// resolve the same statistic differently -- gh-macos puts `echo/heavy`
+    /// at a 33.4% half-width against `echo/minimal`'s 3.2% -- so a factor
+    /// sized honestly for the wide fixture must reach that cell and no
+    /// other, or characterizing it loosens the narrow bar beside it.
+    ///
+    /// Disconfirm: a lookup that skipped the fixture level reads 1.12 for
+    /// heavy and the first assertion fails; one that let the fixture entry
+    /// leak fails the second or the third.
+    #[test]
+    fn a_fixture_qualified_headroom_wins_over_the_scenario_and_the_host() {
+        let table: HeadroomTable = [
+            ("ratio_p50".to_string(), 1.06),
+            ("echo.ratio_p50".to_string(), 1.12),
+            ("echo.heavy.ratio_p50".to_string(), 1.35),
+        ]
+        .into_iter()
+        .collect();
+        let bar = |scenario: &str, fixture: &str| {
+            headroom_for(&table, &CellId::new(scenario, fixture), "ratio_p50", false)
+        };
+
+        assert_eq!(bar("echo", "heavy"), Some(Headroom::Proportional(1.35)));
+        assert_eq!(
+            bar("echo", "minimal"),
+            Some(Headroom::Proportional(1.12)),
+            "the scenario entry stays in force for the fixtures without one"
+        );
+        assert_eq!(
+            bar("scroll", "heavy"),
+            Some(Headroom::Proportional(1.06)),
+            "a fixture name is not a scope of its own: the bare entry governs \
+             another scenario's fixture of the same name"
+        );
+        assert_eq!(
+            declared_headroom(&table, &CellId::new("echo", "heavy"), "ratio_p50"),
+            Some(Headroom::Proportional(1.35)),
+            "the ratchet's spread reader walks the same three scopes as the gate"
         );
     }
 
@@ -2346,16 +2436,16 @@ mod tests {
         .collect();
 
         assert_eq!(
-            declared_headroom(&table, "scroll", "ratio_p50"),
+            declared_headroom(&table, &cell("scroll"), "ratio_p50"),
             Some(Headroom::Proportional(1.18))
         );
         assert_eq!(
-            declared_headroom(&table, "echo", "view_p99_ms"),
+            declared_headroom(&table, &cell("echo"), "view_p99_ms"),
             None,
             "an uncharacterized statistic reports absence, never a default"
         );
         assert_eq!(
-            declared_headroom(&table, "echo", "ratio_p50"),
+            declared_headroom(&table, &cell("echo"), "ratio_p50"),
             Some(Headroom::Proportional(1.06))
         );
     }
@@ -2379,13 +2469,16 @@ mod tests {
         .into_iter()
         .collect();
 
-        assert_eq!(headroom_for(&table, "flood", "cadence_p99_ms", false), None);
         assert_eq!(
-            declared_headroom(&table, "flood", "cadence_p99_ms"),
+            headroom_for(&table, &cell("flood"), "cadence_p99_ms", false),
+            None
+        );
+        assert_eq!(
+            declared_headroom(&table, &cell("flood"), "cadence_p99_ms"),
             Some(Headroom::Proportional(1.15))
         );
         assert_eq!(
-            declared_headroom(&table, "echo", "paired_delta_p99_ms"),
+            declared_headroom(&table, &cell("echo"), "paired_delta_p99_ms"),
             Some(Headroom::Signed {
                 factor: 1.30,
                 floor: SIGNED_DELTA_FLOOR_MS

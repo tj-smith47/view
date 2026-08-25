@@ -5,9 +5,10 @@
 # run-to-run spread established on this class and gates on the conservative
 # default; absence is a statement, not a gap to fill with a plausible number.
 # A bare key characterizes the statistic host-wide; a quoted
-# "scenario.metric" key scopes it to one scenario and wins there, for a
-# statistic whose spread is a property of the scenario rather than of the
-# host.
+# "scenario.metric" key scopes it to one scenario and a quoted
+# "scenario.fixture.metric" key to one cell, each winning over the wider
+# scope -- for a statistic whose spread is a property of the scenario, or
+# of one fixture of it, rather than of the host.
 machine_class = "dev-macos"
 
 [headroom]
@@ -51,9 +52,10 @@ machine_class = "dev-macos"
 # pre-cleanup loaded host (loads 2.60-8.89) against a since-superseded
 # recording; the quiet-host spread does not support a factor that wide.
 #
-# Scoped to scroll, not scroll.heavy: headroom_for looks up the bare
-# scenario name only (baselines.rs:304-309), so this key governs both
-# scroll fixtures; both were characterized above.
+# Scoped to the scenario rather than to either scroll fixture, though the
+# key grammar admits both: the campaign characterized minimal and heavy
+# together and neither asks for its own factor, so one key governing both
+# is the honest statement.
 #
 # The minimal ceiling this factor produces (2.3816 x 1.024 = 2.4387) sits
 # 0.03% above the worst included quiet draw (2.438): a knife-edge that is a

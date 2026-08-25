@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use view_harness::baselines::{declared_headroom, load_headroom, Headroom};
+use view_harness::baselines::{declared_headroom, load_headroom, CellId, Headroom};
 use view_harness::builds::{view_bin_flag, NOSPEC_VIEW_BIN, TAPS_VIEW_BIN};
 use view_harness::fixture::workspace_root;
 
@@ -248,17 +248,17 @@ fn gated_value(stdout: &str, metric: &str) -> Option<f64> {
 /// instead of falling back to a default, because a fallback would report
 /// "no measurable delta" from an apparatus nobody has shown can measure
 /// one.
-fn tolerance(scenario: &str, metric: &str) -> f64 {
+fn tolerance(scenario: &str, fixture: &str, metric: &str) -> f64 {
     let path = workspace_root()
         .join("crates")
         .join("view-bench")
         .join("baselines")
         .join(format!("{}.headroom.toml", class()));
     let table = load_headroom(&path, &class()).expect("loading the class headroom sidecar");
-    match declared_headroom(&table, scenario, metric) {
+    match declared_headroom(&table, &CellId::new(scenario, fixture), metric) {
         Some(Headroom::Proportional(factor)) => factor,
         other => panic!(
-            "class {} publishes no proportional spread for {scenario}.{metric} ({other:?}); \
+            "class {} publishes no proportional spread for {scenario}.{fixture}.{metric} ({other:?}); \
              characterize the statistic on this class before reading a paired difference \
              against it",
             class()
@@ -335,7 +335,7 @@ fn the_heartbeat_prober_costs_nothing_this_class_can_measure() {
         // comparison
         let armed = measure(row, &arms.armed);
         let bare = measure(row, &arms.bare);
-        let tolerance = tolerance(row.scenario, row.metric);
+        let tolerance = tolerance(row.scenario, row.fixture, row.metric);
         let ratio = armed / bare;
         let line = format!(
             "{}.{} {}: armed {armed:.4}, prober absent {bare:.4}, armed/absent {ratio:.4} \

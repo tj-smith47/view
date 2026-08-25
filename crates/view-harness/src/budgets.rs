@@ -390,14 +390,14 @@ fn find_shortfall<'a>(
 /// none there: on a shared host that number is not a property of the code,
 /// and `None` here is that absence rather than a sentinel standing in for it.
 fn shortfall_ceiling(
-    scenario: &str,
+    cell: &crate::baselines::CellId,
     metric: &str,
     class: &str,
     accepted: f64,
     headroom_table: &crate::baselines::HeadroomTable,
 ) -> Option<(crate::baselines::Headroom, f64)> {
     let controlled = crate::baselines::is_controlled_class(class);
-    let headroom = crate::baselines::headroom_for(headroom_table, scenario, metric, controlled)?;
+    let headroom = crate::baselines::headroom_for(headroom_table, cell, metric, controlled)?;
     Some((headroom, headroom.bar(accepted)))
 }
 
@@ -410,7 +410,7 @@ fn shortfall_ceiling(
 /// class does not gate gets no spread and one inside reading stays one
 /// sample, so the entry stands.
 fn provably_inside(
-    scenario: &str,
+    cell: &crate::baselines::CellId,
     metric: &str,
     class: &str,
     measured: f64,
@@ -418,7 +418,7 @@ fn provably_inside(
     headroom_table: &crate::baselines::HeadroomTable,
 ) -> bool {
     let controlled = crate::baselines::is_controlled_class(class);
-    crate::baselines::headroom_for(headroom_table, scenario, metric, controlled)
+    crate::baselines::headroom_for(headroom_table, cell, metric, controlled)
         .is_some_and(|headroom| headroom.bar(measured) <= budget)
 }
 
@@ -454,13 +454,13 @@ fn provably_inside(
 /// two gates therefore fail at the same number instead of one of them
 /// firing on noise the other was built to absorb.
 fn excursion_ceiling(
-    scenario: &str,
+    cell: &crate::baselines::CellId,
     metric: &str,
     budget: f64,
     recorded: Option<&crate::baselines::CellMetrics>,
     headroom_table: &crate::baselines::HeadroomTable,
 ) -> Option<(crate::baselines::Headroom, f64, f64)> {
-    let headroom = crate::baselines::declared_headroom(headroom_table, scenario, metric)?;
+    let headroom = crate::baselines::declared_headroom(headroom_table, cell, metric)?;
     if headroom.admits_non_positive() {
         return None;
     }
@@ -533,7 +533,7 @@ pub fn check_cell(
         } else {
             match find_shortfall(file, scenario, fixture, metric, class) {
                 None => {
-                    match excursion_ceiling(scenario, metric, budget.max, recorded, headroom_table)
+                    match excursion_ceiling(&cell.id, metric, budget.max, recorded, headroom_table)
                     {
                         Some((headroom, recorded, ceiling)) if measured <= ceiling => {
                             Verdict::Excursion {
@@ -547,7 +547,7 @@ pub fn check_cell(
                 }
                 Some(shortfall) => {
                     match shortfall_ceiling(
-                        scenario,
+                        &cell.id,
                         metric,
                         class,
                         shortfall.accepted,
@@ -616,7 +616,7 @@ pub fn unreached_shortfalls<'a>(
                 visited = true;
                 f.verdict != Verdict::Inside
                     || !provably_inside(
-                        &f.scenario,
+                        &crate::baselines::CellId::new(&f.scenario, &f.fixture),
                         &f.metric,
                         class,
                         f.measured,
@@ -1516,6 +1516,63 @@ why = \"because\"
             "controlled-linux",
         );
         assert!(unreached_shortfalls(&file, "controlled-linux", &still_short, &none).is_empty());
+    }
+
+    /// A fixture-scoped spread reaches the cell it names and no other, so
+    /// characterizing a wide fixture cannot spend the narrow one's entry
+    /// beside it.
+    ///
+    /// Disconfirm: a lookup that ignored the fixture level leaves both
+    /// entries standing; one handed the two names the other way round spends
+    /// neither.
+    #[test]
+    fn a_fixture_scoped_spread_spends_only_its_own_cells_shortfall() {
+        let entry = |fixture: &str| {
+            format!(
+                "
+[[shortfall]]
+scenario = \"echo\"
+fixture = \"{fixture}\"
+metric = \"view_p99_ms\"
+class = \"controlled-linux\"
+accepted = 9.0
+why = \"because\"
+"
+            )
+        };
+        let file = file_from(&format!(
+            "{ONE_BUDGET}{}{}",
+            entry("minimal"),
+            entry("heavy")
+        ));
+        // budget max 8.0: a 5% spread proves the 7.0 reading inside (7.35),
+        // the compiled 1.5 default does not (10.5)
+        let table: crate::baselines::HeadroomTable =
+            [("echo.minimal.view_p99_ms".to_string(), 1.05)]
+                .into_iter()
+                .collect();
+        let findings: Vec<Finding> = ["minimal", "heavy"]
+            .into_iter()
+            .flat_map(|fixture| {
+                check_cell(
+                    &file,
+                    "echo",
+                    fixture,
+                    &metrics(&[("view_p99_ms", 7.0)]),
+                    "controlled-linux",
+                )
+            })
+            .collect();
+
+        let unreached = unreached_shortfalls(&file, "controlled-linux", &findings, &table);
+        assert_eq!(
+            unreached
+                .iter()
+                .map(|shortfall| shortfall.fixture.as_str())
+                .collect::<Vec<_>>(),
+            ["minimal"],
+            "only the characterized cell's reading is provably inside its bound"
+        );
     }
 
     /// A statistic whose honest draws straddle its bound must not spend its

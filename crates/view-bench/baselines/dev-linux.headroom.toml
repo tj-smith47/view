@@ -5,9 +5,10 @@
 # run-to-run spread established on this class and gates on the conservative
 # default; absence is a statement, not a gap to fill with a plausible number.
 # A bare key characterizes the statistic host-wide; a quoted
-# "scenario.metric" key scopes it to one scenario and wins there, for a
-# statistic whose spread is a property of the scenario rather than of the
-# host.
+# "scenario.metric" key scopes it to one scenario and a quoted
+# "scenario.fixture.metric" key to one cell, each winning over the wider
+# scope -- for a statistic whose spread is a property of the scenario, or
+# of one fixture of it, rather than of the host.
 machine_class = "dev-linux"
 
 [headroom]

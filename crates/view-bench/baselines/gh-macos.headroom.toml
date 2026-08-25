@@ -4,10 +4,13 @@
 # comments survive every record pass. A metric absent here has not had its
 # run-to-run spread established on this class and gates on the conservative
 # default; absence is a statement, not a gap to fill with a plausible
-# number. A bare key characterizes the statistic host-wide; a quoted
-# "scenario.metric" key scopes it to one scenario and wins there, for a
-# statistic whose spread is a property of the scenario rather than of the
-# host.
+# number.
+#
+# A bare key characterizes the statistic host-wide; a quoted
+# "scenario.metric" key scopes it to one scenario and a quoted
+# "scenario.fixture.metric" key to one cell, each winning over the wider
+# scope -- for a statistic whose spread is a property of the scenario, or
+# of one fixture of it, rather than of the host.
 #
 # The replicates behind these entries are the bench legs CI already ran on
 # this class, harvested from their logs: a hosted runner cannot be held
@@ -53,15 +56,16 @@ machine_class = "gh-macos"
 # not a rounding.
 "first_paint.marker_ratio_p50" = 1.48
 
-# echo.ratio_p50 is deliberately absent, and the reason is a gap in the
-# key grammar rather than in the evidence. echo/minimal is one of the
+# echo.ratio_p50 is deliberately absent, and what is missing now is the
+# record run rather than the key grammar. echo/minimal is one of the
 # tightest statistics on this runner (1.103..1.176 over eleven legs, 3.2%
 # half-width) while echo/heavy is the widest (0.798..1.503 over ten,
-# 33.4%), and a key scopes to a scenario, never to one fixture -- so the
-# factor honest for heavy would loosen minimal's bar from 1.378 to 2.095.
-# heavy's stale 0.9316 bar was deleted at 741ad03 pending an honest
-# reseat and records fresh today, which is why neither fixture masks a
-# regression now. When that reseat lands, a factor sized on heavy's band
-# needs a fixture-scoped key to exist first; seating heavy's bar from one
-# draw of a band that wide, under the compiled default, puts the class
-# back where 32534348333 and 32537625267 exited 3.
+# 33.4%), so a scenario-wide factor honest for heavy would loosen
+# minimal's bar from 1.378 to 2.095 -- which is why any factor sized on
+# heavy's band belongs on an "echo.heavy.ratio_p50" key, the fixture scope
+# the loader now binds. heavy's stale 0.9316 bar was deleted at 741ad03
+# pending an honest reseat and records fresh today, which is why neither
+# fixture masks a regression now. The reseat still waits on a recorded
+# bar: seating heavy's bar from one draw of a band that wide, under the
+# compiled default, puts the class back where 32534348333 and
+# 32537625267 exited 3.
