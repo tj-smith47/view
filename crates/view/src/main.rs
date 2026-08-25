@@ -1141,9 +1141,10 @@ mod tests {
         code_only(body.split_once("\n}\n").map_or(body, |(body, _)| body))
     }
 
-    /// `source` with every comment gone -- `/* … */` spans and the `//`
-    /// tail of every line, not only lines that open with one -- so a
-    /// marker can resolve to code and nothing else. Every step the pins
+    /// `source` with every comment gone -- `/* … */` spans, nesting
+    /// included the way rustc reads them, and the `//` tail of every line,
+    /// not only lines that open with one -- so a marker can resolve to
+    /// code and nothing else. Every step the pins
     /// below name is named in the prose around its own call site too, and
     /// a pin measuring the mention rather than the call keeps passing with
     /// the call moved out of the window.
@@ -1157,11 +1158,40 @@ mod tests {
     fn code_only(source: &str) -> String {
         let mut spanless = String::with_capacity(source.len());
         let mut rest = source;
-        while let Some((before, after)) = rest.split_once("/*") {
-            spanless.push_str(before);
-            rest = after.split_once("*/").map_or("", |(_, after)| after);
+        // depth-counted, because rust's block comments nest: taking the
+        // first `*/` as the end of the first `/*` hands back the tail of an
+        // outer comment as if it were code
+        let mut depth = 0usize;
+        loop {
+            let open = rest.find("/*");
+            let close = rest.find("*/");
+            match (open, close) {
+                (Some(open), close) if close.is_none_or(|close| open < close) => {
+                    if depth == 0 {
+                        spanless.push_str(&rest[..open]);
+                    }
+                    depth += 1;
+                    rest = &rest[open + 2..];
+                }
+                (_, Some(close)) => {
+                    // at depth 0 this closes nothing -- the source is
+                    // unbalanced, and dropping the text around it would
+                    // hide code rather than prose
+                    if depth == 0 {
+                        spanless.push_str(&rest[..close + 2]);
+                    }
+                    depth = depth.saturating_sub(1);
+                    rest = &rest[close + 2..];
+                }
+                // no delimiter left: an arm guard does not count towards
+                // exhaustivity, so this also spells `(Some(_), None)`,
+                // which the opener arm above has already taken
+                _ => break,
+            }
         }
-        spanless.push_str(rest);
+        if depth == 0 {
+            spanless.push_str(rest);
+        }
         spanless
             .lines()
             .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
@@ -1174,10 +1204,11 @@ mod tests {
     #[test]
     fn a_step_named_only_in_a_comment_is_not_a_step_the_pins_can_find() {
         let body = "    let probe = term\n        .other_call(); // .settle_probe() in prose\n\
-                    /* .engine_result() spanning\n   two lines */\n    let x = 1;\n";
+                    /* .engine_result() spanning\n   two lines */\n    let x = 1;\n\
+                    /* outer /* inner */ .drain_pre_attach() still inside */\n    let y = 2;\n";
         let code = code_only(body);
 
-        for buried in [".settle_probe()", ".engine_result()"] {
+        for buried in [".settle_probe()", ".engine_result()", ".drain_pre_attach()"] {
             assert!(
                 !code.contains(buried),
                 "`{buried}` survived in a comment, so a pin naming it can \
@@ -1185,7 +1216,9 @@ mod tests {
             );
         }
         assert!(
-            code.contains(".other_call();") && code.contains("let x = 1;"),
+            code.contains(".other_call();")
+                && code.contains("let x = 1;")
+                && code.contains("let y = 2;"),
             "the code around the comments has to survive, or every pin \
              reads as \"this step is gone\""
         );
