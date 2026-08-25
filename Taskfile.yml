@@ -288,11 +288,50 @@ tasks:
         code=$?; echo "perf-audit wrapper exit: $code"; exit $code
 
   commit:
-    desc: Gated commit — runs the ci chain first
+    desc: "Gated commit: stage with `git add <path>` first, then `task commit -- -m 'msg'` — runs ci, re-stages only what you staged plus what ci regenerated"
+    preconditions:
+      - sh: test -n "$(git diff --cached --name-only)"
+        msg: "Nothing staged. Stage files with `git add <path>` before running task commit."
+    vars:
+      STAGED_PRE:
+        sh: git diff --cached --name-only
+      MODIFIED_PRE:
+        sh: git diff --name-only
     cmds:
       - task: ci
-      - git add -A
+      - task: _commit:restage
+        vars:
+          STAGED_LIST: "{{.STAGED_PRE}}"
+          MODIFIED_LIST: "{{.MODIFIED_PRE}}"
       - git commit {{.CLI_ARGS}}
+
+  commit:quick:
+    desc: "Commit already-staged NON-CODE files (docs, plans, README, .claude notes) without the ci chain. Usage: `git add <paths>` first, then `task commit:quick -- -m 'msg'`. Anything under crates/, scripts/, .github/, or Taskfile.yml goes through `task commit`."
+    preconditions:
+      - sh: test -n "$(git diff --cached --name-only)"
+        msg: "Nothing staged. Stage files with `git add <path>` before running task commit:quick."
+      - sh: '! git diff --cached --name-only | grep -qE "^(crates/|scripts/|\.github/|Taskfile\.yml$|Cargo\.(toml|lock)$|\.engine-pin$)"'
+        msg: "Staged set contains code, scripts, CI, or build files; those go through `task commit` (the ci gate)."
+    cmds:
+      - git commit {{.CLI_ARGS}}
+
+  _commit:restage:
+    internal: true
+    desc: "Re-stage what was staged at task start (so ci's fmt touch-ups ride along) plus files ci newly modified; files modified-but-unstaged at start stay out of the commit"
+    cmds:
+      - |
+        # -A per path keeps deletes and renames staged with `git mv`.
+        while IFS= read -r f; do
+          [ -n "$f" ] && { git add -A -- "$f" 2>/dev/null || git rm --cached -- "$f" 2>/dev/null || true; }
+        done <<'STAGED_EOF'
+        {{.STAGED_LIST}}
+        STAGED_EOF
+        git diff --name-only | while IFS= read -r f; do
+          [ -z "$f" ] && continue
+          printf '%s\n' '{{.STAGED_LIST}}' | grep -qxF -- "$f" && continue
+          printf '%s\n' '{{.MODIFIED_LIST}}' | grep -qxF -- "$f" && continue
+          git add -- "$f"
+        done
 
   release:init:
     desc: Scaffold .anodizer.yaml — run once, then review the generated config

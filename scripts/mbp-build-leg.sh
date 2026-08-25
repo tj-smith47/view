@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Recurring macOS build leg, run from a dev host against the mbp machine.
 #
-# CI's own macos legs (ci.yml's `ci`/`oracle`/`compat`/`bench` jobs) only
-# run on a push or a PR, so a macOS-only build break sits unseen on a branch
-# nobody has pushed yet -- the gap that left macOS broken for days. This
-# closes it independently of push timing: mirror the tracked tree to a
-# scratch checkout on mbp and build the workspace there.
+# CI's own macos legs (ci.yml's `ci`/`oracle`/`compat` jobs, plus bench.yml's
+# `bench` job) only run on a push or a PR, so a macOS-only build break sits
+# unseen on a branch nobody has pushed yet -- the gap that left macOS broken
+# for days. This closes it independently of push timing: mirror the tracked
+# tree to a scratch checkout on mbp and build the workspace there.
 #
 #   bash scripts/mbp-build-leg.sh
 #
