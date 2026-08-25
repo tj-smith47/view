@@ -382,7 +382,7 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // scaled by the load this run started under.
     let _exclusive = pty_isolation_exclusive();
     let _warm = common::view_bin_path();
-    let budget = common::startup_budget(common::PROBE_DEADLINE + STARTUP_SETTLE);
+    let budget = common::startup_budget(common::PROBE_HARD_CAP + STARTUP_SETTLE);
     let start = Instant::now();
     let mut session = spawn_view_pty_raw_isolated(QueryPolicy::Silent);
     let spawned = start.elapsed();
@@ -404,10 +404,12 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     let elapsed = start.elapsed();
     let spend = format!(
         "{spawned:?} opening the pty and spawning view, {:?} between the \
-         spawn and the quit (the {:?} probe fallback, the nvim attach and \
-         the {STARTUP_SETTLE:?} settle sleep), {:?} from `:wq` to exit",
+         spawn and the quit (the {:?} probe fallback, the {:?} the second \
+         probe window then spends behind the nvim attach, the attach itself \
+         and the {STARTUP_SETTLE:?} settle sleep), {:?} from `:wq` to exit",
         quit_at - spawned,
         common::PROBE_DEADLINE,
+        common::PROBE_HARD_CAP - common::PROBE_DEADLINE,
         elapsed - quit_at
     );
     // the run's own record of what it measured, for a report that would
@@ -2882,9 +2884,10 @@ fn the_terminals_answers_decide_which_tier_the_child_paints_at() {
 ///
 /// The two inputs are independent and neither is visible on screen: the
 /// probe replies this pty chooses to send, and `COLORTERM` in the child's
-/// environment. `Tier::Full` -- the tier the measurement protocol's budget
-/// rows name -- needs both, so a bench that set only one would report a row
-/// at a tier its child never reached.
+/// environment. Either one carries a truecolor terminal to `Tier::Full` --
+/// the tier the measurement protocol's budget rows name -- so a bench needs
+/// only one of them, and a bench that arranges neither reports a row at a
+/// tier its child never reached.
 fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
     let paths = common::ScratchPaths::new("smoke-tier");
     let log_path = paths.isolated_home.join("view.log");
@@ -2978,5 +2981,30 @@ fn a_terminal_a_round_trip_away_still_reaches_the_full_tier() {
          before the hard cap the child waits out behind its engine spawn; \
          the tier it settles on must be the one the terminal answered for",
         view_oracle::LATE_ANSWER_DELAY
+    );
+}
+
+/// The hard cap [`common::PROBE_HARD_CAP`] copies is still the one view-tui
+/// declares.
+///
+/// Held by source text because this crate may not depend on view-tui, the
+/// same standing the sibling pin on `PROBE_DEADLINE` has in this crate's
+/// `timing_bounds` suite; this one sits beside the budget it feeds.
+#[test]
+fn the_probe_hard_cap_copy_still_matches_view_tuis_own() {
+    let tiers = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../view-tui/src/tiers.rs");
+    let source =
+        std::fs::read_to_string(&tiers).expect("view-tui's tiers.rs must be readable from here");
+    let expected = format!(
+        "pub const PROBE_HARD_CAP: Duration = Duration::from_millis({});",
+        common::PROBE_HARD_CAP.as_millis()
+    );
+    assert!(
+        source.contains(&expected),
+        "common::PROBE_HARD_CAP reads {:?}, which {} no longer declares. \
+         Update the copy, and with it the silent-probe startup budget \
+         derived from it",
+        common::PROBE_HARD_CAP,
+        tiers.display()
     );
 }

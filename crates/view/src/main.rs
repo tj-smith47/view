@@ -847,6 +847,12 @@ fn main() -> Result<()> {
     // through this channel for the same reason -- it is not known yet at
     // the point the thread starts, and the thread only needs it at its very
     // last step, after `ui_attach` has returned.
+    //
+    // What that costs a terminal which never answers the fence at all: the
+    // attach's last step blocks on the residue, so editable content lands at
+    // `max(PROBE_HARD_CAP, attach)` rather than at the attach alone -- the
+    // full cap, on a host where the attach is an order of magnitude shorter
+    // than it. First paint is unaffected either way; it happened above.
     let (residue_tx, residue_rx) = mpsc::sync_channel(1);
     let engine_rx = startup::attach_in_background(cfg, width, height, residue_rx, msg_tx.clone());
     let probe = term

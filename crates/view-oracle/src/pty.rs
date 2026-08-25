@@ -224,11 +224,17 @@ fn spawn_reader(
         let writer = Arc::clone(writer);
         let delay = policy.answer_delay();
         std::thread::spawn(move || {
+            let mut delayed = false;
             while let Ok(bytes) = reply_rx.recv() {
                 // on this thread rather than the reader's, which is why the
                 // two are separate at all: a delayed reply must not delay
-                // the drain of what the child is painting meanwhile
-                if !delay.is_zero() {
+                // the drain of what the child is painting meanwhile.
+                // Once per session, not once per chunk: a read that split
+                // the child's query batch in two would otherwise put the
+                // second half at twice the delay, and the fence past the
+                // child's own hard cap.
+                if !delay.is_zero() && !delayed {
+                    delayed = true;
                     std::thread::sleep(delay);
                 }
                 // poison is recovered rather than propagated: what this

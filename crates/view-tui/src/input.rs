@@ -402,7 +402,13 @@ impl InputSource {
                 .into_iter()
                 .map(|notation| Msg::Key(Key { notation })),
         );
-        if !replies.da1 && replies.residue.is_empty() {
+        // a reply the terminal has only half delivered keeps the guard
+        // armed even once a typed byte has come through: disarming on that
+        // byte would hand the reply's tail to crossterm as literal
+        // keystrokes, which is the failure the guard exists to prevent.
+        // Staying armed costs the typed byte nothing -- it was already
+        // forwarded above.
+        if !replies.da1 && (replies.residue.is_empty() || !guard.buf.is_empty()) {
             self.guard = Some(guard);
         }
     }

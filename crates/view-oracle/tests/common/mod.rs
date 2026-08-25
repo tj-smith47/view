@@ -213,6 +213,18 @@ impl Drop for ScratchPaths {
 /// `timing_bounds` suite instead of by the type system.
 pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);
 
+/// view-tui's `PROBE_HARD_CAP`: the total the capability probe may wait for
+/// the DA1 fence, measured from the query write, so it subsumes
+/// [`PROBE_DEADLINE`] rather than following it.
+///
+/// A terminal that answers ends both windows early; a pty that answers
+/// nothing spends all of this, the part past the first window behind the
+/// engine attach. Copied for the same reason [`PROBE_DEADLINE`] is, and
+/// held against the definition by
+/// `the_probe_hard_cap_copy_still_matches_view_tuis_own` in this crate's
+/// `smoke` suite.
+pub const PROBE_HARD_CAP: Duration = Duration::from_millis(400);
+
 /// The wall-clock bound a pty startup sequence gets on a host with nothing
 /// else to do, and the bound this crate asserted before any load reading
 /// existed.

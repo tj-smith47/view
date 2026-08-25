@@ -53,8 +53,11 @@ const QUERY_KITTY: &[u8] = b"\x1b[?u";
 /// (Terminal.app never sets it at all), while a terminal that quantized the
 /// request down to 256 colors echoes back the SGR it kept, not the one it
 /// was handed. The readback itself is the mechanism nvim already relies on:
-/// v0.12.4's own startup batch carries `ESC [ 4:3 m  ESC P $ q m  ESC \`,
-/// the same question asked about a curly underline instead of a color.
+/// v0.12.4 sends `ESC P $ q m ESC \` twice per startup, first behind
+/// `ESC [ 4:3 m` (a curly underline) in its opening batch, and again behind
+/// `ESC [ 48;2;1;2;3 m` -- these exact bytes -- after its XTGETTCAP round.
+/// The question below is the second of those, moved into the opening
+/// batch.
 ///
 /// No cell is painted by this: the set and the reset are adjacent, with no
 /// text between them, and both run before the alternate screen exists.
