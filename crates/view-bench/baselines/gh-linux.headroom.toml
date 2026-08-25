@@ -40,44 +40,48 @@ machine_class = "gh-linux"
 #
 # The 2.537 draw is the runner, not view: the same commit measured 1.620
 # against a 1.605 bar on the coordinated quiet dev-linux host, and that
-# leg's operands moved together -- scroll/minimal view p50 1.783 ms and
-# nvim p50 0.697 ms were both the slowest of the ten legs, against
-# campaign ranges of 0.793..1.783 and 0.383..0.697. A per-sample
-# interleaved ratio cancels the shared slowdown but not view's scroll
-# degrading faster than nvim's as the runner slows, and that residual is
-# what this factor covers. Nothing here trends: the second leg of the
-# window already read 2.295.
+# leg's operands moved together -- the trial behind the 2.537 median read
+# view p50 1.801 ms against nvim p50 0.710 ms, and the leg's per-operand
+# medians (view 1.783 ms, nvim 0.697 ms) were both the slowest of the ten
+# legs, against campaign ranges of 0.793..1.783 and 0.383..0.697. A
+# per-sample interleaved ratio cancels the shared slowdown but not view's
+# scroll degrading faster than nvim's as the runner slows, and that
+# residual is what this factor covers. Nothing here trends: the second leg
+# of the window already read 2.295.
+#
+# The factor also survives its own ratchet, which is the check that decides
+# whether a sized entry still holds once the recorded value moves. The
+# lowest draw is what the min-ratchet seats, and 1.809 x 1.42 = 2.5688
+# still clears the campaign's worst reading 2.537 -- by 1.2%, thin enough
+# to state rather than leave to be rediscovered; the heavy fixture's
+# equivalent is 2.067 x 1.42 = 2.935 against a 2.553 worst. A later draw
+# that turns either margin negative is a re-sizing, not a rounding.
 "scroll.ratio_p50" = 1.42
 
-# 6 CI bench legs, runs 32531092866, 32533279176, 32534348333,
-# 32537625267, 32619785446 and 32784781768 (2026-08-21/24; the cell
-# entered the matrix after the 08-03/04 legs, so the earlier four measure
-# nothing here), runner load 1.19 to 3.18, picker/minimal, gated statistic
-# per leg (median first_page_p50_ms of 3 trials): 14.702, 6.123, 6.519,
-# 11.072, 2.739, 3.376. Median 6.321, half-width 5.9815 (94.6% of median),
-# with no ordering to the draws. Worst excursion above the recorded value
-# 1.328x (14.702 against 11.0723); the 2x half-width rule asks 1.652x
-# (6.321 + 2 x 5.9815 against 11.0723). 1.66 clears both, over an absolute
-# default of 1.5. Six draws is the thinnest characterization in this file
-# and the widest band in it; both are stated rather than rounded away,
-# because the alternative is a default that this runner crosses.
-#
-# The downward half of the band carries more here than the bar does. The
-# recorded value is a min-ratchet, so the 2.739 and 3.376 draws would
-# otherwise seat a floor under which nearly every honest leg breaches
-# (2.739 x 1.66 = 4.55 against a 6.3 median). A published spread refuses a
-# record that far below the recorded value -- the floor is
-# 11.0723 x (2 - 1.66) = 3.765 -- so those two draws hold the bar instead
-# of becoming it.
-"picker.first_page_p50_ms" = 1.66
+# picker.first_page_p50_ms is deliberately absent, and its evidence is not
+# merely thin: it is self-contradictory. Six draws, runs 32531092866,
+# 32533279176, 32534348333, 32537625267, 32619785446 and 32784781768
+# (2026-08-21/24; the cell entered the matrix after the 08-03/04 legs):
+# 14.702, 6.123, 6.519, 11.072, 2.739, 3.376. Median 6.321, half-width
+# 5.9815 (94.6% of median), worst excursion above the recorded 11.0723
+# only 1.328x, and the 2x half-width rule asks 1.651x. No factor satisfies
+# both halves of the published-spread contract on a band that wide:
+# refusing the 6.123 draw as a recorded seat needs
+# 11.0723 x (2 - f) > 6.123, i.e. f < 1.447, while the 2x rule asks
+# f >= 1.651. Anything sized in between seats a bar one honest improving
+# draw later that the next honest draw breaches -- the very failure a
+# characterization exists to remove. The compiled absolute default (1.5)
+# is never crossed by the observed excursion, so absence masks nothing
+# today, and the entry waits for draws enough to resolve the band rather
+# than for a factor chosen to bridge the contradiction.
 
 # first_paint.marker_ratio_p50 is deliberately absent. Its pooled draws
 # (minimal 0.147 0.173 0.126 0.140 on 2026-08-03/04, then 0.211 0.214
 # 0.211 0.216 0.204 0.202 on 08-21/24; heavy 0.366 0.426 0.321 0.359, then
 # 0.440 0.459 0.440 0.450 0.446 0.439) would ask 1.70 and 1.36 under the
 # same rule, but neither fixture's two groups overlap and the cause is on
-# view's side: view's own cold
-# marker p50 steps from 15.2..21.9 ms to 25.9..27.4 ms while nvim's holds
-# 121..128 ms across all ten legs. The recorded 0.1733 predates that step,
-# so the gap between it and today's readings is a measurement to explain,
-# not a band to widen. The default keeps reporting it, which is the point.
+# view's side: view's own cold marker p50 steps from 15.2..21.9 ms to
+# 25.9..27.4 ms while nvim's holds 121..128 ms across all ten legs. The
+# recorded 0.1733 predates that step, so the gap between it and today's
+# readings is a measurement to explain, not a band to widen. The default
+# keeps reporting it, which is the point.

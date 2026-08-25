@@ -1815,6 +1815,14 @@ mod tests {
             .masked_regressions()
         };
 
+        assert_eq!(
+            declared_factor(&table, "scroll", "ratio_p50"),
+            Some(1.42),
+            "the campaign sized this factor at 1.42; a sidecar edit moves the number here too, \
+             so neither a shrink that re-breaches the leg nor an inflation the draws never \
+             asked for lands as a one-file change"
+        );
+
         let measured = 2.5372;
         assert!(
             Headroom::Proportional(RATIO_HEADROOM).bar(recorded) < measured,

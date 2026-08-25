@@ -45,6 +45,12 @@ machine_class = "gh-macos"
 # nvim's holds 217..234 ms -- the two groups overlap in both directions.
 # The same statistic on gh-linux is the opposite case and is deliberately
 # absent from that class's sidecar, where the two groups do not overlap.
+#
+# The factor survives its own ratchet: the lowest draw is what the
+# min-ratchet seats, and 0.185 x 1.48 = 0.2738 still clears the campaign's
+# worst reading 0.252 (heavy: 0.359 x 1.48 = 0.5313 against a 0.415
+# worst). A later draw that turns either margin negative is a re-sizing,
+# not a rounding.
 "first_paint.marker_ratio_p50" = 1.48
 
 # echo.ratio_p50 is deliberately absent, and the reason is a gap in the

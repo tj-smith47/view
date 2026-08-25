@@ -60,7 +60,7 @@ Every statistic that gates on a *shared* class — no `p99` component, no
 |---|---|---|---|---|---|---|---|---|---|---|
 | scroll.minimal | ratio_p50 | 10 | 2.051 | 1.809..2.537 | 17.7% | 1.9669 | 1.290 | **1.413** | 1.25 | **entry 1.42** |
 | scroll.heavy | ratio_p50 | 10 | 2.188 | 2.067..2.553 | 11.1% | 2.0943 | 1.219 | 1.277 | 1.25 | covered by the same entry |
-| picker.minimal | first_page_p50_ms | 6 | 6.321 | 2.739..14.702 | 94.6% | 11.0723 | 1.328 | **1.651** | 1.5 | **entry 1.66** |
+| picker.minimal | first_page_p50_ms | 6 | 6.321 | 2.739..14.702 | 94.6% | 11.0723 | 1.328 | **1.651** | 1.5 | **withdrawn, see below** |
 | first_paint.minimal | marker_ratio_p50 | 10 | 0.203 | 0.126..0.216 | 22.2% | 0.1733 | 1.246 | 1.691 | 1.25 | finding, no entry |
 | first_paint.heavy | marker_ratio_p50 | 10 | 0.4395 | 0.321..0.459 | 15.7% | 0.4262 | 1.077 | 1.355 | 1.25 | finding, no entry |
 | echo.minimal | ratio_p50 | 10 | 1.162 | 1.113..1.209 | 4.1% | 1.1614 | 1.041 | 1.083 | 1.25 | inside the default |
@@ -92,34 +92,68 @@ Every statistic that gates on a *shared* class — no `p99` component, no
 | remote_memory.minimal | remote_local_ratio | 5 | 1.008 | 0.989..1.027 | 1.9% | not recorded | — | — | 1.25 | nothing to gate |
 | first_paint.* | shell_visible_ms | 4 | 31.1/32.0 | 27.27..33.91 | — | not recorded | — | — | 1.5 | 4 draws: too few |
 
-Three of 15 gated gh-linux statistics and one of 14 on gh-macos cross their
-default. The rest keep it, and that absence is the file's statement, not a
-gap: gh-linux resolves `echo`'s `ratio_p50` to 4.1% and `remote_local_ratio`
+Both tables carry 14 rows, counted the same way (each folds the two
+`first_paint` `shell_visible_ms` cells into one row). Five of gh-linux's 14
+rows cross their default and one of gh-macos's 14 does: on gh-linux, one
+entry covers the two crossing `scroll` rows, the two crossing
+`first_paint.marker_ratio_p50` rows are a finding rather than a spread, and
+`picker.first_page_p50_ms` is withdrawn; on gh-macos the single crossing row
+takes the one entry. The rest keep their default, and that absence is the
+file's statement, not a gap: gh-linux resolves `echo`'s `ratio_p50` to 4.1% and `remote_local_ratio`
 to 1.1%, so a default of 1.25 there is loose, but tightening it on draws
 taken from ten *different commits* would be the unverified-constant move
 the 2026-07-27 campaign exists to end. Tightening needs an unchanged-pair
 campaign, which a hosted runner cannot supply.
 
-## The three entries
+## The two entries
 
-| class | key | factor | worst excursion | 2x rule | replaces |
-|---|---|---|---|---|---|
-| gh-linux | `"scroll.ratio_p50"` | 1.42 | 1.290 | 1.413 | 1.25 |
-| gh-linux | `"picker.first_page_p50_ms"` | 1.66 | 1.328 | 1.651 | 1.5 |
-| gh-macos | `"first_paint.marker_ratio_p50"` | 1.48 | 1.227 | 1.478 | 1.25 |
+| class | key | factor | worst excursion | 2x rule | forward ratchet (lowest draw x factor vs worst draw) | replaces |
+|---|---|---|---|---|---|---|
+| gh-linux | `"scroll.ratio_p50"` | 1.42 | 1.290 | 1.413 | 1.809 x 1.42 = 2.5688 > 2.537 (+1.2%); heavy 2.067 x 1.42 = 2.935 > 2.553 | 1.25 |
+| gh-macos | `"first_paint.marker_ratio_p50"` | 1.48 | 1.227 | 1.478 | 0.185 x 1.48 = 0.2738 > 0.252; heavy 0.359 x 1.48 = 0.5313 > 0.415 | 1.25 |
 
 Scoping follows the spread. `scroll.ratio_p50` is scenario-scoped because
 `echo`'s `ratio_p50` on the same legs holds inside 4.1% — the wide reading
 is scroll's, not the host's ratio resolution — and no host-wide entry is
 earned on either class.
 
-`picker.first_page_p50_ms` is the thinnest characterization here (6 draws)
-and the widest band (94.6%), and both facts are stated rather than rounded
-away. Its downward half carries more than its bar: the recorded value is a
-min-ratchet, so the 2.739 and 3.376 draws would seat a floor under which
-nearly every honest leg breaches. A published spread refuses a record that
-far below the recorded value — `record_floor = 11.0723 x (2 - 1.66) =
-3.765` — so those draws hold the bar instead of becoming it.
+The forward-ratchet column is the check that separates a factor which holds
+from one that merely fits today's recorded value. The recorded bar is a
+min-ratchet, so the lowest honest draw is the seat the class will settle
+on; a factor holds only if that seat times the factor still clears the
+band's worst reading. Both entries clear it, `scroll.minimal` by 1.2% —
+thin, stated, and a later draw that turns it negative is a re-sizing rather
+than a rounding.
+
+### `picker.first_page_p50_ms` is withdrawn, not sized
+
+Six draws (runs 32531092866, 32533279176, 32534348333, 32537625267,
+32619785446, 32784781768; 2026-08-21/24): 14.702, 6.123, 6.519, 11.072,
+2.739, 3.376. Median 6.321, half-width 5.9815 (94.6%), worst excursion over
+the recorded 11.0723 only 1.328x, 2x rule 1.651x.
+
+That band cannot satisfy both halves of the published-spread contract at
+once. Refusing the 6.123 draw as a recorded seat needs
+`11.0723 x (2 - f) > 6.123`, i.e. `f < 1.447`; the 2x rule asks
+`f >= 1.651`. Any factor in between passes the forward-ratchet check only
+until one honest improving draw seats a lower bar, and then the next honest
+draw breaches it:
+
+```
+recorded 11.0723  bar 18.380  record_floor = 2(11.0723) - 18.380 = 3.7646
+  draws 2.739, 3.376 -> below floor -> RefusedBelowSpread
+  draw  6.123        -> above floor -> Improved, recorded becomes 6.123
+recorded  6.123   bar = 6.123 x 1.66 = 10.164
+  draws 11.072, 14.702 -> masked regression, leg exits 3
+```
+
+Resizing to `14.702 / 6.123 = 2.41` would clear that, but it sizes against
+a seat the class has not taken and admits a 2.4x move on a statistic whose
+worst observed excursion is 1.328x. The compiled absolute default (1.5) is
+never crossed by that excursion, so absence masks nothing today. Six draws
+is too few to resolve a 94.6% band, and that is the reason recorded here —
+the same reason `shell_visible_ms` is named at 3 and 4 draws. The entry
+waits for draws, not for a factor chosen to bridge the contradiction.
 
 ## Two findings the sidecars deliberately do not absorb
 
@@ -166,7 +200,6 @@ machine_class = "gh-linux"
 
 [headroom]
 "scroll.ratio_p50" = 1.42
-"picker.first_page_p50_ms" = 1.66
 ```
 
 ```toml
@@ -179,9 +212,12 @@ machine_class = "gh-macos"
 
 Both files are loaded by the run's own class:
 `bench.rs:932-938` derives the sidecar path from `baseline_path(&cli.class)`,
-and both bench legs invoke `task bench -- --all --class gh-{linux,macos}
---record` (`.github/workflows/ci.yml`, and the not-yet-pushed
-`.github/workflows/bench.yml`). No wiring beyond the files is needed:
+and both legs invoke `task bench -- --all --class gh-{linux,macos}
+--record` at `.github/workflows/bench.yml:96` — the not-yet-pushed workflow
+that is nonetheless the only live invocation at this commit, since 7e4abf2
+moved the two jobs out of `ci.yml`. Every leg harvested above predates that
+split and ran as `ci.yml`'s `bench` job, which is why the runs are listed
+under `--workflow=ci.yml` below. No wiring beyond the files is needed:
 `every_shipped_headroom_sidecar_binds_to_its_baseline` already walks the
 whole baselines directory, so both new files load and bind under
 `task ci` today.
