@@ -158,8 +158,9 @@ pub enum AttachFailure {
 /// [`attach_in_background`]'s doc comment for why).
 ///
 /// The size arrives through a callback rather than as two arguments
-/// because the caller does not have it yet when the child should start: `nvim --embed` performs no startup at all
-/// until a UI attaches, so the terminal handshake that resolves the size
+/// because the caller does not have it yet when the child should start:
+/// `nvim --embed` performs no startup at all until a UI attaches, so the
+/// terminal handshake that resolves the size
 /// is work the child's own startup can run underneath instead of behind
 /// (see `main.rs`'s call ordering). Only the attach needs a terminal.
 ///
@@ -1030,11 +1031,17 @@ mod tests {
 
     /// The pid is published the moment `Engine::spawn` returns, so this
     /// resolves during the handshake rather than at the end of the attach.
+    ///
+    /// The bound is a wedge, not a measurement: a fork that has not
+    /// happened within it did not happen at all, so it is generous and
+    /// scaled for the host rather than picked to fit one.
     #[cfg(unix)]
     fn wait_for_spawn(guard: &AttachGuard) -> u32 {
-        (0..100_000)
-            .find_map(|_| {
-                let pid = guard.pid();
+        let deadline =
+            Instant::now() + view_test_support::host_deadline(std::time::Duration::from_secs(5));
+        std::iter::repeat_with(|| guard.pid())
+            .take_while(|_| Instant::now() < deadline)
+            .find_map(|pid| {
                 if pid.is_none() {
                     std::thread::yield_now();
                 }
@@ -1050,10 +1057,15 @@ mod tests {
         let gone = if cfg!(target_os = "linux") {
             !std::path::Path::new(&format!("/proc/{pid}")).exists()
         } else {
+            // `.output()`, and an unrunnable `ps` failing the test rather
+            // than reading as an absent child: a check that cannot run is
+            // the one result this assertion must never accept quietly
             !std::process::Command::new("ps")
                 .args(["-p", &pid.to_string()])
-                .status()
-                .is_ok_and(|status| status.success())
+                .output()
+                .expect("`ps` has to run for this assertion to mean anything")
+                .status
+                .success()
         };
         assert!(
             gone,

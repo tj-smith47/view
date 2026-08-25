@@ -1124,12 +1124,20 @@ mod tests {
     /// as "this pin can no longer see it" rather than as an ordering that
     /// happens to still compare. Ends at the first brace in column zero,
     /// which is where every top-level item closes.
-    fn startup_body() -> &'static str {
+    fn startup_body() -> String {
         let source = include_str!("main.rs");
         let (_, body) = source
             .split_once("\nfn main() -> Result<()> {")
             .expect("main.rs still defines fn main");
-        body.split_once("\n}\n").map_or(body, |(body, _)| body)
+        let body = body.split_once("\n}\n").map_or(body, |(body, _)| body);
+        // without the comment lines a marker can only ever resolve to code:
+        // every step below is named in the prose around its own call site
+        // too, and a pin that measured the mention rather than the call
+        // would keep passing with the call moved out of the window
+        body.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn offset_of(marker: &str) -> usize {
