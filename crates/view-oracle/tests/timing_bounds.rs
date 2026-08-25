@@ -172,6 +172,21 @@ mod tests {
     }
 
     #[test]
+    fn an_inclusive_bound_is_still_a_bound() {
+        assert!(elapsed <= Duration::from_secs(4), "took {elapsed:?}");
+    }
+
+    #[test]
+    fn the_same_bound_reads_the_same_backwards() {
+        assert!(Duration::from_secs(4) > elapsed, "took {elapsed:?}");
+    }
+
+    #[test]
+    fn converting_the_span_hides_the_type_not_the_clock() {
+        assert!(start.elapsed().as_millis() < 50, "took {elapsed:?}");
+    }
+
+    #[test]
     fn these_are_the_shapes_the_rule_asks_for() {
         assert!(
             elapsed < view_test_support::host_deadline(Duration::from_secs(2)),
@@ -192,11 +207,13 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
         .iter()
         .map(|found| found.number)
         .collect();
-    // the three deliberately wrong lines: the named constant, the
-    // rustfmt-wrapped comparison, and the deadline built from `now`
+    // the six deliberately wrong lines: the named constant, the
+    // rustfmt-wrapped comparison, the deadline built from `now`, the
+    // inclusive bound, the same bound written backwards, and the one whose
+    // span is converted to a number first
     assert_eq!(
         found,
-        vec![9, 16, 23],
+        vec![9, 16, 23, 29, 34, 39],
         "the walk read {found:?} of the fixture. Every line it missed is a \
          shape the population can carry unnoticed; every extra line is a \
          shape the rule asks for being reported as a violation"
@@ -355,11 +372,8 @@ fn absolute_span_bounds(source: &str) -> Vec<AbsoluteBound> {
         found.push(AbsoluteBound { number, line });
     };
     for statement in &statements {
-        for at in comparison_offsets(&statement.text) {
-            let (left, right) = statement.text.split_at(at);
-            if (left.contains("elapsed") || left.contains("took"))
-                && is_absolute(first_argument(&right[1..]), &consts)
-            {
+        for (at, span, bound) in comparisons(&statement.text) {
+            if (span.contains("elapsed") || span.contains("took")) && is_absolute(bound, &consts) {
                 push(at, statement);
             }
         }
@@ -383,7 +397,9 @@ fn is_absolute(expr: &str, consts: &HashSet<String>) -> bool {
     if SCALERS.iter().any(|scaler| expr.contains(scaler)) {
         return false;
     }
-    holds_a_duration_literal(expr) || identifiers(expr).any(|name| consts.contains(&name))
+    holds_a_duration_literal(expr)
+        || is_a_bare_number(expr)
+        || identifiers(expr).any(|name| consts.contains(&name))
 }
 
 /// The names of every `const NAME: Duration` in `statements` whose value is
@@ -412,6 +428,13 @@ fn absolute_constants(statements: &[Statement]) -> HashSet<String> {
         }
     }
     named
+}
+
+/// Whether `expr` is a plain number, which is what a bound looks like once
+/// the span has been converted: `elapsed().as_millis() < 50`.
+fn is_a_bare_number(expr: &str) -> bool {
+    let digits: String = expr.chars().filter(|c| !c.is_whitespace()).collect();
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
 }
 
 /// Whether `text` builds a `Duration` straight from a number rather than
@@ -449,20 +472,36 @@ fn identifiers(text: &str) -> impl Iterator<Item = String> + '_ {
         .map(std::borrow::ToOwned::to_owned)
 }
 
-/// The offsets of every `<` in `text` that compares rather than shifts,
-/// arrows, or opens a generic argument list.
-fn comparison_offsets(text: &str) -> Vec<usize> {
+/// Every comparison in `text`, as (offset of the operator, the side that
+/// may name a measured span, the side that may be its bound).
+///
+/// All four of `<`, `<=`, `>`, `>=`, because a bound reads the same
+/// backwards and an inclusive one is still a bound. An operator with no
+/// whitespace before it is a generic's angle bracket, a shift, or an arrow.
+fn comparisons(text: &str) -> Vec<(usize, &str, &str)> {
     let bytes = text.as_bytes();
-    offsets_of(text, "<")
-        .into_iter()
-        .filter(|at| {
-            let before = at.checked_sub(1).map(|before| bytes[before]);
-            let after = bytes.get(at + 1).copied();
-            !matches!(after, Some(b'<' | b'=' | b'-'))
-                && !matches!(before, Some(b'<' | b'=' | b'-' | b'>'))
-                && before.is_some_and(|b| b.is_ascii_whitespace())
-        })
-        .collect()
+    let mut found = Vec::new();
+    for (at, c) in text.char_indices() {
+        if c != '<' && c != '>' {
+            continue;
+        }
+        let before = at.checked_sub(1).map(|before| bytes[before]);
+        let after = bytes.get(at + 1).copied();
+        if !before.is_some_and(|before| before.is_ascii_whitespace())
+            || matches!(after, Some(b'<' | b'>' | b'-'))
+        {
+            continue;
+        }
+        let len = if after == Some(b'=') { 2 } else { 1 };
+        let left = &text[..at];
+        let right = first_argument(&text[at + len..]);
+        found.push(if c == '<' {
+            (at, left, right)
+        } else {
+            (at, right, left)
+        });
+    }
+    found
 }
 
 fn offsets_of(text: &str, needle: &str) -> Vec<usize> {
