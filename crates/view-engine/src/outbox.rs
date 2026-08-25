@@ -884,7 +884,9 @@ mod tests {
         }
 
         let seen = done_rx
-            .recv_timeout(std::time::Duration::from_secs(120))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(120),
+            ))
             .expect("the reader drained every byte that was sent");
         let (inline, threaded) = outbox.path_counts();
         assert_same_bytes(
@@ -1018,7 +1020,9 @@ mod tests {
         }
 
         let seen = done_rx
-            .recv_timeout(std::time::Duration::from_secs(120))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(120),
+            ))
             .expect("the reader drained every byte that was sent");
         assert_eq!(
             seen.len(),

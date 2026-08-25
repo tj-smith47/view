@@ -776,7 +776,7 @@ mod tests {
             }))
             .expect("worker channel closed");
         let msg = msg_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("no PickerResults within 5s");
         match msg {
             Msg::PickerResults { generation, items } => {
@@ -1211,7 +1211,9 @@ mod tests {
         let deadline = start + budget;
         let mut last_batch: Option<Vec<String>> = None;
         while Instant::now() < deadline {
-            let Ok(msg) = msg_rx.recv_timeout(Duration::from_millis(200)) else {
+            let Ok(msg) =
+                msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(200)))
+            else {
                 continue;
             };
             if let Msg::PickerResults { items, .. } = msg {
@@ -1553,7 +1555,7 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel::<()>();
         let guard = std::thread::spawn(move || {
             if let Err(mpsc::RecvTimeoutError::Timeout) =
-                done_rx.recv_timeout(Duration::from_secs(30))
+                done_rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(30)))
             {
                 let _ = req_tx.send(WorkerRequest::Close);
             }
@@ -1635,7 +1637,9 @@ mod tests {
         let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(60));
         let mut items = Vec::new();
         while Instant::now() < deadline {
-            let Ok(msg) = msg_rx.recv_timeout(Duration::from_millis(200)) else {
+            let Ok(msg) =
+                msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(200)))
+            else {
                 continue;
             };
             if let Msg::PickerResults { items: batch, .. } = msg {

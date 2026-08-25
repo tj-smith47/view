@@ -2239,7 +2239,9 @@ mod tests {
 
         write_request(&mut peer_write, 42, "view_vim_enter");
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::EngineRequest(EngineRequest::VimEnter { token }) = msg else {
             unreachable!("expected Msg::EngineRequest(VimEnter), got {msg:?}");
         };
@@ -2300,7 +2302,9 @@ mod tests {
         drop(peer_write);
 
         loop {
-            let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let msg = rx
+                .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                .unwrap();
             if matches!(msg, Msg::EngineStopped { .. }) {
                 break;
             }
@@ -2382,13 +2386,14 @@ mod tests {
 
         assert!(
             matches!(
-                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                    .unwrap(),
                 Msg::Resized { .. }
             ),
             "dummy fill must be the first message drained"
         );
         let stopped = rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
             .expect("EngineStopped must arrive once the dummy is drained");
         let Msg::EngineStopped {
             reason: Some(reason),
@@ -2503,7 +2508,9 @@ mod tests {
         std::thread::spawn(move || {
             let _ = tx.send(h.request("nvim_get_api_info", vec![]));
         });
-        let outcome = rx.recv_timeout(std::time::Duration::from_secs(2));
+        let outcome = rx.recv_timeout(view_test_support::host_deadline(
+            std::time::Duration::from_secs(2),
+        ));
         assert!(
             outcome.is_ok(),
             "request() hung after reader exit instead of returning Closed"
@@ -2582,7 +2589,9 @@ mod tests {
         peer_write.flush().unwrap();
         drop(peer_write);
 
-        let in_flight = rx.recv_timeout(std::time::Duration::from_secs(2));
+        let in_flight = rx.recv_timeout(view_test_support::host_deadline(
+            std::time::Duration::from_secs(2),
+        ));
         assert!(
             in_flight.is_ok(),
             "in-flight request() hung after garbage on the wire"
@@ -2768,7 +2777,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::HlProbeReply { generation, fg, bg } = msg else {
             unreachable!("expected HlProbeReply, got {msg:?}");
         };
@@ -2805,7 +2816,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::HlProbeReply { generation, fg, bg } = msg else {
             unreachable!("expected HlProbeReply, got {msg:?}");
         };
@@ -2839,7 +2852,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::HlProbeReply { generation, fg, bg } = msg else {
             unreachable!("expected HlProbeReply, got {msg:?}");
         };
@@ -2876,7 +2891,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::HiddenBufferLoaded {
             generation,
             buf,
@@ -2970,7 +2987,9 @@ mod tests {
             "the delete must target the buffer the late reply named"
         );
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert!(
             matches!(msg, Msg::HiddenBufferLoaded { buf: Some(_), .. }),
             "the late reply must still route to the pump even though its hold was \
@@ -3007,7 +3026,9 @@ mod tests {
             };
             rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
             peer_write.flush().unwrap();
-            let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let msg = rx
+                .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                .unwrap();
             assert!(
                 matches!(msg, Msg::HiddenBufferLoaded { buf: Some(_), .. }),
                 "expected HiddenBufferLoaded with a handle, got {msg:?}"
@@ -3056,7 +3077,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert!(
             matches!(msg, Msg::HiddenBufferLoaded { buf: None, .. }),
             "an error reply must still route as HiddenBufferLoaded with no buffer, got {msg:?}"
@@ -3170,7 +3193,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::HeartbeatReply { generation } = msg else {
             unreachable!("expected HeartbeatReply, got {msg:?}");
         };
@@ -3201,7 +3226,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::HeartbeatReply { generation } = msg else {
             unreachable!("expected HeartbeatReply, got {msg:?}");
         };
@@ -3239,7 +3266,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &notif.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::ColorSchemeChanged { name } = msg else {
             unreachable!("expected ColorSchemeChanged, got {msg:?}");
         };
@@ -3421,7 +3450,8 @@ mod tests {
 
         assert!(
             matches!(
-                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                    .unwrap(),
                 Msg::Resized { .. }
             ),
             "dummy fill must be the first message drained, proving the real event above \
@@ -3442,7 +3472,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &clean_notif.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::BufTextChanged { desynced, .. } = msg else {
             unreachable!("expected BufTextChanged, got {msg:?}");
         };
@@ -3498,7 +3530,8 @@ mod tests {
 
         assert!(
             matches!(
-                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                    .unwrap(),
                 Msg::Resized { .. }
             ),
             "dummy fill must be the first message drained, proving the detach above \
@@ -3515,7 +3548,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &bridge_notif.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::BufDetached { buf, generation } = msg else {
             unreachable!("expected the parked Msg::BufDetached to be flushed first, got {msg:?}");
         };
@@ -3568,7 +3603,8 @@ mod tests {
 
         assert!(
             matches!(
-                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                    .unwrap(),
                 Msg::Resized { .. }
             ),
             "dummy fill must be the first message drained, proving the answer above \
@@ -3582,7 +3618,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &bridge_notif.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::AiFsReadReply { request_id, result } = msg else {
             unreachable!("expected the parked Msg::AiFsReadReply to be flushed first, got {msg:?}");
         };
@@ -3631,7 +3669,8 @@ mod tests {
 
         assert!(
             matches!(
-                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+                    .unwrap(),
                 Msg::Resized { .. }
             ),
             "dummy fill must be the first message drained, proving the reply above \
@@ -3645,7 +3684,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &bridge_notif.to_value()).unwrap();
         peer_write.flush().unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let Msg::CheckTimeReply {
             request_id,
             results,

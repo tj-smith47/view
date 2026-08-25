@@ -2706,7 +2706,9 @@ mod tests {
             out
         });
         done_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("a write outcome must never wait for room on the channel the loop drains");
         worker.join().unwrap()
     }
@@ -2941,7 +2943,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("TreeScanResult arrives from the worker thread");
         match msg {
             Msg::TreeScanResult {
@@ -3011,7 +3015,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("SessionCrashed arrives from the worker the effect must have queued to");
         assert!(
             matches!(
@@ -3047,7 +3053,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("a Cancel with nothing running must still report something visible");
         assert!(
             matches!(
@@ -3105,7 +3113,9 @@ mod tests {
         assert!(matches!(flow2, Flow::Continue));
 
         let first = msg_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("the submitted prompt's spawn failure must still report a crash");
         assert!(
             matches!(
@@ -3142,7 +3152,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let job = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("the job must reach the wired context worker channel");
         match job {
             crate::ai_context_worker::AiContextJob::Submit { text } => {
@@ -3211,7 +3223,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = toast_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("an unwired context worker must still surface a local error");
         assert!(
             matches!(
@@ -3252,7 +3266,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = toast_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("a dead context worker's failed send must still surface a local error");
         assert!(
             matches!(
@@ -3311,7 +3327,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("PickerPreviewFile arrives from the worker thread");
         match msg {
             Msg::PickerPreviewFile { generation, lines } => {
@@ -3359,7 +3377,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("TreeGitResult arrives from the worker thread");
         match msg {
             Msg::TreeGitResult {
@@ -3422,7 +3442,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("TreeCreateFileResult arrives from the worker thread");
         assert!(
             matches!(
@@ -3465,7 +3487,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("TreeCreateFileResult arrives from the worker thread");
         assert!(
             matches!(
@@ -3503,7 +3527,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("TreeDeleteFileResult arrives from the worker thread");
         assert!(
             matches!(
@@ -3581,7 +3607,9 @@ mod tests {
             assert!(matches!(flow, Flow::Continue));
 
             let msg = rx
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(view_test_support::host_deadline(
+                    std::time::Duration::from_secs(5),
+                ))
                 .expect("AiTrustResolved arrives from the worker thread");
             assert!(
                 matches!(msg, Msg::AiTrustResolved { trusted: true, .. }),
@@ -3618,7 +3646,9 @@ mod tests {
             assert!(matches!(flow, Flow::Continue));
 
             let msg = rx
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(view_test_support::host_deadline(
+                    std::time::Duration::from_secs(5),
+                ))
                 .expect("AiTrustResolved arrives from the worker thread");
             assert!(
                 matches!(msg, Msg::AiTrustResolved { trusted: false, .. }),
@@ -3743,7 +3773,9 @@ mod tests {
         assert!(matches!(flow, Flow::Continue));
 
         let msg = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("TreeScanResult arrives from the worker thread");
         match msg {
             Msg::TreeScanResult {
@@ -4208,7 +4240,9 @@ mod tests {
             "re-asking this soon answers from inside the save it is waiting out"
         );
         match msg_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(5),
+            ))
             .expect("the grace has to end in a second look, not in silence")
         {
             Msg::ConfirmExternalRemoval { path } => assert_eq!(

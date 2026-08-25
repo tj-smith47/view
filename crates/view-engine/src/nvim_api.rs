@@ -3740,7 +3740,9 @@ mod tests {
     fn register_vim_enter_autocmd_sends_the_exact_verified_vimscript_shape() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.register_vim_enter_autocmd(7).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_command");
         assert_eq!(
             params,
@@ -3759,7 +3761,9 @@ mod tests {
     fn register_mappings_sends_one_chunk_carrying_its_data_as_arguments() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.register_mappings(default_maps(), 7).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_exec_lua");
         assert_eq!(params[0], Value::from(REGISTER_MAPPINGS_CHUNK));
         let args = params[1]
@@ -3832,7 +3836,9 @@ mod tests {
         ];
         h.review_show(BufferHandle(4), &marks, 1, true, ReviewOpenTarget::Split)
             .unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_exec_lua");
         assert_eq!(params[0], Value::from(REVIEW_SHOW_CHUNK));
         let args = params[1]
@@ -3885,7 +3891,9 @@ mod tests {
     fn review_clear_sends_the_namespace_and_every_key_the_show_installed() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.review_clear(BufferHandle(4)).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_exec_lua");
         assert_eq!(params[0], Value::from(REVIEW_CLEAR_CHUNK));
         let args = params[1].as_array().expect("arguments cross as an array");
@@ -3949,7 +3957,9 @@ mod tests {
     fn register_bridge_sends_one_chunk_carrying_the_channel_as_an_argument() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.register_bridge(7).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_exec_lua");
         assert_eq!(params[0], Value::from(REGISTER_BRIDGE_CHUNK));
         assert_eq!(
@@ -3976,7 +3986,9 @@ mod tests {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         const ANSWER: &str = "\x1b]52;c;aGVsbG8=\x1b\\";
         h.ui_term_event(ANSWER).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_ui_term_event");
         assert_eq!(
             params,
@@ -4062,7 +4074,9 @@ mod tests {
             },
         ];
         h.register_mappings(&hostile, 7).unwrap();
-        let (_, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (_, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let args = params[1].as_array().expect("the arguments array");
         let specs = args[1].as_array().expect("the specs array");
         assert_eq!(
@@ -4082,7 +4096,9 @@ mod tests {
     fn ui_attach_sends_the_full_ext_set() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.ui_attach(80, 24).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_ui_attach");
         assert_eq!(params[0], Value::from(80));
         assert_eq!(params[1], Value::from(24));
@@ -4108,7 +4124,9 @@ mod tests {
     fn ui_attach_with_stdin_relay_adds_stdin_fd_over_the_same_ext_set() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.ui_attach_with_stdin_relay(80, 24).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_ui_attach");
         let Value::Map(opts) = &params[2] else {
             unreachable!("expected an options map, got {:?}", params[2]);
@@ -4137,7 +4155,9 @@ mod tests {
     fn eval_str_sends_the_expression_as_a_single_positional_string() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         let _ = h.eval_str("getline(1)");
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_eval");
         assert_eq!(params, vec![Value::from("getline(1)")]);
     }
@@ -4149,7 +4169,9 @@ mod tests {
         // have had to escape, in one notation
         let hostile = "<Cmd>call setline(1, 'a\\b')<CR>\nix\"y'z";
         let _ = h.feed_keys(hostile);
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_exec_lua");
         assert_eq!(params[0], Value::from(FEED_KEYS_CHUNK));
         assert_eq!(params[1], Value::Array(vec![Value::from(hostile)]));
@@ -4163,7 +4185,9 @@ mod tests {
     fn set_option_sends_name_value_and_an_empty_scope_map() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.set_option("laststatus", &OptionValue::Int(0)).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_set_option_value");
         assert_eq!(
             params,
@@ -4179,7 +4203,9 @@ mod tests {
     fn hold_option_sends_the_constant_chunk_with_name_and_value_as_arguments() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.hold_option("laststatus", &OptionValue::Int(0)).unwrap();
-        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         assert_eq!(method, "nvim_exec_lua");
         assert_eq!(
             params,

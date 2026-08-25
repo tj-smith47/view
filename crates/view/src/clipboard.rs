@@ -1050,7 +1050,9 @@ mod tests {
         // is dropped: a worker that silently swallowed the job must fail
         // this test with a named timeout, never hang it
         let (msgid, value) = reply_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("a read job must answer its token within 2s, not block the engine forever");
         assert_eq!(msgid, 42, "the reply must answer the token the job carried");
         assert!(matches!(value, ReplyValue::ClipboardLines { .. }));
@@ -1085,7 +1087,9 @@ mod tests {
             .unwrap();
 
         let (msgid, value) = reply_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("a write job must answer its token within 2s, not block the engine forever");
         assert_eq!(msgid, 7, "the reply must answer the token the job carried");
         assert!(matches!(value, ReplyValue::Nil));
@@ -1137,7 +1141,9 @@ mod tests {
             .unwrap();
 
         let (_msgid, value) = reply_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("a read job must answer within 2s");
         assert_eq!(
             value,
@@ -1177,7 +1183,9 @@ mod tests {
             })
             .unwrap();
         reply_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("the write must reply within 2s");
 
         job_tx
@@ -1190,7 +1198,9 @@ mod tests {
             })
             .unwrap();
         let (_msgid, value) = reply_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("the read must reply within 2s");
         assert_eq!(
             value,
@@ -1243,7 +1253,9 @@ mod tests {
             .unwrap();
 
         let answer = term_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("a query must be answered within 2s, never left to nvim's own timeout");
         assert_eq!(answer, "\x1b]52;c;eWFua2VkCg==\x1b\\");
         assert!(
@@ -1359,7 +1371,9 @@ mod tests {
             .unwrap();
 
         let answer = term_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("an empty clipboard must still answer within 2s");
         assert_eq!(answer, "\x1b]52;p;\x1b\\");
 
@@ -1390,7 +1404,9 @@ mod tests {
             })
             .unwrap();
         first_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("the write must reply within 2s");
 
         let (second_tx, second_rx) = mpsc::channel();
@@ -1406,7 +1422,9 @@ mod tests {
             .unwrap();
 
         let (msgid, value) = second_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("the read must answer the engine the route now names, within 2s");
         assert_eq!(msgid, 2);
         assert_eq!(
@@ -1459,7 +1477,9 @@ mod tests {
             .unwrap();
 
         let (msgid, _value) = second_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
             .expect("the replacement's own job must still answer, within 2s");
         assert_eq!(msgid, 4);
         assert!(

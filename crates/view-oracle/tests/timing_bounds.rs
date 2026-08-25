@@ -78,10 +78,31 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
                   just a longer-lived stray process",
     },
     DeclaredAbsolute {
+        file: "view-ai/tests/fixtures/drop_harness.rs",
+        line: "if rx.recv_timeout(READY).is_err() {",
+        grounds: "the fixture is a binary rather than a test, so it links \
+                  none of the dev-only crate that scales a bound, and what \
+                  it waits out is a handshake that either happens or does \
+                  not",
+    },
+    DeclaredAbsolute {
+        file: "view/src/runtime.rs",
+        line: ".recv_timeout(std::time::Duration::from_millis(60))",
+        grounds: "it sits above one coalesce window and below the re-probe \
+                  grace, and a scaled one straddles the grace it is there \
+                  to stay under",
+    },
+    DeclaredAbsolute {
         file: "view-engine/tests/shutdown.rs",
         line: "let deadline = std::time::Instant::now() + GRACEFUL_EXIT_LIVENESS_BOUND;",
         grounds: "a child that has not run at all in a minute is not a \
                   descheduled child, which is the whole of what the bound claims",
+    },
+    DeclaredAbsolute {
+        file: "view-engine/tests/shutdown.rs",
+        line: ".recv_timeout(GRACEFUL_EXIT_LIVENESS_BOUND)",
+        grounds: "it is the same liveness bound the deadline above it is, \
+                  spent waiting rather than compared",
     },
     DeclaredAbsolute {
         file: "view-oracle/src/reference.rs",
@@ -193,6 +214,12 @@ mod tests {
     }
 
     #[test]
+    fn a_timeout_spends_the_same_wall_clock_without_comparing_it() {
+        let first = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (_held, timed_out) = cvar.wait_timeout(guard, INTERRUPTED).unwrap();
+    }
+
+    #[test]
     fn these_are_the_shapes_the_rule_asks_for() {
         assert!(
             elapsed < view_test_support::host_deadline(Duration::from_secs(2)),
@@ -203,6 +230,8 @@ mod tests {
         let ceiling = wait_for(&rx, Duration::from_secs(5));
         let deadline = Instant::now() + common::rpc_deadline();
         let settle = Instant::now() + SETTLE;
+        let answer = rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)));
+        let held = cvar.wait_timeout(guard, SETTLE).unwrap();
     }
 }
 "#;
@@ -213,16 +242,32 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
         .iter()
         .map(|found| found.number)
         .collect();
-    // the six deliberately wrong lines: the named constant, the
+    // the eight deliberately wrong lines: the named constant, the
     // rustfmt-wrapped comparison, the deadline built from `now`, the
-    // inclusive bound, the same bound written backwards, and the one whose
-    // span is converted to a number first
+    // inclusive bound, the same bound written backwards, the one whose
+    // span is converted to a number first, and the two waits handed a wall
+    // clock they spend rather than compare
     assert_eq!(
         found,
-        vec![9, 16, 23, 29, 34, 39],
+        vec![9, 16, 23, 29, 34, 39, 44, 45],
         "the walk read {found:?} of the fixture. Every line it missed is a \
          shape the population can carry unnoticed; every extra line is a \
          shape the rule asks for being reported as a violation"
+    );
+}
+
+#[test]
+fn an_indented_test_module_is_reported_at_the_lines_it_occupies() {
+    // the shape: a `#[cfg(test)]` that is not in column one, which is what
+    // a test module nested inside another module looks like
+    let source = "fn f() {}\nmod outer {\n    #[cfg(test)]\n    mod tests {\n                          let got = rx.recv_timeout(Duration::from_secs(2));\n    }\n}\n";
+    let found = absolute_span_bounds(&test_region(source));
+    let at: Vec<usize> = found.iter().map(|found| found.number).collect();
+    assert_eq!(
+        at,
+        vec![5],
+        "the wait is on line 5 of the source; a report that names any other \
+         line sends its reader to code that does not hold the bound"
     );
 }
 
@@ -337,16 +382,32 @@ fn named(crates: &Path, source: &Path, test_region_only: bool) -> (String, Strin
     if !test_region_only {
         return (name, text);
     }
+    (name, test_region(&text))
+}
+
+/// `text` from its first `#[cfg(test)]` onwards, with the elided prefix
+/// replaced by blank lines so reported line numbers stay real.
+///
+/// Counted in newlines rather than in lines: an indented `#[cfg(test)]`
+/// leaves its own indentation as a last partial line, which `lines()`
+/// counts as a whole one and every site in the module is then reported one
+/// line below where a reader will find it.
+fn test_region(text: &str) -> String {
     let Some(at) = text.find("#[cfg(test)]") else {
-        return (name, String::new());
+        return String::new();
     };
-    let skipped = text[..at].lines().count();
-    (name, "\n".repeat(skipped) + &text[at..])
+    "\n".repeat(text[..at].matches('\n').count()) + &text[at..]
 }
 
 /// A call that hands a duration to the load-scaled budget, which is what
 /// makes the duration a base rather than a bound.
 const SCALERS: [&str; 3] = ["host_deadline", "HostBudget", "rpc_deadline"];
+
+/// The blocking waits that spend a wall clock instead of comparing one.
+///
+/// Named with their opening paren so a field or a differently-spelled
+/// method with the same prefix is not read as one.
+const BLOCKING_WAITS: [&str; 2] = ["recv_timeout(", "wait_timeout("];
 
 /// One place a measured span is bounded by a wall clock nothing scales.
 struct AbsoluteBound {
@@ -356,13 +417,16 @@ struct AbsoluteBound {
 
 /// Every absolute bound in `source`, in the order they appear.
 ///
-/// Two shapes count. A comparison whose left side names a measured span
-/// (`elapsed`, `took`) and whose right side is an unscaled duration, and a
+/// Three shapes count. A comparison whose left side names a measured span
+/// (`elapsed`, `took`) and whose right side is an unscaled duration; a
 /// deadline built as `Instant::now() + <unscaled duration>`, which is the
-/// same wall clock with the subtraction moved. Both read through the
-/// statement rather than the line, so wrapping hides neither, and both
-/// resolve a bare constant against the file's own `const` declarations, so
-/// naming the literal does not launder it.
+/// same wall clock with the subtraction moved; and a wall clock handed to a
+/// blocking wait (`recv_timeout`, `wait_timeout`), where the comparison
+/// happens inside the standard library and the failure it produces on a
+/// loaded host is a timed-out receive rather than a failed assertion. All
+/// three read through the statement rather than the line, so wrapping hides
+/// none of them, and all three resolve a bare constant against the file's
+/// own `const` declarations, so naming the literal does not launder it.
 fn absolute_span_bounds(source: &str) -> Vec<AbsoluteBound> {
     let lines: Vec<&str> = source.lines().collect();
     let statements = statements(source);
@@ -390,6 +454,14 @@ fn absolute_span_bounds(source: &str) -> Vec<AbsoluteBound> {
             };
             if is_absolute(first_argument(&rest[plus + 1..]), &consts) {
                 push(at + plus, statement);
+            }
+        }
+        for waiter in BLOCKING_WAITS {
+            for at in offsets_of(&statement.text, waiter) {
+                let open = at + waiter.len() - 1;
+                if is_absolute(call_arguments(&statement.text[open..]), &consts) {
+                    push(open, statement);
+                }
             }
         }
     }
@@ -512,6 +584,29 @@ fn comparisons(text: &str) -> Vec<(usize, &str, &str)> {
 
 fn offsets_of(text: &str, needle: &str) -> Vec<usize> {
     text.match_indices(needle).map(|(at, _)| at).collect()
+}
+
+/// The whole argument list of the call whose opening bracket `text` starts
+/// at, without it.
+///
+/// Every argument rather than the first, because the position a duration is
+/// passed in differs per waiter: `recv_timeout` takes it first and
+/// `Condvar::wait_timeout` takes it after the guard.
+fn call_arguments(text: &str) -> &str {
+    let mut depth = 0i32;
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &text[1..at];
+                }
+            }
+            _ => {}
+        }
+    }
+    text
 }
 
 /// `text` up to the first comma or semicolon outside brackets, which is the

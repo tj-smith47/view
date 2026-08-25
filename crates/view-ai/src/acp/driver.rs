@@ -1801,7 +1801,9 @@ mod tests {
         rx: &std::sync::mpsc::Receiver<view_core::msg::Msg>,
         what: &str,
     ) -> view_core::msg::Msg {
-        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        match rx.recv_timeout(view_test_support::host_deadline(
+            std::time::Duration::from_secs(5),
+        )) {
             Ok(msg) => msg,
             Err(err) => panic!("{what}: {err}"),
         }
@@ -1869,7 +1871,9 @@ mod tests {
         );
         assert!(
             matches!(
-                events_rx.recv_timeout(std::time::Duration::from_secs(5)),
+                events_rx.recv_timeout(view_test_support::host_deadline(
+                    std::time::Duration::from_secs(5)
+                )),
                 Ok(view_core::msg::Msg::Ai(AiEvent::FsWriteRequested { .. }))
             ),
             "fs/write_text_file dispatched to on_fs_write"

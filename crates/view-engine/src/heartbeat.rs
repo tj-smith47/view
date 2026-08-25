@@ -1125,7 +1125,9 @@ mod tests {
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         std::io::Write::flush(&mut peer_write).unwrap();
 
-        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
         let view_core::msg::Msg::HeartbeatReply { generation } = msg else {
             unreachable!("expected HeartbeatReply, got {msg:?}");
         };

@@ -1378,7 +1378,9 @@ mod tests {
         });
         assert!(
             done_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
+                .recv_timeout(view_test_support::host_deadline(
+                    std::time::Duration::from_secs(2)
+                ))
                 .is_ok(),
             "10,000 undrained folds did not complete: fold_redraw blocked"
         );

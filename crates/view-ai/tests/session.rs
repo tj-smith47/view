@@ -70,7 +70,7 @@ fn session_requiring_auth(args: &[&str]) -> (AiSession, Receiver<Msg>) {
 
 /// The next event, or a failure naming what was waited for.
 fn next_event(rx: &Receiver<Msg>, what: &str) -> AiEvent {
-    match rx.recv_timeout(WAIT) {
+    match rx.recv_timeout(view_test_support::host_deadline(WAIT)) {
         Ok(Msg::Ai(event)) => event,
         Ok(other) => panic!("waiting for {what}, got {other:?}"),
         Err(RecvTimeoutError::Timeout) => panic!("timed out waiting for {what}"),
@@ -126,7 +126,7 @@ fn send_returns_while_the_agent_is_not_reading() {
         let _ = done_tx.send(());
     });
     done_rx
-        .recv_timeout(WAIT)
+        .recv_timeout(view_test_support::host_deadline(WAIT))
         .expect("512 sends complete against an agent that is not reading");
 
     // the queue was real, not discarded: once the agent reads again, the
@@ -647,7 +647,7 @@ fn a_dropped_session_signals_its_agent_before_the_editor_process_is_gone() {
         let _ = tx.send(file.lock().is_ok());
     });
 
-    let outcome = rx.recv_timeout(WAIT);
+    let outcome = rx.recv_timeout(view_test_support::host_deadline(WAIT));
     let _ = std::fs::remove_file(&lock_path);
     match outcome {
         Ok(true) => {}

@@ -1231,7 +1231,7 @@ mod tests {
             3,
             "three of the four directories must still be watched"
         );
-        match msg_rx.recv_timeout(Duration::from_millis(500)) {
+        match msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(500))) {
             Ok(Msg::ExternalWatchDegraded { reason }) => {
                 assert!(reason.contains("will not be noticed"), "got {reason:?}")
             }
@@ -1239,7 +1239,7 @@ mod tests {
         }
         assert!(
             matches!(
-                msg_rx.recv_timeout(Duration::from_millis(100)),
+                msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(100))),
                 Err(RecvTimeoutError::Timeout)
             ),
             "one refusal must not become a storm of notices"
@@ -1275,7 +1275,7 @@ mod tests {
         assert!(watched.lock().unwrap().is_empty());
         let mut reasons = Vec::new();
         while let Ok(Msg::ExternalWatchDegraded { reason }) =
-            msg_rx.recv_timeout(Duration::from_millis(500))
+            msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(500)))
         {
             reasons.push(reason);
         }
@@ -1391,7 +1391,7 @@ mod tests {
 
         flush(&mut pending, &mut window_closes, &emit);
 
-        match rx.recv_timeout(Duration::from_millis(500)) {
+        match rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(500))) {
             Ok(Msg::ExternalWritesDetected { paths }) => assert_eq!(paths.len(), MAX_BATCH),
             other => panic!("expected one bounded batch, got {other:?}"),
         }
@@ -1719,7 +1719,7 @@ mod tests {
 
         std::fs::write(root.join("after-stop.rs"), b"z").unwrap();
 
-        match rx.recv_timeout(Duration::from_millis(500)) {
+        match rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(500))) {
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {}
             Ok(msg) => panic!("expected no event after stop, got {msg:?}"),
         }
@@ -1762,7 +1762,7 @@ mod tests {
         );
         drop(rx);
 
-        match msg_rx.recv_timeout(Duration::from_millis(500)) {
+        match msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(500))) {
             Ok(Msg::ExternalWatchDegraded { reason }) => {
                 assert!(
                     reason.contains("will not be noticed"),
@@ -1804,7 +1804,7 @@ mod tests {
             &mut false,
         );
 
-        match msg_rx.recv_timeout(Duration::from_millis(500)) {
+        match msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(500))) {
             Ok(Msg::ExternalWatchDegraded { reason }) => {
                 assert!(reason.contains("may go unnoticed"), "got {reason:?}");
             }
@@ -1812,7 +1812,9 @@ mod tests {
             Err(err) => panic!("a backend error must report itself: {err}"),
         }
         assert!(
-            msg_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            msg_rx
+                .recv_timeout(view_test_support::host_deadline(Duration::from_millis(100)))
+                .is_err(),
             "three backend errors must not produce three notices"
         );
 
@@ -1907,7 +1909,8 @@ mod tests {
         // the wait is bounded and the empty batch becomes the assertion's
         // failure rather than a hang
         let closer = std::thread::spawn(move || {
-            let _ = emitted_rx.recv_timeout(Duration::from_secs(5));
+            let _ =
+                emitted_rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)));
             drop(tx);
         });
 
@@ -2884,7 +2887,7 @@ mod tests {
 
         let mut notices = Vec::new();
         while let Ok(Msg::ExternalWatchDegraded { reason }) =
-            msg_rx.recv_timeout(Duration::from_millis(200))
+            msg_rx.recv_timeout(view_test_support::host_deadline(Duration::from_millis(200)))
         {
             notices.push(reason);
         }

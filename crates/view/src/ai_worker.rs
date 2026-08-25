@@ -649,7 +649,7 @@ mod tests {
         // the background thread's own failure is measured separately, below
         // -- this assertion only pins that `dispatch` itself never becomes
         // the wait
-        let _ = rx.recv_timeout(Duration::from_secs(5));
+        let _ = rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)));
     }
 
     /// A spawn that cannot start (an absent program, standing in for a
@@ -667,7 +667,7 @@ mod tests {
         });
 
         let msg = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("a spawn failure must report SessionCrashed, not silently vanish");
         match msg {
             Msg::Ai(AiEvent::SessionCrashed { message }) => {
@@ -700,7 +700,7 @@ mod tests {
         });
 
         let msg = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("an unknown adapter id must still report SessionCrashed");
         assert!(
             matches!(&msg, Msg::Ai(AiEvent::SessionCrashed { message }) if message.contains("unknown AI agent id")),
@@ -723,7 +723,7 @@ mod tests {
         worker.dispatch(AiCommand::Cancel);
 
         let msg = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("an idle Cancel must still report something visible");
         match msg {
             Msg::Ai(AiEvent::SessionCrashed { message }) => {
@@ -761,7 +761,7 @@ mod tests {
         // its own crash -- this is what leaves the slot `Ready` with a
         // closed channel rather than ever reaching `SessionReady`.
         let first = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("the first session must report its own end");
         assert!(
             matches!(&first, Msg::Ai(AiEvent::SessionCrashed { .. })),
@@ -792,7 +792,7 @@ mod tests {
         });
 
         let second = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("a Prompt against a dead session must restart, not vanish");
         assert!(
             matches!(&second, Msg::Ai(AiEvent::SessionCrashed { .. })),
@@ -822,7 +822,7 @@ mod tests {
         });
 
         let msg = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("a thread-spawn refusal must still report SessionCrashed");
         assert!(
             matches!(&msg, Msg::Ai(AiEvent::SessionCrashed { message }) if message.contains("worker thread")),
@@ -869,7 +869,7 @@ mod tests {
         );
 
         let msg = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("the slow resolver's eventual failure must still be reported");
         assert!(
             matches!(&msg, Msg::Ai(AiEvent::SessionCrashed { .. })),
@@ -1037,7 +1037,7 @@ mod tests {
 
         assert!(!worker.watch_is_running(), "an idle worker watches nothing");
         worker.dispatch(AiCommand::Cancel);
-        let _ = rx.recv_timeout(Duration::from_secs(5));
+        let _ = rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)));
 
         assert!(
             !worker.watch_is_running(),
@@ -1071,7 +1071,7 @@ mod tests {
         });
 
         let msg = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(5)))
             .expect("a fast-exiting child must still report its own crash");
         assert!(
             matches!(&msg, Msg::Ai(AiEvent::SessionCrashed { .. })),
