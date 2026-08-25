@@ -14,7 +14,8 @@
 use std::path::PathBuf;
 
 use view_harness::baselines::{
-    self, gate_cell, CellId, CellMetrics, Headroom, HeadroomTable, MeasuredCell, ABSOLUTE_HEADROOM,
+    self, gate_cell, headroom_for, headroom_path, is_controlled_class, load_headroom, CellId,
+    CellMetrics, Headroom, HeadroomTable, MeasuredCell, ABSOLUTE_HEADROOM,
 };
 use view_harness::fixture::{workspace_root, USER_FIXTURE, USER_FIXTURE_STALL_MS};
 
@@ -26,12 +27,25 @@ const MARKER: &str = "marker_cold_ms";
 /// what the real value is reads it, below.
 const SYNTHETIC_MARKER_MS: f64 = 96.0;
 
-/// The largest recorded cold marker [`USER_FIXTURE_STALL_MS`] can still
-/// breach: the absolute headroom lets a cell grow by
-/// `ABSOLUTE_HEADROOM - 1` of itself before it is a breach, so a stall
-/// smaller than that share of the recorded value fires nothing at all.
-fn largest_marker_the_stall_can_breach() -> f64 {
-    USER_FIXTURE_STALL_MS as f64 / (ABSOLUTE_HEADROOM - 1.0)
+/// Whether [`USER_FIXTURE_STALL_MS`] on top of `recorded` still lands past
+/// the bar `headroom` sets, which is the whole of what makes the knob a
+/// proof rather than a decoration.
+///
+/// Asked of the [`Headroom`] the gate itself would apply rather than of a
+/// factor written here: a class's sidecar can widen the metric's allowance,
+/// and a stall sized against the compiled default would then be asserted to
+/// fire against a bar twice as far away.
+fn stall_clears(headroom: Headroom, recorded: f64) -> bool {
+    recorded + USER_FIXTURE_STALL_MS as f64 > headroom.bar(recorded)
+}
+
+/// The bar the named class really applies to this cell's cold marker, or
+/// `None` where the class does not gate the metric at all -- every shared
+/// class, which records a cold absolute without gating it.
+fn class_headroom(class: &str, path: &std::path::Path) -> Option<Headroom> {
+    let table = load_headroom(&headroom_path(path), class)
+        .unwrap_or_else(|err| panic!("{class}'s headroom sidecar must load: {err}"));
+    headroom_for(&table, &cell(), MARKER, is_controlled_class(class))
 }
 
 fn cell() -> CellId {
@@ -91,7 +105,10 @@ fn class_baselines() -> Vec<(String, PathBuf)> {
 #[test]
 fn a_stalled_login_breaches_the_cold_marker_on_a_controlled_class_alone() {
     assert!(
-        SYNTHETIC_MARKER_MS < largest_marker_the_stall_can_breach(),
+        stall_clears(
+            Headroom::Proportional(ABSOLUTE_HEADROOM),
+            SYNTHETIC_MARKER_MS
+        ),
         "the numbers this policy test runs on have to be a case the stall really fires on, \
          or it would be asserting the gate's silence rather than its verdict"
     );
@@ -136,13 +153,42 @@ fn a_stalled_login_breaches_the_cold_marker_on_a_controlled_class_alone() {
     );
 }
 
+/// Where the bar comes from, pinned on the one class that publishes a
+/// measured factor for this metric today.
+///
+/// `dev-linux.headroom.toml` carries `first_paint.marker_cold_ms = 2.0`,
+/// which doubles the bar and halves the recorded value a fixed stall can
+/// still breach. A ceiling computed from the compiled-in default would
+/// claim a breach that class would never report, so the walk below asks
+/// the same function the gate asks -- and gets `None` here, because a
+/// shared class records a cold absolute without gating it, which is why
+/// the factor does not bite on this class at all.
+#[test]
+fn the_bar_this_walk_reads_is_the_factor_the_class_publishes() {
+    let (class, path) = class_baselines()
+        .into_iter()
+        .find(|(class, _)| class == "dev-linux")
+        .expect("dev-linux must be among the class baselines");
+    let table = load_headroom(&headroom_path(&path), &class).unwrap();
+    assert_eq!(
+        headroom_for(&table, &cell(), MARKER, true),
+        Some(Headroom::Proportional(2.0)),
+        "the sidecar's own factor has to reach the bar this test reasons about"
+    );
+    assert_eq!(
+        class_headroom(&class, &path),
+        None,
+        "a shared class gates no cold absolute, so the walk has nothing to assert here"
+    );
+}
+
 /// The other half, and the one the policy test cannot make: that the stall
 /// the fixture actually plants is still large enough to breach the bar the
 /// recorded row sets.
 ///
-/// Read from the baselines rather than written here, so the day a class
-/// records a login slower than [`largest_marker_the_stall_can_breach`] is
-/// the day this fails -- at that point the knob proves nothing, and a
+/// Read from the baselines and their headroom sidecars rather than written
+/// here, so the day a class records a login the stall can no longer reach
+/// is the day this fails -- at that point the knob proves nothing, and a
 /// green test saying otherwise is worse than no test.
 ///
 /// Before any class records the cell there is no bar to bind to, and the
@@ -152,7 +198,6 @@ fn a_stalled_login_breaches_the_cold_marker_on_a_controlled_class_alone() {
 /// is pinned to a real refusal rather than to this test's silence.
 #[test]
 fn the_planted_stall_clears_the_bar_of_every_class_that_records_the_login() {
-    let ceiling = largest_marker_the_stall_can_breach();
     let mut recorded_anywhere = 0_usize;
     for (class, path) in class_baselines() {
         let baseline = baselines::load(&path).unwrap_or_else(|err| {
@@ -170,16 +215,20 @@ fn the_planted_stall_clears_the_bar_of_every_class_that_records_the_login() {
         let marker = *metrics.get(MARKER).unwrap_or_else(|| {
             panic!("{class} records first_paint.{USER_FIXTURE} without {MARKER}")
         });
+        let Some(headroom) = class_headroom(&class, &path) else {
+            continue;
+        };
         recorded_anywhere += 1;
         assert!(
-            marker < ceiling,
+            stall_clears(headroom, marker),
             "{class} records a cold marker of {marker:.1} ms for the login, and \
-             {USER_FIXTURE_STALL_MS} ms of deliberate stall no longer reaches its \
-             {:.1} ms bar ({ABSOLUTE_HEADROOM}x). The knob proves nothing at that size: raise \
-             USER_FIXTURE_STALL_MS past {:.1} ms, or the fixture's own slowdown is decoration",
-            marker * ABSOLUTE_HEADROOM,
-            marker * (ABSOLUTE_HEADROOM - 1.0)
+             {USER_FIXTURE_STALL_MS} ms of deliberate stall no longer reaches the \
+             {:.1} ms bar this class applies to it ({headroom:?}). The knob proves nothing at \
+             that size: raise USER_FIXTURE_STALL_MS past {:.1} ms, or the fixture's own \
+             slowdown is decoration",
+            headroom.bar(marker),
+            headroom.bar(marker) - marker
         );
     }
-    println!("{recorded_anywhere} class baseline(s) record first_paint.{USER_FIXTURE}");
+    println!("{recorded_anywhere} class baseline(s) gate first_paint.{USER_FIXTURE}'s {MARKER}");
 }

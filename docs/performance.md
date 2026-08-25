@@ -37,10 +37,11 @@ Its delta over `heavy` is the shape, not the plugin count. Both load their
 top-level plugins eagerly and both enable treesitter highlighting. What
 `user` adds is what a config file carries and a compat fixture does not:
 17 options set before the plugins load, five leader mappings, two
-autocommands, the `habamax` colorscheme, `setup()` on the two plugins
-`heavy` installs only as dependencies, and `setup()` on every plugin
-through one generic pass rather than per-entry options. Whether that is
-also *slower* than `heavy` through a pty is what its recorded row answers;
+autocommands, the `habamax` colorscheme, the two plugins `heavy` carries
+only as dependencies loaded as spec entries of their own, and `setup()` on
+every plugin through one generic pass rather than per-entry options.
+Whether that is also *slower* than `heavy` through a pty is what its
+recorded row answers;
 headless, the two start within a few milliseconds of each other. The
 reason it exists is coverage rather than a bigger number: a real config is
 what decides how long view's startup shell sits on screen saying it is

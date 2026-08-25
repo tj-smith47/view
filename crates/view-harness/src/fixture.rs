@@ -659,8 +659,16 @@ fn write_generated(path: &Path, content: impl AsRef<[u8]>) -> Result<(), Fixture
     let mut staging = path.as_os_str().to_os_string();
     staging.push(format!(".{}.tmp", std::process::id()));
     let staging = PathBuf::from(staging);
-    std::fs::write(&staging, content).map_err(ctx(&staging))?;
-    std::fs::rename(&staging, path).map_err(ctx(path))
+    // a failed write or rename leaves the neighbour behind otherwise, and
+    // the next run picks a name off the same pid: one stale byte string in
+    // target/ per failure, never cleaned by anything
+    let written = std::fs::write(&staging, content)
+        .and_then(|()| std::fs::rename(&staging, path))
+        .map_err(ctx(path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    written
 }
 
 #[cfg(test)]

@@ -6,3 +6,4 @@ crates/view-harness/src/fixture.rs	      vim.notify = function() end	      local
 crates/view-harness/src/fixture.rs	pub const USER_FIXTURE_STALL_MS: u64 = 50;	pub const USER_FIXTURE_STALL_MS: u64 = 5;	-p view-harness --test first_paint_user_gate
 crates/view-harness/src/fixture.rs	ml:  ["nvim-tree.lua"] = { hijack_netrw = false },\n		-p view-harness --lib fixture::
 docs/performance.md	15-plugin lazy.nvim stack, `heavy` (p99)	16-plugin lazy.nvim stack, `heavy` (p99)	-p view-harness --bin bench the_plugin_count
+crates/view-bench/baselines/dev-linux.headroom.toml	"first_paint.marker_cold_ms" = 2.0	"first_paint.marker_cold_ms" = 3.0	-p view-harness --test first_paint_user_gate
