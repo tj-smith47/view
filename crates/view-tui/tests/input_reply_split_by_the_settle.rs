@@ -44,6 +44,11 @@ fn the_head_of_an_answer_still_arriving_at_the_settle_crosses_the_handover() {
     let probe = Probe::start(common::SlaveSource, &mut queries, PROBE_DEADLINE, None).unwrap();
     let outcome = probe.finish(Duration::ZERO);
     assert!(
+        !outcome.fence_seen,
+        "this file's subject is the fence that never came; a probe reporting \
+         one has changed what is under test"
+    );
+    assert!(
         !outcome.caps.sync,
         "half an answer resolves nothing: {:?}",
         outcome.caps

@@ -243,6 +243,11 @@ pub struct InputSource {
 struct LateReplyGuard {
     until: std::time::Instant,
     buf: Vec<u8>,
+    /// Whether the DA1 fence is still owed. False means the probe already
+    /// had it, so the only thing keeping this guard armed is `buf`: once
+    /// that resolves there is nothing left to recognize and the terminal
+    /// goes back to crossterm rather than idling out the cap.
+    fence_owed: bool,
     /// Everything the probe's own window settled on, plus every later
     /// answer folded into it. Held so a sweep can tell a reply that
     /// changes the session's capabilities from one that only restates
@@ -280,24 +285,29 @@ impl InputSource {
     }
 
     /// [`open`](Self::open) for a startup handing the terminal over from its
-    /// capability probe, with the late-reply guard armed if and only if that
-    /// terminal may still say something the probe asked for.
+    /// capability probe, with the late-reply guard armed unless the probe
+    /// ended with nothing outstanding.
     ///
     /// The three arguments are the whole of
     /// [`ProbeOutcome`](crate::tiers::ProbeOutcome) that concerns the input
     /// path: `settled` is what the probe resolved, the floor every later
     /// answer is folded onto; `fence_seen` is whether the DA1 fence arrived;
-    /// `partial_reply` is the head of an answer that was still arriving at
-    /// the settle, carried across the handover so the read that brings its
-    /// tail completes an answer rather than scanning a headless one.
+    /// `partial_reply` is the run the probe's scan stopped on, still a live
+    /// prefix of some answer grammar, carried across the handover so the
+    /// read that brings its tail completes an answer rather than scanning a
+    /// headless one.
     ///
-    /// Either one outstanding thing arms the guard, and the caller is not
-    /// asked which: the fence is answered last, so a missing fence means
-    /// every earlier reply may still be owed -- but a terminal that answered
-    /// out of order can leave a half-delivered reply behind a fence that did
-    /// arrive, and that tail reaches crossterm's parser exactly as damagingly.
-    /// A branch in the caller is a branch that gets one of those two cases
-    /// wrong.
+    /// Either a missing fence or a non-empty tail arms it, and the caller is
+    /// not asked which. Neither condition proves the terminal owes anything:
+    /// the fence is answered last, so a missing one means every earlier
+    /// reply *may* still be owed, and a tail is only bytes that *could*
+    /// still become an answer -- a user's bare `ESC [` landing in the same
+    /// read as the fence arms the guard on a terminal that owes nothing at
+    /// all. Arming on the possibility is the cheap side of both: a guard
+    /// that idles costs typed bytes one decoder, and a guard that was not
+    /// armed costs a capability for the session or a keypress for the user.
+    /// Which of the two the bytes actually were is decided when the run
+    /// finishes or the cap expires, not here.
     ///
     /// A terminal answers queries in the order it received them and the
     /// fence is asked last, so a fence that arrived proves nothing is still
@@ -337,13 +347,15 @@ impl InputSource {
     /// the terminal stalled is not a DA1 fence, a kitty claim or a DECRPM
     /// answer, and `ESC P` is Alt+Shift+P rather than the opening of a DCS.
     ///
-    /// Recognizing an answer costs a typed byte nothing, so it lasts until
-    /// the fence arrives or until
-    /// [`PROBE_HARD_CAP`](crate::tiers::PROBE_HARD_CAP) has passed again,
-    /// whichever comes first: replies land in whatever read the link happens
-    /// to deliver them in, and one that arrives whole, in its own read,
-    /// after a keystroke has already come through is the ordinary case on a
-    /// slow link, not an exotic one.
+    /// Recognizing an answer costs a typed byte nothing, so it lasts as long
+    /// as anything is still outstanding: until the fence arrives if one was
+    /// owed, until the seeded tail resolves if that was the whole reason it
+    /// armed, and in either case no longer than
+    /// [`PROBE_HARD_CAP`](crate::tiers::PROBE_HARD_CAP) from the handover.
+    /// Replies land in whatever read the link happens to deliver them in,
+    /// and one that arrives whole, in its own read, after a keystroke has
+    /// already come through is the ordinary case on a slow link, not an
+    /// exotic one.
     ///
     /// Two shapes are kept back rather than decoded on arrival, both of them
     /// buffer tails with nothing typed behind them to delay: a live answer
@@ -382,10 +394,15 @@ impl InputSource {
         if fence_seen && partial_reply.is_empty() {
             return Self::open_with(None);
         }
-        Self::open_with(Some((settled, partial_reply)))
+        Self::open_with(Some(LateReplyGuard {
+            until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
+            buf: partial_reply,
+            caps: settled,
+            fence_owed: !fence_seen,
+        }))
     }
 
-    fn open_with(guard_late_replies: Option<(TermCaps, Vec<u8>)>) -> std::io::Result<Self> {
+    fn open_with(guard: Option<LateReplyGuard>) -> std::io::Result<Self> {
         let tty = TtyFd::open()?;
         let (winch_read, winch_write) = new_signal_pipe()?;
         signal_hook::low_level::pipe::register(signal_hook::consts::SIGWINCH, winch_write)?;
@@ -444,18 +461,27 @@ impl InputSource {
             guard: None,
             guard_msgs: std::collections::VecDeque::new(),
         };
-        if let Some((caps, partial_reply)) = guard_late_replies {
-            source.guard = Some(LateReplyGuard {
-                until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
-                buf: partial_reply,
-                caps,
-            });
+        if guard.is_some() {
+            source.guard = guard;
             // ahead of the crossterm touch below, which reads: the guard
             // has to own the terminal from this handle's first byte
             source.sweep_late_replies();
         }
         let _ = crossterm::event::poll(Duration::ZERO);
         Ok(source)
+    }
+
+    /// Whether this handle is still reading the terminal ahead of crossterm
+    /// for an answer the startup probe did not get.
+    ///
+    /// False is the steady state and the state of every session whose
+    /// terminal answered its fence in time. It is also the only way to
+    /// observe the guard from outside: every other difference it makes is
+    /// one crossterm cannot be asked to demonstrate without being handed
+    /// the sequence that wedges it.
+    #[must_use]
+    pub fn still_listening(&self) -> bool {
+        self.guard.is_some()
     }
 
     /// Reads whatever the terminal still owes the capability probe before
@@ -504,15 +530,24 @@ impl InputSource {
         guard.buf.drain(..replies.consumed);
         guard.buf.splice(..0, held);
         self.guard_msgs.extend(typed.msgs);
-        // only the fence ends the filtering: everything else the terminal
-        // owes is still owed, whatever else has happened on the fd since
+        // a fence ends the filtering outright: it is answered last, so
+        // nothing the probe asked for can still be behind it, whatever else
+        // has happened on the fd since
         if replies.da1 {
             if !crate::tiers::is_terminal_only_remainder(&guard.buf) {
                 self.queue_residue(&guard.buf);
             }
-        } else {
-            self.guard = Some(guard);
+            return;
         }
+        // a guard that armed on a tail alone, with its fence already in the
+        // probe's hands, is owed nothing once that tail resolves -- and an
+        // empty buffer is exactly that, since anything half-arrived is put
+        // back above. Without this it would idle out the whole cap with the
+        // key path routed through a decoder for no reply that can arrive.
+        if !guard.fence_owed && guard.buf.is_empty() {
+            return;
+        }
+        self.guard = Some(guard);
     }
 
     /// Queues `bytes` as the messages they decode to, for a caller that has

@@ -2912,21 +2912,28 @@ fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
     tier.unwrap_or_default()
 }
 
-/// Waits out the delay [`QueryPolicy::AnswerFullTierLate`] holds its replies
-/// back by, for a leg whose subject is what the child does with them.
+/// Waits out whichever delay `policy` holds its replies back by, for a leg
+/// whose subject is what the child does with them.
 ///
-/// Content no longer waits for the probe, so a session under that policy is
-/// editable well before its terminal has answered anything: a test that
-/// quit on the painted buffer would be reading the child's patience rather
-/// than its answer. Three times the delay, because what is being waited for
-/// is one pty write plus the child's own wakeup, not a bound on either.
+/// Content no longer waits for the probe, so a session under a delaying
+/// policy is editable well before its terminal has answered anything: a
+/// test that quit on the painted buffer would be reading the child's
+/// patience rather than its answer. Three times the delay, because what is
+/// being waited for is one pty write plus the child's own wakeup, not a
+/// bound on either -- and three times the policy's own delay rather than a
+/// single constant, or the shorter policy pays the longer one's wait.
 fn settle_late_answer(policy: QueryPolicy) {
-    if matches!(
-        policy,
-        QueryPolicy::AnswerFullTierLate | QueryPolicy::AnswerFullTierBarelyLate
-    ) {
-        std::thread::sleep(view_oracle::LATE_ANSWER_DELAY * 3);
-    }
+    let delay = match policy {
+        QueryPolicy::AnswerFullTierLate => view_oracle::LATE_ANSWER_DELAY,
+        QueryPolicy::AnswerFullTierBarelyLate => view_oracle::BARELY_LATE_ANSWER_DELAY,
+        QueryPolicy::AnswerDa1 | QueryPolicy::AnswerFullTier | QueryPolicy::Silent => return,
+        // `QueryPolicy` is `#[non_exhaustive]` to this crate, so a policy
+        // added later reaches here rather than failing the build. Waiting
+        // nothing is the answer that cannot hang a leg; a delaying policy
+        // that lands here fails its own assertion instead.
+        _ => return,
+    };
+    std::thread::sleep(delay * 3);
 }
 
 /// One `view` session's own `VIEW_LOG`, taken from a child that started
@@ -3044,49 +3051,50 @@ fn a_terminal_that_answers_nothing_never_holds_the_session_behind_its_probe() {
     );
 }
 
-/// The ssh shape with the round trip that comes with it: no `COLORTERM`, and
-/// every reply landing after the child's first probe window has closed.
+/// Every shape of reply that misses the child's first probe window, and the
+/// tier its own log reports having settled at.
 ///
 /// This is the failure the whole two-window probe exists for. A child that
 /// stops listening when its first window closes reads exactly the same
 /// silence a terminal that answers nothing does, and spends the session at
 /// `Basic` -- ASCII borders and the legacy palette -- on a terminal that
 /// renders everything.
-#[test]
-fn a_terminal_a_round_trip_away_still_reaches_the_full_tier() {
-    assert_eq!(
-        derived_tier(QueryPolicy::AnswerFullTierLate, None),
-        "Full",
-        "replies delayed by {:?} arrive after the first probe window, on a \
-         session already painting, and are recognized on the input path; \
-         the tier it settles on must be the one the terminal answered for, \
-         whichever side of the attach the answer lands on",
-        view_oracle::LATE_ANSWER_DELAY
-    );
-}
-
-/// The tier a child reports when the answer lands in the window between its
-/// probe and its engine attach.
 ///
-/// The child has two places to absorb the same message there -- the
-/// pre-attach accumulator, before its runtime loop exists, and the loop
-/// itself -- and only the second one is the ordinary path. Which one takes
-/// it is a race between one pty write and one nvim attach, and on a host
-/// that attaches promptly the loop wins outright: the pre-attach window is
-/// under a millisecond wide, so no fixed delay can aim at it. This asserts
-/// what must hold on either side of that race instead of pinning the side:
-/// the last `caps tier=` line the child writes is the answered tier. An
-/// accumulator that applied the upgrade to the model but never logged it
-/// leaves that line stating a tier the session is not at, which this reads
-/// as `Basic` on any host slow enough to land there.
+/// The two policies are the same assertion over two distances, which is the
+/// only thing that separates them:
+///
+/// - [`QueryPolicy::AnswerFullTierLate`] is the ssh shape, a network round
+///   trip behind the query, landing on a session that has been painting for
+///   a while.
+/// - [`QueryPolicy::AnswerFullTierBarelyLate`] misses the window by the
+///   smallest margin a fixed delay can express, landing in the region
+///   between the probe and the engine attach. The child has two places to
+///   absorb the same message there -- the pre-attach accumulator, before
+///   its runtime loop exists, and the loop itself -- and which one takes it
+///   is a race between one pty write and one nvim attach. On a host that
+///   attaches promptly the loop wins outright: the pre-attach window is
+///   under a millisecond wide, so no fixed delay can aim at it. Hence one
+///   predicate over both rather than a pin on the side: an accumulator that
+///   applied the upgrade to the model but never logged it leaves the record
+///   stating a tier the session is not at, which this reads as `Basic` on
+///   any host slow enough to land there.
+///
+/// Neither is read off the screen: `COLORTERM` is withheld, so the
+/// terminal's own answer is the whole basis for the tier.
 #[test]
-fn an_answer_landing_between_the_probe_and_the_attach_is_still_the_tier_reported() {
-    assert_eq!(
-        derived_tier(QueryPolicy::AnswerFullTierBarelyLate, None),
-        "Full",
-        "a reply {:?} behind the query misses the probe's window and reaches \
-         a session that is already painting; wherever it is absorbed, the \
-         child's own record of what it settled at must name it",
-        view_oracle::BARELY_LATE_ANSWER_DELAY
-    );
+fn a_reply_that_misses_the_probes_window_is_still_the_tier_the_child_reports() {
+    for policy in [
+        QueryPolicy::AnswerFullTierLate,
+        QueryPolicy::AnswerFullTierBarelyLate,
+    ] {
+        assert_eq!(
+            derived_tier(policy, None),
+            "Full",
+            "under {policy:?} the replies arrive after the first probe \
+             window, on a session already painting, and are recognized on \
+             the input path; the tier the child records settling at must be \
+             the one its terminal answered for, whichever side of the attach \
+             the answer lands on"
+        );
+    }
 }
