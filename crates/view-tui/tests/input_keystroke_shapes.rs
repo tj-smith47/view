@@ -59,6 +59,7 @@ fn every_keyboard_shape_survives_the_guard_that_reads_it_first() {
     for (bytes, expected, shape) in [
         (b"\x1b".as_slice(), vec!["<Esc>"], "a bare Escape"),
         (b"\x1bx".as_slice(), vec!["<M-x>"], "Alt-prefixed"),
+        (b"\x17".as_slice(), vec!["<C-w>"], "a control chord"),
         (b"\x1b[A".as_slice(), vec!["<Up>"], "a CSI arrow"),
         (b"\x1bOA".as_slice(), vec!["<Up>"], "an SS3 arrow"),
         (b"\x1b[27u".as_slice(), vec!["<Esc>"], "the kitty form"),

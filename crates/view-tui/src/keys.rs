@@ -92,8 +92,9 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// [`crossterm::event::read`] already owns for every keystroke after
 /// startup. Printable ASCII passes through as literal characters (matching
 /// [`encode_key`]'s plain-char case, including `<` becoming `<lt>`);
-/// `\r`/`\n` map to `<CR>`, `\t` to `<Tab>`, backspace (`0x08`/`0x7f`) to
-/// `<BS>`. A run of continuous non-ASCII bytes (`0x80..`) is decoded as one
+/// `\r`/`\n` map to `<CR>`, `\t` to `<Tab>`, `0x7f` to `<BS>`, and the
+/// remaining C0 controls to the `<C-...>` chord they spell
+/// ([`plain_key`]). A run of continuous non-ASCII bytes (`0x80..`) is decoded as one
 /// UTF-8 str and forwarded char-by-char if valid, dropped if not (a
 /// mid-codepoint chunk boundary can produce invalid UTF-8 here, and
 /// guessing at a replacement is worse than dropping a still-rare case).
@@ -202,26 +203,6 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
                     i += 1;
                 }
             }
-            b'\r' | b'\n' => {
-                msgs.push(key_msg("<CR>"));
-                i += 1;
-            }
-            b'\t' => {
-                msgs.push(key_msg("<Tab>"));
-                i += 1;
-            }
-            0x7f | 0x08 => {
-                msgs.push(key_msg("<BS>"));
-                i += 1;
-            }
-            b'<' => {
-                msgs.push(key_msg("<lt>"));
-                i += 1;
-            }
-            b if (0x20..=0x7e).contains(&b) => {
-                msgs.push(key_msg((b as char).to_string()));
-                i += 1;
-            }
             b if b >= 0x80 => {
                 let start = i;
                 i += 1;
@@ -232,9 +213,12 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
                     msgs.extend(s.chars().map(|c| key_msg(c.to_string())));
                 }
             }
-            // any other control byte (bell, null, ...) has no sensible nvim
-            // notation and is dropped rather than guessed at
-            _ => i += 1,
+            byte => {
+                if let Some((code, mods)) = plain_key(byte) {
+                    msgs.extend(encode_key(&KeyEvent::new(code, mods)).map(key_msg));
+                }
+                i += 1;
+            }
         }
     }
     ResidueDecode {
@@ -385,17 +369,39 @@ fn string_sequence_len(run: &[u8]) -> Option<usize> {
 /// window as outside it. `None` for a run that is a lone `ESC`, or one
 /// whose next byte no single key produces.
 fn alt_key(run: &[u8]) -> Option<(usize, Option<Msg>)> {
-    let code = match *run.get(1)? {
-        b'\r' | b'\n' => KeyCode::Enter,
-        b'\t' => KeyCode::Tab,
-        0x7f | 0x08 => KeyCode::Backspace,
-        byte if (0x20..=0x7e).contains(&byte) => KeyCode::Char(byte as char),
-        _ => return None,
-    };
+    let (code, mods) = plain_key(*run.get(1)?)?;
     Some((
         2,
-        encode_key(&KeyEvent::new(code, KeyModifiers::ALT)).map(key_msg),
+        encode_key(&KeyEvent::new(code, mods | KeyModifiers::ALT)).map(key_msg),
     ))
+}
+
+/// One byte outside any sequence, read as the key crossterm reads it as.
+///
+/// The C0 controls are how a terminal spells `Ctrl` with a letter (`0x17`
+/// is `Ctrl`+`w`, the byte being the letter's position in the alphabet),
+/// and dropping them costs the window every `<C-...>` mapping a user has.
+/// Only the four a keyboard has a key of its own for -- `Enter`, `Tab`,
+/// `Esc`, `Backspace` -- keep that name instead.
+fn plain_key(byte: u8) -> Option<(KeyCode, KeyModifiers)> {
+    let code = match byte {
+        b'\r' | b'\n' => KeyCode::Enter,
+        b'\t' => KeyCode::Tab,
+        0x1b => KeyCode::Esc,
+        0x7f => KeyCode::Backspace,
+        0 => return Some((KeyCode::Char(' '), KeyModifiers::CONTROL)),
+        0x01..=0x1a => {
+            let letter = byte - 1 + b'a';
+            return Some((KeyCode::Char(letter as char), KeyModifiers::CONTROL));
+        }
+        0x1c..=0x1f => {
+            let digit = byte - 0x1c + b'4';
+            return Some((KeyCode::Char(digit as char), KeyModifiers::CONTROL));
+        }
+        b if (0x20..=0x7e).contains(&b) => KeyCode::Char(b as char),
+        _ => return None,
+    };
+    Some((code, KeyModifiers::NONE))
 }
 
 fn decoded(len: usize, code: KeyCode, mods: KeyModifiers) -> Escape {
@@ -736,7 +742,23 @@ mod tests {
         assert_eq!(encode_residue_bytes(b"\n"), vec!["<CR>"]);
         assert_eq!(encode_residue_bytes(b"\t"), vec!["<Tab>"]);
         assert_eq!(encode_residue_bytes(b"\x7f"), vec!["<BS>"]);
-        assert_eq!(encode_residue_bytes(b"\x08"), vec!["<BS>"]);
+    }
+
+    #[test]
+    fn residue_control_bytes_are_the_chords_they_spell() {
+        // dropped, every `<C-...>` mapping a user has is dead for the
+        // window; typed as their bytes they are not keys at all
+        assert_eq!(encode_residue_bytes(b"\x17"), vec!["<C-w>"]);
+        assert_eq!(encode_residue_bytes(b"\x04"), vec!["<C-d>"]);
+        assert_eq!(encode_residue_bytes(b"\x12"), vec!["<C-r>"]);
+        // `Ctrl`+`h` and `Backspace` are different keys and different
+        // bytes, as crossterm also reports them
+        assert_eq!(encode_residue_bytes(b"\x08"), vec!["<C-h>"]);
+        assert_eq!(encode_residue_bytes(b"\x00"), vec!["<C-Space>"]);
+        assert_eq!(encode_residue_bytes(b"\x1c"), vec!["<C-4>"]);
+        assert_eq!(encode_residue_bytes(b"\x1f"), vec!["<C-7>"]);
+        // and with `ESC` in front, the same chord with Alt held
+        assert_eq!(encode_residue_bytes(b"\x1b\x17"), vec!["<C-M-w>"]);
     }
 
     #[test]
@@ -913,8 +935,11 @@ mod tests {
     }
 
     #[test]
-    fn residue_unrecognized_control_bytes_are_dropped() {
-        assert_eq!(encode_residue_bytes(b"a\x00b\x07c"), vec!["a", "b", "c"]);
+    fn residue_control_bytes_keep_their_place_among_the_letters() {
+        assert_eq!(
+            encode_residue_bytes(b"a\x00b\x07c"),
+            vec!["a", "<C-Space>", "b", "<C-g>", "c"]
+        );
     }
 
     #[test]
