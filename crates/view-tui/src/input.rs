@@ -712,16 +712,24 @@ impl InputSource {
             sink(msg);
         }
         // a resize is the one thing the guard used to hand the fd back
-        // for. It arrives as a signal, and its new shape is an ioctl away
-        // (`terminal::size` is TIOCGWINSZ), so the frame is corrected here
-        // without the read that would cost the guard a reply. A shape this
-        // cannot read is not lost either: the guard ends inside its cap and
-        // crossterm's own copy of the signal is an `Event::Resize` on the
-        // next drain -- the same message, to the same shape
+        // for. It arrives as a signal, and its new shape is a TIOCGWINSZ
+        // away on the fd this already holds, so the frame is corrected here
+        // without the read that would cost the guard a reply. The ioctl is
+        // issued directly rather than through `crossterm::terminal::size`,
+        // which re-opens `/dev/tty` per call and, when that and stdout both
+        // refuse the ioctl, shells out to `tput` -- a subprocess spawn
+        // inside the first-paint window. A shape this cannot read, or one
+        // the kernel reports as zero because it does not know it yet, is
+        // not lost either: the guard ends inside its cap and crossterm's
+        // own copy of the signal is an `Event::Resize` on the next drain --
+        // the same message, to the same shape
         if resized && self.guard.is_some() {
-            if let Ok((width, height)) = crossterm::terminal::size() {
-                size.publish(width, height);
-                sink(Msg::Resized { width, height });
+            if let Ok(shape) = rustix::termios::tcgetwinsize(self.tty_fd()) {
+                let (width, height) = (shape.ws_col, shape.ws_row);
+                if width > 0 && height > 0 {
+                    size.publish(width, height);
+                    sink(Msg::Resized { width, height });
+                }
             }
         }
         if !crossterm_may_read(self.guard.is_some()) {
@@ -764,9 +772,9 @@ impl InputSource {
 ///
 /// There is no exception. A resize was one until its shape turned out to
 /// be readable without the fd -- [`drain`](InputSource::drain) answers a
-/// SIGWINCH from `crossterm::terminal::size`, a `TIOCGWINSZ` ioctl, so the
-/// frame is corrected on the pass the signal arrives and the parser still
-/// never sees a byte.
+/// SIGWINCH with a `TIOCGWINSZ` on the fd it already holds, so the frame is
+/// corrected on the pass the signal arrives and the parser still never sees
+/// a byte.
 #[cfg(unix)]
 const fn crossterm_may_read(guard_armed: bool) -> bool {
     !guard_armed

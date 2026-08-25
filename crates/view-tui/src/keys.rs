@@ -318,13 +318,14 @@ fn csi_sequence(run: &[u8]) -> Escape {
         // sends one unasked, and crossterm names none of those a key: bare
         // it is an error there, typing nothing, and with a row and column
         // it is the report. The one spelling that is F3 is the modifier
-        // form `CSI ; m R`, whose empty first parameter no position report
-        // has -- crossterm reads that one through
-        // `parse_csi_modifier_key_code` and so does this
-        b'R' => match field(&fields, 0) {
-            Some(0) => decoded(len, KeyCode::F(3), modifier),
-            _ => Escape::Decoded { len, msg: None },
-        },
+        // form `CSI ; m R`, whose first parameter no position report
+        // leaves empty -- crossterm routes it by that leading `;` through
+        // `parse_csi_modifier_key_code` and so does this. Read off the
+        // bytes rather than the parsed fields: a field that is missing and
+        // a field that is a literal `0` both parse to 0, and `CSI 0 R` is
+        // a report crossterm types nothing from
+        b'R' if params.starts_with(b";") => decoded(len, KeyCode::F(3), modifier),
+        b'R' => Escape::Decoded { len, msg: None },
         _ => match cursor_key(final_byte) {
             Some(code) => decoded(len, code, modifier),
             None => unnamed,
@@ -1033,9 +1034,15 @@ mod tests {
         // and a bare one is a report crossterm cannot parse and types
         // nothing from, rather than the F3 that final byte also spells
         assert!(encode_residue_bytes(b"\x1b[R").is_empty());
-        // the one spelling that is the key: an empty first parameter, which
-        // is the modifier form and never a position
+        // the one spelling that is the key: a leading `;`, which is the
+        // modifier form and never a position
         assert_eq!(encode_residue_bytes(b"\x1b[;5R"), vec!["<C-F3>"]);
+        // a literal `0` where the modifier form has nothing is a numbered
+        // report, which crossterm reads as a position and types nothing
+        // from -- the two are one value once parsed, so only the bytes
+        // tell them apart
+        assert!(encode_residue_bytes(b"\x1b[0R").is_empty());
+        assert!(encode_residue_bytes(b"\x1b[0;5R").is_empty());
         // SS3 keeps its own F3, which crossterm names too
         assert_eq!(encode_residue_bytes(b"\x1bOR"), vec!["<F3>"]);
         for report in [

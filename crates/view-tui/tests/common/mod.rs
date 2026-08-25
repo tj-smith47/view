@@ -35,6 +35,9 @@ pub fn stdin_pty() -> (rustix::fd::OwnedFd, std::fs::File) {
 }
 
 /// Blocks until `fd` has something to read, up to two seconds.
+// each test file compiles this module for itself, so a helper the file at
+// hand does not call is dead code only in that one binary
+#[allow(dead_code)]
 pub fn wait_readable(fd: std::os::fd::BorrowedFd<'_>) -> bool {
     let mut fds = [rustix::event::PollFd::from_borrowed_fd(
         fd,
