@@ -100,27 +100,6 @@ impl TerminalGuard {
         enter_bytes(&mut std::io::stdout(), cfg!(unix) && kitty_kbd)
     }
 
-    /// Pushes the kitty keyboard protocol on its own, for a terminal that
-    /// only admitted to speaking it after
-    /// [`finish_entering_alt_screen`](Self::finish_entering_alt_screen) had
-    /// already run without it (see [`Term::settle_probe`], and
-    /// [`Term::draw_surface`] for an answer that arrives after it).
-    ///
-    /// The pop in [`restore_bytes`] needs no matching change: it is written
-    /// unconditionally on every exit path, and a pop against an empty stack
-    /// is a no-op, so a push that lands late is still popped exactly once
-    /// and a decision that never became a push pops nothing that exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying `std::io::Error` if the push cannot be
-    /// written.
-    pub fn push_kitty_keyboard(&self) -> std::io::Result<()> {
-        let mut out = std::io::stdout();
-        out.write_all(KITTY_KBD_PUSH)?;
-        out.flush()
-    }
-
     /// Restores the terminal immediately rather than waiting for [`Drop`].
     ///
     /// For exit paths that bypass destructors (`std::process::exit`).
@@ -177,6 +156,29 @@ fn enter_bytes<W: Write>(out: &mut W, kitty_kbd: bool) -> std::io::Result<()> {
         crossterm::event::EnableBracketedPaste
     )?;
     if kitty_kbd {
+        out.write_all(KITTY_KBD_PUSH)?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
+/// Writes the keyboard-protocol push a terminal that only admitted to
+/// speaking it *after* [`enter_bytes`] ran is owed, and nothing at all
+/// when the entry window already pushed it or the terminal does not speak
+/// it. Generic over `Write` for the same reason its two siblings are:
+/// "exactly one push per session, however late the answer" is a claim
+/// about bytes, and only a `Vec<u8>` can hold a whole session's worth.
+///
+/// The pop in [`restore_bytes`] needs no matching condition: it is written
+/// unconditionally on every exit path, and a pop against an empty stack is
+/// a no-op, so a push that lands late is still popped exactly once and a
+/// decision that never became a push pops nothing that exists.
+fn push_kitty_keyboard<W: Write>(
+    out: &mut W,
+    already_pushed: bool,
+    kitty_kbd: bool,
+) -> std::io::Result<()> {
+    if kitty_kbd && !already_pushed {
         out.write_all(KITTY_KBD_PUSH)?;
         out.flush()?;
     }
@@ -471,9 +473,11 @@ impl Term {
         // still owes the terminal the push `finish_entering_alt_screen`
         // skipped, or `keys::encode_key` spends the session unable to tell
         // `<S-CR>` from `<CR>` on a terminal that can
-        if cfg!(unix) && caps.kitty_kbd && !self.caps.kitty_kbd {
-            self.guard.push_kitty_keyboard()?;
-        }
+        push_kitty_keyboard(
+            &mut std::io::stdout(),
+            self.caps.kitty_kbd,
+            cfg!(unix) && caps.kitty_kbd,
+        )?;
         if caps.tier != self.caps.tier {
             // the frame on screen was painted at the old tier, in the old
             // border charset and palette; leaving the next frame free to
@@ -936,6 +940,64 @@ mod tests {
             "the pop must be written on the screen the push applied to, matching nvim's own \
              terminfo_disable-then-terminfo_stop order"
         );
+    }
+
+    /// The whole session's worth of keyboard-protocol bytes, for the one
+    /// order the unit pins above cannot see between them: the entry window
+    /// that heard no answer, the settle that heard one, and every frame
+    /// after it asking the same question again. `draw_surface` compares
+    /// `model.caps` to its own on every frame, so "push once" is a claim
+    /// about a run of adoptions rather than about any single one.
+    #[cfg(unix)]
+    #[test]
+    fn a_kitty_answer_arriving_after_entry_pushes_the_protocol_exactly_once() {
+        let mut wire = Vec::new();
+        enter_bytes(&mut wire, false).unwrap();
+        assert_eq!(
+            occurrences(&wire, KITTY_KBD_PUSH),
+            0,
+            "the entry window heard no answer, so it pushes nothing"
+        );
+
+        // the settle, and then the frames that follow it
+        push_kitty_keyboard(&mut wire, false, true).unwrap();
+        for _ in 0..3 {
+            push_kitty_keyboard(&mut wire, true, true).unwrap();
+        }
+        assert_eq!(
+            occurrences(&wire, KITTY_KBD_PUSH),
+            1,
+            "a terminal pushed twice needs two pops, and this session writes one"
+        );
+
+        restore_bytes(&mut wire).unwrap();
+        assert_eq!(
+            occurrences(&wire, KITTY_KBD_POP),
+            1,
+            "one push, one pop: the shell gets its own Esc handling back"
+        );
+    }
+
+    /// The other end of the same rule: an answer that never arrives leaves
+    /// the wire clean, and the unconditional pop is still a no-op there.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_that_never_answers_is_pushed_nothing() {
+        let mut wire = Vec::new();
+        enter_bytes(&mut wire, false).unwrap();
+        for _ in 0..3 {
+            push_kitty_keyboard(&mut wire, false, false).unwrap();
+        }
+        assert_eq!(occurrences(&wire, KITTY_KBD_PUSH), 0);
+    }
+
+    // Serves only the unix-gated enter/restore byte tests above.
+    #[cfg(unix)]
+    fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack
+            .windows(needle.len())
+            .filter(|window| *window == needle)
+            .count()
     }
 
     // Serves only the unix-gated enter/restore byte tests above.
