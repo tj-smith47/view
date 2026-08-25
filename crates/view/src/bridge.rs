@@ -19,6 +19,20 @@
 //! it has actually seen, on both edges, and disarms on the first
 //! highlight-bearing batch after the announcement -- so the write path is
 //! reachable for one batch per switch and never for the steady state.
+//!
+//! The announcement is not the only way in, because it is not reliable
+//! enough to be. It is a best-effort notification, and its position in the
+//! stream relative to the highlights it announces is not fixed. The case
+//! that made this matter is a session whose colorscheme is chosen by the
+//! user's own config: the announcement arrives with an *older* probe
+//! generation already confirmed, the one armed batch that follows it is
+//! still carrying the previous scheme's colors, and disarming there leaves
+//! the cache holding a theme the user never saw for the rest of the
+//! session. So a probe reply is a write edge on its own, announced or not.
+//! It answers a `default_colors_set` -- a scheme change, never steady-state
+//! traffic -- which is what keeps that unconditional edge off the paint
+//! path, and it is the last edge any scheme that moves the default
+//! background produces, so the theme it writes is the applied one.
 
 use std::path::{Path, PathBuf};
 
@@ -106,9 +120,14 @@ impl ThemeBridge {
     pub(crate) fn classify(&self, msg: &Msg) -> Trigger {
         match msg {
             Msg::ColorSchemeChanged { .. } => Trigger::Switched,
+            // above the outstanding-switch gate, unlike every other edge: a
+            // probe reply answers a `default_colors_set`, so it is the one
+            // message that cannot arrive without the colors having moved,
+            // and the cache has to reach it whether or not the announcement
+            // that moved them was seen (see the module docs)
+            Msg::HlProbeReply { .. } => Trigger::Applied,
             _ if self.pending != Pending::Open => Trigger::None,
             Msg::Redraw(events) if events.iter().any(redefines_highlights) => Trigger::Applied,
-            Msg::HlProbeReply { .. } => Trigger::Applied,
             _ => Trigger::None,
         }
     }
@@ -131,6 +150,15 @@ impl ThemeBridge {
     /// announcement leaves the bridge armed for exactly one highlight batch,
     /// so a config that redefines a chrome group on every window or mode
     /// change cannot turn each of those into a synchronous cache write.
+    ///
+    /// A probe reply writes with no switch outstanding at all, which is what
+    /// keeps an early close from losing a scheme: whatever the armed batch
+    /// was carrying, the reply settling the new default colors arrives after
+    /// it and persists them. `classify` is what keeps that free in the
+    /// steady state -- an unannounced *redraw* never reaches
+    /// [`Trigger::Applied`] at all -- so the gate below is on the write
+    /// being worth doing, never on a switch being outstanding.
+    ///
     /// Returns whatever effect a failed write owes the engine (a native
     /// notice reporting the failure), the same "return it, never push it
     /// directly" contract [`crate::native::NativeSession::load`] follows --
@@ -152,16 +180,7 @@ impl ThemeBridge {
                 let (_, effects) = self.persist(model);
                 effects
             }
-            // Gated on `pending == Open` *before* calling `persist`, not
-            // after: an unannounced highlight batch (the steady-state case,
-            // by far the most common `Applied` trigger) must never reach
-            // `persist` at all, or every ordinary redraw that happens to
-            // redefine a highlight group would attempt a cache write with
-            // no switch behind it.
             Trigger::Applied => {
-                if self.pending != Pending::Open {
-                    return Vec::new();
-                }
                 let (settled, effects) = self.persist(model);
                 if settled == Settled::Yes {
                     self.pending = Pending::Idle;
@@ -216,7 +235,7 @@ impl ThemeBridge {
             return (Settled::Yes, Vec::new());
         };
         crate::vlog::log_with("theme", || {
-            format!("caching switched colorscheme to {}", path.display())
+            format!("caching applied colorscheme to {}", path.display())
         });
         let notice = crate::theme_cache::store_to_path(theme, path);
         self.written = Some(theme);
@@ -291,27 +310,30 @@ mod tests {
         m
     }
 
-    /// Applies one named group to `model` the way nvim's own events would,
-    /// so the theme the bridge derives is one the derivation path produced.
+    /// The batch nvim sends to define one named group, so the theme the
+    /// bridge derives is one the derivation path produced.
+    fn define_group_batch(group: ChromeGroup, hl_id: u64, fg: u32) -> Msg {
+        Msg::Redraw(vec![
+            UiEvent::HlAttrDefine {
+                id: hl_id,
+                fg: Some(fg),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::HlGroupSet {
+                name: group.hl_name().to_string(),
+                hl_id,
+            },
+        ])
+    }
+
+    /// Applies one named group to `model`, leaving the trigger to the
+    /// caller.
     fn define_group(model: &mut Model, group: ChromeGroup, hl_id: u64, fg: u32) {
-        let _ = update(
-            model,
-            Msg::Redraw(vec![
-                UiEvent::HlAttrDefine {
-                    id: hl_id,
-                    fg: Some(fg),
-                    bg: None,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                    reverse: false,
-                },
-                UiEvent::HlGroupSet {
-                    name: group.hl_name().to_string(),
-                    hl_id,
-                },
-            ]),
-        );
+        let _ = update(model, define_group_batch(group, hl_id, fg));
     }
 
     /// Each highlight-bearing batch shape, wrapped in an ordinary frame's
@@ -358,8 +380,18 @@ mod tests {
         ])
     }
 
+    /// Dispatches `msg` the way `runtime::dispatch` does -- classified
+    /// before `update()` consumes it, followed up after -- so a test
+    /// exercises the ordering the loop really has rather than a trigger the
+    /// test chose itself.
+    fn dispatch(bridge: &mut ThemeBridge, model: &mut Model, msg: Msg) {
+        let trigger = bridge.classify(&msg);
+        let _ = update(model, msg);
+        let _ = bridge.follow_up(model, trigger);
+    }
+
     #[test]
-    fn a_colorscheme_switch_is_the_only_message_that_opens_a_write() {
+    fn only_a_switch_or_a_probe_reply_opens_a_write_on_an_idle_bridge() {
         let bridge = bridge_writing_to(Path::new("/nonexistent/theme.toml"));
         assert!(
             bridge.classify(&Msg::ColorSchemeChanged {
@@ -372,8 +404,8 @@ mod tests {
                 generation: 1,
                 fg: None,
                 bg: None
-            }) == Trigger::None,
-            "a probe answering while nothing is outstanding completes no switch"
+            }) == Trigger::Applied,
+            "a probe reply answers a default-colors change, so it is a write edge with or without an announcement"
         );
     }
 
@@ -409,7 +441,7 @@ mod tests {
     /// half of the cost bound: the answer is settled before the events are
     /// reachable, so the steady state never walks a batch.
     #[test]
-    fn an_idle_bridge_reacts_to_nothing_a_switch_did_not_announce() {
+    fn an_idle_bridge_reacts_to_no_redraw_a_switch_did_not_announce() {
         let bridge = bridge_writing_to(Path::new("/nonexistent/theme.toml"));
         assert!(bridge.pending == Pending::Idle);
         for batch in hl_bearing_batches() {
@@ -463,8 +495,11 @@ mod tests {
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
-        define_group(&mut model, ChromeGroup::TabLineFill, 7, 0x00ff_00ff);
-        let _ = bridge.follow_up(&mut model, Trigger::Applied);
+        dispatch(
+            &mut bridge,
+            &mut model,
+            define_group_batch(ChromeGroup::TabLineFill, 7, 0x00ff_00ff),
+        );
         assert!(
             !path.exists(),
             "nothing had announced a switch yet, so nothing may be persisted"
@@ -530,13 +565,11 @@ mod tests {
         );
 
         for id in 20u32..25 {
-            define_group(
+            dispatch(
+                &mut bridge,
                 &mut model,
-                ChromeGroup::StatusLine,
-                u64::from(id),
-                0x00aa_bb00 + id,
+                define_group_batch(ChromeGroup::StatusLine, u64::from(id), 0x00aa_bb00 + id),
             );
-            let _ = bridge.follow_up(&mut model, Trigger::Applied);
         }
 
         let (cached, _) = crate::theme_cache::load_from_path(&path);
@@ -590,22 +623,134 @@ mod tests {
         assert_eq!(cached.fg, Some(0x00ab_cdef));
     }
 
-    /// Every frame applies highlight state; only a switch may write. A
-    /// bridge writing on ordinary redraw traffic would put a file write on
-    /// the paint path.
+    /// Every frame applies highlight state; a redraw no switch announced
+    /// may not write. A bridge writing on ordinary redraw traffic would put
+    /// a file write on the paint path. Routed through `classify`, because
+    /// that is the gate: `follow_up` is handed whatever the loop's own
+    /// classification produced, never a trigger a caller picked.
     #[test]
     fn ordinary_redraw_traffic_never_writes_the_cache() {
         let path = scratch("no-switch");
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
         for id in 1..8 {
-            define_group(&mut model, ChromeGroup::TabLine, id, 0x0000_1111);
-            let _ = bridge.follow_up(&mut model, Trigger::Applied);
+            dispatch(
+                &mut bridge,
+                &mut model,
+                define_group_batch(ChromeGroup::TabLine, id, 0x0000_1111),
+            );
         }
         assert!(
             !path.exists(),
             "nothing announced a switch, so nothing may be persisted"
         );
+    }
+
+    /// The first run every user has: a config that selects a colorscheme at
+    /// startup, so the derived theme exists long before any exit path could
+    /// persist it. The probe that settles the scheme's default colors is
+    /// what caches it, with nothing announced -- a crash before exit must
+    /// not cost the user their theme, and the next launch's first paint has
+    /// to wear the scheme they actually use.
+    #[test]
+    fn a_first_run_probe_reply_caches_the_theme_with_no_switch_announced() {
+        let path = scratch("first-run-probe");
+        let mut bridge = bridge_writing_to(&path);
+        let mut model = Model::with_term_size(80, 24);
+
+        dispatch(
+            &mut bridge,
+            &mut model,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: Some(0x00f8_f8f2),
+                bg: Some(0x0028_2a36),
+                sp: None,
+            }]),
+        );
+        assert!(
+            !path.exists(),
+            "the background is still wire-ambiguous, so nothing may be persisted yet"
+        );
+
+        let generation = model.engine.hl().probe_generation();
+        dispatch(
+            &mut bridge,
+            &mut model,
+            Msg::HlProbeReply {
+                generation,
+                fg: Some(0x00f8_f8f2),
+                bg: Some(0x0028_2a36),
+            },
+        );
+
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached = cached.expect("the confirmed probe must have cached the derived theme");
+        assert_eq!(cached.bg, Some(0x0028_2a36));
+        assert_eq!(cached.fg, Some(0x00f8_f8f2));
+    }
+
+    /// The arrival order that left a session's cache holding a theme its
+    /// user never saw: the announcement lands while the *previous* scheme's
+    /// probe is already confirmed, so it writes the previous theme and the
+    /// one batch it arms is still carrying those same colors -- closing the
+    /// switch before the new scheme's highlights have arrived at all. What
+    /// makes the cache right anyway is the probe the new scheme's own
+    /// default-colors change opens, which writes with no switch
+    /// outstanding.
+    #[test]
+    fn a_switch_that_closed_early_is_still_corrected_by_the_probe_that_settles_it() {
+        let path = scratch("closed-early");
+        let mut bridge = bridge_writing_to(&path);
+        let mut model = settled_model();
+
+        dispatch(
+            &mut bridge,
+            &mut model,
+            Msg::ColorSchemeChanged {
+                name: "view-dracula".into(),
+            },
+        );
+        dispatch(
+            &mut bridge,
+            &mut model,
+            Msg::Redraw(vec![UiEvent::HlGroupSet {
+                name: "TabLine".into(),
+                hl_id: 4,
+            }]),
+        );
+        assert!(
+            bridge.pending == Pending::Idle,
+            "the arrival order this test exists for is the one that closes the switch early"
+        );
+
+        dispatch(
+            &mut bridge,
+            &mut model,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: Some(0x00f8_f8f2),
+                bg: Some(0x0028_2a36),
+                sp: None,
+            }]),
+        );
+        let generation = model.engine.hl().probe_generation();
+        dispatch(
+            &mut bridge,
+            &mut model,
+            Msg::HlProbeReply {
+                generation,
+                fg: Some(0x00f8_f8f2),
+                bg: Some(0x0028_2a36),
+            },
+        );
+
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached = cached.expect("the settled scheme must reach the cache");
+        assert_eq!(
+            cached.bg,
+            Some(0x0028_2a36),
+            "the cache kept the theme the switch was leaving, not the one it arrived at"
+        );
+        assert_eq!(cached.fg, Some(0x00f8_f8f2));
     }
 
     /// A user cycling schemes announces the next one before the previous
