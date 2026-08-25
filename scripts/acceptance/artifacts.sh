@@ -19,6 +19,27 @@
 #
 # Callers must define `REPO_ROOT` before sourcing.
 
+# A power assertion for the length of the run, on the one host class that
+# needs one.
+#
+# Every threshold this suite asserts is a duration the code under test reads
+# off a monotonic clock, and every wait that bounds it is wall time read off
+# `date`. macOS parts the two on its own: on AC and unattended, it takes a
+# maintenance sleep whenever it likes (`pmset -g log`: "Entering Sleep state
+# due to 'Maintenance Sleep'"), and a Mach monotonic clock does not advance
+# across one. Measured here, a 30s escalation was 21s short of its threshold
+# after 50s of wall, and a wait that has been sleeping for five minutes reads
+# as a five-minute stall in whatever it was waiting on -- a supervision
+# threshold that never arrives, an engine that looks wedged, an editor that
+# looks frozen. None of it is the code's, and all of it fails the leg.
+#
+# `-w $$` rather than a trap: the assertion is released when this shell is
+# gone, however it went, including the kill an aborted run takes.
+if [ "$(uname -s)" = Darwin ] && command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -dims -w $$ &
+    CAFFEINATE_PID=$!
+fi
+
 # A fractional-seconds clock every leg's wait loops time out against.
 #
 # BSD `date` (macOS, an established validation host for this repo) has no

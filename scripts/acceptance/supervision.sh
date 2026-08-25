@@ -576,19 +576,20 @@ grep -qF -- "$INTERRUPT_UNANSWERED" "$SUPERVISION_RS" || {
 
 # Both wedges spin unconditionally, with no duration bound of their own.
 #
-# A bound is what a bounded loop has to read a clock to enforce, and a clock
-# read from inside a wedged engine is not a measurement this harness can
-# trust: on dev-macos the same `vim.uv.hrtime()` budget that holds for its
-# whole 180 s on dev-linux is observed crossed after 18-50 s of wall (the
-# leg then fails on the modal, which is still 30 s away), and a 120 s budget
-# in the same shape has equally been observed crossed only after 411 s. An
-# unbounded loop reads no clock, so neither reading can end it.
+# A bound is what a bounded loop has to read a clock to enforce, and the
+# clock it reads is monotonic while every wait that bounds this leg is wall
+# time. A host that stops the first parts them: a 120 s `vim.uv.hrtime()`
+# budget in this shape was measured taking 411 s of wall on dev-macos, whose
+# maintenance sleeps the run now holds an assertion against (`artifacts.sh`).
+# The assertion is the fix for the parting; dropping the bound is what keeps
+# the wedge from depending on a clock at all, on any host that ever stops
+# one. An unbounded loop reads none.
 #
-# Nothing is lost by dropping the bound. What ends each wedge is the recovery
-# under test, and the property the bound was there for -- that a loop which
-# simply finished can never be mistaken for one a recovery ended -- is
-# strictly stronger here, since a loop with no exit condition cannot finish.
-# A leg that fails before its recovery leaves the engine spinning, which the
+# Nothing is lost by dropping it. What ends each wedge is the recovery under
+# test, and the property the bound was there for -- that a loop which simply
+# finished can never be mistaken for one a recovery ended -- is strictly
+# stronger here, since a loop with no exit condition cannot finish. A leg
+# that fails before its recovery leaves the engine spinning, which the
 # script's own cleanup kills along with every other engine it started.
 #
 # A Lua `while` pumps nothing: an engine inside one answers neither the
