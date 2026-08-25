@@ -41,13 +41,13 @@ const TIERS_SOURCE: &str = "../../view-tui/src/tiers.rs";
 /// two apart, a liveness bound stops being one, and a runaway guard becomes
 /// a longer-lived stray.
 ///
-/// Keyed by line number as well as text, so a second copy of the same line
-/// elsewhere in the file does not inherit an exemption nobody granted it.
+/// Keyed by the statement's text, which must occur exactly once in the
+/// file: a second copy of the same line cannot quietly inherit an exemption
+/// nobody granted it, and no unrelated edit above the line moves the key.
 struct DeclaredAbsolute {
     /// The path under `crates/`, as the walk below names what it finds.
     file: &'static str,
-    /// The line the bound sits on, and the text that must still be there.
-    number: usize,
+    /// The bound's own text, trimmed, which must appear exactly once.
     line: &'static str,
     /// Why this one is a real timing rather than a guess at the host, for
     /// the reader who finds the entry before finding the test.
@@ -57,40 +57,34 @@ struct DeclaredAbsolute {
 const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
     DeclaredAbsolute {
         file: "view-oracle/tests/osc52_user_provider_paste.rs",
-        number: 144,
         line: "elapsed < Duration::from_secs(2),",
         grounds: "it sits below nvim's own OSC 52 provider waiting out its first vim.wait(1000)",
     },
     DeclaredAbsolute {
         file: "view-oracle/tests/osc52_user_provider_paste.rs",
-        number: 197,
         line: "elapsed < Duration::from_secs(3),",
         grounds: "it sits below the same provider's wait, for the empty-clipboard answer",
     },
     DeclaredAbsolute {
         file: "view-native/src/tree/git.rs",
-        number: 422,
         line: "elapsed < Duration::from_secs(2),",
         grounds:
             "it sits below the wedged fixture's own 5s sleep, which a scaled bound would reach",
     },
     DeclaredAbsolute {
         file: "view-ai/tests/fixtures/stub_agent.rs",
-        number: 635,
         line: "while start.elapsed() < SUSTAINED_CEILING {",
         grounds: "it is the fixture's own runaway guard, and a scaled one is \
                   just a longer-lived stray process",
     },
     DeclaredAbsolute {
         file: "view-engine/tests/shutdown.rs",
-        number: 249,
         line: "let deadline = std::time::Instant::now() + GRACEFUL_EXIT_LIVENESS_BOUND;",
         grounds: "a child that has not run at all in a minute is not a \
                   descheduled child, which is the whole of what the bound claims",
     },
     DeclaredAbsolute {
         file: "view-oracle/src/reference.rs",
-        number: 1079,
         line: "started.elapsed() < QUIESCE_DEADLINE,",
         grounds: "it is the deadline quiesce itself was handed, which the \
                   assertion exists to prove was not exhausted",
@@ -646,9 +640,9 @@ fn statements(source: &str) -> Vec<Statement> {
 }
 
 fn is_declared(file: &str, found: &AbsoluteBound) -> bool {
-    DECLARED_ABSOLUTES.iter().any(|declared| {
-        declared.file == file && declared.number == found.number && declared.line == found.line
-    })
+    DECLARED_ABSOLUTES
+        .iter()
+        .any(|declared| declared.file == file && declared.line == found.line)
 }
 
 /// `relative` resolved against this crate's `tests` directory, so the walk
@@ -668,17 +662,19 @@ fn every_declared_absolute_is_still_in_the_test_it_names() {
             .find(|(name, _)| name == declared.file)
             .map(|(_, source)| source.as_str())
             .unwrap_or_default();
-        let line = source.lines().nth(declared.number - 1).unwrap_or_default();
+        let occurrences = source
+            .lines()
+            .filter(|line| line.trim() == declared.line)
+            .count();
         assert_eq!(
-            line.trim(),
-            declared.line,
-            "DECLARED_ABSOLUTES still exempts line {} of {}, on the grounds \
-             that {}, but that line now reads differently. Move the entry to \
-             where the bound went, or drop it rather than leaving a standing \
-             exemption nothing claims",
-            declared.number,
-            declared.file,
-            declared.grounds
+            occurrences, 1,
+            "{} holds {occurrences} occurrences of {:?}, and DECLARED_ABSOLUTES \
+             declares 1, on the grounds that {}. At zero the bound has moved \
+             or gone and the exemption is a standing licence nothing claims; \
+             above one a second bound is inheriting an exemption nobody \
+             granted it -- give each its own entry, or make them tell \
+             themselves apart",
+            declared.file, declared.line, declared.grounds
         );
     }
 }
