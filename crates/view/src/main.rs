@@ -883,10 +883,19 @@ fn main() -> Result<()> {
         .context("failed to take the terminal capability probe off the terminal")?;
     attach.send_residue(probe.residue);
     model.caps = probe.caps;
+    // `fence_seen` is on the line because the tier on it is not necessarily
+    // final: false means the terminal still owes replies, and a later
+    // `caps tier=` line supersedes this one. Without it a reader tailing
+    // `VIEW_LOG` takes the first verdict for the session's.
     vlog::log_with("startup", || {
         format!(
-            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} term={width}x{height}",
-            VERSION, model.caps.tier, model.caps.sync, model.caps.truecolor, model.caps.kitty_kbd
+            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} fence_seen={} term={width}x{height}",
+            VERSION,
+            model.caps.tier,
+            model.caps.sync,
+            model.caps.truecolor,
+            model.caps.kitty_kbd,
+            probe.fence_seen
         )
     });
 
@@ -902,7 +911,7 @@ fn main() -> Result<()> {
         // everything: those replies must not reach crossterm's parser, and
         // what they resolve to is this session's tier -- handed to the loop
         // as `Msg::CapsUpgraded` rather than waited for here
-        view_tui::input::InputSource::open_listening(model.caps)
+        view_tui::input::InputSource::open_listening(model.caps, probe.partial_reply)
     }
     .context("failed to open the pollable terminal input handle")?;
     #[cfg(not(unix))]

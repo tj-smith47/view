@@ -720,10 +720,17 @@ impl PreAttach {
                 false
             }
             // applied to the model here for the same reason a resize is:
-            // the overflow repaint above and the first content frame both
-            // paint at the model's capabilities, and this window is the one
-            // place a late answer has no loop to reach
+            // the first content frame paints at the model's capabilities,
+            // and this window is the one place a late answer has no loop to
+            // reach. No repaint of its own -- the shell frame carries no
+            // cell a tier changes, so the cutover is early enough.
+            //
+            // Logged through the loop's own path rather than beside it: the
+            // last `caps tier=` line is the session's record of what it
+            // settled at, and a reader cannot be asked to know which side
+            // of the attach the answer happened to land on.
             Msg::CapsUpgraded(caps) => {
+                crate::vlog::log_msg(&msg);
                 model.caps = caps;
                 false
             }

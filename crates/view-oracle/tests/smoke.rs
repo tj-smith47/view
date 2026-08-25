@@ -3054,9 +3054,10 @@ fn a_terminal_a_round_trip_away_still_reaches_the_full_tier() {
     assert_eq!(
         derived_tier(QueryPolicy::AnswerFullTierLate, None),
         "Full",
-        "replies delayed by {:?} arrive after the first probe window and \
-         before the hard cap the child waits out behind its engine spawn; \
-         the tier it settles on must be the one the terminal answered for",
+        "replies delayed by {:?} arrive after the first probe window, on a \
+         session already painting, and are recognized on the input path; \
+         the tier it settles on must be the one the terminal answered for, \
+         whichever side of the attach the answer lands on",
         view_oracle::LATE_ANSWER_DELAY
     );
 }

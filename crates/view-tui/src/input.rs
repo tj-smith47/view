@@ -283,7 +283,11 @@ impl InputSource {
     /// whose capability probe handed the terminal over without ever seeing
     /// its DA1 fence (`ProbeOutcome::fence_seen` false). `settled` is what
     /// that probe resolved, which is the floor every later answer is folded
-    /// onto.
+    /// onto, and `partial_reply` is
+    /// [`ProbeOutcome::partial_reply`](crate::tiers::ProbeOutcome::partial_reply)
+    /// -- the head of an answer that was still arriving at the settle,
+    /// carried across the handover so the read that brings its tail
+    /// completes an answer rather than scanning a headless one.
     ///
     /// A terminal answers queries in the order it received them and the
     /// fence is asked last, so a fence that arrived proves nothing is still
@@ -360,11 +364,11 @@ impl InputSource {
     ///
     /// Returns the underlying `std::io::Error` if the terminal fd or the
     /// signal pipe cannot be set up.
-    pub fn open_listening(settled: TermCaps) -> std::io::Result<Self> {
-        Self::open_with(Some(settled))
+    pub fn open_listening(settled: TermCaps, partial_reply: Vec<u8>) -> std::io::Result<Self> {
+        Self::open_with(Some((settled, partial_reply)))
     }
 
-    fn open_with(guard_late_replies: Option<TermCaps>) -> std::io::Result<Self> {
+    fn open_with(guard_late_replies: Option<(TermCaps, Vec<u8>)>) -> std::io::Result<Self> {
         let tty = TtyFd::open()?;
         let (winch_read, winch_write) = new_signal_pipe()?;
         signal_hook::low_level::pipe::register(signal_hook::consts::SIGWINCH, winch_write)?;
@@ -423,10 +427,10 @@ impl InputSource {
             guard: None,
             guard_msgs: std::collections::VecDeque::new(),
         };
-        if let Some(caps) = guard_late_replies {
+        if let Some((caps, partial_reply)) = guard_late_replies {
             source.guard = Some(LateReplyGuard {
                 until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
-                buf: Vec::new(),
+                buf: partial_reply,
                 caps,
             });
             // ahead of the crossterm touch below, which reads: the guard

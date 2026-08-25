@@ -98,6 +98,17 @@ pub struct ProbeOutcome {
     /// them off the input path (see
     /// [`InputSource::open_listening`](crate::input::InputSource::open_listening)).
     pub fence_seen: bool,
+    /// The live prefix of an answer that was still arriving when the probe
+    /// stopped reading: the terminal's bytes, not the user's, so they are
+    /// neither residue nor keys.
+    ///
+    /// The settle takes no wait at all, which puts this seam at the first
+    /// probe window rather than at the hard cap -- exactly where a reply a
+    /// network round trip away is mid-flight. Handed to
+    /// [`InputSource::open_listening`](crate::input::InputSource::open_listening)
+    /// so the read that completes the answer completes it, instead of
+    /// scanning a tail with no head and typing it into the buffer.
+    pub partial_reply: Vec<u8>,
 }
 
 /// A capability probe in flight: the query batch is written, the first
@@ -182,10 +193,12 @@ impl<'a> Probe<'a> {
     pub fn finish(mut self, hard_cap: Duration) -> ProbeOutcome {
         self.read_until(hard_cap);
         let replies = scan_replies(&self.buf);
+        let partial_reply = self.buf.split_off(replies.consumed);
         ProbeOutcome {
             caps: self.caps_from(&replies),
             fence_seen: replies.da1,
             residue: replies.residue,
+            partial_reply,
         }
     }
 

@@ -36,7 +36,7 @@ fn a_reply_that_lands_whole_after_the_first_keystroke_still_answers_the_probe() 
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
 
     rustix::io::write(&master, b"a").unwrap();
     assert!(

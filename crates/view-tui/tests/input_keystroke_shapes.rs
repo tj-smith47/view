@@ -32,7 +32,7 @@ fn every_keyboard_shape_survives_the_guard_that_reads_it_first() {
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
     let size = TermSizeCell::default();
 
     let write = |bytes: &[u8]| {

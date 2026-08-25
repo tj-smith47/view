@@ -448,6 +448,7 @@ impl Term {
                 caps: self.caps,
                 residue: Vec::new(),
                 fence_seen: true,
+                partial_reply: Vec::new(),
             });
         };
         // zero, not a budget: every byte the terminal has already sent is

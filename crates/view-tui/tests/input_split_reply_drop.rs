@@ -42,7 +42,7 @@ fn a_keystroke_ahead_of_a_split_reply_does_not_hand_the_rest_of_it_to_crossterm(
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
 
     rustix::io::write(&master, KEY_THEN_PARTIAL_REPLY).unwrap();
     assert!(

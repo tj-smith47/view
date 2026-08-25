@@ -50,7 +50,7 @@ fn a_reply_arriving_after_the_probe_gave_up_never_reaches_the_engine() {
     // opened while the queue is empty, so crossterm's reader binds to this
     // terminal without consuming any of the burst written below
     // exactly what `main` opens for a probe whose fence never came
-    let mut input = InputSource::open_listening(TermCaps::default()).unwrap();
+    let mut input = InputSource::open_listening(TermCaps::default(), Vec::new()).unwrap();
 
     rustix::io::write(&master, LATE_BATCH_THEN_KEY).unwrap();
     assert!(
