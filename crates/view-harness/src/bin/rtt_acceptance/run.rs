@@ -34,7 +34,9 @@ use view_bench::scenarios::{echo_speculated, Protocol};
 use view_bench::session::{NvimSpec, SpawnSpec, ViewSpec};
 use view_harness::baselines::{self, CellId};
 use view_harness::budgets;
-use view_harness::fixture::{copy_dir_recursive, fixtures_root, scratch_root, workspace_root};
+use view_harness::fixture::{
+    copy_dir_recursive, fixtures_root, scratch_root, target_root, workspace_root,
+};
 
 #[derive(Parser)]
 struct Cli {
@@ -283,13 +285,9 @@ fn unspeculated_equivalent_ms(honest_view_p99_ms: f64, rtt_ms: u64) -> f64 {
 pub fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let taps_view_bin = cli.taps_view_bin.unwrap_or_else(|| {
-        workspace_root()
-            .join("target")
-            .join("taps")
-            .join("release")
-            .join("view")
-    });
+    let taps_view_bin = cli
+        .taps_view_bin
+        .unwrap_or_else(|| target_root().join("taps").join("release").join("view"));
     if !taps_view_bin.is_file() {
         bail!(
             "taps view binary {} does not exist; build it first (`cargo build --release -p view \

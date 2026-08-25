@@ -368,7 +368,7 @@ start_session() {
              $VIEW_BIN $ROOT/view-ai-stub-diff.txt"
 
     wait_for 'alpha' "$WAIT_SECS" "the seeded buffer" >/dev/null
-    watch_view "$SESSION" >/dev/null
+    watch_view "$SESSION"
 }
 
 # Opens the panel and answers the trust gate, leaving the panel entered --

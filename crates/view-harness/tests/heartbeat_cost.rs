@@ -100,11 +100,13 @@ enum Build {
 
 impl Build {
     /// The target directories `task heartbeat-ab` fills for this build:
-    /// prober armed, prober compiled out.
+    /// prober armed, prober compiled out. Named relative to
+    /// [`target_root`], which is where the task's own `--target-dir`
+    /// arguments put them.
     fn dirs(self) -> (&'static str, &'static str) {
         match self {
-            Build::Taps => ("target/taps", "target/taps-no-heartbeat"),
-            Build::NoSpeculate => ("target/nospec", "target/nospec-no-heartbeat"),
+            Build::Taps => ("taps", "taps-no-heartbeat"),
+            Build::NoSpeculate => ("nospec", "nospec-no-heartbeat"),
         }
     }
 
@@ -128,7 +130,7 @@ struct Arms {
 }
 
 fn arms(build: Build) -> Arms {
-    let root = workspace_root();
+    let root = target_root();
     let (armed, bare) = build.dirs();
     Arms {
         armed: root.join(armed).join("release").join(view_bin_name()),

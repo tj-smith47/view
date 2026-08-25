@@ -648,7 +648,7 @@ start_session() {
              $VIEW_BIN $ROOT/scratch.txt"
 
     wait_for "$seed" "$WAIT_SECS" "the seeded buffer" >/dev/null || return 1
-    watch_view "$SESSION" >/dev/null || return 1
+    watch_view "$SESSION" || return 1
     # anchored on the ruler rather than on any buffer text, which was
     # already on screen before the motion and so would report the cursor
     # moved whether it had or not
@@ -924,7 +924,7 @@ tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$warm_root" \
          TERM=xterm-256color COLORTERM=truecolor \
          $VIEW_BIN $warm_root/scratch.txt"
 wait_for 'warm the theme cache' "$WAIT_SECS" "the warming session's buffer" >/dev/null
-watch_view "$SESSION" >/dev/null
+watch_view "$SESSION"
 # Every assertion below compares a decimal triple, which only a truecolor
 # server ever emits. One that stores indexed colors instead answers `48;5;N`
 # for every cell, no background matches the fixture's, and the run fails on

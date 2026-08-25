@@ -282,7 +282,7 @@ start_session() {
              $VIEW_BIN --remote view-test-host:$ROOT/scratch.txt"
 
     wait_for 'acceptance seed line' 30 "the remote buffer" >/dev/null || return 1
-    VIEW_PID=$(watch_view "$SESSION") || return 1
+    watch_view "$SESSION" || return 1
     read_client_pid || return 1
 }
 

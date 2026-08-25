@@ -55,7 +55,9 @@ dump_dir() {
 # which is what an isolated export of the tree is measured from, so a
 # harness that spelled `$REPO_ROOT/target` refuses every leg on the one
 # procedure the A/B and bisect recipes are run under. A relative value is
-# resolved against the repo, the way cargo itself resolves it.
+# resolved against the repo; cargo resolves one against the cwd of the
+# invocation instead, and the two agree only because every target and
+# script here runs from the root.
 #
 # The variable rather than `cargo metadata`: a `build.target-dir` in a cargo
 # config file is the one redirection this does not see, and reading it costs
@@ -93,12 +95,19 @@ check_target_root() {
 check_target_root
 TARGET_ROOT=$(target_root)
 
-# Every `view` a run has started, reaped by pid when it ends.
+# Every `view` a run has started, reaped by pid when it ends, and the one
+# the most recent call recorded.
 VIEW_PIDS=()
+VIEW_PID=""
 
-# Records the `view` behind a tmux session's pane and answers its pid.
+# Records the `view` behind a tmux session's pane, as `VIEW_PID`.
 #
-#   VIEW_PID=$(watch_view "$SESSION") || return 1
+#   watch_view "$SESSION" || return 1
+#
+# A statement, never a command substitution: a substitution runs in a
+# subshell, so the recording would die with it while the caller still got
+# its pid back -- a reaper holding an empty list and reporting every run
+# clean. `check_view_reaping` refuses the shape outright.
 #
 # The pane command is `view` itself in most legs and a shell that runs view
 # in the exit legs, so both shapes are looked for. Taken while the session
@@ -121,7 +130,7 @@ watch_view() {
         return 1
     fi
     VIEW_PIDS+=("$pid")
-    printf '%s\n' "$pid"
+    VIEW_PID=$pid
 }
 
 # Kills every `view` this run started and refuses to let the run end while
@@ -158,29 +167,76 @@ reap_views() {
     return 1
 }
 
-# The reaper against a known answer, on every run: one that killed nothing
-# would let every orphan through while the run reported green, and the check
-# it runs on itself would pass by finding nothing.
+# The recorder and the reaper end to end, on every run, through the call
+# shape the legs use: a stand-in named `view` in a tmux pane of its own,
+# recorded by `watch_view` and then reaped.
 #
-# The victim is started from a shell that exits immediately, so it is
-# reparented rather than left a zombie of this one -- which `kill -0`
-# answers for as though it were alive, exactly the way a real orphan is not.
-check_reaper() {
-    local victim
-    victim=$(sh -c 'sleep 30 >/dev/null 2>&1 & echo $!')
-    VIEW_PIDS=("$victim")
+# Both halves need it. A reaper that killed nothing would let every orphan
+# through while the run reported green; a recorder whose pid never left its
+# own subshell would leave that reaper nothing to kill, and it too would
+# report green by finding nothing. Seeding the list by hand pins only the
+# first half, which is how the second half shipped broken.
+#
+# The victim is a tmux pane's process, so it is no child of this shell --
+# `kill -0` answers for a zombie as though it were alive, and a real orphan
+# is never one.
+check_view_reaping() {
+    local tmp session before
+    tmp=$(mktemp -d)
+    # a shell under the name the recorder looks for. The trailing `:` is
+    # what keeps that name: given one command, a shell execs it and becomes
+    # `sleep` instead of staying the `view` this has to find
+    ln -s /bin/sh "$tmp/view"
+    session="view-acc-selfcheck-$$"
+    tmux new-session -d -s "$session" "$tmp/view -c 'sleep 300; :'" || {
+        printf 'FAIL: tmux could not start the session the self-check reaps\n' >&2
+        exit 1
+    }
+    before=${#VIEW_PIDS[@]}
+    VIEW_PID=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        watch_view "$session" 2>/dev/null && break
+        sleep 0.2
+    done
+    if [ -z "$VIEW_PID" ] || [ "${#VIEW_PIDS[@]}" -eq "$before" ]; then
+        printf 'FAIL: watch_view recorded no pid, so the reaper has nothing to kill\n' >&2
+        tmux kill-session -t "$session" 2>/dev/null || true
+        exit 1
+    fi
     if ! reap_views; then
-        printf 'FAIL: the reaper could not reap a live process\n' >&2
+        printf 'FAIL: the reaper could not reap a live view\n' >&2
         exit 1
     fi
-    if kill -0 "$victim" 2>/dev/null; then
+    if kill -0 "$VIEW_PID" 2>/dev/null; then
         printf 'FAIL: the reaper reported a clean run with its victim still alive\n' >&2
-        kill -9 "$victim" 2>/dev/null || true
+        kill -9 "$VIEW_PID" 2>/dev/null || true
         exit 1
     fi
+    tmux kill-session -t "$session" 2>/dev/null || true
+    rm -rf "$tmp"
     VIEW_PIDS=()
+    VIEW_PID=""
+
+    # the call shape, across every script at once. The end-to-end above
+    # proves the recorder works when called as a statement; only this
+    # proves the legs call it that way, and the subshell form is invisible
+    # at the call site -- the caller still gets a pid, and only the reaper
+    # is left with nothing
+    # spelled in two halves so this line is not itself the thing it refuses
+    local needle subshelled
+    needle='$(watch'"_view"
+    subshelled=$(grep -rlF "$needle" "$REPO_ROOT/scripts/acceptance" 2>/dev/null | tr '\n' ' ' || true)
+    if [ -n "$subshelled" ]; then
+        printf 'FAIL: watch_view is called in a command substitution (%s), where the pid it records dies with the subshell\n' \
+            "$subshelled" >&2
+        exit 1
+    fi
 }
-check_reaper
+command -v tmux >/dev/null || {
+    printf 'FAIL: tmux is required (every leg here drives a real terminal session)\n' >&2
+    exit 1
+}
+check_view_reaping
 
 # This host's machine-class name, in `budgets.toml`'s vocabulary.
 #

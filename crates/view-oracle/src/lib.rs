@@ -112,8 +112,11 @@ pub fn workspace_root() -> std::path::PathBuf {
 /// -- the shape a bisect and an A/B pair are run in. A harness that spelled
 /// `<root>/target` instead spawns a binary that is not there and fails
 /// every leg for a reason that has nothing to do with the code under test.
-/// A relative value is resolved against the workspace root, the way cargo
-/// resolves it.
+/// A relative value is resolved against the workspace root. Cargo resolves
+/// one against the cwd of the invocation instead, so the two agree only
+/// because every `task` target and every script here runs from the root --
+/// a harness started from a subdirectory with a relative
+/// `CARGO_TARGET_DIR` would look one level up from where cargo wrote.
 ///
 /// The variable rather than `cargo metadata`: a `build.target-dir` in a
 /// cargo config file is the one redirection this does not see, and reading

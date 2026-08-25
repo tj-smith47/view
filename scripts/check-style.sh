@@ -253,6 +253,23 @@ else
   echo "STYLE FAIL: scripts/audit-god-files.sh or crates/ missing; cannot check condition-notice ownership"
   fail=1
 fi
+# Every path to a binary cargo built goes through `view_oracle::target_root`
+# (re-exported as `view_harness::fixture::target_root`), which honours
+# `CARGO_TARGET_DIR`. One spelled from `workspace_root` instead is invisible
+# on a normal checkout and fails every leg of a run made from an isolated
+# export, for a reason that has nothing to do with the code under test.
+# `workspace_root` stays correct for source files and scratch roots -- what
+# it must never reach is a `release`/`debug` profile directory.
+if [ -d crates ]; then
+  built=$(grep -rnE -A6 'workspace_root\(\)' crates --include='*.rs' \
+    | grep -E 'join\("(release|debug)"\)' || true)
+  if [ -n "$built" ]; then
+    printf '%s\n' "$built"
+    echo "STYLE FAIL: a built binary resolved from workspace_root instead of target_root"
+    echo "  A profile directory belongs to cargo, and CARGO_TARGET_DIR moves it."
+    fail=1
+  fi
+fi
 for dir in compat corpus; do
   if [ -d "$dir" ]; then
     # --exclude-dir=.cache: compat/.cache/ is the gitignored, populated-at-

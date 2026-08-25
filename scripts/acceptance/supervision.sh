@@ -256,7 +256,7 @@ start_session() {
              $VIEW_BIN $ROOT/scratch.txt"
 
     wait_for "$seed" 30 "the seeded buffer" >/dev/null || return 1
-    VIEW_PID=$(watch_view "$SESSION") || return 1
+    watch_view "$SESSION" || return 1
     read_engine_pid || return 1
 }
 
@@ -321,7 +321,7 @@ assert_restart_recovered() {
     tmux send-keys -t "$SESSION" -l "o$live"
     tmux send-keys -t "$SESSION" Escape
     wait_for "$live" 15 "typed text after the restart" >/dev/null || return 1
-    VIEW_PID=$(watch_view "$SESSION") || return 1
+    watch_view "$SESSION" || return 1
     read_engine_pid || return 1
 }
 
@@ -377,7 +377,7 @@ EOF
     wait_for "$EXIT_SEED" 30 "the seeded buffer" >/dev/null || return 1
     # the pane runs the shell above, so view is its child rather than the
     # pane process itself
-    VIEW_PID=$(watch_view "$SESSION") || return 1
+    watch_view "$SESSION" || return 1
     read_engine_pid || return 1
 }
 
