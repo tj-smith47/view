@@ -107,16 +107,12 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// name decodes into the key it is, through the same [`encode_key`] every
 /// keystroke after startup goes through.
 ///
-/// One they do not splits by whether it carries parameters. A run with
-/// them is the terminal reporting something (a mouse position, a focus
-/// change, a cursor position, a key this table is too old for) and is
-/// consumed whole, exactly as crossterm's parser consumes what it cannot
-/// name: typing `<lt>0;24;10M` out of an SGR mouse report is nine
-/// keystrokes nobody pressed. A run without them is the other reading of
-/// those two bytes -- an `<Esc>` and then someone typing -- so only the
-/// introducer goes and the keys behind it survive. Both are better than
-/// dropping the buffer from the `ESC` onward, which costs every key typed
-/// behind two bytes that were never a sequence.
+/// One they do not is consumed whole and typed as nothing, which is what
+/// crossterm's parser does with a sequence it cannot name: it drops the
+/// bytes it had accumulated and reads on from the one after them. Typing
+/// `<lt>0;24;10M` out of an SGR mouse report is nine keystrokes nobody
+/// pressed, and `h` out of `ESC [ h` is a `dd` waiting to happen; the keys
+/// behind the run are the user's in both readings and survive in both.
 ///
 /// A string sequence (`ESC P`, `ESC ]`, `ESC ^`, `ESC _`, `ESC X`) is a
 /// report too and is consumed through its terminator -- but only once the
@@ -130,12 +126,15 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// [`decode_residue`] reports the length of such a tail so a caller that
 /// can wait for the rest does; this entry point cannot and drops it.
 ///
-/// `ESC` and a printable in the same run are Alt and that key, which is
-/// how crossterm reads them for the rest of the session. A lone trailing
-/// `ESC` is the Escape key and maps to `<Esc>`: crossterm holds one only
-/// while the fd still has bytes to give it, and the caller here has
-/// already drained the fd to `EAGAIN`, so the two answers differ only for
-/// a chord whose second byte was still in flight at that moment.
+/// `ESC` and one key in the same run are Alt and that key, which is how
+/// crossterm reads them for the rest of the session -- for a multi-byte
+/// character as much as for a printable ASCII one. Two `ESC`s in a run are
+/// the Escape key rather than `Alt`+`Esc`, again as crossterm reads them.
+/// A lone trailing `ESC` is the Escape key too and maps to `<Esc>`:
+/// crossterm holds one only while the fd still has bytes to give it, and
+/// the caller here has already drained the fd to `EAGAIN`, so the two
+/// answers differ only for a chord whose second byte was still in flight
+/// at that moment.
 #[must_use]
 pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
     decode_residue(residue)
@@ -175,19 +174,21 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
     let mut i = 0;
     while i < residue.len() {
         match residue[i] {
-            0x1b if matches!(residue.get(i + 1), Some(&b'[') | Some(&b'O')) => {
-                match escape_sequence(&residue[i..]) {
+            0x1b => {
+                let run = &residue[i..];
+                let escape = if let Some(len) = string_sequence_len(run) {
+                    Escape::Unknown { len }
+                } else if matches!(run.get(1), Some(&b'[') | Some(&b'O')) {
+                    escape_sequence(run)
+                } else {
+                    alt_key(run)
+                };
+                match escape {
                     Escape::Decoded { len, msg } => {
                         msgs.extend(msg);
                         i += len;
                     }
-                    Escape::Unknown { len, parameterised } => {
-                        i += if parameterised {
-                            len
-                        } else {
-                            ESCAPE_INTRODUCER_LEN
-                        };
-                    }
+                    Escape::Unknown { len } => i += len,
                     Escape::Unfinished => {
                         return ResidueDecode {
                             msgs,
@@ -196,27 +197,19 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
                     }
                 }
             }
-            0x1b => {
-                if let Some(len) = string_sequence_len(&residue[i..]) {
+            b if b >= 0x80 => match utf8_char(&residue[i..]) {
+                Utf8::Char(decoded, len) => {
+                    msgs.push(key_msg(decoded.to_string()));
                     i += len;
-                } else if let Some((len, msg)) = alt_key(&residue[i..]) {
-                    msgs.extend(msg);
-                    i += len;
-                } else {
-                    msgs.push(key_msg("<Esc>"));
-                    i += 1;
                 }
-            }
-            b if b >= 0x80 => {
-                let start = i;
-                i += 1;
-                while residue.get(i).is_some_and(|&b| b >= 0x80) {
-                    i += 1;
+                Utf8::Unfinished => {
+                    return ResidueDecode {
+                        msgs,
+                        unfinished: residue.len() - i,
+                    }
                 }
-                if let Ok(s) = std::str::from_utf8(&residue[start..i]) {
-                    msgs.extend(s.chars().map(|c| key_msg(c.to_string())));
-                }
-            }
+                Utf8::Invalid => i += 1,
+            },
             byte => {
                 if let Some((code, mods)) = plain_key(byte) {
                     msgs.extend(encode_key(&KeyEvent::new(code, mods)).map(key_msg));
@@ -231,8 +224,8 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
     }
 }
 
-/// `ESC [` and `ESC O`: the two bytes that are equally the opening of a
-/// sequence and of nothing, and so the only ones ever dropped alone.
+/// `ESC [` and `ESC O`: the two bytes a sequence opens with, and where
+/// its parameters start.
 const ESCAPE_INTRODUCER_LEN: usize = 2;
 
 /// The bracketed-paste parameters and closer, as the terminal writes them
@@ -252,10 +245,9 @@ enum Escape {
     /// A complete sequence `len` bytes long, and the message it is (`None`
     /// for one with no nvim equivalent, which is consumed all the same).
     Decoded { len: usize, msg: Option<Msg> },
-    /// Complete, and nothing this decoder's tables name. `parameterised`
-    /// is what tells a terminal's report (consume all `len` bytes) from an
-    /// `<Esc>` with typing behind it (consume the introducer only).
-    Unknown { len: usize, parameterised: bool },
+    /// Complete, and nothing this decoder's tables name: `len` bytes that
+    /// type nothing, the reading crossterm takes of the same run.
+    Unknown { len: usize },
     /// Its final byte, or its paste closer, has not arrived.
     Unfinished,
 }
@@ -268,12 +260,7 @@ fn escape_sequence(run: &[u8]) -> Escape {
         };
         return match cursor_key(final_byte) {
             Some(code) => decoded(3, code, KeyModifiers::NONE),
-            // SS3 carries no parameters, so an unnamed one reads as the
-            // `<Esc>` `O` it equally is
-            None => Escape::Unknown {
-                len: 3,
-                parameterised: false,
-            },
+            None => Escape::Unknown { len: 3 },
         };
     }
     csi_sequence(run)
@@ -296,10 +283,7 @@ fn csi_sequence(run: &[u8]) -> Escape {
     }
     let fields = param_fields(params);
     let modifier = modifiers(field(&fields, 1));
-    let unnamed = Escape::Unknown {
-        len,
-        parameterised: !fields.is_empty(),
-    };
+    let unnamed = Escape::Unknown { len };
     match final_byte {
         b'~' => match tilde_key(&fields) {
             Some((code, mods)) => decoded(len, code, mods),
@@ -316,6 +300,15 @@ fn csi_sequence(run: &[u8]) -> Escape {
                     .map(key_msg),
             },
             None => unnamed,
+        },
+        // the Linux console's F1-F5: a second introducer and then the
+        // letter, with nothing between them
+        b'[' if fields.is_empty() => match run.get(len) {
+            None => Escape::Unfinished,
+            Some(&letter @ b'A'..=b'E') => {
+                decoded(len + 1, KeyCode::F(1 + letter - b'A'), KeyModifiers::NONE)
+            }
+            Some(_) => Escape::Unknown { len: len + 1 },
         },
         // a focus report, which `event_to_msg` also drops for crossterm's
         // own events -- and which typed through would insert at the line
@@ -373,16 +366,67 @@ fn string_sequence_len(run: &[u8]) -> Option<usize> {
 }
 
 /// `ESC` and one key in the same run: crossterm reads that as the key with
-/// Alt held (its parser recurses on the byte after the `ESC` and ors the
+/// Alt held (its parser recurses on the bytes after the `ESC` and ors the
 /// modifier in), so a `<M-...>` mapping resolves the same inside this
-/// window as outside it. `None` for a run that is a lone `ESC`, or one
-/// whose next byte no single key produces.
-fn alt_key(run: &[u8]) -> Option<(usize, Option<Msg>)> {
-    let (code, mods) = plain_key(*run.get(1)?)?;
-    Some((
-        2,
-        encode_key(&KeyEvent::new(code, mods | KeyModifiers::ALT)).map(key_msg),
-    ))
+/// window as outside it. The recursion is what makes a multi-byte
+/// character an Alt chord there as much as an ASCII one, and the same
+/// decode is what makes it one here.
+///
+/// Three runs are not that chord. A second `ESC` is the Escape key --
+/// crossterm's parser names the byte after the first and `ESC` is one of
+/// the names -- and so is an `ESC` with nothing behind it. A character cut
+/// short by the end of the read is unfinished, because the rest of it is
+/// still in flight.
+fn alt_key(run: &[u8]) -> Escape {
+    let escape_key = |len| Escape::Decoded {
+        len,
+        msg: Some(key_msg("<Esc>")),
+    };
+    match run.get(1) {
+        None => escape_key(1),
+        Some(&0x1b) => escape_key(2),
+        Some(&byte) if byte >= 0x80 => match utf8_char(&run[1..]) {
+            Utf8::Char(typed, len) => decoded(1 + len, KeyCode::Char(typed), KeyModifiers::ALT),
+            Utf8::Unfinished => Escape::Unfinished,
+            Utf8::Invalid => escape_key(1),
+        },
+        Some(&byte) => match plain_key(byte) {
+            Some((code, mods)) => decoded(2, code, mods | KeyModifiers::ALT),
+            None => escape_key(1),
+        },
+    }
+}
+
+/// One character off the front of a byte run.
+enum Utf8 {
+    /// The character and the number of bytes it took.
+    Char(char, usize),
+    /// The run ends part-way through a character, so the rest of it is in
+    /// the read that has not happened yet.
+    Unfinished,
+    /// Bytes no character encodes to. Dropping them is the only answer
+    /// that cannot type something nobody pressed.
+    Invalid,
+}
+
+fn utf8_char(run: &[u8]) -> Utf8 {
+    let first = |text: &str| {
+        text.chars()
+            .next()
+            .map_or(Utf8::Invalid, |typed| Utf8::Char(typed, typed.len_utf8()))
+    };
+    match std::str::from_utf8(run) {
+        Ok(text) => first(text),
+        // a character can be whole with the error behind it, and the
+        // difference between the two errors is the whole point: bytes that
+        // ran out mid-character are a tail to wait for, bytes that no
+        // character encodes to are a tail to drop
+        Err(err) => match std::str::from_utf8(&run[..err.valid_up_to()]) {
+            Ok(text) if !text.is_empty() => first(text),
+            _ if err.error_len().is_none() => Utf8::Unfinished,
+            _ => Utf8::Invalid,
+        },
+    }
 }
 
 /// One byte outside any sequence, read as the key crossterm reads it as.
@@ -561,7 +605,55 @@ fn char_key(code: u32) -> Option<KeyCode> {
         13 => KeyCode::Enter,
         27 => KeyCode::Esc,
         0 => return None,
+        FUNCTIONAL_FIRST..=FUNCTIONAL_LAST => functional_key(code)?,
         _ => KeyCode::Char(char::from_u32(code)?),
+    })
+}
+
+/// The private-use block the kitty keyboard protocol spells its functional
+/// keys in, which are keys rather than characters: passed through as
+/// characters they type a glyph no font has and no user pressed.
+const FUNCTIONAL_FIRST: u32 = 57358;
+const FUNCTIONAL_LAST: u32 = 57454;
+
+/// A functional codepoint as the key it names, mirroring crossterm's
+/// `translate_functional_key_code` so a kitty terminal answering late in
+/// the window produces the same key it would a millisecond afterwards.
+///
+/// The media keys and the bare modifier keys resolve to `None`: nvim has
+/// no notation for either, and [`key_token`] drops crossterm's own events
+/// for them the same way -- so both readings end as a consumed sequence
+/// that types nothing.
+fn functional_key(code: u32) -> Option<KeyCode> {
+    Some(match code {
+        57358 => KeyCode::CapsLock,
+        57359 => KeyCode::ScrollLock,
+        57360 => KeyCode::NumLock,
+        57361 => KeyCode::PrintScreen,
+        57362 => KeyCode::Pause,
+        57363 => KeyCode::Menu,
+        57376..=57398 => KeyCode::F(u8::try_from(code - 57376 + 13).ok()?),
+        57399..=57408 => KeyCode::Char(char::from_u32(code - 57399 + u32::from(b'0'))?),
+        57409 => KeyCode::Char('.'),
+        57410 => KeyCode::Char('/'),
+        57411 => KeyCode::Char('*'),
+        57412 => KeyCode::Char('-'),
+        57413 => KeyCode::Char('+'),
+        57414 => KeyCode::Enter,
+        57415 => KeyCode::Char('='),
+        57416 => KeyCode::Char(','),
+        57417 => KeyCode::Left,
+        57418 => KeyCode::Right,
+        57419 => KeyCode::Up,
+        57420 => KeyCode::Down,
+        57421 => KeyCode::PageUp,
+        57422 => KeyCode::PageDown,
+        57423 => KeyCode::Home,
+        57424 => KeyCode::End,
+        57425 => KeyCode::Insert,
+        57426 => KeyCode::Delete,
+        57427 => KeyCode::KeypadBegin,
+        _ => return None,
     })
 }
 
@@ -783,6 +875,20 @@ mod tests {
         assert_eq!(encode_residue_bytes(b"\x1bx"), vec!["<M-x>"]);
         assert_eq!(encode_residue_bytes(b"\x1b\r"), vec!["<M-CR>"]);
         assert_eq!(encode_residue_bytes(b"\x1b<"), vec!["<M-lt>"]);
+        // Alt holds over a multi-byte character as much as an ASCII one:
+        // crossterm's parser recurses on the bytes behind the `ESC` and
+        // ors the modifier into whatever they decode to
+        assert_eq!(
+            encode_residue_bytes("\x1b\u{e9}".as_bytes()),
+            vec!["<M-\u{e9}>"]
+        );
+        // two `ESC`s in one run are the Escape key rather than `Alt`+`Esc`:
+        // crossterm names the second byte, and `Esc` is one of its names
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b"), vec!["<Esc>"]);
+        // both bytes go with it, so what follows opens nothing -- the same
+        // reading crossterm takes, whose buffer clears at the `Esc` and
+        // meets the `[` as the character it then is
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b[A"), vec!["<Esc>", "[", "A"]);
         // and the `ESC` that ends a run is still the Escape key
         assert_eq!(encode_residue_bytes(b"ok\x1b"), vec!["o", "k", "<Esc>"]);
     }
@@ -804,18 +910,31 @@ mod tests {
     }
 
     #[test]
-    fn residue_an_escape_run_no_table_names_costs_its_introducer_and_no_more() {
+    fn residue_an_escape_run_no_table_names_is_consumed_whole() {
         // `ESC [ h` is a valid CSI (set mode) and equally an `<Esc>`, a `[`
-        // and the first letter of typing; the keys behind it are the user's
-        // either way, so only the two bytes that were never a key go
+        // and the first letter of typing. Crossterm reads it as the
+        // sequence, types none of it, and reads on from the byte after --
+        // so this does too, inside the window and outside it alike
         assert_eq!(
             encode_residue_bytes(b"\x1b[hello"),
-            vec!["h", "e", "l", "l", "o"]
+            vec!["e", "l", "l", "o"]
         );
         assert_eq!(
             encode_residue_bytes(b"\x1bOhello"),
-            vec!["h", "e", "l", "l", "o"]
+            vec!["e", "l", "l", "o"]
         );
+    }
+
+    #[test]
+    fn residue_the_linux_consoles_own_function_keys_decode_as_function_keys() {
+        // `CSI [ A`..`CSI [ E`: a second introducer where a parameter
+        // would be, which is how the Linux console spells F1-F5
+        assert_eq!(encode_residue_bytes(b"\x1b[[A"), vec!["<F1>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b[[Eok"), vec!["<F5>", "o", "k"]);
+        // one byte short of the letter is a tail to wait for
+        assert_eq!(decode_residue(b"\x1b[[").unfinished, 3);
+        // and a letter no key has is the sequence it still is
+        assert!(encode_residue_bytes(b"\x1b[[Z").is_empty());
     }
 
     #[test]
@@ -844,6 +963,53 @@ mod tests {
         // the function-key rows above F12, which the same terminals send
         assert_eq!(encode_residue_bytes(b"\x1b[28~"), vec!["<F13>"]);
         assert_eq!(encode_residue_bytes(b"\x1b[34~"), vec!["<F17>"]);
+    }
+
+    /// The kitty protocol's other spelling of a functional key: a
+    /// private-use codepoint in a `CSI u`, which crossterm names through
+    /// `translate_functional_key_code` and which this table has to name
+    /// the same way or a real keypress arrives as a glyph nobody has a key
+    /// for.
+    #[test]
+    fn residue_kitty_functional_codepoints_are_the_keys_crossterm_names() {
+        // the empty rows are the keys nvim has no notation for, which
+        // crossterm's own events also end as nothing
+        let named: [(u32, &[&str]); 15] = [
+            (57358, &[]),        // CapsLock
+            (57363, &[]),        // Menu
+            (57376, &["<F13>"]), // the row `CSI 28 ~` also spells
+            (57398, &["<F35>"]), // the last one nvim can name
+            (57399, &["0"]),     // the keypad digits, as the digits
+            (57408, &["9"]),     // they type
+            (57411, &["*"]),
+            (57414, &["<CR>"]),   // keypad Enter
+            (57417, &["<Left>"]), // the keypad's own arrows
+            (57422, &["<PageDown>"]),
+            (57426, &["<Del>"]),
+            (57427, &[]), // KeypadBegin
+            (57430, &[]), // a media key
+            (57441, &[]), // a bare modifier key
+            (57454, &[]), // the last codepoint in the block
+        ];
+        for (code, expected) in named {
+            assert_eq!(
+                encode_residue_bytes(format!("\x1b[{code}u").as_bytes()),
+                expected.to_vec(),
+                "CSI {code} u"
+            );
+        }
+        // a modifier rides one exactly as it rides any other key
+        assert_eq!(encode_residue_bytes(b"\x1b[57376;5u"), vec!["<C-F13>"]);
+        // and nothing in the block reaches the buffer as its glyph
+        for code in FUNCTIONAL_FIRST..=FUNCTIONAL_LAST {
+            let glyph = char::from_u32(code).map(|typed| typed.to_string());
+            assert!(
+                !encode_residue_bytes(format!("\x1b[{code}u").as_bytes())
+                    .iter()
+                    .any(|notation| Some(notation) == glyph.as_ref()),
+                "CSI {code} u types the private-use glyph nobody pressed"
+            );
+        }
     }
 
     #[test]
@@ -936,6 +1102,14 @@ mod tests {
             );
             assert_eq!(encode_residue_bytes(run), vec!["o", "k"]);
         }
+        // half a multi-byte character is a tail too: its second byte is in
+        // the read that has not happened yet, and dropped now it would
+        // reach that read as bytes no character encodes to
+        let split = &"ok\u{e9}".as_bytes()[..3];
+        assert_eq!(decode_residue(split).unfinished, 1);
+        assert_eq!(encode_residue_bytes(split), vec!["o", "k"]);
+        // including behind an `ESC`, where the whole chord is the tail
+        assert_eq!(decode_residue(&"\x1b\u{e9}".as_bytes()[..2]).unfinished, 2);
         // a bare `ESC` is the Escape key, never a tail to wait on
         assert_eq!(decode_residue(b"ok\x1b").unfinished, 0);
     }

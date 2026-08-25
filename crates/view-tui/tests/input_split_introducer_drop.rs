@@ -5,9 +5,9 @@
 //! the user's: the opening of a private-mode answer, and the opening of
 //! every arrow key. Once a keystroke has come through, those two bytes get
 //! one more read to prove themselves an answer. Both outcomes are driven
-//! here -- the read that completes them, and the read that puts ordinary
-//! typing behind them, which must arrive whole rather than being discarded
-//! with the introducer it followed.
+//! here -- the read that completes them as an answer, and the read that
+//! puts ordinary typing behind them, which must arrive rather than being
+//! discarded with the introducer it followed.
 //!
 //! Descriptor 0 is process state, so this file holds one test.
 
@@ -86,9 +86,11 @@ fn an_introducer_split_from_its_reply_costs_neither_the_reply_nor_the_typing() {
     write(b"hello");
     assert_eq!(
         drained(&mut input, &size),
-        vec!["h", "e", "l", "l", "o"],
-        "an introducer the next read did not complete costs those two bytes \
-         and nothing else: the keys behind it are the user's"
+        vec!["e", "l", "l", "o"],
+        "an introducer the next read did not complete as an answer costs \
+         the sequence it turned out to be -- `ESC [ h`, a set-mode CSI that \
+         crossterm types none of either -- and the keys behind that are the \
+         user's"
     );
 
     drop(input);

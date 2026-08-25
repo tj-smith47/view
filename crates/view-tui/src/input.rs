@@ -467,7 +467,9 @@ impl InputSource {
             // has to own the terminal from this handle's first byte
             source.sweep_late_replies();
         }
-        let _ = crossterm::event::poll(Duration::ZERO);
+        if crossterm_may_read(source.guard.is_some(), false) {
+            let _ = crossterm::event::poll(Duration::ZERO);
+        }
         Ok(source)
     }
 
@@ -530,12 +532,20 @@ impl InputSource {
         guard.buf.drain(..replies.consumed);
         guard.buf.splice(..0, held);
         self.guard_msgs.extend(typed.msgs);
-        // a fence ends the filtering outright: it is answered last, so
-        // nothing the probe asked for can still be behind it, whatever else
-        // has happened on the fd since
+        // a fence ends what the guard is *listening* for: it is answered
+        // last, so nothing the probe asked for can still be behind it,
+        // whatever else has happened on the fd since
         if replies.da1 {
-            if !crate::tiers::is_terminal_only_remainder(&guard.buf) {
-                self.queue_residue(&guard.buf);
+            // a keypress still arriving behind the fence is the same shape
+            // the settle cut leaves, one read later: handed over now it
+            // would be decoded down to its `ESC [` and its own last byte
+            // would reach the next read alone, typing an arrow's `A` into
+            // the buffer as a literal key. So the guard stays for the tail
+            // alone, owed no fence, and the rule below hands the fd back
+            // the moment that tail resolves -- to an answer or to the key
+            if !guard.buf.is_empty() && !crate::tiers::is_terminal_only_remainder(&guard.buf) {
+                guard.fence_owed = false;
+                self.guard = Some(guard);
             }
             return;
         }
@@ -665,6 +675,9 @@ impl InputSource {
         if !self.guard_msgs.is_empty() {
             return true;
         }
+        if !crossterm_may_read(self.guard.is_some(), false) {
+            return false;
+        }
         for _ in 0..BUFFERED_POLL_LIMIT {
             match crossterm::event::poll(Duration::ZERO) {
                 Ok(true) => return true,
@@ -690,10 +703,16 @@ impl InputSource {
     /// engine-side channel keeps the session itself alive.
     pub fn drain(&mut self, size: &TermSizeCell, mut sink: impl FnMut(Msg)) -> DrainOutcome {
         let mut scratch = [0_u8; 64];
-        while matches!(rustix::io::read(&self.winch_read, &mut scratch), Ok(n) if n > 0) {}
+        let mut resized = false;
+        while matches!(rustix::io::read(&self.winch_read, &mut scratch), Ok(n) if n > 0) {
+            resized = true;
+        }
         self.sweep_late_replies();
         for msg in self.guard_msgs.drain(..) {
             sink(msg);
+        }
+        if !crossterm_may_read(self.guard.is_some(), resized) {
+            return DrainOutcome::Drained;
         }
         loop {
             match crossterm::event::poll(Duration::ZERO) {
@@ -719,6 +738,25 @@ impl InputSource {
     }
 }
 
+/// Whether crossterm may touch the terminal on this pass.
+///
+/// A crossterm poll is a read. While the late-reply guard is armed the fd
+/// is the guard's alone: a reply landing between the sweep's last empty
+/// read and a poll here reaches exactly the parser the guard exists to keep
+/// it away from, and that parser answers a private-mode reply it does not
+/// recognize by waiting forever for a final byte that already went past.
+/// The loop still wakes on the terminal fd itself
+/// (`view/src/wake.rs` polls [`InputSource::tty_fd`]), so nothing is missed
+/// by not asking crossterm -- the next sweep reads the same bytes.
+///
+/// A resize is the exception, and the only one: it does not come off this
+/// fd at all, and a frame painted at a shape the terminal has left outlives
+/// the guard's own window by the whole rest of the session.
+#[cfg(unix)]
+const fn crossterm_may_read(guard_armed: bool, resized: bool) -> bool {
+    !guard_armed || resized
+}
+
 /// Translates one crossterm event into the core [`Msg`] the runtime loop
 /// dispatches, or `None` for events with no nvim equivalent. Shared by the
 /// unix drain above and the non-unix input thread, so the two platforms
@@ -741,5 +779,60 @@ pub(crate) fn event_to_msg(event: Event, size: &TermSizeCell) -> Option<Msg> {
         Event::Paste(text) => Some(Msg::Paste(text)),
         Event::Mouse(m) => Some(Msg::Mouse(encode_mouse(&m))),
         _ => None,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn the_guard_owns_the_terminal_and_a_resize_is_the_only_thing_that_reads_past_it() {
+        assert!(
+            crossterm_may_read(false, false),
+            "an unarmed session is crossterm's own"
+        );
+        assert!(
+            !crossterm_may_read(true, false),
+            "while the guard is armed a poll is a read of the fd it owns"
+        );
+        assert!(
+            crossterm_may_read(true, true),
+            "a resize does not come off that fd, and a stale shape outlives \
+             the guard's whole window"
+        );
+    }
+
+    /// Every `poll` in this file is behind that rule, which is the half a
+    /// truth table cannot state: the rule holding while a call site walks
+    /// out from under it is exactly the regression.
+    #[test]
+    fn no_crossterm_poll_in_this_file_stands_outside_that_rule() {
+        let source = include_str!("input.rs");
+        let needle = concat!("crossterm::event::", "poll(");
+        let gate = concat!("crossterm_may", "_read(");
+        let lines: Vec<&str> = source.lines().collect();
+        let mut sites = 0;
+        for (at, line) in lines.iter().enumerate() {
+            if !line.contains(needle) {
+                continue;
+            }
+            sites += 1;
+            let window = lines[at.saturating_sub(8)..at].join("\n");
+            assert!(
+                window.contains(gate),
+                "the poll at line {} is not gated on the guard: a read here \
+                 takes the byte the guard is waiting for and hands it to the \
+                 parser that wedges on it",
+                at + 1
+            );
+        }
+        assert_eq!(
+            sites, 3,
+            "this file polls crossterm {sites} times, not the three the walk \
+             above was written against; a new one is a new place the guard \
+             can be walked past"
+        );
     }
 }

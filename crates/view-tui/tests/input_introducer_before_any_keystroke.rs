@@ -4,7 +4,7 @@
 //! The guard's grace is not something a keystroke switches on: an
 //! introducer is equally an answer's and an arrow key's from the moment the
 //! guard arms, and the burst behind one that turns out to be neither must
-//! still arrive. Two bytes are the whole cost.
+//! still arrive. The sequence it completes is the whole cost.
 //!
 //! Descriptor 0 is process state, so this file holds one test.
 //!
@@ -24,7 +24,7 @@ use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
 
 #[test]
-fn an_introducer_ahead_of_the_first_keystroke_costs_only_its_two_bytes() {
+fn an_introducer_ahead_of_the_first_keystroke_costs_only_what_completes_it() {
     use std::os::fd::AsFd;
 
     // this test's failure mode is a block, not a wrong answer
@@ -59,8 +59,10 @@ fn an_introducer_ahead_of_the_first_keystroke_costs_only_its_two_bytes() {
     write(b"hello");
     assert_eq!(
         drained(&mut input),
-        vec!["h", "e", "l", "l", "o"],
-        "the burst behind an introducer that became nothing is the user's"
+        vec!["e", "l", "l", "o"],
+        "the burst behind an introducer is the user's, all but the byte \
+         that finished the sequence the introducer opened -- which is where \
+         crossterm's own parser stops reading it too"
     );
 
     drop(input);
