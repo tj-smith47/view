@@ -99,7 +99,17 @@ cleanup() {
     fi
     exit "$code"
 }
-trap cleanup EXIT INT TERM
+# The signals are named one at a time rather than shared with the EXIT trap,
+# and each names the status a shell killed by it reports (128 + signal).
+# `trap cleanup EXIT INT TERM` reads as though it covered them, and it does
+# run the cleanup -- but the handler enters with `$?` from whatever the leg
+# was doing, so the `exit "$code"` at its end reported 0 and an interrupted
+# run read as a passing one in the log. HUP was not on the list at all,
+# which is the signal an ssh session dropping under a running leg delivers.
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
 under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }

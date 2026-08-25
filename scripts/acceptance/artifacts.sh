@@ -35,8 +35,15 @@
 #
 # `-w $$` rather than a trap: the assertion is released when this shell is
 # gone, however it went, including the kill an aborted run takes.
-if [ "$(uname -s)" = Darwin ] && command -v caffeinate >/dev/null 2>&1; then
-    caffeinate -dims -w $$ &
+if [ "$(uname -s)" = Darwin ]; then
+    if command -v caffeinate >/dev/null 2>&1; then
+        caffeinate -dims -w $$ &
+    else
+        # announced rather than skipped quietly: without the assertion every
+        # threshold below is measured against a clock that stops, and a leg
+        # that fails for that reads exactly like one that failed for the code
+        printf 'WARNING: no caffeinate on this Darwin host, so nothing holds it awake -- a maintenance sleep will read as a stalled threshold\n' >&2
+    fi
 fi
 
 # A fractional-seconds clock every leg's wait loops time out against.
