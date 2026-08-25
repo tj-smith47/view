@@ -745,6 +745,38 @@ fn main() -> Result<()> {
     // on the first grid Flush
     model.content_painted = false;
 
+    // ahead of the trust, config and theme reads below rather than after
+    // them: `nvim --embed` runs no startup at all -- no `init.lua`, no file
+    // opened -- until a UI attaches, so every read this thread performs
+    // before the attach thread reaches `ui_attach` is prepended whole to
+    // when the opened buffer reaches the screen. Spawning here costs the
+    // shell frame one thread creation and hands the child that entire
+    // prefix.
+    let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
+    let term_size = view_tui::terminal::TermSizeCell::default();
+    #[cfg(unix)]
+    let msg_tx = wake::LoopSender::with_waker(
+        raw_tx,
+        wake::LoopWaker::new().context("failed to create the runtime loop's wake pipe")?,
+    );
+    #[cfg(not(unix))]
+    let msg_tx = {
+        view_tui::terminal::spawn_input_thread(raw_tx.clone(), term_size.clone());
+        wake::LoopSender::new(raw_tx)
+    };
+    // the residue reaches the attach through this channel rather than as a
+    // value: it is not known yet at the point the thread starts (the
+    // probe's second window is still open), and the thread only needs it at
+    // its very last step, after `ui_attach` has returned.
+    //
+    // What that costs a terminal which never answers the fence at all: the
+    // attach's last step blocks on the residue, so editable content lands at
+    // `max(PROBE_HARD_CAP, attach)` rather than at the attach alone -- the
+    // full cap, on a host where the attach is an order of magnitude shorter
+    // than it. First paint is unaffected either way; it happens below.
+    let (residue_tx, residue_rx) = mpsc::sync_channel(1);
+    let engine_rx = startup::attach_in_background(cfg, width, height, residue_rx, msg_tx.clone());
+
     // resolved before the engine exists because the theme cache is keyed on
     // it, so cold start can already paint last session's colors before nvim
     // answers `ui_attach` with its own `default_colors_set`. The `[native]`
@@ -820,41 +852,17 @@ fn main() -> Result<()> {
         }
     }
 
-    // painted before the engine even spawns, themed from the cache just
-    // seeded above, so a slow-starting nvim can never delay the terminal's
-    // first visible content
+    // themed from the cache just seeded above, and painted on this thread
+    // while the engine spawned above is still coming up, so a slow-starting
+    // nvim can never delay the terminal's first visible content
     startup::paint_shell_frame(&mut term, &model, process_start)
         .context("failed to paint the startup shell frame")?;
 
-    let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
-    let term_size = view_tui::terminal::TermSizeCell::default();
-    #[cfg(unix)]
-    let msg_tx = wake::LoopSender::with_waker(
-        raw_tx,
-        wake::LoopWaker::new().context("failed to create the runtime loop's wake pipe")?,
-    );
-    #[cfg(not(unix))]
-    let msg_tx = {
-        view_tui::terminal::spawn_input_thread(raw_tx.clone(), term_size.clone());
-        wake::LoopSender::new(raw_tx)
-    };
-
-    // the engine spawn goes first and the capability probe's second window
-    // is waited out behind it, not in front: the attach thread's own work
-    // (fork/exec nvim, register, `ui_attach`) is what the wait overlaps, so
-    // a terminal that answers a network round trip late costs this startup
-    // nothing it was not already spending. The residue reaches the attach
-    // through this channel for the same reason -- it is not known yet at
-    // the point the thread starts, and the thread only needs it at its very
-    // last step, after `ui_attach` has returned.
-    //
-    // What that costs a terminal which never answers the fence at all: the
-    // attach's last step blocks on the residue, so editable content lands at
-    // `max(PROBE_HARD_CAP, attach)` rather than at the attach alone -- the
-    // full cap, on a host where the attach is an order of magnitude shorter
-    // than it. First paint is unaffected either way; it happened above.
-    let (residue_tx, residue_rx) = mpsc::sync_channel(1);
-    let engine_rx = startup::attach_in_background(cfg, width, height, residue_rx, msg_tx.clone());
+    // the capability probe's second window is waited out behind the engine
+    // spawn, not in front: the attach thread's own work (fork/exec nvim,
+    // register, `ui_attach`) is what the wait overlaps, so a terminal that
+    // answers a network round trip late costs this startup nothing it was
+    // not already spending
     let probe = term
         .finish_probe()
         .context("failed to finish terminal capability detection")?;
@@ -1092,6 +1100,38 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use std::ffi::OsString;
+
+    /// `nvim --embed` sources nothing and opens nothing until a UI
+    /// attaches, so every read `main` performs before the attach thread is
+    /// started is prepended whole to the engine's own startup and lands in
+    /// `first_paint`'s marker. Measured on dev-linux at 200 spawns: moving
+    /// the spawn ahead of the trust, config and theme reads took the fork
+    /// from 1.79ms to 1.43ms after process start (p50) and the opened
+    /// buffer's own paint from 15.20ms to 14.80ms, for +0.03ms on the shell
+    /// frame. Nothing but a source-order check can hold that: the reads
+    /// still have to happen before the shell frame is rendered, so a
+    /// reviewer moving one back above the spawn breaks no other test.
+    #[test]
+    fn the_engine_spawn_precedes_every_startup_read_that_only_this_process_needs() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(body, _)| body);
+        let spawn = body
+            .find("startup::attach_in_background(")
+            .expect("main must start the engine attach");
+        for later in [
+            "view_ai::TrustStore::load()",
+            "theme_cache::load(path)",
+            "startup::paint_shell_frame(",
+        ] {
+            let at = body.find(later).expect("startup read still performed");
+            assert!(
+                spawn < at,
+                "{later} runs before the engine spawn, so nvim's whole startup waits on it"
+            );
+        }
+    }
 
     // The ordering rule lives only in `passthrough`'s own field doc, which
     // nothing renders to a user typing `--help`; a rule a user cannot see
