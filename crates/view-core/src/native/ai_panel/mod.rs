@@ -102,6 +102,30 @@ pub struct AiPanelState {
     /// which are the only writers there are, since the text itself is
     /// private.
     breaks: Vec<usize>,
+    /// The first and last byte offsets in [`Self::input`] holding a
+    /// character that is not ASCII, or `None` while every character is.
+    ///
+    /// [`wrap_window`]'s grid steps a row at a time in bytes, and a row is
+    /// `width` bytes only where a cell is one byte. One accented character
+    /// ahead of the window's opening therefore slides that opening off the
+    /// row boundary it is defined to land on, and the composer paints rows
+    /// the whole input's wrap never had -- text that visibly re-flows as
+    /// the next character is typed and changes shape again once the prompt
+    /// is sent, since the transcript wraps the whole prompt. The two
+    /// offsets are what lets the grid be used only over a stretch it is
+    /// exact for.
+    ///
+    /// Both ends rather than a flag, because either end alone leaves a
+    /// whole shape on the slow path for nothing: a long single-line paste
+    /// carrying one emoji near its end is exact over everything before it,
+    /// and a long prompt whose only accented character is in its first line
+    /// is exact over every line after it.
+    ///
+    /// Maintained by the same three methods [`Self::breaks`] is, and
+    /// deliberately only in the safe direction: a backspace over the very
+    /// character an offset names leaves that offset where it was, which
+    /// widens the stretch the grid is refused on and never narrows it.
+    non_ascii: Option<(usize, usize)>,
     /// A single slot by design, not a queue: ACP blocks the agent's own
     /// turn on the reply, so a conformant agent never has two outstanding
     /// at once, and a second arriving request is a protocol violation
@@ -250,6 +274,7 @@ impl AiPanelState {
             transcript: Transcript::new(),
             input: String::new(),
             breaks: Vec::new(),
+            non_ascii: None,
             pending_permission: None,
             focused: false,
             turn_in_flight: false,
@@ -274,6 +299,14 @@ impl AiPanelState {
         let base = self.input.len();
         self.breaks
             .extend(text.match_indices(['\n', '\r']).map(|(at, _)| base + at));
+        if !text.is_ascii() {
+            let first = text.char_indices().find(|(_, ch)| !ch.is_ascii());
+            let last = text.char_indices().rev().find(|(_, ch)| !ch.is_ascii());
+            if let (Some((first, _)), Some((last, _))) = (first, last) {
+                let seen = self.non_ascii.get_or_insert((base + first, base + last));
+                seen.1 = base + last;
+            }
+        }
         self.input.push_str(text);
     }
 
@@ -282,7 +315,10 @@ impl AiPanelState {
     ///
     /// The removed character is the composer's last, so the break it may
     /// have been is the last one recorded: nothing is re-derived and
-    /// nothing is scanned.
+    /// nothing is scanned. [`Self::non_ascii`] is deliberately left alone
+    /// for the same reason -- re-deriving either end of it is the scan this
+    /// avoids, and an offset that outlives its character only widens the
+    /// stretch [`wrap_window`]'s grid is refused on.
     pub fn pop_input(&mut self) -> bool {
         let Some(ch) = self.input.pop() else {
             return false;
@@ -297,6 +333,7 @@ impl AiPanelState {
     /// submitting one does.
     pub fn take_input(&mut self) -> String {
         self.breaks.clear();
+        self.non_ascii = None;
         std::mem::take(&mut self.input)
     }
 
@@ -451,7 +488,7 @@ impl AiPanelState {
         };
         let width = width.max(1);
         wrap(
-            wrap_window(&self.input, width, cap, &self.breaks),
+            wrap_window(&self.input, width, cap, &self.breaks, self.non_ascii),
             width,
             cap,
             Break::Cell,
@@ -778,16 +815,29 @@ fn char_cells(ch: char) -> usize {
 /// trusted, so a break list that has drifted from the input costs alignment
 /// and never correctness. The window never opens later than the span above
 /// allows, so it always holds more rows than the panel paints.
-fn wrap_window<'a>(input: &'a str, width: usize, keep: usize, breaks: &[usize]) -> &'a str {
+fn wrap_window<'a>(
+    input: &'a str,
+    width: usize,
+    keep: usize,
+    breaks: &[usize],
+    non_ascii: Option<(usize, usize)>,
+) -> &'a str {
     let span = keep
         .saturating_add(1)
         .saturating_mul(width)
         .saturating_mul(BYTES_PER_CELL);
     let floor = input.len().saturating_sub(span);
+    let bytes = input.as_bytes();
     let phase = breaks[..breaks.partition_point(|&at| at <= floor)]
         .last()
-        .filter(|&&at| matches!(input.as_bytes().get(at), Some(b'\n' | b'\r')))
-        .map_or(0, |&at| at + 1);
+        .filter(|&&at| matches!(bytes.get(at), Some(b'\n' | b'\r')))
+        .map_or(0, |&at| {
+            // `\r\n` is one break and the row after it opens past both of
+            // its bytes: an opening on the `\n` is read as a second break
+            // and paints an empty row the input never had
+            let crlf = bytes.get(at) == Some(&b'\r') && bytes.get(at + 1) == Some(&b'\n');
+            at + 1 + usize::from(crlf)
+        });
     // saturating because a break landing exactly on `floor` opens the next
     // line one byte past it, which is a whole row nearer the end and never
     // fewer rows than the panel paints
@@ -796,6 +846,17 @@ fn wrap_window<'a>(input: &'a str, width: usize, keep: usize, breaks: &[usize]) 
     // panic the slice, and the row spare above is what pays for the shift
     while !input.is_char_boundary(start) {
         start += 1;
+    }
+    // The grid above counts a row as `width` bytes, which is `width` cells
+    // only while every character it steps over is ASCII. One that is not
+    // slides the opening off the row boundary it is defined to land on, and
+    // the composer then paints rows the whole input's wrap never had. The
+    // line's own start is the nearest opening that is provably a boundary
+    // whatever the text holds, so a stretch the grid is not exact for is
+    // wrapped from there instead -- the whole line, at the cost of walking
+    // it, which is bounded by that line and not by the whole composer.
+    if non_ascii.is_some_and(|(first, last)| first < start && last >= phase) {
+        return &input[phase..];
     }
     &input[start..]
 }
@@ -1447,7 +1508,7 @@ mod tests {
                 wrap(&input, width, cap, Break::Cell),
                 "{name}: the rows are the whole input's own, column for column"
             );
-            let window = wrap_window(&input, width, cap, &state.breaks);
+            let window = wrap_window(&input, width, cap, &state.breaks, state.non_ascii);
             assert!(
                 window.len() <= (cap + 2) * width * BYTES_PER_CELL,
                 "{name}: the walk is bounded by the rows the panel has, not \
@@ -1531,7 +1592,7 @@ mod tests {
             "the rows are still the whole text's own"
         );
         assert!(
-            wrap_window(&letters, width, cap, &state.breaks).len()
+            wrap_window(&letters, width, cap, &state.breaks, state.non_ascii).len()
                 <= (cap + 2) * width * BYTES_PER_CELL,
             "and the walk is still bounded"
         );
@@ -2177,5 +2238,134 @@ mod tests {
             painted, prompt,
             "every character the user sent is on screen"
         );
+    }
+
+    /// The reported leftover: the same huge paste wrapped in two different
+    /// columns depending on what had been typed into the composer before
+    /// it, so a prompt re-flowed as it was composed and changed shape again
+    /// in the transcript once it was sent. The composer's rows are the tail
+    /// of the whole input's own wrap or they are wrong, and here the input
+    /// carries a character costing more bytes than cells -- which is what put the
+    /// window's byte grid off the row boundary it opens on.
+    #[test]
+    fn a_paste_after_a_typed_break_wraps_where_the_same_paste_alone_does() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let paste: String = std::iter::once('\u{754c}')
+            .chain((0..(1 << 14)).map(|i: usize| char::from(b'a' + (i % 26) as u8)))
+            .collect();
+
+        let mut alone = AiPanelState::new();
+        alone.push_input(&paste);
+
+        let mut after_break = AiPanelState::new();
+        after_break.push_input("first");
+        after_break.push_input("\n");
+        after_break.push_input(&paste);
+
+        let rows_alone = alone.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+        assert_eq!(
+            rows_alone,
+            wrap(&paste, width, cap, Break::Cell),
+            "the paste alone wraps as its own text does"
+        );
+        assert_eq!(
+            after_break.view(TEN_ROW_PANEL, WIDE_PANEL).input,
+            wrap(&format!("first\n{paste}"), width, cap, Break::Cell),
+            "and the same paste under a typed break wraps as that whole \
+             input does, in the same columns"
+        );
+        assert_eq!(
+            rows_alone.last(),
+            after_break.view(TEN_ROW_PANEL, WIDE_PANEL).input.last(),
+            "which is the same last row either way"
+        );
+    }
+
+    /// The window against the whole input's wrap over every shape a
+    /// composer is handed: widths and heights across the panel sizes a
+    /// frame is drawn at, and text mixing ASCII, accented Latin, a wide
+    /// glyph and all three line endings, at lengths straddling the window's
+    /// own span.
+    ///
+    /// A walk rather than the four named shapes above it: the opening this
+    /// pins is a function of where the last break, the window's span and
+    /// the first character wider than a byte fall relative to one another,
+    /// and every combination of those three is a shape somebody pastes. The
+    /// seed is fixed, so a failure is reproducible and a passing run is the
+    /// same four thousand shapes every time.
+    #[test]
+    fn the_window_opens_on_a_row_boundary_whatever_the_composer_holds() {
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let alphabet: Vec<char> = "ab \n\r\u{e9}\u{754c}c".chars().collect();
+        for _ in 0..4_000 {
+            let panel_w = 12 + (next() % 90) as usize;
+            let panel_h = 4 + (next() % 30) as usize;
+            let width = composer_width(panel_w).max(1);
+            let cap = if composer_width(panel_w) == 0 {
+                1
+            } else {
+                AiPanelState::new().composer_cap(panel_h)
+            };
+            let target = (cap + 1) * width * BYTES_PER_CELL + (next() % 200) as usize;
+            let mut input = String::new();
+            while input.len() < target {
+                let r = next();
+                if r % 20 == 0 {
+                    input.push(alphabet[(r >> 8) as usize % alphabet.len()]);
+                } else {
+                    input.push(char::from(b'a' + ((r >> 8) % 26) as u8));
+                }
+            }
+            let mut state = AiPanelState::new();
+            state.push_input(&input);
+
+            assert_eq!(
+                state.composer_rows(panel_h, panel_w),
+                wrap(&input, width, cap, Break::Cell),
+                "panel {panel_w}x{panel_h}: the rows are the whole input's \
+                 own, column for column, over {} bytes",
+                input.len()
+            );
+        }
+    }
+
+    /// The bound the window exists for, on the text it is exact over: a
+    /// composer holding only ASCII walks the rows the panel can paint and
+    /// not the megabyte behind them, whether or not a line break sits in
+    /// front of the opening.
+    #[test]
+    fn an_ascii_composer_walks_the_panels_rows_and_not_the_whole_paste() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let letters: String = (0..(1 << 20))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+
+        for (name, input) in [
+            ("no break at all", letters.clone()),
+            ("a typed break in front of it", format!("first\n{letters}")),
+            (
+                "a pasted CRLF in front of it",
+                format!("first\r\n{letters}"),
+            ),
+        ] {
+            let mut state = AiPanelState::new();
+            state.push_input(&input);
+
+            let window = wrap_window(&input, width, cap, &state.breaks, state.non_ascii);
+
+            assert!(
+                window.len() <= (cap + 2) * width * BYTES_PER_CELL,
+                "{name}: {} bytes walked for {cap} rows",
+                window.len()
+            );
+        }
     }
 }
