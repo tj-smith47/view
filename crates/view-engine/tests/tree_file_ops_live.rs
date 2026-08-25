@@ -24,9 +24,11 @@
 //! without the real-key path this file exists to prove.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use view_core::model::Model;
 use view_core::msg::{DeleteConfirmOutcome, Effect, Key, Msg, RpcCall};
@@ -121,7 +123,7 @@ fn pressing_a_creates_a_file_through_the_real_prompt_and_rescans() {
     }
     engine.handle.input("<CR>").unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let (reply_gen, name) = wait_for(&rx, deadline, |msg| match msg {
         Msg::TreeCreatePromptReply { generation, name } => Some((*generation, name.clone())),
         _ => None,
@@ -222,7 +224,7 @@ fn pressing_r_renames_a_file_through_the_real_prompt_and_the_real_rename_reply()
     }
     engine.handle.input("<CR>").unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let (reply_gen, reply_old_path, name) = wait_for(&rx, deadline, |msg| match msg {
         Msg::TreeRenamePromptReply {
             generation,
@@ -263,7 +265,7 @@ fn pressing_r_renames_a_file_through_the_real_prompt_and_the_real_rename_reply()
         .rename_file(&rename_old, &rename_new, rename_generation)
         .expect("issue the real rename RPC");
 
-    let rename_deadline = Instant::now() + Duration::from_secs(5);
+    let rename_deadline = Instant::now() + common::rpc_deadline();
     let ok = wait_for(&rx, rename_deadline, |msg| match msg {
         Msg::TreeRenameReply { generation, ok } if *generation == rename_generation => Some(*ok),
         _ => None,
@@ -329,7 +331,7 @@ fn pressing_d_deletes_a_file_through_the_real_confirm_and_rescans() {
     // vim.fn.confirm's first choice ("&Yes") answers to plain "y"
     engine.handle.input("y").unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let (reply_gen, reply_path, outcome) = wait_for(&rx, deadline, |msg| match msg {
         Msg::TreeDeleteConfirmReply {
             generation,
@@ -453,7 +455,7 @@ fn pressing_d_on_a_file_with_a_loaded_modified_buffer_refuses_the_delete_and_rec
         .tree_delete_confirm(&path_str, generation)
         .expect("issue the real delete confirm RPC");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let (reply_gen, reply_path, outcome) = wait_for(&rx, deadline, |msg| match msg {
         Msg::TreeDeleteConfirmReply {
             generation,

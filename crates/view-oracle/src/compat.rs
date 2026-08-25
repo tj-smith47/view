@@ -2128,7 +2128,8 @@ mod tests {
             "expected SendConfirmTimedOut, got {err:?}"
         );
         assert!(
-            elapsed < SEND_CONFIRM_DEADLINE + Duration::from_secs(2),
+            elapsed
+                < SEND_CONFIRM_DEADLINE + view_test_support::host_deadline(Duration::from_secs(2)),
             "confirm loop ran well past its own {SEND_CONFIRM_DEADLINE:?} deadline: {elapsed:?}"
         );
 
@@ -2148,7 +2149,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stderr.len(), FIXTURE_PAYLOAD_LEN);
         assert!(
-            elapsed < Duration::from_secs(5),
+            elapsed < view_test_support::host_deadline(Duration::from_secs(5)),
             "took {elapsed:?}, which suggests the child blocked on an \
              undrained pipe rather than exiting promptly once its output \
              was consumed"

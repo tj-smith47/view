@@ -59,14 +59,16 @@ fn response_is_not_starved_by_unbounded_notification_flood() {
     let result = h.request("test", vec![]);
     let elapsed = start.elapsed();
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < view_test_support::host_deadline(Duration::from_secs(2)),
         "request() took {elapsed:?}, should be under 2s"
     );
     assert_eq!(result.unwrap(), Value::from(1));
     // Only now is the channel drained, proving all 10,000 notifications
     // were fully buffered while unread.
     let mut count = 0usize;
-    while let Ok(note) = n.recv_timeout(Duration::from_millis(500)) {
+    while let Ok(note) =
+        n.recv_timeout(view_test_support::host_deadline(Duration::from_millis(500)))
+    {
         assert_eq!(note.method, "redraw");
         count += 1;
         if count == 10_000 {

@@ -12,6 +12,8 @@
 //! [`EngineHandle::release_hidden`]: view_engine::handle::EngineHandle::release_hidden
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -55,7 +57,7 @@ fn scratch_root(nonce_suffix: &str) -> std::path::PathBuf {
 /// Waits up to 5s for the next `Msg::HiddenBufferLoaded`, skipping the
 /// redraw traffic the UI attach produces.
 fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>, bool, u64) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
@@ -78,7 +80,7 @@ fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>, boo
 /// Waits up to 5s for the next `Msg::PickerBufferList`, skipping the redraw
 /// traffic the UI attach produces.
 fn next_picker_buffer_list(rx: &mpsc::Receiver<Msg>) -> Vec<String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
@@ -145,7 +147,7 @@ fn buf_option(engine: &Engine, buf: u64, name: &str) -> rmpv::Value {
 /// redraw traffic the UI attach produces -- the same helper
 /// `buf_attach_live.rs` uses.
 fn next_buf_text_changed(rx: &mpsc::Receiver<Msg>) -> Msg {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(

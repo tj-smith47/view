@@ -1,7 +1,9 @@
 //! Fixtures shared across every crate whose tests need them: `ScratchDir`,
 //! a panic-safe temp directory; `settle_mtime`, the sleep a second write
-//! needs to land on an mtime the first one is distinguishable from; and
-//! `CountingAllocator`, for an allocation-count budget.
+//! needs to land on an mtime the first one is distinguishable from;
+//! `CountingAllocator`, for an allocation-count budget; and [`HostBudget`],
+//! the wall clock a test may give a live process without gating on what
+//! else the host is doing.
 //!
 //! Before this crate existed, `view-native::config`, `view::native`, and
 //! the `cli_live`/`supersede_live` integration tests each hand-rolled the
@@ -26,6 +28,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// A directory under the OS temp root, owned for the fixture's lifetime and
 /// removed on every exit path via [`Drop`] -- including a panicking
@@ -171,6 +174,166 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 }
 
+/// The most [`HostBudget`] will widen a host's share by.
+///
+/// A bound that scales without limit stops being a bound: past this much
+/// contention the run is measuring the neighbours, and the honest outcome
+/// is a failure that says so rather than a pass that could not have gone
+/// any other way.
+pub const MAX_LOAD_FACTOR: f64 = 3.0;
+
+/// The wall clock a test gives a live process, split into the part the
+/// code's own constants own and the part the host owns.
+///
+/// A gated test that spawns nvim, drives a pty or waits on an RPC round
+/// trip is timing two different things at once. One is the property under
+/// test -- a probe deadline, a handshake bound, a settle sleep -- and it
+/// costs the same on every machine. The other is a process spawn, a
+/// scheduler and a page cache, and it costs whatever the host has left
+/// over. A single hand-picked wall clock covering both fails on a loaded
+/// host without saying anything about the code, which is a defect in the
+/// gate rather than a finding about the code; splitting them lets the
+/// host's half scale with the contention the run actually started under
+/// while the code's half stays exactly where it was.
+///
+/// An idle host and a host that publishes no load average both keep the
+/// unscaled bound, so this only ever widens, never narrows, what a bound
+/// asserted before it was derived this way.
+pub struct HostBudget {
+    fixed: Duration,
+    host_share: Duration,
+    load: Option<f64>,
+    factor: f64,
+}
+
+impl HostBudget {
+    /// A budget whose constants cost `fixed` and whose host work is allowed
+    /// `host_share` before scaling.
+    #[must_use]
+    pub fn new(fixed: Duration, host_share: Duration) -> Self {
+        let load = host_load();
+        Self {
+            fixed,
+            host_share,
+            load,
+            factor: load.map_or(1.0, load_factor),
+        }
+    }
+
+    /// A budget that is all host work: a bound on an operation whose whole
+    /// cost is the host answering, such as one live RPC round trip.
+    #[must_use]
+    pub fn host_only(host_share: Duration) -> Self {
+        Self::new(Duration::ZERO, host_share)
+    }
+
+    /// The whole bound: the fixed part plus the host's scaled share.
+    #[must_use]
+    pub fn total(&self) -> Duration {
+        self.fixed + self.host_share.mul_f64(self.factor)
+    }
+
+    /// What the sequence's own constants cost.
+    #[must_use]
+    pub fn fixed(&self) -> Duration {
+        self.fixed
+    }
+
+    /// What the host is allowed, after scaling.
+    #[must_use]
+    pub fn allowance(&self) -> Duration {
+        self.host_share.mul_f64(self.factor)
+    }
+
+    /// The 1-minute load average this budget was built under, or `None` on
+    /// a host that publishes none.
+    #[must_use]
+    pub fn load(&self) -> Option<f64> {
+        self.load
+    }
+}
+
+impl std::fmt::Display for HostBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?} = {:?} of the code's own constants + {:?} for the host",
+            self.total(),
+            self.fixed,
+            self.allowance()
+        )?;
+        match self.load {
+            Some(load) => write!(
+                f,
+                " ({:?} x{:.2} at 1-min load {load:.2} over {} cpu(s))",
+                self.host_share,
+                self.factor,
+                cpus()
+            ),
+            None => write!(
+                f,
+                " (this host publishes no load average, so the host's share \
+                 keeps its unscaled {:?})",
+                self.host_share
+            ),
+        }
+    }
+}
+
+/// `base` widened for the load this host started the call under: the
+/// one-liner for a bound with no fixed part of its own.
+#[must_use]
+pub fn host_deadline(base: Duration) -> Duration {
+    HostBudget::host_only(base).total()
+}
+
+/// What a 1-minute load average of `load` multiplies the host's share by.
+///
+/// Contention, not raw runnable count: a load of four is idle on a
+/// twelve-core host and a threefold overcommit on one core, and a bound has
+/// to mean the same thing on both. Split out from the reading so the rule
+/// can be asserted without a load to produce it.
+#[must_use]
+pub fn load_factor(load: f64) -> f64 {
+    (1.0 + load / f64::from(cpus())).clamp(1.0, MAX_LOAD_FACTOR)
+}
+
+/// This host's logical cpu count, or one where it cannot be determined --
+/// the conservative reading, since it makes any load look like full
+/// contention rather than none.
+#[must_use]
+pub fn cpus() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX))
+}
+
+/// This host's 1-minute load average, or `None` where it cannot be read.
+#[must_use]
+pub fn host_load() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/loadavg")
+            .ok()?
+            .split_ascii_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `{ 1.23 4.56 7.89 }`
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output()
+            .ok()?;
+        String::from_utf8(out.stdout)
+            .ok()?
+            .split_ascii_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -246,5 +409,83 @@ mod tests {
             "a file occupying the target path must surface as an error, not a panic"
         );
         std::fs::remove_file(&path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn an_idle_host_keeps_the_unscaled_bound() {
+        assert!((load_factor(0.0) - 1.0).abs() < f64::EPSILON);
+        let budget = HostBudget {
+            fixed: Duration::from_millis(550),
+            host_share: Duration::from_millis(2450),
+            load: Some(0.0),
+            factor: 1.0,
+        };
+        assert_eq!(budget.total(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_host_that_publishes_no_load_keeps_the_unscaled_bound() {
+        let budget = HostBudget {
+            fixed: Duration::ZERO,
+            host_share: Duration::from_secs(5),
+            load: None,
+            factor: 1.0,
+        };
+        assert_eq!(budget.total(), Duration::from_secs(5));
+        assert!(
+            format!("{budget}").contains("no load average"),
+            "the rendering must say why the bound did not scale: {budget}"
+        );
+    }
+
+    #[test]
+    fn contention_scales_the_host_share_and_nothing_else() {
+        let full = load_factor(f64::from(cpus()));
+        assert!(
+            (full - 2.0).abs() < 1e-9,
+            "one runnable thread per cpu is one extra host's worth of time, got {full}"
+        );
+        let budget = HostBudget {
+            fixed: Duration::from_millis(550),
+            host_share: Duration::from_millis(2450),
+            load: Some(1.0),
+            factor: 2.0,
+        };
+        assert_eq!(budget.fixed(), Duration::from_millis(550));
+        assert_eq!(budget.allowance(), Duration::from_millis(4900));
+    }
+
+    #[test]
+    fn a_budget_built_from_a_live_reading_never_narrows_what_it_was_given() {
+        let base = Duration::from_secs(5);
+        assert!(
+            host_deadline(base) >= base,
+            "a load-scaled deadline may widen the base, never narrow it"
+        );
+        let budget = HostBudget::new(Duration::from_millis(550), Duration::from_millis(2450));
+        assert_eq!(budget.fixed(), Duration::from_millis(550));
+        assert!(
+            budget.total() >= Duration::from_secs(3),
+            "the whole bound is at least the unscaled sum, got {}",
+            budget
+        );
+        assert!(
+            budget.total()
+                <= Duration::from_millis(550)
+                    + Duration::from_millis(2450).mul_f64(MAX_LOAD_FACTOR),
+            "the whole bound stays under the capped sum, got {budget}"
+        );
+    }
+
+    #[test]
+    fn the_factor_cannot_grow_without_limit() {
+        assert!((load_factor(f64::from(cpus()) * 100.0) - MAX_LOAD_FACTOR).abs() < f64::EPSILON);
+        assert!((load_factor(-5.0) - 1.0).abs() < f64::EPSILON);
     }
 }

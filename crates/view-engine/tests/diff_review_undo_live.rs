@@ -13,6 +13,8 @@
 //! asserts what one `u` leaves in the buffer.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -138,7 +140,7 @@ fn carry_out(engine: &Engine, review: &mut DiffReviewState, effect: &Effect) {
 /// the loop's own `Msg::BufTextChanged` arm does. Waits for at least one,
 /// then drains whatever else has already arrived.
 fn fold_events(rx: &mpsc::Receiver<Msg>, review: &mut DiffReviewState) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let mut folded = 0;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());

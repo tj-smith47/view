@@ -10,6 +10,8 @@
 //! naming a row the user has since deleted throws instead of drawing.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::Duration;
 
@@ -17,9 +19,13 @@ use view_core::msg::{BufferHandle, HunkMark, Msg, ReviewOpenTarget};
 use view_core::native::mappings::review_keys;
 use view_engine::process::{Engine, EngineConfig};
 
-/// How long a notification produced by a fed key is waited for. Generous
-/// because a cold nvim on a loaded box is the slow part.
-const ARRIVAL: Duration = Duration::from_secs(10);
+/// How long a notification produced by a fed key is waited for: two live
+/// round trips (the key reaching nvim, the notification coming back),
+/// widened for the load the run started under, because a cold nvim on a
+/// loaded box is the slow part.
+fn arrival() -> Duration {
+    common::rpc_deadline_for(2)
+}
 
 const LINES: [&str; 7] = ["one", "two", "three", "four", "five", "six", "seven"];
 
@@ -526,7 +532,7 @@ fn pressing_a_review_key_in_the_buffer_invokes_the_verb() {
 
     s.press("\\ha");
 
-    let deadline = std::time::Instant::now() + ARRIVAL;
+    let deadline = std::time::Instant::now() + arrival();
     let mut verb = None;
     while verb.is_none() {
         let left = deadline.saturating_duration_since(std::time::Instant::now());

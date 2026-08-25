@@ -1,7 +1,10 @@
 //! Scaffolding shared by every integration test binary in this crate that
 //! spawns a real `view` process: locating the `view` binary, isolating a
 //! spawned `view` process's `XDG_*_HOME` from the host's real nvim config,
-//! and a scratch-file/isolated-home pair that cleans itself up on drop.
+//! and a scratch-file/isolated-home pair that cleans itself up on drop,
+//! plus the wall-clock budget a timing test holds a startup sequence to
+//! ([`startup_budget`], over the workspace-shared
+//! [`view_test_support::HostBudget`]).
 //!
 //! Compiled separately into each of those binaries, so a helper only one of
 //! them needs reads as dead code in the other: `dead_code` is allowed here
@@ -10,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Locates the `view` binary next to this crate's own target directory,
 /// always invoking `cargo build -p view` first to guarantee it reflects
@@ -34,9 +38,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// view-oracle`, indistinguishable from a real pass/fail until someone
 /// noticed the binary's mtime predated the source. `cargo build` is a
 /// no-op (a fast up-to-date check, not a recompile) when the binary is
-/// already current, so paying for the invocation on every run is cheap
-/// insurance against exactly that class of false result.
+/// already current, so paying for the invocation once is cheap insurance
+/// against exactly that class of false result.
+///
+/// Built once per test process, not once per spawn. The source cannot
+/// change under a running test binary, so every call after the first can
+/// only re-confirm what the first proved -- and the cargo invocation that
+/// re-confirms it takes the workspace build-directory lock, which on a
+/// host running other cargo work blocks for as long as that work holds it.
+/// A spawn helper that pays that inside a caller's timing window measures
+/// the neighbours instead of view.
 pub fn view_bin_path() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT.get_or_init(build_view_bin).clone()
+}
+
+fn build_view_bin() -> PathBuf {
     let profile_dir = if cfg!(debug_assertions) {
         "debug"
     } else {
@@ -182,4 +199,41 @@ impl Drop for ScratchPaths {
         let _ = std::fs::remove_file(&self.scratch);
         let _ = std::fs::remove_dir_all(&self.isolated_home);
     }
+}
+
+/// view-tui's `PROBE_DEADLINE`: how long the capability probe's first
+/// window -- the one that runs before the alternate screen goes up -- waits
+/// for replies that a silent terminal never sends.
+///
+/// Re-declared rather than imported. This crate takes no dependency on
+/// view-tui (see the crate's module doc, and the crossterm/ratatui reach
+/// rows in `scripts/audit-deps.sh` that such an edge would trip), so the
+/// copy is held against the definition by `probe_deadline_matches_view_tui`
+/// in the smoke suite instead of by the type system.
+pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);
+
+/// The wall-clock bound a pty startup sequence gets on a host with nothing
+/// else to do, and the bound this crate asserted before any load reading
+/// existed.
+///
+/// Kept as the anchor rather than replaced: [`startup_budget`] widens only
+/// what the host is being asked to do, so an idle host -- and a host that
+/// publishes no load at all -- still asserts exactly this.
+pub const FLAT_STARTUP_BOUND: Duration = Duration::from_secs(3);
+
+/// The wall clock a pty startup sequence may take, given that the sequence's
+/// own constants sum to `fixed`.
+///
+/// The sequence is what these tests prove -- the probe goes unanswered, the
+/// tier falls back at [`PROBE_DEADLINE`], the engine attaches, a typed
+/// character reaches the buffer -- and only the fixed half of that is a
+/// claim about view. The rest is a process spawn, an nvim start and a file
+/// write, all of which take as long as the host lets them, so
+/// [`view_test_support::HostBudget`] scales that half by the contention
+/// this run actually started under. The absolute "how fast does view start"
+/// claim lives in the bench's `first_paint` rows, which carry load-aware
+/// headroom of their own; a restatement of it here would be a second,
+/// weaker copy of that gate.
+pub fn startup_budget(fixed: Duration) -> view_test_support::HostBudget {
+    view_test_support::HostBudget::new(fixed, FLAT_STARTUP_BOUND.saturating_sub(fixed))
 }

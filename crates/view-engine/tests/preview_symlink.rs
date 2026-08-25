@@ -12,8 +12,10 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rmpv::Value;
 use view_core::msg::Msg;
@@ -70,7 +72,7 @@ fn a_symlinked_candidate_path_still_finds_its_modified_buffer() {
         .preview_buffer(&real_str, 1)
         .expect("issue preview request");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let mut reply = None;
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());

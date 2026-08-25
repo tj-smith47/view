@@ -100,7 +100,7 @@ fn write_unsaved_edit(engine: &Engine, text: &str) {
                 false.into(),
                 rmpv::Value::Array(vec![text.into()]),
             ],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_buf_set_lines");
     engine
@@ -108,7 +108,7 @@ fn write_unsaved_edit(engine: &Engine, text: &str) {
         .request_timeout(
             "nvim_command",
             vec!["preserve".into()],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers :preserve");
 }
@@ -120,7 +120,7 @@ fn first_line(engine: &Engine) -> String {
         .request_timeout(
             "nvim_buf_get_lines",
             vec![0.into(), 0.into(), (-1).into(), false.into()],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_buf_get_lines");
     lines
@@ -141,7 +141,7 @@ fn swap_events(engine: &Engine) -> u64 {
         .request_timeout(
             "nvim_eval",
             vec![rmpv::Value::from("get(g:, 'view_swap_recovered', 0)")],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_eval")
         .as_u64()
@@ -160,7 +160,7 @@ fn swap_failure(engine: &Engine) -> String {
         .request_timeout(
             "nvim_eval",
             vec![rmpv::Value::from(SWAP_RECOVERY_PROBE)],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_eval");
     reading
@@ -179,7 +179,7 @@ fn number(engine: &Engine, expr: &str) -> u64 {
         .request_timeout(
             "nvim_eval",
             vec![rmpv::Value::from(expr)],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_eval");
     value
@@ -198,7 +198,7 @@ fn swap_global(engine: &Engine, name: &str) -> String {
             vec![rmpv::Value::from(format!(
                 "string(get(g:, '{name}', '<unset>'))"
             ))],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_eval");
     value
@@ -225,7 +225,7 @@ fn swap_guard_live(engine: &Engine) -> bool {
             vec![rmpv::Value::from(
                 "exists('#view_swap_recovery#SwapExists')",
             )],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_eval")
         .as_u64()
@@ -290,7 +290,7 @@ fn kill_out_of_band(pid: u32) {
 /// been sent is not yet a process that has died, and an assertion made
 /// against a still-running child would prove nothing about the crash path.
 fn wait_until_gone(pid: u32) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + common::rpc_deadline();
     while std::time::Instant::now() < deadline {
         if !common::pid_in_process_table(pid) {
             return;
@@ -310,7 +310,7 @@ fn wait_until_gone(pid: u32) {
 fn blocking(engine: &Engine) -> bool {
     let mode = engine
         .handle
-        .request_timeout("nvim_get_mode", vec![], Duration::from_secs(5))
+        .request_timeout("nvim_get_mode", vec![], common::rpc_deadline())
         .expect("a live engine answers nvim_get_mode");
     mode.as_map()
         .and_then(|entries| {
@@ -509,7 +509,7 @@ fn a_vimrc_clearing_every_autocommand_leaves_the_swap_guard_standing() {
         .request_timeout(
             "nvim_eval",
             vec![rmpv::Value::from("get(g:, 'vimrc_ran', 0)")],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("a live engine answers nvim_eval")
         .as_u64();
@@ -558,7 +558,7 @@ fn a_file_opened_mid_session_over_a_swap_recovers_without_parking_the_editor() {
         .request_timeout(
             "nvim_command",
             vec![rmpv::Value::from(format!("edit {}", file.display()))],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .expect("an open over a swap file must return, not park inside :edit");
 
@@ -684,7 +684,7 @@ fn failure_read_from_a_config_park(scratch_name: &str, planted: ErrorNaming) -> 
 
     // sourcing runs after the attach, so the park is something to wait for
     // rather than something to read once
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + common::rpc_deadline_for(2);
     while std::time::Instant::now() < deadline
         && number(&engine, "get(g:, 'reached_the_park', 0)") == 0
     {
@@ -851,7 +851,7 @@ fn a_restart_with_no_file_to_recover_carries_no_flag_and_stays_usable() {
         .request_timeout(
             "nvim_eval",
             vec![rmpv::Value::from("6 * 7")],
-            Duration::from_secs(5),
+            common::rpc_deadline(),
         )
         .unwrap();
     assert_eq!(

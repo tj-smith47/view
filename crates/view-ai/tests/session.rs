@@ -211,7 +211,7 @@ fn killing_the_agent_mid_turn_reports_the_crash_within_a_tight_bound() {
         "expected SessionCrashed, got {event:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < view_test_support::host_deadline(Duration::from_secs(2)),
         "a crash mid-turn must reach the caller promptly, not stall the loop \
          that is waiting to paint it: took {elapsed:?}"
     );

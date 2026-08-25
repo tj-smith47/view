@@ -2690,6 +2690,7 @@ dependencies = [
  "ureq",
  "view-ai",
  "view-core",
+ "view-test-support",
 ]
 
 [[package]]
@@ -2775,6 +2776,7 @@ dependencies = [
  "view-core",
  "view-engine",
  "view-surface",
+ "view-test-support",
  "vt100",
 ]
 

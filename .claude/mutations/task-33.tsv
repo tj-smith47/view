@@ -1,0 +1,5 @@
+crates/view-tui/src/tiers.rs	pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);	pub const PROBE_DEADLINE: Duration = Duration::from_millis(30_000);	-p view-oracle --test smoke view_starts_and_takes_input_under_a_pty_that_never_answers
+crates/view-tui/src/tiers.rs	pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);	pub const PROBE_DEADLINE: Duration = Duration::from_millis(30_000);	-p view-oracle --test timing_bounds the_probe_deadline_copy_still_matches
+crates/view-test-support/src/lib.rs	(1.0 + load / f64::from(cpus())).clamp(1.0, MAX_LOAD_FACTOR)	(1.0 + load / f64::from(cpus()))	-p view-test-support --lib budget_tests
+crates/view-test-support/src/lib.rs	        self.fixed + self.host_share.mul_f64(self.factor)	        self.fixed + self.host_share.mul_f64(0.5)	-p view-test-support --lib budget_tests
+crates/view-engine/tests/common/mod.rs	view_test_support::host_deadline(EngineConfig::default().handshake_timeout * round_trips)	Duration::from_millis(1)	-p view-engine --test restart

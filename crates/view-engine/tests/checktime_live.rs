@@ -25,9 +25,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 #[cfg(unix)]
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use view_core::msg::{CheckTimeOutcome, Msg};
 use view_engine::process::{Engine, EngineConfig};
@@ -132,7 +134,7 @@ fn a_scratch_root_takes_its_blocking_fixtures_with_it() {
 }
 
 fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> u64 {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Msg::HiddenBufferLoaded { buf, .. }) => {
@@ -169,7 +171,7 @@ impl CheckTimeReply {
 /// different bugs, and one diagnostic covering both sends the next reader
 /// looking in the wrong place.
 fn next_checktime_reply(rx: &mpsc::Receiver<Msg>) -> CheckTimeReply {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Msg::CheckTimeReply {

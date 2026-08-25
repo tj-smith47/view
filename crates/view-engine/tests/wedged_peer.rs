@@ -43,7 +43,7 @@ fn request_timeout_bounds_write_phase_against_wedged_peer() {
         "expected Timeout, got {result:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < view_test_support::host_deadline(Duration::from_secs(2)),
         "request_timeout took {elapsed:?} against a {timeout:?} bound; \
          the write phase is leaking outside the timeout again"
     );

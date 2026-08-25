@@ -12,6 +12,8 @@
 //! wire traffic through instead.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::io::Write as _;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -52,7 +54,7 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let [saw_grid_line, saw_flush] = drain_until(
         &rx,
         &pump,
@@ -88,7 +90,7 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
     // of emitting mode_change + cmdline_show.
     engine.handle.input(":").unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let [saw_mode_change, saw_cmdline_show] = drain_until(
         &rx,
         &pump,
@@ -144,7 +146,7 @@ fn a_redraw_retracts_the_messages_nvim_had_shown() {
         .handle
         .command("echomsg 'a message that must be retracted'")
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let [saw_msg_show] = drain_until(&rx, &pump, deadline, [false], |event, flags| {
         if matches!(event, UiEvent::MsgShow { .. }) {
             flags[0] = true;
@@ -157,7 +159,7 @@ fn a_redraw_retracts_the_messages_nvim_had_shown() {
 
     engine.handle.redraw().unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     let [saw_msg_clear] = drain_until(&rx, &pump, deadline, [false], |event, flags| {
         if matches!(event, UiEvent::MsgClear) {
             flags[0] = true;
@@ -234,7 +236,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
         .request_timeout(
             "nvim_command",
             vec![rmpv::Value::from(format!("e {}", file_path.display()))],
-            Duration::from_secs(10),
+            common::rpc_deadline_for(2),
         )
         .unwrap();
     let loaded = engine.handle.eval_str("line('$')").unwrap();
@@ -261,7 +263,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
     // production pattern the runtime loop uses
     let mut model = Model::new();
     let mut compacted: Vec<UiEvent> = Vec::new();
-    let overall_deadline = Instant::now() + Duration::from_secs(10);
+    let overall_deadline = Instant::now() + common::rpc_deadline_for(2);
     let settle = Duration::from_millis(500);
     loop {
         if Instant::now() >= overall_deadline {

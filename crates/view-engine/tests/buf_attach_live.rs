@@ -11,6 +11,8 @@
 //! [`buf_detach`]: view_engine::handle::EngineHandle::buf_detach
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -93,7 +95,7 @@ fn create_scratch_buf(engine: &Engine) -> u64 {
 /// traffic from the UI attach chiefly) -- the same "wait for the one
 /// message that matters" shape `redraw_live.rs`'s own tests use.
 fn next_buf_text_changed(rx: &mpsc::Receiver<Msg>) -> Msg {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
@@ -402,7 +404,7 @@ fn scratch_file(nonce_suffix: &str, contents: &str) -> std::path::PathBuf {
 /// other `Msg` in the meantime -- the `Msg::BufDetached` analogue of
 /// `next_buf_text_changed`.
 fn next_buf_detached(rx: &mpsc::Receiver<Msg>) -> Msg {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(

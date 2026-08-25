@@ -40,7 +40,7 @@ fn handshake_failure_reaps_child() {
         // main runs at all, which has been measured in this tree at over
         // half a second, and a handshake that gave up first would kill the
         // fixture before it could ever report itself
-        .with_handshake_timeout(Duration::from_secs(2));
+        .with_handshake_timeout(view_test_support::host_deadline(Duration::from_secs(2)));
 
     // spawn() blocks waiting on a handshake that never comes; watch for the
     // fixture's marker on this thread meanwhile, to prove the fake process

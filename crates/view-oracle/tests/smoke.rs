@@ -30,15 +30,22 @@ use std::time::{Duration, Instant};
 use view_oracle::{PtySession, QueryPolicy};
 use view_surface::SHELL_PLACEHOLDER;
 
-// The pty-isolation lock. A timing-bound test measures an absolute wall-clock
-// bound (startup+save) that is only meaningful with the host to itself: a
-// parallel run on few cores (e.g. `taskpolicy -b` confining the suite to 2
-// efficiency cores) inflates every session by the scheduling tax and
-// false-trips a bound that is really about the 50ms probe deadline, not
-// contention. Every spawn takes the read side, so ordinary sessions still run
-// in parallel with each other; a timing-bound test takes the write side for a
+// The pty-isolation lock. A timing-bound test measures a sequence whose
+// budget only has a host share for the host's OWN other work: a sibling
+// session spawning nvim on the same few cores is this suite inflating its own
+// measurement, which no load reading taken before the run can account for.
+// Every spawn takes the read side, so ordinary sessions still run in parallel
+// with each other; a timing-bound test takes the write side for a
 // contention-free measurement window.
 static PTY_ISOLATION: RwLock<()> = RwLock::new(());
+
+/// How long the two startup-timing tests sleep between the last keystroke
+/// and `:wq`.
+///
+/// Part of the sequence rather than an allowance for it, so it is spent on
+/// every host and counted against the fixed half of
+/// `common::startup_budget` rather than the half the load scales.
+const STARTUP_SETTLE: Duration = Duration::from_millis(500);
 
 // The read side of `PTY_ISOLATION`, held for a whole session lifetime.
 // `unwrap_or_else(into_inner)` recovers a poisoned lock: the guarded value is
@@ -367,14 +374,18 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // The oracle is the saved file's real contents, not the pty's screen:
     // see `view_paints_typed_text_in_a_pty`'s comment for why a
     // screen-content assertion here would be vacuous.
-    // An absolute wall-clock bound is only meaningful with exclusive CPU: take
-    // the isolation window BEFORE the clock (its acquisition can block waiting
-    // for in-flight sessions to drain, which is not the startup latency under
-    // test) so a parallel run on few cores cannot inflate this measurement past
-    // a bound that is really about the 50ms probe deadline, not host contention.
+    // What is timed is the sequence, not the host: take the isolation window
+    // and resolve the binary BEFORE the clock (the first can block waiting for
+    // in-flight sessions to drain, the second forks a cargo that takes the
+    // workspace build lock -- neither is startup latency), then hold the rest
+    // to a budget derived from the sequence's own constants plus a host share
+    // scaled by the load this run started under.
     let _exclusive = pty_isolation_exclusive();
+    let _warm = common::view_bin_path();
+    let budget = common::startup_budget(common::PROBE_DEADLINE + STARTUP_SETTLE);
     let start = Instant::now();
     let mut session = spawn_view_pty_raw_isolated(QueryPolicy::Silent);
+    let spawned = start.elapsed();
 
     session.send(b"ibasic tier still works").unwrap();
     // A fixed sleep, not a screen-content wait, bridges to the save: the
@@ -384,16 +395,29 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // than a fix for it. This file's own module doc already documents fixed
     // sleeps over a deterministic "settled" signal as this suite's
     // tradeoff.
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(STARTUP_SETTLE);
+    let quit_at = start.elapsed();
     session.send(b"\x1b:wq\r").unwrap();
 
     let exit = session.wait().expect("view never exited after :wq");
     assert!(exit.success(), "view did not exit cleanly after :wq");
+    let elapsed = start.elapsed();
+    let spend = format!(
+        "{spawned:?} opening the pty and spawning view, {:?} between the \
+         spawn and the quit (the {:?} probe fallback, the nvim attach and \
+         the {STARTUP_SETTLE:?} settle sleep), {:?} from `:wq` to exit",
+        quit_at - spawned,
+        common::PROBE_DEADLINE,
+        elapsed - quit_at
+    );
+    // the run's own record of what it measured, for a report that would
+    // otherwise have to induce a failure to learn the numbers; captured by
+    // default, so this costs a passing run nothing
+    println!("silent-probe startup: {elapsed:?} against a budget of {budget}. Spent: {spend}");
     assert!(
-        start.elapsed() < Duration::from_secs(3),
-        "startup+save took {:?}, far longer than the probe's bounded \
-         deadline plus ordinary nvim attach/save time should allow",
-        start.elapsed()
+        elapsed < budget.total(),
+        "the silent-probe startup sequence took {elapsed:?}, past its budget \
+         of {budget}. Spent: {spend}"
     );
 
     let saved = session.read_saved_file();
@@ -425,14 +449,16 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // its reply in first, on its own, letting the probe break out before the
     // burst ever arrived -- the co-arrival this test is built to exercise
     // would simply stop happening, and it would still pass.
-    // An absolute wall-clock bound is only meaningful with exclusive CPU: take
-    // the isolation window BEFORE the clock (its acquisition can block waiting
-    // for in-flight sessions to drain, which is not the startup latency under
-    // test) so a parallel run on few cores cannot inflate this measurement past
-    // a bound that is really about the 50ms probe deadline, not host contention.
+    // Timed the same way as the silent-probe sequence above, and for the same
+    // reason: isolation window and binary resolved before the clock, then a
+    // budget derived from the sequence's own constants with a load-scaled
+    // share for the host.
     let _exclusive = pty_isolation_exclusive();
+    let _warm = common::view_bin_path();
+    let budget = common::startup_budget(common::PROBE_DEADLINE + STARTUP_SETTLE);
     let start = Instant::now();
     let mut session = spawn_view_pty_raw_isolated(QueryPolicy::Silent);
+    let spawned = start.elapsed();
 
     let da1_reply = b"\x1b[?62c";
     let payload = "A".repeat(260);
@@ -453,16 +479,27 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // A fixed sleep, not a screen-content wait, bridges to the save: see
     // the deadline-path test above for why a screen-content signal would
     // itself become part of the race here.
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(STARTUP_SETTLE);
+    let quit_at = start.elapsed();
     session.send(b"\x1b:wq\r").unwrap();
 
     let exit = session.wait().expect("view never exited after :wq");
     assert!(exit.success(), "view did not exit cleanly after :wq");
+    let elapsed = start.elapsed();
+    let spend = format!(
+        "{spawned:?} opening the pty and spawning view, {:?} between the \
+         spawn and the quit (the {:?} probe window the DA1 reply ends early, \
+         the nvim attach and the {STARTUP_SETTLE:?} settle sleep), {:?} from \
+         `:wq` to exit",
+        quit_at - spawned,
+        common::PROBE_DEADLINE,
+        elapsed - quit_at
+    );
+    println!("burst startup: {elapsed:?} against a budget of {budget}. Spent: {spend}");
     assert!(
-        start.elapsed() < Duration::from_secs(3),
-        "startup+save took {:?}, far longer than the probe's bounded \
-         deadline plus ordinary nvim attach/save time should allow",
-        start.elapsed()
+        elapsed < budget.total(),
+        "the burst startup sequence took {elapsed:?}, past its budget of \
+         {budget}. Spent: {spend}"
     );
 
     let saved = session.read_saved_file();

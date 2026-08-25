@@ -13,6 +13,8 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use view_engine::process::{Engine, EngineConfig, RemoteSpec};
@@ -85,7 +87,7 @@ fn remote_clean() -> EngineConfig {
         .with_arg("--clean")
         .with_arg("-n")
         .with_remote(stub_spec())
-        .with_handshake_timeout(Duration::from_secs(10))
+        .with_handshake_timeout(common::rpc_deadline_for(2))
 }
 
 /// The stub's own fidelity, proven before anything is asserted through it:
@@ -245,7 +247,7 @@ fn an_environment_removal_unsets_what_the_remote_login_environment_exported() {
         EngineConfig::default()
             .with_arg("--clean")
             .with_arg("-n")
-            .with_handshake_timeout(Duration::from_secs(10))
+            .with_handshake_timeout(common::rpc_deadline_for(2))
     };
 
     let inherited =
@@ -292,7 +294,7 @@ fn an_isolated_remote_spawn_neutralizes_the_far_sides_login_environment() {
         EngineConfig::default()
             .with_arg("--clean")
             .with_arg("-n")
-            .with_handshake_timeout(Duration::from_secs(10))
+            .with_handshake_timeout(common::rpc_deadline_for(2))
             .with_remote(spec()),
     )
     .expect("a remote spawn must handshake");
@@ -305,7 +307,7 @@ fn an_isolated_remote_spawn_neutralizes_the_far_sides_login_environment() {
 
     let isolated = Engine::spawn(
         EngineConfig::isolated()
-            .with_handshake_timeout(Duration::from_secs(10))
+            .with_handshake_timeout(common::rpc_deadline_for(2))
             .with_remote(spec()),
     )
     .expect("an isolated remote spawn must handshake");
@@ -358,7 +360,7 @@ fn an_isolated_remote_spawn_neutralizes_the_far_sides_login_environment() {
 fn a_far_side_variable_no_list_names_survives_an_isolated_remote_spawn() {
     let isolated = Engine::spawn(
         EngineConfig::isolated()
-            .with_handshake_timeout(Duration::from_secs(10))
+            .with_handshake_timeout(common::rpc_deadline_for(2))
             .with_remote(
                 RemoteSpec::new("view-test-host").with_ssh_bin(fixture("fake-ssh-login-env")),
             ),
@@ -403,7 +405,7 @@ fn a_non_utf8_argument_and_value_reach_the_executed_process_byte_for_byte() {
         .with_env("VIEW_PROBE_OUT", &out)
         .with_env("VIEW_PROBE_VALUE", &value)
         .with_arg(&file)
-        .with_handshake_timeout(Duration::from_secs(5))
+        .with_handshake_timeout(common::rpc_deadline())
         .with_remote(stub_spec().with_remote_nvim_bin(probe.display().to_string()));
     // the probe answers no handshake; what it does before exiting is the
     // subject here
@@ -437,7 +439,7 @@ fn a_non_utf8_argument_and_value_reach_the_executed_process_byte_for_byte() {
 /// caller would see a spawn that never returns rather than an error.
 #[test]
 fn a_missing_remote_editor_fails_loudly_instead_of_hanging() {
-    let handshake = Duration::from_secs(10);
+    let handshake = common::rpc_deadline_for(2);
     let cfg = EngineConfig::default()
         .with_remote(stub_spec().with_remote_nvim_bin("/nonexistent/view-remote-nvim"))
         .with_handshake_timeout(handshake);

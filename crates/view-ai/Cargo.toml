@@ -96,6 +96,10 @@ notify = "8.2.0"
 ignore = "0.4.33"
 
 [dev-dependencies]
+# the load-scaled wall clock a promptness assertion here holds a live
+# session to (view_test_support::host_deadline), shared with view-engine's
+# and view-oracle's own timing tests rather than copied into each
+view-test-support = { version = "0.0.1", path = "../view-test-support" }
 # `time` is test-only: nothing in the shipped crate uses a timer, and the
 # runtime it builds does not enable one. The tests need a bounded wait so a
 # regression that reintroduces a forever-running session loop fails the gate

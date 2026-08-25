@@ -16,6 +16,13 @@ view-engine = { version = "0.0.1", path = "../view-engine" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
 vt100 = "0.16.2"
 
+# the load-scaled wall clocks this crate's timing tests hold a live
+# sequence to (view_test_support::HostBudget), shared with view-engine's
+# own live tests rather than copied into each; dev-only, like every other
+# consumer of that fixture crate
+[dev-dependencies]
+view-test-support = { version = "0.0.1", path = "../view-test-support" }
+
 # Process groups are a Unix mechanism; killpg is what lets a session kill
 # everything its pty child spawned, not just the child. Windows keeps the
 # per-child kill portable-pty provides.

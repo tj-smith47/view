@@ -7,8 +7,10 @@
 //! new one -- this test fails loudly for exactly that regression.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rmpv::Value;
 use view_core::msg::Msg;
@@ -32,7 +34,7 @@ fn scratch_root(nonce_suffix: &str) -> std::path::PathBuf {
 }
 
 fn wait_for_rename_reply(rx: &mpsc::Receiver<Msg>, generation: u64) -> Option<bool> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {

@@ -11,6 +11,8 @@
 //! [`EngineHandle::ai_fs_write`]: view_engine::handle::EngineHandle::ai_fs_write
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -45,7 +47,7 @@ fn scratch_root(nonce_suffix: &str) -> std::path::PathBuf {
 }
 
 fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>, u64) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
@@ -66,7 +68,7 @@ fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>, u64
 }
 
 fn next_read_reply(rx: &mpsc::Receiver<Msg>) -> (u64, Result<String, FsError>) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
@@ -82,7 +84,7 @@ fn next_read_reply(rx: &mpsc::Receiver<Msg>) -> (u64, Result<String, FsError>) {
 }
 
 fn next_write_reply(rx: &mpsc::Receiver<Msg>) -> (u64, Result<(), FsError>) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::rpc_deadline();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
