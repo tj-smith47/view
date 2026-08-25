@@ -654,29 +654,14 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::io::Write as _;
+    use view_test_support::ScratchDir;
 
     /// A scratch directory of this test's own, removed when the guard
     /// drops. Directories only: an executable written by a test and then
     /// run is an `ETXTBSY` race against a sibling test's fork, which is why
     /// every program these tests run is a committed fixture.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "view-remote-guard-{name}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            std::fs::create_dir_all(&path).expect("a scratch directory for this test");
-            Self(path)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    fn scratch(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("remote-guard-{name}")).expect("a scratch directory for this test")
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -783,8 +768,8 @@ mod tests {
 
     #[test]
     fn a_client_in_no_path_entry_is_absent() {
-        let scratch = Scratch::new("empty-path");
-        let path = std::env::join_paths([scratch.0.clone()]).unwrap();
+        let scratch = scratch("empty-path");
+        let path = std::env::join_paths([scratch.to_path_buf()]).unwrap();
         assert_eq!(
             resolve_client(Path::new("ssh"), Some(&path), None),
             Presence::Absent
@@ -793,9 +778,9 @@ mod tests {
 
     #[test]
     fn a_client_in_a_later_path_entry_is_found() {
-        let scratch = Scratch::new("later-entry");
-        let empty = scratch.0.join("empty");
-        let holding = scratch.0.join("holding");
+        let scratch = scratch("later-entry");
+        let empty = scratch.join("empty");
+        let holding = scratch.join("holding");
         std::fs::create_dir_all(&empty).unwrap();
         std::fs::create_dir_all(&holding).unwrap();
         std::fs::write(holding.join("ssh"), b"").unwrap();
@@ -810,9 +795,9 @@ mod tests {
     /// would report every Windows host as having no client at all.
     #[test]
     fn a_client_spelled_with_a_pathext_extension_is_found() {
-        let scratch = Scratch::new("pathext");
-        std::fs::write(scratch.0.join("ssh.EXE"), b"").unwrap();
-        let path = std::env::join_paths([scratch.0.clone()]).unwrap();
+        let scratch = scratch("pathext");
+        std::fs::write(scratch.join("ssh.EXE"), b"").unwrap();
+        let path = std::env::join_paths([scratch.to_path_buf()]).unwrap();
         assert_eq!(
             resolve_client(
                 Path::new("ssh"),
@@ -836,9 +821,9 @@ mod tests {
     /// exec still falls back to a built-in default path).
     #[test]
     fn an_unsearchable_case_is_undetermined_rather_than_absent() {
-        let scratch = Scratch::new("undetermined");
+        let scratch = scratch("undetermined");
         assert_eq!(
-            resolve_client(&scratch.0.join("nowhere/ssh"), None, None),
+            resolve_client(&scratch.join("nowhere/ssh"), None, None),
             Presence::Undetermined,
             "a client named by path is left to the spawn to report"
         );
@@ -1223,8 +1208,8 @@ mod tests {
     /// spelled with permissions would be bypassed by root.
     #[test]
     fn a_capture_under_a_parent_that_cannot_hold_one_is_never_opened() {
-        let scratch = Scratch::new("unusable-capture-parent");
-        let blocker = scratch.0.join("blocker-file");
+        let scratch = scratch("unusable-capture-parent");
+        let blocker = scratch.join("blocker-file");
         std::fs::write(&blocker, b"").unwrap();
         assert!(Capture::open_in(&blocker).is_none());
         assert!(Capture::open_in(&blocker.join("sub")).is_none());

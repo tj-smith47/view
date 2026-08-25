@@ -16,6 +16,7 @@ use std::time::Duration;
 use view_bench::boundaries::screen_holds;
 use view_bench::remote_ui::RemoteUiServer;
 use view_bench::session::{BenchSession, SettleBound, SpawnSpec};
+use view_test_support::ScratchDir;
 
 /// How long the client is given to go quiet after spawning, and the quiet
 /// window it has to hold, before the host's own contention is accounted
@@ -43,10 +44,10 @@ fn nvim_bin() -> Option<PathBuf> {
         .map(|_| bin)
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("view-remote-ui-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A scratch root for one case, removed by the guard it is returned as on
+/// every exit path -- a failing assertion included.
+fn scratch(tag: &str) -> ScratchDir {
+    ScratchDir::new(&format!("remote-ui-{tag}")).unwrap()
 }
 
 #[test]
@@ -79,7 +80,7 @@ fn a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing() {
             file.clone().into_os_string(),
         ],
         env: vec![(OsString::from("TERM"), OsString::from("xterm-256color"))],
-        cwd: Some(dir.clone()),
+        cwd: Some(dir.to_path_buf()),
     };
 
     let server = RemoteUiServer::start(&bare, dir.join("ui.sock")).expect("headless server");

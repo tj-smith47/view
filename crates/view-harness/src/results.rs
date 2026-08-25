@@ -107,6 +107,7 @@ pub fn load_results(path: &Path) -> Result<ResultsFile, ResultsError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use view_test_support::ScratchDir;
 
     fn sample() -> ResultsFile {
         ResultsFile {
@@ -130,11 +131,7 @@ mod tests {
 
     #[test]
     fn results_round_trip_through_write_and_load() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-results-write-{}-round-trip",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let dir = ScratchDir::new("harness-results-write-round-trip").unwrap();
         let path = dir.join("results.json");
 
         write_results(&path, &sample()).expect("write_results failed");
@@ -143,8 +140,6 @@ mod tests {
         assert_eq!(loaded.results.len(), 1);
         assert_eq!(loaded.results[0].plugin, "lualine");
         assert_eq!(loaded.results[0].status, ScenarioStatus::Ok);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

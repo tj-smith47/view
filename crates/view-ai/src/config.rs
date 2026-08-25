@@ -456,6 +456,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use view_test_support::ScratchDir;
 
     #[test]
     fn from_toml_str_reads_the_enabled_and_agent_id_keys() {
@@ -665,9 +666,7 @@ agent = "claude-code"
 
     #[test]
     fn a_file_backed_empty_agent_names_its_path() {
-        let dir =
-            std::env::temp_dir().join(format!("view-ai-empty-agent-probe-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let dir = ScratchDir::new("ai-empty-agent-probe").expect("temp dir must be creatable");
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nagent = \"\"\n").expect("temp file must be writable");
 
@@ -681,8 +680,6 @@ agent = "claude-code"
             msg.contains(&path.display().to_string()),
             "a file-backed error must name the file it came from, got: {msg}"
         );
-
-        std::fs::remove_dir_all(&dir).expect("temp dir must be removable");
     }
 
     /// A key no wire table will ever accept, used to make one refuse and

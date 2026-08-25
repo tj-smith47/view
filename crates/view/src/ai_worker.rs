@@ -570,6 +570,7 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+    use view_test_support::ScratchDir;
 
     /// An `AgentSpec::Command` naming a program that does not exist:
     /// resolving it never touches the network, so this fixture spawns
@@ -881,17 +882,8 @@ mod tests {
     /// needs a genuinely readable path, unlike every other test's `"."`
     /// stand-in (which happens to work too, but would leave a live watcher
     /// on this crate's own source tree for the duration of the test run).
-    fn watch_tempdir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "view-ai-worker-watch-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn watch_tempdir(label: &str) -> ScratchDir {
+        ScratchDir::resolved(&format!("ai-worker-watch-{label}")).unwrap()
     }
 
     /// A live session (one that never crashes) keeps its watch running --
@@ -911,7 +903,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let worker = AiWorker::new(
             AgentSpec::Command(vec!["sleep".to_string(), "5".to_string()]),
-            dir.clone(),
+            dir.to_path_buf(),
             LoopSender::new(tx),
         );
 
@@ -948,7 +940,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let worker = AiWorker::new(
             AgentSpec::Command(vec!["sleep".to_string(), "5".to_string()]),
-            dir.clone(),
+            dir.to_path_buf(),
             LoopSender::new(tx),
         );
 
@@ -1033,7 +1025,11 @@ mod tests {
     fn a_command_that_starts_no_session_starts_no_watch() {
         let dir = watch_tempdir("untrusted");
         let (tx, rx) = mpsc::sync_channel(8);
-        let worker = AiWorker::new(missing_program_spec(), dir.clone(), LoopSender::new(tx));
+        let worker = AiWorker::new(
+            missing_program_spec(),
+            dir.to_path_buf(),
+            LoopSender::new(tx),
+        );
 
         assert!(!worker.watch_is_running(), "an idle worker watches nothing");
         worker.dispatch(AiCommand::Cancel);
@@ -1061,7 +1057,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let worker = AiWorker::new(
             AgentSpec::Command(vec!["true".to_string()]),
-            dir.clone(),
+            dir.to_path_buf(),
             LoopSender::new(tx),
         );
 

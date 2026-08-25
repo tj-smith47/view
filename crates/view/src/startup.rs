@@ -923,6 +923,7 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use view_test_support::ScratchDir;
 
     fn key(notation: &str) -> Key {
         Key {
@@ -942,10 +943,8 @@ mod tests {
     fn spawn_and_attach_takes_the_stdin_relay_branch_when_armed() {
         use std::os::fd::AsFd;
 
-        let content = std::env::temp_dir().join(format!(
-            "view-startup-spawn-and-attach-stdin-relay-{}.txt",
-            std::process::id()
-        ));
+        let scratch = ScratchDir::new("startup-spawn-and-attach-stdin-relay").unwrap();
+        let content = scratch.join("source.txt");
         std::fs::write(&content, "hello from spawn_and_attach\n").unwrap();
         let source = std::fs::File::open(&content).unwrap();
 
@@ -964,7 +963,6 @@ mod tests {
              up at all"
         );
         let _ = engine.wait_exit();
-        std::fs::remove_file(&content).ok();
     }
 
     /// A process that cannot bring its terminal up still spawned an nvim

@@ -1112,6 +1112,7 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
 mod tests {
     use super::*;
     use std::sync::mpsc::{channel, RecvTimeoutError};
+    use view_test_support::ScratchDir;
 
     /// The grace's magnitude is the feature, not its existence: a grace
     /// shorter than the absence an ordinary save can leave re-probes while
@@ -1186,7 +1187,7 @@ mod tests {
     fn fake_backend(
         refuse_at: usize,
         limit_at: usize,
-    ) -> (PathBuf, WatcherSlot, Arc<Mutex<Vec<PathBuf>>>) {
+    ) -> (ScratchDir, WatcherSlot, Arc<Mutex<Vec<PathBuf>>>) {
         let root = tempdir();
         for dir in ["a", "b", "c"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -1293,34 +1294,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A tempdir this crate's own `view-test-support` fixture would
-    /// normally supply, but that crate is a dev-only leaf with no reach
-    /// into `view-ai` (`scripts/audit-deps.sh`'s `check_dev_only` row) --
-    /// so a real filesystem event needs a real directory here instead.
+    /// A directory for one test's real filesystem events, removed on every
+    /// exit path by the guard it is returned as -- a panicking assertion
+    /// included, which is how a run of this module used to leave one
+    /// directory per test behind in the system temp root.
     ///
-    /// The counter is what actually separates two callers: macOS reports
-    /// `SystemTime` at microsecond granularity, so two of this module's
-    /// tests starting in the same microsecond -- which they do, since
-    /// `cargo test` starts them all at once -- built the very same name.
-    /// `create_dir_all` accepts an existing directory, so that collision was
-    /// silent: one test walked another's tree, or read rules a test that
-    /// had already finished had deleted underneath it. Creating the
-    /// directory non-recursively is what keeps any future collision loud.
-    fn tempdir() -> PathBuf {
+    /// Resolved, because `register` resolves the root it is handed
+    /// (`root_owned`) and a watcher answers with paths under that: on macOS
+    /// the unresolved `TMPDIR` is under `/var`, a symlink to `/private/var`,
+    /// and a path assembled from the unresolved one matches nothing the
+    /// pump forwards.
+    ///
+    /// The counter is what actually separates two callers: it is the only
+    /// thing distinguishing directories within one test binary, and this
+    /// module's tests all start at once under `cargo test`.
+    fn tempdir() -> ScratchDir {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let mut dir = std::env::temp_dir();
-        let unique = format!(
-            "view-ai-watch-test-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        dir.push(unique);
-        std::fs::create_dir(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ScratchDir::resolved(&format!("ai-watch-test-{n}")).unwrap()
     }
 
     /// The walk registers one platform descriptor per directory, so what it

@@ -23,13 +23,12 @@ use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use rustix::io::FdFlags;
 use view_engine::process::{Engine, EngineConfig};
+use view_test_support::ScratchDir;
 
 #[test]
 fn relay_survives_when_the_source_fd_already_is_the_child_target_fd() {
-    let content = std::env::temp_dir().join(format!(
-        "view-engine-stdin-relay-self-dup-{}.txt",
-        std::process::id()
-    ));
+    let scratch = ScratchDir::new("engine-stdin-relay-self-dup").unwrap();
+    let content = scratch.join("source.txt");
     std::fs::write(&content, "hello from fd 3\n").unwrap();
     let opened = std::fs::File::open(&content).unwrap();
 

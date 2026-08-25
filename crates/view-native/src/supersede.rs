@@ -202,11 +202,12 @@ fn plan_from(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::*;
     use view_core::msg::Effect;
     use view_core::native::registry;
+    use view_test_support::ScratchDir;
 
     #[test]
     fn an_enabled_statusline_yields_one_entry_reversed_by_its_own_off_switch() {
@@ -457,10 +458,9 @@ mod tests {
 
     /// A fixture config directory holding an `init.lua`, at the path this
     /// module's own disconfirmation writes to (see the invariant test).
-    fn fixture_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("view-supersede-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("the fixture directory must be creatable");
+    fn fixture_dir(name: &str) -> ScratchDir {
+        let dir = ScratchDir::new(&format!("supersede-{name}"))
+            .expect("the fixture directory must be creatable");
         std::fs::write(
             dir.join("init.lua"),
             "vim.opt.laststatus = 3\nrequire('lualine').setup({})\n",
@@ -483,7 +483,6 @@ mod tests {
         );
 
         let after = snapshot_dir(&dir);
-        std::fs::remove_dir_all(&dir).expect("the fixture directory must be removable");
         assert_eq!(
             before,
             after,

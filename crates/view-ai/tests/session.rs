@@ -14,6 +14,7 @@ use view_core::native::ai_event::{
     AiCommand, AiEvent, Cost, FsError, PermissionOutcome, PlanEntry, PlanEntryPriority,
     PlanEntryStatus, StopReason, ToolCallStatus,
 };
+use view_test_support::ScratchDir;
 
 /// Generous enough that a loaded CI host does not flake, short enough that a
 /// genuinely wedged session fails the run rather than hanging it.
@@ -93,8 +94,8 @@ fn the_handshake_reaches_session_ready() {
 
 #[test]
 fn send_returns_while_the_agent_is_not_reading() {
-    let resume = std::env::temp_dir().join(format!("view-ai-resume-{}", std::process::id()));
-    let _ = std::fs::remove_file(&resume);
+    let scratch = ScratchDir::new("ai-resume").unwrap();
+    let resume = scratch.join("resume");
     let (session, rx) = session_with(&[&resume.to_string_lossy()]);
     let session = Arc::new(session);
     ready(&rx);
@@ -136,7 +137,6 @@ fn send_returns_while_the_agent_is_not_reading() {
         next_event(&rx, "the first turn the agent had not read yet"),
         AiEvent::TurnEnded { .. }
     ));
-    let _ = std::fs::remove_file(&resume);
 }
 
 #[test]
@@ -224,11 +224,8 @@ fn killing_the_agent_mid_turn_reports_the_crash_within_a_tight_bound() {
 /// is the regression this catches.
 #[test]
 fn a_sustained_stream_records_its_count_where_the_client_named_it() {
-    let progress = std::env::temp_dir().join(format!(
-        "view-ai-stub-named-progress-{}.txt",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&progress);
+    let scratch = ScratchDir::new("ai-stub-named-progress").unwrap();
+    let progress = scratch.join("progress.txt");
     let (session, rx) = session_with(&["", "", "", "", &progress.to_string_lossy()]);
     ready(&rx);
     session.send(AiCommand::Prompt {
@@ -251,7 +248,6 @@ fn a_sustained_stream_records_its_count_where_the_client_named_it() {
         std::thread::sleep(Duration::from_millis(20));
     };
     assert!(count > 0, "the named file holds the chunk count: {count}");
-    let _ = std::fs::remove_file(&progress);
 }
 
 #[test]
@@ -615,12 +611,8 @@ fn a_missing_agent_is_an_error_value_not_a_panic() {
 
 #[test]
 fn a_dropped_session_signals_its_agent_before_the_editor_process_is_gone() {
-    let lock_path = std::env::temp_dir().join(format!(
-        "view-ai-liveness-{}-{}.lock",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_file(&lock_path);
+    let scratch = ScratchDir::new("ai-liveness").unwrap();
+    let lock_path = scratch.join("agent.lock");
 
     // The editor stand-in spawns the agent, waits for it to answer, drops the
     // session, and returns from main at once. Anything the agent's own death
@@ -648,7 +640,6 @@ fn a_dropped_session_signals_its_agent_before_the_editor_process_is_gone() {
     });
 
     let outcome = rx.recv_timeout(view_test_support::host_deadline(WAIT));
-    let _ = std::fs::remove_file(&lock_path);
     match outcome {
         Ok(true) => {}
         Ok(false) => panic!("the liveness lock could not be taken at all"),

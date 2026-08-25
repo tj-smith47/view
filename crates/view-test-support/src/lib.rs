@@ -69,6 +69,27 @@ impl ScratchDir {
         Ok(Self { path })
     }
 
+    /// [`new`](Self::new), with the path resolved through
+    /// [`std::fs::canonicalize`].
+    ///
+    /// For a fixture whose path is compared against one some other party
+    /// reports back: macOS puts `TMPDIR` under `/var`, which is a symlink
+    /// to `/private/var`, so a filesystem watcher, a shell, or a child
+    /// process answering with the resolved path answers with a string the
+    /// unresolved fixture path never equals. Not the default, because
+    /// resolving on Windows answers a `\\?\` extended-length path, which
+    /// is not the spelling a fixture hands to a child process.
+    ///
+    /// # Errors
+    ///
+    /// The [`new`](Self::new) errors, plus the [`std::io::Error`] from
+    /// resolving a path that was just created.
+    pub fn resolved(label: &str) -> std::io::Result<Self> {
+        let mut dir = Self::new(label)?;
+        dir.path = std::fs::canonicalize(&dir.path)?;
+        Ok(dir)
+    }
+
     /// The directory's path, for a call site that wants it explicitly
     /// rather than through `Deref`.
     #[must_use]

@@ -681,6 +681,7 @@ fn write_generated(path: &Path, content: impl AsRef<[u8]>) -> Result<(), Fixture
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use view_test_support::ScratchDir;
 
     #[test]
     fn lockfile_cache_key_is_stable_for_identical_bytes() {
@@ -855,7 +856,7 @@ mod tests {
 
     #[test]
     fn copy_dir_recursive_copies_nested_files() {
-        let base = std::env::temp_dir().join(format!("view-fixture-copy-{}", std::process::id()));
+        let base = ScratchDir::new("fixture-copy").unwrap();
         let src = base.join("src");
         std::fs::create_dir_all(src.join("nested")).unwrap();
         std::fs::write(src.join("a.txt"), b"top").unwrap();

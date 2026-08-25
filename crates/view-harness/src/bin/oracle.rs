@@ -1188,6 +1188,7 @@ mod tests {
         clippy::panic
     )]
     use super::*;
+    use view_test_support::ScratchDir;
 
     /// The selector's default is the gate's value, and a narrowed one drives
     /// exactly the leg it names. A default that quietly became `local` would
@@ -1576,11 +1577,7 @@ mod tests {
         let filler: Vec<String> = "a".repeat(30).chars().map(|c| c.to_string()).collect();
         let inject_at = filler.len() / 2;
 
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-oracle-inject-e2e-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let dir = ScratchDir::new("harness-oracle-inject-e2e").unwrap();
         let path = dir.join("planted.toml");
         corpus::write_entry(
             &path,
@@ -1615,8 +1612,6 @@ mod tests {
             "the rewritten entry must be stamped with the pin the run was verified \
              against, not the scratch entry's authored-against value"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A diff-review entry must be refused by the minimizer before it
@@ -1626,11 +1621,7 @@ mod tests {
     /// drives the write path at all.
     #[test]
     fn minimizing_a_diff_review_entry_is_refused() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-oracle-review-minimize-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let dir = ScratchDir::new("harness-oracle-review-minimize").unwrap();
         let path = dir.join("review.toml");
         std::fs::write(
             &path,
@@ -1654,8 +1645,6 @@ mod tests {
                 .contains("diff_review"),
             "the refused entry must be left exactly as it was"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Pins `fuzz_rounds`'s continue-past-error contract with a fake probe,
@@ -1670,11 +1659,7 @@ mod tests {
     /// suffer from the same change.
     #[test]
     fn fuzz_rounds_continues_past_a_probe_error_and_quarantines_it_raw() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-oracle-fuzz-pin-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let dir = ScratchDir::new("harness-oracle-fuzz-pin").unwrap();
 
         let seed = 7u64;
         let rounds = 5u32;
@@ -1732,8 +1717,6 @@ mod tests {
             join_tokens(&expected_tokens),
             "the quarantined error round must hold its raw (unminimized) generated script"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Pins the dependency `collect_entries`'s WHY comment states: the walk
@@ -1742,10 +1725,7 @@ mod tests {
     /// collected into a plain corpus-wide run.
     #[test]
     fn collect_entries_does_not_recurse_into_subdirectories() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-oracle-collect-entries-{}",
-            std::process::id()
-        ));
+        let dir = ScratchDir::new("harness-oracle-collect-entries").unwrap();
         let subdir = dir.join("quarantine");
         std::fs::create_dir_all(&subdir).expect("failed to create scratch dirs");
 
@@ -1778,7 +1758,5 @@ mod tests {
             vec!["top-level"],
             "a .toml file in a subdirectory of the corpus dir must not be collected"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

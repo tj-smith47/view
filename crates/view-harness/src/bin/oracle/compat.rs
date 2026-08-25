@@ -860,6 +860,7 @@ mod tests {
         clippy::panic
     )]
     use super::*;
+    use view_test_support::ScratchDir;
     /// Reference values independently computed via Python's
     /// `datetime.date` (`epoch + timedelta(days=N)`), not transcribed from
     /// the Hinnant algorithm's own worked examples -- an independent
@@ -1038,12 +1039,9 @@ mod tests {
     /// to pass [`resolve_fixture`]'s "has `init.lua`/`init.vim`" check
     /// without needing an actual lazy.nvim-managed config on the test host.
     #[cfg(unix)]
-    fn scratch_daily_config(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-oracle-daily-config-{label}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch daily config dir");
+    fn scratch_daily_config(label: &str) -> ScratchDir {
+        let dir = ScratchDir::new(&format!("harness-oracle-daily-config-{label}"))
+            .expect("failed to create scratch daily config dir");
         std::fs::write(dir.join("init.lua"), "").expect("failed to write scratch init.lua");
         dir
     }
@@ -1065,17 +1063,13 @@ mod tests {
         let _guard = env_mutation_guard();
 
         let daily_dir = scratch_daily_config("env-set");
-        let ambient_data = std::env::temp_dir().join(format!(
-            "view-harness-oracle-ambient-data-home-{}",
-            std::process::id()
-        ));
-        let _daily_env = EnvRestore::set("VIEW_DAILY_CONFIG", &daily_dir);
+        let names = ScratchDir::new("harness-oracle-daily-names")
+            .expect("a directory to name the two paths under");
+        let ambient_data = names.join("data-home");
+        let _daily_env = EnvRestore::set("VIEW_DAILY_CONFIG", daily_dir.path());
         let _data_home_env = EnvRestore::set("XDG_DATA_HOME", &ambient_data);
 
-        let sock_path = std::env::temp_dir().join(format!(
-            "view-harness-oracle-daily-sock-{}",
-            std::process::id()
-        ));
+        let sock_path = names.join("daily.sock");
         let resolution =
             resolve_fixture(None, false, &sock_path).expect("resolve_fixture must not error");
         let ready = match resolution {

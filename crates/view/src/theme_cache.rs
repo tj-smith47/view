@@ -432,18 +432,13 @@ mod tests {
     // bound; each holds the guard across its own restore
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
     use super::*;
+    use view_test_support::ScratchDir;
 
-    fn tmp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "view-theme-cache-test-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A cache directory for one test, removed by the guard it is returned
+    /// as on every exit path -- a failing assertion included, which is what
+    /// a trailing removal never covers.
+    fn tmp_dir(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("theme-cache-test-{name}")).unwrap()
     }
 
     /// Serializes every test in this module that calls `std::env::set_var`/
@@ -722,7 +717,7 @@ mod tests {
         let _guard = env_mutation_guard();
         let dir = tmp_dir("two-configs");
         let prev = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_STATE_HOME", &dir);
+        std::env::set_var("XDG_STATE_HOME", dir.path());
 
         let first_config = Path::new("/home/first/.config/view/view.toml");
         let second_config = Path::new("/home/second/.config/view/view.toml");
@@ -948,7 +943,7 @@ mod tests {
         let _guard = env_mutation_guard();
         let dir = tmp_dir("xdg-e2e");
         let prev = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_STATE_HOME", &dir);
+        std::env::set_var("XDG_STATE_HOME", dir.path());
 
         let config_path = Path::new("/home/x/.config/view/view.toml");
         let theme = Theme::with_colors(Some(0x123456), Some(0x654321));

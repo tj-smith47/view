@@ -233,14 +233,12 @@ mod tests {
     use std::path::PathBuf;
     use view_core::native::mappings::MappingClaim;
     use view_core::native::registry;
+    use view_test_support::ScratchDir;
 
     /// A scratch directory for one test's record file, named for the test
     /// so two of them never share a path.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("view-toast-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("the scratch directory must be creatable");
-        dir
+    fn scratch(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("toast-{name}")).expect("the scratch directory must be creatable")
     }
 
     fn claim(feature: &str, lhs: &str) -> MappingClaim {

@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use view_engine::process::{Engine, EngineConfig, RemoteSpec};
 use view_engine::{EngineError, Liveness, HEARTBEAT_PROBE_INTERVAL};
+use view_test_support::ScratchDir;
 
 fn fixture(name: &str) -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -55,24 +56,8 @@ fn relay_spec() -> RemoteSpec {
 /// a parallel test binary: a sibling test's `fork` between the write and the
 /// `exec` still holds the file open, and the `exec` fails with `ETXTBSY`.
 /// The programs these tests run are committed fixtures for that reason.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "view-remote-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&path).expect("a scratch directory for this test");
-        Self(path)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+fn scratch(name: &str) -> ScratchDir {
+    ScratchDir::new(&format!("remote-{name}")).expect("a scratch directory for this test")
 }
 
 /// A config whose child ignores the host's own editor configuration without
@@ -393,8 +378,8 @@ fn a_non_utf8_argument_and_value_reach_the_executed_process_byte_for_byte() {
     use std::ffi::OsString;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-    let scratch = Scratch::new("raw-bytes");
-    let out = scratch.0.join("observed");
+    let scratch = scratch("raw-bytes");
+    let out = scratch.join("observed");
     let probe = fixture("remote-probe");
 
     // a latin-1 e-acute, in a filename and in a path-shaped value: both are

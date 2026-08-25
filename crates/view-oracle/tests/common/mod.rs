@@ -4,7 +4,9 @@
 //! and a scratch-file/isolated-home pair that cleans itself up on drop,
 //! plus the wall-clock budget a timing test holds a startup sequence to
 //! ([`startup_budget`], over the workspace-shared
-//! [`view_test_support::HostBudget`]).
+//! [`view_test_support::HostBudget`]) and the walk over every source in the
+//! workspace that holds test code ([`workspace_test_sources`]), which the
+//! source-text pins in this directory read the population through.
 //!
 //! Compiled separately into each of those binaries, so a helper only one of
 //! them needs reads as dead code in the other: `dead_code` is allowed here
@@ -242,4 +244,110 @@ pub const FLAT_STARTUP_BOUND: Duration = Duration::from_secs(3);
 /// weaker copy of that gate.
 pub fn startup_budget(fixed: Duration) -> view_test_support::HostBudget {
     view_test_support::HostBudget::new(fixed, FLAT_STARTUP_BOUND.saturating_sub(fixed))
+}
+
+/// Every source in the workspace that holds test code, as
+/// (path under `crates/`, the test-code part of its contents).
+///
+/// A `crates/*/tests/**/*.rs` file is test code outright. A `src` file is
+/// test code only from its first `#[cfg(test)]` onwards -- the convention
+/// this tree follows without exception, and the conservative reading either
+/// way: the walk can miss a test written above the module, and can never
+/// flag a production line for comparing an elapsed time to a literal, which
+/// is a thing production code is entitled to do.
+pub fn workspace_test_sources() -> Vec<(String, String)> {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate sits inside the workspace's crates directory")
+        .to_owned();
+    let mut found = Vec::new();
+    let mut members: Vec<PathBuf> = std::fs::read_dir(&crates)
+        .expect("the workspace's crates directory must be readable")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    members.sort();
+    for member in members {
+        for source in rust_sources(&member.join("tests")) {
+            found.push(named(&crates, &source, false));
+        }
+        for source in rust_sources(&member.join("src")) {
+            let whole_file_is_a_test_module = is_test_module_file(&source);
+            found.push(named(&crates, &source, !whole_file_is_a_test_module));
+        }
+    }
+    assert!(
+        found.len() > 100,
+        "the walk found only {} sources, so it is not looking where the \
+         workspace keeps them and would pass by finding nothing",
+        found.len()
+    );
+    found
+}
+
+/// Whether a `src` file is a test module outright rather than a source
+/// file with one at the bottom.
+///
+/// `src/thing/tests.rs` is the other half of `#[cfg(test)] mod tests;` and
+/// carries no attribute of its own, so reading it from a `#[cfg(test)]`
+/// onwards reads none of it.
+fn is_test_module_file(source: &Path) -> bool {
+    source.file_stem().is_some_and(|stem| stem == "tests")
+        || source
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|dir| dir == "tests")
+}
+
+/// Every `.rs` file at or under `dir`, sorted, or nothing where `dir` does
+/// not exist.
+fn rust_sources(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut nested: Vec<PathBuf> = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            nested.push(path);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            paths.push(path);
+        }
+    }
+    nested.sort();
+    for dir in nested {
+        paths.extend(rust_sources(&dir));
+    }
+    paths.sort();
+    paths
+}
+
+/// `source` as (path under `crates`, contents), keeping only the part after
+/// the first `#[cfg(test)]` when `test_region_only`. The elided prefix is
+/// replaced by blank lines so reported line numbers stay real.
+fn named(crates: &Path, source: &Path, test_region_only: bool) -> (String, String) {
+    let name = source
+        .strip_prefix(crates)
+        .unwrap_or(source)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let text = std::fs::read_to_string(source).expect("a source file must be readable");
+    if !test_region_only {
+        return (name, text);
+    }
+    (name, test_region(&text))
+}
+
+/// `text` from its first `#[cfg(test)]` onwards, with the elided prefix
+/// replaced by blank lines so reported line numbers stay real.
+///
+/// Counted in newlines rather than in lines: an indented `#[cfg(test)]`
+/// leaves its own indentation as a last partial line, which `lines()`
+/// counts as a whole one and every site in the module is then reported one
+/// line below where a reader will find it.
+pub fn test_region(text: &str) -> String {
+    let Some(at) = text.find("#[cfg(test)]") else {
+        return String::new();
+    };
+    "\n".repeat(text[..at].matches('\n').count()) + &text[at..]
 }

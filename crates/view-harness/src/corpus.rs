@@ -255,6 +255,7 @@ pub fn write_entry(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use view_test_support::ScratchDir;
 
     const VALID: &str = r#"
 schema = 1
@@ -353,12 +354,7 @@ engine_pin = "v0.12.4"
 
     #[test]
     fn write_entry_round_trips_through_parse() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-corpus-write-{}-{}",
-            std::process::id(),
-            "round-trip"
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let dir = ScratchDir::new("harness-corpus-round-trip").unwrap();
         let path = dir.join("entry.toml");
 
         write_entry(
@@ -380,18 +376,11 @@ engine_pin = "v0.12.4"
         assert_eq!(entry.quiesce_silence_ms, DEFAULT_QUIESCE_SILENCE_MS);
         assert_eq!(entry.quiesce_deadline_ms, DEFAULT_QUIESCE_DEADLINE_MS);
         assert_eq!(entry.diff_review, None);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn write_entry_omits_quiesce_fields_at_their_defaults() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-corpus-write-{}-{}",
-            std::process::id(),
-            "omit-defaults"
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let dir = ScratchDir::new("harness-corpus-omit-defaults").unwrap();
         let path = dir.join("entry.toml");
 
         write_entry(
@@ -410,18 +399,11 @@ engine_pin = "v0.12.4"
             !text.contains("quiesce_silence_ms") && !text.contains("quiesce_deadline_ms"),
             "expected default-valued quiesce fields to be omitted, got:\n{text}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn write_entry_preserves_a_non_default_quiesce_override() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-harness-corpus-write-{}-{}",
-            std::process::id(),
-            "keep-override"
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let dir = ScratchDir::new("harness-corpus-keep-override").unwrap();
         let path = dir.join("entry.toml");
 
         write_entry(&path, "written", "x", "v0.12.4", "default", 50, 9000)
@@ -430,7 +412,5 @@ engine_pin = "v0.12.4"
 
         assert_eq!(entry.quiesce_silence_ms, 50);
         assert_eq!(entry.quiesce_deadline_ms, 9000);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

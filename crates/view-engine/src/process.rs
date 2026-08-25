@@ -3274,6 +3274,7 @@ mod tests {
     use super::*;
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::process::ExitStatusExt;
+    use view_test_support::ScratchDir;
 
     #[test]
     fn wait_exit_mapping_passes_normal_exit_code_through() {
@@ -3370,11 +3371,9 @@ mod tests {
         use rustix::fd::AsFd;
         use rustix::io::FdFlags;
 
-        let content = std::env::temp_dir().join(format!(
-            "view-engine-relay-stdin-fd-unit-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let scratch = ScratchDir::new("engine-relay-stdin-fd-unit")
+            .expect("a directory for the fd under test");
+        let content = scratch.join("probe.txt");
         std::fs::write(&content, "probe").expect("scratch file for the fd under test");
         let opened = std::fs::File::open(&content).expect("just wrote it");
         std::fs::remove_file(&content).ok();

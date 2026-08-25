@@ -1623,6 +1623,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use view_test_support::ScratchDir;
 
     /// [`super::gate_cell`] with no measured per-class headroom, so every
     /// case below reads against the policy defaults. The override path has
@@ -1680,8 +1681,7 @@ mod tests {
     /// because the record flow writes only the baseline path.
     #[test]
     fn a_record_pass_preserves_the_headroom_characterization() {
-        let dir = std::env::temp_dir().join(format!("view-headroom-record-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ScratchDir::new("headroom-record").unwrap();
         let path = dir.join("dev-linux.toml");
         std::fs::write(
             &path,
@@ -1733,15 +1733,13 @@ mod tests {
             headroom_for(&survived, &minimal_cell("echo"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06))
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A `[headroom]` table inside the baseline is exactly what the next
     /// `--record` destroys, so it is refused at load with the sidecar named.
     #[test]
     fn a_baseline_carrying_a_headroom_table_is_refused() {
-        let dir = std::env::temp_dir().join(format!("view-headroom-inline-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ScratchDir::new("headroom-inline").unwrap();
         let path = dir.join("dev-linux.toml");
         std::fs::write(
             &path,
@@ -1755,7 +1753,6 @@ mod tests {
             err.to_string().contains("dev-linux.headroom.toml"),
             "the refusal must name the sidecar the table belongs in: {err}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every shipped headroom sidecar against the baseline it characterises:
@@ -1872,8 +1869,7 @@ mod tests {
     /// would be used with.
     #[test]
     fn a_headroom_entry_that_binds_nothing_is_a_load_error() {
-        let dir = std::env::temp_dir().join(format!("view-headroom-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ScratchDir::new("headroom").unwrap();
         let path = dir.join("dev-linux.toml");
         let sidecar = headroom_path(&path);
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
@@ -1945,7 +1941,6 @@ mod tests {
             load_headroom(&sidecar, "dev-linux").unwrap().is_empty(),
             "no sidecar means nothing characterized, which loads as an empty table"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2601,8 +2596,7 @@ mod tests {
 
     #[test]
     fn unsupported_schema_is_rejected_on_load() {
-        let dir = std::env::temp_dir().join(format!("view-baselines-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ScratchDir::new("baselines").unwrap();
         let path = dir.join("bad-schema.toml");
         std::fs::write(
             &path,
@@ -2613,7 +2607,6 @@ mod tests {
             load(&path).unwrap_err(),
             BaselineError::UnsupportedSchema { found: 2, .. }
         ));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2627,7 +2620,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip_on_disk() {
-        let dir = std::env::temp_dir().join(format!("view-baselines-rt-{}", std::process::id()));
+        let dir = ScratchDir::new("baselines-rt").unwrap();
         let path = dir.join("dev-linux.toml");
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
         file.upsert_cell(
@@ -2640,7 +2633,6 @@ mod tests {
             loaded.cell(&CellId::new("first_paint", "heavy")).unwrap()["cold_ms"],
             38.0
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2649,7 +2641,7 @@ mod tests {
         // back as present-and-empty, not absent -- absent would fail the
         // gate's unrecorded_cells walk on the very next run, turning an
         // attributed refusal into an unattributed coverage failure
-        let dir = std::env::temp_dir().join(format!("view-baselines-empty-{}", std::process::id()));
+        let dir = ScratchDir::new("baselines-empty").unwrap();
         let path = dir.join("gh-macos.toml");
         let mut file = BaselineFile::new("gh-macos", "v0.12.4");
         let id = CellId::new("output_path", "minimal");
@@ -2668,7 +2660,6 @@ mod tests {
             }]
         )
         .is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn outcome_for<'a>(outcomes: &'a [RatchetOutcome], name: &str) -> &'a RatchetOutcome {

@@ -277,6 +277,7 @@ mod tests {
     use super::*;
     use view_core::theme::{ChromeGroup, ResolvedStyle};
     use view_core::update::update;
+    use view_test_support::ScratchDir;
 
     /// A bridge writing to `path`, bypassing the environment lookup
     /// [`ThemeBridge::new`] performs so a test never depends on process-wide
@@ -289,14 +290,16 @@ mod tests {
         }
     }
 
-    /// A scratch cache file for one test, named for it so two tests never
-    /// read each other's cache.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("view-bridge-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("the scratch directory must be creatable");
-        dir.join("theme.toml")
+    /// A scratch cache directory for one test, named for it so two tests
+    /// never read each other's cache, and removed by the guard it is
+    /// returned as -- a failing assertion included. The file itself is
+    /// [`CACHE_FILE`] inside it.
+    fn scratch(name: &str) -> ScratchDir {
+        ScratchDir::new(&format!("bridge-{name}")).expect("the scratch directory must be creatable")
     }
+
+    /// The cache file every test above writes inside its own [`scratch`].
+    const CACHE_FILE: &str = "theme.toml";
 
     /// A model whose highlight table has already settled on one probe, the
     /// ordinary steady state a colorscheme switch interrupts.
@@ -469,7 +472,8 @@ mod tests {
     /// just left. The batch that follows has to supersede it.
     #[test]
     fn the_colors_that_follow_an_announcement_supersede_what_it_cached() {
-        let path = scratch("after-colors");
+        let scratch = scratch("after-colors");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
@@ -503,7 +507,8 @@ mod tests {
     /// would never write again for the rest of that session.
     #[test]
     fn colors_applied_before_the_announcement_are_still_cached() {
-        let path = scratch("colors-first");
+        let scratch = scratch("colors-first");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
@@ -534,7 +539,8 @@ mod tests {
     /// it, because classification is the thing that decides this.
     #[test]
     fn a_batch_that_redefines_nothing_leaves_the_switch_outstanding() {
-        let path = scratch("unchanged-batch");
+        let scratch = scratch("unchanged-batch");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
@@ -564,7 +570,8 @@ mod tests {
     /// of them, inside the runtime loop.
     #[test]
     fn a_closed_switch_ignores_every_later_theme_change() {
-        let path = scratch("stays-closed");
+        let scratch = scratch("stays-closed");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
@@ -598,7 +605,8 @@ mod tests {
     /// pairs the new foreground with the old background.
     #[test]
     fn a_switch_awaiting_its_probe_is_not_cached_until_the_probe_answers() {
-        let path = scratch("awaiting-probe");
+        let scratch = scratch("awaiting-probe");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
@@ -642,7 +650,8 @@ mod tests {
     /// classification produced, never a trigger a caller picked.
     #[test]
     fn ordinary_redraw_traffic_never_writes_the_cache() {
-        let path = scratch("no-switch");
+        let scratch = scratch("no-switch");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
         for id in 1..8 {
@@ -666,7 +675,8 @@ mod tests {
     /// to wear the scheme they actually use.
     #[test]
     fn a_first_run_probe_reply_caches_the_theme_with_no_switch_announced() {
-        let path = scratch("first-run-probe");
+        let scratch = scratch("first-run-probe");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = Model::with_term_size(80, 24);
 
@@ -709,7 +719,8 @@ mod tests {
     /// message on the loop thread is the theme this bridge last wrote.
     #[test]
     fn a_probe_reply_that_settles_the_theme_already_written_writes_nothing() {
-        let path = scratch("unchanged-probe");
+        let scratch = scratch("unchanged-probe");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = Model::with_term_size(80, 24);
 
@@ -753,7 +764,8 @@ mod tests {
     /// outstanding.
     #[test]
     fn a_switch_that_closed_early_is_still_corrected_by_the_probe_that_settles_it() {
-        let path = scratch("closed-early");
+        let scratch = scratch("closed-early");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
@@ -811,7 +823,8 @@ mod tests {
     /// one's colors land. What must survive is the scheme they stop on.
     #[test]
     fn a_second_switch_supersedes_one_whose_colors_never_landed() {
-        let path = scratch("superseded");
+        let scratch = scratch("superseded");
+        let path = scratch.join(CACHE_FILE);
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
@@ -846,7 +859,8 @@ mod tests {
     /// this test exercises.
     #[test]
     fn a_write_failure_surfaces_as_a_native_notice_not_stderr() {
-        let path = scratch("write-failure");
+        let scratch = scratch("write-failure");
+        let path = scratch.join(CACHE_FILE);
         std::fs::create_dir_all(&path).expect("the planted directory must be creatable");
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
