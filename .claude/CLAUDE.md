@@ -72,6 +72,12 @@ whose turn has ended; they go to the coordinator, and you simply stall.
 The global no-polling rule stands (no sleep/until loops, hook-denied);
 foreground-with-timeout is the compliant way for a subagent to wait.
 
+The tree, the target dir and the process table are shared with peer sessions
+and their tests. Never `pkill`/`killall` by name (`nvim --embed`, `view`) —
+a peer's live-nvim test fails spuriously and nothing tells it why. Kill
+only pids you spawned; a stray from your own test is your harness's bug to
+fix (reap on drop), not a sweep to run.
+
 ## Enforcement
 
 - `task ci` = fmt-check, lint, audit, style, loc, test. Commit only via `task commit PATHS="<path> <path>" -- -m "<msg>"`: it runs ci, then commits exactly the named paths from the working tree (`--only`). Never `git add` — the index is shared by every session committing on this tree and a peer's staging can land at any moment, so what is staged is never the set to commit; the named paths are. Non-code changes (docs, plans, README, `.claude/` notes) commit with `task commit:quick PATHS="…" -- -m "<msg>"`, which skips ci and refuses a path under `crates/`, `scripts/`, `.github/`, `Taskfile.yml`, or the Cargo/engine pins.
