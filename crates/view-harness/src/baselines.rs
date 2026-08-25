@@ -1645,22 +1645,10 @@ mod tests {
         )
     }
 
-    /// One cell of `scenario`, for the cases whose subject is the metric
+    /// `scenario`'s minimal cell, for the cases whose subject is the metric
     /// rule or a wider key scope than the fixture level.
-    fn cell(scenario: &str) -> CellId {
+    fn minimal_cell(scenario: &str) -> CellId {
         CellId::new(scenario, "minimal")
-    }
-
-    /// [`super::ratchet_cell`] against one fixture of `scenario`, for the
-    /// same reason.
-    fn ratchet_cell(
-        existing: Option<&CellMetrics>,
-        measured: &CellMetrics,
-        scenario: &str,
-        controlled: bool,
-        headroom: &HeadroomTable,
-    ) -> (CellMetrics, Vec<RatchetOutcome>) {
-        super::ratchet_cell(existing, measured, &cell(scenario), controlled, headroom)
     }
 
     fn metrics(pairs: &[(&str, f64)]) -> CellMetrics {
@@ -1742,7 +1730,7 @@ mod tests {
         let survived = load_headroom(&sidecar, "dev-linux").unwrap();
         assert_eq!(survived.get("ratio_p50"), Some(&1.06));
         assert_eq!(
-            headroom_for(&survived, &cell("echo"), "ratio_p50", false),
+            headroom_for(&survived, &minimal_cell("echo"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06))
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1848,7 +1836,7 @@ mod tests {
         };
 
         assert_eq!(
-            declared_factor(&table, &cell("scroll"), "ratio_p50"),
+            declared_factor(&table, &minimal_cell("scroll"), "ratio_p50"),
             Some(1.42),
             "the campaign sized this factor at 1.42; a sidecar edit moves the number here too, \
              so neither a shrink that re-breaches the leg nor an inflation the draws never \
@@ -1867,7 +1855,7 @@ mod tests {
             "the class's measured spread accepts {measured} over a recorded {recorded}"
         );
 
-        let bar = headroom_for(&table, &cell("scroll"), "ratio_p50", false)
+        let bar = headroom_for(&table, &minimal_cell("scroll"), "ratio_p50", false)
             .expect("ratio_p50 gates on a shared class")
             .bar(recorded);
         assert_eq!(
@@ -2326,21 +2314,21 @@ mod tests {
         .collect();
 
         assert_eq!(
-            headroom_for(&table, &cell("echo"), "ratio_p50", false),
+            headroom_for(&table, &minimal_cell("echo"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06))
         );
         assert_eq!(
-            headroom_for(&table, &cell("echo"), "marker_ratio_p50", false),
+            headroom_for(&table, &minimal_cell("echo"), "marker_ratio_p50", false),
             Some(Headroom::Proportional(RATIO_HEADROOM)),
             "a metric with no entry keeps the default"
         );
         assert_eq!(
-            headroom_for(&table, &cell("echo"), "view_p99_ms", false),
+            headroom_for(&table, &minimal_cell("echo"), "view_p99_ms", false),
             None,
             "a shared-class tail stays ungated however well its spread is known"
         );
         assert_eq!(
-            headroom_for(&table, &cell("echo"), "view_p99_ms", true),
+            headroom_for(&table, &minimal_cell("echo"), "view_p99_ms", true),
             Some(Headroom::Proportional(1.10))
         );
     }
@@ -2362,16 +2350,16 @@ mod tests {
         .collect();
 
         assert_eq!(
-            headroom_for(&table, &cell("scroll"), "ratio_p50", false),
+            headroom_for(&table, &minimal_cell("scroll"), "ratio_p50", false),
             Some(Headroom::Proportional(1.12))
         );
         assert_eq!(
-            headroom_for(&table, &cell("echo"), "ratio_p50", false),
+            headroom_for(&table, &minimal_cell("echo"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06)),
             "the bare entry stays the host-wide characterization"
         );
         assert_eq!(
-            headroom_for(&table, &cell("flood"), "ratio_p50", false),
+            headroom_for(&table, &minimal_cell("flood"), "ratio_p50", false),
             Some(Headroom::Proportional(1.06)),
             "a qualified entry must not leak outside its scenario"
         );
@@ -2436,16 +2424,16 @@ mod tests {
         .collect();
 
         assert_eq!(
-            declared_headroom(&table, &cell("scroll"), "ratio_p50"),
+            declared_headroom(&table, &minimal_cell("scroll"), "ratio_p50"),
             Some(Headroom::Proportional(1.18))
         );
         assert_eq!(
-            declared_headroom(&table, &cell("echo"), "view_p99_ms"),
+            declared_headroom(&table, &minimal_cell("echo"), "view_p99_ms"),
             None,
             "an uncharacterized statistic reports absence, never a default"
         );
         assert_eq!(
-            declared_headroom(&table, &cell("echo"), "ratio_p50"),
+            declared_headroom(&table, &minimal_cell("echo"), "ratio_p50"),
             Some(Headroom::Proportional(1.06))
         );
     }
@@ -2470,15 +2458,15 @@ mod tests {
         .collect();
 
         assert_eq!(
-            headroom_for(&table, &cell("flood"), "cadence_p99_ms", false),
+            headroom_for(&table, &minimal_cell("flood"), "cadence_p99_ms", false),
             None
         );
         assert_eq!(
-            declared_headroom(&table, &cell("flood"), "cadence_p99_ms"),
+            declared_headroom(&table, &minimal_cell("flood"), "cadence_p99_ms"),
             Some(Headroom::Proportional(1.15))
         );
         assert_eq!(
-            declared_headroom(&table, &cell("echo"), "paired_delta_p99_ms"),
+            declared_headroom(&table, &minimal_cell("echo"), "paired_delta_p99_ms"),
             Some(Headroom::Signed {
                 factor: 1.30,
                 floor: SIGNED_DELTA_FLOOR_MS
@@ -2703,7 +2691,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -2729,7 +2717,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -2754,7 +2742,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -2771,7 +2759,13 @@ mod tests {
     #[test]
     fn ratchet_with_no_existing_cell_records_every_metric_as_new() {
         let measured = metrics(&[("ratio_p50", 1.20), ("view_p99_ms", 2.0)]);
-        let (cell, outcomes) = ratchet_cell(None, &measured, "echo", false, &HeadroomTable::new());
+        let (cell, outcomes) = ratchet_cell(
+            None,
+            &measured,
+            &minimal_cell("echo"),
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(cell, measured);
         assert!(outcomes
             .iter()
@@ -2789,7 +2783,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -2812,7 +2806,7 @@ mod tests {
         let (cell, _outcomes) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -2832,7 +2826,7 @@ mod tests {
         let (_cell, outcomes) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -2863,7 +2857,13 @@ mod tests {
         let existing = metrics(&[("ratio_p50", 1.20)]);
         let measured = metrics(&[("ratio_p50", 1.05)]);
         let table = spread_table(&[("echo.ratio_p50", 1.10)]);
-        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, "echo", false, &table);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            &minimal_cell("echo"),
+            false,
+            &table,
+        );
         assert_eq!(
             cell["ratio_p50"], 1.20,
             "the refused value must not be written; the recorded bar is held"
@@ -2892,7 +2892,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("ratio_p50", floor)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &table,
         );
@@ -2905,7 +2905,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("ratio_p50", floor - 1e-9)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &table,
         );
@@ -2932,7 +2932,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("paired_delta_p99_ms", floor)]),
-            "echo",
+            &minimal_cell("echo"),
             true,
             &table,
         );
@@ -2945,7 +2945,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("paired_delta_p99_ms", floor - 1e-9)]),
-            "echo",
+            &minimal_cell("echo"),
             true,
             &table,
         );
@@ -2977,7 +2977,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("paired_delta_p99_ms", floor)]),
-            "echo",
+            &minimal_cell("echo"),
             true,
             &table,
         );
@@ -2990,7 +2990,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("paired_delta_p99_ms", floor - 1e-9)]),
-            "echo",
+            &minimal_cell("echo"),
             true,
             &table,
         );
@@ -3027,7 +3027,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("ratio_p50", 0.30)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -3048,7 +3048,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("ratio_p50", 1.10)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &table,
         );
@@ -3074,7 +3074,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("ratio_p50", 0.90)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &table,
         );
@@ -3099,7 +3099,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("ratio_p99", 0.85)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &table,
         );
@@ -3116,7 +3116,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             None,
             &metrics(&[("ratio_p50", 0.50)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &table,
         );
@@ -3451,7 +3451,7 @@ mod tests {
         let (cell, outcomes) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             true,
             &HeadroomTable::new(),
         );
@@ -3468,7 +3468,13 @@ mod tests {
     #[test]
     fn a_non_finite_measurement_is_rejected_rather_than_recorded() {
         let measured = metrics(&[("view_p99_ms", f64::NAN)]);
-        let (cell, outcomes) = ratchet_cell(None, &measured, "echo", false, &HeadroomTable::new());
+        let (cell, outcomes) = ratchet_cell(
+            None,
+            &measured,
+            &minimal_cell("echo"),
+            false,
+            &HeadroomTable::new(),
+        );
         assert!(
             cell.is_empty(),
             "a NaN must not be written as a fresh bar: {cell:?}"
@@ -3489,7 +3495,7 @@ mod tests {
         let (cell, _) = ratchet_cell(
             Some(&existing),
             &measured,
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -3510,7 +3516,7 @@ mod tests {
         let (cell, _) = ratchet_cell(
             Some(&existing),
             &metrics(&[("view_p99_ms", 0.0)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -3526,7 +3532,7 @@ mod tests {
         let (cell, _) = ratchet_cell(
             Some(&existing),
             &metrics(&[("view_p99_ms", f64::NAN)]),
-            "echo",
+            &minimal_cell("echo"),
             false,
             &HeadroomTable::new(),
         );
@@ -3545,7 +3551,7 @@ mod tests {
         let (_cell, outcomes) = ratchet_cell(
             Some(&existing),
             &metrics(&[("ratio_p99", 1.40)]),
-            "echo",
+            &minimal_cell("echo"),
             true,
             &HeadroomTable::new(),
         );

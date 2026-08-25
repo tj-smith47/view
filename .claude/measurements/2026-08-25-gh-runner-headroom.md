@@ -192,6 +192,14 @@ in the key grammar (`"echo.heavy.ratio_p50"`), which `declared_factor`,
 have to learn; it is not written here because an entry no recorded cell
 binds is a load error, and heavy records nothing to bind to today.
 
+**Update 2026-08-25 (`596cbf0`):** the fixture level now exists. A headroom
+key resolves narrowest-first, `"scenario.fixture.metric"` >
+`"scenario.metric"` > `metric`, so the paragraph above describes the grammar
+before that commit and not today's. What still blocks the `echo.heavy`
+entry is unchanged and is the second half of that paragraph: an entry no
+recorded cell binds is a load error, and heavy records nothing to bind to
+until a record run reseats it.
+
 ## What changed
 
 ```toml
