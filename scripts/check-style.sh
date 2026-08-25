@@ -260,12 +260,48 @@ fi
 # export, for a reason that has nothing to do with the code under test.
 # `workspace_root` stays correct for source files and scratch roots -- what
 # it must never reach is a `release`/`debug` profile directory.
+# Keyed on the profile join itself rather than on what sits near a
+# `workspace_root` call: any distance rule is one refactor away from a
+# locator that spells the root and the profile far enough apart to pass.
+# A join is answered for by its own statement -- `target_root()` in the
+# chain, or a name the file bound to one earlier.
 if [ -d crates ]; then
-  built=$(grep -rnE -A6 'workspace_root\(\)' crates --include='*.rs' \
-    | grep -E 'join\("(release|debug)"\)' || true)
+  built=$(find crates -name '*.rs' -print0 | xargs -0 awk '
+    function check(  name) {
+      if (stmt ~ /target_root\(\)/ &&
+          match(stmt, /let[ \t]+(mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*/)) {
+        name = substr(stmt, RSTART, RLENGTH)
+        sub(/^let[ \t]+/, "", name)
+        sub(/^mut[ \t]+/, "", name)
+        rooted[name] = 1
+      }
+      if (stmt !~ /\.join\("(release|debug)"\)/ && stmt !~ /\.join\(profile/) {
+        return
+      }
+      if (stmt ~ /target_root\(\)/) {
+        return
+      }
+      for (name in rooted) {
+        if (stmt ~ ("(^|[^A-Za-z0-9_])" name "[^A-Za-z0-9_]")) {
+          return
+        }
+      }
+      printf "%s:%d:%s\n", FILENAME, FNR, stmt
+    }
+    FNR == 1 { delete rooted; stmt = "" }
+    {
+      line = $0
+      sub(/\/\/.*$/, "", line)
+      n = split(line, part, /[;{}]/)
+      for (i = 1; i <= n; i++) {
+        stmt = stmt " " part[i]
+        if (i < n) { check(); stmt = "" }
+      }
+    }
+  ' || true)
   if [ -n "$built" ]; then
     printf '%s\n' "$built"
-    echo "STYLE FAIL: a built binary resolved from workspace_root instead of target_root"
+    echo "STYLE FAIL: a built binary resolved from something other than target_root"
     echo "  A profile directory belongs to cargo, and CARGO_TARGET_DIR moves it."
     fail=1
   fi

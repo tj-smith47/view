@@ -120,7 +120,7 @@ watch_view() {
         printf 'FAIL: tmux session %s has no pane to read a pid from\n' "$session" >&2
         return 1
     fi
-    if [ "$(ps -o comm= -p "$pane_pid" 2>/dev/null | tr -d ' ')" = view ]; then
+    if [ "$(ps -o ucomm= -p "$pane_pid" 2>/dev/null | tr -d ' ')" = view ]; then
         pid=$pane_pid
     else
         pid=$(pgrep -P "$pane_pid" -x view | head -1 || true)
@@ -167,6 +167,44 @@ reap_views() {
     return 1
 }
 
+# The call shape, across every script at once, on every run.
+#
+# `watch_view` records into an array; a caller that wraps the call in a
+# command substitution still gets the pid it wanted, so nothing at the call
+# site looks wrong -- the record dies with the substitution's subshell and
+# only the reaper, holding an empty list, is left reporting every run
+# clean. That is how the recorder shipped broken once already.
+#
+# Walks all of `scripts`, not just the acceptance directory: the shape is
+# wrong wherever it is written, and a helper one directory over is exactly
+# where the next caller appears.
+refuse_subshelled_watch_view() {
+    # spelled in two halves so this line is not itself the thing it refuses
+    local needle subshelled
+    needle='$(watch'"_view"
+    subshelled=$(grep -rlF "$needle" "$REPO_ROOT/scripts" 2>/dev/null | tr '\n' ' ' || true)
+    if [ -n "$subshelled" ]; then
+        printf 'FAIL: watch_view is called in a command substitution (%s), where the pid it records dies with the subshell\n' \
+            "$subshelled" >&2
+        exit 1
+    fi
+}
+
+# Every exit path of the self-check, including the ones that abort it.
+#
+# The stand-in is a directory named `view` and the session holds a live
+# process: an abort that left them behind would outlive the run it aborted,
+# and the next run would find a `view` it never started.
+selfcheck_abort() {
+    printf 'FAIL: %s\n' "$1" >&2
+    if [ -n "${VIEW_PID:-}" ]; then
+        kill -9 "$VIEW_PID" 2>/dev/null || true
+    fi
+    tmux kill-session -t "${SELFCHECK_SESSION:-}" 2>/dev/null || true
+    rm -rf "${SELFCHECK_TMP:-}"
+    exit 1
+}
+
 # The recorder and the reaper end to end, on every run, through the call
 # shape the legs use: a stand-in named `view` in a tmux pane of its own,
 # recorded by `watch_view` and then reaped.
@@ -181,62 +219,47 @@ reap_views() {
 # `kill -0` answers for a zombie as though it were alive, and a real orphan
 # is never one.
 check_view_reaping() {
-    local tmp session before
-    tmp=$(mktemp -d)
+    local before
+    SELFCHECK_TMP=$(mktemp -d)
+    SELFCHECK_SESSION="view-acc-selfcheck-$$"
     # a shell under the name the recorder looks for. The trailing `:` is
     # what keeps that name: given one command, a shell execs it and becomes
     # `sleep` instead of staying the `view` this has to find
-    ln -s /bin/sh "$tmp/view"
-    session="view-acc-selfcheck-$$"
-    tmux new-session -d -s "$session" "$tmp/view -c 'sleep 300; :'" || {
-        printf 'FAIL: tmux could not start the session the self-check reaps\n' >&2
-        exit 1
-    }
-    before=${#VIEW_PIDS[@]}
+    ln -s /bin/sh "$SELFCHECK_TMP/view"
     VIEW_PID=""
+    tmux new-session -d -s "$SELFCHECK_SESSION" "$SELFCHECK_TMP/view -c 'sleep 300; :'" ||
+        selfcheck_abort 'tmux could not start the session the self-check reaps'
+    before=${#VIEW_PIDS[@]}
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        watch_view "$session" 2>/dev/null && break
+        watch_view "$SELFCHECK_SESSION" 2>/dev/null && break
         sleep 0.2
     done
     if [ -z "$VIEW_PID" ] || [ "${#VIEW_PIDS[@]}" -eq "$before" ]; then
-        printf 'FAIL: watch_view recorded no pid, so the reaper has nothing to kill\n' >&2
-        tmux kill-session -t "$session" 2>/dev/null || true
-        exit 1
+        selfcheck_abort 'watch_view recorded no pid, so the reaper has nothing to kill'
     fi
-    if ! reap_views; then
-        printf 'FAIL: the reaper could not reap a live view\n' >&2
-        exit 1
-    fi
+    reap_views || selfcheck_abort 'the reaper could not reap a live view'
     if kill -0 "$VIEW_PID" 2>/dev/null; then
-        printf 'FAIL: the reaper reported a clean run with its victim still alive\n' >&2
-        kill -9 "$VIEW_PID" 2>/dev/null || true
-        exit 1
+        selfcheck_abort 'the reaper reported a clean run with its victim still alive'
     fi
-    tmux kill-session -t "$session" 2>/dev/null || true
-    rm -rf "$tmp"
+    tmux kill-session -t "$SELFCHECK_SESSION" 2>/dev/null || true
+    rm -rf "$SELFCHECK_TMP"
     VIEW_PIDS=()
     VIEW_PID=""
+}
+refuse_subshelled_watch_view
 
-    # the call shape, across every script at once. The end-to-end above
-    # proves the recorder works when called as a statement; only this
-    # proves the legs call it that way, and the subshell form is invisible
-    # at the call site -- the caller still gets a pid, and only the reaper
-    # is left with nothing
-    # spelled in two halves so this line is not itself the thing it refuses
-    local needle subshelled
-    needle='$(watch'"_view"
-    subshelled=$(grep -rlF "$needle" "$REPO_ROOT/scripts/acceptance" 2>/dev/null | tr '\n' ' ' || true)
-    if [ -n "$subshelled" ]; then
-        printf 'FAIL: watch_view is called in a command substitution (%s), where the pid it records dies with the subshell\n' \
-            "$subshelled" >&2
+# The live half runs only for a script that records views. It needs a tmux
+# session of its own, and `remote-rtt.sh` starts none: it was aborting at
+# source over a tool it never calls, with a message that was false for it.
+# Read off the caller's own text rather than a flag it must remember to
+# set, so a script is covered the run it starts recording.
+if grep -q watch_view "${BASH_SOURCE[${#BASH_SOURCE[@]} - 1]}" 2>/dev/null; then
+    command -v tmux >/dev/null || {
+        printf 'FAIL: tmux is required (this leg drives a real terminal session)\n' >&2
         exit 1
-    fi
-}
-command -v tmux >/dev/null || {
-    printf 'FAIL: tmux is required (every leg here drives a real terminal session)\n' >&2
-    exit 1
-}
-check_view_reaping
+    }
+    check_view_reaping
+fi
 
 # This host's machine-class name, in `budgets.toml`'s vocabulary.
 #
