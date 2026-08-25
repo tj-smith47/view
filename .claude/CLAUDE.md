@@ -78,6 +78,14 @@ a peer's live-nvim test fails spuriously and nothing tells it why. Kill
 only pids you spawned; a stray from your own test is your harness's bug to
 fix (reap on drop), not a sweep to run.
 
+A signature that another crate calls changes by add-beside-then-switch, never
+in place: land the new function next to the old one, switch the callers in
+the crates you own, and delete the old one only in the commit that switches
+the last caller. Files you do not own are being edited and gated by peers
+at the same moment; an in-place change leaves their `task ci` unable to
+compile until you finish, and a shim you had to restore under pressure is
+the same edit done twice.
+
 ## Enforcement
 
 - `task ci` = fmt-check, lint, audit, style, loc, test. Commit only via `task commit PATHS="<path> <path>" -- -m "<msg>"`: it runs ci, then commits exactly the named paths from the working tree (`--only`). Never `git add` — the index is shared by every session committing on this tree and a peer's staging can land at any moment, so what is staged is never the set to commit; the named paths are. Non-code changes (docs, plans, README, `.claude/` notes) commit with `task commit:quick PATHS="…" -- -m "<msg>"`, which skips ci and refuses a path under `crates/`, `scripts/`, `.github/`, `Taskfile.yml`, or the Cargo/engine pins.
