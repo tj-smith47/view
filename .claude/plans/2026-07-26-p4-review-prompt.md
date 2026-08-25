@@ -83,7 +83,7 @@ find yourself writing either from memory, stop.
 
 **Standing rules that apply to you:**
 
-- Never push. Commit only via `task commit -- -m "<msg>"`.
+- Commit only via `task commit -- -m "<msg>"`.
 - Use `task` targets, never raw cargo.
 - Scratch files go in `~/.claude/tmp/`, never `/tmp/`.
 - No concession, metric degradation, or budget amendment is accepted

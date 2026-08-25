@@ -209,7 +209,7 @@ the vendored ignore-crate source and 20 clean runs on mbp.
 
 Still owed: the recorded long-session dogfood against this build — the
 prompt for it is staged — and the gh-runner proof of the new visual CI
-job, which lands with the bench-baseline push round.
+job, which lands with the bench-baseline re-record round.
 
 ## 2026-08-23 — the live session's second harvest (T13–T18)
 

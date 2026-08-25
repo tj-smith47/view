@@ -73,4 +73,4 @@ verdict attests only on a `controlled-*` class (none published yet); this
 class ratchets the recorded bars, which is the standing gate-attestation
 split. `speculated_paint_p99_ms` is a tail absolute — recorded here,
 gated on controlled classes. The gh-linux/gh-macos cells for this
-scenario record post-push (Ruling 17, `pending-first-push.md`).
+scenario record on the next GHA run (Ruling 17, `pending-gha-verification.md`).

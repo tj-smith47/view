@@ -28,21 +28,31 @@ mode, the open task list, and the judgment that no other file records. Create
 tasks from its open-task section at startup — the harness task store does not
 persist across sessions, so that file is the only carrier. HANDOFF.md is
 machine-local and untracked (as are STATUS.md, known-bugs.md, archive/, and
-pending-first-push.md); a fresh clone has none of them and starts from the
+pending-gha-verification.md); a fresh clone has none of them and starts from the
 spec and plans instead.
 
 Spec of record: `.claude/specs/2026-07-17-view-design.md`. Plans:
 `.claude/plans/INDEX.md`. On conflict, spec wins.
 
 Hard rules (in addition to global rules):
-- **Pushes land on `master` directly until the first version is tagged.** No
-  pull requests, no draft PRs, no integration branch gate: CI runs on pushes
-  to `master`, and a PR is a needless gate the user has had to remove more
-  than once. Land a feature branch with `git push origin <branch>:master`
-  (fast-forward; the branch stays for the session's own bookkeeping) and
-  obtain CI green yourself on that run — never hand "confirm green" to the
-  next session. The ask-only guard in `.claude/hooks/validate-commands.sh`
-  (singular standalone push command) is about command shape, not destination.
+- **The goal is the bar, never the landing.** Quality, performance and
+  reliability held high while working the open tasks toward a one-of-a-kind
+  UX — that is the whole goal. Landing the branch on `master` exists only to
+  obtain GHA checks; it is implicit in that work and is never a plan step, a
+  milestone, an exit item or something "authorized". Mechanics, when a GHA
+  run is needed: `master` directly until the first tag (no PRs — a needless
+  gate the user has removed more than once), `git push origin <branch>:master`
+  as a singular standalone command (the hook's ask-only guard is about
+  command shape), and whoever lands it obtains the green run — never handed
+  to a later session.
+- **Work is never kicked into a later phase.** Findings are fixed in the wave
+  that found them. The one approved deferral: implement all features first,
+  holding existing quality bars (ledgered when close), then one pre-v0.1.0
+  performance-and-stability session. It exists so a single item cannot burn a
+  week of context: a task that has absorbed ~4 h of tuning goes to that
+  session's ledger with the hours spent, and the work moves on. A remark the
+  user makes about one phase is scoped to that phase; it never becomes a
+  standing rule.
 - nvim owns all buffer text. No view subsystem holds authoritative text
   state. Buffer mutation happens only through `Effect::Rpc`.
 - The paint loop never awaits RPC. The RPC reader thread never blocks.

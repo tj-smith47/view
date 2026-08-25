@@ -993,13 +993,12 @@ fallback: a mode that quietly records instead would exit 0 having
 compared nothing, which no CI log can tell from a gate that compared
 everything and passed. A class is armed by a separate `--record` run
 whose command line says so, and which uploads the baseline TOML as a CI
-artifact. The T11 implementer's flow: push the branch with the bench
-legs on `--record`, download the two gh-class artifacts, commit them,
-and switch those legs to `--gate` in the same commit. From then on a
-missing baseline is a loud failure and every baseline change is a
-reviewed diff. (CI-runner verification itself remains push-gated —
-known-bugs.md item, user-owned; the flow above is written into the
-task so the first push executes it.)
+artifact. The T11 implementer's flow: run the bench legs on `--record`
+in GHA, download the two gh-class artifacts, commit them, and switch
+those legs to `--gate` in the same commit. From then on a missing
+baseline is a loud failure and every baseline change is a reviewed
+diff. (CI-runner verification itself needs a GHA run — resolved
+2026-08-03, when the flow above first executed.)
 
 **Falsifiable check:** a doctored baseline (impossible ratio) makes the
 bench gate command exit 1 locally naming the cell; `--gate` with the
@@ -1013,8 +1012,8 @@ the Taskfile is the single source).
 - [ ] **Step 2:** ci.yml jobs calling exactly those targets; actionlint
   clean; engine-pin check still green (T1's guard sees the new jobs).
 - [ ] **Step 3:** Local disconfirm of the gate path (doctored baseline
-  → exit 1, named row). CI-runner verification itself remains
-  push-gated (known-bugs.md item; user-owned).
+  → exit 1, named row). CI-runner verification itself needs a GHA run
+  (resolved 2026-08-03).
 - [ ] **Step 4:** `task ci`; commit.
 
 ---
@@ -1090,9 +1089,9 @@ gate-verified — see the perf-audit item).
   without `VIEW_DAILY_CONFIG`, and 15/15 OK with it; mbp real
   hardware 15/15 OK twice back-to-back (hermetic-home reset proven
   across runs) plus a plain run, all 2026-08-03; page regenerated and
-  committed `6043585`. The T11 CI legs are armed in the workflow but
-  have never executed remotely — nothing has been pushed; recorded in
-  `.claude/pending-first-push.md`.
+  committed `6043585`. The T11 CI legs are armed in the workflow but had
+  not yet executed remotely at the time of writing; recorded in
+  `.claude/pending-gha-verification.md` and resolved 2026-08-03.
 - [x] Every §3.1 row measurable without P4 features measured, and gated
   per T11's per-row table (CI paired gates armed with committed
   baselines; dev-class absolute gates green via `task perf-audit`) —

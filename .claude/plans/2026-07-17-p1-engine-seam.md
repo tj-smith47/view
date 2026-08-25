@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- All P0 constraints apply (lints, Taskfile usage, commit trailer, never push, WHY-only comments).
+- All P0 constraints apply (lints, Taskfile usage, commit trailer, WHY-only comments).
 - Attach options this phase: `ext_linegrid` only. Other ext layers land in P2 per the spec.
 - nvim ≥ 0.11 on PATH is required for integration tests; tests fail loudly if missing — no silent skips.
 - Add dependencies with `cargo add <crate> -p <member>` (e.g. `cargo add rmpv -p view-engine`); never hand-write guessed version numbers.

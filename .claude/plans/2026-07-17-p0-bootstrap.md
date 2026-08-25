@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Repo root: `/opt/repos/view`; branch `master`; git identity already configured locally.
-- Never push. Commits are fine and expected per task. Commit messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Commits are fine and expected per task. Commit messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 - After Task 2 exists, commit via `task commit -- -m "<msg>"`; before that, plain `git commit`.
 - Workspace lints (exact values in Task 1) apply to every crate forever: `unsafe_code = "deny"`, clippy `unwrap_used`/`expect_used`/`panic` = deny. Test modules may open with `#![allow(clippy::unwrap_used, clippy::expect_used)]` — test code only, never lib code.
 - Inline comments: WHY-only (constraint, invariant, workaround). No session narrative, no "Phase/Task/Step" markers, no "§" chapter refs in code or comments.
@@ -382,7 +382,7 @@ jobs:
 - [ ] **Step 2: Verify the workflow is well-formed YAML and the local mirror passes**
 
 Run: `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml'))" && task ci`
-Expected: no YAML error; `task ci` green. (Real CI proof lands on the user's first push — record that in `.claude/known-bugs.md` as a user-owned pending verification, per the honesty rule: we have not seen this workflow run.)
+Expected: no YAML error; `task ci` green. (Real CI proof needs a GHA run on a real runner — **resolved 2026-08-03**, when the workflow first ran on GitHub Actions.)
 
 - [ ] **Step 3: Commit**
 
@@ -497,7 +497,7 @@ Hard rules (in addition to global rules):
 Unchecked items must be drained before any "done" declaration or session
 sign-off; deferral requires explicit user approval.
 
-- [ ] CI workflow has never run (proof requires the user's first push).
+- [x] CI workflow proven on a real GHA runner — resolved 2026-08-03.
 ```
 
 - [ ] **Step 3: Write `.claude/dogfood-journal.md`**

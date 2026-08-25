@@ -192,7 +192,7 @@ nested `.gitignore` even when the event arrives without a registered
 parent (the FSEvents leak shape, simulated directly); the existing
 event-level test stays as-is and must pass on macOS. macOS verification
 owed via an mbp run of the view-ai suite (script file, provenance line,
-caffeinate) before the next push is called green-capable.
+caffeinate) before this is called green-capable.
 
 ## T9 — User messages appear in the transcript
 
@@ -797,7 +797,7 @@ Every box observed at the chain tip (d2b1533):
 
 Bench evidence en route: `ai_composer` gate OK (p50 0.08ms, p99 0.141ms
 vs 0.169 bar) in the final review's run; the gh legs re-record on the
-next push round. Latency note owed by 2010df6's body: one fewer
+next GHA run. Latency note owed by 2010df6's body: one fewer
 O(overlays) scan per keypress, sub-microsecond, no allocation.
 
 ### Exit record — 2026-08-23, second stretch (T13–T18)
@@ -830,7 +830,7 @@ Every box observed at the chain tip (e3ec6a8):
   (payload already in memory).
 
 Owed beyond this plan: the recorded long-session dogfood (unblocked by
-this stretch), then the push round that re-records the gh bench legs
+this stretch), then the round that re-records the gh bench legs on GHA
 and flips them to --gate.
 
 ### Exit record — 2026-08-24, third stretch (T19–T27)
@@ -853,10 +853,9 @@ Every box observed at the wave tip (46a6c04):
   types the `<C-w>` chord; the pending-question caret and the transcript's
   live reflow are pinned by surface/unit tests only; the standing-answer
   store is driven against the stub, never the real adapter's request
-  shape; bench attestation for the AI rows arrives with the post-push gh
-  record legs (standing split), not a dev-linux number.
+  shape; bench attestation for the AI rows arrives with the gh record
+  legs (standing split), not a dev-linux number.
 
-Owed beyond this plan: the push (authorized, singular) and the next
-session's confirmation that CI goes green; the gh bench TOML → `--gate`
+Owed beyond this plan: GHA checks green; the gh bench TOML → `--gate`
 flip on that green run; the adapter probe re-run on the next adapter
 bump; the typed line-break key for the composer, pitched.

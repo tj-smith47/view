@@ -73,5 +73,5 @@ Published spread (`dev-linux.headroom.toml`, scenario-scoped):
 - Attestation scope: dev-linux is a shared class — the `max = 6.0` budget
   verdict attests only on a `controlled-*` class; this class ratchets the
   recorded bars (BUDGET SKIP printed, standing gate-attestation split).
-- gh-linux/gh-macos cells for this scenario record post-push (Ruling 17,
-  `pending-first-push.md`).
+- gh-linux/gh-macos cells for this scenario record on the next GHA run (Ruling 17,
+  `pending-gha-verification.md`).

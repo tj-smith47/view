@@ -60,7 +60,7 @@ detection uses raw escape queries
   marker, we/I/Claude, plan/review/finding/audit references, em dashes
   (`scripts/check-style.sh` scans crate sources and will fail the commit).
 - Build/lint/test via task targets only; commit via
-  `task commit -- -m "<msg>"`; NEVER push. Trailer on every commit:
+  `task commit -- -m "<msg>"`. Trailer on every commit:
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. Any commit
   touching key dispatch, grid apply, or paint states its latency consequence
   in one sentence.
@@ -984,8 +984,8 @@ observed output — never a bare checkmark (planning protocol step 7).
   approved by the user or pulled into the phase; none silently expire.
   (Surfaced to the user 2026-07-18; awaiting their call.)
 - [ ] `.claude/known-bugs.md` drained or user-approved deferrals only.
-  (One item: GitHub Actions CI unverified until first push — user-owned;
-  approval requested 2026-07-18.)
+  (One item: GitHub Actions CI unverified on a real runner — resolved
+  2026-08-03, when the workflow first ran on GitHub Actions.)
 - [x] Dogfood note appended (start using view for real edits). Evidence:
   `.claude/dogfood-journal.md` entry dated 2026-07-18.
 - [x] P3 plan authored under the charter + planning protocol, against
