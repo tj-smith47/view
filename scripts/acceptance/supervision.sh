@@ -44,13 +44,6 @@ ROWS=40
 # so it is small next to the tightest window any of them assert (2.5s).
 POLL=0.25
 
-# How long the wedge chunks are told to spin for. Never waited out: what
-# ends each of them is the recovery under test, and the budget exists only
-# so that a loop which simply finished can never be mistaken for one a
-# recovery ended. Comfortably past the whole read-side observation window
-# (detection, escalation, then the interrupt reaction window).
-WEDGE_BUDGET_SECS=180
-
 # One bracketed paste, sized past what a pipe will hold. This is the whole
 # write-side induction: view sends a bracketed paste as a single
 # `nvim_paste` message, so a peer that has stopped reading leaves exactly
@@ -581,15 +574,31 @@ grep -qF -- "$INTERRUPT_UNANSWERED" "$SUPERVISION_RS" || {
     exit 1
 }
 
-# A Lua `while`, which pumps nothing: an engine inside one answers neither
-# the liveness probe nor the interrupt, which is the wedge class the
-# restart exists for. `vim.uv.hrtime` because libuv's loop-cached clock
-# never advances inside a loop that reaches no loop iteration.
-LUA_WEDGE=":lua local t=vim.uv.hrtime() while $((WEDGE_BUDGET_SECS * 1000000000)) - (vim.uv.hrtime()-t) > 0 do end"
+# Both wedges spin unconditionally, with no duration bound of their own.
+#
+# A bound is what a bounded loop has to read a clock to enforce, and a clock
+# read from inside a wedged engine is not a measurement this harness can
+# trust: on dev-macos the same `vim.uv.hrtime()` budget that holds for its
+# whole 180 s on dev-linux is observed crossed after 18-50 s of wall (the
+# leg then fails on the modal, which is still 30 s away), and a 120 s budget
+# in the same shape has equally been observed crossed only after 411 s. An
+# unbounded loop reads no clock, so neither reading can end it.
+#
+# Nothing is lost by dropping the bound. What ends each wedge is the recovery
+# under test, and the property the bound was there for -- that a loop which
+# simply finished can never be mistaken for one a recovery ended -- is
+# strictly stronger here, since a loop with no exit condition cannot finish.
+# A leg that fails before its recovery leaves the engine spinning, which the
+# script's own cleanup kills along with every other engine it started.
+#
+# A Lua `while` pumps nothing: an engine inside one answers neither the
+# liveness probe nor the interrupt, which is the wedge class the restart
+# exists for.
+LUA_WEDGE=':lua while true do end'
 # A Vimscript `while`, whose break check pumps the event loop: it stops
 # answering the probe just the same, and it is the wedge class `<C-c>`
 # reaches, so it is what proves the modal's first choice recovers anything.
-VIM_WEDGE=":let g:t=reltime() | while $WEDGE_BUDGET_SECS - reltimefloat(reltime(g:t)) > 0 | endwhile"
+VIM_WEDGE=':while 1 | endwhile'
 
 printf 'view acceptance: supervision (%s, %s, %sx%s)\n' \
     "${VIEW_BIN#"$REPO_ROOT/"}" "$(nvim --version | head -1)" "$COLS" "$ROWS"
