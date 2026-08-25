@@ -314,9 +314,17 @@ fn csi_sequence(run: &[u8]) -> Escape {
         // own events -- and which typed through would insert at the line
         // start or open a line above
         b'I' | b'O' if fields.is_empty() => Escape::Decoded { len, msg: None },
-        // `CSI R` with parameters is a cursor-position report; without
-        // them it is the F3 this table and crossterm's both name
-        b'R' if !fields.is_empty() => Escape::Decoded { len, msg: None },
+        // `CSI R` is a cursor-position report in every form a terminal
+        // sends one unasked, and crossterm names none of those a key: bare
+        // it is an error there, typing nothing, and with a row and column
+        // it is the report. The one spelling that is F3 is the modifier
+        // form `CSI ; m R`, whose empty first parameter no position report
+        // has -- crossterm reads that one through
+        // `parse_csi_modifier_key_code` and so does this
+        b'R' => match field(&fields, 0) {
+            Some(0) => decoded(len, KeyCode::F(3), modifier),
+            _ => Escape::Decoded { len, msg: None },
+        },
         _ => match cursor_key(final_byte) {
             Some(code) => decoded(len, code, modifier),
             None => unnamed,
@@ -549,6 +557,9 @@ fn modifiers(field: Option<u32>) -> KeyModifiers {
 
 /// The final byte of a cursor or editing-key sequence, in the spelling CSI
 /// and SS3 share.
+///
+/// `R` reaches this from SS3 alone: as a CSI final it is answered above,
+/// where the same byte is a cursor-position report.
 fn cursor_key(final_byte: u8) -> Option<KeyCode> {
     Some(match final_byte {
         b'A' => KeyCode::Up,
@@ -1015,10 +1026,18 @@ mod tests {
     #[test]
     fn residue_a_terminal_report_is_consumed_rather_than_typed() {
         // `CSI R` answers "where is the cursor" and shares its final byte
-        // with F3. Its parameters are what tell the two apart: a report
-        // carries them, the key does not
+        // with F3. An empty first parameter is what tells the two apart:
+        // a position report always names a row, the modifier form never
+        // does
         assert!(encode_residue_bytes(b"\x1b[1;40R").is_empty());
-        assert_eq!(encode_residue_bytes(b"\x1b[R"), vec!["<F3>"]);
+        // and a bare one is a report crossterm cannot parse and types
+        // nothing from, rather than the F3 that final byte also spells
+        assert!(encode_residue_bytes(b"\x1b[R").is_empty());
+        // the one spelling that is the key: an empty first parameter, which
+        // is the modifier form and never a position
+        assert_eq!(encode_residue_bytes(b"\x1b[;5R"), vec!["<C-F3>"]);
+        // SS3 keeps its own F3, which crossterm names too
+        assert_eq!(encode_residue_bytes(b"\x1bOR"), vec!["<F3>"]);
         for report in [
             // an SGR mouse press, which typed through is nine keystrokes
             b"\x1b[<0;24;10M".as_slice(),

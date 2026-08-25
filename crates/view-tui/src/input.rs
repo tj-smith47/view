@@ -467,7 +467,7 @@ impl InputSource {
             // has to own the terminal from this handle's first byte
             source.sweep_late_replies();
         }
-        if crossterm_may_read(source.guard.is_some(), false) {
+        if crossterm_may_read(source.guard.is_some()) {
             let _ = crossterm::event::poll(Duration::ZERO);
         }
         Ok(source)
@@ -675,7 +675,7 @@ impl InputSource {
         if !self.guard_msgs.is_empty() {
             return true;
         }
-        if !crossterm_may_read(self.guard.is_some(), false) {
+        if !crossterm_may_read(self.guard.is_some()) {
             return false;
         }
         for _ in 0..BUFFERED_POLL_LIMIT {
@@ -711,7 +711,20 @@ impl InputSource {
         for msg in self.guard_msgs.drain(..) {
             sink(msg);
         }
-        if !crossterm_may_read(self.guard.is_some(), resized) {
+        // a resize is the one thing the guard used to hand the fd back
+        // for. It arrives as a signal, and its new shape is an ioctl away
+        // (`terminal::size` is TIOCGWINSZ), so the frame is corrected here
+        // without the read that would cost the guard a reply. A shape this
+        // cannot read is not lost either: the guard ends inside its cap and
+        // crossterm's own copy of the signal is an `Event::Resize` on the
+        // next drain -- the same message, to the same shape
+        if resized && self.guard.is_some() {
+            if let Ok((width, height)) = crossterm::terminal::size() {
+                size.publish(width, height);
+                sink(Msg::Resized { width, height });
+            }
+        }
+        if !crossterm_may_read(self.guard.is_some()) {
             return DrainOutcome::Drained;
         }
         loop {
@@ -749,12 +762,14 @@ impl InputSource {
 /// (`view/src/wake.rs` polls [`InputSource::tty_fd`]), so nothing is missed
 /// by not asking crossterm -- the next sweep reads the same bytes.
 ///
-/// A resize is the exception, and the only one: it does not come off this
-/// fd at all, and a frame painted at a shape the terminal has left outlives
-/// the guard's own window by the whole rest of the session.
+/// There is no exception. A resize was one until its shape turned out to
+/// be readable without the fd -- [`drain`](InputSource::drain) answers a
+/// SIGWINCH from `crossterm::terminal::size`, a `TIOCGWINSZ` ioctl, so the
+/// frame is corrected on the pass the signal arrives and the parser still
+/// never sees a byte.
 #[cfg(unix)]
-const fn crossterm_may_read(guard_armed: bool, resized: bool) -> bool {
-    !guard_armed || resized
+const fn crossterm_may_read(guard_armed: bool) -> bool {
+    !guard_armed
 }
 
 /// Translates one crossterm event into the core [`Msg`] the runtime loop
@@ -788,19 +803,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guard_owns_the_terminal_and_a_resize_is_the_only_thing_that_reads_past_it() {
+    fn the_guard_owns_the_terminal_and_nothing_reads_past_it() {
         assert!(
-            crossterm_may_read(false, false),
+            crossterm_may_read(false),
             "an unarmed session is crossterm's own"
         );
         assert!(
-            !crossterm_may_read(true, false),
-            "while the guard is armed a poll is a read of the fd it owns"
-        );
-        assert!(
-            crossterm_may_read(true, true),
-            "a resize does not come off that fd, and a stale shape outlives \
-             the guard's whole window"
+            !crossterm_may_read(true),
+            "while the guard is armed a poll is a read of the fd it owns, \
+             and a resize is answered by an ioctl rather than by one"
         );
     }
 
