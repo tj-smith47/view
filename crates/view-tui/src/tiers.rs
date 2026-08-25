@@ -324,39 +324,166 @@ pub(crate) struct Replies {
 /// Whether what [`scan_replies`] left unaccounted for can only be the
 /// terminal's own half-delivered answer.
 ///
-/// The scan stops short of three shapes, and two of them a keyboard cannot
-/// produce: a private-mode CSI still missing its final byte, and the
-/// opening of the batch's own DCS answer. Nothing else arrives in either --
-/// no key emits `?` as a CSI's first byte, and five bytes of `ESC P 0/1 $ r`
-/// are past anything `ESC P` can be as a keypress. The third is a trailing
-/// bare `ESC [`, equally the first two bytes of every arrow and function
-/// key, so that one is ambiguous and this reports false for it.
+/// True for a run that is still a live prefix of an answer grammar and that
+/// no keyboard can produce: `ESC [ ?` and the five bytes the batch's DCS
+/// answer opens with. A bare `ESC [` is equally the opening of every arrow
+/// and function key, so that one reports false even though the scan is
+/// still waiting on it.
 pub(crate) fn is_terminal_only_remainder(buf: &[u8]) -> bool {
     matches!(
-        buf,
-        [0x1b, b'P', b'0' | b'1', b'$', b'r', ..] | [0x1b, b'[', b'?', ..]
+        answer_head(buf),
+        AnswerHead::Partial {
+            keyboard_possible: false
+        }
     )
+}
+
+/// What one of the probe's answers resolves to.
+enum AnswerKind {
+    /// A DECRPM reply, and whether it reports synchronized output usable.
+    Decrpm(bool),
+    Kitty,
+    Da1,
+    /// A DECRQSS readback, and whether it echoed the 24-bit background.
+    Decrqss(bool),
+}
+
+/// How the head of a byte run stands against the probe's answer grammars.
+enum AnswerHead {
+    /// The run's first `len` bytes are one whole answer.
+    Complete { len: usize, kind: AnswerKind },
+    /// Every byte so far is a live prefix of at least one grammar and the
+    /// rest of the answer has not arrived. `keyboard_possible` marks the
+    /// prefixes a keypress can also produce (`ESC [`), which must not be
+    /// discarded as the terminal's when the guard runs out of time.
+    Partial { keyboard_possible: bool },
+    /// The run leaves every grammar. `terminal_prefix` counts the leading
+    /// bytes that were provably the terminal's before it did -- a stalled
+    /// private-mode answer with a keypress on the end of it -- so the byte
+    /// at that offset is the user's and everything before it is not.
+    NotAnAnswer { terminal_prefix: usize },
+}
+
+/// Matches the head of `buf` against the four shapes the probe's batch can
+/// be answered with, and only those:
+///
+/// | Answer | Grammar |
+/// |---|---|
+/// | DECRPM (`QUERY_SYNC`) | `ESC [ ? Ps ; Pm $ y`, `Ps` digits, `Pm` 0..=4 |
+/// | kitty flags (`QUERY_KITTY`) | `ESC [ ? flags u`, `flags` a five-bit field |
+/// | DA1 fence (`QUERY_DA1_FENCE`) | `ESC [ ? class ; ... c`, digits and `;`, `class` <= 65 |
+/// | DECRQSS (`QUERY_TRUECOLOR`) | `ESC P 0/1 $ r ... ESC \` (or `BEL`) |
+///
+/// One acceptor for all four, because every rule that guessed from a
+/// shorter prefix has been wrong about some keypress: `ESC P` is
+/// Alt+Shift+P, a `c` behind a stalled `?2026` is a change operator rather
+/// than a DA1 fence, and a `u` behind the same stall is not a kitty
+/// terminal. A byte that leaves every grammar ends the answer, whatever
+/// that byte is.
+fn answer_head(buf: &[u8]) -> AnswerHead {
+    match buf {
+        // `ESC [` alone is where an answer and an arrow key are the same
+        // two bytes; the read after it decides which
+        [0x1b, b'['] => AnswerHead::Partial {
+            keyboard_possible: true,
+        },
+        [0x1b, b'[', b'?', params @ ..] => private_csi_head(params),
+        [0x1b, b'P', b'0' | b'1', b'$', b'r', ..] => match dcs_body(&buf[2..]) {
+            Some((body, past)) => AnswerHead::Complete {
+                len: 2 + past,
+                kind: AnswerKind::Decrqss(truecolor_from_decrqss(body)),
+            },
+            None => AnswerHead::Partial {
+                keyboard_possible: false,
+            },
+        },
+        _ => AnswerHead::NotAnAnswer { terminal_prefix: 0 },
+    }
+}
+
+/// The three private-mode grammars, from the byte after their shared
+/// `ESC [ ?` introducer. `params` is what has arrived of the parameter
+/// bytes, final byte included once it is there.
+fn private_csi_head(params: &[u8]) -> AnswerHead {
+    const INTRODUCER: usize = 3;
+    for (at, &byte) in params.iter().enumerate() {
+        if (0x40..=0x7e).contains(&byte) {
+            let seen = &params[..at];
+            let kind = match byte {
+                b'y' if is_decrpm_params(seen) => AnswerKind::Decrpm(is_sync_supported(seen)),
+                b'u' if is_kitty_flags(seen) => AnswerKind::Kitty,
+                b'c' if is_da1_class(seen) => AnswerKind::Da1,
+                _ => {
+                    return AnswerHead::NotAnAnswer {
+                        terminal_prefix: INTRODUCER + at,
+                    }
+                }
+            };
+            return AnswerHead::Complete {
+                len: INTRODUCER + at + 1,
+                kind,
+            };
+        }
+        if !matches!(byte, b'0'..=b'9' | b';' | b'$') {
+            return AnswerHead::NotAnAnswer {
+                terminal_prefix: INTRODUCER + at,
+            };
+        }
+    }
+    AnswerHead::Partial {
+        keyboard_possible: false,
+    }
+}
+
+/// A DECRPM reply's parameters: `Ps ; Pm $`, the mode number and the state
+/// the terminal reports for it. The state is one of the five the grammar
+/// defines (0 not recognized, 1 set, 2 reset, 3/4 permanently so), and the
+/// `$` is mandatory -- which is what tells the answer from a stalled reply
+/// with a `y` typed onto the end of it.
+fn is_decrpm_params(params: &[u8]) -> bool {
+    let Some(core) = params.strip_suffix(b"$") else {
+        return false;
+    };
+    let Some(sep) = core.iter().position(|&b| b == b';') else {
+        return false;
+    };
+    parse_ascii_u32(&core[..sep]).is_some()
+        && matches!(parse_ascii_u32(&core[sep + 1..]), Some(0..=4))
+}
+
+/// The kitty keyboard protocol reports its progressive-enhancement flags as
+/// a five-bit field, so anything above 31 is not that answer.
+fn is_kitty_flags(params: &[u8]) -> bool {
+    matches!(parse_ascii_u32(params), Some(0..=31))
+}
+
+/// A DA1 reply's first parameter is the device class -- 1, 6, 12 and 62..65
+/// in practice. The bound is deliberately loose (any class a VT-anything
+/// has claimed) and the shape is exact: no `$`, because that byte belongs
+/// to DECRPM alone.
+fn is_da1_class(params: &[u8]) -> bool {
+    if params.contains(&b'$') {
+        return false;
+    }
+    let first = params.split(|&b| b == b';').next().unwrap_or_default();
+    matches!(parse_ascii_u32(first), Some(0..=65))
 }
 
 /// Scans `buf` for every reply detection cares about.
 ///
-/// Two shapes are treated as replies: private-mode CSI sequences
-/// (`ESC [ ?` ...), which is what DECRPM, the kitty flags and DA1 all
-/// answer with, and a DCS (`ESC P` ...), which is what the DECRQSS
-/// truecolor readback answers with. A byte that is not part of one is
-/// appended to `residue` instead of being discarded: nothing on this fd but
-/// the terminal itself answers the probe's own query batch in either shape,
-/// so anything else -- including a plain `ESC [` sequence like an arrow key
-/// -- came from somewhere else, almost always keystrokes queued before or
-/// during the probe window, and must survive to be forwarded rather than
-/// vanish.
+/// Each position is matched by [`answer_head`]: a whole answer is consumed
+/// silently, a live prefix ends the scan (those bytes are the terminal's
+/// and belong to the read that completes them), and anything else is the
+/// user's and goes to `residue` byte by byte. Nothing on this fd but the
+/// terminal itself answers the probe's own query batch, so a byte outside
+/// every grammar came from somewhere else -- almost always keystrokes
+/// queued before or during the probe window -- and must survive to be
+/// forwarded rather than vanish.
 ///
-/// A reply of either shape with no terminator yet by the end of `buf` (the
-/// terminal's own answer, cut off by the probe's deadline) is dropped
-/// rather than added to `residue`, and `consumed` stops short of it: a
-/// keyboard cannot produce `ESC [ ?` or `ESC P`, so a truncated fragment
-/// matching either shape is always a half-delivered answer, never something
-/// to replay into nvim.
+/// A stalled answer with a keypress on the end of it (`ESC [ ? 2026` still
+/// in the buffer when the user presses `c`) is split rather than taken
+/// whole: the run in front is the terminal's and goes, the byte that ended
+/// it is the user's and stays.
 pub(crate) fn scan_replies(buf: &[u8]) -> Replies {
     let mut sync = false;
     let mut kitty = false;
@@ -365,63 +492,23 @@ pub(crate) fn scan_replies(buf: &[u8]) -> Replies {
     let mut residue = Vec::new();
     let mut i = 0;
     while i < buf.len() {
-        // the batch asks one DCS question and its answer opens
-        // `ESC P 0/1 $ r`; five bytes are what tells that from a keypress.
-        // `ESC P` alone is Alt+Shift+P, and an `<Esc>` typed just before a
-        // `P` coalesces into the same two bytes -- both reachable here,
-        // because a scan only runs while the kitty keyboard protocol is
-        // unpushed. Anything shorter falls through to residue and reads
-        // back as `<Esc>` then `P`, which is what was typed
-        if let [0x1b, b'P', b'0' | b'1', b'$', b'r', ..] = &buf[i..] {
-            let Some((body, past)) = dcs_body(&buf[i + 2..]) else {
-                // an unterminated answer: the rest of it is still in
-                // flight, and none of these bytes is anyone's keystroke
-                break;
-            };
-            truecolor_reply |= truecolor_from_decrqss(body);
-            i += 2 + past;
-            continue;
+        match answer_head(&buf[i..]) {
+            AnswerHead::Complete { len, kind } => {
+                match kind {
+                    AnswerKind::Decrpm(supported) => sync |= supported,
+                    AnswerKind::Kitty => kitty = true,
+                    AnswerKind::Da1 => da1 = true,
+                    AnswerKind::Decrqss(truecolor) => truecolor_reply |= truecolor,
+                }
+                i += len;
+            }
+            AnswerHead::Partial { .. } => break,
+            AnswerHead::NotAnAnswer { terminal_prefix } => {
+                i += terminal_prefix;
+                residue.push(buf[i]);
+                i += 1;
+            }
         }
-        // a CSI introducer ending the read is the terminal mid-reply, not
-        // typed input: forwarding it would replay an Escape plus a literal
-        // `[` into the engine, the same reason the >=3-byte truncation
-        // below is dropped. A lone trailing ESC stays residue -- that is
-        // what the Escape key produces, so dropping it would eat a key
-        if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'[' && i + 2 >= buf.len() {
-            break;
-        }
-        let is_private_csi_start =
-            i + 2 < buf.len() && buf[i] == 0x1b && buf[i + 1] == b'[' && buf[i + 2] == b'?';
-        if !is_private_csi_start {
-            residue.push(buf[i]);
-            i += 1;
-            continue;
-        }
-        let params_start = i + 3;
-        let mut j = params_start;
-        while j < buf.len() && !(0x40..=0x7e).contains(&buf[j]) {
-            j += 1;
-        }
-        if j >= buf.len() {
-            // an in-flight reply with no final byte yet: nothing more to
-            // find until the next chunk arrives, and the bytes seen so far
-            // are the terminal's own, not residue
-            break;
-        }
-        let params = &buf[params_start..j];
-        match buf[j] {
-            b'y' => sync |= is_sync_supported(params),
-            b'u' => kitty = true,
-            b'c' => da1 = true,
-            // the batch's private-mode questions are answered with `y`,
-            // `u` and `c`, so a sequence ending in anything else is the
-            // terminal's stalled answer with a keystroke on the end of it:
-            // a printable key terminates the pending CSI wherever it
-            // stopped. The run in front is the terminal's and goes; the
-            // byte that ended it is the user's and stays
-            _ => residue.push(buf[j]),
-        }
-        i = j + 1;
     }
     Replies {
         sync,
@@ -1073,6 +1160,78 @@ mod tests {
             detect(&mut source, &mut sink, PROBE_DEADLINE, Some("truecolor")).unwrap();
         assert!(caps.truecolor, "COLORTERM keeps its own, unchanged say");
         assert_eq!(tier_name(caps.tier), "full");
+    }
+
+    #[test]
+    fn a_stalled_private_reply_never_fabricates_an_answer_from_a_keypress() {
+        // the keys most pressed in normal mode are the ones a private-mode
+        // CSI's grammar can end on: a `c` read as the DA1 fence would drop
+        // the late-reply guard, a `u` would claim a kitty terminal that
+        // never answered, and a `y` would eat a yank
+        for key in *b"cuyh:" {
+            let mut buf = b"\x1b[?2026".to_vec();
+            buf.push(key);
+            let replies = scan_replies(&buf);
+            assert_eq!(
+                replies.residue,
+                vec![key],
+                "{} must reach the engine as the key it is",
+                key as char
+            );
+            assert_eq!(replies.consumed, buf.len());
+            assert!(
+                !replies.da1 && !replies.kitty && !replies.sync,
+                "no capability may be read out of `?2026` plus {}",
+                key as char
+            );
+        }
+    }
+
+    #[test]
+    fn each_answer_the_batch_can_receive_is_consumed_whole_and_silently() {
+        for (answer, name) in [
+            (b"\x1b[?2026;1$y".as_slice(), "DECRPM"),
+            (b"\x1b[?2026;0$y".as_slice(), "DECRPM, mode unrecognized"),
+            (b"\x1b[?0u".as_slice(), "kitty flags"),
+            (b"\x1b[?62;4c".as_slice(), "DA1"),
+            (b"\x1bP1$r0;48;2;1;2;3m\x1b\\".as_slice(), "DECRQSS"),
+        ] {
+            let replies = scan_replies(answer);
+            assert!(
+                replies.residue.is_empty() && replies.consumed == answer.len(),
+                "{name} must leave nothing behind: {replies:?}",
+                replies = replies.residue
+            );
+        }
+        assert!(scan_replies(b"\x1b[?2026;1$y").sync);
+        assert!(scan_replies(b"\x1b[?0u").kitty);
+        assert!(scan_replies(b"\x1b[?62;4c").da1);
+        assert!(scan_replies(b"\x1bP1$r0;48;2;1;2;3m\x1b\\").truecolor_reply);
+    }
+
+    #[test]
+    fn a_parameter_outside_its_grammars_range_is_not_that_answer() {
+        // the kitty field is five bits and DA1's class is a small number;
+        // past either bound the run is a stalled reply with a key on it
+        assert!(!scan_replies(b"\x1b[?32u").kitty);
+        assert!(!scan_replies(b"\x1b[?66c").da1);
+        assert!(scan_replies(b"\x1b[?31u").kitty);
+        assert!(scan_replies(b"\x1b[?65c").da1);
+        // DECRPM without its `$`, and with a state outside 0..=4
+        assert_eq!(scan_replies(b"\x1b[?2026;1y").residue, b"y");
+        assert_eq!(scan_replies(b"\x1b[?2026;5$y").residue, b"y");
+    }
+
+    #[test]
+    fn only_the_shapes_no_keyboard_emits_are_held_as_the_terminals_own() {
+        assert!(is_terminal_only_remainder(b"\x1b[?2026"));
+        assert!(is_terminal_only_remainder(b"\x1bP1$r0;48"));
+        // equally the opening of every arrow key, so the flush hands it to
+        // the decoder rather than discarding it as an answer
+        assert!(!is_terminal_only_remainder(b"\x1b["));
+        assert!(!is_terminal_only_remainder(b"\x1bP"));
+        assert!(!is_terminal_only_remainder(b"\x1b"));
+        assert!(!is_terminal_only_remainder(b""));
     }
 
     #[test]
