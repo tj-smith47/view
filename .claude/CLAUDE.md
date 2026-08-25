@@ -53,6 +53,12 @@ Hard rules (in addition to global rules):
 - Performance is a contract: any change touching key dispatch, grid apply,
   or paint states its latency consequence in the PR/commit description.
 - Use `task` targets, never raw cargo, for build/fmt/lint/test/commit.
+- **A measurement needs a quiet host, and a quiet host needs the peer's
+  consent.** Before `task bench` / `perf-audit` / `heartbeat-ab`: message the
+  other session on this machine (`ListAgents` → `cfgd-*`) to finish its
+  cargo work and hold, wait for its "go", `touch ~/.cache/view-quiet-host.lock`,
+  measure, `rm` the lock, tell it "released". The hook denies those targets
+  without a fresh lock; the lock is the receipt, not the coordination.
 
 ## Subagents: gates run in the FOREGROUND
 
@@ -68,7 +74,7 @@ foreground-with-timeout is the compliant way for a subagent to wait.
 
 ## Enforcement
 
-- `task ci` = fmt-check, lint, audit, style, loc, test. Commit only via `task commit -- -m "<msg>"`. Stage first: `git add <paths>`, then `task commit`, which runs ci and re-stages only what you staged plus what ci regenerated — never `git add -A`, so parallel implementers on disjoint files cannot sweep each other's in-flight edits into a commit. The index itself is still shared: stage and commit in one command (`git add <paths> && task commit -- -m "…"`) and never leave files staged between steps, or a peer's commit takes them. Non-code changes (docs, plans, README, `.claude/` notes) commit with `task commit:quick -- -m "<msg>"`, which skips ci and refuses a staged set that touches `crates/`, `scripts/`, `.github/`, `Taskfile.yml`, or the Cargo/engine pins.
+- `task ci` = fmt-check, lint, audit, style, loc, test. Commit only via `task commit PATHS="<path> <path>" -- -m "<msg>"`: it runs ci, then commits exactly the named paths from the working tree (`--only`). Never `git add` — the index is shared by every session committing on this tree and a peer's staging can land at any moment, so what is staged is never the set to commit; the named paths are. Non-code changes (docs, plans, README, `.claude/` notes) commit with `task commit:quick PATHS="…" -- -m "<msg>"`, which skips ci and refuses a path under `crates/`, `scripts/`, `.github/`, `Taskfile.yml`, or the Cargo/engine pins.
 - `scripts/audit-deps.sh` enforces crate dependency direction; `scripts/check-style.sh` enforces comment/doc style. Both run in CI.
 - `.claude/settings.json` hooks block `git push` and plain `git commit`, and check edited Rust files for formatting and comment style.
 - Conventions for Rust code: `.claude/rules/rust.md`.

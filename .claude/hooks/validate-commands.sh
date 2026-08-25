@@ -72,4 +72,15 @@ if printf %s "$FLAT" | grep -qE '\bgit\b[^|;&]*\bcommit\b'; then
   echo "BLOCKED: commit via: task commit -- -m \"<msg>\" (runs the ci gate)." >&2
   exit 2
 fi
+# A measurement on this shared host is only evidence if the other sessions
+# on it were asked to hold their cargo work first. The lock is the receipt
+# for that exchange: created by hand after the peer session (cfgd-*) says
+# "go", removed when it is told "released". Its age caps a forgotten lock.
+QUIET_LOCK="$HOME/.cache/view-quiet-host.lock"
+if printf %s "$FLAT" | grep -qE '\btask\b[^|;&]*\b(bench|bench-micro|perf-audit|heartbeat-ab)\b'; then
+  if [[ ! -f "$QUIET_LOCK" ]] || (( $(date +%s) - $(stat -c %Y "$QUIET_LOCK") > 7200 )); then
+    echo "BLOCKED: quiet-host measurement without coordination. Message the peer session (ListAgents → cfgd-*) to hold heavy cargo work, wait for its \"go\", then \`touch $QUIET_LOCK\` and re-run; \`rm\` the lock and tell the peer \"released\" when done. A lock older than 2h is stale." >&2
+    exit 2
+  fi
+fi
 exit 0

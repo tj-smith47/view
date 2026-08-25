@@ -288,50 +288,39 @@ tasks:
         code=$?; echo "perf-audit wrapper exit: $code"; exit $code
 
   commit:
-    desc: "Gated commit: stage with `git add <path>` first, then `task commit -- -m 'msg'` — runs ci, re-stages only what you staged plus what ci regenerated"
+    desc: "Gated commit of exactly the paths you name: task commit PATHS=\"<path> <path>\" -- -m 'msg' — runs ci, then commits those paths from the working tree; nothing else, staged or not, enters"
     preconditions:
-      - sh: test -n "$(git diff --cached --name-only)"
-        msg: "Nothing staged. Stage files with `git add <path>` before running task commit."
-    vars:
-      STAGED_PRE:
-        sh: git diff --cached --name-only
-      MODIFIED_PRE:
-        sh: git diff --name-only
+      - sh: test -n "{{.PATHS}}"
+        msg: "Name the paths: task commit PATHS=\"<path> <path>\" -- -m '<msg>'"
+      - sh: test -n "$(git status --porcelain -- {{.PATHS}})"
+        msg: "None of the named paths has a change to commit."
     cmds:
       - task: ci
-      - task: _commit:restage
-        vars:
-          STAGED_LIST: "{{.STAGED_PRE}}"
-          MODIFIED_LIST: "{{.MODIFIED_PRE}}"
-      - git commit {{.CLI_ARGS}}
+      - task: _commit:only
+        vars: { PATHS: "{{.PATHS}}", CLI_ARGS: "{{.CLI_ARGS}}" }
 
   commit:quick:
-    desc: "Commit already-staged NON-CODE files (docs, plans, README, .claude notes) without the ci chain. Usage: `git add <paths>` first, then `task commit:quick -- -m 'msg'`. Anything under crates/, scripts/, .github/, or Taskfile.yml goes through `task commit`."
+    desc: "Commit NON-CODE paths (docs, plans, README, .claude notes) without the ci chain: task commit:quick PATHS=\"<path> <path>\" -- -m 'msg'. Anything under crates/, scripts/, .github/, or Taskfile.yml goes through `task commit`."
     preconditions:
-      - sh: test -n "$(git diff --cached --name-only)"
-        msg: "Nothing staged. Stage files with `git add <path>` before running task commit:quick."
-      - sh: '! git diff --cached --name-only | grep -qE "^(crates/|scripts/|\.github/|Taskfile\.yml$|Cargo\.(toml|lock)$|\.engine-pin$)"'
-        msg: "Staged set contains code, scripts, CI, or build files; those go through `task commit` (the ci gate)."
+      - sh: test -n "{{.PATHS}}"
+        msg: "Name the paths: task commit:quick PATHS=\"<path> <path>\" -- -m '<msg>'"
+      - sh: test -n "$(git status --porcelain -- {{.PATHS}})"
+        msg: "None of the named paths has a change to commit."
+      - sh: test -z "$(printf '%s\n' {{.PATHS}} | grep -E '^(crates/|scripts/|[.]github/|Taskfile[.]yml$|Cargo[.](toml|lock)$|[.]engine-pin$)')"
+        msg: "The named paths include code, scripts, CI, or build files; those go through `task commit` (the ci gate)."
     cmds:
-      - git commit {{.CLI_ARGS}}
+      - task: _commit:only
+        vars: { PATHS: "{{.PATHS}}", CLI_ARGS: "{{.CLI_ARGS}}" }
 
-  _commit:restage:
+  _commit:only:
     internal: true
-    desc: "Re-stage what was staged at task start (so ci's fmt touch-ups ride along) plus files ci newly modified; files modified-but-unstaged at start stay out of the commit"
+    desc: "Stage the named paths (new files and deletions included) and commit them with --only, so whatever else sits in the shared index stays out"
     cmds:
-      - |
-        # -A per path keeps deletes and renames staged with `git mv`.
-        while IFS= read -r f; do
-          [ -n "$f" ] && { git add -A -- "$f" 2>/dev/null || git rm --cached -- "$f" 2>/dev/null || true; }
-        done <<'STAGED_EOF'
-        {{.STAGED_LIST}}
-        STAGED_EOF
-        git diff --name-only | while IFS= read -r f; do
-          [ -z "$f" ] && continue
-          printf '%s\n' '{{.STAGED_LIST}}' | grep -qxF -- "$f" && continue
-          printf '%s\n' '{{.MODIFIED_LIST}}' | grep -qxF -- "$f" && continue
-          git add -- "$f"
-        done
+      # the index is shared by every session committing on this tree, and a
+      # peer's `git add` can land at any moment, so the set to commit is
+      # taken from the caller's PATHS and never from what happens to be staged
+      - git add -A -- {{.PATHS}}
+      - git commit {{.CLI_ARGS}} --only -- {{.PATHS}}
 
   release:init:
     desc: Scaffold .anodizer.yaml — run once, then review the generated config
