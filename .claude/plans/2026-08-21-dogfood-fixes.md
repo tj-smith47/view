@@ -654,6 +654,30 @@ Evidence: the next master bench run's gh-linux and gh-macos legs exit 0 with
 the same code that exited 3, or exit 3 with a reading the sidecar's
 provenance says is outside the runner's band.
 
+## T33 — the oracle's startup-under-silence test stops timing the host
+
+`view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries`
+(view-oracle) asserts that view comes up and takes input within a wall-clock
+deadline when the terminal never answers the capability probe. Under three
+concurrent cargo builds it failed at 3.26 s and passed unchanged on the next
+run. A per-commit gate that trips on host load is a defect in the gate, not a
+finding about view.
+
+Split what the test proves from what it times. The sequence is the contract:
+the probe goes unanswered, the tier falls back at `PROBE_DEADLINE`, the
+engine attaches, a typed character reaches the screen. Assert that sequence
+with a deadline derived from the code's own constants plus an allowance
+scaled by the host's load at test start (`/proc/loadavg` on Linux, `sysctl
+vm.loadavg` on macOS; a class with no reading keeps today's constant), and
+say in the assertion message which part of the budget was spent where. The
+absolute "how fast" claim already lives in the bench `first_paint` row, where
+load-aware headroom exists; the oracle test must not restate it.
+
+Evidence: the test passes with three concurrent `cargo build --workspace`
+runs on dev-linux (record the load and the measured time in the report), and
+still fails when the fallback is broken (a mutation row that lengthens
+`PROBE_DEADLINE` past the derived budget, or skips the fallback tier).
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
