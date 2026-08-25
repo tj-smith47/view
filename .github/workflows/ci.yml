@@ -220,6 +220,20 @@ jobs:
       - name: Run overlay-chrome visual sweep
         run: task acceptance:visual
 
+      # a failing sweep keeps its pane dumps, the VIEW_LOG of the leg that
+      # failed and the theme state it was reading under the runner's own
+      # /tmp, which goes away with the job -- without this the only evidence
+      # of a failure is its one-line message
+      - name: Upload visual sweep evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-evidence
+          path: |
+            /tmp/view-visual-sweep-*
+            /tmp/view-visual-state-*
+          if-no-files-found: warn
+
   # The ACP conformance legs the local stub agent drives. Its own job rather
   # than more steps on `visual`: they assert different layers (that one reads
   # the escape sequences view emits, this one drives a whole agent session
@@ -270,6 +284,17 @@ jobs:
 
       - name: Run stub-driven ACP conformance legs
         run: task acceptance:acp
+
+      # same reason as the visual job's: the legs' pane dumps and view logs
+      # live under the runner's /tmp and are the only way to read a failure
+      # that did not reproduce locally
+      - name: Upload ACP conformance evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acp-evidence
+          path: /tmp/view-ai-conformance-*
+          if-no-files-found: warn
 
   # The differential oracle corpus is merge-blocking on both tier-1
   # platforms (spec section 14: linux + macos tier-1; Windows is tier-2,

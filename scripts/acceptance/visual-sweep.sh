@@ -368,6 +368,17 @@ fail() {
     printf 'FAIL [%s]: %s\n' "$CURRENT_LEG" "$1" >&2
     printf '      pane dump: %s.pane (escapes: %s.esc, cells: %s.cells)\n' \
         "$dump" "$dump" "$dump" >&2
+    # the leg's own roots are wiped by `cleanup`, and on a CI runner the
+    # whole filesystem goes with the job, so anything a reader needs has to
+    # be inside the one directory a failing run keeps
+    if [ -n "$ROOT" ] && [ -f "$ROOT/view.log" ]; then
+        cp "$ROOT/view.log" "$dump.log" 2>/dev/null || true
+        printf '      view log: %s.log\n' "$dump" >&2
+    fi
+    if [ -n "${STATE_HOME:-}" ] && [ -d "$STATE_HOME/view" ]; then
+        cp -R "$STATE_HOME/view" "$dump.state" 2>/dev/null || true
+        printf '      state: %s.state\n' "$dump" >&2
+    fi
     return 1
 }
 
@@ -903,6 +914,9 @@ CURRENT_LEG=theme-cache
 SESSION="view-visual-$$-warm"
 warm_root=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-warm-XXXXXX")
 ROOTS+=("$warm_root")
+# this preamble drives its own session rather than going through
+# `start_session`, so `fail` is told where its log is the same way
+ROOT=$warm_root
 mkdir -p "$warm_root/xdg_data_home" "$warm_root/xdg_cache_home"
 printf 'warm the theme cache\n' >"$warm_root/scratch.txt"
 SESSIONS+=("$SESSION")
@@ -911,6 +925,7 @@ tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$warm_root" \
          XDG_DATA_HOME=$warm_root/xdg_data_home \
          XDG_STATE_HOME=$STATE_HOME \
          XDG_CACHE_HOME=$warm_root/xdg_cache_home \
+         VIEW_LOG=$warm_root/view.log \
          TERM=xterm-256color COLORTERM=truecolor \
          $VIEW_BIN $warm_root/scratch.txt"
 wait_for 'warm the theme cache' "$WAIT_SECS" "the warming session's buffer" >/dev/null
