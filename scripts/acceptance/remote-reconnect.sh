@@ -320,6 +320,12 @@ type_unsaved() {
     # would fail for the clock rather than for the recovery
     tmux send-keys -t "$SESSION" -l ':preserve'
     tmux send-keys -t "$SESSION" Enter
+    # and the flush is waited for, not assumed: the send returns once the
+    # bytes are handed to tmux, so a caller that dropped the connection next
+    # was racing the remote editor's execution of the command its whole
+    # recovery depends on. On a loaded host the drop wins, the swap holds
+    # nothing, and the leg fails on the recovery notice instead of the race
+    wait_for "$PRESERVED" 15 "the swap flush" >/dev/null || return 1
 }
 
 for tool in tmux awk sed grep pgrep pkill python3; do
@@ -361,6 +367,10 @@ grep -qF -- 'Self::Restart => "Restart"' "$SUPERVISION_RS" || {
 # this is as fixed as the constants above, and a reconnect that recovered
 # nothing prints something else.
 SWAP_REPLAYED='Recovery completed'
+
+# nvim's own acknowledgement of `:preserve`, and the cue that the swap file
+# a reconnect recovers from actually holds the unsaved line.
+PRESERVED='File preserved'
 
 # The line view itself raises once its replacement engine has replayed a swap
 # file, and the whole reason the report above comes down without a keypress

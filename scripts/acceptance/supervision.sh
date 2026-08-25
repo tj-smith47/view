@@ -298,6 +298,12 @@ type_unsaved() {
     # what a restart recovers from, and an acceptance that raced the flush
     # would fail for the clock rather than for the recovery
     type_line ':preserve'
+    # and the flush is waited for, not assumed: `type_line` returns once the
+    # bytes are handed to tmux, so a caller that killed the engine next was
+    # racing nvim's execution of the command its whole recovery depends on.
+    # On a loaded host the kill wins, the swap holds nothing, and the leg
+    # fails on the recovery notice instead of on the race
+    wait_for "$PRESERVED" 15 "the swap flush" >/dev/null || return 1
 }
 
 # The recovery a restart owes, from either wedge: a fresh engine, the
@@ -551,6 +557,10 @@ DEAD_MAX=2.5
 # this is as fixed as the constants above, and a restart that recovered
 # nothing prints something else.
 SWAP_REPLAYED='Recovery completed'
+
+# nvim's own acknowledgement of `:preserve`, and the cue that the swap file
+# a restart recovers from actually holds the unsaved line.
+PRESERVED='File preserved'
 
 # The line view itself raises once its replacement engine has replayed a swap
 # file, and the whole reason the report above comes down without a keypress
