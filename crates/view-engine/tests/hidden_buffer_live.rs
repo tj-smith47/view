@@ -1570,8 +1570,14 @@ fn a_trailing_backslash_is_refused_here_exactly_as_the_chunk_refuses_it() {
         ),
         "a trailing backslash must refuse as unusable: {err:?}"
     );
+    // the answer this request would produce, not an idle channel: the same
+    // receiver carries the attach's own redraw traffic (see
+    // `next_hidden_buffer_loaded`), so a contended run has unrelated
+    // messages queued here and an emptiness check reads one of them as an
+    // answer
     assert!(
-        rx.try_recv().is_err(),
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|msg| matches!(msg, Msg::HiddenBufferLoaded { .. })),
         "a refused spelling never reaches the wire, so nothing may answer it"
     );
     assert_eq!(
