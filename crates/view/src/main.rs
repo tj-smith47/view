@@ -739,9 +739,11 @@ fn main() -> Result<()> {
     //
     // The guard, not the call, is what makes this safe: from here to
     // `engine_result` this process owns a live nvim it has no other handle
-    // on, so every `?` in between must kill it (see `AttachGuard`).
-    let (residue_tx, residue_rx) = mpsc::sync_channel(1);
-    let mut attach = startup::attach_in_background(cfg, residue_rx);
+    // on, so every `?` in between must kill it -- and must not park on a
+    // channel while doing so, which is why the guard owns every sender the
+    // attach can wait for rather than leaving one as a local here (see
+    // `AttachGuard`).
+    let mut attach = startup::attach_in_background(cfg);
 
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
@@ -878,7 +880,7 @@ fn main() -> Result<()> {
     let probe = term
         .finish_probe()
         .context("failed to finish terminal capability detection")?;
-    let _ = residue_tx.send(probe.residue);
+    attach.send_residue(probe.residue);
     model.caps = probe.caps;
     vlog::log_with("startup", || {
         format!(
@@ -1113,19 +1115,24 @@ mod tests {
     use clap::CommandFactory;
     use std::ffi::OsString;
 
-    /// Everything `main` does before the attach thread is started, and
-    /// only this process needs, prepended to nvim's own startup.
+    /// `fn main`'s own body, and nothing else in the file: the sequence
+    /// these pins describe is a sequence only inside one function, so a
+    /// step hoisted into a helper -- above `main` or below it -- must read
+    /// as "this pin can no longer see it" rather than as an ordering that
+    /// happens to still compare. Ends at the first brace in column zero,
+    /// which is where every top-level item closes.
     fn startup_body() -> &'static str {
         let source = include_str!("main.rs");
-        source
-            .split_once("#[cfg(test)]")
-            .map_or(source, |(body, _)| body)
+        let (_, body) = source
+            .split_once("\nfn main() -> Result<()> {")
+            .expect("main.rs still defines fn main");
+        body.split_once("\n}\n").map_or(body, |(body, _)| body)
     }
 
     fn offset_of(marker: &str) -> usize {
         startup_body()
             .find(marker)
-            .expect("startup no longer performs this step at all")
+            .expect("fn main no longer performs this step itself")
     }
 
     /// `nvim --embed` sources nothing and opens nothing until a UI
@@ -1179,7 +1186,7 @@ mod tests {
     #[test]
     fn every_fallible_startup_step_runs_inside_the_attach_guards_window() {
         let spawn = offset_of("startup::attach_in_background(");
-        let result = offset_of("attach\n        .engine_result()");
+        let result = offset_of(".engine_result()");
         for step in [
             "Term::init(",
             "term.size()?",

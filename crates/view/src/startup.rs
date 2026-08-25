@@ -157,9 +157,8 @@ pub enum AttachFailure {
 /// pre-attach window has been fully replayed (see
 /// [`attach_in_background`]'s doc comment for why).
 ///
-/// The size arrives through a callback, taking the spawned child's pid,
-/// rather than as two arguments, because the caller does not have it yet
-/// when the child should start: `nvim --embed` performs no startup at all
+/// The size arrives through a callback rather than as two arguments
+/// because the caller does not have it yet when the child should start: `nvim --embed` performs no startup at all
 /// until a UI attaches, so the terminal handshake that resolves the size
 /// is work the child's own startup can run underneath instead of behind
 /// (see `main.rs`'s call ordering). Only the attach needs a terminal.
@@ -173,13 +172,20 @@ pub enum AttachFailure {
 /// own error instead.
 fn spawn_and_attach(
     cfg: EngineConfig,
-    size: impl FnOnce(u32) -> Option<(u16, u16)>,
+    spawned: &AtomicU32,
+    size: impl FnOnce() -> Option<(u16, u16)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     // read before `Engine::spawn` consumes `cfg` by value: there is no
     // config left to ask afterward, and the choice below depends on it
     let stdin_relay = cfg.stdin_relay_requested();
     let engine = Engine::spawn(cfg).map_err(AttachFailure::Spawn)?;
+    // published before the handshake and the registrations below, not
+    // after them: the window this pid identifies a child through is
+    // exactly the window in which the child can stop answering, and a
+    // diagnostic that names it only once the attach is nearly done cannot
+    // describe the failure anybody would be hunting
+    spawned.store(engine.pid(), Ordering::SeqCst);
     crate::vlog::log_with("engine", || {
         format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
     });
@@ -228,7 +234,7 @@ pub(crate) fn restart_and_attach(
             engine.pid()
         )
     });
-    register_and_attach(engine, stdin_relay, |_| Some((width, height)), Vec::new)
+    register_and_attach(engine, stdin_relay, || Some((width, height)), Vec::new)
 }
 
 /// The half of [`spawn_and_attach`] that runs against a child that is
@@ -244,7 +250,7 @@ pub(crate) fn restart_and_attach(
 fn register_and_attach(
     engine: Engine,
     stdin_relay: bool,
-    size: impl FnOnce(u32) -> Option<(u16, u16)>,
+    size: impl FnOnce() -> Option<(u16, u16)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     engine
@@ -257,7 +263,7 @@ fn register_and_attach(
         .register_bridge(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
     crate::vlog::log("engine", "registered view_bridge autocmd group");
-    let Some((width, height)) = size(engine.pid()) else {
+    let Some((width, height)) = size() else {
         crate::vlog::log("engine", "no terminal size ever came; killing the child");
         // `Engine`'s own `Drop` is the kill and the reap (see its impl):
         // dropping it here is what performs them, and returning without it
@@ -333,17 +339,18 @@ type AttachStart = (crate::wake::LoopSender, u16, u16);
 /// correct rather than merely lucky: there is no other kind of message this
 /// loop could ever see before `EngineReady`, besides `Msg::Key` and
 /// `Msg::Resized` from the input thread.
-pub fn attach_in_background(cfg: EngineConfig, residue_rx: Receiver<Vec<u8>>) -> AttachGuard {
+pub fn attach_in_background(cfg: EngineConfig) -> AttachGuard {
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     let (start_tx, start_rx) = std::sync::mpsc::sync_channel(1);
+    let (residue_tx, residue_rx) = std::sync::mpsc::sync_channel(1);
     let pid = Arc::new(AtomicU32::new(0));
     let spawned = Arc::clone(&pid);
     let attach = std::thread::spawn(move || {
         let mut started: Option<crate::wake::LoopSender> = None;
         let result = spawn_and_attach(
             cfg,
-            |pid| {
-                spawned.store(pid, Ordering::SeqCst);
+            &spawned,
+            || {
                 let (msg_tx, width, height) = start_rx.recv().ok()?;
                 started = Some(msg_tx);
                 Some((width, height))
@@ -372,6 +379,7 @@ pub fn attach_in_background(cfg: EngineConfig, residue_rx: Receiver<Vec<u8>>) ->
     });
     AttachGuard {
         start_tx: Some(start_tx),
+        residue_tx: Some(residue_tx),
         attach: Some(attach),
         engine_rx: result_rx,
         pid,
@@ -390,9 +398,19 @@ pub fn attach_in_background(cfg: EngineConfig, residue_rx: Receiver<Vec<u8>>) ->
 /// that unrepresentable rather than a list of call sites to remember: its
 /// [`Drop`] kills and reaps whatever the attach produced, so a new early
 /// return added between those two points is safe by construction.
+///
+/// It owns *both* channels the attach thread can block on, and that is
+/// load-bearing rather than tidy: a sender left in `main` outlives the
+/// guard (locals drop in reverse declaration order), so `Drop` would join
+/// a thread parked on a channel nothing can ever disconnect, and an
+/// editor that failed to paint its first frame would hang holding the very
+/// child this exists to kill.
 pub struct AttachGuard {
     /// Dropping this is what tells the attach thread no size is coming.
     start_tx: Option<SyncSender<AttachStart>>,
+    /// Dropping this is what tells it no probe residue is coming, which is
+    /// the last thing an attach that already succeeded waits for.
+    residue_tx: Option<SyncSender<Vec<u8>>>,
     attach: Option<JoinHandle<()>>,
     engine_rx: Receiver<Result<Engine, AttachFailure>>,
     /// The spawned child, `0` until it exists; see [`Self::pid`].
@@ -414,8 +432,21 @@ impl AttachGuard {
             .map(|start_tx| start_tx.send((msg_tx, width, height)));
     }
 
+    /// Hands the attach the capability probe's leftover bytes, the last
+    /// thing it waits for (see `register_and_attach`).
+    pub fn send_residue(&self, residue: Vec<u8>) {
+        let _ = self
+            .residue_tx
+            .as_ref()
+            .map(|residue_tx| residue_tx.send(residue));
+    }
+
     /// Blocks for the attach's result and disarms: from here the caller
     /// owns the engine, and dropping this guard does nothing.
+    ///
+    /// Disarming only on `Ok` is the point of the `if let`: an `Err` means
+    /// the caller was handed no engine at all, so the guard is still the
+    /// only thing that can kill one.
     ///
     /// # Errors
     ///
@@ -423,7 +454,9 @@ impl AttachGuard {
     /// a result at all.
     pub fn engine_result(&mut self) -> Result<Result<Engine, AttachFailure>, RecvError> {
         let result = self.engine_rx.recv();
-        self.armed = false;
+        if result.is_ok() {
+            self.armed = false;
+        }
         result
     }
 
@@ -443,7 +476,10 @@ impl Drop for AttachGuard {
         if !self.armed {
             return;
         }
+        // both, and both before the join: whichever of the two the thread
+        // is parked on, a disconnected channel is what returns it
         self.start_tx.take();
+        self.residue_tx.take();
         // the thread is what owns the engine until it sends it, so the join
         // is what makes "there is nothing left running" true rather than
         // eventually true
@@ -900,7 +936,8 @@ mod tests {
         let cfg = EngineConfig::isolated()
             .with_arg("-")
             .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap());
-        let mut engine = spawn_and_attach(cfg, |_| Some((80, 24)), Vec::new).unwrap();
+        let mut engine =
+            spawn_and_attach(cfg, &AtomicU32::new(0), || Some((80, 24)), Vec::new).unwrap();
 
         assert_eq!(
             engine.handle.eval_str("getline(1)").unwrap(),
@@ -923,41 +960,55 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_size_that_never_arrives_leaves_no_nvim_behind() {
-        let mut spawned = 0;
-        let failed = spawn_and_attach(
-            EngineConfig::isolated(),
-            |pid| {
-                spawned = pid;
-                None
-            },
-            Vec::new,
-        );
+        let spawned = AtomicU32::new(0);
+        let failed = spawn_and_attach(EngineConfig::isolated(), &spawned, || None, Vec::new);
 
         assert!(
             failed.is_err(),
             "an attach that never got a terminal size cannot report success"
         );
-        assert!(spawned != 0, "the child was never spawned at all");
-        assert_reaped(spawned);
+        let pid = spawned.load(Ordering::SeqCst);
+        assert!(pid != 0, "the child was never spawned at all");
+        assert_reaped(pid);
     }
 
-    /// The other half: the size did arrive, the attach ran, and the caller
-    /// failed somewhere between the two (`paint_shell_frame`,
-    /// `finish_probe`, `InputSource::open` -- every `?` `main` takes while
-    /// the guard is armed). The engine is sitting in the result channel at
-    /// that point, owned by nobody the caller can still reach.
+    /// The other half, at the point it is most dangerous: the size did
+    /// arrive, `ui_attach` succeeded, and the caller failed before it could
+    /// hand over the probe's residue -- `paint_shell_frame` writing into a
+    /// pty that has gone away, or `finish_probe` itself. The attach thread
+    /// is parked in the residue wait at that moment, so the guard's `Drop`
+    /// returns only if it disconnects that channel too: a residue sender
+    /// living anywhere else outlives the guard, and this hangs forever
+    /// holding the child it exists to kill.
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_before_the_residue_is_handed_over_leaves_no_nvim_behind() {
+        let (raw_tx, _msg_rx) = std::sync::mpsc::sync_channel(MSG_CHANNEL_CAPACITY);
+        let msg_tx =
+            crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
+
+        let guard = attach_in_background(EngineConfig::isolated());
+        guard.attach_at(msg_tx, 80, 24);
+        let pid = wait_for_spawn(&guard);
+
+        drop(guard);
+
+        assert_reaped(pid);
+    }
+
+    /// And the ordinary early return, after everything the attach waits on
+    /// has been handed over: the engine is sitting in the result channel,
+    /// owned by nobody the caller can still reach.
     #[cfg(unix)]
     #[test]
     fn dropping_the_guard_before_its_result_leaves_no_nvim_behind() {
         let (raw_tx, msg_rx) = std::sync::mpsc::sync_channel(MSG_CHANNEL_CAPACITY);
         let msg_tx =
             crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
-        // dropped at once: this startup never ran a capability probe, and
-        // an unanswered residue channel reads as "nothing was typed"
-        let (_, residue_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
 
-        let guard = attach_in_background(EngineConfig::isolated(), residue_rx);
+        let guard = attach_in_background(EngineConfig::isolated());
         guard.attach_at(msg_tx, 80, 24);
+        guard.send_residue(Vec::new());
         assert!(
             matches!(msg_rx.recv().unwrap(), Msg::EngineReady),
             "the attach thread announces itself once, with EngineReady"
@@ -969,18 +1020,38 @@ mod tests {
         assert_reaped(pid);
     }
 
+    /// The pid is published the moment `Engine::spawn` returns, so this
+    /// resolves during the handshake rather than at the end of the attach.
+    #[cfg(unix)]
+    fn wait_for_spawn(guard: &AttachGuard) -> u32 {
+        (0..100_000)
+            .find_map(|_| {
+                let pid = guard.pid();
+                if pid.is_none() {
+                    std::thread::yield_now();
+                }
+                pid
+            })
+            .expect("the attach never reported a spawned child")
+    }
+
     /// Killed *and* reaped: a zombie is still a child this process left
-    /// behind, and `/proc` keeps the entry until the parent waits.
+    /// behind, and both checks below report one.
     #[cfg(unix)]
     fn assert_reaped(pid: u32) {
-        #[cfg(target_os = "linux")]
+        let gone = if cfg!(target_os = "linux") {
+            !std::path::Path::new(&format!("/proc/{pid}")).exists()
+        } else {
+            !std::process::Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
         assert!(
-            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            gone,
             "pid {pid} is still around: startup left an nvim running with \
              nothing in the process able to reach it"
         );
-        #[cfg(not(target_os = "linux"))]
-        let _ = pid;
     }
 
     /// Pins what makes the capability probe's second window free: the
@@ -1003,7 +1074,8 @@ mod tests {
         let recorder = Arc::clone(&asked_after);
         let mut engine = spawn_and_attach(
             EngineConfig::isolated(),
-            |_| Some((80, 24)),
+            &AtomicU32::new(0),
+            || Some((80, 24)),
             move || {
                 let elapsed = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 recorder.store(elapsed, Ordering::SeqCst);
