@@ -120,7 +120,14 @@ watch_view() {
         printf 'FAIL: tmux session %s has no pane to read a pid from\n' "$session" >&2
         return 1
     fi
-    if [ "$(ps -o ucomm= -p "$pane_pid" 2>/dev/null | tr -d ' ')" = view ]; then
+    # `comm` is the name on Linux and the whole invocation path on macOS,
+    # so the basename is the one spelling both hosts agree on. `ucomm` is
+    # not the alternative it looks like: it reports the binary a symlink
+    # resolves to, which on macOS is what a stand-in named `view` is
+    # recorded as -- the self-check below runs exactly that shape
+    local name
+    name=$(ps -o comm= -p "$pane_pid" 2>/dev/null | tr -d ' ')
+    if [ "${name##*/}" = view ]; then
         pid=$pane_pid
     else
         pid=$(pgrep -P "$pane_pid" -x view | head -1 || true)
