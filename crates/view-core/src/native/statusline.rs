@@ -92,6 +92,29 @@ impl StatuslineState {
         }
     }
 
+    /// Clears the segments the engine both raises and retracts, for a
+    /// connection being replaced.
+    ///
+    /// [`Self::mode`], [`Self::showcmd`], [`Self::ruler`] and
+    /// [`Self::search_count`] arrive as `msg_showmode`/`msg_showcmd`/
+    /// `msg_ruler`/`search_count` and are taken back by the same events
+    /// carrying empty content -- which an engine that was killed mid-`d2` or
+    /// mid-macro never sends, so the pending operator stays painted on the
+    /// replacement's own bar. The replacement re-raises whatever is true of
+    /// it, so clearing costs a frame of nothing.
+    ///
+    /// The other four ([`Self::file`], [`Self::modified`],
+    /// [`Self::diagnostics`], [`Self::git_branch`]) are deliberately kept:
+    /// they come from view's own bridge rather than from a redraw event,
+    /// they still describe the buffers a restart recovers, and the
+    /// replacement's bridge install re-fires them.
+    pub fn forget_engine_segments(&mut self) {
+        self.mode.clear();
+        self.showcmd.clear();
+        self.ruler.clear();
+        self.search_count.clear();
+    }
+
     /// Composes the current segments into a [`StatuslineView`] that fits
     /// `width` columns.
     ///

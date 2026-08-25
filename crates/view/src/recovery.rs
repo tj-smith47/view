@@ -813,9 +813,37 @@ mod tests {
                 level: 1,
             }]),
         );
+        // the rest of the class the command line belongs to: a pending
+        // operator and a mode the dead engine owed an empty `msg_showcmd`/
+        // `msg_showmode` for, and a mouse capture it owed a `mouse_off` for
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![
+                view_core::events::UiEvent::MsgShowcmd {
+                    content: vec![(0, "d2".to_string())],
+                },
+                view_core::events::UiEvent::MsgShowmode {
+                    content: vec![(0, "recording @q".to_string())],
+                },
+                view_core::events::UiEvent::MouseOn,
+            ]),
+        );
+        let painted = |model: &Model| -> String {
+            let bar = model.engine.statusline.view(80);
+            [&bar.left, &bar.center, &bar.right]
+                .into_iter()
+                .flatten()
+                .map(|span| span.text.as_str())
+                .collect()
+        };
         assert!(
-            model.engine.cmdline.is_some(),
-            "the seed must actually put a command line on the model, or the assertion below is vacuous"
+            model.engine.cmdline.is_some()
+                && model.engine.mouse_on
+                && painted(&model).contains("d2")
+                && painted(&model).contains("recording @q"),
+            "the seed must actually put the dead engine's state on the model, \
+             or the assertions below are vacuous: {}",
+            painted(&model)
         );
         let fresh = restart_engine(
             &mut engine,
@@ -830,6 +858,19 @@ mod tests {
             model.engine.cmdline.is_none(),
             "a restart must drop the dead engine's command line: nothing retracts it, \
              so it survives onto the replacement's first frame"
+        );
+        assert!(
+            !model.engine.mouse_on,
+            "a restart must drop the dead engine's mouse capture: a fresh child \
+             announces mouse_on only if it wants one, and never mouse_off, so a \
+             stale capture swallows the terminal's own selection for the session"
+        );
+        let after = painted(&model);
+        assert!(
+            !after.contains("d2") && !after.contains("recording @q"),
+            "a restart must drop the dead engine's pending command and mode: they \
+             are retracted by the same events that raised them, which a killed \
+             engine never sends, so they stay on the replacement's own bar: {after}"
         );
 
         // the AI worker the restart's executor answers through must be the

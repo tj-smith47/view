@@ -90,7 +90,17 @@ cleanup() {
     fi
     exit "$code"
 }
-trap cleanup EXIT INT TERM
+# The signals are named one at a time rather than shared with the EXIT trap,
+# and each names the status a shell killed by it reports (128 + signal).
+# `trap cleanup EXIT INT TERM` reads as though it covered them, and it does
+# run the cleanup -- but the handler enters with `$?` from whatever the leg
+# was doing, so the `exit "$code"` at its end reported 0 and an interrupted
+# run read as a passing one in the log. HUP was not on the list at all,
+# which is the signal an ssh session dropping under a running leg delivers.
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # two decimals, not one: a recovery this fast rounds to a flat zero at one,
 # and "recovers in 0.0s" reads as a measurement that did not happen
@@ -317,6 +327,19 @@ assert_restart_recovered() {
         fail "$token is in the file on disk, so its return proves a re-read and not a swap recovery"
         return 1
     fi
+    # the row, not the model: the defect was a command line the dead engine
+    # owed a `cmdline_hide` for, painted over the replacement's own first
+    # frame. A unit pin can say the model no longer holds one; only the pane
+    # can say the last row is not still showing it, which is where a user
+    # meets it
+    local last_row
+    last_row=$(pane | grep -v '^$' | tail -1)
+    case "$last_row" in
+    *:preserve*)
+        fail "the last row still reads '$last_row' after the restart, so the dead engine's command line is painted over its replacement"
+        return 1
+        ;;
+    esac
     tmux send-keys -t "$SESSION" -l "o$live"
     tmux send-keys -t "$SESSION" Escape
     wait_for "$live" 15 "typed text after the restart" >/dev/null || return 1

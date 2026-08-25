@@ -1060,25 +1060,44 @@ impl EngineModel {
         self.hl.mark_dirty();
     }
 
-    /// Drops the three overlay states an engine owns, for a connection being
-    /// replaced.
+    /// Drops every piece of this model the engine both raises and retracts,
+    /// for a connection being replaced.
     ///
-    /// Each one is raised by the engine and taken down only by the same
-    /// engine -- `cmdline` and `popupmenu` by their `_hide` events,
-    /// `tabline` by the next `tabline_update` -- so an engine that dies with
-    /// one raised takes down nothing: the command line a user was typing at
-    /// the moment the engine was killed stays painted on the last row over
-    /// the replacement's own first frame, which reads as an editor that lost
-    /// its prompt. A replacement re-establishes all three from its own state
-    /// on attach, so dropping them costs a frame of nothing rather than a
-    /// frame of the dead engine. The grid needs no equivalent -- a fresh
-    /// attach redraws every cell of it -- and neither `mode` nor `messages`
-    /// does: the replacement announces its modes on attach, and the message
-    /// log is scrollback rather than a point-in-time overlay.
+    /// The shape of the defect is one: an engine killed with such a state
+    /// raised never sends the event that takes it back, so it stays painted
+    /// over the replacement's own first frame -- a command line the user was
+    /// typing reads as an editor that lost its prompt, a pending `d2` reads
+    /// as a replacement that is still holding it. Every field with that
+    /// lifetime belongs here, and every field of this struct is accounted
+    /// for one way or the other:
+    ///
+    /// | field | how it is taken down | forgotten |
+    /// |---|---|---|
+    /// | `cmdline` | `cmdline_hide` | yes |
+    /// | `popupmenu` | `popupmenu_hide` | yes |
+    /// | `tabline` | the next `tabline_update` | yes |
+    /// | `mouse_on` | `mouse_off` | yes |
+    /// | `statusline`'s `msg_*` segments | the same event, empty | yes, via [`crate::native::statusline::StatuslineState::forget_engine_segments`] |
+    /// | `statusline`'s bridge segments | view's own bridge, re-fired on install | no |
+    /// | `grid` | a fresh attach redraws every cell | no |
+    /// | `hl` | the replacement's own table replaces it | no |
+    /// | `mode` | the replacement announces its modes on attach | no |
+    /// | `messages`, `toast_history` | scrollback, not a point-in-time state | no |
+    ///
+    /// `mouse_on` is in the list because nvim only emits `mouse_on`/
+    /// `mouse_off` when its own view of the mouse state changes, and that
+    /// view is per-process: the replacement is always a freshly spawned
+    /// child ([`crate::model::Model`]'s only caller of this restarts through
+    /// `Engine::spawn_recovering`), so it starts from mouse-off and
+    /// announces `mouse_on` only if it wants one. A stale `true` left here
+    /// would swallow the host terminal's own selection gestures for the rest
+    /// of the session with nothing ever to correct it.
     pub fn forget_overlays(&mut self) {
         self.cmdline = None;
         self.popupmenu = None;
         self.tabline = None;
+        self.mouse_on = false;
+        self.statusline.forget_engine_segments();
     }
 
     /// The one place a [`MessageEntry`] is created that also classifies it
