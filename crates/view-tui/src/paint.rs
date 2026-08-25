@@ -3726,7 +3726,7 @@ mod tests {
             (
                 "composer clears",
                 Box::new(|m: &mut Model| {
-                    while !m.ai_panel().input.is_empty() {
+                    while !m.ai_panel().input().is_empty() {
                         type_key(m, "<BS>");
                     }
                 }),
@@ -3744,7 +3744,7 @@ mod tests {
                     let before = m.ai_panel().transcript.len();
                     type_key(m, "<CR>");
                     assert!(
-                        m.ai_panel().input.is_empty(),
+                        m.ai_panel().input().is_empty(),
                         "the submit emptied the composer"
                     );
                     assert_eq!(

@@ -2,8 +2,11 @@
 
 use crate::model::Model;
 use crate::msg::Effect;
-use crate::native::ai_event::{AiCommand, AiEvent, PermissionOutcome};
+use crate::native::ai_event::{AiCommand, AiEvent, PermissionOptionKind, PermissionOutcome};
 use crate::native::ai_panel::{DiffReviewState, PermissionPrompt, StandingAnswer};
+use crate::native::keys::{Action, Resolved};
+
+use super::{ai_scroll_for, reaches_past_a_panel_owner, review, scroll_ai_transcript};
 
 /// Applies `event` to [`Model::ai_panel`].
 ///
@@ -437,6 +440,218 @@ pub(super) fn open_ai_trust_prompt(model: &mut Model, verb: String) -> Vec<Effec
         }
     }
     model.dirty = true;
+    Vec::new()
+}
+
+/// Every key the agent panel answers while it owns the keyboard, with
+/// `binding` already resolved against `[keys]` by the caller.
+///
+/// Lifted out of `route_key`'s own `OverlayKind::Ai` arm rather than
+/// inlined there: the panel answers a pending permission request, a review
+/// announcement, the transcript's scroll keys and the composer's own
+/// editing keys, which is more of one surface's behaviour than a match arm
+/// in the routing table should hold. The resolution stays at the call site
+/// because it consumes the chord prefix, which must happen exactly once per
+/// keystroke whatever the key turns out to mean.
+pub(super) fn ai_panel_key(
+    model: &mut Model,
+    notation: &str,
+    binding: Option<Resolved>,
+) -> Vec<Effect> {
+    if let Some(prompt) = model.ai_panel().pending_permission.clone() {
+        // <Esc> settles the request as `Cancelled` rather than
+        // any offered option -- the one answer that exists
+        // even when the agent offered only allow-kind options,
+        // so declining always has a key that means it
+        // regardless of what was offered.
+        if notation == "<Esc>" {
+            model.ai_panel_mut().pending_permission = None;
+            model.dirty = true;
+            return vec![Effect::Ai(AiCommand::AnswerPermission {
+                request_id: prompt.request_id,
+                outcome: PermissionOutcome::Cancelled,
+            })];
+        }
+        // An unmapped printable is swallowed rather than
+        // forwarded, the same way an unmatched key on a
+        // confirm-class `PromptState` leaves the prompt open
+        // instead of falling through.
+        let mut chars = notation.chars();
+        let key = chars.next().filter(|_| chars.next().is_none());
+        if let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() {
+            model.ai_panel_mut().pending_permission = None;
+            // What "always" means on this side of the wire: the
+            // answer is recorded against the request's own tool
+            // kind, and the next request naming that kind is
+            // answered without asking (see
+            // `AiPanelState::standing_answers` for why view
+            // keeps this rather than the adapter). Both
+            // directions, since both are answers the user asked
+            // to stand; the two once-answers record nothing.
+            let standing = match option.kind {
+                PermissionOptionKind::AllowAlways => Some(StandingAnswer::Allow),
+                PermissionOptionKind::RejectAlways => Some(StandingAnswer::Reject),
+                PermissionOptionKind::AllowOnce | PermissionOptionKind::RejectOnce => None,
+            };
+            if let Some((kind, answer)) = prompt.tool_kind.clone().zip(standing) {
+                model.ai_panel_mut().record_standing_answer(kind, answer);
+            }
+            model.dirty = true;
+            // The question is settled, so a review that was
+            // waiting behind it gets the keyboard it needs:
+            // its keys are on the buffer, not here.
+            if model.ai_panel().pending_diff.is_some() {
+                review::take_panel_focus_off(model);
+            }
+            return vec![Effect::Ai(AiCommand::AnswerPermission {
+                request_id: prompt.request_id,
+                outcome: PermissionOutcome::Selected {
+                    option_id: option.option_id,
+                },
+            })];
+        }
+        // Only the ways out fall through, and they fall
+        // through for every state the panel can be in. A turn
+        // holding an unanswered permission is a turn in flight,
+        // and it is the case the wire's cancellation contract is
+        // written for ("the Client MUST respond to all pending
+        // session/request_permission requests with Cancelled");
+        // swallowing `<C-c>` here would leave that contract with
+        // no key that reaches it.
+        //
+        if !reaches_past_a_panel_owner(model, notation, binding) {
+            return Vec::new();
+        }
+    }
+    // Nothing pending: the panel's own composer keys. Every key
+    // not named below is swallowed rather than leaked to nvim --
+    // the whole point of having deliberately entered the panel
+    // is that the engine does not see these keystrokes.
+    if let Some(bound) = binding {
+        // First in the chain because the resize keys here are
+        // the ones every other state also honors (see
+        // `reaches_past_a_panel_owner`): a reader who reaches for
+        // one with a question up gets the same notch they get
+        // with nothing pending. A chord's first key moves
+        // nothing and is swallowed, which is what keeps the
+        // composer from typing it while its follower is owed.
+        match bound {
+            Resolved::Act(Action::Resize(direction)) => {
+                if model.resize_ai_panel(direction.widens()) {
+                    model.dirty = true;
+                }
+            }
+            // The line break `<CR>` cannot be: that key sends
+            // the prompt, so a prompt of more than one line is
+            // typed with this one and arrives at the agent as
+            // the same `\n` a paste would have carried.
+            Resolved::Act(Action::ComposerNewline) => {
+                model.ai_panel_mut().push_input("\n");
+                model.dirty = true;
+            }
+            Resolved::Pending => {}
+        }
+    } else if notation == "<Esc>" {
+        // Relinquishes the keyboard (clears `focused`) without
+        // closing the panel itself: it stays visible beside the
+        // buffer, the same non-modal presence it had before
+        // being entered, and the `close` verb remains the only
+        // thing that removes it from the stack.
+        model.ai_panel_mut().focused = false;
+        model.dirty = true;
+    } else if notation == "<C-c>" {
+        // `<Esc>` is already taken by prompt-cancel/un-enter
+        // above, so cancelling an in-flight turn gets the
+        // vocabulary's other interrupt notation (see
+        // `supervision::INTERRUPT_NOTATION`, the same key for
+        // the same reason elsewhere in this codebase). Gated on
+        // `turn_in_flight` so cancelling with nothing running
+        // has no session to interrupt, rather than reaching
+        // `AiWorker::dispatch`'s own "no active session" surface
+        // for a key the panel itself could have refused instead.
+        if model.ai_panel().turn_in_flight {
+            return vec![Effect::Ai(AiCommand::Cancel)];
+        }
+    } else if notation == "<C-d>" {
+        // The crash banner's reader is by construction inside an
+        // entered panel, where the composer consumes every
+        // printable -- so dismissal needs a named notation the
+        // composer excludes, beside `<C-c>` above. The `:View ai
+        // dismiss` verb remains the from-outside route to the
+        // same slot.
+        //
+        // The banner outranks the half-page scroll this key
+        // otherwise performs, and says so on screen while it is
+        // up (`DISMISS_KEY_HINT`): the one state where `<C-d>`
+        // means something else is the one state that names what
+        // it means.
+        // Short-circuiting is the priority: a taken banner never
+        // reaches the scroll behind it.
+        let dismissed = model.ai_panel_mut().local_error.take().is_some();
+        if dismissed || scroll_ai_transcript(model, notation) {
+            model.dirty = true;
+        }
+    } else if ai_scroll_for(notation).is_some() {
+        if scroll_ai_transcript(model, notation) {
+            model.dirty = true;
+        }
+    } else if notation == "<CR>" {
+        let panel = model.ai_panel_mut();
+        // One turn at a time. The wire has no correlation id on
+        // `session/prompt`, so a second prompt sent into a live
+        // turn gives the agent two questions and the panel one
+        // stream to fold both answers into; `<C-c>` above is
+        // the key that ends a turn, and this is the key that
+        // starts one.
+        if !panel.turn_in_flight && !panel.input().trim().is_empty() {
+            let text = panel.take_input();
+            panel.turn_in_flight = true;
+            // The transcript's own copy of what was just asked,
+            // written here rather than waited for over the wire:
+            // see `Transcript::echo_user_prompt`.
+            panel.transcript.echo_user_prompt(&text);
+            // A prompt sent from a scrolled-back panel would
+            // otherwise stream its answer somewhere off screen.
+            panel.follow_transcript_tail();
+            model.dirty = true;
+            // `view-core` cannot assemble this prompt's context
+            // itself: every block `view_ai::context::assemble`
+            // could turn into a `ContextBlock` is read over RPC,
+            // and this crate does neither I/O nor `view-ai` (see
+            // `scripts/audit-deps.sh`'s dependency direction).
+            // `Effect::AiPromptSubmit` carries only the text; the
+            // bin's executor performs the four reads, assembles
+            // the context, and only then hands the agent session
+            // the completed `AiCommand::Prompt` -- see that
+            // effect's own doc.
+            return vec![Effect::AiPromptSubmit { text }];
+        }
+    } else if notation == "<BS>" {
+        if model.ai_panel_mut().pop_input() {
+            model.dirty = true;
+        }
+    } else if notation == "<lt>" {
+        // nvim's own escape for a literal `<`, the one
+        // printable character that cannot arrive as itself
+        // (see `keys::encode_key`'s own doc).
+        model.ai_panel_mut().push_input("<");
+        model.dirty = true;
+    } else if let Some(ch) = {
+        // Every other single character, including a literal
+        // space, arrives as itself rather than a named `<...>`
+        // notation -- the same convention the permission
+        // options above already key off of.
+        let mut chars = notation.chars();
+        chars.next().filter(|_| chars.next().is_none())
+    } {
+        model
+            .ai_panel_mut()
+            .push_input(ch.encode_utf8(&mut [0_u8; 4]));
+        model.dirty = true;
+    }
+    // Any other named key (`<Up>`, `<Tab>`, ...) has no
+    // composer meaning yet and is swallowed the same way it
+    // always was.
     Vec::new()
 }
 

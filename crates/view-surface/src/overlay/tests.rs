@@ -673,7 +673,7 @@ fn a_painted_ai_panel_wraps_a_long_prompt_and_keeps_its_tail() {
             .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
             .collect();
         let mut state = AiPanelState::new();
-        state.input.clone_from(&typed);
+        state.push_input(&typed);
 
         let view = state.view(24, usize::from(width));
         let tail = view.input.last().cloned().unwrap_or_default();
@@ -962,7 +962,7 @@ fn a_pasted_multi_line_prompt_paints_a_row_per_line() {
     use view_core::native::ai_panel::AiPanelState;
     use view_core::native::views::AiPanelView;
     let mut state = AiPanelState::new();
-    state.input = "first\nsecond".to_string();
+    state.push_input("first\nsecond");
     let kind =
         LayerKind::Ai(AiPanelView::new("AI Agent").with_input_rows(state.view(10, 40).input));
 
@@ -994,7 +994,7 @@ fn the_caret_lands_on_the_last_row_of_a_multi_line_prompt() {
     use view_core::native::views::AiPanelView;
     let (width, height) = (40, 10);
     let mut state = AiPanelState::new();
-    state.input = "first\nsecond".to_string();
+    state.push_input("first\nsecond");
     let view = AiPanelView::new("AI Agent")
         .with_input_rows(state.view(usize::from(height), usize::from(width)).input);
 

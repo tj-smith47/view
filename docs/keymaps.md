@@ -128,16 +128,30 @@ See [ai.md](ai.md) for what a review is and what each decision writes.
 
 | key | does |
 | --- | --- |
-| `<S-CR>` | breaks the line, where the terminal reports the shift |
-| `<M-CR>` | breaks the line, everywhere else |
+| `<M-CR>` | breaks the line -- works everywhere |
+| `<S-CR>` | breaks the line -- **full tier only** |
 | `<CR>` | sends the prompt |
 
 Both are bound because terminals disagree about Enter. Alt+Enter arrives as
-`ESC` + Enter from nearly every one of them; Shift+Enter arrives as a
-*shifted* Enter only where a keyboard protocol says so, and reaches view as
-a plain `<CR>` otherwise -- which is why it is a second binding and not the
-only one. A pasted line break needs no key at all: paste a multi-line prompt
-and it keeps its lines.
+`ESC` + Enter from nearly every one of them, so `<M-CR>` is the one to reach
+for. Shift+Enter is only distinguishable from a plain Enter under the kitty
+keyboard protocol, which view enables on the **full** tier alone -- on any
+lower tier the terminal sends the same byte for both and Shift+Enter *sends
+the prompt*. view resolves the tier at startup from what the terminal
+answers its capability probe, and `--tier` overrides it. A pasted line
+break needs no key at all: paste a multi-line prompt and it keeps its
+lines.
+
+| tier | keyboard protocol | what view sends |
+| --- | --- | --- |
+| `full` | on | `CSI > 1 u` after entering the alternate screen, `CSI < u` before leaving it |
+| `standard`, `basic` | off | nothing |
+
+That is the same window nvim keeps the protocol open for when you run it
+directly in kitty, ghostty or WezTerm, so the keys your terminal
+disambiguates are view's for the session and your shell has its own
+keyboard back the moment view exits -- including when it exits through a
+crash or a signal.
 
 The break the agent receives is the same `\n` either way, and the composer
 paints the text after it on a row of its own with the cursor on that row.

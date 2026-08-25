@@ -870,13 +870,13 @@ fn esc_on_the_top_of_a_stack_forwards_without_touching_what_is_beneath() {
 #[test]
 fn a_paste_into_the_focused_composer_lands_at_its_cursor() {
     let mut m = entered_ai_panel_model();
-    m.ai_panel_mut().input = "draft ".to_string();
+    m.ai_panel_mut().push_input("draft ");
     m.dirty = false;
 
     let effects = update(&mut m, Msg::Paste("pasted text".into()));
 
     assert_eq!(
-        m.ai_panel().input,
+        m.ai_panel().input(),
         "draft pasted text",
         "the paste lands whole, at the composer's cursor"
     );
@@ -898,7 +898,7 @@ fn a_pasted_key_notation_is_text_and_not_the_key_it_names() {
 
     let effects = update(&mut m, Msg::Paste("press <CR> or <lt>".into()));
 
-    assert_eq!(m.ai_panel().input, "press <CR> or <lt>");
+    assert_eq!(m.ai_panel().input(), "press <CR> or <lt>");
     assert!(
         !m.ai_panel().turn_in_flight,
         "a pasted <CR> is two characters of a prompt, not the key that sends one"
@@ -919,7 +919,7 @@ fn a_pasted_trailing_newline_leaves_the_prompt_in_the_composer() {
     let effects = update(&mut m, Msg::Paste("first line\nsecond line\n".into()));
 
     assert_eq!(
-        m.ai_panel().input,
+        m.ai_panel().input(),
         "first line\nsecond line\n",
         "the text is kept verbatim, its line breaks included"
     );
@@ -966,7 +966,7 @@ fn a_paste_past_the_wrap_cap_keeps_every_character_and_paints_its_tail() {
 
     let _ = update(&mut m, Msg::Paste(pasted.clone()));
 
-    assert_eq!(m.ai_panel().input, pasted, "no pasted character is cut");
+    assert_eq!(m.ai_panel().input(), pasted, "no pasted character is cut");
     let rows = m.ai_panel().view(PANEL_HEIGHT, PANEL_WIDTH).input;
     assert!(rows.len() > 1, "a paste this long has to wrap");
     assert!(
@@ -1020,7 +1020,7 @@ fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
             PERMISSION_PASTE_NOTICE,
         ),
     ] {
-        m.ai_panel_mut().input = "draft".to_string();
+        m.ai_panel_mut().push_input("draft");
         m.dirty = false;
 
         let effects = update(&mut m, Msg::Paste("pasted text".into()));
@@ -1034,7 +1034,7 @@ fn a_paste_at_a_native_surface_with_no_text_input_answers_with_a_notice() {
             "{what}'s notice is scheduled to be painted, not just filed"
         );
         assert_eq!(
-            m.ai_panel().input,
+            m.ai_panel().input(),
             "draft",
             "{what} owns the keyboard, so nothing lands in the composer behind it"
         );
@@ -3980,7 +3980,7 @@ fn ctrl_c_cancels_the_turn_a_pending_permission_is_holding_open() {
 fn the_composer_is_not_editable_behind_an_unanswered_permission() {
     for notation in ["<BS>", "<lt>"] {
         let mut m = pending_permission_model();
-        m.ai_panel_mut().input = "draft".to_string();
+        m.ai_panel_mut().push_input("draft");
         let effects = update(
             &mut m,
             Msg::Key(Key {
@@ -3992,7 +3992,7 @@ fn the_composer_is_not_editable_behind_an_unanswered_permission() {
             "{notation} must not forward past the prompt: {effects:?}"
         );
         assert_eq!(
-            m.ai_panel().input,
+            m.ai_panel().input(),
             "draft",
             "{notation} must leave the composer exactly as the prompt found it"
         );
@@ -4006,7 +4006,7 @@ fn the_composer_is_not_editable_behind_an_unanswered_permission() {
 fn a_second_prompt_cannot_be_submitted_into_a_turn_already_in_flight() {
     let mut m = entered_ai_panel_model();
     m.ai_panel_mut().turn_in_flight = true;
-    m.ai_panel_mut().input = "and another thing".to_string();
+    m.ai_panel_mut().push_input("and another thing");
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -4018,7 +4018,7 @@ fn a_second_prompt_cannot_be_submitted_into_a_turn_already_in_flight() {
         "a turn is already running; nothing may be submitted into it: {effects:?}"
     );
     assert_eq!(
-        m.ai_panel().input,
+        m.ai_panel().input(),
         "and another thing",
         "the refused prompt stays in the composer rather than being eaten"
     );
@@ -4072,7 +4072,7 @@ fn panel_transcript_texts_at(m: &Model, panel_width: usize) -> Vec<String> {
 #[test]
 fn paging_the_transcript_holds_the_window_and_paging_back_follows_it_again() {
     let mut m = scrollable_ai_panel_model(100);
-    m.ai_panel_mut().input = "draft".to_string();
+    m.ai_panel_mut().push_input("draft");
     m.dirty = false;
 
     let effects = update(&mut m, key("<PageUp>"));
@@ -4082,7 +4082,7 @@ fn paging_the_transcript_holds_the_window_and_paging_back_follows_it_again() {
         "scrolling issues no effect: {effects:?}"
     );
     assert!(m.dirty, "a moved window has to repaint");
-    assert_eq!(m.ai_panel().input, "draft");
+    assert_eq!(m.ai_panel().input(), "draft");
     let held = panel_transcript_texts(&m);
     assert_eq!(
         held.first().unwrap(),
@@ -4103,7 +4103,7 @@ fn paging_the_transcript_holds_the_window_and_paging_back_follows_it_again() {
         "● line 99",
         "paging back onto the tail resumes following it"
     );
-    assert_eq!(m.ai_panel().input, "draft");
+    assert_eq!(m.ai_panel().input(), "draft");
 }
 
 /// The half-page pair, and the one collision in it: `<C-d>` already
@@ -4143,7 +4143,7 @@ fn ctrl_u_and_ctrl_d_move_the_window_by_half_a_page() {
 fn submitting_a_prompt_returns_the_panel_to_the_newest_line() {
     let mut m = scrollable_ai_panel_model(100);
     let _ = update(&mut m, key("<PageUp>"));
-    m.ai_panel_mut().input = "and another thing".to_string();
+    m.ai_panel_mut().push_input("and another thing");
 
     let _ = update(&mut m, key("<CR>"));
 
@@ -4162,7 +4162,7 @@ fn submitting_a_prompt_returns_the_panel_to_the_newest_line() {
 #[test]
 fn submitting_a_prompt_puts_it_in_the_transcript_and_still_sends_it() {
     let mut m = scrollable_ai_panel_model(0);
-    m.ai_panel_mut().input = "what changed here?".to_string();
+    m.ai_panel_mut().push_input("what changed here?");
 
     let effects = update(&mut m, key("<CR>"));
 
@@ -4475,12 +4475,12 @@ fn a_resize_key_is_honored_in_every_state_that_owns_the_panels_keys() {
 #[test]
 fn resizing_leaves_a_half_written_prompt_alone() {
     let mut m = scrollable_ai_panel_model(0);
-    m.ai_panel_mut().input = "draft".to_string();
+    m.ai_panel_mut().push_input("draft");
 
     let _ = update(&mut m, key("<S-Right>"));
     let _ = update(&mut m, key("<S-Left>"));
 
-    assert_eq!(m.ai_panel().input, "draft");
+    assert_eq!(m.ai_panel().input(), "draft");
 }
 
 /// The panel outlives its overlay, so the width does too: a session that
@@ -4590,14 +4590,14 @@ fn both_sidebars_resize_with_nvims_own_window_chord() {
     assert!(effects.is_empty(), "the first key decides nothing yet");
     assert_eq!(ai_panel_width_pct(&panel), 30, "and moves nothing yet");
     assert_eq!(
-        panel.ai_panel().input,
+        panel.ai_panel().input(),
         "",
         "nor does the composer type the key it is waiting on"
     );
 
     let _ = update(&mut panel, key(">"));
     assert_eq!(ai_panel_width_pct(&panel), 35, "one notch wider");
-    assert_eq!(panel.ai_panel().input, "", "and the '>' was not typed");
+    assert_eq!(panel.ai_panel().input(), "", "and the '>' was not typed");
 
     let _ = update(&mut panel, key("<C-w>"));
     let _ = update(&mut panel, key("<lt>"));
@@ -4620,12 +4620,12 @@ fn a_follower_that_completes_nothing_falls_through_to_its_own_handling() {
     let mut panel = scrollable_ai_panel_model(0);
     let _ = update(&mut panel, key("<C-w>"));
     let _ = update(&mut panel, key("a"));
-    assert_eq!(panel.ai_panel().input, "a", "typed into the composer");
+    assert_eq!(panel.ai_panel().input(), "a", "typed into the composer");
     assert_eq!(ai_panel_width_pct(&panel), 30, "and nothing resized");
 
     let _ = update(&mut panel, key(">"));
     assert_eq!(
-        panel.ai_panel().input,
+        panel.ai_panel().input(),
         "a>",
         "the prefix did not outlive the key after it"
     );
@@ -4661,7 +4661,7 @@ fn a_chord_prefix_does_not_survive_focus_leaving_the_sidebar() {
     assert!(m.ai_panel().focused, "and the user came back to the panel");
 
     let _ = update(&mut m, key(">"));
-    assert_eq!(m.ai_panel().input, ">", "typed, not spent on a width");
+    assert_eq!(m.ai_panel().input(), ">", "typed, not spent on a width");
     assert_eq!(ai_panel_width_pct(&m), 30);
 }
 
@@ -4842,13 +4842,13 @@ fn typing_and_backspacing_edit_the_composers_input_line() {
         let effects = update(&mut m, key(ch));
         assert!(effects.is_empty(), "typing emits no effect of its own");
     }
-    assert_eq!(m.ai_panel().input, "hi");
+    assert_eq!(m.ai_panel().input(), "hi");
     assert!(m.dirty);
 
     m.dirty = false;
     let effects = update(&mut m, key("<BS>"));
     assert!(effects.is_empty());
-    assert_eq!(m.ai_panel().input, "h");
+    assert_eq!(m.ai_panel().input(), "h");
     assert!(m.dirty);
 }
 
@@ -4860,7 +4860,7 @@ fn typing_and_backspacing_edit_the_composers_input_line() {
 fn lt_notation_inserts_a_literal_angle_bracket() {
     let mut m = entered_ai_panel_model();
     let _ = update(&mut m, key("<lt>"));
-    assert_eq!(m.ai_panel().input, "<");
+    assert_eq!(m.ai_panel().input(), "<");
 }
 
 /// A named key with no composer meaning (`<Up>`) is swallowed exactly as
@@ -4872,7 +4872,7 @@ fn an_unmapped_named_key_on_the_composer_is_swallowed() {
     m.dirty = false;
     let effects = update(&mut m, key("<Up>"));
     assert!(effects.is_empty());
-    assert_eq!(m.ai_panel().input, "");
+    assert_eq!(m.ai_panel().input(), "");
     assert!(!m.dirty, "an unmapped key changes nothing to repaint");
 }
 
@@ -4911,7 +4911,7 @@ fn enter_on_a_non_empty_composer_submits_a_prompt_and_clears_the_input() {
         panic!("expected one AiPromptSubmit, got {effects:?}");
     };
     assert_eq!(text, "hi");
-    assert_eq!(m.ai_panel().input, "", "the composer clears on submit");
+    assert_eq!(m.ai_panel().input(), "", "the composer clears on submit");
     assert!(m.ai_panel().turn_in_flight);
     assert!(m.dirty);
 }
@@ -4932,7 +4932,7 @@ fn a_typed_line_break_opens_a_row_and_enter_still_submits() {
 
     assert!(effects.is_empty(), "a line break submits nothing");
     assert!(m.dirty, "and the panel repaints for it");
-    assert_eq!(m.ai_panel().input, "one\n");
+    assert_eq!(m.ai_panel().input(), "one\n");
     let view = m.ai_panel().view(24, 40);
     assert_eq!(view.input, vec!["one".to_string(), String::new()]);
     assert_eq!(
@@ -4952,7 +4952,7 @@ fn a_typed_line_break_opens_a_row_and_enter_still_submits() {
         panic!("expected one AiPromptSubmit, got {effects:?}");
     };
     assert_eq!(text, "one\ntwo", "the agent is sent the break as typed");
-    assert_eq!(m.ai_panel().input, "");
+    assert_eq!(m.ai_panel().input(), "");
 }
 
 /// Shift+Enter is the same binding by default, and a permission prompt
@@ -4962,7 +4962,7 @@ fn a_typed_line_break_opens_a_row_and_enter_still_submits() {
 fn shift_enter_breaks_the_line_too_and_neither_key_reaches_past_a_question() {
     let mut m = entered_ai_panel_model();
     let _ = update(&mut m, key("<S-CR>"));
-    assert_eq!(m.ai_panel().input, "\n");
+    assert_eq!(m.ai_panel().input(), "\n");
 
     let mut m = pending_permission_model();
     m.ai_panel_mut().push_input("\n");
@@ -4971,7 +4971,7 @@ fn shift_enter_breaks_the_line_too_and_neither_key_reaches_past_a_question() {
         let effects = update(&mut m, key(notation));
         assert!(effects.is_empty(), "{notation} answers no request");
         assert_eq!(
-            m.ai_panel().input,
+            m.ai_panel().input(),
             "\n",
             "{notation} types nothing under an unanswered question"
         );
@@ -5035,7 +5035,7 @@ fn ctrl_d_with_no_local_error_is_a_noop_and_types_nothing() {
     let effects = update(&mut m, key("<C-d>"));
 
     assert!(effects.is_empty());
-    assert_eq!(m.ai_panel().input, "");
+    assert_eq!(m.ai_panel().input(), "");
     assert!(!m.dirty);
 }
 
@@ -9018,7 +9018,7 @@ fn the_composer_takes_text_again_while_a_review_is_open() {
         rpc_calls(&effects).is_empty(),
         "an entered panel still keeps its keys off the engine: {effects:?}"
     );
-    assert_eq!(m.ai_panel().input, "z");
+    assert_eq!(m.ai_panel().input(), "z");
 }
 
 /// Hunk-jump is the review's primary navigation and it skips what is

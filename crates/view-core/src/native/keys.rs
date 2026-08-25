@@ -69,9 +69,10 @@ impl Default for KeyBindings {
     /// window-resize chord. Two for the composer's line break as well, and
     /// for the same reason in a different form: Alt+Enter (`<M-CR>`)
     /// arrives as `ESC CR` from nearly every terminal, while Shift+Enter
-    /// (`<S-CR>`) arrives only where a keyboard protocol reports the shift
-    /// -- so the pair covers both the terminals that can say it and the
-    /// ones that cannot.
+    /// (`<S-CR>`) is distinguishable from a plain Enter only under the
+    /// kitty keyboard protocol, which view enables on the full tier alone
+    /// -- so the pair covers the terminals that can report a shifted Enter
+    /// and the ones that cannot.
     ///
     /// Two rather than one because a terminal that eats one still leaves
     /// the other -- macOS Terminal and Termius consume the shifted arrows

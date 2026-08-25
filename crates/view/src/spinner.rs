@@ -142,7 +142,7 @@ mod tests {
                 verb: "open".to_string(),
             },
         );
-        model.ai_panel_mut().input = "fix the retry policy".to_string();
+        model.ai_panel_mut().push_input("fix the retry policy");
         let _ = update(
             &mut model,
             Msg::Key(view_core::msg::Key {

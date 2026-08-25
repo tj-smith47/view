@@ -83,19 +83,25 @@ pub struct AiPanelState {
     /// The panel's own prompt-composition line, as typed. Longer than one
     /// painted row is ordinary: [`Self::view`] wraps it (see
     /// [`composer_width`]), so this is never cut to what fits.
-    pub input: String,
-    /// The byte offset of the last line break in [`Self::input`], or `None`
-    /// while it holds none -- the phase [`wrap_window`] opens its window on.
+    input: String,
+    /// The byte offset of every line break in [`Self::input`], ascending --
+    /// the row boundaries [`wrap_window`] opens its window on.
     ///
-    /// Cached rather than searched for, because searching for it is a scan
-    /// of the whole input on every frame, which is the one cost the window
-    /// exists to refuse. It is maintained by the three methods that change
-    /// the composer's text ([`Self::push_input`], [`Self::pop_input`],
-    /// [`Self::take_input`]) at the cost of one write per keystroke, and
-    /// [`wrap_window`] checks that the offset still names a break before it
-    /// trusts it -- so a text written straight into the public field above
-    /// costs alignment, never correctness.
-    last_break: Option<usize>,
+    /// Cached rather than searched for, because searching is a scan of the
+    /// whole input on every frame, which is the one cost the window exists
+    /// to refuse. Every break rather than the last one, because the window
+    /// opens wherever the panel's own height puts it, and the boundary it
+    /// has to land on is the break before *that* point -- with only the
+    /// last one cached, a short closing line under a long paste leaves the
+    /// window a column off, and the prompt visibly reflows when it is sent.
+    ///
+    /// Eight bytes per line held in the composer, and a binary search per
+    /// paint ([`Self::input`] is the text; this is only where its rows
+    /// start). Maintained by the three methods that change that text
+    /// ([`Self::push_input`], [`Self::pop_input`], [`Self::take_input`]),
+    /// which are the only writers there are, since the text itself is
+    /// private.
+    breaks: Vec<usize>,
     /// A single slot by design, not a queue: ACP blocks the agent's own
     /// turn on the reply, so a conformant agent never has two outstanding
     /// at once, and a second arriving request is a protocol violation
@@ -243,7 +249,7 @@ impl AiPanelState {
             session_id: None,
             transcript: Transcript::new(),
             input: String::new(),
-            last_break: None,
+            breaks: Vec::new(),
             pending_permission: None,
             focused: false,
             turn_in_flight: false,
@@ -262,27 +268,27 @@ impl AiPanelState {
     /// bracketed paste.
     ///
     /// Verbatim, control characters and all -- what a paste reads as is the
-    /// wrap's question, never this one -- and the last-break cache is
-    /// carried forward by scanning only the appended text.
+    /// wrap's question, never this one -- and [`Self::breaks`] is carried
+    /// forward by scanning only the appended text.
     pub fn push_input(&mut self, text: &str) {
-        if let Some(offset) = text.rfind(['\n', '\r']) {
-            self.last_break = Some(self.input.len() + offset);
-        }
+        let base = self.input.len();
+        self.breaks
+            .extend(text.match_indices(['\n', '\r']).map(|(at, _)| base + at));
         self.input.push_str(text);
     }
 
     /// Removes the composer's last character, reporting whether there was
     /// one to remove.
     ///
-    /// Re-deriving the cache costs a scan back to the previous break --
-    /// one line's worth -- and only on the keystroke that removes a break,
-    /// which is the one keystroke that can invalidate it.
+    /// The removed character is the composer's last, so the break it may
+    /// have been is the last one recorded: nothing is re-derived and
+    /// nothing is scanned.
     pub fn pop_input(&mut self) -> bool {
         let Some(ch) = self.input.pop() else {
             return false;
         };
         if ch == '\n' || ch == '\r' {
-            self.last_break = self.input.rfind(['\n', '\r']);
+            self.breaks.pop();
         }
         true
     }
@@ -290,8 +296,16 @@ impl AiPanelState {
     /// Takes the composed prompt, leaving the composer empty -- what
     /// submitting one does.
     pub fn take_input(&mut self) -> String {
-        self.last_break = None;
+        self.breaks.clear();
         std::mem::take(&mut self.input)
+    }
+
+    /// The prompt as composed so far. Read-only: [`Self::breaks`] holds
+    /// where its rows start, and a text written past these three methods
+    /// would leave that answer describing a prompt nobody typed.
+    #[must_use]
+    pub fn input(&self) -> &str {
+        &self.input
     }
 
     /// Records `answer` as `tool_kind`'s standing answer, so a later request
@@ -437,7 +451,7 @@ impl AiPanelState {
         };
         let width = width.max(1);
         wrap(
-            wrap_window(&self.input, width, cap, self.last_break),
+            wrap_window(&self.input, width, cap, &self.breaks),
             width,
             cap,
             Break::Cell,
@@ -746,35 +760,38 @@ fn char_cells(ch: char) -> usize {
 /// window may open in the middle of one.
 ///
 /// Its rows are the tail of the whole input's wrap, because it opens where
-/// that wrap opens a row: the start of the line the last break began
-/// (`last_break + 1`), plus a whole number of `width`-cell rows into it --
-/// a grid, never a fixed distance from the end, so appending a character
-/// does not slide the window and reflow a row the reader has already read.
+/// that wrap opens a row: the start of the line the last break before the
+/// window began, plus a whole number of `width`-cell rows into it -- a
+/// grid, never a fixed distance from the end, so appending a character does
+/// not slide the window and reflow a row the reader has already read.
 ///
-/// `last_break` is [`AiPanelState::last_break`], checked against the text
-/// rather than trusted, so a stale offset costs alignment and never
-/// correctness: with none, the window falls back to a multiple of `width`
-/// from the start, which is a row boundary of an input that holds no break
-/// at all. It never opens later than the span above allows, so it always
-/// holds more rows than the panel paints. The one placement left over is a
-/// last line shorter than the window, which has to open ahead of that
-/// break: the rows before the first break inside the window align to the
-/// break before *them*, and finding that one is the whole-input scan this
-/// exists to refuse.
-fn wrap_window(input: &str, width: usize, keep: usize, last_break: Option<usize>) -> &str {
+/// A row of that grid is `width` bytes because a cell is one byte, which
+/// holds for the ASCII a composer is overwhelmingly typed in and not for a
+/// line of multibyte characters longer than the window: those rows sit a
+/// constant column off, the same way they always have. Finding their
+/// boundary means measuring cells from the break, which is the whole-input
+/// walk this exists to refuse.
+///
+/// `breaks` is [`AiPanelState::breaks`], every line break in ascending
+/// order, binary-searched for the last one at or before the window's own
+/// start. The offset it lands on is checked against the text rather than
+/// trusted, so a break list that has drifted from the input costs alignment
+/// and never correctness. The window never opens later than the span above
+/// allows, so it always holds more rows than the panel paints.
+fn wrap_window<'a>(input: &'a str, width: usize, keep: usize, breaks: &[usize]) -> &'a str {
     let span = keep
         .saturating_add(1)
         .saturating_mul(width)
         .saturating_mul(BYTES_PER_CELL);
     let floor = input.len().saturating_sub(span);
-    let phase = last_break
-        .filter(|&at| matches!(input.as_bytes().get(at), Some(b'\n' | b'\r')))
-        .map_or(0, |at| at + 1);
-    let mut start = if phase <= floor {
-        phase + ((floor - phase) / width) * width
-    } else {
-        floor - floor % width
-    };
+    let phase = breaks[..breaks.partition_point(|&at| at <= floor)]
+        .last()
+        .filter(|&&at| matches!(input.as_bytes().get(at), Some(b'\n' | b'\r')))
+        .map_or(0, |&at| at + 1);
+    // saturating because a break landing exactly on `floor` opens the next
+    // line one byte past it, which is a whole row nearer the end and never
+    // fewer rows than the panel paints
+    let mut start = phase + (floor.saturating_sub(phase) / width) * width;
     // forward to a boundary, never back: a start inside a character would
     // panic the slice, and the row spare above is what pays for the shift
     while !input.is_char_boundary(start) {
@@ -1415,6 +1432,10 @@ mod tests {
                 "one line longer than the window, after a break",
                 format!("first\n{}", letters(1 << 14)),
             ),
+            (
+                "a short last line under a line longer than the window",
+                format!("first\n{}\nshort", letters(1 << 14)),
+            ),
         ] {
             let mut state = AiPanelState::new();
             state.push_input(&input);
@@ -1426,7 +1447,7 @@ mod tests {
                 wrap(&input, width, cap, Break::Cell),
                 "{name}: the rows are the whole input's own, column for column"
             );
-            let window = wrap_window(&input, width, cap, state.last_break);
+            let window = wrap_window(&input, width, cap, &state.breaks);
             assert!(
                 window.len() <= (cap + 2) * width * BYTES_PER_CELL,
                 "{name}: the walk is bounded by the rows the panel has, not \
@@ -1439,40 +1460,81 @@ mod tests {
 
     /// The cache the window opens on, across every gesture that moves it: a
     /// paste scans only what it pasted, a typed break lands at the end, a
-    /// backspace over a break re-derives the one before it, and a submitted
-    /// prompt leaves none.
+    /// backspace over a break drops the last one, and a submitted prompt
+    /// leaves none.
     #[test]
-    fn the_last_break_follows_the_composers_text() {
+    fn the_breaks_follow_the_composers_text() {
         let mut state = AiPanelState::new();
         state.push_input("no break here");
-        assert_eq!(state.last_break, None);
+        assert!(state.breaks.is_empty());
 
-        state.push_input(" and\nthen one\nmore");
-        assert_eq!(state.last_break, state.input.rfind('\n'));
+        state.push_input(" and\nthen one\r\nmore");
+        assert_eq!(
+            state.breaks,
+            every_break(state.input()),
+            "a paste records each of its own breaks, `\\r\\n` as the two \
+             bytes it is"
+        );
 
         state.push_input("\n");
         assert_eq!(
-            state.last_break,
-            Some(state.input.len() - 1),
+            state.breaks.last().copied(),
+            Some(state.input().len() - 1),
             "a typed break is the last one"
         );
 
         assert!(state.pop_input());
         assert_eq!(
-            state.last_break,
-            state.input.rfind('\n'),
-            "and removing it falls back to the break before it"
+            state.breaks,
+            every_break(state.input()),
+            "and removing it drops exactly that one"
         );
-        let unchanged = state.last_break;
+        let unchanged = state.breaks.clone();
         assert!(state.pop_input());
         assert_eq!(
-            state.last_break, unchanged,
-            "a backspace over an ordinary character re-derives nothing"
+            state.breaks, unchanged,
+            "a backspace over an ordinary character drops none"
         );
 
         assert!(!state.take_input().is_empty());
-        assert_eq!(state.last_break, None, "and a sent prompt leaves none");
+        assert!(state.breaks.is_empty(), "and a sent prompt leaves none");
         assert!(!state.pop_input(), "an empty composer has nothing to pop");
+    }
+
+    /// Every line break in `text`, the scan the cache exists to avoid --
+    /// here as the independent answer to check it against.
+    fn every_break(text: &str) -> Vec<usize> {
+        text.match_indices(['\n', '\r']).map(|(at, _)| at).collect()
+    }
+
+    /// The guard that makes the cache safe to be wrong: a break list that no
+    /// longer describes the text names an offset that is not a break, and
+    /// the window opens the way it does for a text with no break at all
+    /// rather than a row boundary of nothing.
+    #[test]
+    fn a_break_list_that_no_longer_describes_the_text_costs_only_alignment() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let letters: String = (0..(1 << 16))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+
+        let mut state = AiPanelState::new();
+        state.push_input("first\nsecond\n");
+        state.input.clone_from(&letters);
+
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+
+        assert_eq!(
+            rows,
+            wrap(&letters, width, cap, Break::Cell),
+            "the rows are still the whole text's own"
+        );
+        assert!(
+            wrap_window(&letters, width, cap, &state.breaks).len()
+                <= (cap + 2) * width * BYTES_PER_CELL,
+            "and the walk is still bounded"
+        );
     }
 
     /// The wrap boundary itself, where an off-by-one puts the cursor on a

@@ -1278,7 +1278,7 @@ mod tests {
             .expect("some panel width gives the composer an entry body's width");
 
         let mut state = crate::native::ai_panel::AiPanelState::new();
-        state.input = text.to_string();
+        state.push_input(text);
         let composer = state.view(ROOM, panel).input;
 
         let mut transcript = Transcript::new();
@@ -1291,6 +1291,53 @@ mod tests {
 
         assert!(composer.len() > 3, "the text has to wrap to prove anything");
         assert_eq!(composer, entry);
+    }
+
+    /// The same agreement at the size where the composer stops wrapping the
+    /// whole prompt and wraps a window of it instead: its rows are the last
+    /// of the entry's, column for column. A prompt reaching that size is
+    /// ordinary -- a pasted log with a short closing line under it -- and a
+    /// window opening off the whole wrap's grid is exactly what makes such
+    /// a prompt reflow the moment it is sent.
+    #[test]
+    fn an_entrys_rows_are_the_composers_rows_for_a_prompt_past_the_window() {
+        const PANEL_ROWS: usize = 24;
+
+        let body = WIDE - MARK_COLS;
+        let panel = (1..=200)
+            .find(|w| crate::native::ai_panel::composer_width(*w) == body)
+            .expect("some panel width gives the composer an entry body's width");
+        // past the window the composer wraps and under the entry's own
+        // paint ceiling, so both halves hold the whole prompt
+        let long: String = (0..(1 << 12))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let text = format!("first\n{long}\nshort");
+
+        let mut state = crate::native::ai_panel::AiPanelState::new();
+        state.push_input(&text);
+        let composer = state.view(PANEL_ROWS, panel).input;
+
+        let mut transcript = Transcript::new();
+        transcript.echo_user_prompt(&text);
+        let entry: Vec<String> =
+            texts(&transcript.rows_from(TranscriptAnchor::default(), ROOM, WIDE))
+                .iter()
+                .map(|row| row.chars().skip(MARK_COLS).collect())
+                .collect();
+
+        assert!(
+            entry.len() > composer.len(),
+            "the prompt has to be past what the composer paints to prove \
+             anything: {} entry rows, {} composer rows",
+            entry.len(),
+            composer.len()
+        );
+        assert_eq!(
+            composer,
+            entry[entry.len() - composer.len()..],
+            "the composer paints the last of the rows the transcript will"
+        );
     }
 
     /// A line past the row's width wraps rather than being clipped, and the

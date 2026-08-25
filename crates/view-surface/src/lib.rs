@@ -1898,7 +1898,7 @@ mod tests {
             OverlayBox::new(30, 100).with_anchor(Anchor::Right),
             OverlayKind::Ai,
         );
-        model.ai_panel_mut().input = typed.to_string();
+        model.ai_panel_mut().push_input(typed);
         // A real session has this set: `mode_info_set` reports it true for
         // any non-empty `guicursor`, which is nvim's default. The struct's
         // own `Default` is false, so leaving it would test the one
@@ -2333,7 +2333,7 @@ mod tests {
             OverlayBox::new(30, 100).with_anchor(Anchor::Right),
             OverlayKind::Ai,
         );
-        model.ai_panel_mut().input = "hello".to_string();
+        model.ai_panel_mut().push_input("hello");
         model.ai_panel_mut().focused = true;
 
         let surface = render(&model);

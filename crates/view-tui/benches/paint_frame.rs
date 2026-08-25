@@ -404,7 +404,7 @@ fn bench_paint_frame_agent_composer(c: &mut Criterion) {
             // boundary
             *typed += 1;
             if (*typed).is_multiple_of(20) {
-                model.ai_panel_mut().input.clear();
+                let _ = model.ai_panel_mut().take_input();
             }
             let _ = update(
                 model,
