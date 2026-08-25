@@ -266,8 +266,21 @@ fi
 # A join is answered for by its own statement -- `target_root()` in the
 # chain, or a name the file bound to one earlier.
 if [ -d crates ]; then
-  built=$(find crates -name '*.rs' -print0 | xargs -0 awk '
+  # the pipeline's own status is checked rather than discarded: an awk with
+  # a syntax error prints nothing and would otherwise read exactly like a
+  # clean tree, passing the gate on a pin that never ran. `pipefail` is what
+  # carries that status out of the pipe. No `-r` is owed for the empty case:
+  # xargs runs its utility with stdin on /dev/null, so an awk reached with
+  # no file operands reads nothing and prints nothing rather than hanging on
+  # the gate's own stdin.
+  if ! built=$(find crates -name '*.rs' -print0 | xargs -0 awk '
     function check(  name) {
+      # a binding belongs to the function it was made in: bash-style file
+      # scope would let one function name a root and whitelist the same
+      # identifier for every sibling that never bound one
+      if (stmt ~ /(^|[^A-Za-z0-9_])fn[ \t]/) {
+        delete rooted
+      }
       if (stmt ~ /target_root\(\)/ &&
           match(stmt, /let[ \t]+(mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*/)) {
         name = substr(stmt, RSTART, RLENGTH)
@@ -298,7 +311,11 @@ if [ -d crates ]; then
         if (i < n) { check(); stmt = "" }
       }
     }
-  ' || true)
+  '); then
+    echo "STYLE FAIL: the target_root pin could not be evaluated (find or awk failed)"
+    fail=1
+    built=""
+  fi
   if [ -n "$built" ]; then
     printf '%s\n' "$built"
     echo "STYLE FAIL: a built binary resolved from something other than target_root"

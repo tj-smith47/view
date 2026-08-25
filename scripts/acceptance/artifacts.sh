@@ -125,8 +125,12 @@ watch_view() {
     # not the alternative it looks like: it reports the binary a symlink
     # resolves to, which on macOS is what a stand-in named `view` is
     # recorded as -- the self-check below runs exactly that shape
+    # `|| true` on the pipeline, not decoration: `ps` exits 1 for a pid that
+    # has already gone, and under `set -euo pipefail` that status would end
+    # the leg where it stands -- with none of the diagnostics below printed,
+    # so the run reports nothing about the session it could not read
     local name
-    name=$(ps -o comm= -p "$pane_pid" 2>/dev/null | tr -d ' ')
+    name=$(ps -o comm= -p "$pane_pid" 2>/dev/null | tr -d ' ' || true)
     if [ "${name##*/}" = view ]; then
         pid=$pane_pid
     else
@@ -226,7 +230,11 @@ selfcheck_abort() {
 # `kill -0` answers for a zombie as though it were alive, and a real orphan
 # is never one.
 check_view_reaping() {
-    local before
+    # local, so the two names this needs do not become globals in every
+    # script that sources this file: bash's dynamic scoping still shows
+    # them to `selfcheck_abort` while this frame is live, which is the only
+    # reader either of them has
+    local before SELFCHECK_TMP SELFCHECK_SESSION
     SELFCHECK_TMP=$(mktemp -d)
     SELFCHECK_SESSION="view-acc-selfcheck-$$"
     # a shell under the name the recorder looks for. The trailing `:` is
