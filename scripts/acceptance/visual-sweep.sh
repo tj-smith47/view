@@ -39,6 +39,7 @@ FIXTURE=$SCRIPT_DIR/fixtures/themed
 COLORSCHEME=$FIXTURE/nvim/colors/view-dracula.lua
 MAPPINGS_RS=$REPO_ROOT/crates/view-core/src/native/mappings.rs
 PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
+PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 PICKER_RS=$REPO_ROOT/crates/view-core/src/native/picker.rs
 PALETTE_RS=$REPO_ROOT/crates/view-core/src/native/palette.rs
 SURFACES_RS=$REPO_ROOT/crates/view-core/src/update/surfaces.rs
@@ -610,6 +611,103 @@ assert_caret_outside_a_box() {
     pass "$what: the caret is at row $row col $col, left of the framed box on its row (col $edge)"
 }
 
+# The column the agent panel's left frame edge stands in.
+#
+# The panel is pinned to one edge of the terminal, so that column is its
+# width read off the screen -- the only reading of a resize there is, since
+# the width itself is state no capture holds. Leftmost across the whole
+# capture, because the legs that call it have exactly one framed surface up.
+panel_edge() {
+    settle
+    LC_ALL=C awk -F'\t' '$6 == "\342\224\202" { if (min == "" || $2 < min) min = $2 }
+        END { if (min != "") print min }' "$CELLS"
+}
+
+# The glyph the pane's caret is standing on, or nothing when the cell it
+# names holds none.
+#
+# Read by joining tmux's own cursor to the capture rather than from either
+# alone: which key a caret is offering to press is a claim about both, and
+# the two are separate readings of the same frame.
+caret_glyph() {
+    local row col
+    read -r row col _ <<<"$(caret_cell)"
+    LC_ALL=C awk -F'\t' -v r="$row" -v c="$col" '$1 == r && $2 == c { print $6; exit }' "$CELLS"
+}
+
+# How many screen rows the transcript entry opening with `head` spans:
+# its own row and every filled row under it, up to the first blank one.
+# Nothing at all when `head` is off screen.
+#
+# Counted by rows rather than by finding a marker on the entry's last one,
+# because a re-wrap is exactly what puts a marker across a row boundary --
+# the tail of a narrowed entry reads as `REF` / `LOWTAIL` and no span
+# search finds it. What a row holds is asked of the cells between the
+# panel's own two edges, so the buffer beside it cannot fill a row here.
+entry_rows() {
+    local head="$1" span head_row
+    settle
+    span=$(text_span "$head")
+    [ -n "$span" ] || return 0
+    read -r head_row _ _ _ <<<"$span"
+    LC_ALL=C awk -F'\t' -v head="$head_row" '
+        {
+            glyph[$1 "," $2] = $6
+            if ($6 == "\342\224\202") {
+                if (!($1 in lo) || $2 < lo[$1]) lo[$1] = $2
+                if (!($1 in hi) || $2 > hi[$1]) hi[$1] = $2
+            }
+            if ($1 > last) last = $1
+        }
+        END {
+            for (r = head; r <= last; r++) {
+                if (!(r in lo) || !(r in hi) || hi[r] <= lo[r] + 1) break
+                filled = 0
+                for (c = lo[r] + 1; c < hi[r]; c++) {
+                    g = glyph[r "," c]
+                    if (g != "" && g != " ") { filled = 1; break }
+                }
+                if (!filled) break
+                rows++
+            }
+            print rows + 0
+        }' "$CELLS"
+}
+
+# Everything framed on screen, in row order, with the frame, the row breaks
+# and the padding taken out.
+#
+# A wrapped entry is the one place a marker cannot be looked for as it was
+# typed: the wrap puts a row boundary through the middle of it, and after a
+# re-wrap the boundary is somewhere else -- a narrowed `REFLOWTAIL` reads as
+# `REF` on one row and `LOWTAIL` on the next. Joining is what lets a leg ask
+# whether the text survived without also asserting where it broke. Built
+# from the cells rather than from [`box_text`], whose rows come out in awk's
+# own order for an associative array: unordered rows joined are a different
+# string every run.
+box_text_joined() {
+    settle
+    LC_ALL=C awk -F'\t' '
+        {
+            glyph[$1 "," $2] = $6
+            if ($6 == "\342\224\202") {
+                if (!($1 in lo) || $2 < lo[$1]) lo[$1] = $2
+                if (!($1 in hi) || $2 > hi[$1]) hi[$1] = $2
+            }
+            if ($1 > last) last = $1
+        }
+        END {
+            for (r = 0; r <= last; r++) {
+                if (!(r in lo) || !(r in hi)) continue
+                for (c = lo[r] + 1; c < hi[r]; c++) {
+                    g = glyph[r "," c]
+                    if (g != "" && g != " ") printf "%s", g
+                }
+            }
+            printf "\n"
+        }' "$CELLS"
+}
+
 assert_chrome() {
     local what="$1" findings
     settle
@@ -811,6 +909,16 @@ CREATE_PROMPT=$(grep -A 6 'pub fn tree_create_prompt' "$NVIM_API_RS" |
     grep -oE 'Value::from\("[^"]+"\)' | sed -E 's/.*"(.*)".*/\1/' | head -1)
 [ -n "$CREATE_PROMPT" ] || {
     printf 'FAIL: %s no longer primes the tree create prompt with a literal question\n' "$NVIM_API_RS" >&2
+    exit 1
+}
+# What a permission question opens with, read out of the format that builds
+# it: the caret leg has to know the prompt is up before it reads where the
+# keyboard is waiting.
+PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_RS" |
+    sed -E 's/.*"(.*)/\1/')
+[ -n "$PERMISSION_PROMPT" ] || {
+    printf 'FAIL: the permission prompt is not built from a literal in %s any more\n' \
+        "$PERMISSION_RS" >&2
     exit 1
 }
 HISTORY_TITLE=$(grep -oE 'PaletteView::new\("[^"]+"\)' "$PALETTE_RS" |
@@ -1527,7 +1635,266 @@ leg_inline_review() {
     end_session
 }
 
-LEGS=(leg_entry_points leg_toast_and_history leg_toast_over_panel leg_panel_typing leg_panel_paste leg_narrow_title leg_inline_review)
+# The sidebar resize chord, the way a user arriving from nvim types it.
+#
+# `<S-Right>`/`<S-Left>` are the other half of the same binding and are
+# swept by the entry-point leg; this one exists for the chord, which is a
+# two-key gesture with state between the presses and two ways to be wrong
+# that no single-key test can see: a follower that finishes nothing must be
+# handled as though it had been typed alone, and a prefix armed in a sidebar
+# that then loses focus must not still be waiting minutes later to spend the
+# next `>` on a width. The width itself is state no capture holds, so every
+# assertion below reads the panel's own frame edge instead.
+leg_resize_chord() {
+    CURRENT_LEG=resize-chord
+    start_session chord 'visual sweep seed line'
+    command_line ':View ai'
+    wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
+    send_text 'y'
+    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
+
+    local opened wider narrower armed dropped start
+    opened=$(panel_edge)
+    [ -n "$opened" ] || {
+        fail 'the entered panel has no frame edge on screen, so nothing here can read its width'
+        return 1
+    }
+
+    send_key 'C-w'
+    send_text '>'
+    # polled rather than read once: the chord crosses the engine and comes
+    # back as a repaint, and a single capture right after the second key
+    # would be reading the frame before the width moved
+    start=$(now)
+    while :; do
+        wider=$(panel_edge)
+        [ -n "$wider" ] && [ "$wider" != "$opened" ] && break
+        if ! under "$(elapsed "$start" "$(now)")" "$REACTION_SECS"; then
+            fail "'<C-w>>' left the panel edge at column $opened after ${REACTION_SECS}s, so the chord reached no resize"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+    [ "$wider" -lt "$opened" ] || {
+        fail "'<C-w>>' moved the panel edge from column $opened to $wider, which is a narrower panel, not a wider one"
+        return 1
+    }
+    pass "'<C-w>>' widens the panel (left edge column $opened -> $wider)"
+
+    send_key 'C-w'
+    send_text '<'
+    start=$(now)
+    while :; do
+        narrower=$(panel_edge)
+        [ -n "$narrower" ] && [ "$narrower" != "$wider" ] && break
+        if ! under "$(elapsed "$start" "$(now)")" "$REACTION_SECS"; then
+            fail "'<C-w><' left the panel edge at column $wider after ${REACTION_SECS}s, so the chord reached no resize"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+    [ "$narrower" -gt "$wider" ] || {
+        fail "'<C-w><' moved the panel edge from column $wider to $narrower, which is a wider panel, not a narrower one"
+        return 1
+    }
+    pass "'<C-w><' narrows the panel back (left edge column $wider -> $narrower)"
+
+    # A follower that finishes no chord: typed alone is what it means, and
+    # the composer is where "typed alone" lands. Without this the keys the
+    # whole binding exists for would be the one class a waiting prefix
+    # locks out.
+    send_key 'C-w'
+    send_text 'FELLTHROUGH'
+    wait_in_box 'FELLTHROUGH' "$REACTION_SECS" 'a follower that finishes no chord' >/dev/null
+    armed=$(panel_edge)
+    [ "$armed" = "$narrower" ] || {
+        fail "typing after '<C-w>' moved the panel edge from column $narrower to $armed, so a fall-through spent itself on a width"
+        return 1
+    }
+    pass "a follower finishing no chord types into the composer and resizes nothing (edge still column $narrower)"
+
+    # And the prefix does not outlive the focus it was armed in. `<Esc>`
+    # cannot stand in for that case: it is itself a keystroke, and every
+    # keystroke consumes the prefix on its way through the resolver whether
+    # the panel keeps focus or not. The case that needs the drop is focus
+    # leaving with no key involved at all -- a review landing hands the
+    # keyboard back to the buffer it is drawn in -- after which a prefix
+    # still waiting would meet the next `>` the user types on coming back
+    # and spend it on a width instead of putting it in the prompt.
+    send_key Enter
+    printf 'alpha\nbeta\ngamma\n' >"$ROOT/view-ai-stub-diff.txt"
+    send_text 'propose'
+    send_key Enter
+    # armed before the proposal can arrive: these keys are already in the
+    # pty when the agent is still being asked, and the check below is what
+    # says so rather than assuming it
+    send_key 'C-w'
+    wait_for '+BETA' "$WAIT_SECS" 'the review the agent proposed' >/dev/null
+    settle
+    if grep -qF '^W' "$SCREEN"; then
+        fail 'the review landed before the chord prefix was armed (nvim is showing a pending ^W of its own), so this leg is not reading a prefix that belonged to the panel'
+        return 1
+    fi
+
+    local ai_key
+    ai_key=$(printf '%s\n' "$ENTRY_POINTS" | awk '$1 == "ai" && $3 == "toggle" { print $2 }')
+    [ -n "$ai_key" ] || {
+        fail 'no ai/toggle row in DEFAULT_MAPS any more, so there is no key back into the panel'
+        return 1
+    }
+    ai_key=$(tmux_key "$ai_key") || return 1
+    send_text "$ai_key"
+    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" 'the panel the toggle re-enters' >/dev/null
+    send_text '>DROPPED'
+    wait_in_box '>DROPPED' "$REACTION_SECS" "the '>' typed after focus came back" >/dev/null
+    dropped=$(panel_edge)
+    [ "$dropped" = "$narrower" ] || {
+        fail "a '>' typed after a review took focus from the panel moved the edge from column $narrower to $dropped, so the chord prefix outlived the focus it was armed in"
+        return 1
+    }
+    pass "a chord prefix armed in the panel is dropped when a review takes the focus (edge still column $narrower)"
+
+    assert_chrome 'the resized agent panel'
+    dismiss ai
+    end_session
+}
+
+# Where the keyboard is waiting while a permission question stands.
+#
+# The composer swallows every printable until the question is answered, so a
+# caret left on it -- wearing the bar an editor uses to say *type here* --
+# invites exactly the keystrokes the panel is about to eat. The contract is
+# that it stands on the digit that answers instead, and that is terminal
+# state: no screen dump of this panel can tell the two apart, which is why
+# it is read from tmux and joined to the capture here rather than pinned in
+# a surface test alone.
+leg_permission_caret() {
+    CURRENT_LEG=permission-caret
+    start_session permission 'visual sweep seed line'
+    command_line ':View ai'
+    wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
+    send_text 'y'
+    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
+
+    send_text 'ask'
+    send_key Enter
+    wait_in_box "$PERMISSION_PROMPT" "$WAIT_SECS" 'the permission question' >/dev/null
+
+    local row col flag glyph start
+    settle
+    read -r row col flag <<<"$(caret_cell)"
+    [ "$flag" = 1 ] || {
+        fail "the caret is hidden (flag '$flag') while a permission question stands, so the user is shown no waiting key at all"
+        return 1
+    }
+    glyph=$(caret_glyph)
+    [ "$glyph" = 1 ] || {
+        fail "the caret stands on '${glyph:-nothing}' at row $row col $col, not on the '1' that answers the first option"
+        return 1
+    }
+    pass "a pending permission puts the caret on the digit that answers it (row $row col $col, glyph '1')"
+
+    # The other half of the same promise: the keys the caret is not offering
+    # go nowhere. A composer that took them would be collecting a prompt
+    # with no caret in it.
+    send_text 'ZZTOP'
+    sleep "$POLL"
+    settle
+    if box_text | grep -qF -- 'ZZTOP'; then
+        fail 'a printable typed at a pending permission reached the composer, which the caret is not pointing at'
+        return 1
+    fi
+    pass 'printables typed at a pending permission reach no composer'
+
+    send_text '1'
+    start=$(now)
+    while :; do
+        settle
+        box_text | grep -qF -- "$PERMISSION_PROMPT" || break
+        if ! under "$(elapsed "$start" "$(now)")" "$WAIT_SECS"; then
+            fail "the permission question is still up ${WAIT_SECS}s after the digit the caret was standing on"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+    send_text 'BACKINTHECOMPOSER'
+    wait_in_box 'BACKINTHECOMPOSER' "$REACTION_SECS" 'the composer after the answer' >/dev/null
+    assert_caret_after 'BACKINTHECOMPOSER' 'the composer once the question is answered' || return 1
+
+    assert_chrome 'the agent panel after a permission answer'
+    dismiss ai
+    end_session
+}
+
+# A transcript entry re-wrapped under a live resize.
+#
+# The panel caches the rows it wrapped, and a narrower panel that kept them
+# would paint an entry off its own right edge -- the text still there, in a
+# width that no longer exists. Pinned as a cache drop and an anchor clamp in
+# unit tests; what neither can see is a real SIGWINCH arriving mid-frame and
+# the rows the terminal is left holding, which is what this reads.
+leg_transcript_reflow() {
+    CURRENT_LEG=transcript-reflow
+    start_session reflow 'visual sweep seed line'
+    command_line ':View ai'
+    wait_in_box 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
+    send_text 'y'
+    wait_in_box "$FOCUSED_TITLE" "$WAIT_SECS" "the entered agent panel" >/dev/null
+
+    # Long enough to wrap several times at this width, so a re-wrap has rows
+    # to add rather than a single row to leave alone.
+    local head=REFLOWHEAD tail=REFLOWTAIL body wide narrow start
+    body=$(awk 'BEGIN { for (i = 0; i < 14; i++) printf "reflowing " }')
+    send_text "$head $body$tail"
+    send_key Enter
+    wait_in_box "$head" "$WAIT_SECS" "the submitted entry" >/dev/null
+    box_text_joined | grep -qF -- "$tail" || {
+        fail "the submitted entry is on screen without its own tail ('$tail'), so it was cut rather than wrapped"
+        return 1
+    }
+    wide=$(entry_rows "$head")
+    [ -n "$wide" ] && [ "$wide" -gt 1 ] || {
+        fail "the submitted entry spans ${wide:-no} row(s) at $COLS columns, so it is not wrapped and a re-wrap would prove nothing"
+        return 1
+    }
+    pass "the transcript entry wraps over $wide rows at $COLS columns"
+
+    tmux resize-window -t "$SESSION" -x "$NARROW_COLS" -y "$ROWS"
+    start=$(now)
+    while :; do
+        narrow=$(entry_rows "$head")
+        [ -n "$narrow" ] && [ "$narrow" != "$wide" ] && break
+        if ! under "$(elapsed "$start" "$(now)")" "$WAIT_SECS"; then
+            fail "the entry still spans ${narrow:-no readable} row(s) ${WAIT_SECS}s after the pane narrowed to $NARROW_COLS columns, so the panel is painting rows it wrapped for a width that is gone"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+    [ "$narrow" -gt "$wide" ] || {
+        fail "the entry went from $wide rows to $narrow on a narrower pane, which is fewer rows for less width"
+        return 1
+    }
+    box_text_joined | grep -qF -- "$tail" || {
+        fail "the entry lost its tail ('$tail') when the pane narrowed, so the re-wrap dropped text rather than re-laying it"
+        return 1
+    }
+    # the head is the anchor: an entry re-wrapped into more rows than the
+    # panel has left would push its own beginning off the top, and the user
+    # would watch the thing they were reading leave the screen on a resize
+    if ! box_text | grep -qF -- "$head"; then
+        fail "the entry's first row ('$head') left the panel when the pane narrowed, so the resize scrolled the user off what they were reading"
+        return 1
+    fi
+    pass "a live narrowing re-wraps the entry ($wide rows -> $narrow) and keeps its anchor row on screen"
+
+    assert_chrome 'the agent panel after a live resize'
+    dismiss ai
+    end_session
+}
+
+LEGS=(leg_entry_points leg_toast_and_history leg_toast_over_panel leg_panel_typing
+    leg_panel_paste leg_narrow_title leg_inline_review leg_resize_chord
+    leg_permission_caret leg_transcript_reflow)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

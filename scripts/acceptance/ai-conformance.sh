@@ -1289,9 +1289,119 @@ ROOTS+=("$ADAPTER_CACHE")
 # session from nothing, so any subset is a run in its own right -- which is
 # what makes reverting one task and re-running the one leg that covers it a
 # practical way to check that the leg is really the thing being asserted.
+# The standing-answer store against the adapter it exists for.
+#
+# Leg 8 drives the store over a wire whose every frame this repo writes, so
+# what it proves is view's half. The half it cannot reach is the shape the
+# real adapter asks in -- which option ids and kinds it offers, which
+# `toolCall.kind` it scopes them with, and whether it honors an
+# `allow_always` at all. The store is keyed on that kind, so an adapter that
+# started spelling it differently would leave every "Always Allow" the user
+# gives silently answering nothing, and no stub could ever say so.
+#
+# Either side may be the one that answers, and the leg reports which: view's
+# store fires only while the adapter keeps re-asking (see
+# `crates/view-ai/src/provision.rs`'s pin assertion and
+# `scripts/acp-allow-always-probe.mjs`). What is asserted rather than
+# reported is the user's own contract -- one question, one answer, and the
+# second edit made without asking again.
+leg_standing_answer_real_adapter() {
+    CURRENT_LEG=10-standing-answer-real-adapter
+    local prompt digit option_id tool_kind asked answered
+    start_session standing default "$ADAPTER_CACHE"
+    open_panel "$WAIT_SECS"
+
+    # Shell commands rather than edits: view advertises `fs.writeTextFile`,
+    # so the adapter routes an Edit through a diff proposal (leg 3) and
+    # never asks permission for one at all. Two commands of the same kind
+    # is the shape a standing answer is for.
+    #
+    # Project settings in the directory the agent is spawned in, because
+    # whether it asks at all is the host's to decide otherwise: this machine
+    # runs with `defaultMode: auto`, under which the adapter grants both
+    # commands itself and no permission ever reaches view. Written here
+    # rather than left to the host so the leg asserts the same thing on any
+    # of them -- and scoped to the leg's own throwaway root, so no
+    # developer's own configuration is touched.
+    mkdir -p "$ROOT/.claude"
+    printf '%s\n' \
+        '{ "permissions": { "defaultMode": "default", "ask": ["Bash(echo:*)"] } }' \
+        >"$ROOT/.claude/settings.json"
+    prompt='Using the Bash tool exactly twice and no other tool, first run the command `echo alpha > alpha.log`, then run the command `echo beta > beta.log`. Then say DONE.'
+    submit "$prompt"
+    wait_for "$PERMISSION_PROMPT" "$PROVISION_SECS" \
+        "the real adapter's first permission request" >/dev/null
+
+    # The digit to press is the adapter's own option order, read off the
+    # request it just sent rather than assumed: the wire says which of its
+    # options is the always-allow, and the panel numbers them in the order
+    # they arrived.
+    # `kind: X }` rather than `kind: X`, since the line's own `tool_kind:`
+    # field would otherwise count as an option and put every digit one out.
+    digit=$(grep -m1 'ai PermissionRequested' "$ROOT/view.log" |
+        grep -oE 'kind: [A-Za-z]+ \}' |
+        awk '{ n++ } /AllowAlways/ { print n; exit }')
+    [ -n "$digit" ] || {
+        fail "the real adapter offered no always-allow option at all: $(grep -m1 'ai PermissionRequested' "$ROOT/view.log")"
+        return 1
+    }
+    tool_kind=$(grep -m1 'ai PermissionRequested' "$ROOT/view.log" |
+        sed -nE 's/.*tool_kind: Some\("([^"]*)"\).*/\1/p')
+    [ -n "$tool_kind" ] || {
+        fail 'the real adapter scoped its request with no tool kind, so there is nothing for a standing answer to be keyed on'
+        return 1
+    }
+    pass "the real adapter asks with an always-allow at digit $digit, scoped '$tool_kind'"
+
+    send_text "$digit"
+    wait_for_log 'ai AnswerPermission .* option_id: "[^"]+"' "$WAIT_SECS" \
+        "the answer view sent back" >/dev/null
+    option_id=$(grep -m1 'ai AnswerPermission' "$ROOT/view.log" |
+        sed -nE 's/.*option_id: "([^"]*)".*/\1/p')
+    pass "the user's always-allow went back as option id '$option_id'"
+
+    # Both commands run is what makes the rest meaningful: an agent that
+    # only ever made one call would need one permission whatever either
+    # side did with the grant.
+    wait_for_log 'ai TurnEnded' "$PROVISION_SECS" "the real agent's turn ending" >/dev/null
+    local left right
+    left=$(cat "$ROOT/alpha.log" 2>/dev/null || true)
+    right=$(cat "$ROOT/beta.log" 2>/dev/null || true)
+    if [ "$left" != "alpha" ] || [ "$right" != "beta" ]; then
+        fail "the agent did not run both commands (alpha.log is $(printf '%q' "$left"), beta.log is $(printf '%q' "$right")), so the second permission this leg is about was never needed"
+        return 1
+    fi
+
+    # The contract, whichever side kept it: the user was asked once.
+    asked=$(grep -c 'ai PermissionRequested' "$ROOT/view.log" || true)
+    answered=$(grep -c 'ai AnswerPermission' "$ROOT/view.log" || true)
+    if [ "$asked" -ne "$answered" ]; then
+        fail "$asked permission request(s) reached view and $answered were answered, so one is still standing unanswered"
+        return 1
+    fi
+    if [ "$asked" -eq 1 ]; then
+        pass "the pinned adapter honored the always-allow itself: it asked once for two '$tool_kind' calls, and view's standing-answer store never fired"
+        pass 'the user answered one question for two calls (the adapter answered the second)'
+    else
+        # view's store answered, so it must have said so on the transcript:
+        # an auto-answer the user cannot see is a grant they cannot audit.
+        wait_for "auto-allowed $tool_kind (standing" "$WAIT_SECS" \
+            "the standing grant's own transcript row" >/dev/null
+        if grep 'ai AnswerPermission' "$ROOT/view.log" | tail -n +2 |
+            grep -qvF "option_id: \"$option_id\""; then
+            fail "view's store answered a later request with an option id the user never chose (wanted '$option_id')"
+            return 1
+        fi
+        pass "the pinned adapter re-asked for the same '$tool_kind' kind ($asked requests) and view's store answered every later one with '$option_id'"
+        pass 'the user answered one question for two calls (view answered the second)'
+    fi
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
 LEGS=(leg_session_lifecycle leg_streaming_and_tool_status leg_diff_accept_and_reject
     leg_cancel_mid_turn leg_agent_crash leg_permission_overlap leg_filesystem_round_trip
-    leg_permission_keys_and_grant leg_prompt_awaiting_its_answer)
+    leg_permission_keys_and_grant leg_prompt_awaiting_its_answer
+    leg_standing_answer_real_adapter)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else
