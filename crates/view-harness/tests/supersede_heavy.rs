@@ -35,17 +35,31 @@ use view_native::config::NativeConfig;
 use view_native::supersede::{plan, Supersession};
 
 /// How long a warm-cache heavy fixture is given to finish loading its
-/// plugin stack. Generous rather than tight: the same bound has to hold on
-/// a shared CI runner, and the only failure it can hide is a fixture that
-/// never loads at all, which the probe below reports as itself.
-const LOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// plugin stack, before the host's own contention is accounted for.
+/// Generous rather than tight: the only failure it can hide is a fixture
+/// that never loads at all, which the probe below reports as itself.
+const LOAD_BOUND: Duration = Duration::from_secs(180);
 
 /// How long the held option is given to come back after something else
-/// writes it. Much tighter than [`LOAD_TIMEOUT`] because the guard's own
-/// bound is one return to nvim's main loop, and no plugin install is in
-/// flight by then; loose enough that a busy shared runner scheduling the
-/// probe thread late cannot fail a session that is behaving.
-const HOLD_TIMEOUT: Duration = Duration::from_secs(10);
+/// writes it, likewise before scaling. Much tighter than [`LOAD_BOUND`]
+/// because the guard's own bound is one return to nvim's main loop, and no
+/// plugin install is in flight by then.
+const HOLD_BOUND: Duration = Duration::from_secs(10);
+
+/// [`LOAD_BOUND`] widened for the load this run started under.
+///
+/// Every millisecond of both bounds is the host's: a plugin stack loading
+/// off a warm cache and an autocommand getting a turn on nvim's main loop
+/// cost whatever the machine has left over, and a flat wall clock covering
+/// them fails on a busy runner while saying nothing about supersession.
+fn load_timeout() -> Duration {
+    view_test_support::host_deadline(LOAD_BOUND)
+}
+
+/// [`HOLD_BOUND`] widened the same way.
+fn hold_timeout() -> Duration {
+    view_test_support::host_deadline(HOLD_BOUND)
+}
 
 /// `laststatus` as the heavy fixture's own lualine sets it: lualine's
 /// `set_statusline()` writes `3` under `globalstatus` and `2` otherwise,
@@ -166,10 +180,10 @@ fn wait_for_lualine(handle: &EngineHandle) {
         handle,
         "luaeval('package.loaded.lualine ~= nil')",
         "true",
-        LOAD_TIMEOUT,
+        load_timeout(),
     );
-    wait_for(handle, "&statusline =~# 'lualine'", "1", LOAD_TIMEOUT);
-    wait_for(handle, "&laststatus", LUALINE_LASTSTATUS, LOAD_TIMEOUT);
+    wait_for(handle, "&statusline =~# 'lualine'", "1", load_timeout());
+    wait_for(handle, "&laststatus", LUALINE_LASTSTATUS, load_timeout());
 }
 
 /// Installs a witness that records `laststatus` as it stood at the start of
@@ -209,7 +223,7 @@ fn witnessed_frames(handle: &EngineHandle) -> Vec<String> {
         handle,
         "luaeval('#_G.__view_redraws > 0')",
         "true",
-        HOLD_TIMEOUT,
+        hold_timeout(),
     );
     handle
         .eval_str("luaeval('table.concat(_G.__view_redraws, [[,]])')")
@@ -286,7 +300,7 @@ fn an_enabled_statusline_takes_the_status_line_from_a_live_lualine() {
     // bound rather than instantly: the guard's idle arm runs when nvim next
     // returns to its main loop, which is not ordered against this probe's
     // own reply.
-    wait_for(&engine.handle, "&laststatus", "0", HOLD_TIMEOUT);
+    wait_for(&engine.handle, "&laststatus", "0", hold_timeout());
 
     assert_eq!(
         before_config,

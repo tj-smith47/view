@@ -493,8 +493,13 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn direct_children_includes_a_freshly_spawned_child() {
+        // the child has to outlive the window this test is willing to wait,
+        // or a loaded host turns "the listing raced" into "the child was
+        // never there": the wait scales with contention, so its lifetime
+        // does too, with a second of margin over the last read
+        let budget = view_test_support::host_deadline(std::time::Duration::from_secs(5));
         let mut child = std::process::Command::new("sleep")
-            .arg("5")
+            .arg(format!("{:.1}", budget.as_secs_f64() + 1.0))
             .spawn()
             .expect("spawning a throwaway child process for the test");
         let child_pid = child.id();
@@ -506,7 +511,7 @@ mod tests {
         // first miss would fail for the listing rather than for the
         // relationship being measured, while an undercount that is really
         // there still exhausts this loop.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + budget;
         let mut children = Vec::new();
         while std::time::Instant::now() < deadline {
             children = direct_children(std::process::id())

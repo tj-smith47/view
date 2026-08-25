@@ -82,19 +82,21 @@ fixtures), regardless of whether your setup has zero plugins or forty.
 Numbers below are recorded baselines on a Linux dev host, Neovim `v0.12.4`,
 1000 samples per cell, measured *paired*: view and bare Neovim in the same
 run, same host, same config, samples interleaved. Reproduce with
-`task perf-audit`.
+`task perf-audit`, which gates every recorded row and reports the `user`
+row above as uncovered until that recording lands.
 
 | | view | bare Neovim |
 |---|---|---|
 | Shell painted, config still loading (p99) | **3.8-4.1 ms** | n/a |
 | First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | 130.3 ms |
-| First paint, cold, 14-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 164.3 ms |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 164.3 ms |
+| First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a |
 | Keystroke to cell change, steady typing (p99) | 0.73 ms | **0.67 ms** |
 
 Cold start is a big win. The no-plugins memory row above is view's own
 process only (the embedded Neovim engine is a separate process this budget
-excludes) and has no bare-Neovim comparison. Under the 14-plugin lazy.nvim
+excludes) and has no bare-Neovim comparison. Under the 15-plugin lazy.nvim
 stack, a diagnostic (not CI-gated) reading does have one: bare Neovim's
 whole process is 4.39 MB, view's own process is 5.00 MB, and view's own
 process plus its embedded Neovim engine child -- the honest comparison,

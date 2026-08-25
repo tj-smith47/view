@@ -41,10 +41,18 @@ use view_native::config::NativeConfig;
 use view_native::mappings::register_plan;
 use view_oracle::{snapshot, OracleError, Probe};
 
-/// How long a `MappingsClaimed`/`FeatureInvoke` notification is waited for.
-/// Generous for a loaded CI box; a `--clean`, plugin-free session with
-/// nothing installing answers in milliseconds.
-const ARRIVAL: Duration = Duration::from_secs(10);
+/// How long a `MappingsClaimed`/`FeatureInvoke` notification is waited for,
+/// before the host's own contention is accounted for. A `--clean`,
+/// plugin-free session with nothing installing answers in milliseconds.
+const ARRIVAL_BOUND: Duration = Duration::from_secs(10);
+
+/// [`ARRIVAL_BOUND`] widened for the load this run started under: the whole
+/// wait is a real engine being scheduled and answering, which costs
+/// whatever the machine has left over, so a flat wall clock here fails on a
+/// busy runner without saying anything about the notification path.
+fn arrival() -> Duration {
+    view_test_support::host_deadline(ARRIVAL_BOUND)
+}
 
 /// A real embedded engine plus the client-side `Model` production's own
 /// `update()` mutates, drained by hand instead of the production runtime
@@ -129,9 +137,9 @@ impl Driver {
 
     /// Drains the raw channel, applying every `Msg` through [`Self::apply`]
     /// as it arrives, until `extract` finds one worth returning or
-    /// [`ARRIVAL`] elapses.
+    /// [`arrival`] elapses.
     fn wait_for<T>(&mut self, extract: impl Fn(&Msg) -> Option<T>) -> Option<T> {
-        let deadline = Instant::now() + ARRIVAL;
+        let deadline = Instant::now() + arrival();
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {

@@ -3,3 +3,6 @@ crates/view-harness/src/fixture.rs	.map_err(|_| FixtureError::SlowKnob { value: 
 crates/view-harness/src/fixture.rs	ml:    if name == USER_FIXTURE {\n        return generate_user_fixture();\n    }		-p view-harness --bin bench every_matrix_fixture
 crates/view-harness/src/fixture.rs	        TREESITTER_HIGHLIGHT_LUA	        ""	-p view-harness --lib fixture::
 crates/view-harness/src/fixture.rs	      vim.notify = function() end	      local _ = 0	-p view-harness --lib fixture::
+crates/view-harness/src/fixture.rs	pub const USER_FIXTURE_STALL_MS: u64 = 50;	pub const USER_FIXTURE_STALL_MS: u64 = 5;	-p view-harness --test first_paint_user_gate
+crates/view-harness/src/fixture.rs	ml:  ["nvim-tree.lua"] = { hijack_netrw = false },\n		-p view-harness --lib fixture::
+docs/performance.md	15-plugin lazy.nvim stack, `heavy` (p99)	16-plugin lazy.nvim stack, `heavy` (p99)	-p view-harness --bin bench the_plugin_count

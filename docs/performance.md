@@ -15,7 +15,7 @@ the gated subset CI uses.
 The engine is pinned (`.engine-pin`, currently Neovim `v0.12.4`) and the
 harness verifies the binary on `PATH` actually reports that version before
 recording anything. Plugin-heavy cells use a committed lazy.nvim fixture
-with 14 plugins pinned by its `lazy-lock.json`, driven through a real pty.
+with 15 plugins pinned by its `lazy-lock.json`, driven through a real pty.
 
 ### The three first-paint configs
 
@@ -25,17 +25,36 @@ number below says which one it belongs to:
 | fixture | what it is |
 |---|---|
 | `minimal` | no plugins at all: nvim's own startup and nothing else |
-| `heavy` | the committed 14-plugin lazy.nvim stack, loaded as that fixture's spec asks |
-| `user` | a login: the same pinned plugin set, every plugin loaded and set up at startup, plus the options, keymaps, autocmds, colorscheme and treesitter highlighting a real config carries |
+| `heavy` | the committed 15-plugin lazy.nvim stack, loaded as that fixture's spec asks |
+| `user` | the same pinned plugin set arranged as a login: a `lua/config` module tree, a leader, a colorscheme, and `setup()` called on every plugin the cache holds |
 
 The `user` fixture is generated at run time from the plugin cache the
 harness already keeps, never committed: its plugin set *is* whatever that
 cache holds, and it shares the cache with `heavy` by carrying the same
-lockfile, so a run installs nothing. It exists because the two committed
-fixtures bracket cold start from below: a real config is what decides how
-long view's startup shell sits on screen saying it is waiting for Neovim,
-and until this fixture existed no recorded bar moved when that window got
-longer.
+lockfile, so a run installs nothing.
+
+Its delta over `heavy` is the shape, not the plugin count. Both load their
+top-level plugins eagerly and both enable treesitter highlighting. What
+`user` adds is what a config file carries and a compat fixture does not:
+17 options set before the plugins load, five leader mappings, two
+autocommands, the `habamax` colorscheme, `setup()` on the two plugins
+`heavy` installs only as dependencies, and `setup()` on every plugin
+through one generic pass rather than per-entry options. Whether that is
+also *slower* than `heavy` through a pty is what its recorded row answers;
+headless, the two start within a few milliseconds of each other. The
+reason it exists is coverage rather than a bigger number: a real config is
+what decides how long view's startup shell sits on screen saying it is
+waiting for Neovim, and until this fixture existed no recorded bar moved
+when that window got longer.
+
+Two run-time notes for anyone recording it. The fixture is driven through
+a real session first (`task user-fixture`, after `task compat` has filled
+the plugin cache) as a precondition of a record run: a plugin that draws a
+message where the content marker is read would otherwise land in the
+number rather than in a failure. And a `first_paint` cell costs 100 warmup
+plus 1000 measured cold spawns per side, so adding this one grows every
+class's bench leg and every `task perf-audit` by roughly 2200 cold spawns
+-- about one `first_paint/heavy` again.
 
 ## Current numbers
 
@@ -45,33 +64,40 @@ Recorded baselines on a shared Linux dev host:
 |---|---|---|---|
 | UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | 130.3 ms | **5.2x faster** |
-| First paint, cold, 14-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 164.3 ms | **2.1x faster** |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 164.3 ms | **2.1x faster** |
 | First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded | |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower |
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
-| Sustained scroll, 100k lines, 14-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
+| Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
 
 The `user` row is measured by the same code as the two above it and lands
 with the next recorded baseline; it is listed empty rather than omitted so
 its absence is visible.
 
+Until a class records that cell, a gate run against that class reports it
+as uncovered and exits on it -- the designed signal for a measured row
+with nothing to compare against, not a fault to work around. Every class
+has to record it before its gate is green again: the two dev classes in
+one batched quiet-host session, the CI classes on their own next
+recording legs, which already run under `--record`.
+
 The first row is unpaired on purpose: view paints its shell before it has
 even started the Neovim child, so bare Neovim has no comparable event. It
 shows nothing until your config finishes loading. The 3.8-4.1 ms range is
-nearly identical on a bare config (4.1 ms) and on the 14-plugin stack
+nearly identical on a bare config (4.1 ms) and on the 15-plugin stack
 (3.8 ms), because none of your config has run yet at that point.
 
 The no-plugins memory row is view's own process only: the embedded Neovim
 engine is a separate process this budget deliberately excludes, so the
 bare-Neovim column reads `n/a` rather than a real comparison.
 
-### Memory equivalence, 14-plugin lazy.nvim stack
+### Memory equivalence, 15-plugin lazy.nvim stack
 
 view embeds Neovim, so it can never be smaller than the Neovim it embeds --
-no claim here says otherwise. Under the committed 14-plugin lazy.nvim
+no claim here says otherwise. Under the committed 15-plugin lazy.nvim
 fixture, the same standard workload, recorded diagnostically (`task bench
 -- --scenario memory --fixture heavy`, not CI-gated):
 
@@ -88,7 +114,7 @@ view's process and its embedded engine's, and it is what a bare-Neovim
 comparison must be read against: view's real footprint here is about 6.4x
 bare Neovim's. Neither side changes much between this reading and the
 no-plugins one for view's own-process number (4.96 MB vs 5.00 MB) because
-lazy.nvim defers most of the 14 plugins until their trigger event fires,
+lazy.nvim defers most of the 15 plugins until their trigger event fires,
 and the standard workload (opening and paging through plain text buffers)
 never fires one -- this reading is each side settled after that workload,
 not a ceiling on what a plugin stack can cost once its triggers do fire.
@@ -105,7 +131,7 @@ speaking Neovim's RPC protocol just costs this much. Neovim ships its own
 out-of-process TUI, which makes that theory testable. Measured under the
 identical protocol on the same host:
 
-| steady typing, dev-linux (no plugins / 14-plugin stack) | vs bare Neovim |
+| steady typing, dev-linux (no plugins / 15-plugin stack) | vs bare Neovim |
 |---|---|
 | Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** |
 | view, at the time of that measurement | 1.22x / 1.24x |
@@ -130,8 +156,8 @@ waking an idle core accounts for most of the improvement:
 | RPC handoff to bytes written | 42.5 µs | **10.5 µs** |
 | Keystroke to RPC bytes written (p99) | 154.7 µs | **117.7 µs** |
 | Steady typing vs Neovim, no plugins | 1.354x | **1.172x** |
-| Steady typing vs Neovim, 14 plugins | 1.244x | **1.184x** |
-| Tail (p99) typing ratio, 14 plugins | 1.142x | **1.010x** |
+| Steady typing vs Neovim, 15 plugins | 1.244x | **1.184x** |
+| Tail (p99) typing ratio, 15 plugins | 1.142x | **1.010x** |
 
 What remains is measured, not guessed. Of the ~644 µs from keypress to
 glyph, 366 are spent inside Neovim itself, 80 in the OS's terminal plumbing

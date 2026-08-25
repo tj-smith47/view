@@ -416,7 +416,7 @@ fixture = "heavy"
 metric = "marker_cold_ms"
 class = "dev-linux"
 accepted = 120.464107
-why = "the 14-plugin fixture's cold start, against a bar set from the minimal fixture's 24.9 ms. Bare nvim opening the same fixture reaches the same marker at 199.8 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first by 79 ms. It is not a reason to widen the bar: the 30 ms promise is about the cold start of a config that is not paying for 14 plugins."
+why = "the 15-plugin fixture's cold start, against a bar set from the minimal fixture's 24.9 ms. Bare nvim opening the same fixture reaches the same marker at 199.8 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first by 79 ms. It is not a reason to widen the bar: the 30 ms promise is about the cold start of a config that is not paying for 15 plugins."
 
 [[shortfall]]
 scenario = "first_paint"
@@ -465,7 +465,7 @@ fixture = "heavy"
 metric = "view_p99_ms"
 class = "dev-macos"
 accepted = 10.311
-why = "29% over the 8 ms bar with the 14-plugin fixture's own paint cost on top; bare nvim's p99 in the same gated trial is 10.112 ms and the recorded gated ratio_p99 is 1.1481, so most of the absolute tail is the fixture rather than view. Individual clean trials span 8.6-20.9 ms on this cell -- run-to-run tail spread, not host contention, is the residual story -- and the accepted value follows the recorded median-of-3."
+why = "29% over the 8 ms bar with the 15-plugin fixture's own paint cost on top; bare nvim's p99 in the same gated trial is 10.112 ms and the recorded gated ratio_p99 is 1.1481, so most of the absolute tail is the fixture rather than view. Individual clean trials span 8.6-20.9 ms on this cell -- run-to-run tail spread, not host contention, is the residual story -- and the accepted value follows the recorded median-of-3."
 
 [[shortfall]]
 scenario = "echo"
@@ -504,7 +504,7 @@ fixture = "heavy"
 metric = "marker_cold_ms"
 class = "dev-macos"
 accepted = 84.02604099999999
-why = "the 14-plugin fixture's cold start, against a bar set from the minimal fixture's 32.9 ms. Bare nvim opening the same fixture reaches the same marker at 204.186 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first at p99 by 120.2 ms -- the same shape the dev-linux heavy shortfall for this metric describes, at this class's own absolute scale."
+why = "the 15-plugin fixture's cold start, against a bar set from the minimal fixture's 32.9 ms. Bare nvim opening the same fixture reaches the same marker at 204.186 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first at p99 by 120.2 ms -- the same shape the dev-linux heavy shortfall for this metric describes, at this class's own absolute scale."
 
 [[shortfall]]
 scenario = "first_paint"

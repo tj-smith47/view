@@ -22,11 +22,13 @@ use view_bench::scenarios::{first_paint, Protocol};
 use view_bench::session::{NvimSpec, SpawnSpec, ViewSpec};
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, generate_user_fixture, generate_user_fixture_with_stall,
-    lockfile_cache_key, scratch_root, workspace_root, USER_FIXTURE, USER_FIXTURE_STALL_RECEIPT,
+    lockfile_cache_key, scratch_root, workspace_root, USER_FIXTURE, USER_FIXTURE_STALL_MS,
+    USER_FIXTURE_STALL_RECEIPT,
 };
 
-/// The stall the proof plants, in milliseconds.
-const STALL_MS: u64 = 50;
+/// The stall the proof plants: the fixture's own constant, so this leg and
+/// the bar the gate test reasons about cannot drift apart.
+const STALL_MS: u64 = USER_FIXTURE_STALL_MS;
 
 /// Content only the opened file can supply, planted on enough lines that
 /// no corner overlay could hide every one of them. The row's own marker is

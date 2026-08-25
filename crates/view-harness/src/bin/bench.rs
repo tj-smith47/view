@@ -134,7 +134,7 @@ const CLASS_SCOPED: &[(&str, &[&str])] = &[
 /// `memory/heavy` is the equivalence-matrix resource leg (spec 3.4,
 /// ledger E2): it decomposes the gated `memory/minimal` row's own-process
 /// number into a three-way reading (bare nvim, view's own process, view's
-/// process plus its embedded nvim engine child) under the 14-plugin
+/// process plus its embedded nvim engine child) under the 15-plugin
 /// fixture the gated row does not measure. Diagnostic rather than a new
 /// gated cell because arming a new bar across every baseline class is a
 /// separate, cross-platform undertaking (see ledger E4 on `picker`); this
@@ -2108,8 +2108,63 @@ mod tests {
     /// The generated fixture is allowed to answer "the plugin cache is
     /// empty" instead: it is built from a cache a compat or bench run
     /// fills, and a tree that has never run one has nothing to build from.
+    ///
+    /// The same walk reads the performance doc, because a fixture is a
+    /// name a reader of a recorded number has to be able to look up: the
+    /// baseline half of a new fixture announces itself at gate time as an
+    /// uncovered cell, and the documentation half announces itself
+    /// nowhere at all.
+    /// The plugin count the prose names is the committed lockfile's, in
+    /// every document that names one. A count is the one number a reader
+    /// cannot check against the rows, and the lockfile moves without any
+    /// of these sentences noticing.
+    #[test]
+    fn the_plugin_count_the_prose_names_is_the_one_the_lockfile_pins() {
+        let lockfile = std::fs::read_to_string(
+            view_harness::fixture::fixtures_root()
+                .join("heavy")
+                .join("nvim")
+                .join("lazy-lock.json"),
+        )
+        .expect("the heavy fixture's lockfile must be readable");
+        let pinned = lockfile
+            .lines()
+            .filter(|line| line.contains("\"commit\""))
+            .count()
+            - usize::from(lockfile.contains("\"lazy.nvim\""));
+        for doc in ["README.md", "docs/performance.md"] {
+            let text = std::fs::read_to_string(workspace_root().join(doc))
+                .expect("every document this walk names must be readable");
+            for suffix in ["-plugin", " plugins"] {
+                for claim in counted_before(&text, suffix) {
+                    assert_eq!(
+                        claim, pinned,
+                        "{doc} names {claim}{suffix} where the heavy fixture's lockfile pins \
+                         {pinned} (the plugin manager itself excluded)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every number written immediately before `suffix` in `text`.
+    fn counted_before(text: &str, suffix: &str) -> Vec<usize> {
+        text.match_indices(suffix)
+            .filter_map(|(at, _)| {
+                let digits: String = text[..at]
+                    .chars()
+                    .rev()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.chars().rev().collect::<String>().parse().ok()
+            })
+            .collect()
+    }
+
     #[test]
     fn every_matrix_fixture_resolves_to_a_config_tree() {
+        let doc_path = workspace_root().join("docs").join("performance.md");
+        let doc = std::fs::read_to_string(&doc_path).expect("docs/performance.md must be readable");
         let mut fixtures: Vec<&str> = MATRIX
             .iter()
             .chain(DIAGNOSTIC_MATRIX)
@@ -2119,6 +2174,13 @@ mod tests {
         fixtures.dedup();
         assert!(fixtures.contains(&USER_FIXTURE));
         for fixture in fixtures {
+            assert!(
+                doc.contains(&format!("`{fixture}`")),
+                "fixture {fixture:?} is measured by the matrix and named nowhere in {}, so a \
+                 reader of one of its numbers has no way to learn what config it was measured \
+                 against",
+                doc_path.display()
+            );
             match fixture_source_dir(fixture) {
                 Ok(dir) => assert!(
                     dir.join("nvim").join("init.lua").exists(),
