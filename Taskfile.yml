@@ -52,7 +52,12 @@ tasks:
 
   test:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)
-    cmd: cargo test --workspace
+    # `bash scripts/hold-awake.sh` here and on every other target that runs
+    # a harness reading a clock: macOS takes maintenance sleeps across which
+    # a monotonic clock stops, so an unheld run reports durations nothing
+    # produced. `crates/view-oracle/tests/macos_clock.rs` fails on a timed
+    # harness in this file, or in a macOS workflow job, that skips it.
+    cmd: bash scripts/hold-awake.sh cargo test --workspace
 
   test-arms:
     desc: Run the tests of the bench feature arms the matrix measures with (bench-no-speculate and its tapped combination)
@@ -70,8 +75,8 @@ tasks:
     # side by side; the tapped combination is the echo_path decomposition's
     # arm and pulls in view-engine/view-tui's tap code as well.
     cmds:
-      - cargo test -p view --features bench-no-speculate
-      - cargo test -p view --features bench-taps,bench-no-speculate
+      - bash scripts/hold-awake.sh cargo test -p view --features bench-no-speculate
+      - bash scripts/hold-awake.sh cargo test -p view --features bench-taps,bench-no-speculate
 
   test-focus:
     desc: Run one crate or one filter's tests (task test-focus -- -p view-core speculate)
@@ -79,7 +84,7 @@ tasks:
     # reaches every task in a chain: `task commit -- -m msg` calls ci, which
     # calls test, and a test target that read CLI_ARGS would hand the commit
     # message to cargo as a manifest path
-    cmd: cargo test {{.CLI_ARGS}}
+    cmd: bash scripts/hold-awake.sh cargo test {{.CLI_ARGS}}
 
   audit:
     desc: Enforce crate dependency direction and the pinned engine version
@@ -124,11 +129,11 @@ tasks:
     # default local-only leg and an all-routes leg CI runs, rather than
     # letting a per-commit gate drift toward the CI budget. `--route` is
     # already the mechanism that split would use.
-    cmd: cargo run -p view-harness --bin oracle -- {{.CLI_ARGS}}
+    cmd: bash scripts/hold-awake.sh cargo run -p view-harness --bin oracle -- {{.CLI_ARGS}}
 
   compat:
     desc: Run the plugin compat harness against the pinned nvim (task compat -- compat/scenarios/lualine.toml for one scenario)
-    cmd: cargo run -p view-harness --bin oracle -- compat {{.CLI_ARGS}}
+    cmd: bash scripts/hold-awake.sh cargo run -p view-harness --bin oracle -- compat {{.CLI_ARGS}}
 
   compat-supersede:
     desc: Assert a native takeover against the heavy fixture's live plugins (needs the compat plugin cache; run after task compat)
@@ -136,7 +141,7 @@ tasks:
     # pinned plugin stack from the network; this target is the only caller
     # that opts them in, and it serializes them so two live heavy sessions
     # never contend for the same machine
-    cmd: cargo test -p view-harness --test supersede_heavy -- --ignored --test-threads=1
+    cmd: bash scripts/hold-awake.sh cargo test -p view-harness --test supersede_heavy -- --ignored --test-threads=1
 
   user-fixture:
     desc: Generate the first-paint matrix's login-shaped `user` fixture from the compat plugin cache and drive a real session over it (needs the compat plugin cache; run after task compat)
@@ -145,7 +150,7 @@ tasks:
     # fills by cloning the pinned stack from the network. Serialized because
     # the knob one of its cases sets is process-wide
     deps: [build]
-    cmd: cargo test -p view-harness --test user_fixture -- --ignored --test-threads=1
+    cmd: bash scripts/hold-awake.sh cargo test -p view-harness --test user_fixture -- --ignored --test-threads=1
 
   acceptance:
     desc: Engine-supervision, overlay-chrome visual sweep, remote-reconnect and ACP-agent conformance against a real terminal session, then the RTT-injection proof that speculative echo hides transport latency (~8 min; needs tmux, and node/npm plus agent credentials for the agent leg; the RTT leg announces a skip off controlled-linux -- CLASS=controlled-linux task acceptance takes it on a quiet host)
@@ -227,18 +232,18 @@ tasks:
       # binary's own verdict text; forwarded via `exit` so the true code
       # still reaches task's own caller
       - >-
-        cargo run --release -p view-harness --bin bench -- {{.CLI_ARGS}};
+        bash scripts/hold-awake.sh cargo run --release -p view-harness --bin bench -- {{.CLI_ARGS}};
         code=$?; echo "bench wrapper exit: $code"; exit $code
 
   bench-micro:
     desc: Hot-path micro-benches (grid apply, key dispatch, damage fold, render)
     cmds:
-      - cargo bench -p view-core --bench grid_apply
-      - cargo bench -p view-core --bench update_key
-      - cargo bench -p view-core --bench input_handoff
-      - cargo bench -p view-engine --bench damage_fold --features bench-support
-      - cargo bench -p view-surface --bench render_frame
-      - cargo bench -p view-tui --bench paint_frame
+      - bash scripts/hold-awake.sh cargo bench -p view-core --bench grid_apply
+      - bash scripts/hold-awake.sh cargo bench -p view-core --bench update_key
+      - bash scripts/hold-awake.sh cargo bench -p view-core --bench input_handoff
+      - bash scripts/hold-awake.sh cargo bench -p view-engine --bench damage_fold --features bench-support
+      - bash scripts/hold-awake.sh cargo bench -p view-surface --bench render_frame
+      - bash scripts/hold-awake.sh cargo bench -p view-tui --bench paint_frame
 
   heartbeat-ab:
     desc: Paired echo/input_path campaign, heartbeat prober armed vs compiled out (crates/view-harness/tests/heartbeat_cost.rs)
@@ -268,7 +273,7 @@ tasks:
       - cargo build --release -p view --features bench-no-speculate --target-dir "${CARGO_TARGET_DIR:-target}/nospec"
       - cargo build --release -p view --features bench-no-speculate,bench-no-heartbeat --target-dir "${CARGO_TARGET_DIR:-target}/nospec-no-heartbeat"
       - cargo build --release -p view-harness --bin bench
-      - cargo test -p view-harness --release --test heartbeat_cost -- --ignored --nocapture
+      - bash scripts/hold-awake.sh cargo test -p view-harness --release --test heartbeat_cost -- --ignored --nocapture
 
   perf-audit:
     desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class (~28 min), then the heartbeat armed-vs-absent campaign (five release builds plus four 400-sample cells; AB=skip drops it), then every hot-path micro-bench (task perf-audit CLASS=dev-linux AB=skip)
@@ -355,7 +360,7 @@ tasks:
 
   mutate:
     desc: "Prove a battery of guards load-bearing: each row is deleted, its tests run, the file restored (task mutate -- .claude/mutations/task-19.tsv)"
-    cmd: scripts/mutate.sh {{.CLI_ARGS}}
+    cmd: bash scripts/hold-awake.sh scripts/mutate.sh {{.CLI_ARGS}}
 
   clean-cache:
     desc: "Reclaim build-cache bloat: incremental output, foreign-target trees, then sweep target/ down to the size ceiling (task clean-cache MAXSIZE=8)"

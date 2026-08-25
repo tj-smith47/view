@@ -12,6 +12,13 @@ interleaved so background noise lands on both sides equally. 1000 samples
 per cell. `task perf-audit` reproduces the full matrix; `task bench` runs
 the gated subset CI uses.
 
+On macOS every timed target holds a power assertion for the length of its
+run (`scripts/hold-awake.sh`, fronting each harness in `Taskfile.yml`): the
+host takes unattended maintenance sleeps, and a Mach monotonic clock does
+not advance across one, so a cell measured through a sleep is a number
+nothing produced. Reach a measurement through its `task` target and the
+assertion comes with it.
+
 The engine is pinned (`.engine-pin`, currently Neovim `v0.12.4`) and the
 harness verifies the binary on `PATH` actually reports that version before
 recording anything. Plugin-heavy cells use a committed lazy.nvim fixture

@@ -167,7 +167,7 @@ jobs:
         env:
           VIEW_CLIPBOARD_TEST_DISPLAY: ":99"
           VIEW_CLIPBOARD_TEST_REQUIRE_DISPLAY: "1"
-        run: cargo test -p view-oracle --test clipboard_roundtrip -- --nocapture
+        run: bash scripts/hold-awake.sh cargo test -p view-oracle --test clipboard_roundtrip -- --nocapture
 
   # The one leg that reads the bytes crossterm writes rather than the
   # resolved styles a `ratatui::Buffer` holds. Every overlay-chrome defect
