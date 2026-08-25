@@ -720,6 +720,47 @@ the same message shape the scenario case uses. Tests walk all three
 precedences and the rejection. No sidecar entry changes in this task; the
 gh-macos reseat is its own record run afterwards.
 
+## T36 — content does not wait for the terminal to answer
+
+The T34 round-2 measurement (`quiet-host-batch-report.md`, task-34-report.md
+"Round 2") shows where the startup delay the user sees actually lives: on a
+terminal that answers late or never (ssh, tmux, a multiplexer that swallows
+DA1), first content lands at the probe's second window plus ~4.5 ms —
+404 ms with the reply withheld, 204 ms with it delayed 200 ms — while the
+shell frame is up at ~50 ms. Two waits sit in series: `main` blocks in
+`finish_probe()` before the loop can paint anything, and the attach's last
+step blocks on the residue that call produces. Spawn ordering (4d0ebed,
+f831a05) cannot touch this; the probe owns the tty for up to
+`PROBE_HARD_CAP` and content is behind it.
+
+That is the wrong owner. The tier the probe decides changes how the frame is
+painted (truecolor, kitty keyboard, synchronized output), not whether it can
+be painted: the placeholder already paints at the pre-upgrade tier (T30
+concern 5). So content paints at the conservative tier the moment the
+attach delivers a grid, the probe keeps running to its fence or cap, and
+its result upgrades the tier and repaints once — the same path a late
+`--tier full` upgrade already takes (`push_kitty_keyboard`, terminal.rs).
+Reply bytes arriving while content is live are exactly the late-reply case
+the T30 guard exists for; the guard's grammar-bounded form (round 4) is the
+precondition, so this lands after it.
+
+Constraints: the paint loop never awaits RPC; the attach's residue handoff
+must not block on `finish_probe` (invert it: the probe's result is an
+event the loop consumes, not a value `main` waits for); no second paint
+path — the upgrade is a tier change plus a full repaint through the one
+loop that exists; a terminal that answers within `PROBE_DEADLINE` must see
+no visible difference (one frame, correct tier, no flash), proven by the
+oracle's frame capture on the normal-answer leg.
+
+Evidence: harness `first_paint` on the withheld-DA1 leg (`QueryPolicy::Silent`)
+shows content within the attach's own cost (tens of ms, not 400) and the
+200 ms-delayed leg the same; the normal-answer leg's frame sequence is
+byte-identical to before; the `AnswerFullTier` cell (prompt answer) is
+recorded on dev-linux so the record states content cost with no probe
+contribution; a pinning test fails if `main` ever again blocks on the probe
+result before the loop's first paint; dev-linux `first_paint` marker and
+shell-visible stay inside their bars on the coordinated quiet host.
+
 ## Exit
 
 - All tasks (T1–T12) fixed, `task ci` green, budgets hold, docs current.
