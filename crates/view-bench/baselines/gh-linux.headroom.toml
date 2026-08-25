@@ -1,0 +1,83 @@
+# Gate headroom measured on this class, overriding the compiled-in default
+# for the metric's kind. Hand-curated characterization: --record rewrites
+# gh-linux.toml and never this file, so entries and their provenance
+# comments survive every record pass. A metric absent here has not had its
+# run-to-run spread established on this class and gates on the conservative
+# default; absence is a statement, not a gap to fill with a plausible
+# number. A bare key characterizes the statistic host-wide; a quoted
+# "scenario.metric" key scopes it to one scenario and wins there, for a
+# statistic whose spread is a property of the scenario rather than of the
+# host.
+#
+# The replicates behind these entries are the bench legs CI already ran on
+# this class, harvested from their logs: a hosted runner cannot be held
+# quiet for a replicate campaign, and the spread that matters here is
+# exactly the one those legs see. They are not one unchanged binary pair --
+# each draw is a different commit of view against the same engine pin
+# (v0.12.4) -- so every entry states what rules out a code trend for its
+# own statistic. A statistic that steps between two non-overlapping levels
+# is a finding for the recorded bar to keep reporting, not a spread for a
+# factor to absorb, and gets no entry however wide its pooled half-width
+# looks.
+machine_class = "gh-linux"
+
+[headroom]
+# 10 CI bench legs, runs 30856641597, 30861044267, 30874125937 and
+# 30879797693 (2026-08-03/04) plus 32531092866, 32533279176, 32534348333,
+# 32537625267, 32619785446 and 32784781768 (2026-08-21/24), runner load at
+# start 1.03 to 3.64, both scroll fixtures, gated statistic per leg (median
+# ratio_p50 of 3 trials). Scoped to scroll because the spread is the
+# scenario's and not this runner's ratio resolution: echo's ratio_p50 from
+# the very same legs stays inside 4.1% (1.113..1.209).
+#   minimal 2.107 2.295 2.086 1.809 1.897 2.057 2.045 1.967 1.987 2.537:
+#     median 2.051, half-width 0.364 (17.75%)
+#   heavy   2.203 2.429 2.176 2.301 2.067 2.200 2.121 2.094 2.156 2.553:
+#     median 2.188, half-width 0.243 (11.11%)
+# Worst excursion above a recorded value 1.290x (minimal 2.537 against
+# 1.9669); the 2x half-width rule asks 1.413x (2.051 + 2 x 0.364 against
+# 1.9669). 1.42 clears both, and replaces a default of 1.25 that the
+# runner's own spread crosses on unchanged behaviour.
+#
+# The 2.537 draw is the runner, not view: the same commit measured 1.620
+# against a 1.605 bar on the coordinated quiet dev-linux host, and that
+# leg's operands moved together -- scroll/minimal view p50 1.783 ms and
+# nvim p50 0.697 ms were both the slowest of the ten legs, against
+# campaign ranges of 0.793..1.783 and 0.383..0.697. A per-sample
+# interleaved ratio cancels the shared slowdown but not view's scroll
+# degrading faster than nvim's as the runner slows, and that residual is
+# what this factor covers. Nothing here trends: the second leg of the
+# window already read 2.295.
+"scroll.ratio_p50" = 1.42
+
+# 6 CI bench legs, runs 32531092866, 32533279176, 32534348333,
+# 32537625267, 32619785446 and 32784781768 (2026-08-21/24; the cell
+# entered the matrix after the 08-03/04 legs, so the earlier four measure
+# nothing here), runner load 1.19 to 3.18, picker/minimal, gated statistic
+# per leg (median first_page_p50_ms of 3 trials): 14.702, 6.123, 6.519,
+# 11.072, 2.739, 3.376. Median 6.321, half-width 5.9815 (94.6% of median),
+# with no ordering to the draws. Worst excursion above the recorded value
+# 1.328x (14.702 against 11.0723); the 2x half-width rule asks 1.652x
+# (6.321 + 2 x 5.9815 against 11.0723). 1.66 clears both, over an absolute
+# default of 1.5. Six draws is the thinnest characterization in this file
+# and the widest band in it; both are stated rather than rounded away,
+# because the alternative is a default that this runner crosses.
+#
+# The downward half of the band carries more here than the bar does. The
+# recorded value is a min-ratchet, so the 2.739 and 3.376 draws would
+# otherwise seat a floor under which nearly every honest leg breaches
+# (2.739 x 1.66 = 4.55 against a 6.3 median). A published spread refuses a
+# record that far below the recorded value -- the floor is
+# 11.0723 x (2 - 1.66) = 3.765 -- so those two draws hold the bar instead
+# of becoming it.
+"picker.first_page_p50_ms" = 1.66
+
+# first_paint.marker_ratio_p50 is deliberately absent. Its pooled draws
+# (minimal 0.147 0.173 0.126 0.140 on 2026-08-03/04, then 0.211 0.214
+# 0.211 0.216 0.204 0.202 on 08-21/24; heavy 0.366 0.426 0.321 0.359, then
+# 0.440 0.459 0.440 0.450 0.446 0.439) would ask 1.70 and 1.36 under the
+# same rule, but neither fixture's two groups overlap and the cause is on
+# view's side: view's own cold
+# marker p50 steps from 15.2..21.9 ms to 25.9..27.4 ms while nvim's holds
+# 121..128 ms across all ten legs. The recorded 0.1733 predates that step,
+# so the gap between it and today's readings is a measurement to explain,
+# not a band to widen. The default keeps reporting it, which is the point.

@@ -1776,6 +1776,67 @@ mod tests {
         );
     }
 
+    /// The gh-linux record leg exited 3 on a scroll ratio its own runner
+    /// produces: recorded 1.9669, measured 2.5372, judged a masked
+    /// regression by the compiled default because the class had published
+    /// no spread. Both halves of the sidecar's answer are pinned against
+    /// the committed files the gate itself loads -- a reading inside the
+    /// published band withdraws the verdict, and one past it keeps it --
+    /// so a factor edited below the campaign's own worst excursion, or a
+    /// sidecar deleted, fails here rather than one CI bench run later.
+    #[test]
+    fn the_gh_linux_sidecar_admits_the_runners_scroll_spread_and_nothing_past_it() {
+        let dir = crate::fixture::workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("baselines");
+        let path = dir.join("gh-linux.toml");
+        let sidecar = headroom_path(&path);
+        let table = load_headroom(&sidecar, "gh-linux").expect("the shipped sidecar must load");
+        let baseline = load(&path).expect("the shipped baseline must load");
+        let id = CellId::new("scroll", "minimal");
+        let recorded = baseline
+            .cell(&id)
+            .and_then(|cell| cell.get("ratio_p50").copied())
+            .expect("scroll.minimal records the ratio the leg breached on");
+
+        let masked = |value: f64| {
+            plan_record(
+                Some(baseline.clone()),
+                RecordMode::SingleCell,
+                "gh-linux",
+                &baseline.engine_pin,
+                &[MeasuredCell {
+                    id: id.clone(),
+                    metrics: metrics(&[("ratio_p50", value)]),
+                }],
+                &table,
+            )
+            .masked_regressions()
+        };
+
+        let measured = 2.5372;
+        assert!(
+            Headroom::Proportional(RATIO_HEADROOM).bar(recorded) < measured,
+            "the compiled default is what failed the leg; if it now admits {measured} this test \
+             no longer pins anything"
+        );
+        assert_eq!(
+            masked(measured),
+            0,
+            "the class's measured spread accepts {measured} over a recorded {recorded}"
+        );
+
+        let bar = headroom_for(&table, "scroll", "ratio_p50", false)
+            .expect("ratio_p50 gates on a shared class")
+            .bar(recorded);
+        assert_eq!(
+            masked(bar + 0.001),
+            1,
+            "a reading past the published band is still a finding, not a tolerated draw"
+        );
+    }
+
     /// The one way this table can lie is an entry that binds nothing: a key
     /// nothing measures looks like an allowance in force while the default
     /// silently applies. Malformed factors and wrong-class sidecars are
