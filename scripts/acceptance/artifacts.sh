@@ -37,7 +37,6 @@
 # gone, however it went, including the kill an aborted run takes.
 if [ "$(uname -s)" = Darwin ] && command -v caffeinate >/dev/null 2>&1; then
     caffeinate -dims -w $$ &
-    CAFFEINATE_PID=$!
 fi
 
 # A fractional-seconds clock every leg's wait loops time out against.
