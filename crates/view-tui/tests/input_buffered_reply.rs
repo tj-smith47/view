@@ -20,7 +20,8 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::os::unix::ffi::OsStrExt;
+mod common;
+
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
@@ -31,42 +32,11 @@ use view_tui::terminal::TermSizeCell;
 /// hand over if it ever got that far.
 const REPLY_THEN_KEY: &[u8] = b"\x1b[?62;1;6ca";
 
-/// Blocks until `fd` has something to read, up to two seconds.
-fn wait_readable(fd: std::os::fd::BorrowedFd<'_>) -> bool {
-    let mut fds = [rustix::event::PollFd::from_borrowed_fd(
-        fd,
-        rustix::event::PollFlags::IN,
-    )];
-    let timeout = rustix::event::Timespec {
-        tv_sec: 2,
-        tv_nsec: 0,
-    };
-    matches!(rustix::event::poll(&mut fds, Some(&timeout)), Ok(n) if n > 0)
-}
-
 #[test]
 fn has_buffered_reports_a_key_parsed_behind_a_dropped_capability_reply() {
     use std::os::fd::AsFd;
 
-    let master =
-        rustix::pty::openpt(rustix::pty::OpenptFlags::RDWR | rustix::pty::OpenptFlags::NOCTTY)
-            .unwrap();
-    rustix::pty::grantpt(&master).unwrap();
-    rustix::pty::unlockpt(&master).unwrap();
-    let name = rustix::pty::ptsname(&master, Vec::new()).unwrap();
-    let slave = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(std::ffi::OsStr::from_bytes(name.as_bytes()))
-        .unwrap();
-    // raw mode carries the burst through byte for byte: a canonical-mode
-    // line discipline would hold every one of these bytes back until a
-    // newline that a capability reply never contains, and would echo them
-    // into the master besides
-    let mut attrs = rustix::termios::tcgetattr(&slave).unwrap();
-    attrs.make_raw();
-    rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &attrs).unwrap();
-    rustix::stdio::dup2_stdin(&slave).unwrap();
+    let (master, slave) = common::stdin_pty();
 
     // opened while the queue is empty, so crossterm's reader binds to this
     // terminal without consuming any of the burst written below
@@ -78,7 +48,7 @@ fn has_buffered_reports_a_key_parsed_behind_a_dropped_capability_reply() {
 
     rustix::io::write(&master, REPLY_THEN_KEY).unwrap();
     assert!(
-        wait_readable(slave.as_fd()),
+        common::wait_readable(slave.as_fd()),
         "the pty never delivered the bytes written into its master"
     );
 

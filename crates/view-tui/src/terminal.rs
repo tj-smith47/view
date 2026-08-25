@@ -82,16 +82,22 @@ impl TerminalGuard {
     /// own selection/scrollback gestures, so there is no reason to gate it
     /// behind engine state.
     ///
+    /// `kitty_kbd` is `Model.caps.kitty_kbd` -- the startup probe's answer,
+    /// or what a `--tier` override asserted. When it holds, the kitty
+    /// keyboard protocol is pushed here and popped by [`restore_bytes`], so
+    /// `<S-CR>`, `<C-i>` and `<Esc>` reach [`crate::keys::encode_key`] as
+    /// keys distinct from `<CR>`, `<Tab>` and an Alt prefix.
+    ///
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the alternate screen
-    /// cannot be entered.
-    pub fn finish_entering_alt_screen(&self) -> std::io::Result<()> {
-        crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::EnterAlternateScreen,
-            crossterm::event::EnableBracketedPaste
-        )
+    /// cannot be entered or the keyboard-protocol push cannot be written.
+    pub fn finish_entering_alt_screen(&self, kitty_kbd: bool) -> std::io::Result<()> {
+        // cfg!(unix) rather than a cfg attribute so the parameter stays used
+        // on every platform: the capability probe only runs on unix, and a
+        // `--tier full` override elsewhere asserts a protocol nothing
+        // negotiated
+        enter_bytes(&mut std::io::stdout(), cfg!(unix) && kitty_kbd)
     }
 
     /// Restores the terminal immediately rather than waiting for [`Drop`].
@@ -111,8 +117,54 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// The kitty keyboard-protocol push view sends on entry when the terminal
+/// speaks it: `CSI > 1 u`, `DISAMBIGUATE_ESCAPE_CODES` alone.
+///
+/// One bit narrower than nvim's own, and deliberately so. Neovim v0.12.4's
+/// `tui_set_key_encoding` (`src/nvim/tui/tui.c:315`) sends `CSI > 3 u`,
+/// adding `REPORT_EVENT_TYPES`; [`crate::keys::encode_key`] discards every
+/// release event, so that bit would only make the terminal send, and the
+/// input drain parse, one more escape per keystroke that is then thrown
+/// away -- a per-key cost on the latency-gated dispatch path buying no
+/// behaviour at all. Widen it the day a release event has a use here.
+const KITTY_KBD_PUSH: &[u8] = b"\x1b[>1u";
+
+/// The pop that undoes [`KITTY_KBD_PUSH`]: `CSI < u`, byte-identical to
+/// nvim's `tui_reset_key_encoding` (`src/nvim/tui/tui.c:330`). Written by
+/// hand rather than through `crossterm::event::PopKeyboardEnhancementFlags`
+/// because that command emits `CSI < 1 u` and reports itself unsupported on
+/// Windows, where its `execute!` arm returns an error that would abandon the
+/// rest of [`restore_bytes`] -- including leaving the alternate screen.
+const KITTY_KBD_POP: &[u8] = b"\x1b[<u";
+
+/// Writes every setup escape to `out`: the alternate screen, bracketed
+/// paste, and the kitty keyboard-protocol push when `kitty_kbd`. Generic
+/// over `Write` for the same reason [`restore_bytes`] is -- the byte
+/// sequence and its ordering are provable against a `Vec<u8>` rather than
+/// only against a live terminal.
+///
+/// The push comes after [`EnterAlternateScreen`](crossterm::terminal::EnterAlternateScreen)
+/// and its pop comes before `LeaveAlternateScreen`, so the protocol's
+/// lifetime nests strictly inside the alternate screen's. That is the
+/// order nvim itself teardown-tests: `terminfo_disable` pops the key
+/// encoding at `src/nvim/tui/tui.c:556`, and only the later
+/// `terminfo_stop` emits `exit_ca_mode` at `:599`.
+fn enter_bytes<W: Write>(out: &mut W, kitty_kbd: bool) -> std::io::Result<()> {
+    crossterm::execute!(
+        out,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableBracketedPaste
+    )?;
+    if kitty_kbd {
+        out.write_all(KITTY_KBD_PUSH)?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
 /// Writes every teardown escape to `out`: the synchronized-update close
-/// first, then mouse capture, bracketed paste, and the alternate screen.
+/// first, then the keyboard-protocol pop, mouse capture, bracketed paste,
+/// and the alternate screen.
 /// Generic over `Write` (mirrors [`write_cursor_shape`]) so the byte
 /// sequence and ordering are unit-testable against a `Vec<u8>` instead of
 /// only provable via a live terminal.
@@ -133,6 +185,12 @@ impl Drop for TerminalGuard {
 /// to a user as a terminal that has stopped responding.
 fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
     out.write_all(b"\x1b[?2026l")?;
+    // popped unconditionally, for the same reason the ESU close above is
+    // written unconditionally: `restore` is a free function reachable from
+    // the panic hook, where no `TermCaps` is in scope to consult. A pop
+    // against an empty stack is a no-op on terminals that speak the
+    // protocol and an ignored unknown CSI on terminals that do not.
+    out.write_all(KITTY_KBD_POP)?;
     // DECSCUSR 0 rather than any of the explicit shapes `write_cursor_shape`
     // emits. 0 is not a guaranteed restore -- xterm's own ctlseqs read it as
     // blinking block, the same as 1 -- but terminals that track a configured
@@ -309,7 +367,7 @@ impl Term {
     pub fn init(tier_override: Option<Tier>) -> std::io::Result<Self> {
         let guard = TerminalGuard::enter_raw_mode()?;
         let (caps, residue) = tiers::resolve(tier_override)?;
-        guard.finish_entering_alt_screen()?;
+        guard.finish_entering_alt_screen(caps.kitty_kbd)?;
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
         let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
         Ok(Self {
@@ -740,7 +798,58 @@ mod tests {
         );
     }
 
-    // Serves only the unix-gated restore_bytes test above.
+    // Same unix gate and same reason as the restore_bytes test above:
+    // enter_bytes drives EnterAlternateScreen through execute!, which on
+    // Windows reaches the WinAPI console layer instead of emitting bytes.
+    #[cfg(unix)]
+    #[test]
+    fn enter_bytes_pushes_the_kitty_keyboard_protocol_only_when_the_terminal_speaks_it() {
+        let mut on = Vec::new();
+        enter_bytes(&mut on, true).unwrap();
+        let enter_alt = find_subslice(&on, b"\x1b[?1049h")
+            .expect("entry must still switch to the alternate screen");
+        let push = find_subslice(&on, b"\x1b[>1u").expect(
+            "the full tier must push DISAMBIGUATE_ESCAPE_CODES, or a shifted and a plain \
+             <CR> stay the same byte and <S-CR> can never fire",
+        );
+        assert!(
+            enter_alt < push,
+            "the protocol's lifetime nests inside the alternate screen's: push after entering"
+        );
+
+        let mut off = Vec::new();
+        enter_bytes(&mut off, false).unwrap();
+        assert!(
+            find_subslice(&off, b"\x1b[>").is_none(),
+            "a terminal whose probe said no must be sent no keyboard-protocol push at all"
+        );
+        assert!(
+            find_subslice(&off, b"\x1b[?1049h").is_some(),
+            "declining the push must not cost the alternate screen"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_bytes_pops_the_kitty_keyboard_protocol_before_leaving_the_alternate_screen() {
+        let mut buf = Vec::new();
+        restore_bytes(&mut buf).unwrap();
+
+        let pop = find_subslice(&buf, b"\x1b[<u").expect(
+            "restore must pop the keyboard protocol unconditionally: the panic hook reaches \
+             this path with no TermCaps in scope, and a shell left in disambiguating mode \
+             reads every Esc as a CSI",
+        );
+        let leave_alt = find_subslice(&buf, b"\x1b[?1049l")
+            .expect("restore must still leave the alternate screen");
+        assert!(
+            pop < leave_alt,
+            "the pop must be written on the screen the push applied to, matching nvim's own \
+             terminfo_disable-then-terminfo_stop order"
+        );
+    }
+
+    // Serves only the unix-gated enter/restore byte tests above.
     #[cfg(unix)]
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
