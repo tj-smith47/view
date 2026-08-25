@@ -92,22 +92,28 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
 ];
 
 #[test]
-fn the_probe_deadline_copy_still_matches_view_tuis_own() {
+fn the_probe_constant_copies_still_match_view_tuis_own() {
     let source = std::fs::read_to_string(crate_relative(TIERS_SOURCE))
         .expect("view-tui's tiers.rs must be readable from this crate");
-    let expected = format!(
-        "pub const PROBE_DEADLINE: Duration = Duration::from_millis({});",
-        common::PROBE_DEADLINE.as_millis()
-    );
-    assert!(
-        source.contains(&expected),
-        "common::PROBE_DEADLINE reads {:?}, which {TIERS_SOURCE} no longer \
-         declares. This crate may not depend on view-tui, so the copy is \
-         held here instead of by the compiler: update it, and with it every \
-         startup budget derived from it, to whatever the definition now \
-         says",
-        common::PROBE_DEADLINE
-    );
+    // every constant this crate copies from the probe, walked rather than
+    // asserted one by one: the next copy is held by adding a row
+    for (name, value) in [
+        ("PROBE_DEADLINE", common::PROBE_DEADLINE),
+        ("PROBE_HARD_CAP", common::PROBE_HARD_CAP),
+    ] {
+        let expected = format!(
+            "pub const {name}: Duration = Duration::from_millis({});",
+            value.as_millis()
+        );
+        assert!(
+            source.contains(&expected),
+            "common::{name} reads {value:?}, which {TIERS_SOURCE} no longer \
+             declares. This crate may not depend on view-tui, so the copy is \
+             held here instead of by the compiler: update it, and with it \
+             every startup budget derived from it, to whatever the \
+             definition now says"
+        );
+    }
 }
 
 #[test]

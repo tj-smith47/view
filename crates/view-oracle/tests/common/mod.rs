@@ -209,7 +209,7 @@ impl Drop for ScratchPaths {
 /// view-tui (see the crate's module doc, and the crossterm/ratatui reach
 /// rows in `scripts/audit-deps.sh` that such an edge would trip), so the
 /// copy is held against the definition by
-/// `the_probe_deadline_copy_still_matches_view_tuis_own` in this crate's
+/// `the_probe_constant_copies_still_match_view_tuis_own` in this crate's
 /// `timing_bounds` suite instead of by the type system.
 pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);
 
@@ -219,10 +219,8 @@ pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);
 ///
 /// A terminal that answers ends both windows early; a pty that answers
 /// nothing spends all of this, the part past the first window behind the
-/// engine attach. Copied for the same reason [`PROBE_DEADLINE`] is, and
-/// held against the definition by
-/// `the_probe_hard_cap_copy_still_matches_view_tuis_own` in this crate's
-/// `smoke` suite.
+/// engine attach. Copied for the same reason [`PROBE_DEADLINE`] is, and held
+/// by the same pin.
 pub const PROBE_HARD_CAP: Duration = Duration::from_millis(400);
 
 /// The wall-clock bound a pty startup sequence gets on a host with nothing

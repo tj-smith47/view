@@ -2983,28 +2983,3 @@ fn a_terminal_a_round_trip_away_still_reaches_the_full_tier() {
         view_oracle::LATE_ANSWER_DELAY
     );
 }
-
-/// The hard cap [`common::PROBE_HARD_CAP`] copies is still the one view-tui
-/// declares.
-///
-/// Held by source text because this crate may not depend on view-tui, the
-/// same standing the sibling pin on `PROBE_DEADLINE` has in this crate's
-/// `timing_bounds` suite; this one sits beside the budget it feeds.
-#[test]
-fn the_probe_hard_cap_copy_still_matches_view_tuis_own() {
-    let tiers = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../view-tui/src/tiers.rs");
-    let source =
-        std::fs::read_to_string(&tiers).expect("view-tui's tiers.rs must be readable from here");
-    let expected = format!(
-        "pub const PROBE_HARD_CAP: Duration = Duration::from_millis({});",
-        common::PROBE_HARD_CAP.as_millis()
-    );
-    assert!(
-        source.contains(&expected),
-        "common::PROBE_HARD_CAP reads {:?}, which {} no longer declares. \
-         Update the copy, and with it the silent-probe startup budget \
-         derived from it",
-        common::PROBE_HARD_CAP,
-        tiers.display()
-    );
-}

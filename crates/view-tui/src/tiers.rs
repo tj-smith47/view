@@ -321,6 +321,19 @@ pub(crate) struct Replies {
     pub(crate) consumed: usize,
 }
 
+/// Whether what [`scan_replies`] left unaccounted for can only be the
+/// terminal's own half-delivered answer.
+///
+/// The scan stops short of three shapes, and two of them a keyboard cannot
+/// produce: a private-mode CSI still missing its final byte, and an
+/// unterminated DCS. Nothing but the query batch's own answers arrives in
+/// either. The third is a trailing bare `ESC [`, which is equally the first
+/// two bytes of every arrow and function key, so that one is ambiguous and
+/// this reports false for it.
+pub(crate) fn is_terminal_only_remainder(buf: &[u8]) -> bool {
+    matches!(buf, [0x1b, b'P', ..] | [0x1b, b'[', b'?', ..])
+}
+
 /// Scans `buf` for every reply detection cares about.
 ///
 /// Two shapes are treated as replies: private-mode CSI sequences

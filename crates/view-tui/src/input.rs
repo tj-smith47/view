@@ -241,6 +241,10 @@ pub struct InputSource {
 struct LateReplyGuard {
     until: std::time::Instant,
     buf: Vec<u8>,
+    /// Whether bytes that could still turn out to be a keystroke may be
+    /// kept back to see what follows them. Cleared by the first keystroke
+    /// that comes through; the filtering itself outlives it.
+    hold: bool,
 }
 
 /// The signals that must end the session through view's own teardown
@@ -291,11 +295,26 @@ impl InputSource {
     /// While armed, ready bytes are read here first, complete replies of
     /// either shape are dropped, and anything else is decoded as residue
     /// (see [`encode_residue_bytes`](crate::keys::encode_residue_bytes)) and
-    /// handed over as keys. The guard disarms the moment the fence arrives
-    /// or the user types -- either one proves the terminal is done answering
-    /// or that waiting further costs more than it saves -- and in any case
-    /// once [`PROBE_HARD_CAP`](crate::tiers::PROBE_HARD_CAP) has passed
-    /// again.
+    /// handed over as keys.
+    ///
+    /// Two behaviours with different lifetimes, because they have different
+    /// costs. *Filtering* -- recognizing a complete reply and dropping it --
+    /// costs a typed byte nothing, so it lasts until the fence arrives or
+    /// until [`PROBE_HARD_CAP`](crate::tiers::PROBE_HARD_CAP) has passed
+    /// again, whichever comes first: replies land in whatever read the link
+    /// happens to deliver them in, and one that arrives whole, in its own
+    /// read, after a keystroke has already come through is the ordinary
+    /// case on a slow link, not an exotic one.
+    ///
+    /// *Holding* is the half that costs. A trailing `ESC [` is either a
+    /// reply the terminal has begun or the first two bytes of an arrow key,
+    /// and keeping it back to find out means keeping back everything typed
+    /// behind it -- the residue encoder drops a buffer from an ambiguous
+    /// `ESC [` onward, so a held prefix takes the next keystrokes with it.
+    /// The first keystroke through the guard ends that: from then on an
+    /// ambiguous remainder is handed over at once and only the two shapes a
+    /// keyboard cannot produce (a private-mode CSI, a DCS -- what
+    /// `tiers::is_terminal_only_remainder` recognizes) are still waited on.
     ///
     /// A separate constructor rather than a call after `open`, because
     /// `open` itself lets crossterm's reader touch the terminal: a reply
@@ -373,6 +392,7 @@ impl InputSource {
             source.guard = Some(LateReplyGuard {
                 until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
                 buf: Vec::new(),
+                hold: true,
             });
             // ahead of the crossterm touch below, which reads: the guard
             // has to own the terminal from this handle's first byte
@@ -397,18 +417,26 @@ impl InputSource {
         }
         let replies = crate::tiers::scan_replies(&guard.buf);
         guard.buf.drain(..replies.consumed);
+        let mut forward = replies.residue;
+        // read before the keystroke below clears the hold: an ambiguous
+        // remainder that arrived in the same read as the keystroke is still
+        // kept, because the rest of it has not arrived yet and the typed
+        // byte ahead of it is already on its way out
+        let hand_back_ambiguous = !guard.hold;
+        if !forward.is_empty() {
+            guard.hold = false;
+        }
+        if hand_back_ambiguous && !crate::tiers::is_terminal_only_remainder(&guard.buf) {
+            forward.append(&mut guard.buf);
+        }
         self.guard_keys.extend(
-            crate::keys::encode_residue_bytes(&replies.residue)
+            crate::keys::encode_residue_bytes(&forward)
                 .into_iter()
                 .map(|notation| Msg::Key(Key { notation })),
         );
-        // a reply the terminal has only half delivered keeps the guard
-        // armed even once a typed byte has come through: disarming on that
-        // byte would hand the reply's tail to crossterm as literal
-        // keystrokes, which is the failure the guard exists to prevent.
-        // Staying armed costs the typed byte nothing -- it was already
-        // forwarded above.
-        if !replies.da1 && (replies.residue.is_empty() || !guard.buf.is_empty()) {
+        // only the fence ends the filtering: everything else the terminal
+        // owes is still owed, whatever else has happened on the fd since
+        if !replies.da1 {
             self.guard = Some(guard);
         }
     }
