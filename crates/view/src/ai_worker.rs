@@ -642,7 +642,7 @@ mod tests {
         let dispatch_elapsed = started.elapsed();
 
         assert!(
-            dispatch_elapsed < Duration::from_millis(50),
+            dispatch_elapsed < view_test_support::host_deadline(Duration::from_millis(50)),
             "dispatch must return before a background spawn resolves, took {dispatch_elapsed:?}"
         );
 
@@ -864,7 +864,7 @@ mod tests {
         let dispatch_elapsed = started.elapsed();
 
         assert!(
-            dispatch_elapsed < Duration::from_millis(50),
+            dispatch_elapsed < view_test_support::host_deadline(Duration::from_millis(50)),
             "dispatch must return before a genuinely slow resolver finishes, took {dispatch_elapsed:?}"
         );
 

@@ -1319,7 +1319,7 @@ mod tests {
 
         assert!(model.ai_panel().local_error.is_some());
         assert!(
-            elapsed < std::time::Duration::from_millis(1),
+            elapsed < view_test_support::host_deadline(std::time::Duration::from_millis(1)),
             "folding a crash into local_error must not stall the paint that \
              follows it: took {elapsed:?}"
         );

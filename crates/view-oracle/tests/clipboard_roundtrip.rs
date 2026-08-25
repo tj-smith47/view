@@ -152,7 +152,7 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
     // instead; this polls the independent read process (never the session
     // under test) until the write it triggered lands, bounded so a genuine
     // regression fails with a named timeout instead of hanging
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
     let mut last_seen = String::new();
     let mut confirmed = false;
     'poll: while Instant::now() < deadline {

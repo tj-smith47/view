@@ -25,9 +25,11 @@ use view_oracle::hang::detection_deadline;
 /// own. Never actually waited out: the engine is killed with the session.
 const BUSY_SECS: u64 = 60;
 
-/// How long an answer that proves the interrupt landed is waited for. An
-/// interrupted engine answers in about a millisecond; this is slack for a
-/// loaded box, still an order of magnitude short of `BUSY_SECS`.
+/// How long an answer that proves the interrupt landed is waited for on an
+/// idle host. An interrupted engine answers in about a millisecond; this is
+/// slack, and `view_test_support::host_deadline` widens it with the load at
+/// the assertion -- at the 3x ceiling still an order of magnitude short of
+/// `BUSY_SECS`, which is what keeps the bound a discriminator.
 const INTERRUPTED: Duration = Duration::from_secs(5);
 
 /// How long past the detection bound the idle wait is left running before a
@@ -89,7 +91,7 @@ fn put_to_work(label: &str, engine: &view_engine::process::Engine, busy: &str) {
     // on to interrupt it
     engine.handle.input(busy).unwrap();
 
-    let deadline = Instant::now() + ENTERS_LOOP;
+    let deadline = Instant::now() + view_test_support::host_deadline(ENTERS_LOOP);
     // an engine that has not yet entered the loop answers this promptly;
     // one that has answers it not at all, which is the whole signal
     while engine.handle.get_mode().is_ok() {
@@ -130,7 +132,7 @@ fn the_interrupt_notation_aborts_an_engine_stuck_in_a_vimscript_loop() {
         "the interrupt did not abort a Vimscript loop: {answered:?}"
     );
     assert!(
-        start.elapsed() < INTERRUPTED,
+        start.elapsed() < view_test_support::host_deadline(INTERRUPTED),
         "the engine answered only after {:?}, which is not an abort",
         start.elapsed()
     );

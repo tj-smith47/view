@@ -820,7 +820,7 @@ mod tests {
         let start = Instant::now();
         let (caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
         assert!(
-            start.elapsed() < Duration::from_millis(500),
+            start.elapsed() < view_test_support::host_deadline(Duration::from_millis(500)),
             "detect blocked for {:?} against a source that reported itself \
              exhausted on the first call",
             start.elapsed()
@@ -838,7 +838,7 @@ mod tests {
         let start = Instant::now();
         let (caps, residue) = detect(&mut source, &mut sink, short_deadline, None).unwrap();
         assert!(
-            start.elapsed() < Duration::from_millis(200),
+            start.elapsed() < view_test_support::host_deadline(Duration::from_millis(200)),
             "detect took {:?} against a source that never stops offering \
              empty chunks",
             start.elapsed()
@@ -1100,7 +1100,7 @@ mod tests {
         let start = Instant::now();
         let outcome = probe.finish(PROBE_HARD_CAP);
         assert!(
-            start.elapsed() < Duration::from_millis(50),
+            start.elapsed() < view_test_support::host_deadline(Duration::from_millis(50)),
             "finish waited {:?} on a probe that was already fenced",
             start.elapsed()
         );

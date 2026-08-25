@@ -2806,6 +2806,7 @@ dependencies = [
  "view-core",
  "view-oracle",
  "view-surface",
+ "view-test-support",
 ]
 
 [[package]]

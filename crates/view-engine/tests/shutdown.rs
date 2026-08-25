@@ -82,7 +82,8 @@ fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
         let _ = tx.send(());
     });
     assert!(
-        rx.recv_timeout(common::rpc_deadline()).is_ok(),
+        rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(3)))
+            .is_ok(),
         "Engine::drop deadlocked with a request in flight"
     );
     // the drop returned, so the child is already reaped and its pid is no

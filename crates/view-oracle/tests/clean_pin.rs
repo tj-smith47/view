@@ -99,7 +99,7 @@ fn engine_session_ignores_an_intrusive_user_config() {
     leaky.handle.ui_attach(40, 6).unwrap();
     // the attach only releases startup; sourcing happens on the child's own
     // schedule from there, and a single probe would race it
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
     let mut leaked = leaky.handle.eval_str(BUFFER_PROBE).unwrap();
     while !leaked.contains(MARKER) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));

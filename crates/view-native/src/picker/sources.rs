@@ -373,13 +373,14 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(
-            elapsed < std::time::Duration::from_secs(20),
+            elapsed < view_test_support::host_deadline(std::time::Duration::from_secs(20)),
             "live-grep scan over crates/ took {elapsed:?}, far past a debug-build-safe ceiling"
         );
 
         // the scan produced results at all -- an empty pass would make the
         // latency measurement meaningless (nothing was actually searched)
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
         loop {
             nucleo.tick(10);
             if nucleo.snapshot().item_count() > 0 || std::time::Instant::now() > deadline {
@@ -438,7 +439,8 @@ mod tests {
             spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
         handle.join().expect("grep scan thread panicked");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
         loop {
             nucleo.tick(10);
             if nucleo.snapshot().item_count() >= 1 || std::time::Instant::now() > deadline {
@@ -499,7 +501,8 @@ mod tests {
         );
         handle.join().expect("grep scan thread panicked");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
         loop {
             nucleo.tick(10);
             if std::time::Instant::now() > deadline {
@@ -551,7 +554,8 @@ mod tests {
             spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
         handle.join().expect("grep scan thread panicked");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(5));
         loop {
             nucleo.tick(10);
             if nucleo.snapshot().item_count() >= 1 || std::time::Instant::now() > deadline {
@@ -618,7 +622,8 @@ mod tests {
             spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
         handle.join().expect("grep scan thread panicked");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(10));
         loop {
             nucleo.tick(10);
             if nucleo.snapshot().item_count() as usize >= LIVE_GREP_MATCH_LIMIT
@@ -687,7 +692,8 @@ mod tests {
             cancel.clone(),
         );
 
-        let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let start_deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(10));
         while injector.injected_items() == 0 {
             assert!(
                 std::time::Instant::now() < start_deadline,
@@ -696,7 +702,8 @@ mod tests {
         }
         cancel.store(true, Ordering::Release);
 
-        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let settle_deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(10));
         let mut last = injector.injected_items();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(20));

@@ -1908,7 +1908,7 @@ mod tests {
     // this helper would have no caller and would fail the dead-code gate.
     #[cfg(unix)]
     fn wait_for_ready_marker(session: &mut CompatSession, marker: &str) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         while !session.pty().screen().contains(marker) {
             assert!(
                 Instant::now() < deadline,

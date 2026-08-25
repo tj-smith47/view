@@ -236,7 +236,7 @@ fn a_sustained_stream_records_its_count_where_the_client_named_it() {
         context: Vec::new(),
     });
 
-    let deadline = Instant::now() + WAIT;
+    let deadline = Instant::now() + view_test_support::host_deadline(WAIT);
     let count = loop {
         if let Ok(text) = std::fs::read_to_string(&progress) {
             if let Ok(count) = text.trim().parse::<u64>() {

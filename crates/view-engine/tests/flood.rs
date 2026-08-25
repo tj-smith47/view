@@ -55,12 +55,14 @@ fn response_is_not_starved_by_unbounded_notification_flood() {
     // writer would block on a full channel and this request would stall
     // past the 2s budget, failing the assertion below structurally rather
     // than relying on a collector racing to keep the channel drained.
+    let bound = view_test_support::host_deadline(Duration::from_secs(2));
     let start = Instant::now();
     let result = h.request("test", vec![]);
     let elapsed = start.elapsed();
     assert!(
-        elapsed < view_test_support::host_deadline(Duration::from_secs(2)),
-        "request() took {elapsed:?}, should be under 2s"
+        elapsed < bound,
+        "request() took {elapsed:?} against a {bound:?} budget (2s plus the \
+         host's share)"
     );
     assert_eq!(result.unwrap(), Value::from(1));
     // Only now is the channel drained, proving all 10,000 notifications

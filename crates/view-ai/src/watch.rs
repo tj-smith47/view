@@ -1404,7 +1404,7 @@ mod tests {
 
     /// The first batch naming `wanted`, or a panic once the deadline passes.
     fn wait_for_path(rx: &std_mpsc::Receiver<Msg>, wanted: &Path) -> Vec<PathBuf> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(
@@ -1541,7 +1541,7 @@ mod tests {
 
         let mut batches = 0;
         let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(20));
         while !wanted.is_subset(&seen) {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(

@@ -34,6 +34,9 @@ fn request_timeout_bounds_write_phase_against_wedged_peer() {
     // drains its stdin
     let huge = rmpv::Value::from("x".repeat(256 * 1024));
     let timeout = Duration::from_millis(200);
+    // the timeout is the engine's to honour; only the slack around it is
+    // the host's, so the bound is the one plus a scaled share of the other
+    let slack = Duration::from_millis(1800);
     let start = Instant::now();
     let result = handle.request_timeout("nvim_eval", vec![huge], timeout);
     let elapsed = start.elapsed();
@@ -43,9 +46,10 @@ fn request_timeout_bounds_write_phase_against_wedged_peer() {
         "expected Timeout, got {result:?}"
     );
     assert!(
-        elapsed < view_test_support::host_deadline(Duration::from_secs(2)),
-        "request_timeout took {elapsed:?} against a {timeout:?} bound; \
-         the write phase is leaking outside the timeout again"
+        elapsed < timeout + view_test_support::host_deadline(slack),
+        "request_timeout took {elapsed:?} against a {timeout:?} timeout plus \
+         {slack:?} of host-scaled slack; the write phase is leaking outside \
+         the timeout again"
     );
 
     let _ = child.kill();

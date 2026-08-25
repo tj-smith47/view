@@ -445,7 +445,8 @@ mod tests {
             assert!(outbox.send(vec![u8::try_from(i % 251).unwrap_or(0)]));
         }
         // drain: the writer thread may still hold queued messages
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(10));
         loop {
             let len = sink.0.lock().unwrap_or_else(PoisonError::into_inner).len();
             if len == 2000 || std::time::Instant::now() >= deadline {

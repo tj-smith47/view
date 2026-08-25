@@ -115,7 +115,7 @@ fn a_paste_through_the_users_own_osc52_provider_returns_the_yanked_text() {
         .expect("the yank keys must reach the session");
     // the copy has to be through the worker before the paste asks for it;
     // the escape reaching the pty is the last observable step of that trip
-    let yank_deadline = Instant::now() + Duration::from_secs(10);
+    let yank_deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
     while !String::from_utf8_lossy(session.raw_output()).contains("\x1b]52;c;") {
         assert!(
             Instant::now() < yank_deadline,

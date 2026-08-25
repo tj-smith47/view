@@ -658,7 +658,7 @@ fn view_recovers_its_own_engine_after_a_signal_death() {
     // a *different* child, not merely a child: the pid answering here is
     // the whole difference between a session that recovered and one still
     // holding the corpse of the engine it lost
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
     let mut replacement = None;
     while Instant::now() < deadline && replacement.is_none() {
         replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(25))
@@ -753,7 +753,7 @@ fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
         .unwrap();
     assert!(kill_status.success(), "kill -KILL {killed} failed");
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
     let mut replacement = None;
     while Instant::now() < deadline && replacement.is_none() {
         replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(25))
@@ -833,7 +833,7 @@ fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empt
         .unwrap();
     assert!(kill_status.success(), "kill -KILL {killed} failed");
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
     let mut replacement = None;
     while Instant::now() < deadline && replacement.is_none() {
         replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(25))
@@ -1651,7 +1651,7 @@ fn plant_swap_truncated_to(
         .spawn()
         .expect("failed to spawn the swap-planting engine");
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
     while Instant::now() < deadline && !ready.exists() {
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -1777,7 +1777,7 @@ fn a_restart_of_a_still_running_engine_leaves_exactly_one_replacement() {
     // `<F5>` as the terminal sends it
     session.send(b"\x1b[15~").unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
     let mut replacement = None;
     while Instant::now() < deadline && replacement.is_none() {
         replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(250))
@@ -1793,7 +1793,7 @@ fn a_restart_of_a_still_running_engine_leaves_exactly_one_replacement() {
     // the window in which the dead reader's report arrives: it is sent the
     // moment the old child is reaped, which is inside the restart above, so
     // anything it was going to do has happened well before this ends
-    let watch_until = Instant::now() + Duration::from_secs(10);
+    let watch_until = Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
     while Instant::now() < watch_until {
         if let Some(pid) = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(500)) {
             assert_eq!(
@@ -2257,7 +2257,8 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     // the engine never sees EOF) must surface as a named, bounded failure
     // rather than hang the whole suite -- a hung child was already observed
     // to survive external `task test` termination as an orphan.
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline =
+        std::time::Instant::now() + view_test_support::host_deadline(Duration::from_secs(15));
     let status = loop {
         if let Some(status) = child
             .try_wait()

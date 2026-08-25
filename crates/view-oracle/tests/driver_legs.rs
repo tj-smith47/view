@@ -71,7 +71,7 @@ fn engine_session_input_and_pump_until_flush_agree_with_eval_str_probe() {
     // proven by pumping until the decoded screen carries the text, under this
     // test's own deadline, rather than by trusting a single flush to be the
     // one that finished the script
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
     let mut flushed = false;
     while Instant::now() < deadline && !session.screen_text().contains("hello") {
         flushed |= session

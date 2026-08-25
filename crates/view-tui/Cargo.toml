@@ -67,6 +67,10 @@ rustix = { version = "1", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
+# the load-scaled wall clock this crate's probe-timing unit tests hold a
+# bounded loop to (view_test_support::host_deadline), shared with the
+# workspace's other timing tests rather than copied into each
+view-test-support = { version = "0.0.1", path = "../view-test-support" }
 # Test-only, for the span-painter parity leg (tests/span_painter_parity.rs):
 # `view-oracle`'s raster is the one other crate that turns a `Surface` into
 # text, and it deliberately stays free of crossterm/ratatui (see its own

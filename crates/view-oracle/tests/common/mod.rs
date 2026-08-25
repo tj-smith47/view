@@ -208,8 +208,9 @@ impl Drop for ScratchPaths {
 /// Re-declared rather than imported. This crate takes no dependency on
 /// view-tui (see the crate's module doc, and the crossterm/ratatui reach
 /// rows in `scripts/audit-deps.sh` that such an edge would trip), so the
-/// copy is held against the definition by `probe_deadline_matches_view_tui`
-/// in the smoke suite instead of by the type system.
+/// copy is held against the definition by
+/// `the_probe_deadline_copy_still_matches_view_tuis_own` in this crate's
+/// `timing_bounds` suite instead of by the type system.
 pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);
 
 /// The wall-clock bound a pty startup sequence gets on a host with nothing

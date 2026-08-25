@@ -1267,6 +1267,12 @@ mod tests {
     /// serial queue, so a read that blocked it would strand every job
     /// behind it, `Read` and `Write` included -- and those owe reply tokens
     /// to an nvim blocked on `rpcrequest`.
+    /// What the two answers below get on top of their own [`READ_BUDGET`]s:
+    /// a channel hop and two wakeups, which cost the host rather than the
+    /// clipboard, and which `HostBudget` therefore scales while the pair of
+    /// budgets it is added to stays fixed.
+    const ANSWER_SLACK: std::time::Duration = std::time::Duration::from_millis(500);
+
     #[test]
     fn a_backend_slower_than_the_budget_is_answered_around_and_blocks_no_later_job() {
         let (job_tx, job_rx) = mpsc::channel();
@@ -1304,10 +1310,14 @@ mod tests {
 
         let started = std::time::Instant::now();
         let first = term_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(1),
+            ))
             .expect("a slow backend must not hold the answer past the provider's own wait");
         let second = term_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(1),
+            ))
             .expect("a timed-out read must not strand the jobs queued behind it");
         let elapsed = started.elapsed();
 
@@ -1315,7 +1325,7 @@ mod tests {
         assert_eq!(first, from_shadow);
         assert_eq!(second, from_shadow);
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
+            elapsed < view_test_support::HostBudget::new(READ_BUDGET * 2, ANSWER_SLACK).total(),
             "two answers took {elapsed:?}; each read must cost at most READ_BUDGET"
         );
 

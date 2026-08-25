@@ -1070,7 +1070,7 @@ mod tests {
         // check into a load meter; costing nothing on a healthy host is the
         // whole point, since the loop exits the moment the group is gone
         let group = nix::unistd::Pid::from_raw(i32::try_from(leader).unwrap());
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(120));
         while nix::sys::signal::killpg(group, None::<nix::sys::signal::Signal>)
             != Err(nix::errno::Errno::ESRCH)
         {
@@ -1130,7 +1130,7 @@ mod tests {
         })
         .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         let hex = loop {
             if let Ok(s) = std::fs::read_to_string(&out) {
                 if s.trim().len() >= 14 {
@@ -1190,7 +1190,7 @@ mod tests {
         );
 
         session.send(DA1.1).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         loop {
             if std::fs::read_to_string(&out).is_ok_and(|s| s.trim().len() >= 14) {
                 break;

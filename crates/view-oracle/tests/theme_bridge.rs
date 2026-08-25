@@ -110,7 +110,7 @@ fn cache_carries_scheme(home: &Path) -> bool {
 /// default colors defers it to the background probe's reply, one round trip
 /// later. Waiting covers both without asserting which one happened.
 fn wait_for_cached_scheme(home: &Path) -> bool {
-    let deadline = Instant::now() + BUDGET;
+    let deadline = Instant::now() + view_test_support::host_deadline(BUDGET);
     while Instant::now() < deadline {
         if cache_carries_scheme(home) {
             return true;

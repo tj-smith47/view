@@ -828,7 +828,7 @@ mod tests {
             .pattern
             .reparse(0, "file", CaseMatching::Smart, Normalization::Smart, false);
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
         let mut saw_results_while_running = false;
         loop {
             let status = session.nucleo.tick(TICK_BUDGET_MS);
@@ -944,7 +944,8 @@ mod tests {
         let injector = active.nucleo.injector();
         seed_or_scan(active, None, "");
 
-        let start_deadline = Instant::now() + Duration::from_secs(10);
+        let start_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
         while injector.injected_items() == 0 {
             assert!(
                 Instant::now() < start_deadline,
@@ -957,7 +958,8 @@ mod tests {
         // drop -- and so cancel -- the old one's still-running Files scan
         ensure_session_bounded_serial(&serial, &mut session, &Source::Buffers, 1);
 
-        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let settle_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         let mut last = injector.injected_items();
         loop {
             std::thread::sleep(Duration::from_millis(20));
@@ -1019,7 +1021,8 @@ mod tests {
         let injector = active.nucleo.injector();
         seed_or_scan(active, None, "");
 
-        let start_deadline = Instant::now() + Duration::from_secs(10);
+        let start_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
         while injector.injected_items() == 0 {
             assert!(
                 Instant::now() < start_deadline,
@@ -1036,7 +1039,8 @@ mod tests {
             "close_session must leave no session behind"
         );
 
-        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let settle_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         let mut last = injector.injected_items();
         loop {
             std::thread::sleep(Duration::from_millis(20));
@@ -1140,7 +1144,8 @@ mod tests {
         // same precedent.
         let injector = active.nucleo.injector();
 
-        let start_deadline = Instant::now() + Duration::from_secs(10);
+        let start_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
         while injector.injected_items() == 0 {
             assert!(
                 Instant::now() < start_deadline,
@@ -1153,7 +1158,8 @@ mod tests {
         // cancel the previous query's scan before starting the new one
         seed_or_scan(active, None, "no-such-needle-anywhere");
 
-        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let settle_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         let mut last = injector.injected_items();
         loop {
             std::thread::sleep(Duration::from_millis(20));
@@ -1500,7 +1506,8 @@ mod tests {
         // reported no work left. That is the exact state the exit arm
         // mishandles, and pinning it keeps the reproduction independent of
         // how quickly the host schedules nucleo's first pattern pass.
-        let settle_deadline = Instant::now() + Duration::from_secs(10);
+        let settle_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
         loop {
             let status = session.nucleo.tick(TICK_BUDGET_MS);
             if !status.running {
@@ -1513,7 +1520,8 @@ mod tests {
         }
 
         let scan = std::thread::spawn(|| {});
-        let finish_deadline = Instant::now() + Duration::from_secs(10);
+        let finish_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
         while !scan.is_finished() {
             assert!(
                 Instant::now() < finish_deadline,
@@ -1624,7 +1632,7 @@ mod tests {
         // 60s rather than this file's usual 30s -- see the bang-equals
         // test above for why a real on-disk grep test needs more headroom
         // than a synthetic producer under host CPU contention.
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(60));
         let mut items = Vec::new();
         while Instant::now() < deadline {
             let Ok(msg) = msg_rx.recv_timeout(Duration::from_millis(200)) else {
@@ -1704,7 +1712,8 @@ mod tests {
             .nucleo
             .pattern
             .reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
-        let settle_deadline = Instant::now() + Duration::from_secs(30);
+        let settle_deadline =
+            Instant::now() + view_test_support::host_deadline(Duration::from_secs(30));
         loop {
             session.nucleo.tick(TICK_BUDGET_MS);
             if session.nucleo.snapshot().matched_item_count() == 100_000 {
@@ -1724,7 +1733,7 @@ mod tests {
             Normalization::Smart,
             false,
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
         let items = loop {
             let status = session.nucleo.tick(TICK_BUDGET_MS);
             if status.changed {
@@ -1748,7 +1757,7 @@ mod tests {
         // 24.924149 ms here, which is why this ceiling is generous rather
         // than the product bar
         assert!(
-            elapsed < Duration::from_secs(1),
+            elapsed < view_test_support::host_deadline(Duration::from_secs(1)),
             "keystroke -> first results at 100k resident took {elapsed:?}"
         );
     }

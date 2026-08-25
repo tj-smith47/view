@@ -3189,7 +3189,7 @@ mod tests {
 
         assert!(matches!(flow, Flow::Continue));
         assert!(
-            elapsed < std::time::Duration::from_millis(50),
+            elapsed < view_test_support::host_deadline(std::time::Duration::from_millis(50)),
             "Effect::AiPromptSubmit must return well before the 2s-blocked reads finish, \
              took {elapsed:?}"
         );
@@ -4665,7 +4665,8 @@ mod tests {
             assert!(matches!(flow, Flow::Continue));
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(500),
+            start.elapsed()
+                < view_test_support::host_deadline(std::time::Duration::from_millis(500)),
             "1000 direct dispatches took {:?}, unexpectedly slow for a \
              channel-free path",
             start.elapsed()
@@ -4695,7 +4696,8 @@ mod tests {
     /// Waits for `probe` to hold, failing the test rather than hanging if
     /// it never does.
     fn wait_until(what: &str, mut probe: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now()
+            + view_test_support::host_deadline(std::time::Duration::from_secs(30));
         while !probe() {
             assert!(std::time::Instant::now() < deadline, "timed out: {what}");
             std::thread::sleep(std::time::Duration::from_millis(1));
