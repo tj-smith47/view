@@ -1218,6 +1218,28 @@ mod tests {
         }
     }
 
+    /// The one thing the guard cannot own, pinned because nothing else in
+    /// the file says the order matters.
+    ///
+    /// The attach thread's last act is a blocking `send` of
+    /// `Msg::EngineReady` on the loop's bounded channel, so an armed
+    /// `Drop`'s join returns only once that send completes or fails. What
+    /// makes it fail rather than park, when nothing is draining the channel
+    /// yet, is the receiver being gone -- and `msg_rx` is a local declared
+    /// after the guard, so it drops first. A guard can hold every sender
+    /// the thread waits on (that is what closed the residue deadlock), but
+    /// it cannot hold the receiver the runtime loop reads from, so this one
+    /// stays ownership by declaration order and gets a pin instead.
+    #[test]
+    fn the_loops_channel_is_declared_after_the_attach_so_its_receiver_drops_first() {
+        assert!(
+            offset_of("startup::attach_in_background(") < offset_of("let (raw_tx, msg_rx)"),
+            "the loop channel is declared before the attach guard, so its \
+             receiver outlives the guard: an abandoned startup joins a \
+             thread parked in the `EngineReady` send, holding the child"
+        );
+    }
+
     // The ordering rule lives only in `passthrough`'s own field doc, which
     // nothing renders to a user typing `--help`; a rule a user cannot see
     // until they hit it (`view notes.md --tier basic` reaching nvim as a
