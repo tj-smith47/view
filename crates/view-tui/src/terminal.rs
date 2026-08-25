@@ -166,7 +166,7 @@ const KITTY_KBD_POP: &[u8] = b"\x1b[<u";
 /// The push comes after [`EnterAlternateScreen`](crossterm::terminal::EnterAlternateScreen)
 /// and its pop comes before `LeaveAlternateScreen`, so the protocol's
 /// lifetime nests strictly inside the alternate screen's. That is the
-/// order nvim itself teardown-tests: `terminfo_disable` pops the key
+/// order nvim's own teardown uses: `terminfo_disable` pops the key
 /// encoding at `src/nvim/tui/tui.c:556`, and only the later
 /// `terminfo_stop` emits `exit_ca_mode` at `:599`.
 fn enter_bytes<W: Write>(out: &mut W, kitty_kbd: bool) -> std::io::Result<()> {

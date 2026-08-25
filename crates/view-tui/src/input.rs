@@ -211,7 +211,8 @@ const BUFFERED_POLL_LIMIT: usize = 4;
 /// A second self-pipe carries the signals that ask this process to stop.
 /// They are folded into the loop rather than left to their default
 /// disposition because the default one ends the process where it stands:
-/// raw mode on, alternate screen up, no destructor and no panic hook run --
+/// raw mode on, the alternate screen up, the kitty keyboard protocol still
+/// pushed, no destructor and no panic hook run --
 /// a terminal the user has to repair from another shell, which over SSH
 /// (the link drops, sshd HUPs the session) is the ordinary way to die. A
 /// self-pipe is what keeps the handler itself async-signal-safe: it stores
@@ -329,8 +330,9 @@ impl InputSource {
         //
         // that repeat-signal escape hatch is a deliberately blunt one:
         // `_exit` runs from the handler, so a second signal ends the process
-        // with raw mode on and the alternate screen up -- the very state this
-        // whole path exists to avoid. It is still the better outcome,
+        // with raw mode on, the alternate screen up and the kitty keyboard
+        // protocol still pushed -- the very state this whole path exists to
+        // avoid. It is still the better outcome,
         // because the alternative is an editor that cannot be ended without
         // `SIGKILL`, and a `reset` repairs a terminal where a lost session
         // cannot be recovered. The flag is shared across all three signals

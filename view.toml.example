@@ -32,9 +32,13 @@ tree_width = 30            # default: 30 -- percent of the terminal width,
 # below: a shifted arrow, and nvim's own window-resize chord for the
 # terminals that swallow the arrows before view sees them (macOS Terminal,
 # Termius); an alted and a shifted Enter for the composer, of which <M-CR>
-# works on every tier and <S-CR> only on the full one -- Shift+Enter is
-# distinguishable from a plain Enter only under the kitty keyboard protocol,
-# which view enables on that tier alone.
+# works everywhere and <S-CR> wherever the terminal speaks the kitty
+# keyboard protocol -- a shifted Enter is distinguishable from a plain one
+# only under that protocol. What decides it is the startup capability
+# probe's answer, not the tier: every full-tier terminal answers the kitty
+# keyboard query, and a terminal that answers it while sitting below full
+# for an unrelated reason (truecolor still unresolved over ssh, say) gets
+# <S-CR> too. See docs/keymaps.md for which exits pop the protocol.
 #
 # Names are case-sensitive: <S-Right>, not <S-right>. A notation that
 # cannot be a key -- an unknown modifier prefix, or a name that is neither

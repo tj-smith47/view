@@ -129,29 +129,47 @@ See [ai.md](ai.md) for what a review is and what each decision writes.
 | key | does |
 | --- | --- |
 | `<M-CR>` | breaks the line -- works everywhere |
-| `<S-CR>` | breaks the line -- **full tier only** |
+| `<S-CR>` | breaks the line -- needs the kitty keyboard protocol |
 | `<CR>` | sends the prompt |
 
 Both are bound because terminals disagree about Enter. Alt+Enter arrives as
 `ESC` + Enter from nearly every one of them, so `<M-CR>` is the one to reach
-for. Shift+Enter is only distinguishable from a plain Enter under the kitty
-keyboard protocol, which view enables on the **full** tier alone -- on any
-lower tier the terminal sends the same byte for both and Shift+Enter *sends
-the prompt*. view resolves the tier at startup from what the terminal
-answers its capability probe, and `--tier` overrides it. A pasted line
-break needs no key at all: paste a multi-line prompt and it keeps its
-lines.
+for. A shifted Enter is distinguishable from a plain one only under the
+kitty keyboard protocol, and where the terminal does not speak it both send
+the same byte, so Shift+Enter *sends the prompt*.
 
-| tier | keyboard protocol | what view sends |
-| --- | --- | --- |
-| `full` | on | `CSI > 1 u` after entering the alternate screen, `CSI < u` before leaving it |
-| `standard`, `basic` | off | nothing |
+What decides it is the startup capability probe's answer, not the tier.
+Every `full`-tier terminal answers the kitty keyboard query -- the tier is
+partly defined by it -- but a terminal can answer that query and still land
+below `full` for an unrelated reason, and `<S-CR>` works there too. Over
+ssh is the ordinary way to meet that: the tier also wants truecolor, which
+takes a second question and a slower round trip, so a kitty-class terminal
+can spend the first moments of a session on a lower tier with the keyboard
+protocol already on.
 
-That is the same window nvim keeps the protocol open for when you run it
-directly in kitty, ghostty or WezTerm, so the keys your terminal
-disambiguates are view's for the session and your shell has its own
-keyboard back the moment view exits -- including when it exits through a
-crash or a signal.
+| the probe's kitty keyboard answer | what view sends |
+| --- | --- |
+| yes | `CSI > 1 u` once the alternate screen is up, `CSI < u` before leaving it |
+| no | `CSI < u` on the way out and nothing else -- a pop nothing pushed is ignored |
+
+`--tier full` asserts all three capabilities instead of asking, so view
+sends the push. That is an assertion and not a negotiation: a terminal that
+does not speak the protocol ignores the push, and `<S-CR>` still will not
+reach the composer. No flag can add a protocol to a terminal that lacks one.
+
+The window view holds the protocol open for is the one nvim holds it open
+for when you run nvim directly in kitty, ghostty or WezTerm. Every exit view
+takes for itself pops it before leaving the alternate screen: quitting,
+`:cq`, a panic, an error during startup, and the first
+`SIGHUP`/`SIGTERM`/`SIGINT`, which view folds into its own teardown. Three
+endings cannot pop it, because no view code runs at all -- a *second* fatal
+signal (view's escape hatch for a session that will not die otherwise, which
+leaves from the signal handler), `SIGKILL`, and an abort. Those strand raw
+mode and the alternate screen too, so `reset` is the repair; to put only the
+keyboard back, `printf '\e[<u'` pops the protocol on its own.
+
+A pasted line break needs no key at all: paste a multi-line prompt and it
+keeps its lines.
 
 The break the agent receives is the same `\n` either way, and the composer
 paints the text after it on a row of its own with the cursor on that row.
