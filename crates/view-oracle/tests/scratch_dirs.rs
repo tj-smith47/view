@@ -149,14 +149,17 @@ fn no_test_assembles_a_scratch_path_outside_the_guard() {
     }
     assert!(
         undeclared.is_empty(),
-        "these tests let the system temp root grow a name of their own -- \
-         by joining onto it, by pushing onto it, or by binding it to a \
-         variable the next statement can push onto -- so whatever they \
-         create there outlives a failing assertion and outlives the \
-         run:\n  {}\nTake the path from view_test_support::ScratchDir \
-         instead -- it removes the tree on every exit path, panic \
-         included -- or, if the site creates nothing at all, add it to \
-         DECLARED_JOINS with the grounds that say so",
+        "these tests put the system temp root somewhere it can grow a name \
+         of its own -- by joining onto it, by pushing onto it, by binding \
+         it to a variable the next statement can push onto, or by handing \
+         it onward as a call's argument, a struct field's value, an \
+         element, a closure's or a match arm's result, or a helper's \
+         return -- so whatever is created there outlives a failing \
+         assertion and outlives the run:\n  {}\nTake the path from \
+         view_test_support::ScratchDir instead -- it removes the tree on \
+         every exit path, panic included -- or, if the site creates \
+         nothing at all, add it to this file's DECLARED_JOINS with the \
+         grounds that say so",
         undeclared.join("\n  ")
     );
 }
@@ -240,6 +243,34 @@ fn scratch_root() -> PathBuf {
 }
 "#,
         3,
+    ),
+    (
+        "handed on as an element of a list",
+        r#"
+open_all([std::env::temp_dir()]);
+"#,
+        2,
+    ),
+    (
+        "handed on as a closure's result",
+        r#"
+spawn(|| std::env::temp_dir());
+"#,
+        2,
+    ),
+    (
+        "handed on as a match arm's result",
+        r#"
+let root = match kind { _ => std::env::temp_dir() };
+"#,
+        2,
+    ),
+    (
+        "handed on past a first call whose name merely ends in it",
+        r#"
+let dir = with(cache_temp_dir(), std::env::temp_dir());
+"#,
+        2,
     ),
     (
         "stored in a struct field",
@@ -385,24 +416,28 @@ fn is_declared(file: &str, line: &str) -> bool {
 /// declaration names the guard -- which for `open_in` is `Capture`'s own
 /// `Drop`.
 fn hands_the_root_onward(statement: &str) -> bool {
-    let Some(at) = statement.find("temp_dir()") else {
-        return false;
-    };
-    let before = statement[..at]
-        .trim_end_matches("temp_dir")
-        .trim_end_matches("::")
-        .trim_end_matches("std::env")
-        .trim_end_matches('&')
-        .trim_end();
-    before.is_empty()
-        || before.ends_with('(')
-        || before.ends_with(',')
-        || before.ends_with(':')
-        || before.ends_with("return")
+    // every occurrence, not the first: a statement whose first `temp_dir()`
+    // is part of a longer name reads as benign and hides the bare root
+    // handed on beside it
+    statement.match_indices("temp_dir()").any(|(at, _)| {
+        let before = statement[..at]
+            .trim_end_matches("::")
+            .trim_end_matches("std::env")
+            .trim_end_matches('&')
+            .trim_end();
+        before.is_empty()
+            || before.ends_with('(')
+            || before.ends_with('[')
+            || before.ends_with('|')
+            || before.ends_with(',')
+            || before.ends_with(':')
+            || before.ends_with("=>")
+            || before.ends_with("return")
+    })
 }
 
 #[test]
-fn every_exemption_still_names_a_line_its_file_holds_exactly_once() {
+fn every_exemption_still_names_a_line_its_file_holds_as_many_times_as_it_declares() {
     let sources = common::workspace_test_sources();
     for declared in DECLARED_JOINS {
         let source = sources

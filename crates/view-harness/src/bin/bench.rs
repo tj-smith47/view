@@ -1470,9 +1470,9 @@ fn main() -> Result<()> {
                 )
             };
             println!(
-                "gate OK: {} cell(s), {gated_metrics} metric(s) compared against recorded \
-                 bars{exempt}, {} metric(s) checked against spec 3.1 budgets, {held} accepted \
-                 shortfall(s) still held{spread}",
+                "gate OK: {} cell(s) measured, {gated_metrics} metric(s) compared against \
+                 recorded bars{exempt}, {} metric(s) checked against spec 3.1 budgets, {held} \
+                 accepted shortfall(s) still held{spread}",
                 measured.len(),
                 findings.len()
             );
