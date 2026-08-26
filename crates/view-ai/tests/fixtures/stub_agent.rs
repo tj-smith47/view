@@ -453,6 +453,20 @@ fn main() {
                     "refuse" => {
                         error_reply(&mut stdout, id, -32603, "the agent refused the turn");
                     }
+                    // A caller that has to put the panel into some state
+                    // between the prompt and the review it answers with
+                    // cannot race the reply for it: this holds the review
+                    // at the resume file, so the window is the caller's to
+                    // close rather than one it hopes is wide enough.
+                    "propose-when-released" => {
+                        stall();
+                        propose_diff(&mut stdout, "");
+                        reply(
+                            &mut stdout,
+                            id,
+                            serde_json::json!({ "stopReason": "end_turn" }),
+                        );
+                    }
                     proposal if proposal.starts_with("propose") => {
                         propose_diff(&mut stdout, &proposal["propose".len()..]);
                         reply(

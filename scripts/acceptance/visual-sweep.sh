@@ -72,6 +72,9 @@ SESSIONS=()
 ROOTS=()
 SESSION=""
 ROOT=""
+# The stub agent's hold-and-release gate (crates/view-ai/tests/fixtures/stub_agent.rs):
+# named here so `cleanup` can remove it whichever leg created it.
+RESUME_FILE=""
 CURRENT_LEG=startup
 DUMP_DIR=$(dump_dir view-visual-sweep)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-work-XXXXXX")
@@ -93,6 +96,7 @@ cleanup() {
         [ -n "$root" ] && rm -rf "$root"
     done
     rm -rf "$WORK"
+    rm -f "$RESUME_FILE"
     if [ "$code" -eq 0 ] || [ -z "$(ls -A "$DUMP_DIR" 2>/dev/null)" ]; then
         rm -rf "$DUMP_DIR"
     else
@@ -1021,7 +1025,11 @@ CONFIG_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-config-XXXXXX")
 STATE_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-state-XXXXXX")
 ROOTS+=("$CONFIG_HOME" "$STATE_HOME")
 cp -R "$FIXTURE/nvim" "$FIXTURE/view" "$CONFIG_HOME/"
-printf '\n[ai]\nagent = ["%s"]\n' "$STUB_BIN" >>"$CONFIG_HOME/view/view.toml"
+# The resume path the stub holds a reply at, handed to it the way the
+# conformance suite hands it: a leg that needs the panel in a known state
+# before the agent answers creates the file when it is ready.
+RESUME_FILE=$(mktemp -u "${TMPDIR:-/tmp}/view-visual-resume-$$-XXXXXX")
+printf '\n[ai]\nagent = ["%s", "%s"]\n' "$STUB_BIN" "$RESUME_FILE" >>"$CONFIG_HOME/view/view.toml"
 
 CURRENT_LEG=theme-cache
 SESSION="view-visual-$$-warm"
@@ -1723,18 +1731,21 @@ leg_resize_chord() {
     # and spend it on a width instead of putting it in the prompt.
     send_key Enter
     printf 'alpha\nbeta\ngamma\n' >"$ROOT/view-ai-stub-diff.txt"
-    send_text 'propose'
+    rm -f "$RESUME_FILE"
+    # the stub holds this review until the resume file appears, so the
+    # prefix below is armed inside a window this leg closes rather than one
+    # it races the agent for
+    send_text 'propose-when-released'
     send_key Enter
-    # armed before the proposal can arrive: these keys are already in the
-    # pty when the agent is still being asked, and the check below is what
-    # says so rather than assuming it
     send_key 'C-w'
-    wait_for '+BETA' "$WAIT_SECS" 'the review the agent proposed' >/dev/null
     settle
     if grep -qF '^W' "$SCREEN"; then
-        fail 'the review landed before the chord prefix was armed (nvim is showing a pending ^W of its own), so this leg is not reading a prefix that belonged to the panel'
+        fail 'nvim is showing a pending ^W of its own, so the prefix this leg armed did not belong to the panel'
         return 1
     fi
+    touch "$RESUME_FILE"
+    wait_for '+BETA' "$WAIT_SECS" 'the review the agent proposed' >/dev/null
+    settle
 
     local ai_key
     ai_key=$(printf '%s\n' "$ENTRY_POINTS" | awk '$1 == "ai" && $3 == "toggle" { print $2 }')
