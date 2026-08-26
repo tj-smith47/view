@@ -32,9 +32,13 @@ COMMAND=$(printf %s "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
 # extension: BSD sed rejects the option outright, and under `set -o pipefail`
 # that aborts the guard before either check runs, so the hook would fail OPEN
 # on macOS and let an unrequested push through. For the same reason the
-# expressions below spell their word boundaries as character classes: `\b` in
-# sed is GNU-only and no-ops on BSD sed, which would silently restore both
-# false positives on macOS only.
+# expressions below -- the sed ones here and the `[[ =~ ]]` ones further
+# down alike -- spell their word boundaries as character classes: `\b` in
+# sed is GNU-only and no-ops on BSD sed, and `[[ =~ ]]` compiles its pattern
+# with the platform libc's `regcomp(REG_EXTENDED)`, where `\b`, `\s` and
+# `\w` are equally glibc-only. On macOS such a pattern matches nothing, so
+# every check written with one fails OPEN -- the one direction a guard must
+# never fail in.
 SQ=\'
 FLAT=$(printf %s "$COMMAND" |
   awk '{ if (sub(/\\$/, "")) printf "%s", $0; else print }' |
@@ -70,12 +74,12 @@ case "$COMMAND" in
     fi
     ;;
 esac
-CHAINED_PUSH='\bgit\b[^|;&]*\bpush\b'
+CHAINED_PUSH='(^|[^[:alnum:]_])git([^|;&]*[^[:alnum:]_])push([^[:alnum:]_]|$)'
 if [[ $FLAT =~ $CHAINED_PUSH ]]; then
   echo "BLOCKED: git push requires interactive approval and must be a singular standalone command: git push <args>, nothing before or after it on the line." >&2
   exit 2
 fi
-CHAINED_COMMIT='\bgit\b[^|;&]*\bcommit\b'
+CHAINED_COMMIT='(^|[^[:alnum:]_])git([^|;&]*[^[:alnum:]_])commit([^[:alnum:]_]|$)'
 if [[ $FLAT =~ $CHAINED_COMMIT ]]; then
   echo "BLOCKED: commit via: task commit -- -m \"<msg>\" (runs the ci gate)." >&2
   exit 2
@@ -87,9 +91,14 @@ fi
 QUIET_LOCK="$HOME/.cache/view-quiet-host.lock"
 # anchored to the task name: a path such as crates/view-bench/... inside a
 # `task commit PATHS=` list is not a measurement
-MEASUREMENT='\btask\b[[:space:]]+(bench|bench-micro|perf-audit|heartbeat-ab)([[:space:]]|$)'
+MEASUREMENT='(^|[^[:alnum:]_])task[[:space:]]+(bench|bench-micro|perf-audit|heartbeat-ab)([[:space:]]|$)'
 if [[ $FLAT =~ $MEASUREMENT ]]; then
-  if [[ ! -f "$QUIET_LOCK" ]] || (( $(date +%s) - $(stat -c %Y "$QUIET_LOCK") > 7200 )); then
+  # The age comes from `find -mmin`, not `stat`, whose mtime format flag is
+  # `-c` on GNU and `-f` on BSD: the wrong one errors, the arithmetic around
+  # it fails under `set -e`, and the hook exits 1 -- which Claude Code reads
+  # as non-blocking, so a stale lock would pass on the platform whose stat
+  # it guessed wrong.
+  if [[ ! -f "$QUIET_LOCK" ]] || [[ -n "$(find "$QUIET_LOCK" -mmin +120)" ]]; then
     echo "BLOCKED: quiet-host measurement without coordination. Message the peer session (ListAgents → cfgd-*) to hold heavy cargo work, wait for its \"go\", then \`touch $QUIET_LOCK\` and re-run; \`rm\` the lock and tell the peer \"released\" when done. A lock older than 2h is stale." >&2
     exit 2
   fi

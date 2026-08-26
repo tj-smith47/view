@@ -79,11 +79,27 @@ check() {
 block_push() { check 2 'push requires' "$1" "$2"; }
 block_commit() { check 2 'commit via' "$1" "$2"; }
 allow() { check 0 '' "$1" "$2"; }
-# the quiet-host guard reads its lock under $HOME, so an empty HOME is a host
-# with no coordination receipt
+# the quiet-host guard reads its lock under $HOME, so each of these hands it
+# a home built to hold exactly one lock state: none, one older than the 2h
+# contract, one just made
 block_bench() { HOME="$NOLOCK_HOME" check 2 'quiet-host' "$1" "$2"; }
-NOLOCK_HOME="$(mktemp -d "${TMPDIR:-/tmp}/validate-commands-home.XXXXXX")"
-trap 'rm -rf "$NOLOCK_HOME"' EXIT
+block_bench_stale() { HOME="$STALE_HOME" check 2 'quiet-host' "$1" "$2"; }
+allow_bench() { HOME="$FRESH_HOME" check 0 '' "$1" "$2"; }
+lock_home() {
+  home="$(mktemp -d "${TMPDIR:-/tmp}/validate-commands-home.XXXXXX")"
+  mkdir -p "$home/.cache"
+  printf '%s' "$home"
+}
+NOLOCK_HOME="$(lock_home)"
+STALE_HOME="$(lock_home)"
+FRESH_HOME="$(lock_home)"
+trap 'rm -rf "$NOLOCK_HOME" "$STALE_HOME" "$FRESH_HOME"' EXIT
+# A fixed date in the past rather than one computed as "now minus three
+# hours": `date -d` and `date -v` are the GNU and BSD spellings of that
+# arithmetic and neither runs on both, while `touch -t`'s stamp is the same
+# on either.
+touch -t 202001010000 "$STALE_HOME/.cache/view-quiet-host.lock"
+touch "$FRESH_HOME/.cache/view-quiet-host.lock"
 
 # ---------------------------------------------------------------------------
 # must pass through to the interactive ask: a singular, standalone push.
@@ -182,6 +198,20 @@ allow 'a quick commit naming a bench doc' 'task commit:quick PATHS="docs/bench-m
 block_bench 'a measurement without the quiet-host lock' 'task bench -- --scenario scroll'
 block_bench 'a micro measurement without the lock' 'task bench-micro'
 block_bench 'a perf audit chained after a build' 'task build && task perf-audit'
+# The lock's age is the whole of what makes it a receipt: a forgotten one
+# stands for a coordination that has since expired, and reading its mtime is
+# the one place the guard touches a utility whose flags differ per platform.
+block_bench_stale 'a measurement behind a lock older than the contract' 'task bench-micro'
+allow_bench 'a measurement behind a lock just made' 'task bench-micro'
+
+# ---------------------------------------------------------------------------
+# word boundaries, both sides: the subcommand expressions must read `git` and
+# `push` as whole words without `\b`, which is a glibc extension the platform
+# regex engine behind `[[ =~ ]]` does not have everywhere
+# ---------------------------------------------------------------------------
+allow 'a command whose only git is a word tail' 'digit push origin'
+allow 'a command whose only git is a word head' 'gitpush origin'
+block_push 'a chained push carrying a trailing argument' 'cd /repo && git push origin'
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
