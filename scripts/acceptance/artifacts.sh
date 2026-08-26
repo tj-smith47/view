@@ -41,6 +41,19 @@ now() {
     esac
 }
 
+# The seconds between two `now` readings, to two decimals.
+#
+# Two decimals, not one: a recovery this fast rounds to a flat zero at one,
+# and "recovers in 0.0s" reads as a measurement that did not happen.
+elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
+
+# Whether a measurement is at or under a bound, whether it stands inside
+# one, and the sum of two of them -- in awk, since the shell compares no
+# fractions.
+under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }
+in_range() { awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'; }
+plus() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a + b }'; }
+
 # A directory for the pane dumps a failing run keeps, with the ones earlier
 # failures kept reaped first.
 #
@@ -446,6 +459,49 @@ spinner_alternation() {
     printf '%b' "$(printf '%s' "$frames" | sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')"
 }
 
+# The `&str` constant `name` holds, read from the file that owns it, `pub`
+# or not: a key the source names is typed by a leg exactly as it is spelled
+# there rather than copied into the script.
+const_str() {
+    local file="$1" name="$2" value
+    value=$(grep -oE "(pub )?const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/') || true
+    if [ -z "$value" ]; then
+        printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
+# The value of a `Duration::from_secs` constant, read from the file that
+# owns it. A threshold that moved and a script that did not would silently
+# assert the wrong window, which is the one failure a timing acceptance
+# cannot afford.
+const_secs() {
+    local file="$1" name="$2" value
+    value=$(grep -oE "pub const $name: Duration = Duration::from_secs\([0-9]+\)" "$file" |
+        grep -oE '[0-9]+' | tail -1) || true
+    if [ -z "$value" ]; then
+        printf 'FAIL: %s is not a from_secs constant in %s any more\n' "$name" "$file" >&2
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
+# One arm of a `WedgeKind` method, so the text asserted on screen is the
+# text the enum returns rather than a copy of it.
+wedge_arm() {
+    local method="$1" variant="$2" value
+    value=$(awk -v method="pub const fn $method" -v arm="Self::$variant" '
+        index($0, method) { inside = 1 }
+        inside && index($0, arm) && index($0, "=> \"") { print; exit }
+    ' "$SUPERVISION_RS" | sed -E 's/.*=> "(.*)",?[[:space:]]*$/\1/')
+    if [ -z "$value" ]; then
+        printf 'FAIL: WedgeKind::%s has no %s arm in %s any more\n' "$method" "$variant" "$SUPERVISION_RS" >&2
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
 # The pane as it stands, for the session the leg drives. Empty rather than
 # failing when there is no session to capture: the callers are assertions,
 # and a capture that failed is a screen holding none of what they look for.
@@ -502,6 +558,62 @@ tmux_key() {
 # A named key in nvim's `<...>` notation as tmux spells it: the two agree on
 # everything the modal legs bind once the brackets are off.
 #
+# What a leg types into the session it drives: text literally, and a key by
+# the name tmux knows it under.
+send_text() { tmux send-keys -t "$SESSION" -l -- "$1"; }
+send_key() { tmux send-keys -t "$SESSION" "$1"; }
+
+# The session the leg drove, gone.
+end_session() {
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
+# One assertion that held, named with the leg that was running.
+pass() { printf 'ok   [%s] %s\n' "$CURRENT_LEG" "$1"; }
+
+# Waits for `pattern` to be on the pane, answering how long that took, and
+# for it to leave again.
+#
+# `fail` is the caller's own: each leg reports a miss in its own vocabulary
+# and keeps its own dumps, which is why these two live here and that one
+# does not.
+wait_on_pane() {
+    local pattern="$1" budget="$2" what="$3" start el
+    start=$(now)
+    while :; do
+        if holds "$pattern" "$(pane)"; then
+            elapsed "$start" "$(now)"
+            return 0
+        fi
+        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+            fail "the view session exited while waiting for $what"
+            return 1
+        fi
+        el=$(elapsed "$start" "$(now)")
+        if ! in_range "$el" 0 "$budget"; then
+            fail "$what never appeared: no '$pattern' on screen after ${budget}s"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+wait_gone() {
+    local pattern="$1" budget="$2" what="$3" start el
+    start=$(now)
+    while :; do
+        if ! holds "$pattern" "$(pane)"; then
+            elapsed "$start" "$(now)"
+            return 0
+        fi
+        el=$(elapsed "$start" "$(now)")
+        if ! in_range "$el" 0 "$budget"; then
+            fail "$what is still on screen after ${budget}s: '$pattern'"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+
 # Beside `tmux_key` and not inside it: that one refuses bracket notation on
 # purpose, because a mapping's own lhs is typed literally and a `<...>` it
 # cannot spell is a leg pressing nothing. This one is given the bracketed

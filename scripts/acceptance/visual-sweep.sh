@@ -131,9 +131,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
-under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }
-
 # One screen cell per line: row, column, background, reverse flag,
 # underline flag, glyph, tab separated.
 #
@@ -406,10 +403,6 @@ fail() {
     return 1
 }
 
-pass() { printf 'ok   [%s] %s\n' "$CURRENT_LEG" "$1"; }
-
-send_text() { tmux send-keys -t "$SESSION" -l -- "$1"; }
-send_key() { tmux send-keys -t "$SESSION" "$1"; }
 command_line() {
     send_text "$1"
     send_key Enter
@@ -782,10 +775,6 @@ start_session() {
     local middle=$((ROWS / 2))
     send_text "${middle}G"
     wait_for "$middle,1" "$WAIT_SECS" "the cursor on the middle line" >/dev/null || return 1
-}
-
-end_session() {
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
 # Puts the screen back to a bare buffer. `ai` needs naming because Escape

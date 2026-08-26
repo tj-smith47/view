@@ -92,9 +92,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
-in_range() { awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'; }
-plus() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a + b }'; }
 minus() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a - b }'; }
 times() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a * b }'; }
 
@@ -104,33 +101,6 @@ fail() {
     printf 'FAIL [%s]: %s\n' "$CURRENT_LEG" "$1" >&2
     printf '      pane dump: %s\n' "$dump" >&2
     return 1
-}
-
-# The value of a `Duration::from_secs` constant, read from the file that owns
-# it. A backoff that moved and a script that did not would silently assert
-# the wrong window, which is the one failure a timing acceptance cannot
-# afford.
-const_secs() {
-    local file="$1" name="$2" value
-    value=$(grep -oE "pub const $name: Duration = Duration::from_secs\([0-9]+\)" "$file" |
-        grep -oE '[0-9]+' | tail -1) || true
-    if [ -z "$value" ]; then
-        printf 'FAIL: %s is not a from_secs constant in %s any more\n' "$name" "$file" >&2
-        return 1
-    fi
-    printf '%s' "$value"
-}
-
-# The `&str` constant `name` holds, read from the file that owns it: the key
-# the modal binds is typed here exactly as the source names it.
-const_str() {
-    local file="$1" name="$2" value
-    value=$(grep -oE "pub const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/') || true
-    if [ -z "$value" ]; then
-        printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
-        return 1
-    fi
-    printf '%s' "$value"
 }
 
 # The value of a plain integer constant, by the same rule.
@@ -150,60 +120,6 @@ const_int() {
 # script asserting text nothing renders any more.
 banner_for() {
     printf '%s' "$RECONNECT_FMT" | sed -e "s/{}/$1/" -e "s/{}/$MAX_ATTEMPTS/"
-}
-
-# One arm of a `WedgeKind` method, so the text asserted on screen is the text
-# the enum returns rather than a copy of it.
-wedge_arm() {
-    local method="$1" variant="$2" value
-    value=$(awk -v method="pub const fn $method" -v arm="Self::$variant" '
-        index($0, method) { inside = 1 }
-        inside && index($0, arm) && index($0, "=> \"") { print; exit }
-    ' "$SUPERVISION_RS" | sed -E 's/.*=> "(.*)",?[[:space:]]*$/\1/')
-    if [ -z "$value" ]; then
-        printf 'FAIL: WedgeKind::%s has no %s arm in %s any more\n' "$method" "$variant" "$SUPERVISION_RS" >&2
-        return 1
-    fi
-    printf '%s' "$value"
-}
-
-# Waits for `pattern` to be on screen, answering how long that took.
-wait_for() {
-    local pattern="$1" budget="$2" what="$3" start el
-    start=$(now)
-    while :; do
-        if holds "$pattern" "$(pane)"; then
-            elapsed "$start" "$(now)"
-            return 0
-        fi
-        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-            fail "the view session exited while waiting for $what"
-            return 1
-        fi
-        el=$(elapsed "$start" "$(now)")
-        if ! in_range "$el" 0 "$budget"; then
-            fail "$what never appeared: no '$pattern' on screen after ${budget}s"
-            return 1
-        fi
-        sleep "$POLL"
-    done
-}
-
-wait_gone() {
-    local pattern="$1" budget="$2" what="$3" start el
-    start=$(now)
-    while :; do
-        if ! holds "$pattern" "$(pane)"; then
-            elapsed "$start" "$(now)"
-            return 0
-        fi
-        el=$(elapsed "$start" "$(now)")
-        if ! in_range "$el" 0 "$budget"; then
-            fail "$what is still on screen after ${budget}s: '$pattern'"
-            return 1
-        fi
-        sleep "$POLL"
-    done
 }
 
 assert_within() {
@@ -240,7 +156,7 @@ assert_edit_accepted() {
     local token="$1"
     tmux send-keys -t "$SESSION" -l "o$token"
     tmux send-keys -t "$SESSION" Escape
-    wait_for "$token" 20 "typed text ($token)" >/dev/null || return 1
+    wait_on_pane "$token" 20 "typed text ($token)" >/dev/null || return 1
 }
 
 # A session of view's own against the stand-in client, isolated from
@@ -281,7 +197,7 @@ start_session() {
              TERM=xterm-256color COLORTERM=truecolor \
              $VIEW_BIN --remote view-test-host:$ROOT/scratch.txt"
 
-    wait_for 'acceptance seed line' 30 "the remote buffer" >/dev/null || return 1
+    wait_on_pane 'acceptance seed line' 30 "the remote buffer" >/dev/null || return 1
     watch_view "$SESSION" || return 1
     read_client_pid || return 1
 }
@@ -305,10 +221,6 @@ wait_refusals() {
     elapsed "$start" "$(now)"
 }
 
-end_session() {
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
-}
-
 # Text typed into the buffer and never written to the file, so a later
 # reading of it off the screen can only have come back through the remote
 # editor's own swap file.
@@ -325,7 +237,7 @@ type_unsaved() {
     # was racing the remote editor's execution of the command its whole
     # recovery depends on. On a loaded host the drop wins, the swap holds
     # nothing, and the leg fails on the recovery notice instead of the race
-    wait_for "$PRESERVED" 15 "the swap flush" >/dev/null || return 1
+    wait_on_pane "$PRESERVED" 15 "the swap flush" >/dev/null || return 1
 }
 
 for tool in tmux awk sed grep pgrep pkill python3; do
@@ -428,7 +340,7 @@ CURRENT_LEG=connection-dropped
 printf '%s\n' "$REFUSED_ATTEMPTS" >"$ROOT/refusals"
 drop_start=$(now)
 kill -9 "$CLIENT_PID"
-wait_for "$FIRST_BANNER" 20 "the first reconnect banner" >/dev/null
+wait_on_pane "$FIRST_BANNER" 20 "the first reconnect banner" >/dev/null
 detected=$(elapsed "$drop_start" "$(now)")
 assert_within "$detected" 0 "$DROP_MAX" "the dropped connection"
 # the counted banner replaces the bare dead-connection notice rather than
@@ -441,7 +353,7 @@ printf '[2/4] %-34s ... %s  OK\n' 'ssh process killed' \
     "Dead detected at ${detected}s, banner shows \"$FIRST_BANNER\""
 
 CURRENT_LEG=reconnected
-first_gap=$(wait_for "$SECOND_BANNER" 20 "the second reconnect banner")
+first_gap=$(wait_on_pane "$SECOND_BANNER" 20 "the second reconnect banner")
 assert_within "$first_gap" "$(minus "$FIRST_WAIT" "$POLL")" \
     "$(plus "$FIRST_WAIT" "$ATTEMPT_SLACK")" "the wait before the first attempt"
 second_gap=$(wait_gone "$SECOND_BANNER" 30 "the reconnect banner")
@@ -450,12 +362,12 @@ assert_within "$second_gap" "$(minus "$SECOND_WAIT" "$POLL")" \
 # the session's own account of the recovery, and equally the first frame the
 # replacement paints: waiting on it is what keeps the assertion below from
 # reading a screen an engine is still coming up behind
-wait_for "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null
+wait_on_pane "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null
 # and nvim's own multi-line report, which covers the top of the buffer the
 # assertion below has to read, goes with no keypress at all: the redraw that
 # retires it rides the same fold that raised the notice
 wait_gone "$SWAP_REPLAYED" 15 "the swap-recovery report" >/dev/null
-wait_for "$UNSAVED" 30 "the unsaved text after the reconnect" >/dev/null
+wait_on_pane "$UNSAVED" 30 "the unsaved text after the reconnect" >/dev/null
 if grep -qF -- "$UNSAVED" "$ROOT/scratch.txt"; then
     fail "$UNSAVED is in the file on disk, so its return proves a re-read and not a swap recovery" || exit 1
 fi
@@ -477,8 +389,8 @@ type_unsaved "$STRANDED"
 printf '%s\n' "$((MAX_ATTEMPTS + 1))" >"$ROOT/refusals"
 giveup_start=$(now)
 kill -9 "$CLIENT_PID"
-wait_for "$LAST_BANNER" "$LADDER_BUDGET" "the last reconnect banner" >/dev/null
-wait_for "$GONE_TITLE" "$(plus "$LAST_WAIT" "$ATTEMPT_SLACK")" \
+wait_on_pane "$LAST_BANNER" "$LADDER_BUDGET" "the last reconnect banner" >/dev/null
+wait_on_pane "$GONE_TITLE" "$(plus "$LAST_WAIT" "$ATTEMPT_SLACK")" \
     "the dead-engine modal the give-up hands back" >/dev/null
 gave_up=$(elapsed "$giveup_start" "$(now)")
 assert_within "$gave_up" "$LADDER_MIN" "$LADDER_BUDGET" "the whole doubling ladder"
@@ -487,16 +399,16 @@ wait_refusals 1 "$ATTEMPT_SLACK" >/dev/null
 # countdown reaching zero is the proof the attempt really ran
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 wait_refusals 0 20 >/dev/null
-wait_for "$GONE_TITLE" 20 "the dead-engine modal after the failed restart" >/dev/null
+wait_on_pane "$GONE_TITLE" 20 "the dead-engine modal after the failed restart" >/dev/null
 holds "$RESTART_ROW" "$(pane)" ||
     fail "the modal is back without the restart it must still offer" || exit 1
 # and the same modal still recovers the session once the far side is
 # reachable again, so nothing about the give-up is a dead end
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 wait_gone "$GONE_TITLE" 30 "the dead-engine modal" >/dev/null
-wait_for "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null
+wait_on_pane "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null
 wait_gone "$SWAP_REPLAYED" 15 "the swap-recovery report" >/dev/null
-wait_for "$STRANDED" 30 "the unsaved text after the manual restart" >/dev/null
+wait_on_pane "$STRANDED" 30 "the unsaved text after the manual restart" >/dev/null
 if grep -qF -- "$STRANDED" "$ROOT/scratch.txt"; then
     fail "$STRANDED is in the file on disk, so its return proves a re-read and not a swap recovery" || exit 1
 fi

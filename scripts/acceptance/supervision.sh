@@ -102,12 +102,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# two decimals, not one: a recovery this fast rounds to a flat zero at one,
-# and "recovers in 0.0s" reads as a measurement that did not happen
-elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
-in_range() { awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'; }
-plus() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a + b }'; }
-
 fail() {
     local dump="$DUMP_DIR/$CURRENT_LEG.pane"
     pane >"$dump" 2>/dev/null || true
@@ -128,88 +122,6 @@ fail() {
         printf '      pane bytes: %s\n' "$DUMP_DIR/$CURRENT_LEG.raw" >&2
     fi
     return 1
-}
-
-# The value of a `Duration::from_secs` constant, read from the file that
-# owns it. A threshold that moved and a script that did not would silently
-# assert the wrong window, which is the one failure a timing acceptance
-# cannot afford.
-const_secs() {
-    local file="$1" name="$2" value
-    value=$(grep -oE "pub const $name: Duration = Duration::from_secs\([0-9]+\)" "$file" |
-        grep -oE '[0-9]+' | tail -1) || true
-    if [ -z "$value" ]; then
-        printf 'FAIL: %s is not a from_secs constant in %s any more\n' "$name" "$file" >&2
-        return 1
-    fi
-    printf '%s' "$value"
-}
-
-# The `&str` constant `name` holds, read from the file that owns it: the
-# keys the modal binds are typed here exactly as the source names them.
-const_str() {
-    local file="$1" name="$2" value
-    value=$(grep -oE "pub const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/') || true
-    if [ -z "$value" ]; then
-        printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
-        return 1
-    fi
-    printf '%s' "$value"
-}
-
-# One arm of a `WedgeKind` method, so the text asserted on screen is the
-# text the enum returns rather than a copy of it.
-wedge_arm() {
-    local method="$1" variant="$2" value
-    value=$(awk -v method="pub const fn $method" -v arm="Self::$variant" '
-        index($0, method) { inside = 1 }
-        inside && index($0, arm) && index($0, "=> \"") { print; exit }
-    ' "$SUPERVISION_RS" | sed -E 's/.*=> "(.*)",?[[:space:]]*$/\1/')
-    if [ -z "$value" ]; then
-        printf 'FAIL: WedgeKind::%s has no %s arm in %s any more\n' "$method" "$variant" "$SUPERVISION_RS" >&2
-        return 1
-    fi
-    printf '%s' "$value"
-}
-
-# Waits for `pattern` to be on screen, answering how long that took.
-wait_for() {
-    local pattern="$1" budget="$2" what="$3" start el
-    start=$(now)
-    while :; do
-        if holds "$pattern" "$(pane)"; then
-            elapsed "$start" "$(now)"
-            return 0
-        fi
-        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-            fail "the view session exited while waiting for $what"
-            return 1
-        fi
-        el=$(elapsed "$start" "$(now)")
-        if ! in_range "$el" 0 "$budget"; then
-            fail "$what never appeared: no '$pattern' on screen after ${budget}s"
-            return 1
-        fi
-        sleep "$POLL"
-    done
-}
-
-# Waits for `pattern` to leave the screen, answering how long that took.
-wait_gone() {
-    local pattern="$1" budget="$2" what="$3" start el
-    start=$(now)
-    while :; do
-        if ! holds "$pattern" "$(pane)"; then
-            elapsed "$start" "$(now)"
-            return 0
-        fi
-        el=$(elapsed "$start" "$(now)")
-        if ! in_range "$el" 0 "$budget"; then
-            fail "$what is still on screen after ${budget}s: '$pattern'"
-            return 1
-        fi
-        sleep "$POLL"
-    done
 }
 
 assert_within() {
@@ -248,7 +160,7 @@ start_session() {
              TERM=xterm-256color COLORTERM=truecolor \
              $VIEW_BIN $ROOT/scratch.txt"
 
-    wait_for "$seed" 30 "the seeded buffer" >/dev/null || return 1
+    wait_on_pane "$seed" 30 "the seeded buffer" >/dev/null || return 1
     watch_view "$SESSION" || return 1
     read_engine_pid || return 1
 }
@@ -286,7 +198,7 @@ type_unsaved() {
     local token="$1"
     tmux send-keys -t "$SESSION" -l "o$token"
     tmux send-keys -t "$SESSION" Escape
-    wait_for "$token" 15 "the unsaved line" >/dev/null || return 1
+    wait_on_pane "$token" 15 "the unsaved line" >/dev/null || return 1
     # `:preserve` rather than a wait on nvim's idle swap flush: the swap is
     # what a restart recovers from, and an acceptance that raced the flush
     # would fail for the clock rather than for the recovery
@@ -296,7 +208,7 @@ type_unsaved() {
     # racing nvim's execution of the command its whole recovery depends on.
     # On a loaded host the kill wins, the swap holds nothing, and the leg
     # fails on the recovery notice instead of on the race
-    wait_for "$PRESERVED" 15 "the swap flush" >/dev/null || return 1
+    wait_on_pane "$PRESERVED" 15 "the swap flush" >/dev/null || return 1
 }
 
 # The recovery a restart owes, from either wedge: a fresh engine, the
@@ -307,12 +219,12 @@ assert_restart_recovered() {
     # the session's own account of the recovery, and equally the first frame
     # the replacement paints: waiting on it is what keeps the assertions
     # below from reading a screen an engine is still coming up behind
-    wait_for "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null || return 1
+    wait_on_pane "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null || return 1
     # and nvim's own multi-line report, which covers the top of the buffer
     # the assertions below have to read, goes with no keypress at all: the
     # redraw that retires it rides the same fold that raised the notice
     wait_gone "$SWAP_REPLAYED" 15 "the swap-recovery report" >/dev/null || return 1
-    wait_for "$token" 30 "the unsaved text after the restart" >/dev/null || return 1
+    wait_on_pane "$token" 30 "the unsaved text after the restart" >/dev/null || return 1
     if grep -qF -- "$token" "$ROOT/scratch.txt"; then
         fail "$token is in the file on disk, so its return proves a re-read and not a swap recovery"
         return 1
@@ -338,7 +250,7 @@ assert_restart_recovered() {
     esac
     tmux send-keys -t "$SESSION" -l "o$live"
     tmux send-keys -t "$SESSION" Escape
-    wait_for "$live" 15 "typed text after the restart" >/dev/null || return 1
+    wait_on_pane "$live" 15 "typed text after the restart" >/dev/null || return 1
     watch_view "$SESSION" || return 1
     read_engine_pid || return 1
 }
@@ -392,7 +304,7 @@ EOF
     # them, so a screen capture can show the outcome but never the sequence
     tmux pipe-pane -o -t "$SESSION" "cat >>$ROOT/pane.raw"
 
-    wait_for "$EXIT_SEED" 30 "the seeded buffer" >/dev/null || return 1
+    wait_on_pane "$EXIT_SEED" 30 "the seeded buffer" >/dev/null || return 1
     # the pane runs the shell above, so view is its child rather than the
     # pane process itself
     watch_view "$SESSION" || return 1
@@ -404,9 +316,9 @@ EOF
 open_stub_panel() {
     local start el
     type_line ':View ai'
-    wait_for "$TRUST_PROMPT" 30 "the project trust prompt" >/dev/null || return 1
+    wait_on_pane "$TRUST_PROMPT" 30 "the project trust prompt" >/dev/null || return 1
     tmux send-keys -t "$SESSION" -l 'y'
-    wait_for "$FOCUSED_TITLE" 30 "the entered agent panel" >/dev/null || return 1
+    wait_on_pane "$FOCUSED_TITLE" 30 "the entered agent panel" >/dev/null || return 1
     # a session starts on the first command, never on the panel opening
     tmux send-keys -t "$SESSION" -l 'hello'
     tmux send-keys -t "$SESSION" Enter
@@ -427,7 +339,7 @@ open_stub_panel() {
 # asserted from the shell that got the tty back.
 assert_exit_was_clean() {
     local want_code="$1" start el code
-    wait_for "$SHELL_BACK" 30 "the shell after view left" >/dev/null || return 1
+    wait_on_pane "$SHELL_BACK" 30 "the shell after view left" >/dev/null || return 1
 
     code=$(cat "$ROOT/exit.code" 2>/dev/null || true)
     if [ "$code" != "$want_code" ]; then
@@ -485,10 +397,6 @@ assert_exit_was_clean() {
         fi
         sleep "$POLL"
     done
-}
-
-end_session() {
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
 for tool in tmux awk sed grep pgrep; do
@@ -628,14 +536,14 @@ start_session lua 'acceptance seed line'
 UNSAVED="UNSAVED-LUA-$$"
 type_unsaved "$UNSAVED"
 type_line "$LUA_WEDGE"
-banner=$(wait_for "$READ_NOTICE" 20 "the read-side banner")
+banner=$(wait_on_pane "$READ_NOTICE" 20 "the read-side banner")
 assert_within "$banner" "$BANNER_MIN" "$BANNER_MAX" "the read-side banner"
-modal=$(wait_for "$BUSY_TITLE" 40 "the busy modal")
+modal=$(wait_on_pane "$BUSY_TITLE" 40 "the busy modal")
 assert_within "$modal" "$MODAL_MIN" "$MODAL_MAX" "the busy modal"
 tmux send-keys -t "$SESSION" "$INTERRUPT_KEY"
 # what the modal owes a wedge the interrupt cannot reach: not silence, but
 # the fact that nothing answered it
-unanswered=$(wait_for "$INTERRUPT_UNANSWERED" 20 "the unanswered-interrupt line")
+unanswered=$(wait_on_pane "$INTERRUPT_UNANSWERED" 20 "the unanswered-interrupt line")
 assert_within "$unanswered" "$INTERRUPT_MIN" "$INTERRUPT_MAX" "the unanswered-interrupt line"
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 assert_restart_recovered "$UNSAVED" "LIVE-LUA-$$" "$BUSY_TITLE"
@@ -646,9 +554,9 @@ printf '[1/6] %-33s ... %s  OK\n' 'read-side wedge (blocked Lua)' \
 CURRENT_LEG=read-side-vimscript
 start_session vim 'acceptance seed line'
 type_line "$VIM_WEDGE"
-vim_banner=$(wait_for "$READ_NOTICE" 20 "the read-side banner")
+vim_banner=$(wait_on_pane "$READ_NOTICE" 20 "the read-side banner")
 assert_within "$vim_banner" "$BANNER_MIN" "$BANNER_MAX" "the read-side banner"
-vim_modal=$(wait_for "$BUSY_TITLE" 40 "the busy modal")
+vim_modal=$(wait_on_pane "$BUSY_TITLE" 40 "the busy modal")
 assert_within "$vim_modal" "$MODAL_MIN" "$MODAL_MAX" "the busy modal"
 interrupt_start=$(now)
 tmux send-keys -t "$SESSION" "$INTERRUPT_KEY"
@@ -657,7 +565,7 @@ wait_gone "$READ_NOTICE" 20 "the read-side banner" >/dev/null
 LIVE=LIVE-VIM-$$
 tmux send-keys -t "$SESSION" -l "o$LIVE"
 tmux send-keys -t "$SESSION" Escape
-wait_for "$LIVE" 15 "typed text after the interrupt" >/dev/null
+wait_on_pane "$LIVE" 15 "typed text after the interrupt" >/dev/null
 recovered=$(elapsed "$interrupt_start" "$(now)")
 end_session
 printf '      %-33s ... %s  OK\n' 'read-side wedge (Vimscript)' \
@@ -668,8 +576,8 @@ start_session dead 'acceptance seed line'
 UNSAVED="UNSAVED-DEAD-$$"
 type_unsaved "$UNSAVED"
 kill -9 "$NVIM_PID"
-dead_notice=$(wait_for "$DEAD_NOTICE" 15 "the dead-connection banner")
-dead_modal=$(wait_for "$GONE_TITLE" 15 "the dead-connection modal")
+dead_notice=$(wait_on_pane "$DEAD_NOTICE" 15 "the dead-connection banner")
+dead_modal=$(wait_on_pane "$GONE_TITLE" 15 "the dead-connection modal")
 assert_within "$dead_notice" 0 "$DEAD_MAX" "the dead-connection banner"
 assert_within "$(plus "$dead_notice" "$dead_modal")" 0 "$DEAD_MAX" "the dead-connection modal"
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
@@ -691,7 +599,7 @@ tmux paste-buffer -p -b "view-acc-$$" -t "$SESSION"
 # timed from the stop rather than from the paste that follows it, so the
 # measurement contains the whole window the loop could have anchored its
 # stall in and can only ever read long
-wait_for "$WRITE_NOTICE" 25 "the write-side banner" >/dev/null
+wait_on_pane "$WRITE_NOTICE" 25 "the write-side banner" >/dev/null
 write_notice=$(elapsed "$write_start" "$(now)")
 assert_within "$write_notice" "$WRITE_MIN" "$WRITE_MAX" "the write-side banner"
 # the write side outranks the read side while both are true, because a

@@ -131,9 +131,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
-under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }
-
 # The pane with the panel column cut away: on every row, everything left of
 # the first vertical border.
 #
@@ -168,19 +165,6 @@ fail() {
         printf '      view log: %s\n' "$DUMP_DIR/$CURRENT_LEG.log" >&2
     fi
     return 1
-}
-
-pass() { printf 'ok   [%s] %s\n' "$CURRENT_LEG" "$1"; }
-
-# The `&str` constant `name` holds, read from the file that owns it.
-const_str() {
-    local file="$1" name="$2" value
-    value=$(grep -oE "const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/') || true
-    if [ -z "$value" ]; then
-        printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
-        return 1
-    fi
-    printf '%s' "$value"
 }
 
 # The marker one status arm renders as, joined from the match arm that
@@ -306,9 +290,6 @@ refute() {
         return 1
     fi
 }
-
-send_text() { tmux send-keys -t "$SESSION" -l -- "$1"; }
-send_key() { tmux send-keys -t "$SESSION" "$1"; }
 
 # One review verb through its `:View` form -- the way in that exists
 # whatever happened to the keys, and the one a user reaches for when

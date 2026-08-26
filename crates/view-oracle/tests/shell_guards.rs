@@ -32,6 +32,7 @@
 //! rather than be told about.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The commands whose "found nothing" is a status, not an empty string --
@@ -98,26 +99,73 @@ fn governed_scripts() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Every function `text` defines at the top level, as (name, the line it
-/// opens on).
+/// One function a script defines at the top level.
+struct Function {
+    name: String,
+    /// The line its definition opens on, counted from 1.
+    line: usize,
+    /// Every line of it, the definition line included.
+    body: String,
+}
+
+/// The name `line` opens a function definition with, in any of the four
+/// spellings bash accepts (`name() {`, `name () {`, `function name {`,
+/// `function name() {`), with the brace allowed to stand on the line below
+/// in each. `None` for anything else.
 ///
 /// Top level only: an indented definition is inside another function or a
 /// heredoc, where it shadows nothing a source-time definition set.
-fn functions_defined(text: &str) -> Vec<(String, usize)> {
+fn definition_name(line: &str) -> Option<&str> {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return None;
+    }
+    let (rest, keyword) = match line.strip_prefix("function ") {
+        Some(rest) => (rest.trim_start(), true),
+        None => (line, false),
+    };
+    let end = rest
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .unwrap_or(rest.len());
+    let (name, after) = rest.split_at(end);
+    if name.is_empty() {
+        return None;
+    }
+    let after = match after.trim_start().strip_prefix('(') {
+        Some(inside) => inside.trim_start().strip_prefix(')')?.trim_start(),
+        // the parentheses are what makes a bare word a definition rather
+        // than a call; only `function` can stand in for them
+        None if keyword => after.trim_start(),
+        None => return None,
+    };
+    (after.is_empty() || after.starts_with('{')).then_some(name)
+}
+
+/// Every function `text` defines at the top level.
+fn functions_defined(text: &str) -> Vec<Function> {
     let mut found = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        let Some((name, rest)) = line.split_once("()") else {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some(name) = definition_name(lines[index]) else {
+            index += 1;
             continue;
         };
-        if name.is_empty()
-            || !name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-            || !rest.trim_start().starts_with('{')
-        {
-            continue;
+        let opened = index;
+        // a one-liner closes on its own line; anything else runs to the
+        // first `}` standing on its own at the top level
+        while index < lines.len() && !lines[index].trim_end().ends_with('}') {
+            index += 1;
         }
-        found.push((name.to_owned(), index + 1));
+        while index < lines.len() && lines[index] != "}" && index > opened {
+            index += 1;
+        }
+        let closed = index.min(lines.len() - 1);
+        found.push(Function {
+            name: name.to_owned(),
+            line: opened + 1,
+            body: lines[opened..=closed].join("\n"),
+        });
+        index = closed + 1;
     }
     found
 }
@@ -129,7 +177,7 @@ fn no_script_redefines_what_the_shared_helper_defines() {
         .expect("the shared helper must be readable");
     let shared_names: Vec<String> = functions_defined(&shared)
         .into_iter()
-        .map(|(name, _)| name)
+        .map(|function| function.name)
         .collect();
     assert!(
         shared_names.len() > 5,
@@ -146,9 +194,9 @@ fn no_script_redefines_what_the_shared_helper_defines() {
         if name == SHARED_HELPER || !text.contains(SHARED_HELPER) {
             continue;
         }
-        for (function, number) in functions_defined(&text) {
-            if shared_names.contains(&function) {
-                shadowed.push(format!("{name}:{number}: {function}"));
+        for function in functions_defined(&text) {
+            if shared_names.contains(&function.name) {
+                shadowed.push(format!("{name}:{}: {}", function.line, function.name));
             }
         }
     }
@@ -163,6 +211,39 @@ fn no_script_redefines_what_the_shared_helper_defines() {
     );
 }
 
+/// One body, defined twice: two scripts carrying the same lines, which
+/// drift apart on the next edit to either one with nothing to say the
+/// other exists. A body more than one leg needs belongs in the shared
+/// helper they all source.
+///
+/// Name and body together, so a helper deliberately given its own name for
+/// its own job is not reported for resembling another one.
+#[test]
+fn no_two_scripts_define_the_same_function_body() {
+    let mut defined: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (name, text) in governed_scripts() {
+        for function in functions_defined(&text) {
+            defined
+                .entry((function.name, function.body))
+                .or_default()
+                .push(format!("{name}:{}", function.line));
+        }
+    }
+    let mut duplicated: Vec<String> = defined
+        .into_iter()
+        .filter(|(_, sites)| sites.len() > 1)
+        .map(|((name, _), sites)| format!("{name}: {}", sites.join(", ")))
+        .collect();
+    duplicated.sort();
+    assert!(
+        duplicated.is_empty(),
+        "these are defined with the same body in more than one script:\n  \
+         {}\nMove the body into {SHARED_HELPER}, which every acceptance \
+         script sources, and delete the copies",
+        duplicated.join("\n  ")
+    );
+}
+
 #[test]
 fn the_definition_reader_sees_a_top_level_function_and_nothing_else() {
     let fixture = "
@@ -172,22 +253,52 @@ holds() { case \"$2\" in *\"$1\"*) return 0 ;; *) return 1 ;; esac; }
 matches() {
     local line
 }
+spaced () {
+    local line
+}
+function kw {
+    local line
+}
+function kw_parens() {
+    local line
+}
+next_line()
+{
+    local line
+}
 outer() {
     inner() { printf 'nested'; }
 }
 pane \"$SESSION\"
 ";
-    let found: Vec<(String, usize)> = functions_defined(fixture);
+    let found: Vec<(String, usize)> = functions_defined(fixture)
+        .into_iter()
+        .map(|function| (function.name, function.line))
+        .collect();
     assert_eq!(
         found,
         vec![
             ("holds".to_owned(), 4),
             ("matches".to_owned(), 5),
-            ("outer".to_owned(), 8),
+            ("spaced".to_owned(), 8),
+            ("kw".to_owned(), 11),
+            ("kw_parens".to_owned(), 14),
+            ("next_line".to_owned(), 17),
+            ("outer".to_owned(), 21),
         ],
-        "the reader must see a one-liner and a block at the top level, and \
-         must leave a nested definition and a call alone -- a reader that \
-         misses a spelling lets the shadowing it exists to catch through"
+        "the reader must see every spelling bash accepts at the top level, \
+         and must leave a nested definition and a call alone -- a reader \
+         that misses a spelling lets the shadowing it exists to catch \
+         through"
+    );
+    let opened_below = functions_defined(fixture)
+        .into_iter()
+        .find(|function| function.name == "next_line")
+        .expect("the fixture defines it");
+    assert_eq!(
+        opened_below.body, "next_line()\n{\n    local line\n}",
+        "a body opened by a brace on the line below must be read whole, or \
+         two scripts holding the same one read as two different bodies"
     );
 }
 
