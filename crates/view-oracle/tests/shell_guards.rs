@@ -258,20 +258,29 @@ shaped=$(printf '%s\\n' \"$rows\" | awk '{ print $1 }')
 
 #[test]
 fn the_second_walk_sees_a_quiet_reader_however_the_pipeline_is_written() {
+    // every row is read before the assertion fires: a walk that has
+    // stopped seeing two spellings names both, where an assertion inside
+    // the loop would hide the second behind the first
+    let mut misread = Vec::new();
     for (shape, source, at) in PIPED_QUIET_SHAPES {
         let found: Vec<usize> = quiet_readers_behind_a_pipe(source)
             .into_iter()
             .map(|(number, _)| number)
             .collect();
-        assert_eq!(
-            found,
-            vec![*at],
-            "the walk read {found:?} of the fixture for {shape}, which is at \
-             line {at}. A shape it misses is a condition that can read a \
-             match as a miss unnoticed; a line it adds is a reader the rule \
-             does not ask about being reported as a violation"
-        );
+        if found != vec![*at] {
+            misread.push(format!(
+                "the walk read {found:?} of the fixture for {shape}, which \
+                 is at line {at}"
+            ));
+        }
     }
+    assert!(
+        misread.is_empty(),
+        "a shape it misses is a condition that can read a match as a miss \
+         unnoticed; a line it adds is a reader the rule does not ask about \
+         being reported as a violation:\n  {}",
+        misread.join("\n  ")
+    );
 }
 
 #[test]
@@ -288,20 +297,29 @@ fn the_second_walk_leaves_the_readers_the_rule_does_not_ask_about_alone() {
 
 #[test]
 fn the_walk_sees_an_unreachable_guard_however_it_is_written() {
+    // every row is read before the assertion fires: a walk that has
+    // stopped seeing two spellings names both, where an assertion inside
+    // the loop would hide the second behind the first
+    let mut misread = Vec::new();
     for (shape, source, at) in ESCAPING_SHAPES {
         let found: Vec<usize> = guards_behind_an_errexit(source)
             .into_iter()
             .map(|(number, _)| number)
             .collect();
-        assert_eq!(
-            found,
-            vec![*at],
-            "the walk read {found:?} of the fixture for {shape}, which is at \
-             line {at}. A shape it misses is a leg that can die with no \
-             diagnosis unnoticed; a line it adds is a capture the rule does \
-             not ask about being reported as a violation"
-        );
+        if found != vec![*at] {
+            misread.push(format!(
+                "the walk read {found:?} of the fixture for {shape}, which is \
+                 at line {at}"
+            ));
+        }
     }
+    assert!(
+        misread.is_empty(),
+        "a shape it misses is a leg that can die with no diagnosis \
+         unnoticed; a line it adds is a capture the rule does not ask \
+         about being reported as a violation:\n  {}",
+        misread.join("\n  ")
+    );
 }
 
 #[test]
@@ -411,9 +429,15 @@ fn quiet_readers_behind_a_pipe(text: &str) -> Vec<(usize, String)> {
 /// walk's one stated ceiling: a quoted `#` inside a string a statement
 /// continues past would end the reading of that line early. Carrying the
 /// state instead would desync the whole file on the first heredoc, so the
-/// narrower reading is the safer one -- it can only under-report, and a
-/// second, differently-written sweep of the population is what says
-/// nothing is being missed today.
+/// narrower reading is the safer one -- the truncation can only lose code
+/// from the line, never add any.
+///
+/// What the statement walk built on it then reports can go either way: a
+/// heredoc body or a quoted block whose line reads as a pipeline is read
+/// as one, and can be reported where no condition exists. That direction
+/// is loud -- a named line in a failing assertion, not a silent miss -- so
+/// it is the safe one to be wrong in; a second, differently-written sweep
+/// of the population is what says nothing is being missed today.
 fn code_before_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     let mut quote: Option<u8> = None;
@@ -485,7 +509,7 @@ fn pipeline_segments(statement: &str) -> Vec<&str> {
 /// the wrappers that run another command. A wrapper's own flags are where
 /// this stops -- `sudo -n grep -q` reads as no grep at all -- which is the
 /// second stated ceiling of the walk, beside the per-line quote state at
-/// [`code_before_comment`]; both can only under-report, and the population
+/// [`code_before_comment`]. This one can only under-report; the population
 /// carries neither spelling today.
 fn reads_quietly(segment: &str) -> bool {
     let mut words = segment.split_whitespace().skip_while(|word| {

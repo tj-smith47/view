@@ -294,20 +294,29 @@ let elsewhere = fixture_root().join("view-eighth");
 
 #[test]
 fn the_walk_sees_the_root_escape_however_it_is_written() {
+    // every row is read before the assertion fires: a walk that has
+    // stopped seeing two spellings names both, where an assertion inside
+    // the loop would hide the second behind the first
+    let mut misread = Vec::new();
     for (shape, source, at) in ESCAPING_SHAPES {
         let found: Vec<usize> = temp_root_escapes(source)
             .into_iter()
             .map(|(number, _)| number)
             .collect();
-        assert_eq!(
-            found,
-            vec![*at],
-            "the walk read {found:?} of the fixture for a root {shape}, \
-             which is at line {at}. A shape it misses is a leak the \
-             population can carry unnoticed; a line it adds is a site the \
-             rule does not ask about being reported as a violation"
-        );
+        if found != vec![*at] {
+            misread.push(format!(
+                "the walk read {found:?} of the fixture for a root {shape}, which is \
+                 at line {at}"
+            ));
+        }
     }
+    assert!(
+        misread.is_empty(),
+        "a shape it misses is a leak the population can carry unnoticed; a \
+         line it adds is a site the rule does not ask about being reported \
+         as a violation:\n  {}",
+        misread.join("\n  ")
+    );
 }
 
 #[test]
