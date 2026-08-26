@@ -25,6 +25,7 @@
 //! `scripts/audit-deps.sh` enforces.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -149,9 +150,19 @@ pub fn settle_mtime() {
 }
 
 /// A [`GlobalAlloc`] that forwards every call unchanged to [`System`] while
-/// counting `alloc` calls, for a test that asserts an allocation-count
-/// budget on a hot path (a fresh `Vec`/`String` per call where amortized
-/// growth was meant to hold is the regression this exists to catch).
+/// counting the `alloc` calls made **on the calling thread**, for a test
+/// that asserts an allocation-count budget on a hot path (a fresh
+/// `Vec`/`String` per call where amortized growth was meant to hold is the
+/// regression this exists to catch).
+///
+/// Per thread rather than per process, because a global allocator sees the
+/// whole process and a budget test only ever means its own work. The test
+/// harness is the other allocator on the line: libtest runs each test on a
+/// thread of its own while the main thread keeps registering join handles,
+/// pushing timeout entries and sending events, and on a busy two-core
+/// runner that bookkeeping lands inside a test's measurement window. A
+/// process-wide counter reports it as the test's own allocations, which is
+/// a budget failing for a reason not present in the code it measures.
 ///
 /// Only the counting logic lives here, not a `static` declaration: a
 /// process has exactly one `#[global_allocator]`, and setting it applies to
@@ -161,33 +172,39 @@ pub fn settle_mtime() {
 /// pull this crate in only for [`ScratchDir`], and swapping their allocator
 /// out from under them because one unrelated test file wanted a counter
 /// would be silent, process-wide collateral.
-pub struct CountingAllocator {
-    count: AtomicUsize,
+pub struct CountingAllocator;
+
+// A `const`-initialised `Cell<usize>` has no destructor, so nothing is
+// registered with the thread's teardown list on first access and the first
+// touch of this cell allocates nothing -- an allocator whose counter
+// allocates would call itself, from inside its own `alloc`.
+thread_local! {
+    static COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 impl CountingAllocator {
-    /// A fresh counter at zero. `const fn` because `#[global_allocator]`
-    /// statics must be const-initialized.
+    /// A fresh counter. `const fn` because `#[global_allocator]` statics
+    /// must be const-initialized.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            count: AtomicUsize::new(0),
-        }
+        Self
     }
 
-    /// Allocations counted since construction or the last [`Self::reset`].
-    /// Relaxed: a test reads this from the same thread that drove the
-    /// allocations under measurement, so no cross-thread ordering is
-    /// needed.
+    /// Allocations made on the calling thread since its first allocation or
+    /// its last [`Self::reset`]. Allocations on any other thread -- the test
+    /// harness's own, a helper the test spawned -- are not in this number.
+    ///
+    /// Reads zero once the calling thread's locals are gone, which is the
+    /// only honest answer for a thread whose count no longer exists.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        COUNT.try_with(Cell::get).unwrap_or(0)
     }
 
-    /// Zeroes the counter, so a test can isolate the allocations one
-    /// operation makes from whatever ran earlier in the same binary.
+    /// Zeroes the calling thread's counter, so a test can isolate the
+    /// allocations one operation makes from whatever ran earlier on it.
     pub fn reset(&self) {
-        self.count.store(0, Ordering::Relaxed);
+        let _ = COUNT.try_with(|count| count.set(0));
     }
 }
 
@@ -198,13 +215,15 @@ impl Default for CountingAllocator {
 }
 
 // SAFETY: every call forwards unchanged to `System`, itself a valid
-// `GlobalAlloc`; the only added behavior is a relaxed counter increment
-// around the forwarded `alloc` call, which changes nothing about what
-// memory is returned or how it must be freed.
+// `GlobalAlloc`; the only added behavior is a thread-local counter
+// increment around the forwarded `alloc` call, which changes nothing about
+// what memory is returned or how it must be freed.
 #[allow(unsafe_code)]
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.count.fetch_add(1, Ordering::Relaxed);
+        // an `Err` is a thread past its own teardown: its locals are gone,
+        // and so is anything that could still read the count
+        let _ = COUNT.try_with(|count| count.set(count.get() + 1));
         System.alloc(layout)
     }
 

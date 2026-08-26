@@ -8,13 +8,10 @@
 //! overriding allocation for any other crate's tests, or for
 //! `view-core`'s own `#![deny(unsafe_code)]` library build.
 //!
-//! Single-test file by design: [`ALLOCATOR`]'s counter is process-global,
-//! and the default test harness runs a binary's tests on multiple threads
-//! at once, so a second test here would race this one for the same
-//! counter. Add a second test only alongside a way to keep them from
-//! running concurrently (a shared `Mutex` guarding each test's
-//! measurement window, or `--test-threads=1` pinned in this binary's own
-//! config), not as a bare second `#[test]` function.
+//! [`ALLOCATOR`] counts per thread and libtest gives each test one of its
+//! own, so a second `#[test]` added here measures only itself -- what it
+//! must not do is spawn a thread and read the count from the wrong side of
+//! it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

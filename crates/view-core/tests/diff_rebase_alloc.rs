@@ -13,10 +13,9 @@
 //! overriding allocation for any other crate's tests or for `view-core`'s
 //! own `#![deny(unsafe_code)]` library build.
 //!
-//! Single-test file by design, on the same terms as that file: the counter
-//! is process-global and the default harness runs a binary's tests on
-//! several threads at once, so a second `#[test]` here would race this one
-//! for the same counter.
+//! Single-test file, on the same terms as that file: the counter is per
+//! thread and libtest gives each test one of its own, so a second `#[test]`
+//! here measures only itself.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
