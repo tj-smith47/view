@@ -166,6 +166,31 @@ impl StyleRole {
             Self::AiToolFailed => Some(ChromeGroup::ErrorMsg),
         }
     }
+
+    /// Whether a `reverse` on this role's chrome group was written for the
+    /// surface this role paints.
+    ///
+    /// It was for every role whose group nvim itself renders reversed --
+    /// a selected tab, a selected popup row, an incremental-search match --
+    /// and it was not for any role resolving through a diff group. A
+    /// colorscheme designs `:h hl-DiffAdd` and its neighbours for diff
+    /// mode, where they color the cells of a diffed line; dracula defines
+    /// `DiffDelete` foreground-only and `reverse`, and a tree row's git
+    /// chip is two cells wide, so inheriting that paints a solid block of
+    /// the color with the glyph knocked out of it. The color is what the
+    /// chip wants from the group, which is the same split the inline
+    /// review's own `ViewReview*` groups are derived on.
+    ///
+    /// Read off [`Self::chrome_group`] rather than off a list of roles, so
+    /// a role mapped onto a diff group later inherits the answer instead of
+    /// needing to be remembered here.
+    #[must_use]
+    pub const fn keeps_group_reverse(self) -> bool {
+        !matches!(
+            self.chrome_group(),
+            Some(ChromeGroup::DiffAdd | ChromeGroup::DiffChange | ChromeGroup::DiffDelete)
+        )
+    }
 }
 
 /// One run of text sharing a single [`StyleRole`]: the smallest unit a
@@ -822,6 +847,41 @@ mod tests {
         assert_eq!(TreeRow::leaf(1, "main.rs").expanded, None);
         assert_eq!(TreeRow::leaf(3, "deep.rs").depth, 3);
         assert_eq!(dir.status, None, "an undecorated row carries no mark");
+    }
+
+    /// A colorscheme's `reverse` on a diff group belongs to diff mode's
+    /// whole-line paint, and no role borrowing that group inherits it --
+    /// including one added later, since the answer is read off the
+    /// `chrome_group` mapping rather than off a list kept beside it. Every
+    /// other role keeps whatever its group says, which is what leaves a
+    /// selected tab and a search match reversed the way nvim draws them.
+    #[test]
+    fn no_role_borrowing_a_diff_group_inherits_its_reverse() {
+        for role in [
+            StyleRole::GitAdded,
+            StyleRole::GitModified,
+            StyleRole::GitDeleted,
+            StyleRole::DiffAdded,
+            StyleRole::DiffRemoved,
+        ] {
+            assert!(
+                !role.keeps_group_reverse(),
+                "{role:?} resolves through {:?} and must take its color alone",
+                role.chrome_group()
+            );
+        }
+        for role in [
+            StyleRole::Plain,
+            StyleRole::Match,
+            StyleRole::Mode,
+            StyleRole::Title,
+            StyleRole::AiUser,
+        ] {
+            assert!(
+                role.keeps_group_reverse(),
+                "{role:?} names no diff group, so its own group decides"
+            );
+        }
     }
 
     #[test]

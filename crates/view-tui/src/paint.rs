@@ -1517,11 +1517,18 @@ fn paint_native_overlay(
             // overlay must never paint, so a colorscheme that named it
             // deliberately is asking for the same hole and is answered the
             // same way.
+            //
+            // A group's `reverse` is dropped on the roles that borrow a
+            // diff group, per `StyleRole::keeps_group_reverse`: what a
+            // reverse-video `DiffDelete` does to two cells of git chip is
+            // what it did to a whole reviewed row before the review
+            // derived groups of its own.
             let resolve = |role: StyleRole| -> Style {
                 role.chrome_group().map_or(interior, |group| {
                     let style = theme.chrome(group);
                     ratatui_style(ResolvedStyle {
                         bg: style.bg.filter(|bg| Some(*bg) != buffer_bg).or(base.bg),
+                        reverse: style.reverse && role.keeps_group_reverse(),
                         ..style
                     })
                 })
@@ -5700,6 +5707,76 @@ mod tests {
                 "{} resolved from its fallback rather than the colorscheme's own \
                  highlight, so this test would pass over an unreachable mapping",
                 group.hl_name()
+            );
+        }
+    }
+
+    /// A tree row's git chip takes the colorscheme's diff color and not
+    /// its `reverse`. dracula defines `DiffDelete` foreground-only and
+    /// reverse-video, which over the chip's two cells is a solid block of
+    /// #FF5555 with the glyph knocked out of it -- the same thing that
+    /// reverse did to a whole reviewed row before the inline review
+    /// derived groups of its own (`StyleRole::keeps_group_reverse`).
+    #[test]
+    fn a_tree_git_chip_takes_a_reverse_video_diff_groups_color_but_not_its_reverse() {
+        use view_core::native::views::{GitMark, TreeRow, TreeView};
+
+        let mut model = caps_model(true, true, true);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 1,
+                fg: Some(0x00FF_5555),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: true,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlGroupSet {
+                name: ChromeGroup::DiffDelete.hl_name().to_string(),
+                hl_id: 1,
+            },
+        );
+        let kind = LayerKind::Tree(
+            TreeView::new("files")
+                .with_rows(vec![
+                    TreeRow::leaf(0, "gone.rs").with_status(Some(GitMark::Deleted))
+                ])
+                .with_selected(1),
+        );
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let width = 30_u16;
+        let rect = Rect::new(1, 1, width, 5);
+        let laid = view_surface::overlay::rows(width, 5, &kind, borders);
+        let layer = Layer::new(rect, kind, model.caps.tier);
+        let buf = paint_layer_alone(&model, layer, width + 4, 8);
+
+        let mut chip = None;
+        for (index, line) in laid.lines.iter().enumerate() {
+            let mut col = rect.col;
+            for span in line {
+                let span_width = u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap();
+                if span.role == StyleRole::GitDeleted {
+                    chip = Some((col, rect.row + u16::try_from(index).unwrap(), span_width));
+                }
+                col += span_width;
+            }
+        }
+        let (col, row, span_width) = chip.expect("the decorated row must carry a git chip");
+        for c in col..col + span_width {
+            let cell = &buf[(c, row)];
+            assert_eq!(
+                cell.fg,
+                ratatui::style::Color::Rgb(0xFF, 0x55, 0x55),
+                "the chip takes the colorscheme's own diff color at column {c}"
+            );
+            assert!(
+                !cell.modifier.contains(ratatui::style::Modifier::REVERSED),
+                "the chip must not paint as a block of that color at column {c}"
             );
         }
     }
