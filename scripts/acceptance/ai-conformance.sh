@@ -1019,7 +1019,8 @@ REVIEW_LEAVE_HINT=$(const_str "$REVIEW_RS" LEAVE_HINT) || exit 1
 # same fixture.
 require_template "$STUB_RS" '("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n")' || exit 1
 require_template "$STUB_RS" '("alpha\nBETA\ngamma\n", "alpha\nBETA\nGAMMA\n")' || exit 1
-require_template "$NVIM_API_RS" "virt[#virt + 1] = { { '+' .. line, 'DiffAdd' } }" || exit 1
+require_template "$NVIM_API_RS" \
+    "virt[#virt + 1] = { { '+' .. line, 'ViewReviewAdded' } }" || exit 1
 PROPOSED_BETA='+BETA'
 PROPOSED_GAMMA='+GAMMA'
 # The keys the review installs on the buffer, read and shape-checked out of

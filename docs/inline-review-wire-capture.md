@@ -56,15 +56,15 @@ replacement of row 5 that proposes nothing. `cursor_row = 1`, `focus = true`,
 Read back as `row:end_row:line_hl_group:sign_text:virt_lines_above:virt|lines`:
 
 ```
-MARK 1:1:DiffDelete:nil:nil:
-MARK 1:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject/DiffText|]c next  [c prev  <leader>hq leave/DiffText|+TWO/DiffAdd
-MARK 3:nil:nil:nil:true:+inserted/DiffAdd
-MARK 5:5:DiffChange:nil:nil:
+MARK 1:1:ViewReviewRemoved:nil:nil:
+MARK 1:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject/ViewReviewHeader|]c next  [c prev  <leader>hq leave/ViewReviewHeader|+TWO/ViewReviewAdded
+MARK 3:nil:nil:nil:true:+inserted/ViewReviewAdded
+MARK 5:5:ViewReviewStale:nil:nil:
 ```
 
 Four extmarks for three hunks. A hunk that replaces rows gets a range mark
-carrying the row highlight -- `DiffDelete`, or `DiffChange` once the buffer has
-moved under it (mark 4) -- and a hunk with anything to propose gets a second
+carrying the row highlight -- `ViewReviewRemoved`, or `ViewReviewStale` once
+the buffer has moved under it (mark 4) -- and a hunk with anything to propose gets a second
 mark carrying the virtual lines. The pure insertion (mark 3) has only the
 second kind, and it is the one mark with `virt_lines_above = true`: it replaces
 no row, so its lines are drawn above the row it inserts before rather than
@@ -74,9 +74,38 @@ answerable without the panel. The header is two virtual lines, not one: nvim's
 grid keeps its full width under view's panel, so a hint on a single line loses
 its tail -- `<leader>hq leave` first -- at the widths a laptop opens.
 
-The groups are nvim's own `DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText`: every
-colorscheme a migrating user already has defines them, so a proposal is legible
-under a theme view has never seen.
+The groups are the review's own, derived at show time from the colorscheme's
+`DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText` rather than being them. Under
+this session's default scheme:
+
+```
+Normal            bg=14161b fg=e0e2ea
+DiffAdd           bg=005523 fg=eef1f8
+DiffChange        bg=4f5258 fg=eef1f8
+DiffDelete        bg=nil    fg=ffc0b9
+DiffText          bg=007373 fg=eef1f8
+
+ViewReviewRemoved bg=43383b fg=nil
+ViewReviewStale   bg=202227 fg=nil
+ViewReviewAdded   bg=10231d fg=eef1f8
+ViewReviewHeader  bg=10292d fg=eef1f8
+ViewReviewSign    bg=nil    fg=eef1f8
+```
+
+Each derived background is a fifth of the diff group's own color over
+`Normal`'s background -- the group's `guibg` where it defines one
+(`DiffAdd`, `DiffChange`, `DiffText` here) and its `guifg` where it does not
+(`DiffDelete` here, and every one of dracula's). Nothing else crosses:
+`ViewReviewRemoved` and `ViewReviewStale` carry a background alone, so a
+reviewed row keeps whatever foreground its own syntax gave it, and no
+`reverse` or `bold` follows the color across. A colorscheme designs its diff
+groups for diff mode, where they color cells inside a diffed line; a
+`line_hl_group` paints a whole row with them, and dracula's foreground-only
+`reverse` `DiffDelete` fills that row with a solid block of `#FF5555`. The
+derived group is a fifth of that same red instead, under the row's own text
+(`crates/view-engine/tests/inline_review_live.rs`'s
+`a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block`
+pins both halves against a dracula-shaped scheme).
 
 The range mark's `end_row` is one *below* the hunk's own `old_range` end: the
 range is half-open and nvim's `end_row` is inclusive for `line_hl_group`, so
@@ -129,15 +158,15 @@ The same review as the user's screen holds it -- `screenattr` at column 3 and
 ```
 row  attr  screen
  1     0   |  one|
- 2    23   |▶ two|            DiffDelete   the row the hunk replaces
- 3    24   |  hunk 1/3 ...|   DiffText     header, a virtual line
- 4    24   |  ]c next ...|    DiffText     the header's second virtual line
- 5    21   |  +TWO|           DiffAdd      the proposal, a virtual line
- 6     0   |  three|                       untouched, and painted as such
- 7    21   |  +inserted|      DiffAdd      the insertion, drawn above its row
+ 2    59   |▶ two|            ViewReviewRemoved  the row the hunk replaces
+ 3    62   |  hunk 1/3 ...|   ViewReviewHeader   header, a virtual line
+ 4    62   |  ]c next ...|    ViewReviewHeader   the header's second virtual line
+ 5    61   |  +TWO|           ViewReviewAdded    the proposal, a virtual line
+ 6     0   |  three|                             untouched, and painted as such
+ 7    61   |  +inserted|      ViewReviewAdded    the insertion, above its row
  8     0   |  four|
  9     0   |  five|
-10    22   |  six|            DiffChange   the stale hunk
+10    60   |  six|            ViewReviewStale    the stale hunk
 ```
 
 Row 6 is the assertion that matters: the row after a hunk carries the same
@@ -148,10 +177,10 @@ attributes above look correct in both versions.
 ## 2. The user inserts two lines above every hunk
 
 ```
-MARK 3:3:DiffDelete:nil:nil:
-MARK 3:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject/DiffText|]c next  [c prev  <leader>hq leave/DiffText|+TWO/DiffAdd
-MARK 5:nil:nil:nil:true:+inserted/DiffAdd
-MARK 7:7:DiffChange:nil:nil:
+MARK 3:3:ViewReviewRemoved:nil:nil:
+MARK 3:nil:nil:▶ :false:hunk 1/3 -- <leader>ha accept  <leader>hA accept all  <leader>hx reject/ViewReviewHeader|]c next  [c prev  <leader>hq leave/ViewReviewHeader|+TWO/ViewReviewAdded
+MARK 5:nil:nil:nil:true:+inserted/ViewReviewAdded
+MARK 7:7:ViewReviewStale:nil:nil:
 ```
 
 Every mark moved down by exactly two, with no call from view. Extmarks track
@@ -165,8 +194,8 @@ The buffer is cut to one line, then a payload naming row 40 is shown.
 
 ```
 line_count=1 keys=7
-MARK 1:40:DiffDelete:nil:nil:
-MARK 1:nil:nil:▶ :false:hunk 1/1/DiffText|+late/DiffAdd
+MARK 1:40:ViewReviewRemoved:nil:nil:
+MARK 1:nil:nil:▶ :false:hunk 1/1/ViewReviewHeader|+late/ViewReviewAdded
 ```
 
 `strict = false` is load-bearing rather than defensive: the row is clamped and
@@ -220,29 +249,60 @@ local ns = vim.api.nvim_create_namespace('view_review')
 if not vim.api.nvim_buf_is_valid(buf) then
   return
 end
+local function derive()
+  local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
+  local base = normal.bg or (vim.o.background == 'light' and 0xffffff or 0x000000)
+  local function source(name)
+    local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
+    return hl.bg or hl.fg or normal.fg or base, hl.fg or hl.bg or normal.fg
+  end
+  local function blend(color)
+    local out = 0
+    for _, shift in ipairs({ 16, 8, 0 }) do
+      local c = math.floor(color / 2 ^ shift) % 256
+      local b = math.floor(base / 2 ^ shift) % 256
+      out = out * 256 + math.floor(b + (c - b) * 0.2 + 0.5)
+    end
+    return out
+  end
+  local removed = source('DiffDelete')
+  local stale = source('DiffChange')
+  local added, added_fg = source('DiffAdd')
+  local header, header_fg = source('DiffText')
+  vim.api.nvim_set_hl(0, 'ViewReviewRemoved', { bg = blend(removed) })
+  vim.api.nvim_set_hl(0, 'ViewReviewStale', { bg = blend(stale) })
+  vim.api.nvim_set_hl(0, 'ViewReviewAdded', { bg = blend(added), fg = added_fg })
+  vim.api.nvim_set_hl(0, 'ViewReviewHeader', { bg = blend(header), fg = header_fg })
+  vim.api.nvim_set_hl(0, 'ViewReviewSign', { fg = header_fg })
+end
+derive()
+vim.api.nvim_create_autocmd('ColorScheme', {
+  group = vim.api.nvim_create_augroup('view_review', { clear = true }),
+  callback = derive,
+})
 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
 for _, m in ipairs(marks) do
   if m.end_row > m.row then
     vim.api.nvim_buf_set_extmark(buf, ns, m.row, 0, {
       end_row = m.end_row - 1,
-      line_hl_group = m.stale and 'DiffChange' or 'DiffDelete',
+      line_hl_group = m.stale and 'ViewReviewStale' or 'ViewReviewRemoved',
       priority = 100,
       strict = false,
     })
   end
   local virt = {}
   for _, line in ipairs(m.header or {}) do
-    virt[#virt + 1] = { { line, 'DiffText' } }
+    virt[#virt + 1] = { { line, 'ViewReviewHeader' } }
   end
   for _, line in ipairs(m.added) do
-    virt[#virt + 1] = { { '+' .. line, 'DiffAdd' } }
+    virt[#virt + 1] = { { '+' .. line, 'ViewReviewAdded' } }
   end
   if #virt > 0 then
     vim.api.nvim_buf_set_extmark(buf, ns, m.anchor, 0, {
       virt_lines = virt,
       virt_lines_above = m.end_row == m.row,
       sign_text = m.current and '▶' or nil,
-      sign_hl_group = 'DiffText',
+      sign_hl_group = 'ViewReviewSign',
       priority = 100,
       strict = false,
     })

@@ -178,8 +178,8 @@ fn replacement(row: u32, added: &[&str], header: &[&str]) -> HunkMark {
 }
 
 /// The whole presentation, read back out of nvim: the replaced row carries
-/// the deletion highlight, the proposal hangs off it as virtual lines in
-/// nvim's own add group, and the header sits above them on the current
+/// the removal highlight, the proposal hangs off it as virtual lines in the
+/// review's own add group, and the header sits above them on the current
 /// hunk only.
 #[test]
 fn a_shown_review_decorates_the_rows_it_replaces_and_nothing_else() {
@@ -207,18 +207,18 @@ fn a_shown_review_decorates_the_rows_it_replaces_and_nothing_else() {
         "two hunks, a highlight and a body each: {marks:?}"
     );
     assert_eq!(
-        marks[0], "1:1:DiffDelete:nil:nil:",
+        marks[0], "1:1:ViewReviewRemoved:nil:nil:",
         "the replaced row is highlighted where it really is: {marks:?}"
     );
     assert_eq!(
         marks[1],
-        "1:nil:nil:\u{25b6} :false:hunk 1/2 -- <leader>ha accept/DiffText|\
-         ]c next  <leader>hq leave/DiffText|+TWO/DiffAdd",
+        "1:nil:nil:\u{25b6} :false:hunk 1/2 -- <leader>ha accept/ViewReviewHeader|\
+         ]c next  <leader>hq leave/ViewReviewHeader|+TWO/ViewReviewAdded",
         "the current hunk carries every header row, the sign, and the proposed line: {marks:?}"
     );
-    assert_eq!(marks[2], "5:5:DiffDelete:nil:nil:");
+    assert_eq!(marks[2], "5:5:ViewReviewRemoved:nil:nil:");
     assert_eq!(
-        marks[3], "5:nil:nil:nil:false:+SIX/DiffAdd",
+        marks[3], "5:nil:nil:nil:false:+SIX/ViewReviewAdded",
         "every other hunk shows its lines and no header: {marks:?}"
     );
 }
@@ -313,15 +313,15 @@ fn a_pure_insertion_draws_above_the_row_and_highlights_nothing() {
 
     assert_eq!(
         s.decoration(buf),
-        vec!["3:nil:nil:nil:true:+inserted/DiffAdd"]
+        vec!["3:nil:nil:nil:true:+inserted/ViewReviewAdded"]
     );
 }
 
-/// A hunk the buffer has moved under is drawn in nvim's change group
-/// rather than its delete group: the rows are still the hunk's, but what
-/// they hold is no longer what the proposal was computed against.
+/// A hunk the buffer has moved under is drawn in the stale group rather
+/// than the removed one: the rows are still the hunk's, but what they hold
+/// is no longer what the proposal was computed against.
 #[test]
-fn a_stale_hunk_is_drawn_in_the_change_group() {
+fn a_stale_hunk_is_drawn_in_the_stale_group() {
     let s = start();
     let buf = s.buffer();
 
@@ -330,7 +330,7 @@ fn a_stale_hunk_is_drawn_in_the_change_group() {
     s.show(buf, &[mark], 1, false);
 
     assert!(
-        s.decoration(buf)[0].contains("DiffChange"),
+        s.decoration(buf)[0].contains("ViewReviewStale"),
         "{:?}",
         s.decoration(buf)
     );
@@ -659,5 +659,153 @@ fn a_file_a_window_already_shows_is_never_moved_or_split() {
     assert_eq!(
         s.lua("return #vim.api.nvim_list_wins()", vec![]),
         windows_before
+    );
+}
+
+/// The colorscheme shape the review's own groups are derived from: the
+/// four diff groups exactly as `nvim_get_hl` reports them under
+/// dracula.nvim -- foreground-only, two of them `reverse` -- over a
+/// `Normal` background to blend against.
+const DRACULA_SHAPED: &str = "\
+vim.cmd('hi Normal guifg=#F8F8F2 guibg=#282A36')
+vim.cmd('hi DiffDelete guibg=NONE guifg=#FF5555 gui=reverse')
+vim.cmd('hi DiffText guibg=NONE guifg=#8BE9FD gui=reverse')
+vim.cmd('hi DiffChange guibg=NONE guifg=#FFB86C gui=NONE')
+vim.cmd('hi DiffAdd guibg=NONE guifg=#50FA7B gui=NONE')";
+
+impl Session {
+    /// `name`'s own resolved colors, as `bg/fg/reverse`.
+    fn group(&self, name: &str) -> String {
+        self.lua(
+            "local hl = vim.api.nvim_get_hl(0, { name = ..., link = false })
+local hex = function(c) return c and string.format('%06x', c) or 'nil' end
+return string.format('%s/%s/%s', hex(hl.bg), hex(hl.fg), tostring(hl.reverse == true))",
+            vec![rmpv::Value::from(name)],
+        )
+        .as_str()
+        .expect("a group's colors")
+        .to_owned()
+    }
+
+    /// One painted cell of the rendered screen, as
+    /// `char:bg/fg/reverse`: the attributes the UI was handed, rather than
+    /// the extmark that asked for them.
+    fn cell(&self, row: u64, col: u64) -> String {
+        self.lua(
+            "vim.cmd('redraw')
+local cell = vim.api.nvim__inspect_cell(1, ...)
+local a = cell[2] or {}
+local hex = function(c) return c and string.format('%06x', c) or 'nil' end
+return string.format('%s:%s/%s/%s', cell[1], hex(a.background), hex(a.foreground),
+  tostring(a.reverse == true))",
+            vec![rmpv::Value::from(row), rmpv::Value::from(col)],
+        )
+        .as_str()
+        .expect("a painted cell")
+        .to_owned()
+    }
+}
+
+/// A colorscheme's diff groups are the review's *source* of color, never
+/// the groups it paints with. Under dracula's shape those groups are
+/// foreground-only and `reverse`, and a `line_hl_group` naming one fills
+/// the whole row with a solid block of it -- the bright-red rows a user
+/// reported instead of their colorscheme. What the review paints with
+/// instead is a fifth of that color over `Normal`'s background, carrying
+/// no attribute the diff group had.
+#[test]
+fn a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block() {
+    let s = start();
+    s.lua(DRACULA_SHAPED, vec![]);
+    let buf = s.buffer();
+    s.show_in_current_window(buf);
+
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+
+    assert_eq!(s.group("ViewReviewRemoved"), "53333c/nil/false");
+    assert_eq!(s.group("ViewReviewStale"), "534641/nil/false");
+    assert_eq!(s.group("ViewReviewAdded"), "305444/50fa7b/false");
+    assert_eq!(s.group("ViewReviewHeader"), "3c505e/8be9fd/false");
+    assert_eq!(s.group("ViewReviewSign"), "nil/8be9fd/false");
+
+    // buffer row 1 is screen row 1, and column 2 is its first text cell
+    // once the current hunk's sign has claimed the two before it
+    assert_eq!(
+        s.cell(1, 2),
+        "t:53333c/nil/false",
+        "the row the hunk replaces is painted in the blend, keeps whatever \
+         foreground its own syntax gave it, and is not reversed"
+    );
+    assert_eq!(
+        s.cell(2, 2),
+        "h:3c505e/8be9fd/false",
+        "the header's virtual line is the blend too, with the diff group's own \
+         color as its text"
+    );
+}
+
+/// The other half of the same claim: a colorscheme that defines its diff
+/// groups as backgrounds -- nvim's own default among them -- is read
+/// through the background it defined, so the derived tint is a fifth of
+/// the color that scheme chose rather than of a foreground it never meant
+/// as one.
+#[test]
+fn a_background_defined_diff_group_is_blended_from_that_background() {
+    let s = start();
+    s.lua(
+        "vim.cmd('hi Normal guifg=#F8F8F2 guibg=#000000')
+vim.cmd('hi DiffDelete guifg=NONE guibg=#500000 gui=NONE')",
+        vec![],
+    );
+    let buf = s.buffer();
+
+    s.show(buf, &[replacement(1, &["TWO"], &[])], 1, false);
+
+    assert_eq!(
+        s.group("ViewReviewRemoved"),
+        "100000/nil/false",
+        "a fifth of #500000 over black, and nothing taken from the foreground"
+    );
+}
+
+/// The groups hold resolved colors rather than a link, so a scheme
+/// switched while a review is open would keep the old scheme's tint on the
+/// rows without something to re-derive them. That something is the
+/// `ColorScheme` autocmd the show installs in the review's own augroup.
+#[test]
+fn a_colorscheme_switched_under_an_open_review_re_derives_its_groups() {
+    let s = start();
+    s.lua(DRACULA_SHAPED, vec![]);
+    let buf = s.buffer();
+    s.show_in_current_window(buf);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+    let before = s.group("ViewReviewRemoved");
+
+    s.lua("vim.cmd('colorscheme blue')", vec![]);
+
+    let after = s.group("ViewReviewRemoved");
+    assert_ne!(
+        before, after,
+        "the review's groups follow the colorscheme the user is now in"
+    );
+    assert_eq!(
+        after,
+        s.lua(
+            "local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
+local hl = vim.api.nvim_get_hl(0, { name = 'DiffDelete', link = false })
+local src = hl.bg or hl.fg
+local base = normal.bg
+local out = 0
+for _, shift in ipairs({ 16, 8, 0 }) do
+  local c = math.floor(src / 2 ^ shift) % 256
+  local b = math.floor(base / 2 ^ shift) % 256
+  out = out * 256 + math.floor(b + (c - b) * 0.2 + 0.5)
+end
+return string.format('%06x/nil/false', out)",
+            vec![]
+        )
+        .as_str()
+        .expect("the expected blend"),
+        "and they are that scheme's own diff color, blended the same way"
     );
 }

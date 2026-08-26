@@ -225,12 +225,19 @@ it would put there, and puts your cursor on the first hunk.
   gamma
 ```
 
-Nothing there is view's own drawing. The rows the agent would remove are
-highlighted with nvim's `DiffDelete`, what it proposes instead is a virtual
-line in `DiffAdd`, the header naming the keys is `DiffText`, and a hunk your
-own typing has moved under turns `DiffChange` -- so a review is painted in
-your colorscheme's own diff colors, in the window the file is already in,
-and it scrolls, folds and wraps the way the rest of the buffer does. The
+Nothing there is a window of view's own. The rows the agent would remove are
+highlighted with `ViewReviewRemoved`, what it proposes instead is a virtual
+line in `ViewReviewAdded`, the header naming the keys is `ViewReviewHeader`,
+a hunk your own typing has moved under turns `ViewReviewStale`, and the `▶`
+marking the current hunk is `ViewReviewSign` -- five groups view derives from
+your colorscheme's own `DiffDelete`, `DiffAdd`, `DiffText` and `DiffChange`
+when the review opens, and re-derives when you
+change colorscheme. Each is a fifth of that group's color over your `Normal`
+background and nothing else: a review reads as your theme's diff colors, the
+row under it keeps its own syntax highlighting, and a colorscheme whose diff
+groups are reverse-video (dracula's are) tints the rows instead of filling
+them. The review is drawn in the window the file is already in, and it
+scrolls, folds and wraps the way the rest of the buffer does. The
 buffer's text is untouched by any of it: nothing is written until you accept
 something. The `▶` on the current hunk needs a sign column to land in; with
 `signcolumn=no` it is simply absent, and the keys are still named. The header
