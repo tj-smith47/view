@@ -77,8 +77,9 @@ laptop opens.
 
 The groups are the review's own, derived from the colorscheme's
 `DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText` rather than being them -- once,
-the first time a review shows, and again on every `ColorScheme` after, so the
-per-keystroke redraws a review does between those two events derive nothing.
+the first time a review shows, and again on every `ColorScheme` and every
+`'cursorline'` change the review's window sees, so the per-keystroke redraws
+a review does between those events derive nothing.
 Under this session's default scheme:
 
 ```
@@ -114,16 +115,26 @@ population: a diff group's own foreground is the row's background under
 `reverse`, and `Normal`'s foreground alone is light on a dark scheme while
 nvim's legacy diff palette hands `DiffText` a `#c6c6c6` fill over verbatim,
 which is 12 of the 28 schemes the pinned nvim ships reading between 1.06:1
-and 1.71:1. `ViewReviewSign` runs the same ladder against `SignColumn`'s
-background rather than a fill of its own, since the gutter is not always the
-buffer's color. Nothing else crosses: `ViewReviewRemoved` and `ViewReviewStale`
-carry a background alone, so a reviewed row keeps whatever foreground its own
-syntax gave it, and no `reverse` or `bold` follows the color across. A
-colorscheme designs its diff groups for diff mode, where they color cells
-inside a diffed line; a `line_hl_group` paints a whole row with them, and
-dracula's foreground-only `reverse` `DiffDelete` fills that row with a solid
-block of `#FF5555`. The derived group is a fifth of that same red instead,
-under the row's own text (`crates/view-engine/tests/inline_review_live.rs`'s
+and 1.71:1. 3:1 is the floor view holds rather than a standard it quotes: it
+is the point past which the scheme's own paired color still survives, and a
+stricter number would trade the author's palette for plain black or white on
+schemes that read perfectly well. `ViewReviewSign` runs the same ladder
+against the gutter rather than a fill of its own, since the gutter is not
+always the buffer's color -- and which gutter group that is depends on
+`'cursorline'`: the `▶` sits on the hunk the cursor is on, whose sign cell
+nvim paints from `CursorLineSign` when the option is set and from `SignColumn`
+when it is not (`:h hl-CursorLineSign`), so the option is read off the
+review's own window and an `OptionSet` on it re-derives. The two groups are
+`nil` here, so both states pick the same `eef1f8`; 18 of the 28 schemes the
+pinned nvim ships give them different backgrounds. Nothing else crosses:
+`ViewReviewRemoved` and `ViewReviewStale` carry a background alone, so a
+reviewed row keeps whatever foreground its own syntax gave it, and no
+`reverse` or `bold` follows the color across. A colorscheme designs its diff
+groups for diff mode, where they color cells inside a diffed line; a
+`line_hl_group` paints a whole row with them, and dracula's foreground-only
+`reverse` `DiffDelete` fills that row with a solid block of `#FF5555`. The
+derived group is a fifth of that same red instead, under the row's own text
+(`crates/view-engine/tests/inline_review_live.rs`'s
 `a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block`
 pins both halves against a dracula-shaped scheme, and
 `a_background_defined_diff_group_is_taken_verbatim` pins the other side).
@@ -341,15 +352,34 @@ local function derive()
   vim.api.nvim_set_hl(0, 'ViewReviewHeader',
     { bg = header, fg = legible(header, header_text, normal.fg) })
   local gutter = vim.api.nvim_get_hl(0, { name = 'SignColumn', link = false })
+  local fill = gutter.bg or base
+  local win = vim.fn.win_findbuf(buf)[1]
+  local lit = vim.o.cursorline
+  if win ~= nil then
+    lit = vim.wo[win].cursorline
+  end
+  if lit then
+    local cursor =
+      vim.api.nvim_get_hl(0, { name = 'CursorLineSign', link = false })
+    fill = cursor.bg or gutter.bg or base
+  end
   vim.api.nvim_set_hl(0, 'ViewReviewSign',
-    { fg = legible(gutter.bg or base, header_hl.fg, header_hl.bg, normal.fg) })
+    { fg = legible(fill, header_hl.fg, header_hl.bg, normal.fg) })
 end
 if not _G.view_review_derived then
   _G.view_review_derived = true
   derive()
-  vim.api.nvim_create_autocmd('ColorScheme', {
-    group = vim.api.nvim_create_augroup('view_review', { clear = true }),
-    callback = derive,
+  local group = vim.api.nvim_create_augroup('view_review', { clear = true })
+  vim.api.nvim_create_autocmd('ColorScheme', { group = group, callback = derive })
+  vim.api.nvim_create_autocmd('OptionSet', {
+    group = group,
+    pattern = 'cursorline',
+    callback = function()
+      if vim.v.option_type == 'global'
+        or vim.api.nvim_get_current_buf() == buf then
+        derive()
+      end
+    end,
   })
 end
 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)

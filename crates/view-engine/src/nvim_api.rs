@@ -1737,12 +1737,28 @@ macro_rules! review_ns_lua {
 /// row's background under `reverse`, and `Normal`'s foreground is light on
 /// a dark scheme while nvim's legacy diff palette hands `DiffText` a
 /// `#c6c6c6` fill over verbatim -- light on light, on 12 of the 28 schemes
-/// the pinned nvim ships. The sign has no fill of its own, so it runs the
-/// same rule against `SignColumn`'s background -- the gutter is not always
-/// the buffer's color, and `pablo` and `vim` paint it a light grey their
-/// diff colors cannot be read on. It keeps the scheme's diff accent
-/// wherever that accent reads (dracula's `#8BE9FD`) and steps back where
-/// it does not.
+/// the pinned nvim ships. 3:1 is a deliberate floor rather than a
+/// standard quoted: it is the point past which the scheme's own paired
+/// color still survives, and raising it to WCAG AA's 4.5:1 for body text
+/// would push at least one shipped scheme off its author's palette and
+/// onto plain black or white.
+///
+/// The sign has no fill of its own, so it runs the same rule against the
+/// gutter -- which is not always the buffer's color: `pablo` and `vim`
+/// paint it a light grey their diff colors cannot be read on. Which
+/// gutter group that is depends on `'cursorline'`: `▶` marks the current
+/// hunk, which is the row `focus` leaves the cursor on, and nvim paints
+/// that row's sign cell from `CursorLineSign` when the option is set and
+/// from `SignColumn` when it is not (`:h hl-CursorLineSign`). 18 of the
+/// 28 give those two different backgrounds -- `pablo`'s accent reads
+/// 8.94:1 on one and 1.85:1 on the other -- so the option is read from
+/// the window the review is in, and an `OptionSet` on it re-derives the
+/// same way a `ColorScheme` does. A cursor the user has since moved off
+/// the marked row puts the sign back on `SignColumn` with no event to
+/// re-derive from; no single foreground clears 3:1 on both of `pablo`'s
+/// gutters (its two backgrounds are 4.8:1 apart), so the row the marker
+/// is on is the one held. It keeps the scheme's diff accent wherever that
+/// accent reads (dracula's `#8BE9FD`) and steps back where it does not.
 ///
 /// A `Normal` carrying no background of its own -- a scheme drawing on
 /// the terminal's, which is what dracula.nvim does -- blends against
@@ -1752,11 +1768,15 @@ macro_rules! review_ns_lua {
 /// Derived once per session rather than once per show: `ReviewShow` is
 /// re-issued on every hunk step, and `nvim_set_hl` on namespace 0
 /// redefines a global group, which is a heavier event than the extmark
-/// churn a redraw already costs. The `ColorScheme` autocmd in the review's
-/// augroup is what keeps that from going stale -- the groups hold resolved
-/// colors rather than a link, so a scheme switched mid-review would
-/// otherwise leave the old one's tint on the rows -- and
-/// [`REVIEW_CLEAR_CHUNK`] takes both the flag and the augroup back off.
+/// churn a redraw already costs. The two autocmds in the review's augroup
+/// are what keep that from going stale -- the groups hold resolved colors
+/// rather than a link, so a scheme switched mid-review would otherwise
+/// leave the old one's tint on the rows, and a `'cursorline'` toggled
+/// under it would leave the sign measured against a gutter that is no
+/// longer the one it lands on. The `OptionSet` arm re-derives only for a
+/// change the review's own window sees, since a global set reaches it and
+/// another window's local set does not. [`REVIEW_CLEAR_CHUNK`] takes both
+/// the flag and the augroup back off.
 ///
 /// The sign is the only part a user can have turned off (`signcolumn=no`);
 /// the header names the verbs, so nothing is unreachable without it.
@@ -1875,15 +1895,34 @@ local function derive()
   vim.api.nvim_set_hl(0, 'ViewReviewHeader',
     { bg = header, fg = legible(header, header_text, normal.fg) })
   local gutter = vim.api.nvim_get_hl(0, { name = 'SignColumn', link = false })
+  local fill = gutter.bg or base
+  local win = vim.fn.win_findbuf(buf)[1]
+  local lit = vim.o.cursorline
+  if win ~= nil then
+    lit = vim.wo[win].cursorline
+  end
+  if lit then
+    local cursor =
+      vim.api.nvim_get_hl(0, { name = 'CursorLineSign', link = false })
+    fill = cursor.bg or gutter.bg or base
+  end
   vim.api.nvim_set_hl(0, 'ViewReviewSign',
-    { fg = legible(gutter.bg or base, header_hl.fg, header_hl.bg, normal.fg) })
+    { fg = legible(fill, header_hl.fg, header_hl.bg, normal.fg) })
 end
 if not _G.view_review_derived then
   _G.view_review_derived = true
   derive()
-  vim.api.nvim_create_autocmd('ColorScheme', {
-    group = vim.api.nvim_create_augroup('view_review', { clear = true }),
-    callback = derive,
+  local group = vim.api.nvim_create_augroup('view_review', { clear = true })
+  vim.api.nvim_create_autocmd('ColorScheme', { group = group, callback = derive })
+  vim.api.nvim_create_autocmd('OptionSet', {
+    group = group,
+    pattern = 'cursorline',
+    callback = function()
+      if vim.v.option_type == 'global'
+        or vim.api.nvim_get_current_buf() == buf then
+        derive()
+      end
+    end,
   })
 end
 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)

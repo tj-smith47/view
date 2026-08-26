@@ -903,14 +903,32 @@ fn a_colorscheme_switched_under_an_open_review_re_derives_its_groups() {
 /// group definitions, because what a reader sees is the foreground the
 /// grid resolved over the background it resolved, including what either
 /// inherited: the sign's own group carries no background at all, and the
-/// cell it lands in is `SignColumn`'s, which `pablo` and `vim` set to a
+/// cell it lands in is the gutter's, which `pablo` and `vim` set to a
 /// light grey their diff colors cannot be read on. A group-level check
 /// would call both of those fine.
+///
+/// Which gutter group that cell resolves to is the reason each scheme is
+/// walked twice. `▶` marks the current hunk, which is the row `focus`
+/// leaves the cursor on, and with `'cursorline'` set nvim paints the sign
+/// cell of that row from `CursorLineSign` rather than `SignColumn` (`:h
+/// hl-CursorLineSign`) -- 18 of these 28 schemes give the two different
+/// backgrounds, and `pablo`'s accent read 8.94:1 on one and 1.85:1 on the
+/// other. So the walk sets the option both ways, moves the cursor onto the
+/// marked row, and holds the floor under each.
+///
+/// Each measured cell is tied back to what should be painting it -- the
+/// header and the proposal to their own derived background, the sign to
+/// the marker glyph -- because a decoration that stopped painting leaves
+/// ordinary buffer text in those cells, and `Normal` on `Normal` clears
+/// 3:1 on nearly every scheme.
 ///
 /// The re-apply on a failed read is `blue`: switching a colorscheme frees
 /// the attribute ids the grid still holds, and `nvim__inspect_cell`
 /// refuses a freed id rather than resolving it stale. Applying the same
-/// scheme again repaints from the ids it now has.
+/// scheme again repaints from the ids it now has. That is engine behavior
+/// view does not control, and an engine-pin bump can move which scheme
+/// trips it -- the retry is written to fail by name rather than by scheme,
+/// so the next one is a named failure here rather than a silent read.
 #[test]
 fn every_colorscheme_the_pinned_nvim_ships_paints_a_review_that_reads() {
     let s = start();
@@ -954,9 +972,10 @@ for _, name in ipairs(names) do
   else
     local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
     local base = normal.bg or (vim.o.background == 'light' and 0xffffff or 0x000000)
-    local seen = {}
+    local seen, derived = {}, {}
     for _, g in ipairs({ 'ViewReviewRemoved', 'ViewReviewStale', 'ViewReviewAdded', 'ViewReviewHeader' }) do
       local hl = vim.api.nvim_get_hl(0, { name = g, link = false })
+      derived[g] = hl.bg
       if hl.bg == nil or hl.bg == base then
         fail('%s: %s is the row it marks (%s)', name, g, hex(hl.bg))
       end
@@ -971,23 +990,50 @@ for _, name in ipairs(names) do
         fail('%s: %s borrowed an attribute from the diff group', name, g)
       end
     end
-    vim.cmd('redraw!')
     local surfaces = {}
-    for _, probe in ipairs({
-      { 'the header', 2, 2 }, { 'the proposal', 3, 2 }, { 'the sign', 1, 0 },
-    }) do
-      local ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
-      if not ok then
-        vim.cmd('colorscheme ' .. name)
-        vim.cmd('redraw!')
-        ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
+    for _, lit in ipairs({ true, false }) do
+      -- the marker sits on the current hunk, which is where focus leaves
+      -- the cursor: with 'cursorline' set that cell is CursorLineSign, and
+      -- 18 of these schemes paint it a different color from SignColumn
+      vim.wo.cursorline = lit
+      vim.api.nvim_win_set_cursor(0, { 2, 0 })
+      vim.cmd('redraw!')
+      local state = lit and 'cursorline on' or 'cursorline off'
+      for _, probe in ipairs({
+        { 'the header', 2, 2, 'ViewReviewHeader' },
+        { 'the proposal', 3, 2, 'ViewReviewAdded' },
+        { 'the sign', 1, 0 },
+      }) do
+        local where = string.format('%s (%s)', probe[1], state)
+        local ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
+        if not ok then
+          vim.cmd('colorscheme ' .. name)
+          vim.cmd('redraw!')
+          ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
+        end
+        if not ok then
+          fail('%s: %s could not be read off the grid -- %s', name, where, cell)
+        else
+          local a = cell[2] or {}
+          -- the cell has to be the review's own: a decoration that stopped
+          -- painting leaves ordinary buffer text here, which is Normal on
+          -- Normal and clears the floor under nearly every scheme
+          if probe[4] ~= nil and a.background ~= derived[probe[4]] then
+            fail('%s: %s is painted on %s, not on the %s the group carries',
+              name, where, hex(a.background), hex(derived[probe[4]]))
+          end
+          if probe[4] == nil and cell[1] ~= '\u{25b6}' then
+            fail('%s: %s holds [%s], not the marker', name, where, cell[1])
+          end
+          surfaces[#surfaces + 1] =
+            { where, a.foreground or normal.fg, a.background or base }
+        end
       end
-      if not ok then
-        fail('%s: %s could not be read off the grid -- %s', name, probe[1], cell)
-      else
-        local a = cell[2] or {}
-        surfaces[#surfaces + 1] = { probe[1], a.foreground or normal.fg, a.background or base }
-      end
+    end
+    -- three cells under each of the two 'cursorline' states: a walk that
+    -- silently stopped reading one of them would report a clean floor
+    if #surfaces ~= 6 then
+      fail('%s: %d of the 6 cells were measured', name, #surfaces)
     end
     for _, surface in ipairs(surfaces) do
       local where, fg, bg = surface[1], surface[2], surface[3]
