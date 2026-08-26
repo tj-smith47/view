@@ -223,7 +223,11 @@ if [ -f scripts/audit-god-files.sh ] && [ -d crates ]; then
   # unit tests that legitimately drive it directly
   prod_lines=$(bash scripts/audit-god-files.sh --prod-lines) || prod_lines=""
   if [ -z "$prod_lines" ]; then
-    echo "STYLE FAIL: could not read production lines to check condition-notice ownership"
+    # the scanner's own reason, re-read only on this path: it is the whole
+    # diagnosis (an untracked tree, a quoted path it cannot name) and
+    # without it this line sends a reader to the wrong file
+    why=$({ bash scripts/audit-god-files.sh --prod-lines 2>&1 >/dev/null || true; } | head -3)
+    echo "STYLE FAIL: could not read production lines to check condition-notice ownership${why:+ -- $why}"
     fail=1
   else
     # any non-identifier char before the name, so UFCS calls
