@@ -998,6 +998,12 @@ fn wrap_window<'a>(
 /// The offset returned is checked against the text for the same reason
 /// `breaks` is -- a list that has drifted from the input costs alignment and
 /// never correctness, and a slice from inside a character would be neither.
+///
+/// A borrow that cannot be taken folds from the line's own start into a
+/// list of its own instead: the same offset, uncached. Reaching here from
+/// inside another read of the list is not a shape any caller has today, and
+/// the fallback is what keeps the one that adds it from being a panic in a
+/// crate that may not panic.
 fn row_start_at_or_before(
     input: &str,
     width: usize,
@@ -1005,7 +1011,11 @@ fn row_start_at_or_before(
     starts: &RefCell<Vec<usize>>,
     folded_at: &Cell<usize>,
 ) -> usize {
-    let mut starts = starts.borrow_mut();
+    let Ok(mut starts) = starts.try_borrow_mut() else {
+        let mut fresh = Vec::new();
+        extend_row_starts(input, width, 0, limit, &mut fresh);
+        return fresh.last().copied().unwrap_or(0);
+    };
     if folded_at.get() != width {
         starts.clear();
         folded_at.set(width);
@@ -2712,15 +2722,18 @@ mod tests {
                 &state.row_width,
             );
 
-            assert!(
-                window.len() <= (cap + 2) * width * BYTES_PER_CELL,
-                "keystroke {typed}: {} bytes walked for {cap} rows",
-                window.len()
-            );
+            // ahead of the window bound: a fold that has drifted past one
+            // row is the regression this pin is for, and reading it first
+            // is what keeps the panic line naming the claim that failed
             assert!(
                 ahead <= width * BYTES_PER_CELL,
                 "keystroke {typed}: the paint folds {ahead} bytes, more than \
                  the one row the keystroke added"
+            );
+            assert!(
+                window.len() <= (cap + 2) * width * BYTES_PER_CELL,
+                "keystroke {typed}: {} bytes walked for {cap} rows",
+                window.len()
             );
             assert_eq!(
                 state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL),
@@ -2738,8 +2751,20 @@ mod tests {
     /// remembered offset (or two) is walked past after a row (or two) and
     /// leaves the paint re-folding the whole line.
     ///
-    /// The assertion is the fold distance rather than a duration, so it
-    /// fails the same way on a loaded machine as on an idle one.
+    /// Two assertions carry that, because neither alone goes red on both
+    /// regressions. The paint appends no boundary: red when a backspace
+    /// drops the list, which sends the next paint back to the fold over the
+    /// whole line. The window stays inside the rows the panel paints: red
+    /// when the list is cut back to the last offset (or two), because a
+    /// text shortened past every offset it then holds opens the window at
+    /// zero. A fold distance measured forward from the list's end -- what
+    /// the append pin asserts -- is identically zero in this direction
+    /// whatever the code does, since the floor falls with the text while
+    /// the list's last entry stays a row behind the cursor; it is the
+    /// append direction's assertion and cannot be this one's.
+    ///
+    /// Both are counts rather than durations, so they fail the same way on
+    /// a loaded machine as on an idle one.
     #[test]
     fn a_held_backspace_after_a_wide_character_folds_nothing() {
         let width = composer_width(WIDE_PANEL);
@@ -2754,13 +2779,7 @@ mod tests {
 
         for deleted in 0..(11 * width * BYTES_PER_CELL) {
             assert!(state.pop_input(), "backspace {deleted}: nothing to pop");
-            let ahead = fold_ahead(&state, width, cap);
-
-            assert!(
-                ahead <= width * BYTES_PER_CELL,
-                "backspace {deleted}: the paint folds {ahead} bytes, more \
-                 than the row the whole line is meant to cost"
-            );
+            let held = state.row_starts.borrow().len();
             let window = wrap_window(
                 &state.input,
                 width,
@@ -2769,6 +2788,12 @@ mod tests {
                 state.non_ascii,
                 &state.row_starts,
                 &state.row_width,
+            );
+            let folded = state.row_starts.borrow().len().saturating_sub(held);
+            assert_eq!(
+                folded, 0,
+                "backspace {deleted}: the paint folded {folded} boundaries \
+                 of a text the list already reached past"
             );
             assert!(
                 window.len() <= (cap + 2) * width * BYTES_PER_CELL,
@@ -2781,6 +2806,34 @@ mod tests {
                 "backspace {deleted}: the rows are the whole input's own"
             );
         }
+    }
+
+    /// The reader reached while the list is already borrowed, which is the
+    /// one shape a `RefCell` would answer with a panic: it folds a list of
+    /// its own instead and opens the window at the same offset the cached
+    /// read gives.
+    #[test]
+    fn a_row_start_read_from_inside_another_one_folds_rather_than_panicking() {
+        let width = composer_width(WIDE_PANEL);
+        let letters: String = (0..(1 << 12))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let input = format!("\u{2014}{letters}");
+        let limit = input.len() / 2;
+
+        let starts = RefCell::new(Vec::new());
+        let folded_at = Cell::new(width);
+        let cached = row_start_at_or_before(&input, width, limit, &starts, &folded_at);
+
+        let held = starts.borrow_mut();
+        let uncached = row_start_at_or_before(&input, width, limit, &starts, &folded_at);
+        drop(held);
+
+        assert_eq!(
+            cached, uncached,
+            "a read that cannot reach the list opens the window where the \
+             one that can does"
+        );
     }
 
     /// The anchor against every gesture that can move a boundary out from
