@@ -804,10 +804,20 @@ fn char_cells(ch: char) -> usize {
 ///
 /// A row of that grid is `width` bytes because a cell is one byte, which
 /// holds for the ASCII a composer is overwhelmingly typed in and not for a
-/// line of multibyte characters longer than the window: those rows sit a
-/// constant column off, the same way they always have. Finding their
-/// boundary means measuring cells from the break, which is the whole-input
-/// walk this exists to refuse.
+/// line of multibyte characters longer than the window. Finding a row
+/// boundary in such a line means measuring cells from the line's start,
+/// because a row is greedy -- one that cannot fit the next two-cell glyph
+/// ends a cell early -- so where its rows fall is a function of the whole
+/// line and not of any count. That measurement is the walk, and the line
+/// is the bound on it: the window such a stretch falls back to is the
+/// line, which for a prompt of one line is the prompt.
+///
+/// So the return is `4 * width * (keep + 1)` bytes for ASCII and for
+/// multibyte text under a line break, and the line itself for a single
+/// line carrying a character wider than a byte. The alternative is rows
+/// that sit a column off the wrap the transcript will give the same text,
+/// re-flowing as the next character is typed -- see [`AiPanelState`]'s
+/// `non_ascii`, which exists to keep the grid off exactly that stretch.
 ///
 /// `breaks` is [`AiPanelState::breaks`], every line break in ascending
 /// order, binary-searched for the last one at or before the window's own
@@ -853,8 +863,8 @@ fn wrap_window<'a>(
     // the composer then paints rows the whole input's wrap never had. The
     // line's own start is the nearest opening that is provably a boundary
     // whatever the text holds, so a stretch the grid is not exact for is
-    // wrapped from there instead -- the whole line, at the cost of walking
-    // it, which is bounded by that line and not by the whole composer.
+    // wrapped from there instead: the line, which for a prompt of one line
+    // is the prompt.
     if non_ascii.is_some_and(|(first, last)| first < start && last >= phase) {
         return &input[phase..];
     }
@@ -2341,7 +2351,7 @@ mod tests {
     /// not the megabyte behind them, whether or not a line break sits in
     /// front of the opening.
     #[test]
-    fn an_ascii_composer_walks_the_panels_rows_and_not_the_whole_paste() {
+    fn a_composer_walks_the_panels_rows_and_not_the_whole_paste() {
         let width = composer_width(WIDE_PANEL);
         let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
         let letters: String = (0..(1 << 20))
@@ -2365,6 +2375,50 @@ mod tests {
                 window.len() <= (cap + 2) * width * BYTES_PER_CELL,
                 "{name}: {} bytes walked for {cap} rows",
                 window.len()
+            );
+        }
+    }
+
+    /// The worst case the window has, stated as what it costs.
+    ///
+    /// A row is greedy: one that cannot fit the next two-cell glyph ends a
+    /// cell early, so where a line's rows fall is a function of the line
+    /// and not of any count that could be carried forward. The line is
+    /// therefore the only opening a multibyte stretch has that is provably
+    /// a row boundary, and for a prompt of one line that is the prompt --
+    /// this pins that cost as the cost, against painting rows a column off
+    /// the wrap the transcript gives the same text.
+    #[test]
+    fn one_long_line_carrying_a_wide_character_costs_that_line() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let letters: String = (0..(1 << 16))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+
+        for (name, input, line_at) in [
+            ("no break to fall back to", format!("\u{2014}{letters}"), 0),
+            (
+                "a typed break in front of it",
+                format!("first\n\u{2014}{letters}"),
+                "first\n".len(),
+            ),
+        ] {
+            let mut state = AiPanelState::new();
+            state.push_input(&input);
+
+            let window = wrap_window(&input, width, cap, &state.breaks, state.non_ascii);
+
+            assert_eq!(
+                window,
+                &input[line_at..],
+                "{name}: the window is the line the wrap has to open from"
+            );
+            assert_eq!(
+                state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL),
+                wrap(&input, width, cap, Break::Cell),
+                "{name}: and what that buys is rows the whole input's wrap \
+                 has, column for column"
             );
         }
     }
