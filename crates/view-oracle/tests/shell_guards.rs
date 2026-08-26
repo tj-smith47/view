@@ -218,17 +218,39 @@ fi
 ",
         3,
     ),
+    (
+        "a quiet grep behind an environment assignment",
+        "
+set -euo pipefail
+if ! pane | LC_ALL=C grep -qF -- \"$text\"; then
+    exit 1
+fi
+",
+        3,
+    ),
+    (
+        "a quiet grep behind a wrapper that runs it",
+        "
+set -euo pipefail
+if ! journal | sudo grep -qF -- \"$text\"; then
+    exit 1
+fi
+",
+        3,
+    ),
 ];
 
 /// The spellings the second rule does not ask about, which its walk must
 /// leave alone: a quiet grep reading a file, a pipeline whose reader drains
 /// its input, an alternation inside the pattern rather than a pipeline, the
-/// `case` reader that replaced the shape, and prose.
+/// `case` reader that replaced the shape, a reader behind a pipe and a
+/// wrapper that does not exit at its first match, and prose.
 const HELD_QUIET_SHAPES: &str = "
 set -euo pipefail
 grep -qF -- 'held' \"$FILE\" || exit 1
 holds() { case \"$2\" in *\"$1\"*) return 0 ;; *) return 1 ;; esac; }
 matched=$(pane | grep -F -- \"$text\") || true
+boxed=$(box_text | LC_ALL=C grep -F -- \"$text\") || true
 grep -qE \"^($ONE|$TWO)$\" \"$FILE\" || exit 1
 # the old shape, piped into | grep -q, named in prose
 shaped=$(printf '%s\\n' \"$rows\" | awk '{ print $1 }')
@@ -457,8 +479,24 @@ fn pipeline_segments(statement: &str) -> Vec<&str> {
 /// Whether `segment` runs a grep that exits at its first match, which is
 /// what leaves the pipeline's status describing the producer's death rather
 /// than the search's answer.
+///
+/// The reader is looked for past what can stand in front of it and change
+/// nothing about it: a negation, a `NAME=value` the command runs with, and
+/// the wrappers that run another command. A wrapper's own flags are where
+/// this stops -- `sudo -n grep -q` reads as no grep at all -- which is the
+/// second stated ceiling of the walk, beside the per-line quote state at
+/// [`code_before_comment`]; both can only under-report, and the population
+/// carries neither spelling today.
 fn reads_quietly(segment: &str) -> bool {
-    let mut words = segment.split_whitespace().skip_while(|word| *word == "!");
+    let mut words = segment.split_whitespace().skip_while(|word| {
+        matches!(*word, "!" | "sudo" | "env" | "command" | "nice" | "stdbuf")
+            || word.split_once('=').is_some_and(|(name, _)| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            })
+    });
     if !words
         .next()
         .is_some_and(|word| matches!(word, "grep" | "egrep" | "fgrep" | "zgrep"))

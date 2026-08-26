@@ -117,6 +117,11 @@ pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
 # pipefail` then reports as a failed pipeline -- so a match reads as no
 # match and the assertion built on it passes for the wrong reason. A
 # captured string has no pipe to fail.
+#
+# The one thing the glob does that `grep -F` did not: it spans the newlines
+# between rows, so a needle written across a row boundary would match here
+# where a line-at-a-time search never matched. Every needle passed in today
+# is a single on-screen string.
 holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 
 fail() {

@@ -144,11 +144,29 @@ pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
 # pipefail` then reports as a failed pipeline -- so a match reads as no
 # match and the assertion built on it passes for the wrong reason. A
 # captured string has no pipe to fail.
+#
+# The one thing the glob does that `grep -F` did not: it spans the newlines
+# between rows, so a needle written across a row boundary would match here
+# where a line-at-a-time search never matched. Every needle passed in today
+# is a single on-screen string.
 holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 
 # Whether `haystack` matches the extended regular expression `needle`. The
 # no-pipe form of `grep -qE`, for the same reason `holds` is `grep -qF`'s.
-matches() { [[ $2 =~ $1 ]]; }
+#
+# A row at a time, not the capture as one string: `[[ =~ ]]` over the whole
+# pane would give `^` and `$` the ends of the capture, where every pattern
+# written for `grep -qE` means the ends of a row. Reading it line by line is
+# what keeps an anchored pattern meaning what its author wrote.
+matches() {
+    local line
+    while IFS= read -r line; do
+        if [[ $line =~ $1 ]]; then
+            return 0
+        fi
+    done <<<"$2"
+    return 1
+}
 
 # The pane with the panel column cut away: on every row, everything left of
 # the first vertical border.
@@ -1052,8 +1070,8 @@ FOCUSED_TITLE=$(const_str "$PANEL_RS" FOCUSED_TITLE)
 # leading run of it still fails loudly if the keys are reworded.
 REVIEW_KEY_HINT=$(const_str "$REVIEW_RS" KEY_HINT) || exit 1
 REVIEW_KEY_HINT=${REVIEW_KEY_HINT:0:20}
-# An empty needle is `grep -F ''`, which matches every screen there is:
-# every review assertion below would pass vacuously.
+# An empty needle leaves `holds` a `case` glob of `**`, which matches every
+# screen there is: every review assertion below would pass vacuously.
 [ -n "$REVIEW_KEY_HINT" ] || {
     printf 'FAIL: the review key hint read empty from %s\n' "$REVIEW_RS" >&2
     exit 1
