@@ -352,6 +352,7 @@ impl Replies {
     /// not withdrawn by a later read that says nothing about it, and
     /// `known` carries the `COLORTERM` reading that no reply can restate
     /// (see [`truecolor_from_colorterm`]).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn upgraded(&self, known: TermCaps) -> TermCaps {
         TermCaps::from_probe(
             known.sync || self.sync,
@@ -369,6 +370,7 @@ impl Replies {
 /// answer opens with. A bare `ESC [` is equally the opening of every arrow
 /// and function key, so that one reports false even though the scan is
 /// still waiting on it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn is_terminal_only_remainder(buf: &[u8]) -> bool {
     matches!(
         answer_head(buf),
@@ -396,7 +398,10 @@ enum AnswerHead {
     /// rest of the answer has not arrived. `keyboard_possible` marks the
     /// prefixes a keypress can also produce (`ESC [`), which must not be
     /// discarded as the terminal's when the guard runs out of time.
-    Partial { keyboard_possible: bool },
+    Partial {
+        #[cfg_attr(not(unix), allow(dead_code))]
+        keyboard_possible: bool,
+    },
     /// The run leaves every grammar. `terminal_prefix` counts the leading
     /// bytes that were provably the terminal's before it did -- a stalled
     /// private-mode answer with a keypress on the end of it -- so the byte

@@ -923,6 +923,7 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    #[cfg(unix)]
     use view_test_support::ScratchDir;
 
     fn key(notation: &str) -> Key {

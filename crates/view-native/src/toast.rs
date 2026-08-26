@@ -230,6 +230,7 @@ mod tests {
     use crate::config::NativeConfig;
     use crate::report::report;
     use crate::supersede::plan;
+    #[cfg(unix)]
     use std::path::PathBuf;
     use view_core::native::mappings::MappingClaim;
     use view_core::native::registry;

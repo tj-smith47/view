@@ -22,6 +22,8 @@ use std::io::IsTerminal;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 #[cfg(unix)]
 use std::time::Duration;
+// the reader that upgrades a capability is the unix descriptor loop below
+#[cfg_attr(not(unix), allow(unused_imports))]
 use view_core::model::TermCaps;
 use view_core::msg::{Key, Msg};
 

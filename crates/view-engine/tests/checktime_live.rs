@@ -23,8 +23,10 @@
 //!
 //! [`EngineHandle::checktime`]: view_engine::nvim_api::EngineHandle::checktime
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// the whole file drives a live engine through unix-only facts: a named
+// pipe, a mode bit, and a descriptor the relay dups
+#![cfg(unix)]
 
-#[cfg(unix)]
 mod common;
 
 use std::os::unix::fs::PermissionsExt;

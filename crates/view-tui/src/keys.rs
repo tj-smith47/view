@@ -164,6 +164,9 @@ pub(crate) struct ResidueDecode {
     /// behind the cut reach the next reader as literal keys, which in
     /// normal mode are commands. Losing it whole is the answer that cannot
     /// corrupt a buffer.
+    // read by the unix descriptor loop, which is the only reader that can
+    // run out of time holding a partial sequence
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) unfinished: usize,
 }
 

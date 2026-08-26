@@ -860,6 +860,7 @@ mod tests {
         clippy::panic
     )]
     use super::*;
+    #[cfg(unix)]
     use view_test_support::ScratchDir;
     /// Reference values independently computed via Python's
     /// `datetime.date` (`epoch + timedelta(days=N)`), not transcribed from
