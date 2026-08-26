@@ -40,7 +40,8 @@ local wanted = canon(old_path)
 local snapshot = {}
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf) then
-    snapshot[#snapshot + 1] = { buf = buf, canon = canon(vim.api.nvim_buf_get_name(buf)) }
+    snapshot[#snapshot + 1] = { buf = buf,
+      canon = canon(vim.api.nvim_buf_get_name(buf)) }
   end
 end
 local rc = vim.fn.rename(old_path, new_path)

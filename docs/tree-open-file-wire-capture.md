@@ -39,7 +39,9 @@ The Lua chunk under test (verbatim `OPEN_FILE_CHUNK`):
 
 ```lua
 local path = ...
-vim.api.nvim_cmd({ cmd = 'edit', args = { path }, magic = { file = false, bar = false } }, {})
+vim.api.nvim_cmd({
+  cmd = 'edit', args = { path }, magic = { file = false, bar = false },
+}, {})
 ```
 
 ## 1. Hostile filenames through the shipped chunk

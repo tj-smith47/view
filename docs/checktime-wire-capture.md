@@ -702,15 +702,19 @@ for i, path in ipairs(paths) do
   else
     local st = vim.uv.fs_stat(canonical)
     if st == nil or st.type ~= 'file' then
-      results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
+      results[i] = { found = true, gone = true,
+        modified = vim.bo[bufnr].modified }
     elseif force then
-      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local reloaded = pcall(vim.api.nvim_buf_call, bufnr,
+        function() vim.cmd('edit!') end)
       local after = vim.uv.fs_stat(canonical)
       local ok = reloaded and after ~= nil and after.type == 'file'
-      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+      results[i] = { found = true, forced = true, ok = ok,
+        modified = vim.bo[bufnr].modified }
     else
       local fired = false
-      local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
+      local group = vim.api.nvim_create_augroup('view_checktime_probe',
+        { clear = true })
       vim.api.nvim_create_autocmd('FileChangedShell', {
         group = group,
         buffer = bufnr,
@@ -726,7 +730,8 @@ for i, path in ipairs(paths) do
       })
       local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
       pcall(vim.api.nvim_del_augroup_by_id, group)
-      results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
+      results[i] = { found = true, fired = checked and fired,
+        modified = vim.bo[bufnr].modified }
     end
   end
 end

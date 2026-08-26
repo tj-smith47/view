@@ -74,8 +74,8 @@ const GET_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 /// key notation as its single vararg. Constant by construction: no caller
 /// data is ever interpolated into it, so no quote, backslash, or newline in
 /// a notation can change what runs.
-const FEED_KEYS_CHUNK: &str =
-    "vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
+const FEED_KEYS_CHUNK: &str = "\
+vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 
 /// The lua chunk [`EngineHandle::hold_option`] runs inside nvim, taking the
 /// option name and its value as its two varargs. Constant by construction
@@ -113,7 +113,8 @@ const FEED_KEYS_CHUNK: &str =
 const HOLD_OPTION_CHUNK: &str = "\
 local name, value = ...
 vim.api.nvim_set_option_value(name, value, {})
-local group = vim.api.nvim_create_augroup('view-hold-' .. name, { clear = true })
+local group = vim.api.nvim_create_augroup(
+  'view-hold-' .. name, { clear = true })
 local function hold()
   if vim.api.nvim_get_option_value(name, {}) ~= value then
     vim.api.nvim_set_option_value(name, value, {})
@@ -201,7 +202,8 @@ for _, spec in ipairs(specs) do
   }
 end
 vim.api.nvim_create_user_command(command, function(opts)
-  vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '', opts.fargs[2] or '')
+  vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '',
+    opts.fargs[2] or '')
 end, {
   nargs = '*',
   desc = 'invoke a view native feature',
@@ -295,7 +297,8 @@ vim.api.nvim_create_autocmd('DiagnosticChanged', {
 vim.api.nvim_create_autocmd({ 'BufEnter', 'DirChanged', 'FocusGained' }, {
   group = group,
   callback = function()
-    vim.system({ 'git', 'rev-parse', '--abbrev-ref', 'HEAD' }, { text = true }, function(res)
+    vim.system({ 'git', 'rev-parse', '--abbrev-ref', 'HEAD' }, { text = true },
+      function(res)
       local branch = ''
       if res.code == 0 and res.stdout then
         branch = res.stdout:gsub('%s+$', '')
@@ -304,10 +307,12 @@ vim.api.nvim_create_autocmd({ 'BufEnter', 'DirChanged', 'FocusGained' }, {
     end)
   end,
 })
-vim.api.nvim_create_autocmd({ 'BufEnter', 'BufFilePost', 'BufWritePost', 'BufModifiedSet' }, {
+vim.api.nvim_create_autocmd(
+  { 'BufEnter', 'BufFilePost', 'BufWritePost', 'BufModifiedSet' }, {
   group = group,
   callback = function()
-    vim.rpcnotify(channel, 'view_bridge', 'buffer', vim.fn.expand('%:t'), vim.bo.modified)
+    vim.rpcnotify(channel, 'view_bridge', 'buffer', vim.fn.expand('%:t'),
+      vim.bo.modified)
   end,
 })
 vim.api.nvim_create_autocmd('VimLeavePre', {
@@ -378,12 +383,20 @@ if vim.g.clipboard == nil then
   vim.g.clipboard = {
     name = 'view',
     copy = {
-      ['+'] = function(lines, regtype) vim.rpcrequest(channel, 'view_clipboard_set', '+', lines, regtype) end,
-      ['*'] = function(lines, regtype) vim.rpcrequest(channel, 'view_clipboard_set', '*', lines, regtype) end,
+      ['+'] = function(lines, regtype)
+        vim.rpcrequest(channel, 'view_clipboard_set', '+', lines, regtype)
+      end,
+      ['*'] = function(lines, regtype)
+        vim.rpcrequest(channel, 'view_clipboard_set', '*', lines, regtype)
+      end,
     },
     paste = {
-      ['+'] = function() return vim.rpcrequest(channel, 'view_clipboard_get', '+') end,
-      ['*'] = function() return vim.rpcrequest(channel, 'view_clipboard_get', '*') end,
+      ['+'] = function()
+        return vim.rpcrequest(channel, 'view_clipboard_get', '+')
+      end,
+      ['*'] = function()
+        return vim.rpcrequest(channel, 'view_clipboard_get', '*')
+      end,
     },
     cache_enabled = 0,
   }
@@ -442,8 +455,10 @@ local function canon(p)
 end
 local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    return { loaded = true, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
+  if vim.api.nvim_buf_is_loaded(buf)
+    and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
+    return { loaded = true,
+      lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
   end
 end
 return { loaded = false }";
@@ -732,7 +747,8 @@ for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if not vim.api.nvim_buf_is_loaded(b) then
       vim.fn.bufload(b)
     end
-    return { buf = b, created = false, changedtick = vim.api.nvim_buf_get_changedtick(b) }
+    return { buf = b, created = false,
+      changedtick = vim.api.nvim_buf_get_changedtick(b) }
   end
 end
 local buf = vim.fn.bufadd(path)
@@ -740,7 +756,8 @@ if buf == 0 then
   return { buf = 0, created = false, changedtick = 0 }
 end
 vim.fn.bufload(buf)
-return { buf = buf, created = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }"
+return { buf = buf, created = true,
+  changedtick = vim.api.nvim_buf_get_changedtick(buf) }"
 );
 
 /// [`LOAD_HIDDEN_CHUNK`]'s `canon()` alone, returning its answer for the
@@ -833,7 +850,9 @@ end";
 /// every Windows path arrived doubled and opened nothing at all.
 const OPEN_FILE_CHUNK: &str = "\
 local path = ...
-vim.api.nvim_cmd({ cmd = 'edit', args = { path }, magic = { file = false, bar = false } }, {})";
+vim.api.nvim_cmd({
+  cmd = 'edit', args = { path }, magic = { file = false, bar = false },
+}, {})";
 
 /// Renames a file on disk and, when a buffer is open for the old path,
 /// retargets that buffer onto the new one in the same call -- verified live
@@ -869,7 +888,8 @@ local wanted = canon(old_path)
 local snapshot = {}
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_is_loaded(buf) then
-    snapshot[#snapshot + 1] = { buf = buf, canon = canon(vim.api.nvim_buf_get_name(buf)) }
+    snapshot[#snapshot + 1] = { buf = buf,
+      canon = canon(vim.api.nvim_buf_get_name(buf)) }
   end
 end
 local rc = vim.fn.rename(old_path, new_path)
@@ -922,7 +942,8 @@ local function canon(p)
 end
 local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
+  if vim.api.nvim_buf_is_loaded(buf)
+    and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
     return { buffer_open = true }
   end
 end
@@ -1004,14 +1025,16 @@ fn decode_buf_set_text_reply(reply: &Value) -> BufWriteOutcome {
 /// dropping an accepted hunk.
 const BUF_SET_TEXT_CHUNK: &str = "\
 local buf, undojoin, expected, edits = ...
-if type(expected) == 'number' and vim.api.nvim_buf_get_changedtick(buf) ~= expected then
+if type(expected) == 'number'
+  and vim.api.nvim_buf_get_changedtick(buf) ~= expected then
   return { applied = false }
 end
 if undojoin then
   pcall(vim.cmd, 'undojoin')
 end
 for _, edit in ipairs(edits) do
-  vim.api.nvim_buf_set_text(buf, edit.start_row, edit.start_col, edit.end_row, edit.end_col, edit.lines)
+  vim.api.nvim_buf_set_text(buf, edit.start_row, edit.start_col, edit.end_row,
+    edit.end_col, edit.lines)
 end
 return { applied = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
 
@@ -1066,7 +1089,8 @@ if type(limit) == 'number' then
   last = first + limit
 end
 local lines = vim.api.nvim_buf_get_lines(buf, first, last, false)
-return { ok = true, lines = lines, eol = first + #lines < total or vim.bo[buf].endofline }";
+return { ok = true, lines = lines,
+  eol = first + #lines < total or vim.bo[buf].endofline }";
 
 /// Replaces a resolved buffer's whole text and saves it, for an agent's
 /// `fs/write_text_file`, verified live against the pinned engine (see
@@ -1118,7 +1142,8 @@ local buf, expected, lines, eol = ...
 if not vim.api.nvim_buf_is_valid(buf) then
   return { applied = false, saved = false, message = 'no such buffer' }
 end
-if type(expected) == 'number' and vim.api.nvim_buf_get_changedtick(buf) ~= expected then
+if type(expected) == 'number'
+  and vim.api.nvim_buf_get_changedtick(buf) ~= expected then
   return { applied = false, saved = false, message = 'the buffer changed' }
 end
 vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -1135,9 +1160,11 @@ local ok, err = pcall(function()
 end)
 if not ok then
   local first = tostring(err):match('[^\\n]*') or ''
-  return { applied = true, saved = false, message = first:match('E%d+:.*') or first }
+  return { applied = true, saved = false,
+    message = first:match('E%d+:.*') or first }
 end
-return { applied = true, saved = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
+return { applied = true, saved = true,
+  changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
 
 /// Decodes an [`AI_FS_READ_CHUNK`] or [`AI_FS_WRITE_CHUNK`] reply into the
 /// message the reader thread routes back, correlated on `request_id`.
@@ -1330,15 +1357,19 @@ for i, path in ipairs(paths) do
   else
     local st = vim.uv.fs_stat(canonical)
     if st == nil or st.type ~= 'file' then
-      results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
+      results[i] = { found = true, gone = true,
+        modified = vim.bo[bufnr].modified }
     elseif force then
-      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local reloaded = pcall(vim.api.nvim_buf_call, bufnr,
+        function() vim.cmd('edit!') end)
       local after = vim.uv.fs_stat(canonical)
       local ok = reloaded and after ~= nil and after.type == 'file'
-      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+      results[i] = { found = true, forced = true, ok = ok,
+        modified = vim.bo[bufnr].modified }
     else
       local fired = false
-      local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
+      local group = vim.api.nvim_create_augroup('view_checktime_probe',
+        { clear = true })
       vim.api.nvim_create_autocmd('FileChangedShell', {
         group = group,
         buffer = bufnr,
@@ -1354,7 +1385,8 @@ for i, path in ipairs(paths) do
       })
       local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
       pcall(vim.api.nvim_del_augroup_by_id, group)
-      results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
+      results[i] = { found = true, fired = checked and fired,
+        modified = vim.bo[bufnr].modified }
     end
   end
 end
@@ -1460,7 +1492,10 @@ pub(crate) fn decode_checktime_reply(
 /// is what this reads.
 const CURRENT_BUFFER_TEXT_CHUNK: &str = "\
 local buf = vim.api.nvim_get_current_buf()
-return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\\n') }";
+return {
+  path = vim.api.nvim_buf_get_name(buf),
+  text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\\n'),
+}";
 
 /// Reads the buffer-space cursor and, when one is active, the visual
 /// selection for [`EngineHandle::read_cursor_context`], verified live
@@ -1543,7 +1578,8 @@ return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim
 /// `PREVIEW_CHUNK`'s `loaded: false` case uses.
 const CURSOR_CONTEXT_CHUNK: &str = "\
 local function line_text(line_number)
-  return vim.api.nvim_buf_get_lines(0, line_number - 1, line_number, false)[1] or ''
+  return vim.api.nvim_buf_get_lines(0, line_number - 1, line_number, false)[1]
+    or ''
 end
 local function byte_end_of_char(line, byte_col0)
   local charidx = vim.fn.charidx(line, byte_col0)
@@ -1556,7 +1592,8 @@ local function byte_end_of_char(line, byte_col0)
   end
   return nextbyte
 end
-local function blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block, pad_vcol)
+local function blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block,
+  pad_vcol)
   local line = line_text(row)
   local end_vcol = vim.fn.virtcol({ row, '$' })
   if dollar_block then
@@ -1594,10 +1631,12 @@ if mode == 'v' or mode == 'V' or mode == '\\22' then
   end
   local text
   if mode == 'V' then
-    text = table.concat(vim.api.nvim_buf_get_lines(0, srow - 1, erow, false), '\\n')
+    text = table.concat(
+      vim.api.nvim_buf_get_lines(0, srow - 1, erow, false), '\\n')
   elseif mode == '\\22' then
     local win = vim.api.nvim_get_current_win()
-    local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1], vim.fn.virtcol('.', 1)[1])
+    local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1],
+      vim.fn.virtcol('.', 1)[1])
     local hi_vcol = math.max(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
     local dollar_block = vim.fn.getcurpos()[5] == 2147483647
     local pad_vcol = hi_vcol
@@ -1609,13 +1648,15 @@ if mode == 'v' or mode == 'V' or mode == '\\22' then
     end
     local rows = {}
     for row = srow, erow do
-      rows[#rows + 1] = blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block, pad_vcol)
+      rows[#rows + 1] = blockwise_row_text(win, row, lo_vcol, hi_vcol,
+        dollar_block, pad_vcol)
     end
     text = table.concat(rows, '\\n')
   else
     local endline = line_text(erow)
     local end_byte0 = byte_end_of_char(endline, ecol - 1)
-    local lines = vim.api.nvim_buf_get_text(0, srow - 1, scol - 1, erow - 1, end_byte0, {})
+    local lines = vim.api.nvim_buf_get_text(0, srow - 1, scol - 1, erow - 1,
+      end_byte0, {})
     text = table.concat(lines, '\\n')
   end
   out.selection_text = text
@@ -1638,7 +1679,8 @@ return out";
 const DIAGNOSTIC_ENTRIES_CHUNK: &str = "\
 local out = {}
 for _, d in ipairs(vim.diagnostic.get(0)) do
-  out[#out + 1] = { line = d.lnum, col = d.col, severity = d.severity, message = d.message }
+  out[#out + 1] = { line = d.lnum, col = d.col, severity = d.severity,
+    message = d.message }
 end
 return out";
 
@@ -1658,7 +1700,8 @@ for _, item in ipairs(vim.fn.getqflist()) do
   if item.bufnr and item.bufnr ~= 0 then
     path = vim.api.nvim_buf_get_name(item.bufnr)
   end
-  out[#out + 1] = { path = path, line = item.lnum, col = item.col, text = item.text }
+  out[#out + 1] = { path = path, line = item.lnum, col = item.col,
+    text = item.text }
 end
 return out";
 

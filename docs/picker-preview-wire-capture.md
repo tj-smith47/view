@@ -38,8 +38,10 @@ local function canon(p)
 end
 local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    return { loaded = true, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
+  if vim.api.nvim_buf_is_loaded(buf)
+    and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
+    return { loaded = true,
+      lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
   end
 end
 return { loaded = false }

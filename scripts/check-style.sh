@@ -201,40 +201,53 @@ if [ "${1:-}" = "--file" ]; then
   exit 0
 fi
 
-# The embedded Lua of the two review chunks, which are published
-# byte-for-byte inside a fence in docs/inline-review-wire-capture.md and
-# pinned there by a test. A line past 80 columns is read twice at that
-# width -- in the doc's fence, which does not wrap, and in the source
-# beside the rustfmt-held Rust around it -- and nothing else catches one:
-# rustfmt does not reach inside a string literal, and the chunk is hand
-# wrapped at 80 everywhere else. Scoped to these two consts rather than
-# every Lua chunk in the file: the rest are not published anywhere a width
-# is load-bearing, and 40 of their lines are over 80 today.
-check_review_chunk_width() {
+# Every embedded Lua chunk in nvim_api.rs -- every `const ..._CHUNK: &str`
+# declaration, in each of its shapes (`concat!( ... );`, `"\` ... `";`, a
+# one-line literal, and an alias that re-exports another chunk's const) --
+# wraps at 80 columns. The chunks are read beside rustfmt-held Rust and
+# rustfmt does not reach inside a string literal, so nothing else in the
+# toolchain catches a line past that width; two of the chunks are also
+# published byte-for-byte inside a fence in
+# docs/inline-review-wire-capture.md, which does not wrap, and pinned there
+# by a test.
+check_lua_chunk_width() {
   local file='crates/view-engine/src/nvim_api.rs'
   if [ ! -f "$file" ]; then
-    echo "STYLE FAIL: $file missing; cannot check review chunk width"
+    echo "STYLE FAIL: $file missing; cannot check Lua chunk width"
     return 1
   fi
   local report
   report=$(awk '
-    /^const REVIEW_(SHOW|CLEAR)_CHUNK: &str = concat!\(/ { found++; inchunk = 1; next }
-    inchunk && /^\);/ { inchunk = 0; next }
-    inchunk && length($0) > 80 {
-      printf "%s:%d: %d columns\n", FILENAME, FNR, length($0)
-      over++
+    function check_width(line) {
+      if (length(line) > 80) {
+        printf "%s:%d: %d columns\n", FILENAME, FNR, length(line)
+        over++
+      }
     }
-    END { printf "CONSTS %d\n", found; exit (over > 0 || found != 2) ? 1 : 0 }
+    inchunk {
+      check_width($0)
+      if ($0 ~ /^\);$/ || $0 ~ /";$/) { inchunk = 0 }
+      next
+    }
+    /^(pub(\(crate\))? )?const [A-Z_]+_CHUNK: &str =/ {
+      found++
+      check_width($0)
+      if ($0 ~ /concat!\($/) { inchunk = 1; next }
+      if ($0 ~ /_CHUNK;$/) { next }
+      if ($0 ~ /";$/) { next }
+      inchunk = 1
+    }
+    END { printf "CHUNKS %d\n", found; exit (over > 0 || found != 26) ? 1 : 0 }
   ' "$file") || {
-    printf '%s\n' "$report" | grep -v '^CONSTS '
-    local consts
-    consts=$(printf '%s\n' "$report" | sed -n 's/^CONSTS //p')
-    if [ "$consts" != "2" ]; then
-      echo "STYLE FAIL: found $consts of the 2 review chunks; the width check did not run"
+    printf '%s\n' "$report" | grep -v '^CHUNKS '
+    local chunks
+    chunks=$(printf '%s\n' "$report" | sed -n 's/^CHUNKS //p')
+    if [ "$chunks" != "26" ]; then
+      echo "STYLE FAIL: found $chunks of the 26 Lua chunks; the width check did not run"
     else
-      echo "STYLE FAIL: a review chunk line is over 80 columns"
-      echo "  The chunk is published in docs/inline-review-wire-capture.md's"
-      echo "  fence, which does not wrap. Break the line the way the rest are."
+      echo "STYLE FAIL: a Lua chunk line is over 80 columns"
+      echo "  Wrap it the way the rest of nvim_api.rs's chunks are: break at"
+      echo "  an operator or after a comma, keep the chunk's indentation."
     fi
     return 1
   }
@@ -244,7 +257,7 @@ check_review_chunk_width() {
 fail=0
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1
-  check_review_chunk_width || fail=1
+  check_lua_chunk_width || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi

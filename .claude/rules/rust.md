@@ -40,4 +40,4 @@ template-source: "rules/rust.md.tmpl"
 - Workspace lints already deny unwrap/expect/panic/todo/unimplemented/dbg. Test modules may open with `#![allow(clippy::unwrap_used, clippy::expect_used)]` — test code only, never lib code.
 - Typed errors per crate via `thiserror`; the bin crate `view` renders them for the user.
 - Only `view-engine` speaks RPC; only `view-tui` touches the terminal; `view-core` is pure (no I/O, no tokio). `scripts/audit-deps.sh` enforces this — run `task audit`.
-- **The embedded Lua of `REVIEW_SHOW_CHUNK` / `REVIEW_CLEAR_CHUNK` wraps at 80 columns.** Both are published byte-for-byte inside a fence in `docs/inline-review-wire-capture.md`, which does not wrap, and rustfmt does not reach inside a string literal. `scripts/check-style.sh` fails a longer line, in `task ci`.
+- **Every embedded Lua chunk in `nvim_api.rs` wraps at 80 columns.** The chunks are read beside rustfmt-held Rust, and rustfmt does not reach inside a string literal, so nothing else in the toolchain catches a line past that width. `scripts/check-style.sh` fails a longer line, in `task ci`.
