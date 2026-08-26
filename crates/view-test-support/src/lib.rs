@@ -475,6 +475,31 @@ mod tests {
             0,
             "a leaked directory from an earlier run must not leak its contents into this run"
         );
+
+        let path = dir.path().to_owned();
+        drop(dir);
+        assert!(
+            !path.exists(),
+            "this crate is the one place the walk in scratch_dirs.rs exempts, \
+             so its own hand-built paths are pinned here or nowhere"
+        );
+    }
+
+    /// The resolved constructor reaches the same root through
+    /// [`std::fs::canonicalize`], and the path it removes on drop is the
+    /// resolved one -- on macOS a different string from the one `new`
+    /// created, which is exactly where a guard stops removing what it made.
+    #[test]
+    fn drop_removes_the_resolved_directory() {
+        let path = {
+            let dir = ScratchDir::resolved("drop-removes-resolved").unwrap();
+            std::fs::write(dir.join("file.txt"), b"x").unwrap();
+            dir.path().to_owned()
+        };
+        assert!(
+            !path.exists(),
+            "the resolved directory must not survive the guard"
+        );
     }
 
     #[test]
@@ -511,6 +536,11 @@ mod tests {
             "a file occupying the target path must surface as an error, not a panic"
         );
         std::fs::remove_file(&path).unwrap();
+        assert!(
+            !path.exists(),
+            "a constructor that failed still leaves this test's own hand-built \
+             name behind unless the test removes it"
+        );
     }
 }
 

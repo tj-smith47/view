@@ -35,18 +35,24 @@ const ACCEPTANCE_SEAM: &str = "scripts/acceptance/artifacts.sh";
 /// reader adding a line will recognize. A `cargo build` is not here: a
 /// build measures nothing, and holding one awake would only widen the rule
 /// past what it can justify.
-const HARNESS_SHAPES: [&str; 8] = [
+const HARNESS_SHAPES: [&str; 6] = [
     "cargo test",
     "cargo bench",
     "--bin bench",
     "--bin oracle",
-    // a built harness invoked by path runs the same clock reads without
-    // cargo anywhere on the line
-    "/bench",
-    "/oracle",
     "scripts/mutate.sh",
     "scripts/acceptance/",
 ];
+
+/// A built harness invoked by path, which runs the same clock reads with
+/// no cargo anywhere on the line.
+///
+/// Matched as a whole path component rather than as a substring: `/bench`
+/// also opens `crates/view-tui/benches/paint_frame.rs`, and a line naming a
+/// bench *source file* would otherwise be reported as an unheld harness.
+/// The binary's name ends its path, so the character after it -- if there
+/// is one -- is never one a file name continues with.
+const BINARY_SHAPES: [&str; 2] = ["/bench", "/oracle"];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -170,22 +176,72 @@ fn acceptance_scripts(root: &Path) -> Vec<(String, String)> {
 /// The shapes the walk must see, each wrong on purpose: a rule proved only
 /// by a population that already satisfies it cannot tell "nothing is wrong"
 /// from "nothing is being read".
-const ESCAPING_SHAPES: &str = r#"
+///
+/// One fixture per shape, each carrying the line the walk must report,
+/// rather than one fixture and a vector of offsets: a walk that stops
+/// seeing one spelling is then red on that spelling by name, and editing
+/// any shape cannot renumber the others. Every entry is `(what the shape
+/// is, the source, the line the walk must report)`.
+const ESCAPING_SHAPES: &[(&str, &str, usize)] = &[
+    (
+        "a bare task command",
+        r#"
   bare:
     cmd: cargo test --workspace
+"#,
+        3,
+    ),
+    (
+        "one held and one unheld command in the same task",
+        r#"
   micro:
     cmds:
       - cargo bench -p view-core --bench grid_apply
       - bash scripts/hold-awake.sh cargo bench -p view-core --bench update_key
+"#,
+        4,
+    ),
+    (
+        "a harness run through cargo run",
+        r#"
   harness:
     cmd: cargo run -p view-harness --bin oracle -- compat
-  # a comment naming cargo test is prose, not a command
+"#,
+        3,
+    ),
+    (
+        "a workflow step",
+        r#"
   workflow_step:
         run: cargo test -p view-oracle --test clipboard_roundtrip
+"#,
+        3,
+    ),
+    (
+        "the bench binary invoked by path",
+        r#"
   direct_binary:
         run: ./target/release/bench --all --class dev-linux
+"#,
+        3,
+    ),
+    (
+        "the oracle binary invoked by path",
+        r#"
   direct_oracle:
         run: ./target/release/oracle compat
+"#,
+        3,
+    ),
+];
+
+/// The spellings the rule does not ask about, which the walk must leave
+/// alone: prose naming a harness, a build that measures nothing, a command
+/// already under the seam, an acceptance script that takes the assertion in
+/// its own shell, and a path that merely opens with a harness binary's
+/// name. A rule that flagged these would be unstatable in its own Taskfile.
+const HELD_SHAPES: &str = r#"
+  # a comment naming cargo test is prose, not a command
   these_are_the_shapes_the_rule_asks_for:
     desc: run cargo test the way the docs say (cargo bench too)
     cmds:
@@ -194,22 +250,53 @@ const ESCAPING_SHAPES: &str = r#"
       - bash scripts/hold-awake.sh cargo test --workspace
       - bash scripts/acceptance/visual-sweep.sh
       - task bench -- --all --record
+  bench_source_file:
+        run: sed -n '1,40p' crates/view-tui/benches/paint_frame.rs
+  oracle_source_dir:
+        run: ls crates/view-oracle/tests/oracle_cases
 "#;
 
 #[test]
 fn the_walk_sees_an_unheld_harness_however_it_is_written() {
-    let at: Vec<usize> = unheld_harnesses(ESCAPING_SHAPES)
-        .into_iter()
-        .map(|(number, _)| number)
-        .collect();
-    assert_eq!(
-        at,
-        vec![3, 6, 9, 12, 14, 16],
-        "the walk read {at:?} of the fixture. Every line it missed is a \
-         harness that can time itself against a stopped clock unnoticed; \
-         every extra line is a command the rule does not ask about being \
-         reported as a violation"
+    for (shape, source, at) in ESCAPING_SHAPES {
+        let found: Vec<usize> = unheld_harnesses(source)
+            .into_iter()
+            .map(|(number, _)| number)
+            .collect();
+        assert_eq!(
+            found,
+            vec![*at],
+            "the walk read {found:?} of the fixture for {shape}, which is at \
+             line {at}. A shape it misses is a harness that can time itself \
+             against a stopped clock unnoticed; a line it adds is a command \
+             the rule does not ask about being reported as a violation"
+        );
+    }
+}
+
+#[test]
+fn the_walk_leaves_the_commands_the_rule_does_not_ask_about_alone() {
+    let found = unheld_harnesses(HELD_SHAPES);
+    assert!(
+        found.is_empty(),
+        "the walk reported {found:?}, so it flags a line the rule does not \
+         ask about -- prose, a build, a command already under the seam, or \
+         a path that merely opens with a harness binary's name"
     );
+}
+
+/// Whether `line` runs the binary `shape` names, rather than merely
+/// holding its name inside a longer path component.
+fn names_the_binary(line: &str, shape: &str) -> bool {
+    let mut rest = line;
+    while let Some(at) = rest.find(shape) {
+        rest = &rest[at + shape.len()..];
+        let next = rest.chars().next();
+        if !next.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            return true;
+        }
+    }
+    false
 }
 
 /// Every command line in `text` that runs a timed harness without the
@@ -225,7 +312,11 @@ fn unheld_harnesses(text: &str) -> Vec<(usize, String)> {
         if line.starts_with('#') || line.starts_with("desc:") {
             continue;
         }
-        if !HARNESS_SHAPES.iter().any(|shape| line.contains(shape)) {
+        if !HARNESS_SHAPES.iter().any(|shape| line.contains(shape))
+            && !BINARY_SHAPES
+                .iter()
+                .any(|shape| names_the_binary(line, shape))
+        {
             continue;
         }
         // `cargo build --release -p view-harness --bin bench` builds the

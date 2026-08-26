@@ -39,7 +39,13 @@ fn repo_root() -> PathBuf {
 #[test]
 fn every_guarded_capture_can_reach_its_guard() {
     let root = repo_root();
-    let mut scripts = shell_scripts(&root.join("scripts"));
+    // `.claude/hooks` as well as `scripts`: the hooks are checked in, run
+    // under the same `set -euo pipefail`, and are the population the next
+    // one of these gets written into
+    let mut scripts: Vec<PathBuf> = ["scripts", ".claude/hooks"]
+        .iter()
+        .flat_map(|dir| shell_scripts(&root.join(dir)))
+        .collect();
     scripts.sort();
     assert!(
         scripts.len() > 5,
@@ -47,6 +53,15 @@ fn every_guarded_capture_can_reach_its_guard() {
          live and would pass by finding nothing",
         scripts.len()
     );
+    for dir in ["scripts", ".claude/hooks"] {
+        assert!(
+            scripts
+                .iter()
+                .any(|script| script.starts_with(root.join(dir))),
+            "the walk found nothing under {dir}, so that half of the \
+             population is not being read at all"
+        );
+    }
 
     let mut unreachable = Vec::new();
     for script in scripts {
@@ -76,40 +91,86 @@ fn every_guarded_capture_can_reach_its_guard() {
 /// The shapes the walk must see, each wrong on purpose: a rule proved only
 /// by a population that already satisfies it cannot tell "nothing is wrong"
 /// from "nothing is being read".
-const ESCAPING_SHAPES: &str = r#"
+///
+/// One fixture per shape, each carrying the line the walk must report,
+/// rather than one fixture and a vector of offsets: a walk that stops
+/// seeing one spelling is then red on that spelling by name, and editing
+/// any shape cannot renumber the others. Every entry is `(what the shape
+/// is, the source, the line the walk must report)`.
+const ESCAPING_SHAPES: &[(&str, &str, usize)] = &[
+    (
+        "a grep capture guarded by -n on the next line",
+        "
 set -euo pipefail
-NAME=$(grep -oE 'const NAME: &str = "[^"]+"' "$FILE" | sed -E 's/.*"(.*)"/\1/')
-[ -n "$NAME" ] || { printf 'FAIL: no NAME\n' >&2; exit 1; }
-wrapped=$(grep -oE "^($ONE|$TWO)$" "$FILE" |
+NAME=$(grep -oE 'const NAME: &str = \"[^\"]+\"' \"$FILE\" | sed -E 's/.*\"(.*)\"/\\1/')
+[ -n \"$NAME\" ] || { printf 'FAIL: no NAME\\n' >&2; exit 1; }
+",
+        3,
+    ),
+    (
+        "a capture rustfmt-style wrapped over two lines, guarded by -z",
+        "
+set -euo pipefail
+wrapped=$(grep -oE \"^($ONE|$TWO)$\" \"$FILE\" |
     head -1 | cut -d: -f1)
-if [ -z "$wrapped" ]; then
+if [ -z \"$wrapped\" ]; then
     exit 1
 fi
-pid=$(pgrep -P "$parent" -x view | head -1)
-[ -n "$pid" ] || return 1
-these_are_the_shapes_the_rule_asks_for() {
-    held=$(grep -oE 'held' "$FILE" | head -1) || true
-    [ -n "$held" ] || return 1
-    counted=$(grep -c . "$FILE" || true)
-    [ -n "$counted" ] || return 1
-    unguarded=$(grep -oE 'nothing tests this' "$FILE")
-    shaped=$(printf '%s\n' "$rows" | awk '{ print $1 }')
-    [ -n "$shaped" ] || return 1
-}
-"#;
+",
+        3,
+    ),
+    (
+        "a pgrep capture guarded by -n",
+        "
+set -euo pipefail
+pid=$(pgrep -P \"$parent\" -x view | head -1)
+[ -n \"$pid\" ] || return 1
+",
+        3,
+    ),
+];
+
+/// The spellings the rule does not ask about, which the walk must leave
+/// alone: a capture that already forces its own status either side of the
+/// closing paren, a command whose "found nothing" is an empty string
+/// rather than a status, and a capture with no guard below it at all.
+const HELD_SHAPES: &str = "
+set -euo pipefail
+held=$(grep -oE 'held' \"$FILE\" | head -1) || true
+[ -n \"$held\" ] || return 1
+counted=$(grep -c . \"$FILE\" || true)
+[ -n \"$counted\" ] || return 1
+unguarded=$(grep -oE 'nothing tests this' \"$FILE\")
+shaped=$(printf '%s\\n' \"$rows\" | awk '{ print $1 }')
+[ -n \"$shaped\" ] || return 1
+";
 
 #[test]
 fn the_walk_sees_an_unreachable_guard_however_it_is_written() {
-    let at: Vec<usize> = guards_behind_an_errexit(ESCAPING_SHAPES)
-        .into_iter()
-        .map(|(number, _)| number)
-        .collect();
-    assert_eq!(
-        at,
-        vec![3, 5, 10],
-        "the walk read {at:?} of the fixture. Every line it missed is a leg \
-         that can die with no diagnosis unnoticed; every extra line is a \
-         capture the rule does not ask about being reported as a violation"
+    for (shape, source, at) in ESCAPING_SHAPES {
+        let found: Vec<usize> = guards_behind_an_errexit(source)
+            .into_iter()
+            .map(|(number, _)| number)
+            .collect();
+        assert_eq!(
+            found,
+            vec![*at],
+            "the walk read {found:?} of the fixture for {shape}, which is at \
+             line {at}. A shape it misses is a leg that can die with no \
+             diagnosis unnoticed; a line it adds is a capture the rule does \
+             not ask about being reported as a violation"
+        );
+    }
+}
+
+#[test]
+fn the_walk_leaves_the_captures_the_rule_does_not_ask_about_alone() {
+    let found = guards_behind_an_errexit(HELD_SHAPES);
+    assert!(
+        found.is_empty(),
+        "the walk reported {found:?}, so it flags a capture the rule does \
+         not ask about -- one that already forces its own status, one whose \
+         command cannot fail on an empty match, or one with no guard at all"
     );
 }
 
