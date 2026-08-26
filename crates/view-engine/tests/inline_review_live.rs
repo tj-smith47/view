@@ -724,9 +724,9 @@ fn a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block() {
 
     assert_eq!(s.group("ViewReviewRemoved"), "53333c/nil/false");
     assert_eq!(s.group("ViewReviewStale"), "534641/nil/false");
-    assert_eq!(s.group("ViewReviewAdded"), "305444/50fa7b/false");
-    assert_eq!(s.group("ViewReviewHeader"), "3c505e/8be9fd/false");
-    assert_eq!(s.group("ViewReviewSign"), "nil/8be9fd/false");
+    assert_eq!(s.group("ViewReviewAdded"), "305444/f8f8f2/false");
+    assert_eq!(s.group("ViewReviewHeader"), "3c505e/f8f8f2/false");
+    assert_eq!(s.group("ViewReviewSign"), "nil/f8f8f2/false");
 
     // buffer row 1 is screen row 1, and column 2 is its first text cell
     // once the current hunk's sign has claimed the two before it
@@ -738,9 +738,9 @@ fn a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block() {
     );
     assert_eq!(
         s.cell(2, 2),
-        "h:3c505e/8be9fd/false",
-        "the header's virtual line is the blend too, with the diff group's own \
-         color as its text"
+        "h:3c505e/f8f8f2/false",
+        "the header's virtual line is the blend too, with the row's own text \
+         color over it"
     );
 }
 
@@ -863,5 +863,160 @@ fn a_colorscheme_switched_under_an_open_review_re_derives_its_groups() {
     assert_eq!(
         after, "af5faf/nil/false",
         "and they are that scheme's own diff color, read the way any scheme's is"
+    );
+}
+
+/// Every colorscheme the pinned nvim ships, walked rather than sampled:
+/// the axis a scheme-by-scheme review keeps missing is the population, and
+/// three of these (`quiet`, `sorbet`, `zaibatsu`) mark their diff groups
+/// `reverse`, where the field nvim fills the row from is the foreground and
+/// the background is what the text is drawn in. Reading `bg` as the fill
+/// under those made all four review states one color, and under `quiet` the
+/// row's own. The names are globbed out of `$VIMRUNTIME/colors`, so a
+/// scheme added by an engine-pin bump is walked with no edit here.
+///
+/// The claims are relations rather than literals -- distinct from the row's
+/// own background, distinct from each other, no attribute borrowed, the
+/// text in `Normal`'s foreground -- because that is what "the review reads"
+/// means for a scheme nobody here has seen.
+#[test]
+fn every_colorscheme_the_pinned_nvim_ships_paints_a_review_that_reads() {
+    let s = start();
+    let buf = s.buffer();
+    s.show_in_current_window(buf);
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+
+    // the show above installs the derive and its `ColorScheme` autocmd; the
+    // walk below never calls either, so what it reads is what a user
+    // switching colorscheme under an open review gets
+    let report = s.strings(
+        "local names = {}
+for _, pat in ipairs({ '*.vim', '*.lua' }) do
+  for _, f in ipairs(vim.fn.globpath(vim.env.VIMRUNTIME .. '/colors', pat, false, true)) do
+    names[#names + 1] = vim.fn.fnamemodify(f, ':t:r')
+  end
+end
+table.sort(names)
+local out = { tostring(#names) }
+local hex = function(v) return v and string.format('%06x', v) or 'nil' end
+local function fail(fmt, ...) out[#out + 1] = string.format(fmt, ...) end
+for _, name in ipairs(names) do
+  vim.o.background = 'dark'
+  if not pcall(vim.cmd, 'colorscheme ' .. name) then
+    fail('%s: does not load', name)
+  else
+    local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
+    local base = normal.bg or (vim.o.background == 'light' and 0xffffff or 0x000000)
+    local seen = {}
+    for _, g in ipairs({ 'ViewReviewRemoved', 'ViewReviewStale', 'ViewReviewAdded', 'ViewReviewHeader' }) do
+      local hl = vim.api.nvim_get_hl(0, { name = g, link = false })
+      if hl.bg == nil or hl.bg == base then
+        fail('%s: %s is the row it marks (%s)', name, g, hex(hl.bg))
+      end
+      if seen[hl.bg] ~= nil then
+        fail('%s: %s and %s are the same color (%s)', name, seen[hl.bg], g, hex(hl.bg))
+      end
+      seen[hl.bg] = g
+      if hl.reverse or hl.bold or hl.italic or hl.underline then
+        fail('%s: %s borrowed an attribute from the diff group', name, g)
+      end
+    end
+    for _, g in ipairs({ 'ViewReviewAdded', 'ViewReviewHeader', 'ViewReviewSign' }) do
+      local hl = vim.api.nvim_get_hl(0, { name = g, link = false })
+      if hl.fg ~= normal.fg then
+        fail('%s: %s draws its text in %s, not the row\\'s own %s', name, g,
+          hex(hl.fg), hex(normal.fg))
+      end
+    end
+  end
+end
+return out",
+        vec![],
+    );
+
+    let (walked, failures) = report.split_first().expect("the count, then failures");
+    assert!(
+        failures.is_empty(),
+        "{} of {walked} colorschemes paint a review that cannot be read: {failures:#?}",
+        failures.len()
+    );
+    assert!(
+        walked.parse::<usize>().expect("a count") >= 28,
+        "only {walked} colorschemes were walked; the pinned nvim ships 28"
+    );
+}
+
+/// A second show does not re-derive. `ReviewShow` is re-issued on every
+/// hunk step, and `nvim_set_hl` on namespace 0 redefines a global group,
+/// so deriving per show would put ten global-highlight redefinitions on
+/// the path of every `]c`. The colorscheme is edited underneath between
+/// the two shows: the groups holding still is the only observable
+/// difference between deriving once and deriving each time.
+#[test]
+fn a_second_show_reuses_the_groups_the_first_one_derived() {
+    let s = start();
+    let buf = s.buffer();
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+    let derived = s.group("ViewReviewAdded");
+
+    s.lua(
+        "vim.cmd('hi DiffAdd guifg=NONE guibg=#123456 gui=NONE')",
+        vec![],
+    );
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+
+    assert_eq!(
+        s.group("ViewReviewAdded"),
+        derived,
+        "the show re-derived: a hunk step would carry the whole set with it"
+    );
+    assert_ne!(
+        s.group("ViewReviewAdded").split('/').next(),
+        Some("123456"),
+        "and the edit that would have shown a re-derive really did land"
+    );
+}
+
+/// Clearing a review takes the derivation back off: the flag the show
+/// derives behind and the augroup carrying the `ColorScheme` re-derive.
+/// A session with no review open re-derives nothing on a colorscheme
+/// change, and the next review starts from the scheme it opens under
+/// rather than from one a previous review saw.
+#[test]
+fn a_cleared_review_releases_the_derivation_it_installed() {
+    let s = start();
+    let buf = s.buffer();
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+    assert_eq!(
+        s.lua("return tostring(_G.view_review_derived)", vec![])
+            .as_str()
+            .expect("the flag"),
+        "true",
+        "a shown review derives behind the flag"
+    );
+
+    s.engine.handle.review_clear(buf).unwrap();
+    s.barrier();
+
+    assert_eq!(
+        s.lua(
+            "local ok = pcall(vim.api.nvim_get_autocmds, { group = 'view_review' })
+return string.format('%s/%s', tostring(_G.view_review_derived), ok and 'present' or 'gone')",
+            vec![]
+        )
+        .as_str()
+        .expect("the flag and the augroup"),
+        "nil/gone"
+    );
+
+    s.lua(
+        "vim.cmd('hi DiffAdd guifg=NONE guibg=#123456 gui=NONE')",
+        vec![],
+    );
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+    assert_eq!(
+        s.group("ViewReviewAdded").split('/').next(),
+        Some("123456"),
+        "and the review after it derives again, against the scheme now loaded"
     );
 }

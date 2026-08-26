@@ -232,13 +232,14 @@ a hunk your own typing has moved under turns `ViewReviewStale`, and the `▶`
 marking the current hunk is `ViewReviewSign` -- five groups view derives from
 your colorscheme's own `DiffDelete`, `DiffAdd`, `DiffText` and `DiffChange`
 when the review opens, and re-derives when you change colorscheme. A diff
-group that defines a background hands that background over as it stands; a
-group that only defines a foreground is blended a fifth of the way over your
-`Normal` background, so a colorscheme whose diff groups are reverse-video
-(dracula's are) tints the rows instead of filling them. The text on those
-rows is the group's own foreground, or `Normal`'s where the group has none --
-never the group's background, which would be text you cannot read. A review
-reads as your theme's diff colors and the row under it keeps its own syntax
+group that defines the background a diffed row sits on hands that background
+over as it stands; where the color a row would be filled with is a
+foreground instead -- a group with no background, or a reverse-video one
+(dracula's are), where nvim fills from the foreground -- it is blended a
+fifth of the way over your `Normal` background, so those schemes tint the
+rows rather than filling them. The text on those rows is your `Normal`
+foreground, the color the row's own text would have used. A review reads as
+your theme's diff colors and the row under it keeps its own syntax
 highlighting. The review is drawn in the window the file is already in, and it
 scrolls, folds and wraps the way the rest of the buffer does. The
 buffer's text is untouched by any of it: nothing is written until you accept

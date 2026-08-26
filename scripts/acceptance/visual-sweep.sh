@@ -823,18 +823,47 @@ ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     exit 1
 }
 
-# A `#rrggbb` from the fixture colorscheme, as the decimal triple a
-# truecolor escape spells it with. Read rather than repeated so a retuned
-# fixture cannot leave the assertions matching a color nothing paints.
-fixture_bg() {
-    local group="$1" hex
-    hex=$(grep -oE "'$group', \{[^}]*bg = '#[0-9a-f]{6}'" "$COLORSCHEME" |
-        grep -oE "#[0-9a-f]{6}" | tail -1) || true
+# The `#rrggbb` a fixture group gives `field` (`bg` or `fg`). Matched on
+# the field's own key rather than on where the hex sits in the call, since
+# a group written `bg` before `fg` would otherwise read one as the other.
+# The key is anchored on the `{` or `,` that opens it rather than on `\b`,
+# which BSD `sed -E` reads as a literal `b` -- a word class there would
+# match nothing on macOS and fail this sweep for a fixture that is fine.
+fixture_hex() {
+    local group="$1" field="$2" hex
+    hex=$(sed -nE "s/.*'$group', [^}]*[{,][[:space:]]*$field = '(#[0-9a-f]{6})'.*/\1/p" \
+        "$COLORSCHEME" | tail -1) || true
     if [ -z "$hex" ]; then
-        printf 'FAIL: %s has no background in %s any more\n' "$group" "$COLORSCHEME" >&2
+        printf 'FAIL: %s has no %s in %s any more\n' "$group" "$field" "$COLORSCHEME" >&2
         return 1
     fi
+    printf '%s' "$hex"
+}
+
+# A fixture group's background as the decimal triple a truecolor escape
+# spells it with. Read rather than repeated so a retuned fixture cannot
+# leave the assertions matching a color nothing paints.
+fixture_bg() {
+    local hex
+    hex=$(fixture_hex "$1" bg) || return 1
     printf '%d;%d;%d' "0x${hex:1:2}" "0x${hex:3:2}" "0x${hex:5:2}"
+}
+
+# What the review derives from a diff group that has no background to hand
+# over: a fifth of its foreground over `Normal`'s background, which is the
+# arithmetic `REVIEW_SHOW_CHUNK`'s `derive` does inside nvim. Integer
+# rounding, in the shell rather than in awk, so the leg needs no more of a
+# host than every other assertion here does.
+review_blend() {
+    local hex base out= i c b
+    hex=$(fixture_hex "$1" fg) || return 1
+    base=$(fixture_hex Normal bg) || return 1
+    for i in 1 3 5; do
+        c=$((16#${hex:i:2}))
+        b=$((16#${base:i:2}))
+        out="${out:+$out;}$(((10 * b + 2 * (c - b) + 5) / 10))"
+    done
+    printf '%s' "$out"
 }
 
 NORMAL_BG=$(fixture_bg Normal) || exit 1
@@ -842,13 +871,15 @@ CURSORLINE_BG=$(fixture_bg CursorLine) || exit 1
 FLOAT_BG=$(fixture_bg NormalFloat) || exit 1
 # What a review is drawn with: not the colorscheme's diff groups themselves
 # but the five view derives from them at show time (see `REVIEW_SHOW_CHUNK`),
-# which carry none of those groups' attributes. This fixture gives all four
-# a background of its own, and a diff group that defines one hands it over
-# as it stands, so the derived background is the fixture's own value here --
-# a fixture retuned to foreground-only diff groups would need these read as
-# a fifth of that foreground over `Normal` instead.
+# which carry none of those groups' attributes. A group that defines a
+# background hands it over as it stands, so those read back as the
+# fixture's own values -- which is why the fixture keeps `DiffDelete`
+# foreground-only and `reverse`, dracula's real shape: its derived value is
+# a color no group in the scheme defines, so a review that reverted to
+# painting with the diff groups themselves fails this leg rather than
+# matching it.
 REVIEW_ADDED_BG=$(fixture_bg DiffAdd) || exit 1
-REVIEW_REMOVED_BG=$(fixture_bg DiffDelete) || exit 1
+REVIEW_REMOVED_BG=$(review_blend DiffDelete) || exit 1
 REVIEW_HEADER_BG=$(fixture_bg DiffText) || exit 1
 # read for the gate below rather than for a leg: it is what a stale hunk
 # paints with and what `StyleRole::GitModified` resolves to in the tree
