@@ -115,7 +115,7 @@ fail() {
 const_secs() {
     local file="$1" name="$2" value
     value=$(grep -oE "pub const $name: Duration = Duration::from_secs\([0-9]+\)" "$file" |
-        grep -oE '[0-9]+' | tail -1)
+        grep -oE '[0-9]+' | tail -1) || true
     if [ -z "$value" ]; then
         printf 'FAIL: %s is not a from_secs constant in %s any more\n' "$name" "$file" >&2
         return 1
@@ -127,7 +127,7 @@ const_secs() {
 # the modal binds is typed here exactly as the source names it.
 const_str() {
     local file="$1" name="$2" value
-    value=$(grep -oE "pub const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/')
+    value=$(grep -oE "pub const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/') || true
     if [ -z "$value" ]; then
         printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
         return 1
@@ -146,7 +146,7 @@ tmux_key() {
 # The value of a plain integer constant, by the same rule.
 const_int() {
     local file="$1" name="$2" value
-    value=$(grep -oE "pub const $name: u32 = [0-9]+" "$file" | grep -oE '[0-9]+$')
+    value=$(grep -oE "pub const $name: u32 = [0-9]+" "$file" | grep -oE '[0-9]+$') || true
     if [ -z "$value" ]; then
         printf 'FAIL: %s is not a u32 constant in %s any more\n' "$name" "$file" >&2
         return 1

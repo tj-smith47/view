@@ -178,7 +178,7 @@ pass() { printf 'ok   [%s] %s\n' "$CURRENT_LEG" "$1"; }
 # The `&str` constant `name` holds, read from the file that owns it.
 const_str() {
     local file="$1" name="$2" value
-    value=$(grep -oE "const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/')
+    value=$(grep -oE "const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/') || true
     if [ -z "$value" ]; then
         printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
         return 1
@@ -193,7 +193,7 @@ const_str() {
 mark_str() {
     local name="$1" value
     value=$(grep -oE "^const $name: &str = \"[^\"]+\"" "$TRANSCRIPT_RS" |
-        sed -E 's/.*"(.*)"/\1/')
+        sed -E 's/.*"(.*)"/\1/') || true
     if [ -z "$value" ]; then
         printf 'FAIL: %s is not a marker constant in %s any more\n' \
             "$name" "$TRANSCRIPT_RS" >&2
@@ -209,7 +209,7 @@ mark_str() {
 arm_mark() {
     local arm="$1" name
     name=$(grep -oE "$arm => \(?[A-Z_]+" "$TRANSCRIPT_RS" |
-        sed -E 's/.*[( ]([A-Z_]+)$/\1/')
+        sed -E 's/.*[( ]([A-Z_]+)$/\1/') || true
     if [ -z "$name" ]; then
         printf 'FAIL: %s renders no marker in %s any more\n' \
             "$arm" "$TRANSCRIPT_RS" >&2
@@ -468,6 +468,25 @@ leg_session_lifecycle() {
     # of the model. The exact rendering of each of these is leg 2's subject,
     # against an agent that can be told what to send.
     wait_for_log 'ai TurnEnded' "$PROVISION_SECS" "the real agent's turn ending" >/dev/null
+    # A refused turn is one chunk and an ending, which every assertion
+    # below reads as a short reply: "the reply arrived in 1 chunk(s)" sends
+    # the next reader at the streaming loop when the host is what said no.
+    # So the stop reason is read first, and the refusal names its own cause.
+    local stop_reason said refused
+    stop_reason=$(grep -oE 'ai TurnEnded \{ stop_reason: [A-Za-z]+' "$ROOT/view.log" |
+        tail -1 | grep -oE '[A-Za-z]+$') || true
+    said=$(grep -E 'ai MessageChunk .*from_agent: true' "$ROOT/view.log" |
+        tail -1 | sed -E 's/.*text: "(.*)".*/\1/') || true
+    if [ "$stop_reason" = "Refusal" ] ||
+        printf '%s' "$said" | grep -qiE 'authentication|not logged in'; then
+        refused="the real adapter refused the turn (stop_reason: ${stop_reason:-none logged}), saying: ${said:-nothing}"
+        refused="$refused -- one-line repro on this host: claude -p 'say hi'"
+        if [ "$(uname -s)" = Darwin ]; then
+            refused="$refused -- on macOS this is the host, not view: a shell that no GUI login session owns (an ssh shell is one) has its login keychain locked, so the adapter cannot read the credential it stored there at all. This leg needs its panes hosted by a tmux server a GUI terminal started -- run 'tmux new -d -s gui' from a Terminal.app window, then run this script so its tmux reaches that server"
+        fi
+        fail "$refused"
+        return 1
+    fi
     # Rendered incrementally means more than one chunk crossed the loop and
     # was folded into the transcript, each one repainting -- a turn
     # delivered whole at its end logs exactly one. The line shape this reads
@@ -492,7 +511,7 @@ leg_session_lifecycle() {
     echoed=$(printf '%s' "$prompt" | grep -oE '[A-Za-z]{5,}' | sort -u)
     tail_word=$(grep -E 'ai MessageChunk .* from_agent: true' "$ROOT/view.log" |
         tail -2 | sed -E 's/.*text: "(.*)".*/\1/' | grep -oE '[A-Za-z]{5,}' |
-        grep -vxF "$echoed" | tail -1)
+        grep -vxF "$echoed" | tail -1) || true
     if [ -z "$tail_word" ]; then
         fail 'the real agent ended its reply on no word of its own to look for'
         return 1
@@ -520,7 +539,7 @@ leg_session_lifecycle() {
 assert_tool_call_went_non_terminal_then_terminal() {
     local id statuses first_terminal first_non_terminal
     id=$(grep -oE 'ai ToolCallUpdate \{ tool_call_id: "[^"]+"' "$ROOT/view.log" |
-        head -1 | sed -E 's/.*"(.*)"/\1/')
+        head -1 | sed -E 's/.*"(.*)"/\1/') || true
     if [ -z "$id" ]; then
         fail 'the real agent made no tool call at all'
         return 1
@@ -530,9 +549,9 @@ assert_tool_call_went_non_terminal_then_terminal() {
     statuses=$(grep -F "ai ToolCallUpdate { tool_call_id: \"$id\"" "$ROOT/view.log" |
         grep -oE '.*status: [A-Za-z]+' | grep -oE '[A-Za-z]+$' || true)
     first_non_terminal=$(printf '%s\n' "$statuses" | grep -nE "^($NON_TERMINAL_STATUSES)$" |
-        head -1 | cut -d: -f1)
+        head -1 | cut -d: -f1) || true
     first_terminal=$(printf '%s\n' "$statuses" | grep -nE "^($TERMINAL_STATUSES)$" |
-        head -1 | cut -d: -f1)
+        head -1 | cut -d: -f1) || true
     if [ -z "$first_non_terminal" ] || [ -z "$first_terminal" ]; then
         fail "tool call $id was never seen both non-terminal and terminal (saw: $(printf '%s' "$statuses" | tr '\n' ' '))"
         return 1
@@ -562,7 +581,7 @@ leg_streaming_and_tool_status() {
     # The marker moves with nothing typed and nothing arriving from the
     # agent: the turn is held here, so a second frame on screen is the
     # editor's own loop deadline coming due and nothing else.
-    held=$(pane | grep -oE "($SPINNER_ALTERNATION) Probe the file" | head -1 | awk '{print $1}')
+    held=$(pane | grep -oE "($SPINNER_ALTERNATION) Probe the file" | head -1 | awk '{print $1}') || true
     [ -n "$held" ] || fail "the spinner frame left the screen before it could be read"
     others=$(printf '%s' "$SPINNER_ALTERNATION" |
         awk -v skip="$held" 'BEGIN { RS = "|" } $0 != skip { printf "%s%s", (n++ ? "|" : ""), $0 }')
@@ -961,7 +980,7 @@ leg_prompt_awaiting_its_answer() {
     submit 'think'
     wait_for_re "($SPINNER_ALTERNATION) think" "$WAIT_SECS" \
         "the submitted prompt's own spinner" >/dev/null
-    held=$(pane | grep -oE "($SPINNER_ALTERNATION) think" | head -1 | awk '{print $1}')
+    held=$(pane | grep -oE "($SPINNER_ALTERNATION) think" | head -1 | awk '{print $1}') || true
     [ -n "$held" ] || fail "the prompt's spinner frame left the screen before it could be read"
     others=$(printf '%s' "$SPINNER_ALTERNATION" |
         awk -v skip="$held" 'BEGIN { RS = "|" } $0 != skip { printf "%s%s", (n++ ? "|" : ""), $0 }')
@@ -1046,7 +1065,7 @@ REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
 REVIEW_MARK=$(mark_str REVIEW_MARK) || exit 1
 DONE_MARK=$(status_mark Completed) || exit 1
 PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_RS" |
-    sed -E 's/.*"(.*)/\1/')
+    sed -E 's/.*"(.*)/\1/') || true
 [ -n "$PERMISSION_PROMPT" ] || {
     printf 'FAIL: the permission prompt is not built from a literal in %s any more\n' \
         "$PERMISSION_RS" >&2
@@ -1057,7 +1076,7 @@ PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_R
 # separately rather than one derived from the other, since the whole
 # assertion downstream is that they are not the same glyph.
 AGENT_PREFIX=$(grep -oE 'TranscriptRole::Agent => \(?[A-Z_]+' "$TRANSCRIPT_RS" |
-    sed -E 's/.*[( ]([A-Z_]+)$/\1/')
+    sed -E 's/.*[( ]([A-Z_]+)$/\1/') || true
 [ -n "$AGENT_PREFIX" ] || {
     printf 'FAIL: TranscriptRole::Agent renders no marker in %s any more\n' \
         "$TRANSCRIPT_RS" >&2
@@ -1065,7 +1084,7 @@ AGENT_PREFIX=$(grep -oE 'TranscriptRole::Agent => \(?[A-Z_]+' "$TRANSCRIPT_RS" |
 }
 AGENT_PREFIX=$(mark_str "$AGENT_PREFIX") || exit 1
 THOUGHT_PREFIX=$(grep -oE 'TranscriptRole::Thought => \(?[A-Z_]+' "$TRANSCRIPT_RS" |
-    sed -E 's/.*[( ]([A-Z_]+)$/\1/')
+    sed -E 's/.*[( ]([A-Z_]+)$/\1/') || true
 [ -n "$THOUGHT_PREFIX" ] || {
     printf 'FAIL: TranscriptRole::Thought renders no marker in %s any more\n' \
         "$TRANSCRIPT_RS" >&2
@@ -1109,13 +1128,13 @@ TERMINAL_CONTENT='[terminal content]'
 # The crash banner's own opening, and the trust prompt's -- both `format!`
 # literals rather than `&str` constants, so both are read to their first
 # substitution.
-CRASH_PREFIX=$(grep -oE '"Error: \{message\}' "$PANEL_RS" | sed -E 's/"(.*)\{message\}/\1/')
+CRASH_PREFIX=$(grep -oE '"Error: \{message\}' "$PANEL_RS" | sed -E 's/"(.*)\{message\}/\1/') || true
 [ -n "$CRASH_PREFIX" ] || {
     printf 'FAIL: the crash banner is not built from a literal in %s any more\n' "$PANEL_RS" >&2
     exit 1
 }
 TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$REPO_ROOT/crates/view-core/src/update/ai.rs" |
-    sed -E 's/"(.*)\{\}/\1/')
+    sed -E 's/"(.*)\{\}/\1/') || true
 [ -n "$TRUST_PROMPT" ] || {
     printf 'FAIL: the AI trust prompt is not built from a literal any more\n' >&2
     exit 1
@@ -1228,7 +1247,7 @@ done
 # The stub agent's first argument is the file whose appearance releases a
 # held turn; one path serves every leg because no two sessions overlap.
 PINNED_VERSION=$(grep -A 2 'id: "claude-code"' "$REPO_ROOT/crates/view-ai/src/provision.rs" |
-    grep -oE 'version: "[^"]+"' | sed -E 's/.*"(.*)"/\1/')
+    grep -oE 'version: "[^"]+"' | sed -E 's/.*"(.*)"/\1/') || true
 [ -n "$PINNED_VERSION" ] || {
     printf 'FAIL: the claude-code row has no pinned version in provision.rs any more\n' >&2
     exit 1
@@ -1239,13 +1258,13 @@ PINNED_VERSION=$(grep -A 2 'id: "claude-code"' "$REPO_ROOT/crates/view-ai/src/pr
 # changed count fails the waits that name them rather than passing on a
 # pattern that now matches nothing.
 STREAM_THOUGHT=$(grep -oE 'chunk\(stdout, "agent_thought_chunk", "[^"]+"\)' "$STUB_RS" |
-    sed -E 's/.*"(.*)"\)/\1/')
+    sed -E 's/.*"(.*)"\)/\1/') || true
 [ -n "$STREAM_THOUGHT" ] || {
     printf 'FAIL: the stub agent no longer streams a thought chunk in %s\n' "$STUB_RS" >&2
     exit 1
 }
-STREAM_USED=$(grep -oE '"used": [0-9]+' "$STUB_RS" | grep -oE '[0-9]+$')
-STREAM_SIZE=$(grep -oE '"size": [0-9]+' "$STUB_RS" | grep -oE '[0-9]+$')
+STREAM_USED=$(grep -oE '"used": [0-9]+' "$STUB_RS" | grep -oE '[0-9]+$') || true
+STREAM_SIZE=$(grep -oE '"size": [0-9]+' "$STUB_RS" | grep -oE '[0-9]+$') || true
 [ -n "$STREAM_USED" ] && [ -n "$STREAM_SIZE" ] || {
     printf 'FAIL: the stub agent no longer streams a usage update in %s\n' "$STUB_RS" >&2
     exit 1
@@ -1257,7 +1276,7 @@ USAGE_ROW="context $STREAM_USED/$STREAM_SIZE"
 # The file the filesystem legs name, and the content the write leg sends,
 # both read from the same fixture for the same reason.
 STUB_FS_FILE=$(grep -oE 'named_inside_cwd\("[^"]+"\)' "$STUB_RS" | head -1 |
-    sed -E 's/.*"(.*)".*/\1/')
+    sed -E 's/.*"(.*)".*/\1/') || true
 [ -n "$STUB_FS_FILE" ] || {
     printf 'FAIL: the stub agent names no file inside its own cwd in %s any more\n' "$STUB_RS" >&2
     exit 1
@@ -1269,9 +1288,9 @@ require_template "$STUB_RS" "\"content\": \"$STUB_FS_WRITE_CONTENT\"" || exit 1
 # the two an out-of-boundary path gets.
 WIRE_RS=$REPO_ROOT/crates/view-ai/src/acp/wire.rs
 INVALID_PARAMS=$(grep -oE 'pub const INVALID_PARAMS: i64 = -?[0-9]+' "$WIRE_RS" |
-    grep -oE '\-?[0-9]+$')
+    grep -oE '\-?[0-9]+$') || true
 RESOURCE_NOT_FOUND=$(grep -oE 'pub const RESOURCE_NOT_FOUND: i64 = -?[0-9]+' "$WIRE_RS" |
-    grep -oE '\-?[0-9]+$')
+    grep -oE '\-?[0-9]+$') || true
 [ -n "$INVALID_PARAMS" ] && [ -n "$RESOURCE_NOT_FOUND" ] || {
     printf 'FAIL: the filesystem refusal codes are not constants in %s any more\n' "$WIRE_RS" >&2
     exit 1
@@ -1340,13 +1359,13 @@ leg_standing_answer_real_adapter() {
     # field would otherwise count as an option and put every digit one out.
     digit=$(grep -m1 'ai PermissionRequested' "$ROOT/view.log" |
         grep -oE 'kind: [A-Za-z]+ \}' |
-        awk '{ n++ } /AllowAlways/ { print n; exit }')
+        awk '{ n++ } /AllowAlways/ { print n; exit }') || true
     [ -n "$digit" ] || {
         fail "the real adapter offered no always-allow option at all: $(grep -m1 'ai PermissionRequested' "$ROOT/view.log")"
         return 1
     }
     tool_kind=$(grep -m1 'ai PermissionRequested' "$ROOT/view.log" |
-        sed -nE 's/.*tool_kind: Some\("([^"]*)"\).*/\1/p')
+        sed -nE 's/.*tool_kind: Some\("([^"]*)"\).*/\1/p') || true
     [ -n "$tool_kind" ] || {
         fail 'the real adapter scoped its request with no tool kind, so there is nothing for a standing answer to be keyed on'
         return 1

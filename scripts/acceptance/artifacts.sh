@@ -432,7 +432,7 @@ review_keys_of() {
         inside && /^\];/ { exit }
     ' "$mappings_rs")
     declared=$(grep -oE '^static REVIEW_KEYS: \[ReviewKey; [0-9]+\]' "$mappings_rs" |
-        grep -oE '[0-9]+')
+        grep -oE '[0-9]+') || true
     read_count=$(printf '%s\n' "$table" | grep -c . || true)
     if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
         printf 'FAIL: %s declares %s review keys and this read %s of them; the table has changed shape\n' \

@@ -825,7 +825,7 @@ ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
 fixture_bg() {
     local group="$1" hex
     hex=$(grep -oE "'$group', \{[^}]*bg = '#[0-9a-f]{6}'" "$COLORSCHEME" |
-        grep -oE "#[0-9a-f]{6}" | tail -1)
+        grep -oE "#[0-9a-f]{6}" | tail -1) || true
     if [ -z "$hex" ]; then
         printf 'FAIL: %s has no background in %s any more\n' "$group" "$COLORSCHEME" >&2
         return 1
@@ -860,7 +860,7 @@ printf '%s\n' "Normal $NORMAL_BG" "CursorLine $CURSORLINE_BG" "NormalFloat $FLOA
 
 panel_const() {
     local name="$1" value
-    value=$(grep -oE "const $name: &str = \"[^\"]+\"" "$PANEL_RS" | sed -E 's/.*"(.*)"/\1/')
+    value=$(grep -oE "const $name: &str = \"[^\"]+\"" "$PANEL_RS" | sed -E 's/.*"(.*)"/\1/') || true
     [ -n "$value" ] || {
         printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$PANEL_RS" >&2
         return 1
@@ -910,7 +910,7 @@ esac
 # primes `vim.fn.input()` with it: the paste leg has to know the prompt is
 # up before it pastes, or it would be pasting at the tree instead.
 CREATE_PROMPT=$(grep -A 6 'pub fn tree_create_prompt' "$NVIM_API_RS" |
-    grep -oE 'Value::from\("[^"]+"\)' | sed -E 's/.*"(.*)".*/\1/' | head -1)
+    grep -oE 'Value::from\("[^"]+"\)' | sed -E 's/.*"(.*)".*/\1/' | head -1) || true
 [ -n "$CREATE_PROMPT" ] || {
     printf 'FAIL: %s no longer primes the tree create prompt with a literal question\n' "$NVIM_API_RS" >&2
     exit 1
@@ -919,14 +919,14 @@ CREATE_PROMPT=$(grep -A 6 'pub fn tree_create_prompt' "$NVIM_API_RS" |
 # it: the caret leg has to know the prompt is up before it reads where the
 # keyboard is waiting.
 PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_RS" |
-    sed -E 's/.*"(.*)/\1/')
+    sed -E 's/.*"(.*)/\1/') || true
 [ -n "$PERMISSION_PROMPT" ] || {
     printf 'FAIL: the permission prompt is not built from a literal in %s any more\n' \
         "$PERMISSION_RS" >&2
     exit 1
 }
 HISTORY_TITLE=$(grep -oE 'PaletteView::new\("[^"]+"\)' "$PALETTE_RS" |
-    sed -E 's/.*"(.*)".*/\1/' | tail -1)
+    sed -E 's/.*"(.*)".*/\1/' | tail -1) || true
 [ -n "$HISTORY_TITLE" ] || {
     printf 'FAIL: the message-history view sets no literal title in %s any more\n' "$PALETTE_RS" >&2
     exit 1
@@ -994,7 +994,7 @@ ENTRY_POINTS=$(awk '
 # reordered or renamed field would leave it silently short, and a sweep that
 # drove four of six entry points would report green over the two it dropped
 declared=$(grep -oE '^static DEFAULT_MAPS: \[MappingSpec; [0-9]+\]' "$MAPPINGS_RS" |
-    grep -oE '[0-9]+')
+    grep -oE '[0-9]+') || true
 read_count=$(printf '%s\n' "$ENTRY_POINTS" | grep -c . || true)
 if [ -z "$declared" ] || [ "$read_count" != "$declared" ]; then
     printf 'FAIL: %s declares %s default mappings and this read %s of them; the table has changed shape\n' \
@@ -1737,8 +1737,18 @@ leg_resize_chord() {
     # it races the agent for
     send_text 'propose-when-released'
     send_key Enter
+    # the submitted prompt on screen is the proof view has drained the
+    # keystrokes before the prefix: without it the `settle` below is the
+    # only thing standing between the prefix and a review that lands first,
+    # and a prefix the panel never read makes every assertion after it pass
+    # on a case the leg did not set up
+    wait_in_box 'propose-when-released' "$REACTION_SECS" \
+        'the prompt whose review this leg holds' >/dev/null
     send_key 'C-w'
     settle
+    # the panel paints no pending-chord indicator, so this reads the
+    # negative only: nvim is not the one holding a prefix. That the panel
+    # arms one is what the FELLTHROUGH step above proves.
     if grep -qF '^W' "$SCREEN"; then
         fail 'nvim is showing a pending ^W of its own, so the prefix this leg armed did not belong to the panel'
         return 1
@@ -1767,6 +1777,9 @@ leg_resize_chord() {
 
     assert_chrome 'the resized agent panel'
     dismiss ai
+    # the stub reads this file as "the held review may resume", so a leg
+    # after this one that stalls would find its own stall already released
+    rm -f "$RESUME_FILE"
     end_session
 }
 

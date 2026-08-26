@@ -152,7 +152,8 @@ function verdict(failure) {
     JSON.stringify(
       {
         version: VERSION,
-        wire: path.join(WORK, "wire.log"),
+        // named only while the directory below still exists
+        wire: honored ? null : path.join(WORK, "wire.log"),
         permission_requests: permCount,
         honors_allow_always: honored,
         failure: failure || null,
@@ -164,6 +165,11 @@ function verdict(failure) {
   );
   child.kill();
   LOG.end();
+  // the wire log is the evidence any verdict other than a clean
+  // allow-always names, so the work directory outlives one of those and
+  // nothing else: a probe run per adapter release would otherwise leave a
+  // directory per run in the temp root forever
+  if (honored) fs.rmSync(WORK, { recursive: true, force: true });
   process.exit(failure ? 1 : 0);
 }
 

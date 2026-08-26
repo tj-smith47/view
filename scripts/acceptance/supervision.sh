@@ -139,7 +139,7 @@ fail() {
 const_secs() {
     local file="$1" name="$2" value
     value=$(grep -oE "pub const $name: Duration = Duration::from_secs\([0-9]+\)" "$file" |
-        grep -oE '[0-9]+' | tail -1)
+        grep -oE '[0-9]+' | tail -1) || true
     if [ -z "$value" ]; then
         printf 'FAIL: %s is not a from_secs constant in %s any more\n' "$name" "$file" >&2
         return 1
@@ -151,7 +151,7 @@ const_secs() {
 # keys the modal binds are typed here exactly as the source names them.
 const_str() {
     local file="$1" name="$2" value
-    value=$(grep -oE "pub const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/')
+    value=$(grep -oE "pub const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/') || true
     if [ -z "$value" ]; then
         printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
         return 1
@@ -532,7 +532,7 @@ case "$FOCUSED_TITLE" in
     exit 1
     ;;
 esac
-TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$AI_UPDATE_RS" | sed -E 's/"(.*)\{\}/\1/')
+TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$AI_UPDATE_RS" | sed -E 's/"(.*)\{\}/\1/') || true
 [ -n "$TRUST_PROMPT" ] || {
     printf 'FAIL: the AI trust prompt is not built from a literal in %s any more\n' "$AI_UPDATE_RS" >&2
     exit 1
