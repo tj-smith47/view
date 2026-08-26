@@ -1426,8 +1426,14 @@ leg_standing_answer_real_adapter() {
         # an auto-answer the user cannot see is a grant they cannot audit.
         wait_for "auto-allowed $tool_kind (standing" "$WAIT_SECS" \
             "the standing grant's own transcript row" >/dev/null
-        if grep 'ai AnswerPermission' "$ROOT/view.log" | tail -n +2 |
-            grep -qvF "option_id: \"$option_id\""; then
+        # captured rather than piped into `grep -q`: a quiet grep exits at
+        # its first match and SIGPIPEs whatever feeds it, which `pipefail`
+        # then reports as a failed pipeline -- so the one shape this branch
+        # exists to catch would read as "nothing found". See `holds`.
+        local unchosen
+        unchosen=$(grep 'ai AnswerPermission' "$ROOT/view.log" | tail -n +2 |
+            grep -vF "option_id: \"$option_id\"") || true
+        if [ -n "$unchosen" ]; then
             fail "view's store answered a later request with an option id the user never chose (wanted '$option_id')"
             return 1
         fi

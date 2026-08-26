@@ -1077,8 +1077,14 @@ FLOAT_BG_DECIMAL=$(awk -v triple="$FLOAT_BG" 'BEGIN {
 }')
 warm_start=$(now)
 while :; do
-    if grep -A 2 -- '^\[chrome.NormalFloat\]' "$STATE_HOME"/view/theme-*.toml 2>/dev/null |
-        grep -qE "^bg = $FLOAT_BG_DECIMAL\$"; then
+    # the reader is not `grep -q`: a quiet grep exits at its first match and
+    # SIGPIPEs the grep feeding it, which `pipefail` then reports as a
+    # failed pipeline -- so the match this loop waits for would read as no
+    # match and the leg would time out on a cache that already held it. See
+    # `holds`. `-x` keeps the anchoring the pattern carried.
+    float_bg_line=$(grep -A 2 -- '^\[chrome.NormalFloat\]' "$STATE_HOME"/view/theme-*.toml 2>/dev/null |
+        grep -xE "bg = $FLOAT_BG_DECIMAL") || true
+    if [ -n "$float_bg_line" ]; then
         break
     fi
     if ! under "$(elapsed "$warm_start" "$(now)")" "$WAIT_SECS"; then

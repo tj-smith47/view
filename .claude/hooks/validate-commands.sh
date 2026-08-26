@@ -56,19 +56,27 @@ FLAT=$(printf %s "$COMMAND" |
 # exists to expose hidden subcommands to the greps below, and would also erase
 # exactly the disguises (quotes, continuations) that disqualify a push from
 # being called deliberate.
+#
+# Matched with `[[ =~ ]]` rather than a pipe into `grep -q`, here and below:
+# a quiet grep exits at its first match and SIGPIPEs what feeds it, which
+# `pipefail` turns into a failed pipeline -- a refusal read as a pass, in
+# the one place that reads as an approval nobody gave.
+STANDALONE='^git push([[:space:]]+[^;&|<>`$\\]*)?$'
 case "$COMMAND" in
   *$'\n'*) : ;;
   *)
-    if printf %s "$COMMAND" | grep -qE '^git push([[:space:]]+[^;&|<>`$\\]*)?$'; then
+    if [[ $COMMAND =~ $STANDALONE ]]; then
       exit 0
     fi
     ;;
 esac
-if printf %s "$FLAT" | grep -qE '\bgit\b[^|;&]*\bpush\b'; then
+CHAINED_PUSH='\bgit\b[^|;&]*\bpush\b'
+if [[ $FLAT =~ $CHAINED_PUSH ]]; then
   echo "BLOCKED: git push requires interactive approval and must be a singular standalone command: git push <args>, nothing before or after it on the line." >&2
   exit 2
 fi
-if printf %s "$FLAT" | grep -qE '\bgit\b[^|;&]*\bcommit\b'; then
+CHAINED_COMMIT='\bgit\b[^|;&]*\bcommit\b'
+if [[ $FLAT =~ $CHAINED_COMMIT ]]; then
   echo "BLOCKED: commit via: task commit -- -m \"<msg>\" (runs the ci gate)." >&2
   exit 2
 fi
@@ -79,7 +87,8 @@ fi
 QUIET_LOCK="$HOME/.cache/view-quiet-host.lock"
 # anchored to the task name: a path such as crates/view-bench/... inside a
 # `task commit PATHS=` list is not a measurement
-if printf %s "$FLAT" | grep -qE '\btask\b[[:space:]]+(bench|bench-micro|perf-audit|heartbeat-ab)([[:space:]]|$)'; then
+MEASUREMENT='\btask\b[[:space:]]+(bench|bench-micro|perf-audit|heartbeat-ab)([[:space:]]|$)'
+if [[ $FLAT =~ $MEASUREMENT ]]; then
   if [[ ! -f "$QUIET_LOCK" ]] || (( $(date +%s) - $(stat -c %Y "$QUIET_LOCK") > 7200 )); then
     echo "BLOCKED: quiet-host measurement without coordination. Message the peer session (ListAgents → cfgd-*) to hold heavy cargo work, wait for its \"go\", then \`touch $QUIET_LOCK\` and re-run; \`rm\` the lock and tell the peer \"released\" when done. A lock older than 2h is stale." >&2
     exit 2
