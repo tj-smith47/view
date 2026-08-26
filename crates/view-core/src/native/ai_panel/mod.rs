@@ -12,7 +12,7 @@
 //! state into these types in place, rather than a live session replacing
 //! them with a shape of its own.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use super::geometry::{interior_text_width, LIST_MARKER_COLS};
@@ -127,30 +127,45 @@ pub struct AiPanelState {
     /// character an offset names leaves that offset where it was, which
     /// widens the stretch the grid is refused on and never narrows it.
     non_ascii: Option<(usize, usize)>,
-    /// The highest offset in [`Self::input`] known to be a row boundary of
-    /// that text's own wrap, and the width that made it one -- or `None`
-    /// while nothing is known.
+    /// Every row boundary of [`Self::input`]'s own wrap that a paint has
+    /// reached, ascending, at the width [`Self::row_width`] holds.
     ///
     /// [`wrap_window`]'s grid is exact only over ASCII, and the fallback
     /// for a multibyte stretch is the line's own start, which for a prompt
     /// of one line is the whole prompt: an unbounded per-keystroke walk.
     /// A greedy row boundary cannot be *derived* in constant time, but it
-    /// can be *remembered*: [`wrap`]'s fold resets at every row it opens,
-    /// so an offset that opened a row keeps opening one for every text
-    /// carrying [`Self::input`]`[..at]` as a prefix. Appending -- the whole
-    /// of what a composer does -- preserves that prefix, so each keystroke
-    /// walks from the remembered boundary rather than from the line.
+    /// can be *recorded*: [`wrap`]'s fold resets at every row it opens, so
+    /// an offset that opened a row keeps opening one for every text
+    /// carrying [`Self::input`]`[..at]` as a prefix. Appending and
+    /// backspacing -- the whole of what a composer does to a prompt -- both
+    /// leave that prefix intact, so this list is folded forward by the
+    /// bytes typed since the last paint and answers a backspace by binary
+    /// search alone, with no fold at all.
     ///
-    /// The width is stored with the offset because a resize wraps to a
-    /// different column, which makes the offset a boundary of a wrap that
-    /// no longer exists; the mismatch drops it, the same rule
-    /// `Transcript::cache_width` follows. A backspace past the offset drops
-    /// it too, and a submitted prompt clears it, alongside
-    /// [`Self::breaks`]. Those three methods are the only writers of the
-    /// text, so nothing else can move a boundary out from under it; a text
-    /// written past them (as a test may) must clear this as well, or the
-    /// composer paints from an offset that text never opened a row at.
-    composer_anchor: Cell<Option<(usize, usize)>>,
+    /// Remembering only the last boundary would serve the typing direction
+    /// and leave the deleting one where it was: a held backspace walks past
+    /// that one offset after a single row and has nothing behind it but the
+    /// line. Remembering the last two only doubles that row. The boundaries
+    /// below the cursor are the ones a backspace needs and the ones a
+    /// forward fold cannot recover, so they are kept rather than recomputed.
+    ///
+    /// One `usize` per painted row of a multibyte composer, and nothing at
+    /// all for an ASCII one -- the grid is exact there, so an ASCII composer
+    /// never writes this and it stays empty.
+    ///
+    /// A resize wraps to a different column, which makes every entry a
+    /// boundary of a wrap that no longer exists: the width mismatch drops
+    /// the list, the rule `Transcript::cache_width` follows. A backspace
+    /// drops what the shortened text no longer reaches and a submitted
+    /// prompt clears the list, alongside [`Self::breaks`]. Those three
+    /// methods are the only writers of the text, and an entry is still
+    /// checked against the text before the window opens on it, so a text
+    /// written past them (as a test may) costs alignment and never
+    /// correctness.
+    row_starts: RefCell<Vec<usize>>,
+    /// The width [`Self::row_starts`] was folded at; a paint at any other
+    /// width drops the list.
+    row_width: Cell<usize>,
     /// A single slot by design, not a queue: ACP blocks the agent's own
     /// turn on the reply, so a conformant agent never has two outstanding
     /// at once, and a second arriving request is a protocol violation
@@ -280,9 +295,9 @@ pub struct AiPanelState {
 }
 
 /// Two panels holding the same state are equal whatever their caches hold:
-/// [`AiPanelState::composer_anchor`] is a remembered row boundary of the
-/// text, derivable from the text at any moment, so a panel that has painted
-/// and one that has not are not two different panels.
+/// [`AiPanelState::row_starts`] holds row boundaries of the text, derivable
+/// from the text at any moment, so a panel that has painted and one that has
+/// not are not two different panels.
 ///
 /// The destructure below is the mechanism, not this paragraph: every field
 /// is named, so a field added to [`AiPanelState`] fails to compile here
@@ -307,7 +322,8 @@ impl PartialEq for AiPanelState {
             hidden_generation,
             standing_answers,
             transcript_top,
-            composer_anchor: _,
+            row_starts: _,
+            row_width: _,
         } = self;
         *session_id == other.session_id
             && *transcript == other.transcript
@@ -348,7 +364,8 @@ impl AiPanelState {
             input: String::new(),
             breaks: Vec::new(),
             non_ascii: None,
-            composer_anchor: Cell::new(None),
+            row_starts: RefCell::new(Vec::new()),
+            row_width: Cell::new(0),
             pending_permission: None,
             focused: false,
             turn_in_flight: false,
@@ -401,14 +418,15 @@ impl AiPanelState {
             self.breaks.pop();
         }
         // A boundary at or below the shortened text is still a boundary of
-        // it -- the text below it is unchanged -- so only a backspace that
-        // reaches past the remembered offset costs anything
-        if self
-            .composer_anchor
-            .get()
-            .is_some_and(|(_, at)| at > self.input.len())
-        {
-            self.composer_anchor.set(None);
+        // it -- the text below it is unchanged -- so a backspace drops only
+        // what the text no longer reaches. Dropping it here rather than
+        // where the list is read is what keeps a pop the next keystroke
+        // types back over from leaving an offset the text no longer opens a
+        // row at
+        let len = self.input.len();
+        let starts = self.row_starts.get_mut();
+        while starts.last().is_some_and(|&at| at > len) {
+            starts.pop();
         }
         true
     }
@@ -418,7 +436,7 @@ impl AiPanelState {
     pub fn take_input(&mut self) -> String {
         self.breaks.clear();
         self.non_ascii = None;
-        self.composer_anchor.set(None);
+        self.row_starts.get_mut().clear();
         std::mem::take(&mut self.input)
     }
 
@@ -579,7 +597,8 @@ impl AiPanelState {
                 cap,
                 &self.breaks,
                 self.non_ascii,
-                &self.composer_anchor,
+                &self.row_starts,
+                &self.row_width,
             ),
             width,
             cap,
@@ -901,10 +920,11 @@ fn char_cells(ch: char) -> usize {
 /// because a row is greedy -- one that cannot fit the next two-cell glyph
 /// ends a cell early -- so where its rows fall is a function of the whole
 /// line and not of any count. That measurement is
-/// [`last_row_boundary`], and `anchor` is what keeps it off the whole
-/// line on every frame: it remembers the boundary the last paint found, so
-/// the next one walks from there. See [`AiPanelState::composer_anchor`] for
-/// why remembering is sound where deriving is not.
+/// [`extend_row_starts`], and `row_starts` is what keeps it off the whole
+/// line on every frame: it holds the boundaries earlier paints folded, so
+/// this one folds only the bytes typed since and answers a backspace with a
+/// binary search. See [`AiPanelState::row_starts`] for why recording is
+/// sound where deriving is not.
 ///
 /// So the return is at most `4 * width * (keep + 2)` bytes for every shape:
 /// the span above, plus the one row the opening may fall inside. The
@@ -925,7 +945,8 @@ fn wrap_window<'a>(
     keep: usize,
     breaks: &[usize],
     non_ascii: Option<(usize, usize)>,
-    anchor: &Cell<Option<(usize, usize)>>,
+    row_starts: &RefCell<Vec<usize>>,
+    row_width: &Cell<usize>,
 ) -> &'a str {
     let span = keep
         .saturating_add(1)
@@ -961,38 +982,73 @@ fn wrap_window<'a>(
     // wrapped from there instead: the line, which for a prompt of one line
     // is the prompt.
     if non_ascii.is_some_and(|(first, last)| first < start && last >= phase) {
-        let from = match anchor.get() {
-            // a boundary from another width is a boundary of a wrap that no
-            // longer exists, and `at < phase` is one the line's own start
-            // already improves on; the offset is checked against the text
-            // for the same reason `breaks` is -- a cache that has drifted
-            // costs alignment and never correctness
-            Some((at_width, at))
-                if at_width == width
-                    && (phase..=floor).contains(&at)
-                    && input.is_char_boundary(at) =>
-            {
-                at
-            }
-            _ => phase,
-        };
-        let open = last_row_boundary(input, width, from, floor);
-        anchor.set(Some((width, open)));
+        let open = row_start_at_or_before(input, width, floor, row_starts, row_width);
         return &input[open..];
     }
     &input[start..]
 }
 
-/// The last [`Break::Cell`] row boundary at or before `limit`, walking from
-/// `from` -- which the caller guarantees is itself one.
+/// The last [`Break::Cell`] row boundary of `input` at or before `limit`,
+/// answered from `starts` and folding only what `starts` has not reached.
+///
+/// `starts` is [`AiPanelState::row_starts`] and `folded_at` its width. A
+/// width other than the one the list was folded at drops it: those offsets
+/// are boundaries of a wrap that no longer exists.
+///
+/// The offset returned is checked against the text for the same reason
+/// `breaks` is -- a list that has drifted from the input costs alignment and
+/// never correctness, and a slice from inside a character would be neither.
+fn row_start_at_or_before(
+    input: &str,
+    width: usize,
+    limit: usize,
+    starts: &RefCell<Vec<usize>>,
+    folded_at: &Cell<usize>,
+) -> usize {
+    let mut starts = starts.borrow_mut();
+    if folded_at.get() != width {
+        starts.clear();
+        folded_at.set(width);
+    }
+    // a text rewritten past the three methods that own it can be shorter
+    // than the list reaches; folding forward from an offset the text no
+    // longer has would extend nothing and open the window an unbounded
+    // distance back
+    while starts.last().is_some_and(|&at| at > input.len()) {
+        starts.pop();
+    }
+    let from = starts.last().copied().unwrap_or(0);
+    if from <= limit {
+        extend_row_starts(input, width, from, limit, &mut starts);
+    }
+    let open = starts[..starts.partition_point(|&at| at <= limit)]
+        .last()
+        .copied()
+        .unwrap_or(0);
+    if input.is_char_boundary(open) {
+        return open;
+    }
+    starts.clear();
+    extend_row_starts(input, width, 0, limit, &mut starts);
+    starts.last().copied().unwrap_or(0)
+}
+
+/// Appends to `starts` every [`Break::Cell`] row boundary of `input` in
+/// `(from, limit]`, folding from `from` -- which the caller guarantees is
+/// itself one, so the fold enters it with no cells used.
 ///
 /// [`wrap`]'s own fold with the rows thrown away: the same greedy width
 /// test, the same `\r\n`-is-one-break rule, the same [`char_cells`]. The two
 /// are read together because they have to agree -- a boundary this reports
 /// that `wrap` does not open is a window that paints rows the whole input's
 /// wrap never had.
-fn last_row_boundary(input: &str, width: usize, from: usize, limit: usize) -> usize {
-    let mut open = from;
+fn extend_row_starts(
+    input: &str,
+    width: usize,
+    from: usize,
+    limit: usize,
+    starts: &mut Vec<usize>,
+) {
     let mut used = 0_usize;
     let mut chars = input.get(from..).unwrap_or_default().char_indices();
     while let Some((offset, ch)) = chars.next() {
@@ -1011,18 +1067,17 @@ fn last_row_boundary(input: &str, width: usize, from: usize, limit: usize) -> us
             if next > limit {
                 break;
             }
-            open = next;
+            starts.push(next);
             used = 0;
             continue;
         }
         let cells = char_cells(ch);
         if used > 0 && used + cells > width {
-            open = at;
+            starts.push(at);
             used = 0;
         }
         used += cells;
     }
-    open
 }
 
 /// The widest UTF-8 encoding of one character, which is also the most bytes
@@ -1678,7 +1733,8 @@ mod tests {
                 cap,
                 &state.breaks,
                 state.non_ascii,
-                &state.composer_anchor,
+                &state.row_starts,
+                &state.row_width,
             );
             assert!(
                 window.len() <= (cap + 2) * width * BYTES_PER_CELL,
@@ -1769,7 +1825,8 @@ mod tests {
                 cap,
                 &state.breaks,
                 state.non_ascii,
-                &state.composer_anchor,
+                &state.row_starts,
+                &state.row_width,
             )
             .len()
                 <= (cap + 2) * width * BYTES_PER_CELL,
@@ -2544,7 +2601,8 @@ mod tests {
                 cap,
                 &state.breaks,
                 state.non_ascii,
-                &state.composer_anchor,
+                &state.row_starts,
+                &state.row_width,
             );
 
             assert!(
@@ -2591,7 +2649,8 @@ mod tests {
                 cap,
                 &state.breaks,
                 state.non_ascii,
-                &state.composer_anchor,
+                &state.row_starts,
+                &state.row_width,
             );
 
             assert!(
@@ -2610,11 +2669,24 @@ mod tests {
         }
     }
 
-    /// The per-keystroke cost the anchor exists for, on the shape that used
-    /// to pay the whole line: a long single line opening with a wide
+    /// How far the next paint at this width would have to fold, which is
+    /// the per-keystroke cost [`AiPanelState::row_starts`] exists to bound:
+    /// the distance from the last boundary the list holds to the floor the
+    /// window opens at or before.
+    fn fold_ahead(state: &AiPanelState, width: usize, cap: usize) -> usize {
+        let floor = state
+            .input
+            .len()
+            .saturating_sub((cap + 1) * width * BYTES_PER_CELL);
+        let from = state.row_starts.borrow().last().copied().unwrap_or(0);
+        floor.saturating_sub(from)
+    }
+
+    /// The per-keystroke cost the row list exists for, on the shape that
+    /// used to pay the whole line: a long single line opening with a wide
     /// character, then typed into one character at a time. Each keystroke
-    /// walks from the boundary the last paint remembered, so the window it
-    /// opens stays inside the same bound the ASCII pin asserts.
+    /// folds only the bytes it added, so the window it opens stays inside
+    /// the same bound the ASCII pin asserts.
     #[test]
     fn a_keystroke_after_a_wide_character_walks_a_bounded_span() {
         let width = composer_width(WIDE_PANEL);
@@ -2629,17 +2701,15 @@ mod tests {
 
         for typed in 0..64_usize {
             state.push_input("x");
-            let (_, at) = state
-                .composer_anchor
-                .get()
-                .unwrap_or_else(|| unreachable!("a painted multibyte composer holds a boundary"));
+            let ahead = fold_ahead(&state, width, cap);
             let window = wrap_window(
                 &state.input,
                 width,
                 cap,
                 &state.breaks,
                 state.non_ascii,
-                &state.composer_anchor,
+                &state.row_starts,
+                &state.row_width,
             );
 
             assert!(
@@ -2647,17 +2717,68 @@ mod tests {
                 "keystroke {typed}: {} bytes walked for {cap} rows",
                 window.len()
             );
-            let floor = state.input.len() - (cap + 1) * width * BYTES_PER_CELL;
             assert!(
-                at + width * BYTES_PER_CELL >= floor,
-                "keystroke {typed}: the anchor at {at} is more than one row \
-                 behind the floor at {floor}, so the walk is not bounded by \
-                 the row"
+                ahead <= width * BYTES_PER_CELL,
+                "keystroke {typed}: the paint folds {ahead} bytes, more than \
+                 the one row the keystroke added"
             );
             assert_eq!(
                 state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL),
                 wrap(&state.input, width, cap, Break::Cell),
                 "keystroke {typed}: the rows are the whole input's own"
+            );
+        }
+    }
+
+    /// The other direction, which a remembered offset does not serve: the
+    /// same long single line opening with a wide character, held backspace
+    /// over eleven rows of it. A boundary the shortened text still reaches
+    /// is still a boundary of it, so every one of those keystrokes is
+    /// answered out of the list with nothing folded at all -- where one
+    /// remembered offset (or two) is walked past after a row (or two) and
+    /// leaves the paint re-folding the whole line.
+    ///
+    /// The assertion is the fold distance rather than a duration, so it
+    /// fails the same way on a loaded machine as on an idle one.
+    #[test]
+    fn a_held_backspace_after_a_wide_character_folds_nothing() {
+        let width = composer_width(WIDE_PANEL);
+        let cap = AiPanelState::new().composer_cap(TEN_ROW_PANEL);
+        let letters: String = (0..(1 << 16))
+            .map(|i: usize| char::from(b'a' + (i % 26) as u8))
+            .collect();
+
+        let mut state = AiPanelState::new();
+        state.push_input(&format!("\u{2014}{letters}"));
+        let _ = state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL);
+
+        for deleted in 0..(11 * width * BYTES_PER_CELL) {
+            assert!(state.pop_input(), "backspace {deleted}: nothing to pop");
+            let ahead = fold_ahead(&state, width, cap);
+
+            assert!(
+                ahead <= width * BYTES_PER_CELL,
+                "backspace {deleted}: the paint folds {ahead} bytes, more \
+                 than the row the whole line is meant to cost"
+            );
+            let window = wrap_window(
+                &state.input,
+                width,
+                cap,
+                &state.breaks,
+                state.non_ascii,
+                &state.row_starts,
+                &state.row_width,
+            );
+            assert!(
+                window.len() <= (cap + 2) * width * BYTES_PER_CELL,
+                "backspace {deleted}: {} bytes walked for {cap} rows",
+                window.len()
+            );
+            assert_eq!(
+                state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL),
+                wrap(&state.input, width, cap, Break::Cell),
+                "backspace {deleted}: the rows are the whole input's own"
             );
         }
     }
@@ -2712,7 +2833,7 @@ mod tests {
                     // two-cell character: the remembered offset is still a
                     // char boundary the text reaches, and the cell it stood
                     // at has moved, so it is no longer a row boundary
-                    let at = state.composer_anchor.get().map_or(0, |(_, at)| at);
+                    let at = state.row_starts.borrow().last().copied().unwrap_or(0);
                     while state.input.len() + 3 > at && state.pop_input() {}
                     state.push_input(&format!("\u{2014}{letters}"));
                 }),
@@ -2731,21 +2852,30 @@ mod tests {
                 whole(&state),
                 "{name}: the rows are the whole input's own"
             );
-            if let Some((at_width, at)) = state.composer_anchor.get() {
+            let starts = state.row_starts.borrow();
+            if !starts.is_empty() {
                 assert_eq!(
-                    at_width, width,
-                    "{name}: the anchor carries the width it was found at"
+                    state.row_width.get(),
+                    width,
+                    "{name}: the list carries the width it was folded at"
                 );
+            }
+            for pair in starts.windows(2) {
+                assert!(
+                    pair[0] < pair[1],
+                    "{name}: {pair:?} is not an ascending pair of boundaries"
+                );
+            }
+            for &at in starts.iter() {
                 assert!(
                     at <= state.input.len() && state.input.is_char_boundary(at),
-                    "{name}: the anchor at {at} is not an offset of the text"
+                    "{name}: the boundary at {at} is not an offset of the text"
                 );
             }
         }
 
-        assert_eq!(
-            state.composer_anchor.get(),
-            None,
+        assert!(
+            state.row_starts.borrow().is_empty(),
             "and a submitted prompt leaves nothing remembered"
         );
     }
@@ -2776,9 +2906,9 @@ mod tests {
     }
 
     /// The shared fold against the same four thousand shapes the window
-    /// itself is walked over: the offset [`last_row_boundary`] reports is a
-    /// boundary [`wrap`] opens a row at, so wrapping the text from there is
-    /// the tail of wrapping the whole of it.
+    /// itself is walked over: the offset [`row_start_at_or_before`] reports
+    /// is a boundary [`wrap`] opens a row at, so wrapping the text from
+    /// there is the tail of wrapping the whole of it.
     ///
     /// This is the property the two folds are one mechanism by. They are
     /// written twice -- once producing rows, once producing an offset --
@@ -2814,7 +2944,8 @@ mod tests {
             }
             let limit = input.len() - (cap + 1) * width * BYTES_PER_CELL;
 
-            let at = last_row_boundary(&input, width, 0, limit);
+            let starts = RefCell::new(Vec::new());
+            let at = row_start_at_or_before(&input, width, limit, &starts, &Cell::new(0));
 
             assert!(
                 at <= limit && input.is_char_boundary(at),
