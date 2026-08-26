@@ -302,10 +302,24 @@ fn parse_slow_ms(raw: Option<String>) -> Result<u64, FixtureError> {
 /// manager itself left out (it is bootstrapped by path, not declared as a
 /// spec entry).
 fn cached_plugin_names(lazy_dir: &Path) -> Result<Vec<String>, FixtureError> {
-    let entries = std::fs::read_dir(lazy_dir).map_err(|source| FixtureError::Copy {
-        path: lazy_dir.to_path_buf(),
-        source,
-    })?;
+    let entries = match std::fs::read_dir(lazy_dir) {
+        Ok(entries) => entries,
+        // a cache directory that was never created is the emptiest case
+        // there is, and the host that meets it -- a fresh clone, a CI
+        // runner -- is exactly the one the populate-it-first diagnostic is
+        // written for. Reported as an unreadable path it says nothing.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(FixtureError::EmptyPluginCache {
+                path: lazy_dir.to_path_buf(),
+            })
+        }
+        Err(source) => {
+            return Err(FixtureError::Copy {
+                path: lazy_dir.to_path_buf(),
+                source,
+            })
+        }
+    };
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| FixtureError::Copy {
@@ -852,6 +866,17 @@ mod tests {
                 "an unpopulated cache must say so; got {err:?}"
             ),
         }
+    }
+
+    #[test]
+    fn a_cache_directory_that_was_never_created_reports_the_empty_cache() {
+        let base = ScratchDir::new("fixture-absent-cache").unwrap();
+        let absent = base.join("nvim").join("lazy");
+        let err = cached_plugin_names(&absent).expect_err("an absent cache cannot be walked");
+        assert!(
+            matches!(err, FixtureError::EmptyPluginCache { .. }),
+            "a cache nobody populated must say so rather than report the path unreadable; got {err:?}"
+        );
     }
 
     #[test]
