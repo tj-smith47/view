@@ -26,9 +26,11 @@
 # "calls something that does", so a reader added tomorrow joins it without
 # being listed anywhere.
 #
-# Scope: whole-line comments are dropped before scanning, so prose naming a
-# banned spelling costs nothing. `grep -E` is deliberately not in scope --
-# both greps take `\b` there, and `scripts/check-style.sh` relies on it.
+# Scope: whole-line comments and here-doc bodies are dropped before scanning,
+# so prose naming a banned spelling costs nothing -- the shell hands a here-doc
+# body to a program as data and never expands it as a command. `grep -E` is
+# deliberately not in scope -- both greps take `\b` there, and
+# `scripts/check-style.sh` relies on it.
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -43,8 +45,45 @@ WORD='(^|[^[:alnum:]_-])'
 
 fail=0
 
-# every line that is not wholly a comment, numbered
-code() { grep -nvE '^[[:space:]]*#' "$1" || true; }
+# ASCII field separator: a scanned line may start with a tab, and a tab-
+# separated record would split that indentation into a field of its own and
+# push the code out of $4.
+SEP=$'\034'
+
+# Rules shared by both passes: drop whole-line comments, and drop the body of
+# a here-doc. `<<<` is a here-string -- one line of data, no body to skip --
+# and an unterminated tag or a left shift yields an empty tag, which is no
+# here-doc at all. The introducing line still gets scanned; only the body and
+# its terminator are dropped.
+SKIP='function tag_of(line,   p, rest, c, t) {
+  p = index(line, "<<")
+  if (p == 0) return ""
+  rest = substr(line, p + 2)
+  if (substr(rest, 1, 1) == "<") return ""
+  dash = 0
+  if (substr(rest, 1, 1) == "-") { dash = 1; rest = substr(rest, 2) }
+  c = substr(rest, 1, 1)
+  if (c == SQ || c == DQ) rest = substr(rest, 2)
+  t = ""
+  while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_]/) {
+    t = t substr(rest, 1, 1)
+    rest = substr(rest, 2)
+  }
+  return t
+}
+FNR == 1 { tag = "" }
+tag != "" {
+  line = $0
+  if (dash) sub(/^\t+/, "", line)
+  if (line == tag) tag = ""
+  next
+}
+/^[[:space:]]*#/ { next }
+{ t = tag_of($0); if (t != "") tag = t }
+'
+
+# every line the shell would run, numbered
+code() { awk -v SQ="'" -v DQ='"' "$SKIP"'{ print FNR ":" $0 }' "$1"; }
 
 report() {
   printf 'PORTABILITY FAIL: %s -- %s\n' "$1" "$2"
@@ -92,17 +131,16 @@ done
 # every function in this tree is written; a one-liner closes on its own
 # line.
 annotate() {
-  awk '
-    /^[[:space:]]*#/ { next }
+  awk -v SQ="'" -v DQ='"' -v S="$SEP" "$SKIP"'
     {
       if (fn == "" && match($0, /^[A-Za-z_][A-Za-z0-9_-]*\(\)[[:space:]]*\{/)) {
         name = $0; sub(/\(\).*/, "", name)
-        print FILENAME "\t" FNR "\t" name "\t" $0
+        print FILENAME S FNR S name S $0
         if ($0 !~ /\}[[:space:]]*$/) fn = name
         next
       }
-      if (fn != "" && $0 ~ /^\}/) { print FILENAME "\t" FNR "\t" fn "\t" $0; fn = ""; next }
-      print FILENAME "\t" FNR "\t" (fn == "" ? "-" : fn) "\t" $0
+      if (fn != "" && $0 ~ /^\}/) { print FILENAME S FNR S fn S $0; fn = ""; next }
+      print FILENAME S FNR S (fn == "" ? "-" : fn) S $0
     }
   ' "$@"
 }
@@ -111,7 +149,7 @@ ANNOTATED=$(annotate "${targets[@]}")
 
 # seed: a body that puts one of its own positionals on the right of `=~`
 readers=$(printf '%s\n' "$ANNOTATED" |
-  awk -F'\t' '$3 != "-" && $4 ~ /=~[[:space:]]*"?[$][{]?[0-9]/ { print $3 }' | sort -u | grep . || true)
+  awk -F"$SEP" '$3 != "-" && $4 ~ /=~[[:space:]]*"?[$][{]?[0-9]/ { print $3 }' | sort -u | grep . || true)
 # closure: a body that hands a reader nothing but a variable is a forwarder,
 # and the pattern that variable holds is whatever ITS caller wrote -- so the
 # forwarder's own call sites are call sites of the reader. A body passing a
@@ -122,7 +160,7 @@ FORWARDS='[[:space:]]+"?[$][{]?[A-Za-z_][A-Za-z0-9_]*[}]?"?([[:space:]]|$)'
 while [ -n "$readers" ]; do
   alternation=$(printf '%s\n' "$readers" | tr '\n' '|' | sed 's/|$//')
   grown=$(printf '%s\n%s\n' "$readers" "$(printf '%s\n' "$ANNOTATED" |
-    awk -F'\t' -v re="$WORD($alternation)$FORWARDS" '$3 != "-" && $4 ~ re { print $3 }')" |
+    awk -F"$SEP" -v re="$WORD($alternation)$FORWARDS" '$3 != "-" && $4 ~ re { print $3 }')" |
     sort -u | grep . || true)
   [ "$grown" = "$readers" ] && break
   readers=$grown
@@ -130,7 +168,7 @@ done
 
 for reader in $readers; do
   sites=$(printf '%s\n' "$ANNOTATED" |
-    awk -F'\t' -v re="$WORD$reader[[:space:]]+[\"']" '$4 ~ re { print $1 ":" $2 ":" $4 }' || true)
+    awk -F"$SEP" -v re="$WORD$reader[[:space:]]+[\"']" '$4 ~ re { print $1 ":" $2 ":" $4 }' || true)
   [ -n "$sites" ] || continue
   while IFS= read -r site; do
     [ -n "$site" ] || continue
