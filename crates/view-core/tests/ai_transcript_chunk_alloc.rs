@@ -22,9 +22,13 @@ use view_test_support::CountingAllocator;
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
 /// 500 chunks sharing one `message_id` fold into a single transcript entry
-/// via far fewer than 500 allocations: `String::push_str`'s amortized
-/// growth means the total stays close to `log2(total bytes)` reallocations
-/// rather than one allocation per chunk. A fresh `Vec`/`String` per chunk
+/// via a fixed 13 allocations: `String::push_str`'s amortized growth means
+/// the total stays close to `log2(total bytes)` reallocations rather than
+/// one allocation per chunk. The bound sits just above the measured count
+/// rather than at a round number -- [`CountingAllocator`] counts only this
+/// thread, so there is no harness noise for a slack to absorb, and slack
+/// past what the code costs is only room for a regression to hide in. A
+/// fresh `Vec`/`String` per chunk
 /// -- the regression this budget exists to catch -- would cost exactly one
 /// allocation per chunk instead, which a chatty agent streaming many chunks
 /// per second would turn into a per-`update()`-call cost that scales with
@@ -43,9 +47,13 @@ fn five_hundred_same_id_chunks_fold_via_far_fewer_than_five_hundred_allocations(
     let entry = transcript.iter().next().expect("one folded entry");
     assert_eq!(entry.text, "x".repeat(500));
     assert!(
-        allocations <= 30,
-        "500 chunks folded via {allocations} allocations -- expected a small \
-         constant (one-time setup: the entry, the message-id index, the \
-         render-cache slot) rather than anything that scales with chunk count"
+        allocations <= 16,
+        "500 chunks folded via {allocations} allocations -- the measured \
+         constant is 13 (the entry, its message-id index slot, its \
+         render-cache slot, and `String::push_str`'s doublings across 500 \
+         bytes), and the 3 above it is room for a growth strategy that \
+         doubles from a different floor. The regression this bounds costs \
+         one allocation per chunk, so it lands at 500-odd and cannot fit \
+         under any margin this side of the chunk count."
     );
 }
