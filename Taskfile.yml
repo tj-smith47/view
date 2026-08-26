@@ -87,12 +87,13 @@ tasks:
     cmd: bash scripts/hold-awake.sh cargo test {{.CLI_ARGS}}
 
   audit:
-    desc: Enforce crate dependency direction, the pinned engine version, budget drift, the shell spellings both userlands accept, and the hook and reader case matrices
+    desc: Enforce crate dependency direction, the pinned engine version, budget drift, the shell spellings both userlands accept, and the hook, portability and reader case matrices
     cmds:
       - bash scripts/audit-deps.sh
       - bash scripts/check-engine-pin.sh
       - bash scripts/check-budget-drift.sh
       - bash scripts/check-portability.sh
+      - bash scripts/check-portability-cases.sh
       - bash .claude/hooks/tests/validate-commands-cases.sh
       - bash scripts/reader-cases.sh
 

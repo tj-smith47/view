@@ -33,7 +33,9 @@
 # `scripts/check-style.sh` relies on it.
 set -euo pipefail
 
-ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+# A scan root handed in as the single argument replaces the tree this script
+# lives in, which is how the case matrix points it at a fixture tree.
+ROOT=${1:-$(cd -- "$(dirname -- "$0")/.." && pwd)}
 cd "$ROOT"
 SELF=$(basename -- "$0")
 
@@ -50,36 +52,80 @@ fail=0
 # push the code out of $4.
 SEP=$'\034'
 
-# Rules shared by both passes: drop whole-line comments, and drop the body of
-# a here-doc. `<<<` is a here-string -- one line of data, no body to skip --
-# and an unterminated tag or a left shift yields an empty tag, which is no
-# here-doc at all. The introducing line still gets scanned; only the body and
-# its terminator are dropped.
-SKIP='function tag_of(line,   p, rest, c, t) {
-  p = index(line, "<<")
-  if (p == 0) return ""
-  rest = substr(line, p + 2)
-  if (substr(rest, 1, 1) == "<") return ""
-  dash = 0
-  if (substr(rest, 1, 1) == "-") { dash = 1; rest = substr(rest, 2) }
-  c = substr(rest, 1, 1)
-  if (c == SQ || c == DQ) rest = substr(rest, 2)
-  t = ""
-  while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_]/) {
-    t = t substr(rest, 1, 1)
-    rest = substr(rest, 2)
+# Rules shared by both passes: drop whole-line comments, and drop the bodies
+# of the here-docs a line opens. Every `<<TAG` on the line opens one and their
+# bodies arrive in the order the tags were written, so a queue tracks them
+# rather than a single tag. A `<<` reached inside a quoted string, or past the
+# `#` that starts a trailing comment, is not an opener at all: reading one as
+# an opener swallows the remainder of the file as data and hides the real call
+# sites behind it, which is the one direction this scan must never fail in.
+# `<<<` is a here-string -- one line of data, no body to skip -- and a left
+# shift or a bare `<<` yields an empty tag, which is no here-doc either. The
+# introducing line still gets scanned; only the body and its terminator are
+# dropped. A tag still open when a file ends means this tokenizer read
+# something as an opener that the shell does not, so it stops the run loudly
+# instead of narrowing the scan in silence.
+SKIP='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out) {
+  out = ""
+  n = length(line)
+  q = ""
+  i = 1
+  while (i <= n) {
+    c = substr(line, i, 1)
+    if (q != "") {
+      if (q == DQ && c == "\\") { i += 2; continue }
+      if (c == q) q = ""
+      i += 1
+      continue
+    }
+    if (c == "\\") { i += 2; continue }
+    if (c == SQ || c == DQ) { q = c; i += 1; continue }
+    if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;&|(]/)) break
+    if (c != "<" || substr(line, i + 1, 1) != "<") { i += 1; continue }
+    rest = substr(line, i + 2)
+    if (substr(rest, 1, 1) == "<") { i += 3; continue }
+    dash = ""
+    if (substr(rest, 1, 1) == "-") { dash = "-"; rest = substr(rest, 2) }
+    qc = substr(rest, 1, 1)
+    if (qc == SQ || qc == DQ || qc == "\\") rest = substr(rest, 2)
+    t = ""
+    while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_]/) {
+      t = t substr(rest, 1, 1)
+      rest = substr(rest, 2)
+    }
+    if (t != "" && (qc == SQ || qc == DQ) && substr(rest, 1, 1) == qc) rest = substr(rest, 2)
+    if (t != "") out = out dash t "\n"
+    i = n - length(rest) + 1
   }
-  return t
+  return out
 }
-FNR == 1 { tag = "" }
-tag != "" {
+function unterminated() {
+  printf("PORTABILITY-SELF-FAIL: %s opens a here-doc <<%s that no later line closes; the scan would read the rest of that file as data\n", opened[qh], queue[qh]) > "/dev/stderr"
+  exit 2
+}
+BEGIN { qh = 1; qn = 0 }
+FNR == 1 { if (qn >= qh) unterminated(); qh = 1; qn = 0; fn = "" }
+qn >= qh {
   line = $0
-  if (dash) sub(/^\t+/, "", line)
-  if (line == tag) tag = ""
+  cur = queue[qh]
+  if (substr(cur, 1, 1) == "-") { sub(/^\t+/, "", line); cur = substr(cur, 2) }
+  if (line == cur) qh += 1
   next
 }
 /^[[:space:]]*#/ { next }
-{ t = tag_of($0); if (t != "") tag = t }
+{
+  found = tags_of($0)
+  if (found != "") {
+    m = split(found, tags, "\n")
+    for (k = 1; k <= m; k += 1) {
+      if (tags[k] == "") continue
+      qn += 1
+      queue[qn] = tags[k]
+      opened[qn] = FILENAME ":" FNR
+    }
+  }
+}
+END { if (qn >= qh) unterminated() }
 '
 
 # every line the shell would run, numbered
