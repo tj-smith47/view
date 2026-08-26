@@ -396,6 +396,56 @@ ensure_artifact() {
     }
 }
 
+# Where the panel spells the glyph each transcript entry opens with.
+TRANSCRIPT_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/transcript.rs
+
+# The glyph the marker constant `name` holds in the panel's own source,
+# with the escape it is written as resolved.
+#
+#   USER_MARK=$(mark_str USER_MARK) || exit 1
+#
+# Read rather than spelled here: a script carrying its own copy of a glyph
+# keeps asserting a character the panel may have stopped painting, and
+# passes every run until someone reads the screen by eye.
+mark_str() {
+    local name="$1" value
+    value=$(grep -oE "^const $name: &str = \"[^\"]+\"" "$TRANSCRIPT_RS" |
+        sed -E 's/.*"(.*)"/\1/') || true
+    if [ -z "$value" ]; then
+        printf 'FAIL: %s is not a marker constant in %s any more\n' \
+            "$name" "$TRANSCRIPT_RS" >&2
+        return 1
+    fi
+    printf '%b' "$(printf '%s' "$value" | sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')"
+}
+
+# Every frame an animating marker cycles through, as one ERE alternation.
+#
+#   SPINNER_ALTERNATION=$(spinner_alternation) || exit 1
+#
+# Which frame is on screen depends on when the screen was read, so an
+# assertion that something is still running has to accept any of them --
+# and an entry whose turn is still in flight wears one of these in place of
+# the marker its role would otherwise open with.
+spinner_alternation() {
+    local frames
+    frames=$(awk '
+        /^const SPINNER_FRAMES/ { inside = 1; next }
+        inside && /^\];/ { exit }
+        inside && match($0, /"[^"]+"/) {
+            frame = substr($0, RSTART + 1, RLENGTH - 2)
+            sub(/ $/, "", frame)
+            printf "%s%s", (n++ ? "|" : ""), frame
+        }
+    ' "$TRANSCRIPT_RS")
+    if [ -z "$frames" ]; then
+        printf 'FAIL: SPINNER_FRAMES no longer lists the running marker frames in %s\n' \
+            "$TRANSCRIPT_RS" >&2
+        return 1
+    fi
+    printf '%b' "$(printf '%s' "$frames" | sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')"
+}
+
 # The pane as it stands, for the session the leg drives. Empty rather than
 # failing when there is no session to capture: the callers are assertions,
 # and a capture that failed is a screen holding none of what they look for.

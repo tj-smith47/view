@@ -58,7 +58,6 @@ FIXTURE=$REPO_ROOT/compat/fixtures/minimal
 PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
 REVIEW_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/review.rs
 PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
-TRANSCRIPT_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/transcript.rs
 STUB_RS=$REPO_ROOT/crates/view-ai/tests/fixtures/stub_agent.rs
 MAPPINGS_RS=$REPO_ROOT/crates/view-core/src/native/mappings.rs
 NVIM_API_RS=$REPO_ROOT/crates/view-engine/src/nvim_api.rs
@@ -182,22 +181,6 @@ const_str() {
         return 1
     fi
     printf '%s' "$value"
-}
-
-# The glyph one transcript marker renders as, read from the `const` that
-# owns it and decoded out of Rust's `\u{...}` escape: the panel says who
-# spoke and how a call went in a marker rather than a word, so the marker is
-# what this script has to look for on screen.
-mark_str() {
-    local name="$1" value
-    value=$(grep -oE "^const $name: &str = \"[^\"]+\"" "$TRANSCRIPT_RS" |
-        sed -E 's/.*"(.*)"/\1/') || true
-    if [ -z "$value" ]; then
-        printf 'FAIL: %s is not a marker constant in %s any more\n' \
-            "$name" "$TRANSCRIPT_RS" >&2
-        return 1
-    fi
-    printf '%b' "$(printf '%s' "$value" | sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')"
 }
 
 # The marker one status arm renders as, joined from the match arm that
@@ -1099,25 +1082,7 @@ THOUGHT_PREFIX=$(mark_str "$THOUGHT_PREFIX") || exit 1
 # The marker the user's own side wears once nothing is pending on it -- the
 # glyph the submitted prompt's spinner stands back down to.
 USER_PREFIX=$(arm_mark "TranscriptRole::User") || exit 1
-# Every frame an unresolved call's marker cycles through, as one alternation:
-# the frame on screen depends on when the screen was read, so the assertion
-# that a call is running has to accept any of them.
-SPINNER_ALTERNATION=$(awk '
-    /^const SPINNER_FRAMES/ { inside = 1; next }
-    inside && /^\];/ { exit }
-    inside && match($0, /"[^"]+"/) {
-        frame = substr($0, RSTART + 1, RLENGTH - 2)
-        sub(/ $/, "", frame)
-        printf "%s%s", (n++ ? "|" : ""), frame
-    }
-' "$TRANSCRIPT_RS")
-[ -n "$SPINNER_ALTERNATION" ] || {
-    printf 'FAIL: SPINNER_FRAMES no longer lists the running marker frames in %s\n' \
-        "$TRANSCRIPT_RS" >&2
-    exit 1
-}
-SPINNER_ALTERNATION=$(printf '%b' "$(printf '%s' "$SPINNER_ALTERNATION" |
-    sed -E 's/\\u\{([0-9a-fA-F]+)\}/\\u\1/g')")
+SPINNER_ALTERNATION=$(spinner_alternation) || exit 1
 # The marker the plan's current task opens with -- the task the stub's own
 # plan update sends as `in_progress` (`docs/acp-v1-wire-capture.md`'s `Plan`
 # pin), read from the arm that renders that state rather than from a word

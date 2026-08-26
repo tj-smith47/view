@@ -67,6 +67,21 @@ WAIT_SECS=25
 # looser than any of them, because what it exists to catch is a gesture that
 # does nothing at all.
 REACTION_SECS=5
+# The mark the transcript opens a prompt the user sent with, and the frames
+# it wears instead while that prompt's turn is still in flight. Read off the
+# panel's own source (`mark_str`, `spinner_alternation`), never spelled
+# here.
+#
+# What a leg asserts a prompt with, rather than the text alone: the composer
+# holds what was typed whether the panel took it as a prompt or refused it,
+# so text on screen says nothing about which happened. The mark does.
+USER_MARK=$(mark_str USER_MARK) || exit 1
+SPINNER_ALTERNATION=$(spinner_alternation) || exit 1
+# The two together, as one alternation: a prompt the panel has taken opens
+# with the settled mark or with whichever frame the screen was read on. The
+# space the settled mark carries is dropped here, since the frames beside it
+# are the glyphs alone.
+TAKEN_MARKS="${USER_MARK% }|$SPINNER_ALTERNATION"
 
 SESSIONS=()
 ROOTS=()
@@ -1467,12 +1482,8 @@ leg_panel_paste() {
 
     # Sent, so what follows starts from an empty composer rather than from
     # whatever this block left in it.
-    local user_mark
-    # the transcript's own mark for a prompt the user sent, built here
-    # rather than written as a literal so the file stays ASCII
-    user_mark=$(printf '\u276f')
     send_key Enter
-    wait_in_box "$user_mark $mark" "$WAIT_SECS" "the sent prompt in the transcript" >/dev/null
+    wait_in_box "$USER_MARK$mark" "$WAIT_SECS" "the sent prompt in the transcript" >/dev/null
 
     # The dogfood complaint's other half: a pasted multi-line prompt read as
     # one condensed row. Its lines have to stand on rows of their own, in
@@ -1504,7 +1515,7 @@ $end"
     # Sent: the entry's own mark opens the first line and the second reads
     # indented under it, on a row of its own.
     send_key Enter
-    echoed=$(wait_in_box "$user_mark $top" "$REACTION_SECS" "the submitted prompt in the transcript")
+    echoed=$(wait_in_box "$USER_MARK$top" "$REACTION_SECS" "the submitted prompt in the transcript")
     assert_chrome 'the agent panel echoing a multi-line prompt'
     read -r top_row _ _ _ <<<"$(text_span "$top")"
     read -r end_row _ _ _ <<<"$(text_span "$end")"
@@ -1542,7 +1553,7 @@ $end"
     pass "a typed line break opens a composer row (${echoed}s)"
 
     send_key Enter
-    echoed=$(wait_in_box "$user_mark $typed_top" "$REACTION_SECS" "the typed prompt in the transcript")
+    echoed=$(wait_in_box "$USER_MARK$typed_top" "$REACTION_SECS" "the typed prompt in the transcript")
     copies=$(box_text | grep -cF -- "$typed_end" || true)
     if [ "$copies" != 1 ]; then
         fail "the typed prompt's last line is on screen $copies times, so <CR> did not send what was typed"
@@ -1742,14 +1753,30 @@ leg_resize_chord() {
     # prefix below is armed inside a window this leg closes rather than one
     # it races the agent for
     send_text 'propose-when-released'
-    send_key Enter
-    # the submitted prompt on screen is the proof view has drained the
+    # The transcript's own entry is the proof view has drained the
     # keystrokes before the prefix: without it the `settle` below is the
     # only thing standing between the prefix and a review that lands first,
     # and a prefix the panel never read makes every assertion after it pass
-    # on a case the leg did not set up
-    wait_in_box 'propose-when-released' "$REACTION_SECS" \
-        'the prompt whose review this leg holds' >/dev/null
+    # on a case the leg did not set up. The mark is what makes it proof --
+    # the text alone is on screen from the moment it is typed, in the
+    # composer, whether or not the panel ever took it as a prompt.
+    #
+    # And the key is repeated rather than sent once: the panel runs one
+    # turn at a time, the `FELLTHROUGH` above is a turn, and a `<CR>`
+    # arriving while it is still in flight is refused with the text left
+    # in the composer. A repeat costs nothing -- `<CR>` on the empty
+    # composer a submit leaves behind is the same no-op.
+    start=$(now)
+    while :; do
+        send_key Enter
+        capture
+        matches "($TAKEN_MARKS) propose-when-released" "$(box_text)" && break
+        if ! under "$(elapsed "$start" "$(now)")" "$WAIT_SECS"; then
+            fail "the prompt whose review this leg holds was never taken: nothing in the transcript opens 'propose-when-released' with one of '$TAKEN_MARKS' after ${WAIT_SECS}s"
+            return 1
+        fi
+        sleep "$POLL"
+    done
     send_key 'C-w'
     settle
     # the panel paints no pending-chord indicator, so this reads the
@@ -1880,7 +1907,7 @@ leg_transcript_reflow() {
     body=$(awk 'BEGIN { for (i = 0; i < 14; i++) printf "reflowing " }')
     send_text "$head $body$tail"
     send_key Enter
-    wait_in_box "$head" "$WAIT_SECS" "the submitted entry" >/dev/null
+    wait_in_box "$USER_MARK$head" "$WAIT_SECS" "the submitted entry" >/dev/null
     holds "$tail" "$(box_text_joined)" || {
         fail "the submitted entry is on screen without its own tail ('$tail'), so it was cut rather than wrapped"
         return 1

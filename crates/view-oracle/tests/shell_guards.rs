@@ -191,6 +191,81 @@ pane \"$SESSION\"
     );
 }
 
+/// Where the panel defines the glyphs its transcript opens entries with.
+const MARK_SOURCE: &str = "crates/view-core/src/native/ai_panel/transcript.rs";
+
+/// Every glyph the panel opens a transcript entry with, as the lowercase
+/// hex of its escape: the marker constants and the spinner frames an entry
+/// wears while its turn is in flight.
+fn painted_marks(code: &str) -> Vec<String> {
+    let mut marks = Vec::new();
+    let mut inside_frames = false;
+    for line in code.lines() {
+        let named = line.starts_with("const ") && line.contains(": &str = \"");
+        if line.starts_with("const SPINNER_FRAMES") {
+            inside_frames = true;
+        } else if inside_frames && line.starts_with("];") {
+            inside_frames = false;
+        }
+        if !named && !inside_frames {
+            continue;
+        }
+        let mut rest = line;
+        while let Some((_, tail)) = rest.split_once("\\u{") {
+            let Some((hex, after)) = tail.split_once('}') else {
+                break;
+            };
+            marks.push(hex.to_ascii_lowercase());
+            rest = after;
+        }
+    }
+    marks
+}
+
+/// A leg proving a prompt was taken -- or a call still running -- reads the
+/// glyph the entry opens with, because the text alone is on screen from the
+/// moment it is typed: the composer holds it whether the panel took it or
+/// refused it. So the glyphs come out of the panel's own source at run time
+/// (`mark_str`, `spinner_alternation` in the shared helper), and no script
+/// spells one itself: a spelled copy keeps asserting a character the panel
+/// may have stopped painting, and passes until someone reads the screen by
+/// eye.
+#[test]
+fn no_script_spells_a_mark_the_panel_paints() {
+    let root = repo_root();
+    let code = std::fs::read_to_string(root.join(MARK_SOURCE))
+        .expect("the panel's transcript must be readable");
+    let marks = painted_marks(&code);
+    assert!(
+        marks.len() > 8,
+        "the reader found {} glyphs in {MARK_SOURCE}, so it is not reading \
+         the markers and every script below would pass against nothing",
+        marks.len()
+    );
+    let mut spelled = Vec::new();
+    for (name, text) in governed_scripts() {
+        for (index, line) in text.lines().enumerate() {
+            let lowered = line.to_ascii_lowercase();
+            for hex in &marks {
+                let literal = u32::from_str_radix(hex, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .expect("a marker's escape must name a character");
+                if lowered.contains(hex) || line.contains(literal) {
+                    spelled.push(format!("{name}:{}: {}", index + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        spelled.is_empty(),
+        "these spell a glyph the panel opens a transcript entry with, rather \
+         than reading it from {MARK_SOURCE} at run time:\n  {}\nRead it with \
+         `mark_str`/`spinner_alternation` instead",
+        spelled.join("\n  ")
+    );
+}
+
 #[test]
 fn every_guarded_capture_can_reach_its_guard() {
     let mut unreachable = Vec::new();
