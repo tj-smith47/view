@@ -331,11 +331,17 @@ assert_restart_recovered() {
     # owed a `cmdline_hide` for, painted over the replacement's own first
     # frame. A unit pin can say the model no longer holds one; only the pane
     # can say the last row is not still showing it, which is where a user
-    # meets it
+    # meets it.
+    #
+    # Any leading `:` and not one command's text: the command line left
+    # behind is the one that wedged the engine, which differs per leg and
+    # will differ again for the next wedge added here. Naming one command
+    # made this a row that could not fail -- the engine hides `:preserve`
+    # before it dies, so the string never reached the pane at all.
     local last_row
     last_row=$(pane | grep -v '^$' | tail -1)
     case "$last_row" in
-    *:preserve*)
+    :*)
         fail "the last row still reads '$last_row' after the restart, so the dead engine's command line is painted over its replacement"
         return 1
         ;;
