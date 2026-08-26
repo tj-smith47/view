@@ -2197,6 +2197,9 @@ const BUSY_TEXT_BACKOFF: Duration = Duration::from_millis(10);
 /// under a live process dies as promptly. Bounded rather than open-ended so
 /// a child `SIGKILL`ed late (an out-of-memory kill during a slow handshake,
 /// a session torn down by hand) is reported, not respawned six times.
+/// Unix-only with the reader it bounds: no other platform lets an exec of a
+/// file open for writing through, so the whole race is gated away there.
+#[cfg(unix)]
 const KILLED_AT_SPAWN_WINDOW: Duration = Duration::from_millis(500);
 
 /// Whether `child` is a spawn the installer race killed: exec succeeded and
