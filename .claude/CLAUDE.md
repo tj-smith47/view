@@ -44,7 +44,9 @@ Hard rules (in addition to global rules):
   gate the user has removed more than once), `git push origin <branch>:master`
   as a singular standalone command (the hook's ask-only guard is about
   command shape), and whoever lands it obtains the green run — never handed
-  to a later session.
+  to a later session. **`master` is the only remote branch**: never push
+  the local branch ref itself, never leave a second head on origin — the
+  remote carries master and tags, nothing else (user ruling 2026-08-26).
 - **Work is never kicked into a later phase.** Findings are fixed in the wave
   that found them. The one approved deferral: implement all features first,
   holding existing quality bars (ledgered when close), then one pre-v0.1.0
