@@ -988,6 +988,27 @@ fn wrap_window<'a>(
     &input[start..]
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Reads that could not reach the cached list and folded the prefix
+    /// instead, counted per thread.
+    ///
+    /// The fallback returns the offset the cached read returns, so nothing
+    /// asserted about the window can tell the two apart -- and what
+    /// separates them is the whole cost the list exists to remove. The
+    /// composer's per-keystroke pins read this, so a caller that makes the
+    /// reader re-entrant fails a pin instead of quietly paying `O(line)`
+    /// per keystroke.
+    static UNCACHED_ROW_START_READS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many times this thread has folded the prefix rather than reading
+/// the cached list.
+#[cfg(test)]
+fn uncached_row_start_reads() -> usize {
+    UNCACHED_ROW_START_READS.with(Cell::get)
+}
+
 /// The last [`Break::Cell`] row boundary of `input` at or before `limit`,
 /// answered from `starts` and folding only what `starts` has not reached.
 ///
@@ -1012,6 +1033,8 @@ fn row_start_at_or_before(
     folded_at: &Cell<usize>,
 ) -> usize {
     let Ok(mut starts) = starts.try_borrow_mut() else {
+        #[cfg(test)]
+        UNCACHED_ROW_START_READS.with(|reads| reads.set(reads.get() + 1));
         let mut fresh = Vec::new();
         extend_row_starts(input, width, 0, limit, &mut fresh);
         return fresh.last().copied().unwrap_or(0);
@@ -2709,6 +2732,7 @@ mod tests {
         state.push_input(&format!("\u{2014}{letters}"));
         let _ = state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL);
 
+        let uncached = uncached_row_start_reads();
         for typed in 0..64_usize {
             state.push_input("x");
             let ahead = fold_ahead(&state, width, cap);
@@ -2739,6 +2763,13 @@ mod tests {
                 state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL),
                 wrap(&state.input, width, cap, Break::Cell),
                 "keystroke {typed}: the rows are the whole input's own"
+            );
+            assert_eq!(
+                uncached_row_start_reads(),
+                uncached,
+                "keystroke {typed}: the read fell back to folding the whole \
+                 prefix, which returns the same offset and pays the cost the \
+                 list exists to remove"
             );
         }
     }
@@ -2777,6 +2808,7 @@ mod tests {
         state.push_input(&format!("\u{2014}{letters}"));
         let _ = state.composer_rows(TEN_ROW_PANEL, WIDE_PANEL);
 
+        let uncached = uncached_row_start_reads();
         for deleted in 0..(11 * width * BYTES_PER_CELL) {
             assert!(state.pop_input(), "backspace {deleted}: nothing to pop");
             let held = state.row_starts.borrow().len();
@@ -2805,6 +2837,13 @@ mod tests {
                 wrap(&state.input, width, cap, Break::Cell),
                 "backspace {deleted}: the rows are the whole input's own"
             );
+            assert_eq!(
+                uncached_row_start_reads(),
+                uncached,
+                "backspace {deleted}: the read fell back to folding the whole \
+                 prefix, which returns the same offset and pays the cost the \
+                 list exists to remove"
+            );
         }
     }
 
@@ -2825,6 +2864,7 @@ mod tests {
         let folded_at = Cell::new(width);
         let cached = row_start_at_or_before(&input, width, limit, &starts, &folded_at);
 
+        let before = uncached_row_start_reads();
         let held = starts.borrow_mut();
         let uncached = row_start_at_or_before(&input, width, limit, &starts, &folded_at);
         drop(held);
@@ -2833,6 +2873,12 @@ mod tests {
             cached, uncached,
             "a read that cannot reach the list opens the window where the \
              one that can does"
+        );
+        assert_eq!(
+            uncached_row_start_reads(),
+            before + 1,
+            "the fallback the perf pins watch for is counted when it is \
+             taken, or those pins are asserting nothing"
         );
     }
 
