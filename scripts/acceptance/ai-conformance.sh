@@ -477,8 +477,14 @@ leg_session_lifecycle() {
         tail -1 | grep -oE '[A-Za-z]+$') || true
     said=$(grep -E 'ai MessageChunk .*from_agent: true' "$ROOT/view.log" |
         tail -1 | sed -E 's/.*text: "(.*)".*/\1/') || true
+    # The text match is a fallback for an adapter that refuses without
+    # saying so in the stop reason, and it is gated on that reason for the
+    # same rule two lines above: a model's words are its own, so a turn the
+    # adapter ended normally is never a host verdict however the model
+    # happened to phrase it.
     if [ "$stop_reason" = "Refusal" ] ||
-        printf '%s' "$said" | grep -qiE 'authentication|not logged in'; then
+        { [ "$stop_reason" != "EndTurn" ] &&
+            printf '%s' "$said" | grep -qiE 'authentication|not logged in'; }; then
         refused="the real adapter refused the turn (stop_reason: ${stop_reason:-none logged}), saying: ${said:-nothing}"
         refused="$refused -- one-line repro on this host: claude -p 'say hi'"
         if [ "$(uname -s)" = Darwin ]; then

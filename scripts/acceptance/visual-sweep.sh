@@ -1756,6 +1756,12 @@ leg_resize_chord() {
     touch "$RESUME_FILE"
     wait_for '+BETA' "$WAIT_SECS" 'the review the agent proposed' >/dev/null
     settle
+    # removed here rather than at the leg's end, because every exit below
+    # this point is a failing one and each of them used to leave the file
+    # behind: the stub reads it as "the held review may resume", so a later
+    # leg that stalls would find its own stall already released and the
+    # second failure would be diagnosed as the first one's shape
+    rm -f "$RESUME_FILE"
 
     local ai_key
     ai_key=$(printf '%s\n' "$ENTRY_POINTS" | awk '$1 == "ai" && $3 == "toggle" { print $2 }')
@@ -1777,9 +1783,6 @@ leg_resize_chord() {
 
     assert_chrome 'the resized agent panel'
     dismiss ai
-    # the stub reads this file as "the held review may resume", so a leg
-    # after this one that stalls would find its own stall already released
-    rm -f "$RESUME_FILE"
     end_session
 }
 
