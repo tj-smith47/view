@@ -33,10 +33,11 @@ jobs:
           - os: macos-latest
             class: gh-macos
     runs-on: ${{ matrix.os }}
-    # the full gated matrix took ~28 minutes on a 12-core dev host (the
-    # first_paint rows' 1100 cold spawn pairs dominate); shared runners
-    # are slower, plus a cold cargo build on a cache miss
-    timeout-minutes: 90
+    # a hang backstop, not a budget: at 5d983db gh-linux ran this matrix in
+    # 43 min while gh-macos was cancelled at 90 min with three scenarios left
+    # (~100 min projected) -- the shared macOS runner is 2-4x slower per
+    # scenario, so any value inside the measured range is a coin-flip cancel
+    timeout-minutes: 180
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
