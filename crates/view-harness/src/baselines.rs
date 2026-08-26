@@ -971,6 +971,37 @@ pub fn gate_cell(
     breaches
 }
 
+/// How many of a cell's recorded metrics [`gate_cell`] actually compared,
+/// and how many it passed over as exempt on this class: the two halves of
+/// what a green gate line is entitled to claim.
+///
+/// The same walk as [`gate_cell`], reading the same [`headroom_for`], so
+/// the count cannot describe a comparison the gate did not make. A metric
+/// the run did not measure is neither -- it is a coverage gap, reported by
+/// [`unmeasured_metrics`].
+#[must_use]
+pub fn gate_coverage(
+    measured: &MeasuredCell,
+    recorded: &CellMetrics,
+    class: &str,
+    headroom_table: &HeadroomTable,
+) -> (usize, usize) {
+    let controlled = is_controlled_class(class);
+    let mut compared = 0;
+    let mut exempt = 0;
+    for metric in recorded.keys() {
+        if !measured.metrics.contains_key(metric) {
+            continue;
+        }
+        if headroom_for(headroom_table, &measured.id, metric, controlled).is_some() {
+            compared += 1;
+        } else {
+            exempt += 1;
+        }
+    }
+    (compared, exempt)
+}
+
 /// Baseline cells that `measured` and `skipped` together leave
 /// unchecked, in deterministic (sorted) order. The forward gate walks
 /// measured cells only, so a cell that silently fell out of a
@@ -2531,6 +2562,53 @@ mod tests {
         );
         let within = metrics(&[("paired_delta_p99_ms", 0.7), ("ratio_p99", 1.2)]);
         assert!(gate_cell("echo", "minimal", &within, &recorded, "controlled-linux").is_empty());
+    }
+
+    /// The counts the green gate line is built from, on the shape that has
+    /// been misread twice: a `first_paint` cell on `dev-macos` records four
+    /// statistics and the gate compares exactly one of them.
+    #[test]
+    fn gate_coverage_names_what_a_shared_class_compares_and_what_it_exempts() {
+        let recorded = metrics(&[
+            ("shell_visible_cold_ms", 7.594_208),
+            ("marker_cold_ms", 32.922),
+            ("marker_ratio_p99", 0.203_77),
+            ("marker_ratio_p50", 0.188_11),
+        ]);
+        let measured = measured_cell(
+            "first_paint",
+            "minimal",
+            &[
+                ("shell_visible_cold_ms", 12.473),
+                ("marker_cold_ms", 35.655),
+                ("marker_ratio_p99", 0.220),
+                ("marker_ratio_p50", 0.207),
+            ],
+        );
+        let table = HeadroomTable::new();
+
+        assert_eq!(
+            gate_coverage(&measured, &recorded, "dev-macos", &table),
+            (1, 3),
+            "a shared class compares the p50 alone: both cold-start \
+             absolutes and the tail are exempt by construction"
+        );
+        assert_eq!(
+            gate_coverage(&measured, &recorded, "controlled-macos", &table),
+            (4, 0),
+            "and a controlled class compares all four"
+        );
+        assert_eq!(
+            gate_coverage(
+                &measured,
+                &metrics(&[("marker_ratio_p50", 0.188_11), ("never_measured", 1.0)]),
+                "dev-macos",
+                &table,
+            ),
+            (1, 0),
+            "a recorded bar the run never measured is a coverage gap, \
+             neither compared nor exempt"
+        );
     }
 
     #[test]

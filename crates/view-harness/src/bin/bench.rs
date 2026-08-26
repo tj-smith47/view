@@ -1259,6 +1259,13 @@ fn main() -> Result<()> {
         baselines::require_class_match(&file, &cli.class, &path)?;
         baselines::require_headroom_bound(&headroom, &file, &headroom_file)?;
         let mut breaches = Vec::new();
+        // the gate line used to count cells alone, which two reviews in a
+        // row read as "every recorded number was compared"; on a shared
+        // class every cold-start absolute and every tail-derived statistic
+        // is exempt by construction, so the count that is compared and the
+        // count that is skipped are both named
+        let mut gated_metrics = 0_usize;
+        let mut exempt_metrics = 0_usize;
         // a cell that ran but stopped producing one of its recorded
         // numbers passes the forward walk, which compares only the
         // metrics both sides hold; naming those makes a silently
@@ -1278,6 +1285,10 @@ fn main() -> Result<()> {
                 continue;
             };
             breaches.extend(baselines::gate_cell(cell, recorded, &cli.class, &headroom));
+            let (compared, exempt) =
+                baselines::gate_coverage(cell, recorded, &cli.class, &headroom);
+            gated_metrics += compared;
+            exempt_metrics += exempt;
             // a refused cell's absent metrics are attributed, not coverage
             // gaps: the row said loudly why it withheld its number, and on
             // this class (a controlled one bails before reaching the gate)
@@ -1450,9 +1461,18 @@ fn main() -> Result<()> {
             } else {
                 format!(", {excursions} reading(s) past spec inside this class's measured spread")
             };
+            let exempt = if exempt_metrics == 0 {
+                String::new()
+            } else {
+                format!(
+                    ", {exempt_metrics} metric(s) exempt on shared class {}",
+                    cli.class
+                )
+            };
             println!(
-                "gate OK: {} cell(s) within recorded bars, {} metric(s) checked against spec 3.1 \
-                 budgets, {held} accepted shortfall(s) still held{spread}",
+                "gate OK: {} cell(s), {gated_metrics} metric(s) compared against recorded \
+                 bars{exempt}, {} metric(s) checked against spec 3.1 budgets, {held} accepted \
+                 shortfall(s) still held{spread}",
                 measured.len(),
                 findings.len()
             );
