@@ -2357,4 +2357,91 @@ mod tests {
             "the statusline row stays the statusline's, so the ruler and the search count stay readable"
         );
     }
+
+    /// The names declared in `source`'s struct block opening with `header`.
+    ///
+    /// A doc line always carries a `/` before its first colon, and an
+    /// attribute carries none at all, so "the text before the first colon
+    /// is a bare snake_case word" is the whole discriminator a field
+    /// declaration needs here.
+    fn declared_fields(source: &str, header: &str) -> Vec<String> {
+        assert!(source.contains(header), "{header} is no longer declared");
+        let after = source.split_once(header).expect("just found above").1;
+        assert!(after.contains("\n}"), "{header} is never closed");
+        let body = after.split_once("\n}").expect("just found above").0;
+        let mut names = Vec::new();
+        for line in body.lines() {
+            let declaration = line.trim().strip_prefix("pub ").unwrap_or(line.trim());
+            let Some((name, _)) = declaration.split_once(':') else {
+                continue;
+            };
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                names.push(name.to_string());
+            }
+        }
+        assert!(!names.is_empty(), "{header} parsed to no fields at all");
+        names
+    }
+
+    /// The doc comment sitting directly above `signature` in `source`.
+    fn doc_above(source: &str, signature: &str) -> String {
+        assert!(
+            source.contains(signature),
+            "{signature} is no longer declared"
+        );
+        let head = source
+            .split_once(signature)
+            .expect("just found above")
+            .0
+            .trim_end();
+        let mut doc: Vec<&str> = head
+            .lines()
+            .rev()
+            .take_while(|line| line.trim_start().starts_with("///"))
+            .collect();
+        doc.reverse();
+        assert!(!doc.is_empty(), "{signature} carries no doc comment");
+        doc.join("\n")
+    }
+
+    /// Whether `doc` names `field`, in either spelling the two tables use.
+    fn classified(doc: &str, field: &str) -> bool {
+        doc.contains(&format!("`{field}`")) || doc.contains(&format!("Self::{field}`"))
+    }
+
+    #[test]
+    fn every_field_the_engine_raises_is_classified_where_it_is_dropped() {
+        let model = include_str!("model.rs");
+        let statusline = include_str!("native/statusline.rs");
+        let mut unclassified = Vec::new();
+
+        let overlays = doc_above(model, "pub fn forget_overlays(&mut self)");
+        for field in declared_fields(model, "pub struct EngineModel {") {
+            if !classified(&overlays, &field) {
+                unclassified.push(format!("EngineModel::{field} (forget_overlays)"));
+            }
+        }
+
+        let segments = doc_above(statusline, "pub fn forget_engine_segments(&mut self)");
+        for field in declared_fields(statusline, "pub struct StatuslineState {") {
+            if !classified(&segments, &field) {
+                unclassified.push(format!("StatuslineState::{field} (forget_engine_segments)"));
+            }
+        }
+
+        assert!(
+            unclassified.is_empty(),
+            "a connection being replaced drops some of this state and keeps \
+             the rest, and these fields say which they are nowhere:\n  \
+             {}\nAdd a row to the table above the named method saying how \
+             the field is taken down and whether the replacement inherits \
+             it -- a field nobody classified is the one that stays painted \
+             over the replacement's first frame",
+            unclassified.join("\n  ")
+        );
+    }
 }

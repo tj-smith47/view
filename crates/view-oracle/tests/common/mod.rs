@@ -249,7 +249,10 @@ pub fn startup_budget(fixed: Duration) -> view_test_support::HostBudget {
 /// Every source in the workspace that holds test code, as
 /// (path under `crates/`, the test-code part of its contents).
 ///
-/// A `crates/*/tests/**/*.rs` file is test code outright. A `src` file is
+/// A `crates/*/tests/**/*.rs` or `crates/*/benches/**/*.rs` file is test
+/// code outright -- a bench harness is compiled by `cargo` and runs on this
+/// host under the same rules, so a scratch directory it leaks leaks the
+/// same way. A `src` file is
 /// test code only from its first `#[cfg(test)]` onwards -- the convention
 /// this tree follows without exception, and the conservative reading either
 /// way: the walk can miss a test written above the module, and can never
@@ -267,8 +270,10 @@ pub fn workspace_test_sources() -> Vec<(String, String)> {
         .collect();
     members.sort();
     for member in members {
-        for source in rust_sources(&member.join("tests")) {
-            found.push(named(&crates, &source, false));
+        for dir in ["tests", "benches"] {
+            for source in rust_sources(&member.join(dir)) {
+                found.push(named(&crates, &source, false));
+            }
         }
         for source in rust_sources(&member.join("src")) {
             let whole_file_is_a_test_module = is_test_module_file(&source);

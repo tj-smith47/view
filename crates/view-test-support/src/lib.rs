@@ -42,17 +42,25 @@ pub struct ScratchDir {
     path: PathBuf,
 }
 
+/// Counts [`ScratchDir::new`] calls in this process, so two fixtures
+/// sharing a label never share a directory.
+static NEXT_SCRATCH: AtomicUsize = AtomicUsize::new(0);
+
 impl ScratchDir {
-    /// Creates a fresh, empty directory named `view-<label>-<pid>` under
-    /// [`std::env::temp_dir`]. Any directory a previous run of the same
-    /// label leaked (a process kill mid-test, before this type existed) is
-    /// removed first, so a stale fixture from an earlier crash can never be
-    /// read as this run's own state.
+    /// Creates a fresh, empty directory named `view-<label>-<pid>-<n>`
+    /// under [`std::env::temp_dir`]. Anything already at that exact path is
+    /// removed first, which after a normal run is nothing: only a killed
+    /// process whose id the OS has since handed back can have left a
+    /// directory there, and reaping it keeps an earlier crash's state from
+    /// being read as this run's own.
     ///
-    /// `label` distinguishes fixtures within one test binary; the process
-    /// id distinguishes concurrent test binaries (`cargo test` runs
+    /// `label` says which fixture a directory on disk belongs to; the
+    /// process id separates concurrent test binaries (`cargo test` runs
     /// multiple integration test binaries as separate processes) sharing
-    /// the same temp root.
+    /// the same temp root; `n` counts calls within this process, so two
+    /// fixtures that happen to share a label are still two directories --
+    /// without it, the second call's removal-first wipes the first's live
+    /// contents, and `cargo test`'s thread pool makes that concurrent.
     ///
     /// # Errors
     ///
@@ -63,7 +71,17 @@ impl ScratchDir {
     /// setup failure surfaces (typically `.expect(...)` at the test's own
     /// `#[cfg(test)]` boundary, where that lint is already relaxed).
     pub fn new(label: &str) -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("view-{label}-{}", std::process::id()));
+        Self::new_at(std::env::temp_dir().join(format!(
+            "view-{label}-{}-{}",
+            std::process::id(),
+            NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
+        )))
+    }
+
+    /// [`new`](Self::new) at a path the caller has already named, which is
+    /// how this crate's own tests drive the removal-first without having to
+    /// guess the counter a concurrent test may have moved.
+    fn new_at(path: PathBuf) -> std::io::Result<Self> {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
@@ -446,16 +464,30 @@ mod tests {
 
     #[test]
     fn a_stale_directory_from_a_prior_run_is_replaced() {
-        let label = "stale-replace";
-        let leaked = std::env::temp_dir().join(format!("view-{label}-{}", std::process::id()));
+        let leaked =
+            std::env::temp_dir().join(format!("view-stale-replace-{}", std::process::id()));
         std::fs::create_dir_all(&leaked).unwrap();
         std::fs::write(leaked.join("leftover.txt"), b"stale").unwrap();
 
-        let dir = ScratchDir::new(label).unwrap();
+        let dir = ScratchDir::new_at(leaked).unwrap();
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             0,
             "a leaked directory from an earlier run must not leak its contents into this run"
+        );
+    }
+
+    #[test]
+    fn two_fixtures_sharing_a_label_are_two_directories() {
+        let first = ScratchDir::new("shared-label").unwrap();
+        std::fs::write(first.join("live.txt"), b"first").unwrap();
+
+        let second = ScratchDir::new("shared-label").unwrap();
+
+        assert_ne!(first.path(), second.path());
+        assert!(
+            first.join("live.txt").exists(),
+            "the second fixture's removal-first wiped the first's live contents"
         );
     }
 
@@ -467,12 +499,12 @@ mod tests {
         // the following create_dir_all is the one that must fail -- this
         // proves the failure comes back as Err rather than a panic, the
         // behavior the Result-returning signature exists to prove
-        let label = "new-reports-error";
-        let path = std::env::temp_dir().join(format!("view-{label}-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("view-new-reports-error-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::write(&path, b"not a directory").unwrap();
 
-        let result = ScratchDir::new(label);
+        let result = ScratchDir::new_at(path.clone());
 
         assert!(
             result.is_err(),

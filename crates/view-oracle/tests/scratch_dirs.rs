@@ -12,8 +12,10 @@
 //!
 //! [`view_test_support::ScratchDir`] is the guard that cannot be skipped:
 //! its `Drop` runs on every exit path, panic included. So the rule is that
-//! test code names a scratch path through it and never through
-//! `temp_dir().join(...)`.
+//! test code names a scratch path through it, and reaches
+//! `std::env::temp_dir()` only to hand the root straight to something else
+//! -- never to extend it, and never to bind it to a name the next statement
+//! can push onto, which is the spelling the leak was written in.
 //!
 //! Housed beside `timing_bounds.rs` and reading the population through the
 //! same [`common::workspace_test_sources`] walk, for the same reason that
@@ -45,12 +47,20 @@ struct DeclaredJoin {
     grounds: &'static str,
 }
 
-const DECLARED_JOINS: &[DeclaredJoin] = &[DeclaredJoin {
-    file: "view-ai/src/config.rs",
-    line: r#"let missing = std::env::temp_dir().join("view-ai-config-does-not-exist.toml");"#,
-    grounds: "it names a path that must NOT exist, and a guard that created \
-              a directory there would be the thing that broke it",
-}];
+const DECLARED_JOINS: &[DeclaredJoin] = &[
+    DeclaredJoin {
+        file: "view-ai/src/config.rs",
+        line: r#"let missing = std::env::temp_dir().join("view-ai-config-does-not-exist.toml");"#,
+        grounds: "it names a path that must NOT exist, and a guard that created \
+                  a directory there would be the thing that broke it",
+    },
+    DeclaredJoin {
+        file: "view-ai/tests/session.rs",
+        line: "std::fs::canonicalize(std::env::temp_dir())",
+        grounds: "it spells the path the stub agent writes from its own side, \
+                  for an equality assertion; this side creates nothing there",
+    },
+];
 
 #[test]
 fn no_test_assembles_a_scratch_path_outside_the_guard() {
@@ -59,7 +69,7 @@ fn no_test_assembles_a_scratch_path_outside_the_guard() {
         if name.ends_with(SELF_SOURCE) || name == GUARD_SOURCE {
             continue;
         }
-        for (number, line) in joins_under_the_temp_root(&source) {
+        for (number, line) in temp_root_escapes(&source) {
             if is_declared(&name, &line) {
                 continue;
             }
@@ -68,12 +78,14 @@ fn no_test_assembles_a_scratch_path_outside_the_guard() {
     }
     assert!(
         undeclared.is_empty(),
-        "these tests assemble a scratch path under the system temp root by \
-         hand, so whatever they create there outlives a failing assertion \
-         and outlives the run:\n  {}\nTake the path from \
-         view_test_support::ScratchDir instead -- it removes the tree on \
-         every exit path, panic included -- or, if the site creates nothing \
-         at all, add it to DECLARED_JOINS with the grounds that say so",
+        "these tests let the system temp root grow a name of their own -- \
+         by joining onto it, by pushing onto it, or by binding it to a \
+         variable the next statement can push onto -- so whatever they \
+         create there outlives a failing assertion and outlives the \
+         run:\n  {}\nTake the path from view_test_support::ScratchDir \
+         instead -- it removes the tree on every exit path, panic \
+         included -- or, if the site creates nothing at all, add it to \
+         DECLARED_JOINS with the grounds that say so",
         undeclared.join("\n  ")
     );
 }
@@ -101,8 +113,27 @@ mod tests {
         temp_dir().join("view-third")
     }
 
+    fn bound_then_pushed() -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("view-fourth-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn bound_in_one_statement_and_joined_in_the_next() -> PathBuf {
+        let base = std::env::temp_dir();
+        base.join("view-fifth")
+    }
+
+    fn wrapped_in_a_conversion() -> PathBuf {
+        PathBuf::from(std::env::temp_dir()).join("view-sixth")
+    }
+
+    fn taken_as_a_path_first() -> PathBuf {
+        std::env::temp_dir().to_path_buf().join("view-seventh")
+    }
+
     fn these_are_the_shapes_the_rule_asks_for() {
-        let cwd = std::env::temp_dir();
         let launch = AgentLaunch::new("agent", std::env::temp_dir());
         let real = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let guarded = ScratchDir::new("label").unwrap().join("file.txt");
@@ -111,32 +142,33 @@ mod tests {
 "#;
 
 #[test]
-fn the_walk_sees_a_join_however_it_is_written() {
-    let at: Vec<usize> = joins_under_the_temp_root(ESCAPING_SHAPES)
+fn the_walk_sees_the_root_escape_however_it_is_written() {
+    let at: Vec<usize> = temp_root_escapes(ESCAPING_SHAPES)
         .into_iter()
         .map(|(number, _)| number)
         .collect();
     assert_eq!(
         at,
-        vec![5, 11, 18],
+        vec![5, 11, 18, 22, 29, 34, 38],
         "the walk read {at:?} of the fixture. Every line it missed is a leak \
          the population can carry unnoticed; every extra line is a site the \
          rule does not ask about being reported as a violation"
     );
 }
 
-/// Every place in `source` that hangs a name off the system temp root, as
-/// (line number, the statement's text on one line).
+/// Every place in `source` that lets the system temp root grow a name, as
+/// (line number, the line's text on one line).
 ///
-/// Statements rather than lines, because rustfmt puts the `.join(` on the
-/// line after the call as soon as the name is long enough, and a
-/// line-at-a-time reader sees neither half. Reported at the line the call
-/// itself is on, which is where a reader will find it.
-fn joins_under_the_temp_root(source: &str) -> Vec<(usize, String)> {
+/// Read a statement at a time rather than a line at a time, because
+/// rustfmt puts the `.join(` on the line after the call as soon as the name
+/// is long enough, and a line-at-a-time reader sees neither half. Reported
+/// at the line the call itself is on, which is where a reader will find it.
+fn temp_root_escapes(source: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
     for (index, line) in lines.iter().enumerate() {
-        if !line.contains("temp_dir()") {
+        let trimmed = line.trim();
+        if !trimmed.contains("temp_dir()") || is_comment(trimmed) {
             continue;
         }
         // the statement, as far as the next `;` or the end of the file:
@@ -148,12 +180,46 @@ fn joins_under_the_temp_root(source: &str) -> Vec<(usize, String)> {
                 break;
             }
         }
-        let hangs_a_name = statement.contains("temp_dir().join(");
-        if hangs_a_name {
-            found.push((index + 1, line.trim().to_string()));
+        if extends_the_root(&statement) || binds_the_root(&statement) {
+            found.push((index + 1, trimmed.to_string()));
         }
     }
     found
+}
+
+/// Whether the line is prose rather than code: a rule quoting the shape it
+/// forbids creates no directory.
+fn is_comment(trimmed: &str) -> bool {
+    trimmed.starts_with("//") || trimmed.starts_with('*')
+}
+
+/// Whether `statement` hangs a name off the temp root in one expression,
+/// however the call is wrapped -- `.join(` and `.push(` reach it through
+/// `PathBuf::from(..)` and `.to_path_buf()` alike.
+fn extends_the_root(statement: &str) -> bool {
+    statement
+        .find("temp_dir()")
+        .map(|at| &statement[at..])
+        .is_some_and(|after| after.contains(".join(") || after.contains(".push("))
+}
+
+/// Whether `statement` binds the bare temp root to a name.
+///
+/// The name is the escape: the statement that pushes onto it is a different
+/// statement, and reading one statement at a time can never see it. So the
+/// binding is the violation, not what a later line does with it -- which is
+/// also the shape that leaked 117 directories on the macOS host. A call
+/// handed straight to something else binds nothing and is left alone.
+fn binds_the_root(statement: &str) -> bool {
+    let Some((binding, value)) = statement.split_once('=') else {
+        return false;
+    };
+    binding.trim_start().starts_with("let ")
+        && value
+            .trim()
+            .trim_end_matches(';')
+            .trim_end()
+            .ends_with("temp_dir()")
 }
 
 /// Whether `line` in `file` is one of [`DECLARED_JOINS`], failing loudly

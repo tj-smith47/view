@@ -35,11 +35,15 @@ const ACCEPTANCE_SEAM: &str = "scripts/acceptance/artifacts.sh";
 /// reader adding a line will recognize. A `cargo build` is not here: a
 /// build measures nothing, and holding one awake would only widen the rule
 /// past what it can justify.
-const HARNESS_SHAPES: [&str; 6] = [
+const HARNESS_SHAPES: [&str; 8] = [
     "cargo test",
     "cargo bench",
     "--bin bench",
     "--bin oracle",
+    // a built harness invoked by path runs the same clock reads without
+    // cargo anywhere on the line
+    "/bench",
+    "/oracle",
     "scripts/mutate.sh",
     "scripts/acceptance/",
 ];
@@ -62,7 +66,10 @@ fn every_timed_harness_runs_under_the_power_assertion() {
     let mut workflows: Vec<PathBuf> = std::fs::read_dir(root.join(".github/workflows"))
         .expect("the workflow directory must be readable")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "yml"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        })
         .collect();
     workflows.sort();
     assert!(
@@ -120,6 +127,44 @@ fn the_seam_still_takes_the_assertion() {
          scripts -- which the walk above lets through on the grounds that it \
          does -- are running unheld"
     );
+    for (name, text) in acceptance_scripts(&root) {
+        if name == ACCEPTANCE_SEAM {
+            continue;
+        }
+        assert!(
+            text.contains("artifacts.sh"),
+            "{name} does not source {ACCEPTANCE_SEAM}, so it takes no power \
+             assertion of its own -- and the walk above lets every command \
+             named scripts/acceptance/ through on the grounds that it does"
+        );
+    }
+}
+
+/// Every acceptance script, as (path under the repo root, its contents).
+fn acceptance_scripts(root: &Path) -> Vec<(String, String)> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(root.join("scripts/acceptance"))
+        .expect("the acceptance directory must be readable")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "sh"))
+        .collect();
+    paths.sort();
+    assert!(
+        !paths.is_empty(),
+        "the walk found no acceptance scripts, so it is not looking where \
+         they live and would pass by finding nothing"
+    );
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = format!(
+                "scripts/acceptance/{}",
+                path.file_name().unwrap().to_string_lossy()
+            );
+            let text =
+                std::fs::read_to_string(&path).expect("an acceptance script must be readable");
+            (name, text)
+        })
+        .collect()
 }
 
 /// The shapes the walk must see, each wrong on purpose: a rule proved only
@@ -137,6 +182,10 @@ const ESCAPING_SHAPES: &str = r#"
   # a comment naming cargo test is prose, not a command
   workflow_step:
         run: cargo test -p view-oracle --test clipboard_roundtrip
+  direct_binary:
+        run: ./target/release/bench --all --class dev-linux
+  direct_oracle:
+        run: ./target/release/oracle compat
   these_are_the_shapes_the_rule_asks_for:
     desc: run cargo test the way the docs say (cargo bench too)
     cmds:
@@ -155,7 +204,7 @@ fn the_walk_sees_an_unheld_harness_however_it_is_written() {
         .collect();
     assert_eq!(
         at,
-        vec![3, 6, 9, 12],
+        vec![3, 6, 9, 12, 14, 16],
         "the walk read {at:?} of the fixture. Every line it missed is a \
          harness that can time itself against a stopped clock unnoticed; \
          every extra line is a command the rule does not ask about being \
