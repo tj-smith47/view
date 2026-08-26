@@ -135,39 +135,6 @@ trap 'exit 143' TERM
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
 under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }
 
-pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
-
-# Whether `haystack` holds `needle`, literally.
-#
-# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
-# match and kills whatever is feeding it with SIGPIPE, which `set -o
-# pipefail` then reports as a failed pipeline -- so a match reads as no
-# match and the assertion built on it passes for the wrong reason. A
-# captured string has no pipe to fail.
-#
-# The one thing the glob does that `grep -F` did not: it spans the newlines
-# between rows, so a needle written across a row boundary would match here
-# where a line-at-a-time search never matched. Every needle passed in today
-# is a single on-screen string.
-holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
-
-# Whether `haystack` matches the extended regular expression `needle`. The
-# no-pipe form of `grep -qE`, for the same reason `holds` is `grep -qF`'s.
-#
-# A row at a time, not the capture as one string: `[[ =~ ]]` over the whole
-# pane would give `^` and `$` the ends of the capture, where every pattern
-# written for `grep -qE` means the ends of a row. Reading it line by line is
-# what keeps an anchored pattern meaning what its author wrote.
-matches() {
-    local line
-    while IFS= read -r line; do
-        if [[ $line =~ $1 ]]; then
-            return 0
-        fi
-    done <<<"$2"
-    return 1
-}
-
 # The pane with the panel column cut away: on every row, everything left of
 # the first vertical border.
 #

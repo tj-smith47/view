@@ -19,6 +19,14 @@
 //! apart. The reader either takes a captured string (`case`, `[[ =~ ]]`)
 //! or drops `-q` and tests what it captured, and then no pipe can fail.
 //!
+//! The third is not an interpreter setting but the same kind of silence: a
+//! script that sources the shared helper and then defines a function the
+//! helper already defines gets whichever body loaded last, and nothing
+//! says which rule it is running under. The two spellings of `tmux_key`
+//! that lived in two legs are the case in hand -- one refused bracket
+//! notation, the other stripped the brackets, and the file you opened
+//! decided which.
+//!
 //! Housed beside `macos_clock.rs` and `scratch_dirs.rs` because it is the
 //! same kind of rule: one the next script has to trip over mechanically
 //! rather than be told about.
@@ -35,6 +43,10 @@ const FALLIBLE: [&str; 2] = ["grep", "pgrep"];
 /// assignment the real sites put in between, short enough that an
 /// unrelated later test of the same name is not read as one.
 const GUARD_REACH: usize = 600;
+
+/// The helper every acceptance script sources, and the one place a reader
+/// they all use belongs.
+const SHARED_HELPER: &str = "scripts/acceptance/artifacts.sh";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -84,6 +96,99 @@ fn governed_scripts() -> Vec<(String, String)> {
             (name, text)
         })
         .collect()
+}
+
+/// Every function `text` defines at the top level, as (name, the line it
+/// opens on).
+///
+/// Top level only: an indented definition is inside another function or a
+/// heredoc, where it shadows nothing a source-time definition set.
+fn functions_defined(text: &str) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let Some((name, rest)) = line.split_once("()") else {
+            continue;
+        };
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            || !rest.trim_start().starts_with('{')
+        {
+            continue;
+        }
+        found.push((name.to_owned(), index + 1));
+    }
+    found
+}
+
+#[test]
+fn no_script_redefines_what_the_shared_helper_defines() {
+    let root = repo_root();
+    let shared = std::fs::read_to_string(root.join(SHARED_HELPER))
+        .expect("the shared helper must be readable");
+    let shared_names: Vec<String> = functions_defined(&shared)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        shared_names.len() > 5,
+        "the reader found {} functions in {SHARED_HELPER}, so it is not \
+         reading it and every script below would pass by comparison with \
+         nothing",
+        shared_names.len()
+    );
+    let mut shadowed = Vec::new();
+    for (name, text) in governed_scripts() {
+        // the rule is about shadowing, so it asks only of the scripts that
+        // load the helper: a script that never sources it defines its own
+        // world and collides with nothing
+        if name == SHARED_HELPER || !text.contains(SHARED_HELPER) {
+            continue;
+        }
+        for (function, number) in functions_defined(&text) {
+            if shared_names.contains(&function) {
+                shadowed.push(format!("{name}:{number}: {function}"));
+            }
+        }
+    }
+    assert!(
+        shadowed.is_empty(),
+        "these define a function {SHARED_HELPER} already defines, and they \
+         source it -- so the body that runs is whichever loaded last, and \
+         two legs can be reading the same call under different rules with \
+         nothing to say so:\n  {}\nMove the shared one into the helper and \
+         delete the copies, or give the different job its own name",
+        shadowed.join("\n  ")
+    );
+}
+
+#[test]
+fn the_definition_reader_sees_a_top_level_function_and_nothing_else() {
+    let fixture = "
+set -euo pipefail
+. \"$SCRIPT_DIR/artifacts.sh\"
+holds() { case \"$2\" in *\"$1\"*) return 0 ;; *) return 1 ;; esac; }
+matches() {
+    local line
+}
+outer() {
+    inner() { printf 'nested'; }
+}
+pane \"$SESSION\"
+";
+    let found: Vec<(String, usize)> = functions_defined(fixture);
+    assert_eq!(
+        found,
+        vec![
+            ("holds".to_owned(), 4),
+            ("matches".to_owned(), 5),
+            ("outer".to_owned(), 8),
+        ],
+        "the reader must see a one-liner and a block at the top level, and \
+         must leave a nested definition and a call alone -- a reader that \
+         misses a spelling lets the shadowing it exists to catch through"
+    );
 }
 
 #[test]

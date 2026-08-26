@@ -396,6 +396,42 @@ ensure_artifact() {
     }
 }
 
+# The pane as it stands, for the session the leg drives. Empty rather than
+# failing when there is no session to capture: the callers are assertions,
+# and a capture that failed is a screen holding none of what they look for.
+pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
+
+# Whether `haystack` holds `needle`, literally.
+#
+# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
+# match and kills whatever is feeding it with SIGPIPE, which `set -o
+# pipefail` then reports as a failed pipeline -- so a match reads as no
+# match and the assertion built on it passes for the wrong reason. A
+# captured string has no pipe to fail.
+#
+# The one thing the glob does that `grep -F` did not: it spans the newlines
+# between rows, so a needle written across a row boundary would match here
+# where a line-at-a-time search never matched. Every needle passed in today
+# is a single on-screen string.
+holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+
+# Whether `haystack` matches the extended regular expression `needle`. The
+# no-pipe form of `grep -qE`, for the same reason `holds` is `grep -qF`'s.
+#
+# A row at a time, not the capture as one string: `[[ =~ ]]` over the whole
+# pane would give `^` and `$` the ends of the capture, where every pattern
+# written for `grep -qE` means the ends of a row. Reading it line by line is
+# what keeps an anchored pattern meaning what its author wrote.
+matches() {
+    local line
+    while IFS= read -r line; do
+        if [[ $line =~ $1 ]]; then
+            return 0
+        fi
+    done <<<"$2"
+    return 1
+}
+
 # A key in nvim notation as a terminal must type it, with `<leader>`
 # expanded to nvim's own default -- which every fixture here leaves alone.
 #
@@ -411,6 +447,20 @@ tmux_key() {
         ;;
     esac
     printf '%s' "$typed"
+}
+
+# A named key in nvim's `<...>` notation as tmux spells it: the two agree on
+# everything the modal legs bind once the brackets are off.
+#
+# Beside `tmux_key` and not inside it: that one refuses bracket notation on
+# purpose, because a mapping's own lhs is typed literally and a `<...>` it
+# cannot spell is a leg pressing nothing. This one is given the bracketed
+# name deliberately. Two jobs, two names -- they were one name in two files
+# before, and the copy that loaded last decided which rule a script got.
+tmux_named_key() {
+    local notation="$1"
+    notation=${notation#<}
+    printf '%s' "${notation%>}"
 }
 
 # The review's own keys as `lhs verb` lines, out of the table the maps are

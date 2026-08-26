@@ -481,20 +481,6 @@ wait_no_box() {
 # The text of every framed box in the last capture.
 box_text() { LC_ALL=C awk "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
 
-# Whether `haystack` holds `needle`, literally.
-#
-# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
-# match and kills whatever is feeding it with SIGPIPE, which `set -o
-# pipefail` then reports as a failed pipeline -- so a match reads as no
-# match and the assertion built on it passes for the wrong reason. A
-# captured string has no pipe to fail.
-#
-# The one thing the glob does that `grep -F` did not: it spans the newlines
-# between rows, so a needle written across a row boundary would match here
-# where a line-at-a-time search never matched. Every needle passed in today
-# is a single on-screen string.
-holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
-
 # "row col leftmost nearest" for `text` in the last capture; empty when it is
 # not on screen at all.
 text_span() { LC_ALL=C awk -v text="$1" "$SPAN_AWK" "$CELLS"; }

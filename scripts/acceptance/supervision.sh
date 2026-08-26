@@ -108,22 +108,6 @@ elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", b - a }'; }
 in_range() { awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'; }
 plus() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a + b }'; }
 
-pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
-
-# Whether `haystack` holds `needle`, literally.
-#
-# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
-# match and kills whatever is feeding it with SIGPIPE, which `set -o
-# pipefail` then reports as a failed pipeline -- so a match reads as no
-# match and the assertion built on it passes for the wrong reason. A
-# captured string has no pipe to fail.
-#
-# The one thing the glob does that `grep -F` did not: it spans the newlines
-# between rows, so a needle written across a row boundary would match here
-# where a line-at-a-time search never matched. Every needle passed in today
-# is a single on-screen string.
-holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
-
 fail() {
     local dump="$DUMP_DIR/$CURRENT_LEG.pane"
     pane >"$dump" 2>/dev/null || true
@@ -186,14 +170,6 @@ wedge_arm() {
         return 1
     fi
     printf '%s' "$value"
-}
-
-# nvim's own key notation as tmux spells it. The two agree on everything
-# this modal binds once the brackets nvim wraps a named key in are off.
-tmux_key() {
-    local notation="$1"
-    notation=${notation#<}
-    printf '%s' "${notation%>}"
 }
 
 # Waits for `pattern` to be on screen, answering how long that took.
@@ -535,8 +511,8 @@ WRITE_NOTICE=$(wedge_arm notice WriteSide)
 DEAD_NOTICE=$(wedge_arm notice Dead)
 BUSY_TITLE=$(wedge_arm title ReadSide)
 GONE_TITLE=$(wedge_arm title Dead)
-INTERRUPT_KEY=$(tmux_key "$(const_str "$SUPERVISION_RS" INTERRUPT_NOTATION)")
-RESTART_KEY=$(tmux_key "$(const_str "$SUPERVISION_RS" RESTART_NOTATION)")
+INTERRUPT_KEY=$(tmux_named_key "$(const_str "$SUPERVISION_RS" INTERRUPT_NOTATION)")
+RESTART_KEY=$(tmux_named_key "$(const_str "$SUPERVISION_RS" RESTART_NOTATION)")
 # crate-private rather than `pub`, so `const_str`'s pattern does not reach it.
 # Only the head of it is ever asserted: the panel is a third of this pane
 # wide, so its own framing truncates the title, and the part that survives is

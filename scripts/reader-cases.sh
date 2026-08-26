@@ -11,12 +11,15 @@
 set -uo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
-CONF="$ROOT/scripts/acceptance/ai-conformance.sh"
+SHARED="$ROOT/scripts/acceptance/artifacts.sh"
 
 # the shipped definitions rather than copies: a copy here would keep
-# passing while the reader the legs actually call drifted away from it
-eval "$(grep -m 1 -- '^holds() {' "$CONF")"
-eval "$(awk '/^matches\(\) \{/,/^\}/' "$CONF")"
+# passing while the reader the legs actually call drifted away from it.
+# Lifted out rather than sourced -- sourcing the shared helper takes a power
+# assertion, resolves the target root and runs the class gate, none of which
+# a unit that reads two strings has any business doing
+eval "$(grep -m 1 -- '^holds() {' "$SHARED")"
+eval "$(awk '/^matches\(\) \{/,/^\}/' "$SHARED")"
 
 # the form `matches` replaced, kept only as the thing the cases below
 # measure the distinction against
