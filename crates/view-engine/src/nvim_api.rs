@@ -1718,21 +1718,36 @@ macro_rules! review_ns_lua {
 /// all -- goes a fifth of the way over `Normal`'s background instead,
 /// because a foreground was drawn to be read against a row, not to be the
 /// row. So does a fill that is already `Normal`'s background, which would
-/// mark nothing. Either way the attributes stay behind, which is the
-/// point: a colorscheme designs its diff groups for diff mode, where they
-/// color cells inside a diffed line, and a `line_hl_group` paints a whole
-/// row with them -- dracula's `reverse` `DiffDelete` over a whole row is a
+/// mark nothing. A `reverse` group stating no foreground inherits
+/// `Normal`'s, which is what nvim would fill such a row from -- reading
+/// its `bg` there would derive the fill from the field that is its text.
+/// Either way the attributes stay behind, which is the point: a
+/// colorscheme designs its diff groups for diff mode, where they color
+/// cells inside a diffed line, and a `line_hl_group` paints a whole row
+/// with them -- dracula's `reverse` `DiffDelete` over a whole row is a
 /// solid block of `#FF5555`.
 ///
-/// The text over those backgrounds is `Normal`'s foreground, on every
-/// scheme: it is the color the row's own text would have used, it is the
-/// one color a colorscheme is certain to have, and it can never be the
-/// background it is drawn on -- which a diff group's own colors can, since
-/// under `reverse` the field that reads as a foreground is the fill. A
-/// `Normal` carrying no background of its own -- a scheme drawing on the
-/// terminal's, which is what dracula.nvim does -- blends against black or
-/// white by `'background'`, since nothing inside nvim can see what the
-/// terminal is painting behind it.
+/// The text over those backgrounds is the first color that reads on them:
+/// the group's own non-fill color -- the pairing its author drew, `fg`
+/// normally and `bg` under `reverse` -- then `Normal`'s foreground, then
+/// plain black or white by which side of the fill's own luminance is
+/// further away. A candidate is taken only where its WCAG contrast
+/// against the fill reaches 3:1, because both of the simpler rules are
+/// wrong on part of the population: a diff group's own foreground is the
+/// row's background under `reverse`, and `Normal`'s foreground is light on
+/// a dark scheme while nvim's legacy diff palette hands `DiffText` a
+/// `#c6c6c6` fill over verbatim -- light on light, on 12 of the 28 schemes
+/// the pinned nvim ships. The sign has no fill of its own, so it runs the
+/// same rule against `SignColumn`'s background -- the gutter is not always
+/// the buffer's color, and `pablo` and `vim` paint it a light grey their
+/// diff colors cannot be read on. It keeps the scheme's diff accent
+/// wherever that accent reads (dracula's `#8BE9FD`) and steps back where
+/// it does not.
+///
+/// A `Normal` carrying no background of its own -- a scheme drawing on
+/// the terminal's, which is what dracula.nvim does -- blends against
+/// black or white by `'background'`, since nothing inside nvim can see
+/// what the terminal is painting behind it.
 ///
 /// Derived once per session rather than once per show: `ReviewShow` is
 /// re-issued on every hunk step, and `nvim_set_hl` on namespace 0
@@ -1811,26 +1826,57 @@ local function derive()
     end
     return out
   end
+  local function luminance(color)
+    local out, weight = 0, { 0.2126, 0.7152, 0.0722 }
+    for i, shift in ipairs({ 16, 8, 0 }) do
+      local c = (math.floor(color / 2 ^ shift) % 256) / 255
+      c = c <= 0.03928 and c / 12.92 or ((c + 0.055) / 1.055) ^ 2.4
+      out = out + weight[i] * c
+    end
+    return out
+  end
+  local function legible(fill, ...)
+    for i = 1, select('#', ...) do
+      local candidate = select(i, ...)
+      if candidate ~= nil then
+        local a, b = luminance(candidate), luminance(fill)
+        if a < b then a, b = b, a end
+        if (a + 0.05) / (b + 0.05) >= 3 then
+          return candidate
+        end
+      end
+    end
+    return luminance(fill) > 0.18 and 0x000000 or 0xffffff
+  end
   local function tint(name)
     local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
-    local row = hl.reverse and hl.fg or hl.bg
-    if row ~= nil and row ~= base and not hl.reverse then
-      return row
+    local fill, text = hl.bg, hl.fg
+    if hl.reverse then
+      fill, text = hl.fg or normal.fg, hl.bg
     end
-    local color = row
+    if fill ~= nil and fill ~= base and not hl.reverse then
+      return fill, text, hl
+    end
+    local color = fill
     if color == nil or color == base then
-      color = hl.reverse and hl.bg or hl.fg
+      color = text
     end
     if color == nil or color == base then
       color = normal.fg or base
     end
-    return blend(color)
+    return blend(color), text, hl
   end
+  local added, added_text = tint('DiffAdd')
+  local header, header_text, header_hl = tint('DiffText')
   vim.api.nvim_set_hl(0, 'ViewReviewRemoved', { bg = tint('DiffDelete') })
   vim.api.nvim_set_hl(0, 'ViewReviewStale', { bg = tint('DiffChange') })
-  vim.api.nvim_set_hl(0, 'ViewReviewAdded', { bg = tint('DiffAdd'), fg = normal.fg })
-  vim.api.nvim_set_hl(0, 'ViewReviewHeader', { bg = tint('DiffText'), fg = normal.fg })
-  vim.api.nvim_set_hl(0, 'ViewReviewSign', { fg = normal.fg })
+  vim.api.nvim_set_hl(0, 'ViewReviewAdded',
+    { bg = added, fg = legible(added, added_text, normal.fg) })
+  vim.api.nvim_set_hl(0, 'ViewReviewHeader',
+    { bg = header, fg = legible(header, header_text, normal.fg) })
+  local gutter = vim.api.nvim_get_hl(0, { name = 'SignColumn', link = false })
+  vim.api.nvim_set_hl(0, 'ViewReviewSign',
+    { fg = legible(gutter.bg or base, header_hl.fg, header_hl.bg, normal.fg) })
 end
 if not _G.view_review_derived then
   _G.view_review_derived = true

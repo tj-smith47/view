@@ -90,9 +90,9 @@ DiffText          bg=007373 fg=eef1f8
 
 ViewReviewRemoved bg=43383b fg=nil
 ViewReviewStale   bg=4f5258 fg=nil
-ViewReviewAdded   bg=005523 fg=e0e2ea
-ViewReviewHeader  bg=007373 fg=e0e2ea
-ViewReviewSign    bg=nil    fg=e0e2ea
+ViewReviewAdded   bg=005523 fg=eef1f8
+ViewReviewHeader  bg=007373 fg=eef1f8
+ViewReviewSign    bg=nil    fg=eef1f8
 ```
 
 What is read off each group is the color nvim would *fill* a row with. For
@@ -105,9 +105,18 @@ and the `quiet`/`sorbet`/`zaibatsu` schemes nvim itself ships) is the case
 where the two fields swap -- nvim fills such a row from the *foreground* -- so
 the fill is read off `guifg` there and blended the same way; reading `guibg`
 under `reverse` collapsed all four review states into the one background those
-schemes share. Text is `Normal`'s foreground on every scheme, never the diff
-group's own colors, since under `reverse` the field that reads as a foreground
-is the fill. Nothing else crosses: `ViewReviewRemoved` and `ViewReviewStale`
+schemes share. Text is the first color that reads at WCAG 3:1 or better on
+the fill it lands on: the group's own non-fill color -- its `guifg`, or its
+`guibg` under `reverse` -- then `Normal`'s foreground, then plain black or
+white. The `eef1f8` rows above are the first of those, `DiffAdd` and
+`DiffText`'s own paired foreground. Neither of the simpler rules survives the
+population: a diff group's own foreground is the row's background under
+`reverse`, and `Normal`'s foreground alone is light on a dark scheme while
+nvim's legacy diff palette hands `DiffText` a `#c6c6c6` fill over verbatim,
+which is 12 of the 28 schemes the pinned nvim ships reading between 1.06:1
+and 1.71:1. `ViewReviewSign` runs the same ladder against `SignColumn`'s
+background rather than a fill of its own, since the gutter is not always the
+buffer's color. Nothing else crosses: `ViewReviewRemoved` and `ViewReviewStale`
 carry a background alone, so a reviewed row keeps whatever foreground its own
 syntax gave it, and no `reverse` or `bold` follows the color across. A
 colorscheme designs its diff groups for diff mode, where they color cells
@@ -283,26 +292,57 @@ local function derive()
     end
     return out
   end
+  local function luminance(color)
+    local out, weight = 0, { 0.2126, 0.7152, 0.0722 }
+    for i, shift in ipairs({ 16, 8, 0 }) do
+      local c = (math.floor(color / 2 ^ shift) % 256) / 255
+      c = c <= 0.03928 and c / 12.92 or ((c + 0.055) / 1.055) ^ 2.4
+      out = out + weight[i] * c
+    end
+    return out
+  end
+  local function legible(fill, ...)
+    for i = 1, select('#', ...) do
+      local candidate = select(i, ...)
+      if candidate ~= nil then
+        local a, b = luminance(candidate), luminance(fill)
+        if a < b then a, b = b, a end
+        if (a + 0.05) / (b + 0.05) >= 3 then
+          return candidate
+        end
+      end
+    end
+    return luminance(fill) > 0.18 and 0x000000 or 0xffffff
+  end
   local function tint(name)
     local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
-    local row = hl.reverse and hl.fg or hl.bg
-    if row ~= nil and row ~= base and not hl.reverse then
-      return row
+    local fill, text = hl.bg, hl.fg
+    if hl.reverse then
+      fill, text = hl.fg or normal.fg, hl.bg
     end
-    local color = row
+    if fill ~= nil and fill ~= base and not hl.reverse then
+      return fill, text, hl
+    end
+    local color = fill
     if color == nil or color == base then
-      color = hl.reverse and hl.bg or hl.fg
+      color = text
     end
     if color == nil or color == base then
       color = normal.fg or base
     end
-    return blend(color)
+    return blend(color), text, hl
   end
+  local added, added_text = tint('DiffAdd')
+  local header, header_text, header_hl = tint('DiffText')
   vim.api.nvim_set_hl(0, 'ViewReviewRemoved', { bg = tint('DiffDelete') })
   vim.api.nvim_set_hl(0, 'ViewReviewStale', { bg = tint('DiffChange') })
-  vim.api.nvim_set_hl(0, 'ViewReviewAdded', { bg = tint('DiffAdd'), fg = normal.fg })
-  vim.api.nvim_set_hl(0, 'ViewReviewHeader', { bg = tint('DiffText'), fg = normal.fg })
-  vim.api.nvim_set_hl(0, 'ViewReviewSign', { fg = normal.fg })
+  vim.api.nvim_set_hl(0, 'ViewReviewAdded',
+    { bg = added, fg = legible(added, added_text, normal.fg) })
+  vim.api.nvim_set_hl(0, 'ViewReviewHeader',
+    { bg = header, fg = legible(header, header_text, normal.fg) })
+  local gutter = vim.api.nvim_get_hl(0, { name = 'SignColumn', link = false })
+  vim.api.nvim_set_hl(0, 'ViewReviewSign',
+    { fg = legible(gutter.bg or base, header_hl.fg, header_hl.bg, normal.fg) })
 end
 if not _G.view_review_derived then
   _G.view_review_derived = true

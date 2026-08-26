@@ -13,15 +13,25 @@
 --
 -- No other group may take the Normal or CursorLine value: the sweep reads
 -- either of them inside an overlay as the layer beneath bleeding through.
--- The semantic groups are therefore foreground-only, bar the four diff
--- ones -- which is the case that proves a span role with no background of
--- its own keeps the overlay's rather than punching a hole in it.
+-- The semantic groups are therefore foreground-only, bar three of the four
+-- diff ones -- which is the case that proves a span role with no background
+-- of its own keeps the overlay's rather than punching a hole in it.
 --
--- The diff groups carry a background each because an agent's proposed edit
--- is drawn in the buffer with nothing but those groups, so a background is
--- the only thing that tells a decorated row from an ordinary one in a
--- capture, which reads no foregrounds. Each is distinct from every other
--- and from the three above, so no leg can confuse them.
+-- DiffAdd, DiffChange and DiffText carry a background each because an
+-- agent's proposed edit is drawn in the buffer with nothing but the groups
+-- view derives from these, so a background is the only thing that tells a
+-- decorated row from an ordinary one in a capture, which reads no
+-- foregrounds. Each is distinct from every other and from the three above,
+-- so no leg can confuse them.
+--
+-- DiffDelete is deliberately the exception: foreground-only and reverse,
+-- dracula's own shape. A group that states a background hands it over to
+-- the review verbatim, so a fixture where all four do that makes the
+-- review's colors identical to the fixture's -- and a regression that went
+-- back to painting rows with the diff groups themselves would satisfy every
+-- assertion in the inline-review leg. Deriving one of them instead gives
+-- that leg a value no group in this scheme defines. Giving DiffDelete a
+-- background back re-blinds it.
 --
 -- CursorLine is also the one underlined group here, and no chrome group may
 -- take an attribute: an overlay cell that comes back underlined can only

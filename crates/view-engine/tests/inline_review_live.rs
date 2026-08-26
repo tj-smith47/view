@@ -724,9 +724,24 @@ fn a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block() {
 
     assert_eq!(s.group("ViewReviewRemoved"), "53333c/nil/false");
     assert_eq!(s.group("ViewReviewStale"), "534641/nil/false");
-    assert_eq!(s.group("ViewReviewAdded"), "305444/f8f8f2/false");
-    assert_eq!(s.group("ViewReviewHeader"), "3c505e/f8f8f2/false");
-    assert_eq!(s.group("ViewReviewSign"), "nil/f8f8f2/false");
+    assert_eq!(
+        s.group("ViewReviewAdded"),
+        "305444/50fa7b/false",
+        "the scheme's own green reads at 6.1:1 over the blend of it, so the \
+         proposal keeps the color its author paired with a diff"
+    );
+    assert_eq!(
+        s.group("ViewReviewHeader"),
+        "3c505e/f8f8f2/false",
+        "a `reverse` group's text field is its background, which dracula \
+         leaves unset, so the header falls to the row's own text color"
+    );
+    assert_eq!(
+        s.group("ViewReviewSign"),
+        "nil/8be9fd/false",
+        "the marker sits on the buffer's own background rather than on a \
+         fill, and the scheme's diff accent reads there"
+    );
 
     // buffer row 1 is screen row 1, and column 2 is its first text cell
     // once the current hunk's sign has claimed the two before it
@@ -876,9 +891,26 @@ fn a_colorscheme_switched_under_an_open_review_re_derives_its_groups() {
 /// scheme added by an engine-pin bump is walked with no edit here.
 ///
 /// The claims are relations rather than literals -- distinct from the row's
-/// own background, distinct from each other, no attribute borrowed, the
-/// text in `Normal`'s foreground -- because that is what "the review reads"
-/// means for a scheme nobody here has seen.
+/// own background, distinct from each other, no attribute borrowed, every
+/// text surface at WCAG 3:1 or better against what it is painted on --
+/// because that is what "the review reads" means for a scheme nobody here
+/// has seen. An identity would be the wrong shape twice over: pinning the
+/// text to `Normal`'s foreground passed on all 28 while leaving 12 of them
+/// with a header at 1.06:1 to 1.71:1, nvim's legacy diff palette being a
+/// `#c6c6c6` fill taken verbatim under a light `Normal.fg`.
+///
+/// The contrast half is measured off the painted grid rather than off the
+/// group definitions, because what a reader sees is the foreground the
+/// grid resolved over the background it resolved, including what either
+/// inherited: the sign's own group carries no background at all, and the
+/// cell it lands in is `SignColumn`'s, which `pablo` and `vim` set to a
+/// light grey their diff colors cannot be read on. A group-level check
+/// would call both of those fine.
+///
+/// The re-apply on a failed read is `blue`: switching a colorscheme frees
+/// the attribute ids the grid still holds, and `nvim__inspect_cell`
+/// refuses a freed id rather than resolving it stale. Applying the same
+/// scheme again repaints from the ids it now has.
 #[test]
 fn every_colorscheme_the_pinned_nvim_ships_paints_a_review_that_reads() {
     let s = start();
@@ -900,6 +932,21 @@ table.sort(names)
 local out = { tostring(#names) }
 local hex = function(v) return v and string.format('%06x', v) or 'nil' end
 local function fail(fmt, ...) out[#out + 1] = string.format(fmt, ...) end
+local function lum(rgb)
+  local out, weight = 0, { 0.2126, 0.7152, 0.0722 }
+  for i, shift in ipairs({ 16, 8, 0 }) do
+    local c = (math.floor(rgb / 2 ^ shift) % 256) / 255
+    if c <= 0.03928 then c = c / 12.92 else c = ((c + 0.055) / 1.055) ^ 2.4 end
+    out = out + weight[i] * c
+  end
+  return out
+end
+local function ratio(a, b)
+  local la, lb = lum(a), lum(b)
+  if la < lb then la, lb = lb, la end
+  return (la + 0.05) / (lb + 0.05)
+end
+local worst, worst_at = math.huge, 'nothing painted'
 for _, name in ipairs(names) do
   vim.o.background = 'dark'
   if not pcall(vim.cmd, 'colorscheme ' .. name) then
@@ -913,31 +960,61 @@ for _, name in ipairs(names) do
       if hl.bg == nil or hl.bg == base then
         fail('%s: %s is the row it marks (%s)', name, g, hex(hl.bg))
       end
-      if seen[hl.bg] ~= nil then
-        fail('%s: %s and %s are the same color (%s)', name, seen[hl.bg], g, hex(hl.bg))
+      -- keyed on the hex rather than on the value: a review background that
+      -- regressed to nil would raise `table index is nil` here and lose
+      -- every per-scheme diagnostic this walk exists to report
+      if seen[hex(hl.bg)] ~= nil then
+        fail('%s: %s and %s are the same color (%s)', name, seen[hex(hl.bg)], g, hex(hl.bg))
       end
-      seen[hl.bg] = g
+      seen[hex(hl.bg)] = g
       if hl.reverse or hl.bold or hl.italic or hl.underline then
         fail('%s: %s borrowed an attribute from the diff group', name, g)
       end
     end
-    for _, g in ipairs({ 'ViewReviewAdded', 'ViewReviewHeader', 'ViewReviewSign' }) do
-      local hl = vim.api.nvim_get_hl(0, { name = g, link = false })
-      if hl.fg ~= normal.fg then
-        fail('%s: %s draws its text in %s, not the row\\'s own %s', name, g,
-          hex(hl.fg), hex(normal.fg))
+    vim.cmd('redraw!')
+    local surfaces = {}
+    for _, probe in ipairs({
+      { 'the header', 2, 2 }, { 'the proposal', 3, 2 }, { 'the sign', 1, 0 },
+    }) do
+      local ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
+      if not ok then
+        vim.cmd('colorscheme ' .. name)
+        vim.cmd('redraw!')
+        ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
+      end
+      if not ok then
+        fail('%s: %s could not be read off the grid -- %s', name, probe[1], cell)
+      else
+        local a = cell[2] or {}
+        surfaces[#surfaces + 1] = { probe[1], a.foreground or normal.fg, a.background or base }
+      end
+    end
+    for _, surface in ipairs(surfaces) do
+      local where, fg, bg = surface[1], surface[2], surface[3]
+      if fg == nil then
+        fail('%s: %s is painted with no foreground at all', name, where)
+      else
+        local r = ratio(fg, bg)
+        if r < worst then worst, worst_at = r, string.format('%s, %s', name, where) end
+        if r < 3 then
+          fail('%s: %s is %s on %s -- %.2f:1, under the 3:1 floor', name, where,
+            hex(fg), hex(bg), r)
+        end
       end
     end
   end
 end
+table.insert(out, 2, string.format('worst contrast %.2f:1 (%s)', worst, worst_at))
 return out",
         vec![],
     );
 
-    let (walked, failures) = report.split_first().expect("the count, then failures");
+    let (walked, rest) = report.split_first().expect("the count, then the summary");
+    let (summary, failures) = rest.split_first().expect("the summary, then failures");
+    println!("{walked} colorschemes walked, {summary}");
     assert!(
         failures.is_empty(),
-        "{} of {walked} colorschemes paint a review that cannot be read: {failures:#?}",
+        "{} findings over {walked} colorschemes ({summary}): {failures:#?}",
         failures.len()
     );
     assert!(

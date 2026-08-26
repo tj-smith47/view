@@ -237,11 +237,16 @@ over as it stands; where the color a row would be filled with is a
 foreground instead -- a group with no background, or a reverse-video one
 (dracula's are), where nvim fills from the foreground -- it is blended a
 fifth of the way over your `Normal` background, so those schemes tint the
-rows rather than filling them. The text on those rows is your `Normal`
-foreground, the color the row's own text would have used. A review reads as
-your theme's diff colors and the row under it keeps its own syntax
-highlighting. The review is drawn in the window the file is already in, and it
-scrolls, folds and wraps the way the rest of the buffer does. The
+rows rather than filling them. The text on those rows is the first color
+that reads on them: the diff group's own paired color, then your `Normal`
+foreground, then plain black or white -- whichever comes first at 3:1
+contrast or better, so a scheme pairing a light `Normal` foreground with a
+light diff background never leaves the header washed out. The `▶` follows
+the same rule against your sign column, which is why it keeps your theme's
+diff accent where that accent reads. A review reads as your theme's diff
+colors and the row under it keeps its own syntax highlighting. The review is
+drawn in the window the file is already in, and it scrolls, folds and wraps
+the way the rest of the buffer does. The
 buffer's text is untouched by any of it: nothing is written until you accept
 something. The `▶` on the current hunk needs a sign column to land in; with
 `signcolumn=no` it is simply absent, and the keys are still named. The header
