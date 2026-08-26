@@ -738,9 +738,9 @@ fn a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block() {
     );
     assert_eq!(
         s.group("ViewReviewSign"),
-        "nil/8be9fd/false",
-        "the marker sits on the buffer's own background rather than on a \
-         fill, and the scheme's diff accent reads there"
+        "3c505e/8be9fd/false",
+        "the marker carries the header's fill rather than whatever the \
+         gutter under it is, and the scheme's diff accent reads on it"
     );
 
     // buffer row 1 is screen row 1, and column 2 is its first text cell
@@ -808,7 +808,7 @@ vim.cmd('hi DiffText guifg=NONE guibg=#0F4F4F gui=NONE')",
 
     assert_eq!(s.group("ViewReviewAdded"), "273923/c7c7c7/false");
     assert_eq!(s.group("ViewReviewHeader"), "0f4f4f/c7c7c7/false");
-    assert_eq!(s.group("ViewReviewSign"), "nil/c7c7c7/false");
+    assert_eq!(s.group("ViewReviewSign"), "0f4f4f/c7c7c7/false");
     for name in ["ViewReviewAdded", "ViewReviewHeader"] {
         let resolved = s.group(name);
         let (bg, rest) = resolved.split_once('/').expect("bg/fg/reverse");
@@ -902,33 +902,38 @@ fn a_colorscheme_switched_under_an_open_review_re_derives_its_groups() {
 /// The contrast half is measured off the painted grid rather than off the
 /// group definitions, because what a reader sees is the foreground the
 /// grid resolved over the background it resolved, including what either
-/// inherited: the sign's own group carries no background at all, and the
-/// cell it lands in is the gutter's, which `pablo` and `vim` set to a
-/// light grey their diff colors cannot be read on. A group-level check
-/// would call both of those fine.
+/// inherited: a group-level check reads the color view asked for, never
+/// the one nvim painted, and the gutter is where those two came apart --
+/// `pablo` and `vim` set it to a light grey their diff colors cannot be
+/// read on.
 ///
-/// Which gutter group that cell resolves to is the reason each scheme is
-/// walked twice. `▶` marks the current hunk, which is the row `focus`
-/// leaves the cursor on, and with `'cursorline'` set nvim paints the sign
-/// cell of that row from `CursorLineSign` rather than `SignColumn` (`:h
+/// Which is why the marker is measured in four states. The cell it lands
+/// in is the gutter's, and nvim resolves that from `CursorLineSign` or
+/// `SignColumn` by `'cursorline'` and by where the cursor sits (`:h
 /// hl-CursorLineSign`) -- 18 of these 28 schemes give the two different
-/// backgrounds, and `pablo`'s accent read 8.94:1 on one and 1.85:1 on the
-/// other. So the walk sets the option both ways, moves the cursor onto the
-/// marked row, and holds the floor under each.
+/// backgrounds, and a marker measured against one of them read 8.94:1 on
+/// it and 1.38:1 on the other. A fill of the review's own is what makes
+/// the cell independent of both, so the claim held here is invariance:
+/// the same pair, at or above the floor, with the option set and clear
+/// and with the cursor on the marked row and off it. The sign block is
+/// two cells wide -- nvim pads a one-cell sign to the width of the
+/// column -- so both are read, since a fill on the glyph's own cell would
+/// leave the marker in an island of the gutter's color.
 ///
-/// Each measured cell is tied back to what should be painting it -- the
-/// header and the proposal to their own derived background, the sign to
-/// the marker glyph -- because a decoration that stopped painting leaves
-/// ordinary buffer text in those cells, and `Normal` on `Normal` clears
-/// 3:1 on nearly every scheme.
+/// Each measured cell is tied back to what should be painting it -- every
+/// one of them to its own derived background, the marker to its glyph --
+/// because a decoration that stopped painting leaves ordinary buffer text
+/// in those cells, and `Normal` on `Normal` clears 3:1 on nearly every
+/// scheme.
 ///
-/// The re-apply on a failed read is `blue`: switching a colorscheme frees
-/// the attribute ids the grid still holds, and `nvim__inspect_cell`
-/// refuses a freed id rather than resolving it stale. Applying the same
-/// scheme again repaints from the ids it now has. That is engine behavior
-/// view does not control, and an engine-pin bump can move which scheme
-/// trips it -- the retry is written to fail by name rather than by scheme,
-/// so the next one is a named failure here rather than a silent read.
+/// The re-apply on a read that came back unpainted is `blue`: switching a
+/// colorscheme frees the attribute ids the grid still holds, and a cell
+/// that kept one either makes `nvim__inspect_cell` refuse it or reads
+/// back carrying no attributes at all. Applying the same scheme again
+/// repaints from the ids it now has. That is engine behavior view does
+/// not control, and an engine-pin bump can move which scheme trips it --
+/// the retry re-reads rather than excusing the cell, so a decoration that
+/// really stopped painting still fails here, by name and by scheme.
 #[test]
 fn every_colorscheme_the_pinned_nvim_ships_paints_a_review_that_reads() {
     let s = start();
@@ -990,50 +995,91 @@ for _, name in ipairs(names) do
         fail('%s: %s borrowed an attribute from the diff group', name, g)
       end
     end
-    local surfaces = {}
-    for _, lit in ipairs({ true, false }) do
-      -- the marker sits on the current hunk, which is where focus leaves
-      -- the cursor: with 'cursorline' set that cell is CursorLineSign, and
-      -- 18 of these schemes paint it a different color from SignColumn
-      vim.wo.cursorline = lit
-      vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    local sign = vim.api.nvim_get_hl(0, { name = 'ViewReviewSign', link = false })
+    derived['ViewReviewSign'] = sign.bg
+    if sign.bg == nil or sign.bg == base then
+      fail('%s: ViewReviewSign carries no fill of its own (%s)', name, hex(sign.bg))
+    end
+    local surfaces, marker = {}, {}
+    vim.wo.signcolumn = 'yes'
+    for _, state in ipairs({
+      { 'cursorline on, cursor on the mark', true, 2 },
+      { 'cursorline on, cursor off it', true, 4 },
+      { 'cursorline off, cursor on the mark', false, 2 },
+      { 'cursorline off, cursor off it', false, 4 },
+    }) do
+      -- what the gutter under the marker resolves to moves with both of
+      -- these: 'cursorline' chooses between CursorLineSign and SignColumn,
+      -- and the cursor's row chooses whether the first one applies at all
+      vim.wo.cursorline = state[2]
+      vim.api.nvim_win_set_cursor(0, { state[3], 0 })
       vim.cmd('redraw!')
-      local state = lit and 'cursorline on' or 'cursorline off'
+      local read = 0
+      -- label, screen row, column, the group whose fill must be under it,
+      -- the glyph it must hold, whether its contrast is measured, whether
+      -- it is the marker whose invariance is checked below
       for _, probe in ipairs({
-        { 'the header', 2, 2, 'ViewReviewHeader' },
-        { 'the proposal', 3, 2, 'ViewReviewAdded' },
-        { 'the sign', 1, 0 },
+        { 'the header', 2, 2, 'ViewReviewHeader', false, true, false },
+        { 'the proposal', 3, 2, 'ViewReviewAdded', false, true, false },
+        { 'the marker', 1, 0, 'ViewReviewSign', '\u{25b6}', true, true },
+        { 'the pad cell', 1, 1, 'ViewReviewSign', ' ', false, false },
       }) do
-        local where = string.format('%s (%s)', probe[1], state)
-        local ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
-        if not ok then
-          vim.cmd('colorscheme ' .. name)
-          vim.cmd('redraw!')
+        local where = string.format('%s (%s)', probe[1], state[1])
+        local ok, cell
+        for attempt = 1, 2 do
           ok, cell = pcall(vim.api.nvim__inspect_cell, 1, probe[2], probe[3])
+          if ok and (cell[2] or {}).background ~= nil then
+            break
+          end
+          if attempt == 1 then
+            vim.cmd('colorscheme ' .. name)
+            vim.cmd('redraw!')
+          end
         end
         if not ok then
           fail('%s: %s could not be read off the grid -- %s', name, where, cell)
         else
+          read = read + 1
           local a = cell[2] or {}
           -- the cell has to be the review's own: a decoration that stopped
           -- painting leaves ordinary buffer text here, which is Normal on
           -- Normal and clears the floor under nearly every scheme
-          if probe[4] ~= nil and a.background ~= derived[probe[4]] then
+          if a.background ~= derived[probe[4]] then
             fail('%s: %s is painted on %s, not on the %s the group carries',
               name, where, hex(a.background), hex(derived[probe[4]]))
           end
-          if probe[4] == nil and cell[1] ~= '\u{25b6}' then
-            fail('%s: %s holds [%s], not the marker', name, where, cell[1])
+          if probe[5] and cell[1] ~= probe[5] then
+            fail('%s: %s holds [%s], not [%s]', name, where, cell[1], probe[5])
           end
-          surfaces[#surfaces + 1] =
-            { where, a.foreground or normal.fg, a.background or base }
+          if probe[6] then
+            surfaces[#surfaces + 1] =
+              { where, a.foreground or normal.fg, a.background or base }
+          end
+          if probe[7] then
+            marker[#marker + 1] = { state[1], a.foreground, a.background }
+          end
         end
       end
+      -- counted per pass against the four probes above rather than once at
+      -- the end, so a state that stops reading a cell is named by the state
+      -- it stopped in, whatever the other three passes managed
+      if read ~= 4 then
+        fail('%s: %s read %d of the 4 cells', name, state[1], read)
+      end
     end
-    -- three cells under each of the two 'cursorline' states: a walk that
-    -- silently stopped reading one of them would report a clean floor
-    if #surfaces ~= 6 then
-      fail('%s: %d of the 6 cells were measured', name, #surfaces)
+    -- the point of the four passes: the marker's own fill makes the cell
+    -- independent of both the option and the cursor, so anything but one
+    -- pair across all of them is the dependency coming back
+    for _, m in ipairs(marker) do
+      if m[2] ~= marker[1][2] or m[3] ~= marker[1][3] then
+        fail('%s: the marker is %s on %s with the %s, and %s on %s with the %s',
+          name, hex(m[2]), hex(m[3]), m[1],
+          hex(marker[1][2]), hex(marker[1][3]), marker[1][1])
+      end
+    end
+    -- three contrast-measured cells in each of the four passes
+    if #surfaces ~= 12 then
+      fail('%s: %d of the 12 cells were measured', name, #surfaces)
     end
     for _, surface in ipairs(surfaces) do
       local where, fg, bg = surface[1], surface[2], surface[3]
@@ -1066,6 +1112,57 @@ return out",
     assert!(
         walked.parse::<usize>().expect("a count") >= 28,
         "only {walked} colorschemes were walked; the pinned nvim ships 28"
+    );
+}
+
+/// The marker's fill is the whole sign block, never the glyph's own cell.
+/// nvim pads a one-cell sign to the width of the column it draws in, and
+/// that width is the user's: two cells under `signcolumn=yes`, and the
+/// number column under `signcolumn=number`, which is `'numberwidth'` wide.
+/// A fill that reached only the glyph would leave the marker in an island
+/// of whatever the gutter is -- the color the review took a fill of its
+/// own to stop depending on.
+#[test]
+fn the_markers_fill_covers_the_sign_block_at_both_column_widths() {
+    let s = start();
+    s.lua(
+        "vim.cmd('hi Normal guifg=#C7C7C7 guibg=#1C1C1C')
+vim.cmd('hi DiffText guifg=NONE guibg=#0F4F4F gui=NONE')
+vim.wo.signcolumn = 'yes'
+vim.wo.cursorline = true",
+        vec![],
+    );
+    let buf = s.buffer();
+    s.show_in_current_window(buf);
+
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, true);
+
+    assert_eq!(
+        s.cell(1, 0),
+        "▶:0f4f4f/c7c7c7/false",
+        "the marker itself, on the fill the review derived rather than on \
+         the gutter's"
+    );
+    assert_eq!(
+        s.cell(1, 1),
+        " :0f4f4f/c7c7c7/false",
+        "the cell nvim pads the sign to, which is as much of the gutter the \
+         reader sees as the glyph is"
+    );
+
+    s.lua("vim.wo.number = true\nvim.wo.signcolumn = 'number'", vec![]);
+    let block: Vec<String> = (0..4).map(|col| s.cell(1, col)).collect();
+    for cell in &block {
+        assert!(
+            cell.contains("0f4f4f/c7c7c7/false"),
+            "every cell the sign takes over from the number column carries \
+             the fill, got {block:?}"
+        );
+    }
+    assert_eq!(
+        block.iter().filter(|c| c.starts_with('\u{25b6}')).count(),
+        1,
+        "the marker is drawn once inside that block: {block:?}"
     );
 }
 

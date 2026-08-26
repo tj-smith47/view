@@ -245,15 +245,18 @@ light diff background never leaves the header washed out. 3:1 is the floor
 view holds rather than a standard it quotes: it is the point past which
 your own theme's paired color still survives, and a stricter number would
 trade your palette for black and white on schemes that read perfectly well.
-The `▶` follows the same rule against your sign column, which is why it
-keeps your theme's diff accent where that accent reads -- against
-`CursorLineSign` when you run with `cursorline`, since the marker sits on
-the hunk the cursor is on, and against `SignColumn` when you do not; toggle
-the option under an open review and the marker is re-derived for the gutter
-it now lands in. A review reads as your theme's diff colors and the row
-under it keeps its own syntax highlighting. The review is drawn in the
-window the file is already in, and it scrolls, folds and wraps the way the
-rest of the buffer does. The buffer's text is untouched by any of it:
+The `▶` is drawn on the header's own background rather than on your sign
+column, and keeps your theme's diff accent over it wherever that accent
+reads. The gutter it lands in is not fixed -- the marker sits on the hunk
+the cursor is on, so nvim fills that cell from `CursorLineSign` while your
+cursor is there and from `SignColumn` once it moves off -- and a marker
+that took its color from the gutter would be legible on one and not the
+other. A fill of its own is what makes the marker read the same wherever
+you leave the cursor, and it covers the whole sign column rather than the
+one cell the glyph is in. A review reads as your theme's diff colors and
+the row under it keeps its own syntax highlighting. The review is drawn in
+the window the file is already in, and it scrolls, folds and wraps the way
+the rest of the buffer does. The buffer's text is untouched by any of it:
 nothing is written until you accept something. The `▶` on the current hunk
 needs a sign column to land in; with `signcolumn=no` it is simply absent,
 and the keys are still named. The header takes two rows rather than one

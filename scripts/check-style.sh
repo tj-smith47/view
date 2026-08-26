@@ -201,9 +201,50 @@ if [ "${1:-}" = "--file" ]; then
   exit 0
 fi
 
+# The embedded Lua of the two review chunks, which are published
+# byte-for-byte inside a fence in docs/inline-review-wire-capture.md and
+# pinned there by a test. A line past 80 columns is read twice at that
+# width -- in the doc's fence, which does not wrap, and in the source
+# beside the rustfmt-held Rust around it -- and nothing else catches one:
+# rustfmt does not reach inside a string literal, and the chunk is hand
+# wrapped at 80 everywhere else. Scoped to these two consts rather than
+# every Lua chunk in the file: the rest are not published anywhere a width
+# is load-bearing, and 40 of their lines are over 80 today.
+check_review_chunk_width() {
+  local file='crates/view-engine/src/nvim_api.rs'
+  if [ ! -f "$file" ]; then
+    echo "STYLE FAIL: $file missing; cannot check review chunk width"
+    return 1
+  fi
+  local report
+  report=$(awk '
+    /^const REVIEW_(SHOW|CLEAR)_CHUNK: &str = concat!\(/ { found++; inchunk = 1; next }
+    inchunk && /^\);/ { inchunk = 0; next }
+    inchunk && length($0) > 80 {
+      printf "%s:%d: %d columns\n", FILENAME, FNR, length($0)
+      over++
+    }
+    END { printf "CONSTS %d\n", found; exit (over > 0 || found != 2) ? 1 : 0 }
+  ' "$file") || {
+    printf '%s\n' "$report" | grep -v '^CONSTS '
+    local consts
+    consts=$(printf '%s\n' "$report" | sed -n 's/^CONSTS //p')
+    if [ "$consts" != "2" ]; then
+      echo "STYLE FAIL: found $consts of the 2 review chunks; the width check did not run"
+    else
+      echo "STYLE FAIL: a review chunk line is over 80 columns"
+      echo "  The chunk is published in docs/inline-review-wire-capture.md's"
+      echo "  fence, which does not wrap. Break the line the way the rest are."
+    fi
+    return 1
+  }
+  return 0
+}
+
 fail=0
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1
+  check_review_chunk_width || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi
