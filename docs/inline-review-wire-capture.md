@@ -64,19 +64,22 @@ MARK 5:5:ViewReviewStale:nil:nil:
 
 Four extmarks for three hunks. A hunk that replaces rows gets a range mark
 carrying the row highlight -- `ViewReviewRemoved`, or `ViewReviewStale` once
-the buffer has moved under it (mark 4) -- and a hunk with anything to propose gets a second
-mark carrying the virtual lines. The pure insertion (mark 3) has only the
-second kind, and it is the one mark with `virt_lines_above = true`: it replaces
-no row, so its lines are drawn above the row it inserts before rather than
-under the rows it would replace. The header and the `▶` sign appear on the
-current hunk alone, which is what makes "which hunk am I about to accept"
-answerable without the panel. The header is two virtual lines, not one: nvim's
-grid keeps its full width under view's panel, so a hint on a single line loses
-its tail -- `<leader>hq leave` first -- at the widths a laptop opens.
+the buffer has moved under it (mark 4) -- and a hunk with anything to propose
+gets a second mark carrying the virtual lines. The pure insertion (mark 3) has
+only the second kind, and it is the one mark with `virt_lines_above = true`:
+it replaces no row, so its lines are drawn above the row it inserts before
+rather than under the rows it would replace. The header and the `▶` sign
+appear on the current hunk alone, which is what makes "which hunk am I about
+to accept" answerable without the panel. The header is two virtual lines, not
+one: nvim's grid keeps its full width under view's panel, so a hint on a
+single line loses its tail -- `<leader>hq leave` first -- at the widths a
+laptop opens.
 
-The groups are the review's own, derived at show time from the colorscheme's
-`DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText` rather than being them. Under
-this session's default scheme:
+The groups are the review's own, derived from the colorscheme's
+`DiffDelete`/`DiffChange`/`DiffAdd`/`DiffText` rather than being them -- once,
+the first time a review shows, and again on every `ColorScheme` after, so the
+per-keystroke redraws a review does between those two events derive nothing.
+Under this session's default scheme:
 
 ```
 Normal            bg=14161b fg=e0e2ea
@@ -86,18 +89,22 @@ DiffDelete        bg=nil    fg=ffc0b9
 DiffText          bg=007373 fg=eef1f8
 
 ViewReviewRemoved bg=43383b fg=nil
-ViewReviewStale   bg=202227 fg=nil
-ViewReviewAdded   bg=10231d fg=eef1f8
-ViewReviewHeader  bg=10292d fg=eef1f8
+ViewReviewStale   bg=4f5258 fg=nil
+ViewReviewAdded   bg=005523 fg=eef1f8
+ViewReviewHeader  bg=007373 fg=eef1f8
 ViewReviewSign    bg=nil    fg=eef1f8
 ```
 
-Each derived background is a fifth of the diff group's own color over
-`Normal`'s background -- the group's `guibg` where it defines one
-(`DiffAdd`, `DiffChange`, `DiffText` here) and its `guifg` where it does not
-(`DiffDelete` here, and every one of dracula's). Nothing else crosses:
-`ViewReviewRemoved` and `ViewReviewStale` carry a background alone, so a
-reviewed row keeps whatever foreground its own syntax gave it, and no
+A diff group that defines a `guibg` hands it over as it stands -- `DiffAdd`,
+`DiffChange` and `DiffText` here, whose backgrounds the derived groups carry
+unchanged -- because that background is what the author drew for a diffed
+row. A group with only a `guifg` (`DiffDelete` here, and every one of
+dracula's) has no such background to take, so its foreground is laid a fifth
+of the way over `Normal`'s background instead: `#ffc0b9` a fifth over
+`#14161b` is the `43383b` above. Text follows the group's own `guifg`, or
+`Normal`'s where it has none, and never the group's background. Nothing else
+crosses: `ViewReviewRemoved` and `ViewReviewStale` carry a background alone,
+so a reviewed row keeps whatever foreground its own syntax gave it, and no
 `reverse` or `bold` follows the color across. A colorscheme designs its diff
 groups for diff mode, where they color cells inside a diffed line; a
 `line_hl_group` paints a whole row with them, and dracula's foreground-only
@@ -105,7 +112,8 @@ groups for diff mode, where they color cells inside a diffed line; a
 derived group is a fifth of that same red instead, under the row's own text
 (`crates/view-engine/tests/inline_review_live.rs`'s
 `a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block`
-pins both halves against a dracula-shaped scheme).
+pins both halves against a dracula-shaped scheme, and
+`a_background_defined_diff_group_is_taken_verbatim` pins the other side).
 
 The range mark's `end_row` is one *below* the hunk's own `old_range` end: the
 range is half-open and nvim's `end_row` is inclusive for `line_hl_group`, so
@@ -159,14 +167,14 @@ The same review as the user's screen holds it -- `screenattr` at column 3 and
 row  attr  screen
  1     0   |  one|
  2    59   |▶ two|            ViewReviewRemoved  the row the hunk replaces
- 3    62   |  hunk 1/3 ...|   ViewReviewHeader   header, a virtual line
- 4    62   |  ]c next ...|    ViewReviewHeader   the header's second virtual line
- 5    61   |  +TWO|           ViewReviewAdded    the proposal, a virtual line
+ 3    61   |  hunk 1/3 ...|   ViewReviewHeader   header, a virtual line
+ 4    61   |  ]c next ...|    ViewReviewHeader   the header's second virtual line
+ 5    60   |  +TWO|           ViewReviewAdded    the proposal, a virtual line
  6     0   |  three|                             untouched, and painted as such
- 7    61   |  +inserted|      ViewReviewAdded    the insertion, above its row
+ 7    60   |  +inserted|      ViewReviewAdded    the insertion, above its row
  8     0   |  four|
  9     0   |  five|
-10    60   |  six|            ViewReviewStale    the stale hunk
+10    32   |  six|            ViewReviewStale    the stale hunk
 ```
 
 Row 6 is the assertion that matters: the row after a hunk carries the same
@@ -210,9 +218,14 @@ against the older buffer is still in flight.
 ```
 marks=0 buffer keymaps=0
 messages after two clears: ""
+derive flag=nil  view_review augroup=gone
 ```
 
-The namespace is emptied and every mapping is gone. A second clear over an
+The namespace is emptied and every mapping is gone. So are the derived
+groups' one-shot flag and the `ColorScheme` autocmd that keeps them current:
+the next review derives against whatever colorscheme is loaded then, rather
+than against a session-old answer, and no autocmd outlives the review that
+installed it. A second clear over an
 already-clear buffer answers without error: `vim.keymap.del` raises for a
 mapping that does not exist, which is what the `pcall` around it absorbs.
 Idempotence is what lets a review's teardown run without first proving a show
@@ -252,10 +265,6 @@ end
 local function derive()
   local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
   local base = normal.bg or (vim.o.background == 'light' and 0xffffff or 0x000000)
-  local function source(name)
-    local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
-    return hl.bg or hl.fg or normal.fg or base, hl.fg or hl.bg or normal.fg
-  end
   local function blend(color)
     local out = 0
     for _, shift in ipairs({ 16, 8, 0 }) do
@@ -265,21 +274,32 @@ local function derive()
     end
     return out
   end
-  local removed = source('DiffDelete')
-  local stale = source('DiffChange')
-  local added, added_fg = source('DiffAdd')
-  local header, header_fg = source('DiffText')
-  vim.api.nvim_set_hl(0, 'ViewReviewRemoved', { bg = blend(removed) })
-  vim.api.nvim_set_hl(0, 'ViewReviewStale', { bg = blend(stale) })
-  vim.api.nvim_set_hl(0, 'ViewReviewAdded', { bg = blend(added), fg = added_fg })
-  vim.api.nvim_set_hl(0, 'ViewReviewHeader', { bg = blend(header), fg = header_fg })
+  local function tint(name)
+    local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
+    local text = hl.fg or normal.fg
+    if hl.bg ~= nil then
+      return hl.bg, text
+    end
+    return blend(hl.fg or normal.fg or base), text
+  end
+  local removed = tint('DiffDelete')
+  local stale = tint('DiffChange')
+  local added, added_fg = tint('DiffAdd')
+  local header, header_fg = tint('DiffText')
+  vim.api.nvim_set_hl(0, 'ViewReviewRemoved', { bg = removed })
+  vim.api.nvim_set_hl(0, 'ViewReviewStale', { bg = stale })
+  vim.api.nvim_set_hl(0, 'ViewReviewAdded', { bg = added, fg = added_fg })
+  vim.api.nvim_set_hl(0, 'ViewReviewHeader', { bg = header, fg = header_fg })
   vim.api.nvim_set_hl(0, 'ViewReviewSign', { fg = header_fg })
 end
-derive()
-vim.api.nvim_create_autocmd('ColorScheme', {
-  group = vim.api.nvim_create_augroup('view_review', { clear = true }),
-  callback = derive,
-})
+if not _G.view_review_derived then
+  _G.view_review_derived = true
+  derive()
+  vim.api.nvim_create_autocmd('ColorScheme', {
+    group = vim.api.nvim_create_augroup('view_review', { clear = true }),
+    callback = derive,
+  })
+end
 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
 for _, m in ipairs(marks) do
   if m.end_row > m.row then
@@ -362,6 +382,8 @@ if displaced ~= nil then
   restore = displaced[buf]
   displaced[buf] = nil
 end
+_G.view_review_derived = nil
+pcall(vim.api.nvim_del_augroup_by_name, 'view_review')
 if not vim.api.nvim_buf_is_valid(buf) then
   return
 end

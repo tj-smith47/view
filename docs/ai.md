@@ -231,12 +231,15 @@ line in `ViewReviewAdded`, the header naming the keys is `ViewReviewHeader`,
 a hunk your own typing has moved under turns `ViewReviewStale`, and the `▶`
 marking the current hunk is `ViewReviewSign` -- five groups view derives from
 your colorscheme's own `DiffDelete`, `DiffAdd`, `DiffText` and `DiffChange`
-when the review opens, and re-derives when you
-change colorscheme. Each is a fifth of that group's color over your `Normal`
-background and nothing else: a review reads as your theme's diff colors, the
-row under it keeps its own syntax highlighting, and a colorscheme whose diff
-groups are reverse-video (dracula's are) tints the rows instead of filling
-them. The review is drawn in the window the file is already in, and it
+when the review opens, and re-derives when you change colorscheme. A diff
+group that defines a background hands that background over as it stands; a
+group that only defines a foreground is blended a fifth of the way over your
+`Normal` background, so a colorscheme whose diff groups are reverse-video
+(dracula's are) tints the rows instead of filling them. The text on those
+rows is the group's own foreground, or `Normal`'s where the group has none --
+never the group's background, which would be text you cannot read. A review
+reads as your theme's diff colors and the row under it keeps its own syntax
+highlighting. The review is drawn in the window the file is already in, and it
 scrolls, folds and wraps the way the rest of the buffer does. The
 buffer's text is untouched by any of it: nothing is written until you accept
 something. The `▶` on the current hunk needs a sign column to land in; with

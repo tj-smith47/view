@@ -823,10 +823,10 @@ ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     exit 1
 }
 
-# A `#rrggbb` from the fixture colorscheme. Read rather than repeated so a
-# retuned fixture cannot leave the assertions matching a color nothing
-# paints.
-fixture_hex() {
+# A `#rrggbb` from the fixture colorscheme, as the decimal triple a
+# truecolor escape spells it with. Read rather than repeated so a retuned
+# fixture cannot leave the assertions matching a color nothing paints.
+fixture_bg() {
     local group="$1" hex
     hex=$(grep -oE "'$group', \{[^}]*bg = '#[0-9a-f]{6}'" "$COLORSCHEME" |
         grep -oE "#[0-9a-f]{6}" | tail -1) || true
@@ -834,49 +834,27 @@ fixture_hex() {
         printf 'FAIL: %s has no background in %s any more\n' "$group" "$COLORSCHEME" >&2
         return 1
     fi
-    printf '%s' "$hex"
-}
-
-# The same color as the decimal triple a truecolor escape spells it with.
-fixture_bg() {
-    local hex
-    hex=$(fixture_hex "$1") || return 1
     printf '%d;%d;%d' "0x${hex:1:2}" "0x${hex:3:2}" "0x${hex:5:2}"
-}
-
-# The background one of the review's own groups resolves to over this
-# fixture: a fifth of the named diff group's color over `Normal`'s, which
-# is the arithmetic `REVIEW_SHOW_CHUNK`'s `derive` does inside nvim.
-# Computed rather than read, because no group in the colorscheme holds it --
-# it exists only once a review has blended one.
-review_bg() {
-    local group="$1" hex base
-    hex=$(fixture_hex "$group") || return 1
-    base=$(fixture_hex Normal) || return 1
-    LC_ALL=C awk -v c="$hex" -v b="$base" 'BEGIN {
-        for (i = 1; i <= 3; i++) {
-            cc = strtonum("0x" substr(c, 2 * i, 2))
-            bb = strtonum("0x" substr(b, 2 * i, 2))
-            printf "%s%d", (i > 1 ? ";" : ""), int(bb + (cc - bb) * 0.2 + 0.5)
-        }
-    }'
 }
 
 NORMAL_BG=$(fixture_bg Normal) || exit 1
 CURSORLINE_BG=$(fixture_bg CursorLine) || exit 1
 FLOAT_BG=$(fixture_bg NormalFloat) || exit 1
 # What a review is drawn with: not the colorscheme's diff groups themselves
-# but the five view derives from them at show time (see
-# `REVIEW_SHOW_CHUNK`), each a fifth of the diff group's color over
-# `Normal`'s background and carrying no attribute of it.
-REVIEW_ADDED_BG=$(review_bg DiffAdd) || exit 1
-REVIEW_REMOVED_BG=$(review_bg DiffDelete) || exit 1
-REVIEW_HEADER_BG=$(review_bg DiffText) || exit 1
+# but the five view derives from them at show time (see `REVIEW_SHOW_CHUNK`),
+# which carry none of those groups' attributes. This fixture gives all four
+# a background of its own, and a diff group that defines one hands it over
+# as it stands, so the derived background is the fixture's own value here --
+# a fixture retuned to foreground-only diff groups would need these read as
+# a fifth of that foreground over `Normal` instead.
+REVIEW_ADDED_BG=$(fixture_bg DiffAdd) || exit 1
+REVIEW_REMOVED_BG=$(fixture_bg DiffDelete) || exit 1
+REVIEW_HEADER_BG=$(fixture_bg DiffText) || exit 1
 # read for the gate below rather than for a leg: it is what a stale hunk
 # paints with and what `StyleRole::GitModified` resolves to in the tree
 # float, so a fixture that let it collide with another group would be found
 # by whichever leg reads it next rather than here
-REVIEW_STALE_BG=$(review_bg DiffChange) || exit 1
+REVIEW_STALE_BG=$(fixture_bg DiffChange) || exit 1
 # Every one of them distinct from every other: two that shared a value would
 # leave a bleed through an overlay indistinguishable from correct paint, and
 # a proposed line indistinguishable from the row it replaces.
@@ -1658,6 +1636,10 @@ leg_inline_review() {
     send_text "$key"
     wait_change "$REACTION_SECS" "the accepted hunk" >/dev/null
     settle
+    # The three values this hunts are also what `StyleRole::GitAdded` and its
+    # neighbours resolve to in the tree float, since both read the same diff
+    # groups. No tree is open in this leg, so the overlap costs nothing --
+    # a leg that opened one would have to scope the scan to the buffer rows.
     local stragglers
     stragglers=$(LC_ALL=C awk -F'\t' -v a="$REVIEW_ADDED_BG" -v d="$REVIEW_REMOVED_BG" \
         -v t="$REVIEW_HEADER_BG" '$3 == a || $3 == d || $3 == t { print; n++ }

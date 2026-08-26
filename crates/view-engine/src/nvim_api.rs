@@ -1701,24 +1701,39 @@ macro_rules! review_ns_lua {
 /// `ViewReviewHeader` on the header and `ViewReviewSign` on the current
 /// hunk's sign -- each derived from the colorscheme's matching diff group
 /// (`:h hl-DiffDelete`, `:h hl-DiffChange`, `:h hl-DiffAdd`, `:h
-/// hl-DiffText`) rather than being that group. The derivation takes the
-/// group's color (its background where it defines one, its foreground
-/// otherwise) a fifth of the way over `Normal`'s background and takes
-/// nothing else: a colorscheme designs its diff groups for diff mode, where
-/// they color cells inside a diffed line, and a `line_hl_group` paints a
-/// whole row with them. dracula's `DiffDelete` and `DiffText` are
-/// foreground-only and `reverse`, which over a whole row is a solid block of
-/// their color -- and every attribute that produces that is left behind
-/// here, so a reviewed row keeps its own syntax foreground over a
-/// background that says it is under review. A colorscheme that themes no
-/// diff group at all falls back to `Normal`'s own foreground, so the review
-/// still reads, and a `Normal` carrying no background of its own -- a
+/// hl-DiffText`) rather than being that group.
+///
+/// A diff group that defines a background hands it over as it stands: its
+/// author already chose what a diffed row sits on, and a scheme that says
+/// so is not improved by view averaging it with something else. A group
+/// with only a foreground is the case that has to be converted, and that
+/// foreground goes a fifth of the way over `Normal`'s background instead.
+/// Either way the attributes are left behind, which is the point: a
+/// colorscheme designs its diff groups for diff mode, where they color
+/// cells inside a diffed line, and a `line_hl_group` paints a whole row
+/// with them. dracula's `DiffDelete` and `DiffText` are foreground-only and
+/// `reverse`, which over a whole row is a solid block of their color, so a
+/// reviewed row keeps its own syntax foreground over a background that says
+/// it is under review.
+///
+/// The text color on the three groups that carry one is the diff group's
+/// foreground, or `Normal`'s where the group has none -- never the group's
+/// own background, which is the one color that would leave a proposal
+/// invisible against the row it is drawn on. A group that defines neither takes a
+/// blend of `Normal`'s foreground, so a scheme themeing no diff group at
+/// all still reads; and a `Normal` carrying no background of its own -- a
 /// scheme drawing on the terminal's, which is what dracula.nvim does --
 /// blends against black or white by `'background'`, since nothing inside
-/// nvim can see what the terminal is painting behind it. The `ColorScheme` autocmd in the review's augroup re-derives
-/// the five, since the groups hold resolved colors rather than a link and a
-/// scheme switched mid-review would otherwise leave the old scheme's tint
-/// on the rows.
+/// nvim can see what the terminal is painting behind it.
+///
+/// Derived once per session rather than once per show: `ReviewShow` is
+/// re-issued on every hunk step, and `nvim_set_hl` on namespace 0
+/// redefines a global group, which is a heavier event than the extmark
+/// churn a redraw already costs. The `ColorScheme` autocmd in the review's
+/// augroup is what keeps that from going stale -- the groups hold resolved
+/// colors rather than a link, so a scheme switched mid-review would
+/// otherwise leave the old one's tint on the rows -- and
+/// [`REVIEW_CLEAR_CHUNK`] takes both the flag and the augroup back off.
 ///
 /// The sign is the only part a user can have turned off (`signcolumn=no`);
 /// the header names the verbs, so nothing is unreachable without it.
@@ -1779,10 +1794,6 @@ end
 local function derive()
   local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
   local base = normal.bg or (vim.o.background == 'light' and 0xffffff or 0x000000)
-  local function source(name)
-    local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
-    return hl.bg or hl.fg or normal.fg or base, hl.fg or hl.bg or normal.fg
-  end
   local function blend(color)
     local out = 0
     for _, shift in ipairs({ 16, 8, 0 }) do
@@ -1792,21 +1803,32 @@ local function derive()
     end
     return out
   end
-  local removed = source('DiffDelete')
-  local stale = source('DiffChange')
-  local added, added_fg = source('DiffAdd')
-  local header, header_fg = source('DiffText')
-  vim.api.nvim_set_hl(0, 'ViewReviewRemoved', { bg = blend(removed) })
-  vim.api.nvim_set_hl(0, 'ViewReviewStale', { bg = blend(stale) })
-  vim.api.nvim_set_hl(0, 'ViewReviewAdded', { bg = blend(added), fg = added_fg })
-  vim.api.nvim_set_hl(0, 'ViewReviewHeader', { bg = blend(header), fg = header_fg })
+  local function tint(name)
+    local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
+    local text = hl.fg or normal.fg
+    if hl.bg ~= nil then
+      return hl.bg, text
+    end
+    return blend(hl.fg or normal.fg or base), text
+  end
+  local removed = tint('DiffDelete')
+  local stale = tint('DiffChange')
+  local added, added_fg = tint('DiffAdd')
+  local header, header_fg = tint('DiffText')
+  vim.api.nvim_set_hl(0, 'ViewReviewRemoved', { bg = removed })
+  vim.api.nvim_set_hl(0, 'ViewReviewStale', { bg = stale })
+  vim.api.nvim_set_hl(0, 'ViewReviewAdded', { bg = added, fg = added_fg })
+  vim.api.nvim_set_hl(0, 'ViewReviewHeader', { bg = header, fg = header_fg })
   vim.api.nvim_set_hl(0, 'ViewReviewSign', { fg = header_fg })
 end
-derive()
-vim.api.nvim_create_autocmd('ColorScheme', {
-  group = vim.api.nvim_create_augroup('view_review', { clear = true }),
-  callback = derive,
-})
+if not _G.view_review_derived then
+  _G.view_review_derived = true
+  derive()
+  vim.api.nvim_create_autocmd('ColorScheme', {
+    group = vim.api.nvim_create_augroup('view_review', { clear = true }),
+    callback = derive,
+  })
+end
 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
 for _, m in ipairs(marks) do
   if m.end_row > m.row then
@@ -1883,6 +1905,15 @@ end"
 /// not a failure, and a throw here would leave the keys after it installed
 /// on a buffer with no review behind them.
 ///
+/// The derived highlight groups are released before anything else: the
+/// flag [`REVIEW_SHOW_CHUNK`] derives behind goes back to nil and the
+/// augroup carrying the `ColorScheme` re-derive is deleted, so a session
+/// with no review open re-derives nothing on a colorscheme change and the
+/// next review starts from the scheme it actually opens under. Deleting by
+/// name through `pcall` rather than checking first, for the same reason the
+/// keymap deletes below are wrapped: an augroup a show never managed to
+/// install is not a failure to fail on.
+///
 /// What the show displaced goes back afterwards, from the dict
 /// `nvim_buf_get_keymap` returned: `mapset` is the only restore that carries
 /// a Lua callback back intact, and it acts on the current buffer, hence
@@ -1899,6 +1930,8 @@ if displaced ~= nil then
   restore = displaced[buf]
   displaced[buf] = nil
 end
+_G.view_review_derived = nil
+pcall(vim.api.nvim_del_augroup_by_name, 'view_review')
 if not vim.api.nvim_buf_is_valid(buf) then
   return
 end

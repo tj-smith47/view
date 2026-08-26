@@ -745,12 +745,12 @@ fn a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block() {
 }
 
 /// The other half of the same claim: a colorscheme that defines its diff
-/// groups as backgrounds -- nvim's own default among them -- is read
-/// through the background it defined, so the derived tint is a fifth of
-/// the color that scheme chose rather than of a foreground it never meant
-/// as one.
+/// groups as backgrounds -- nvim's own default among them -- already chose
+/// what a diffed row sits on, so that background is taken as it stands
+/// rather than averaged with anything. Only a group with no background of
+/// its own is converted from its foreground.
 #[test]
-fn a_background_defined_diff_group_is_blended_from_that_background() {
+fn a_background_defined_diff_group_is_taken_verbatim() {
     let s = start();
     s.lua(
         "vim.cmd('hi Normal guifg=#F8F8F2 guibg=#000000')
@@ -763,8 +763,75 @@ vim.cmd('hi DiffDelete guifg=NONE guibg=#500000 gui=NONE')",
 
     assert_eq!(
         s.group("ViewReviewRemoved"),
-        "100000/nil/false",
-        "a fifth of #500000 over black, and nothing taken from the foreground"
+        "500000/nil/false",
+        "the scheme's own diff background, unblended, with nothing taken from \
+         the foreground"
+    );
+}
+
+/// The text a review draws over its own background is never that
+/// background. A colorscheme defining a diff group by background alone --
+/// `habamax`, which the pinned nvim ships, is one
+/// (`hi DiffAdd guifg=NONE guibg=#273923`) -- leaves the proposal no color
+/// of its own, and answering that with the group's background paints
+/// `+BETA` in exactly the color of the row it sits on. `Normal`'s
+/// foreground is what the row's own text would have used, so it is what
+/// the proposal uses.
+#[test]
+fn a_background_only_diff_group_draws_its_text_in_normals_foreground() {
+    let s = start();
+    s.lua(
+        "vim.cmd('hi Normal guifg=#C7C7C7 guibg=#1C1C1C')
+vim.cmd('hi DiffAdd guifg=NONE guibg=#273923 gui=NONE')
+vim.cmd('hi DiffText guifg=NONE guibg=#0F4F4F gui=NONE')",
+        vec![],
+    );
+    let buf = s.buffer();
+    s.show_in_current_window(buf);
+
+    s.show(buf, &[replacement(1, &["TWO"], &["hunk 1/1"])], 1, false);
+
+    assert_eq!(s.group("ViewReviewAdded"), "273923/c7c7c7/false");
+    assert_eq!(s.group("ViewReviewHeader"), "0f4f4f/c7c7c7/false");
+    assert_eq!(s.group("ViewReviewSign"), "nil/c7c7c7/false");
+    for name in ["ViewReviewAdded", "ViewReviewHeader"] {
+        let resolved = s.group(name);
+        let (bg, rest) = resolved.split_once('/').expect("bg/fg/reverse");
+        let (fg, _) = rest.split_once('/').expect("fg/reverse");
+        assert_ne!(
+            bg, fg,
+            "{name} would draw its text in the color of the row it sits on"
+        );
+    }
+    assert_eq!(
+        s.cell(3, 2),
+        "+:273923/c7c7c7/false",
+        "the proposed line is legible where it is painted, not the row's own color"
+    );
+}
+
+/// A colorscheme themeing a diff group with neither a foreground nor a
+/// background is the branch a minimal or hand-rolled scheme takes, and the
+/// review still has to read on it. `Normal`'s own foreground is what it
+/// converts instead, so the row is marked in the one color the scheme is
+/// certain to have.
+#[test]
+fn a_diff_group_with_no_color_at_all_falls_back_to_normals_foreground() {
+    let s = start();
+    s.lua(
+        "vim.cmd('hi Normal guifg=#F8F8F2 guibg=#282A36')
+vim.cmd('hi DiffDelete guifg=NONE guibg=NONE gui=NONE ctermfg=NONE ctermbg=NONE cterm=NONE')",
+        vec![],
+    );
+    let buf = s.buffer();
+
+    s.show(buf, &[replacement(1, &["TWO"], &[])], 1, false);
+
+    assert_eq!(
+        s.group("ViewReviewRemoved"),
+        "52535c/nil/false",
+        "a fifth of #F8F8F2 over #282A36: the review reads under a scheme that \
+         themes no diff group at all"
     );
 }
 
@@ -788,24 +855,13 @@ fn a_colorscheme_switched_under_an_open_review_re_derives_its_groups() {
         before, after,
         "the review's groups follow the colorscheme the user is now in"
     );
+    // the value is written out rather than recomputed from the scheme that
+    // is now loaded: an assertion that ran the chunk's own arithmetic would
+    // reproduce an error in it instead of catching one. `blue` themes
+    // `DiffDelete` with a background (#af5faf), so what the review takes
+    // from it is that background itself
     assert_eq!(
-        after,
-        s.lua(
-            "local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
-local hl = vim.api.nvim_get_hl(0, { name = 'DiffDelete', link = false })
-local src = hl.bg or hl.fg
-local base = normal.bg
-local out = 0
-for _, shift in ipairs({ 16, 8, 0 }) do
-  local c = math.floor(src / 2 ^ shift) % 256
-  local b = math.floor(base / 2 ^ shift) % 256
-  out = out * 256 + math.floor(b + (c - b) * 0.2 + 0.5)
-end
-return string.format('%06x/nil/false', out)",
-            vec![]
-        )
-        .as_str()
-        .expect("the expected blend"),
-        "and they are that scheme's own diff color, blended the same way"
+        after, "af5faf/nil/false",
+        "and they are that scheme's own diff color, read the way any scheme's is"
     );
 }
