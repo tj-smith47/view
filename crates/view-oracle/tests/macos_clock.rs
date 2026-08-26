@@ -133,17 +133,25 @@ fn the_seam_still_takes_the_assertion() {
          scripts -- which the walk above lets through on the grounds that it \
          does -- are running unheld"
     );
+    // every script is read before the assertion fires, on the same terms
+    // as the fixture walks above: one unheld script must not hide the next
+    let mut unheld = Vec::new();
     for (name, text) in acceptance_scripts(&root) {
         if name == ACCEPTANCE_SEAM {
             continue;
         }
-        assert!(
-            text.contains("artifacts.sh"),
-            "{name} does not source {ACCEPTANCE_SEAM}, so it takes no power \
-             assertion of its own -- and the walk above lets every command \
-             named scripts/acceptance/ through on the grounds that it does"
-        );
+        if !text.contains("artifacts.sh") {
+            unheld.push(name);
+        }
     }
+    assert!(
+        unheld.is_empty(),
+        "these do not source {ACCEPTANCE_SEAM}, so they take no power \
+         assertion of their own -- and the walk above lets every command \
+         named scripts/acceptance/ through on the grounds that they do:\n  \
+         {}",
+        unheld.join("\n  ")
+    );
 }
 
 /// Every acceptance script, as (path under the repo root, its contents).

@@ -93,6 +93,7 @@ tasks:
       - bash scripts/check-engine-pin.sh
       - bash scripts/check-budget-drift.sh
       - bash .claude/hooks/tests/validate-commands-cases.sh
+      - bash scripts/reader-cases.sh
 
   style:
     desc: Enforce comment and doc style rules
