@@ -91,7 +91,7 @@ pub(crate) fn run_taps_row(
             (outcome, "key_to_rpc_p99_us", "us")
         }
         "ai_composer" => (
-            taps::run_ai_composer(&spec, &pipe, protocol, deadline)
+            taps::run_ai_composer(&spec, &pipe, protocol, deadline, &composer_seed(fixture))
                 .with_context(|| format!("ai_composer/{fixture} run failed"))?,
             "p99_ms",
             "ms",
@@ -314,6 +314,20 @@ pub(crate) fn stub_agent_bin() -> Result<PathBuf> {
 /// it reports.
 fn report_live_turn(streamed: u64) {
     println!("      agent chunks streamed across the sampling run: {streamed}");
+}
+
+/// What the composer row's fixture seeds the prompt with before sampling.
+///
+/// The fixture names the nvim config for every other row, and it names the
+/// prompt here as well: `heavy` is the multibyte line the composer's fold
+/// is bounded over, and every other fixture samples the empty composer the
+/// row has always sampled.
+fn composer_seed(fixture: &str) -> String {
+    if fixture == "heavy" {
+        taps::heavy_composer_seed()
+    } else {
+        String::new()
+    }
 }
 
 fn taps_side(

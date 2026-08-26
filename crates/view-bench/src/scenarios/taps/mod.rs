@@ -27,7 +27,7 @@ use crate::session::{
 use crate::BenchError;
 
 mod ai;
-pub use ai::{run_ai_composer, run_ai_session_active, run_ai_streaming};
+pub use ai::{heavy_composer_seed, run_ai_composer, run_ai_session_active, run_ai_streaming};
 
 /// One parsed tap record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

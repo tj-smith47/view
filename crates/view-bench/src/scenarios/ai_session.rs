@@ -102,6 +102,21 @@ const STREAM_STALE: Duration = Duration::from_secs(2);
 /// crates, one convention, no shared dependency between them).
 const CEILING_SENTINEL: &str = "ceiling";
 
+/// The bracketed-paste envelope a terminal puts around pasted text, which
+/// is how view is told a burst of bytes is one paste and not typing.
+const PASTE_OPEN: &[u8] = b"\x1b[200~";
+const PASTE_CLOSE: &[u8] = b"\x1b[201~";
+
+/// Bytes per write inside that envelope. Small enough that a pty buffer
+/// smaller than the text never has to hold all of it at once.
+const PASTE_CHUNK: usize = 4096;
+
+/// Consecutive letters on one screen row that say the row belongs to a
+/// pasted prompt rather than to the panel's own chrome. Comfortably under
+/// the narrowest composer this runs at and far past any word in the
+/// panel's own text.
+const SEEDED_ROW_RUN: usize = 20;
+
 /// A turn confirmed in flight, holding what the stream had produced when
 /// sampling was allowed to start.
 #[derive(Debug)]
@@ -155,6 +170,64 @@ pub fn open_panel(session: &mut BenchSession) -> Result<(), BenchError> {
     session.send(b"\x7f")?;
     quiet(session);
     Ok(())
+}
+
+/// Pastes `text` into the open panel's composer as one bracketed paste,
+/// and confirms it reached the screen.
+///
+/// One paste rather than a keystroke per character: the row's subject is
+/// what a keystroke costs against a composer that already holds this text,
+/// and typing it in would spend that whole cost n times before the first
+/// sample.
+///
+/// Written in chunks because the pty's own buffer is smaller than the text
+/// -- the decoder accumulates until the closing marker, so where the writes
+/// fall inside the envelope does not change what it decodes.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] when no wrapped row of the pasted text
+/// is on screen afterwards, which is the one way the paste can fail
+/// without the write itself failing.
+pub fn seed_composer(session: &mut BenchSession, text: &str) -> Result<(), BenchError> {
+    session.send(PASTE_OPEN)?;
+    for chunk in text.as_bytes().chunks(PASTE_CHUNK) {
+        session.send(chunk)?;
+    }
+    session.send(PASTE_CLOSE)?;
+    quiet(session);
+    if longest_letter_run(&session.screen_text()) < SEEDED_ROW_RUN {
+        return Err(BenchError::Desync {
+            context: format!(
+                "no wrapped row of the {} byte(s) pasted into the composer reached the screen, \
+                 so this row would have measured a keystroke against an empty prompt; screen:\n{}",
+                text.len(),
+                session.screen_text()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The longest run of consecutive ASCII letters on any one row of `screen`.
+///
+/// A wrapped composer row of the seed is a full row of them; the panel's
+/// own chrome and any transcript row above it are words and spaces. So one
+/// run past [`SEEDED_ROW_RUN`] says a painted row belongs to the pasted
+/// prompt, without depending on where the wrap happens to fall.
+fn longest_letter_run(screen: &str) -> usize {
+    screen
+        .lines()
+        .map(|line| {
+            line.chars()
+                .fold((0_usize, 0_usize), |(best, run), ch| {
+                    let run = if ch.is_ascii_alphabetic() { run + 1 } else { 0 };
+                    (best.max(run), run)
+                })
+                .0
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 pub fn start(session: &mut BenchSession, cwd: &Path) -> Result<LiveTurn, BenchError> {

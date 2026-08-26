@@ -30,8 +30,33 @@ const COMPOSER_LABELS: [&str; 5] = [
     "flush-start->term-written",
 ];
 
+/// The composer text the `heavy` fixture seeds before it samples: one
+/// line, opening with a character wider than a byte, far longer than the
+/// rows the panel paints.
+///
+/// `minimal` oscillates between zero and one ASCII character, so every
+/// paint it samples finds its row boundary by arithmetic on a grid that
+/// counts a cell as a byte. That grid is exact only over ASCII. A line
+/// opening with an em dash is folded character by character instead, and
+/// this is the shape whose per-keystroke fold the composer's recorded row
+/// boundaries exist to bound -- the one no other cell of the matrix
+/// reaches. Sixty-four kilobytes so that folding the line and folding a
+/// row differ by orders of magnitude rather than by noise.
+#[must_use]
+pub fn heavy_composer_seed() -> String {
+    let mut seed = String::with_capacity(HEAVY_COMPOSER_BYTES + 4);
+    seed.push('\u{2014}');
+    seed.extend((0..HEAVY_COMPOSER_BYTES).map(|i| char::from(b'a' + (i % 26) as u8)));
+    seed
+}
+
+const HEAVY_COMPOSER_BYTES: usize = 1 << 16;
+
 /// The composer-echo row: one character typed into the open agent panel's
 /// prompt, from the key arriving to the terminal write that shows it.
+///
+/// The prompt the keystroke lands in is the fixture's: `minimal` types
+/// into an empty composer, `heavy` into [`heavy_composer_seed`].
 ///
 /// Held to `echo`'s class of budget rather than paired against nvim,
 /// because nvim has no counterpart to price it against: the composer is
@@ -40,17 +65,21 @@ const COMPOSER_LABELS: [&str; 5] = [
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] when the panel never opens, when a
-/// keystroke produces no terminal write within the sample timeout, or
-/// when the tap stream dropped records.
+/// Returns [`BenchError::Desync`] when the panel never opens, when `seed`
+/// never reaches the screen, when a keystroke produces no terminal write
+/// within the sample timeout, or when the tap stream dropped records.
 pub fn run_ai_composer(
     spec: &SpawnSpec,
     pipe: &TapPipe,
     protocol: &Protocol,
     settle_deadline: Duration,
+    seed: &str,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
     ai_session::open_panel(&mut session)?;
+    if !seed.is_empty() {
+        ai_session::seed_composer(&mut session, seed)?;
+    }
     // the panel's own opening frames are not this row's subject
     let _ = pipe.drain();
     let outcome = sample_ai_composer(&mut session, pipe, protocol);

@@ -99,6 +99,11 @@ const MATRIX: &[(&str, &str)] = &[
     ("ai_session_active", "minimal"),
     ("ai_streaming", "minimal"),
     ("ai_composer", "minimal"),
+    // the composer row against a prompt the byte-per-cell grid is not
+    // exact over (see `taps::heavy_composer_seed`): the one shape in the
+    // matrix whose per-keystroke fold is bounded by what the composer
+    // remembers rather than by arithmetic
+    ("ai_composer", "heavy"),
 ];
 
 /// Cells measured only on the classes named here, and skipped elsewhere.
@@ -118,10 +123,19 @@ const MATRIX: &[(&str, &str)] = &[
 /// Widening them further is a recording on the other class's own host,
 /// not an edit here alone: a class listed with no cell in its baseline
 /// file gates red, which is the point.
+///
+/// `ai_composer` also runs on `dev-macos`, where the other two cannot: it
+/// is the one AI row that starts no turn, so it needs no agent to answer
+/// one, and its subject -- what a keystroke costs against a prompt the
+/// wrap is not exact over -- is a per-platform number like every other
+/// absolute here.
 const CLASS_SCOPED: &[(&str, &[&str])] = &[
     ("ai_session_active", &["dev-linux", "controlled-linux"]),
     ("ai_streaming", &["dev-linux", "controlled-linux"]),
-    ("ai_composer", &["dev-linux", "controlled-linux"]),
+    (
+        "ai_composer",
+        &["dev-macos", "dev-linux", "controlled-linux"],
+    ),
 ];
 
 /// Cells that decompose a gated row instead of being one. They are
