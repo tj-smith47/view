@@ -384,6 +384,14 @@ fn quiet_readers_behind_a_pipe(text: &str) -> Vec<(usize, String)> {
 }
 
 /// `line` up to the `#` that starts a comment on it, if one does.
+///
+/// Quote state is per line rather than carried across them, which is the
+/// walk's one stated ceiling: a quoted `#` inside a string a statement
+/// continues past would end the reading of that line early. Carrying the
+/// state instead would desync the whole file on the first heredoc, so the
+/// narrower reading is the safer one -- it can only under-report, and a
+/// second, differently-written sweep of the population is what says
+/// nothing is being missed today.
 fn code_before_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     let mut quote: Option<u8> = None;

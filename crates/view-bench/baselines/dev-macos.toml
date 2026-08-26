@@ -2,6 +2,12 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "dev-macos"
 
+[ai_composer.heavy]
+p99_ms = 0.537
+
+[ai_composer.minimal]
+p99_ms = 0.367
+
 [echo.heavy]
 paired_delta_p99_ms = 7.241999999999999
 ratio_p50 = 1.114
