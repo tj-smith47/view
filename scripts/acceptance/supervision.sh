@@ -110,6 +110,15 @@ plus() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a + b }'; }
 
 pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
 
+# Whether `haystack` holds `needle`, literally.
+#
+# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
+# match and kills whatever is feeding it with SIGPIPE, which `set -o
+# pipefail` then reports as a failed pipeline -- so a match reads as no
+# match and the assertion built on it passes for the wrong reason. A
+# captured string has no pipe to fail.
+holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+
 fail() {
     local dump="$DUMP_DIR/$CURRENT_LEG.pane"
     pane >"$dump" 2>/dev/null || true
@@ -187,7 +196,7 @@ wait_for() {
     local pattern="$1" budget="$2" what="$3" start el
     start=$(now)
     while :; do
-        if pane | grep -qF -- "$pattern"; then
+        if holds "$pattern" "$(pane)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -209,7 +218,7 @@ wait_gone() {
     local pattern="$1" budget="$2" what="$3" start el
     start=$(now)
     while :; do
-        if ! pane | grep -qF -- "$pattern"; then
+        if ! holds "$pattern" "$(pane)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -707,7 +716,7 @@ assert_within "$write_notice" "$WRITE_MIN" "$WRITE_MAX" "the write-side banner"
 # the write side outranks the read side while both are true, because a
 # writer that stopped delivering is enough on its own to silence the probes
 # the read side is waiting on
-if pane | grep -qF -- "$READ_NOTICE"; then
+if holds "$READ_NOTICE" "$(pane)"; then
     fail "the read-side notice is on screen instead of the write side's, which reports the cause" || exit 1
 fi
 kill -CONT "$NVIM_PID"

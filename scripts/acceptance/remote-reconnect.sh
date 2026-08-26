@@ -100,6 +100,15 @@ times() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a * b }'; }
 
 pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
 
+# Whether `haystack` holds `needle`, literally.
+#
+# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
+# match and kills whatever is feeding it with SIGPIPE, which `set -o
+# pipefail` then reports as a failed pipeline -- so a match reads as no
+# match and the assertion built on it passes for the wrong reason. A
+# captured string has no pipe to fail.
+holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+
 fail() {
     local dump="$DUMP_DIR/$CURRENT_LEG.pane"
     pane >"$dump" 2>/dev/null || true
@@ -182,7 +191,7 @@ wait_for() {
     local pattern="$1" budget="$2" what="$3" start el
     start=$(now)
     while :; do
-        if pane | grep -qF -- "$pattern"; then
+        if holds "$pattern" "$(pane)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -203,7 +212,7 @@ wait_gone() {
     local pattern="$1" budget="$2" what="$3" start el
     start=$(now)
     while :; do
-        if ! pane | grep -qF -- "$pattern"; then
+        if ! holds "$pattern" "$(pane)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -444,7 +453,7 @@ assert_within "$detected" 0 "$DROP_MAX" "the dropped connection"
 # the counted banner replaces the bare dead-connection notice rather than
 # joining it: view has a recovery running, and saying only that the engine
 # is gone would be less than it knows
-if pane | grep -qF -- "$DEAD_NOTICE"; then
+if holds "$DEAD_NOTICE" "$(pane)"; then
     fail "the bare dead-connection notice is on screen while a reconnect is running" || exit 1
 fi
 printf '[2/4] %-34s ... %s  OK\n' 'ssh process killed' \
@@ -498,7 +507,7 @@ wait_refusals 1 "$ATTEMPT_SLACK" >/dev/null
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 wait_refusals 0 20 >/dev/null
 wait_for "$GONE_TITLE" 20 "the dead-engine modal after the failed restart" >/dev/null
-pane | grep -qF -- "$RESTART_ROW" ||
+holds "$RESTART_ROW" "$(pane)" ||
     fail "the modal is back without the restart it must still offer" || exit 1
 # and the same modal still recovers the session once the far side is
 # reachable again, so nothing about the give-up is a dead end

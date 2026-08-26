@@ -481,6 +481,15 @@ wait_no_box() {
 # The text of every framed box in the last capture.
 box_text() { LC_ALL=C awk "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
 
+# Whether `haystack` holds `needle`, literally.
+#
+# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
+# match and kills whatever is feeding it with SIGPIPE, which `set -o
+# pipefail` then reports as a failed pipeline -- so a match reads as no
+# match and the assertion built on it passes for the wrong reason. A
+# captured string has no pipe to fail.
+holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+
 # "row col leftmost nearest" for `text` in the last capture; empty when it is
 # not on screen at all.
 text_span() { LC_ALL=C awk -v text="$1" "$SPAN_AWK" "$CELLS"; }
@@ -521,7 +530,7 @@ wait_in_box() {
     start=$(now)
     while :; do
         capture
-        if box_text | grep -qF -- "$text"; then
+        if holds "$text" "$(box_text)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -1249,7 +1258,7 @@ leg_toast_over_panel() {
     # while the panel stays framed on screen
     send_key Escape
     settle
-    if ! box_text | grep -qF -- "$PANEL_TITLE"; then
+    if ! holds "$PANEL_TITLE" "$(box_text)"; then
         fail 'Escape closed the panel outright, so there is no panel for a toast to land over'
         return 1
     fi
@@ -1346,11 +1355,11 @@ leg_panel_typing() {
     send_key Escape
     wait_change "$REACTION_SECS" "Escape leaving the composer" >/dev/null
     settle
-    if box_text | grep -qF -- "$FOCUSED_TITLE"; then
+    if holds "$FOCUSED_TITLE" "$(box_text)"; then
         fail 'Escape left the panel entered, so the round trip below would re-enter a panel it never left'
         return 1
     fi
-    if ! box_text | grep -qF -- "$PANEL_TITLE"; then
+    if ! holds "$PANEL_TITLE" "$(box_text)"; then
         fail 'Escape closed the panel outright, so there is no un-entered panel for the toggle to return to'
         return 1
     fi
@@ -1400,11 +1409,11 @@ leg_narrow_title() {
     # turned out wide enough would pass on the whole title and prove nothing
     # about a narrow edge; without the second, a title that had lost its
     # tail silently would read as a whole one.
-    if box_text | grep -qF -- "$FOCUSED_TITLE"; then
+    if holds "$FOCUSED_TITLE" "$(box_text)"; then
         fail "the $COLS-column pane fits the whole focused title after all, so this leg is not reading a narrow top edge"
         return 1
     fi
-    if ! box_text | grep -qF -- "$TRUNCATION_MARK"; then
+    if ! holds "$TRUNCATION_MARK" "$(box_text)"; then
         fail 'the narrow panel names itself with no mark of the cut, so its shortened title reads as the whole one'
         return 1
     fi
@@ -1827,7 +1836,7 @@ leg_permission_caret() {
     send_text 'ZZTOP'
     sleep "$POLL"
     settle
-    if box_text | grep -qF -- 'ZZTOP'; then
+    if holds ZZTOP "$(box_text)"; then
         fail 'a printable typed at a pending permission reached the composer, which the caret is not pointing at'
         return 1
     fi
@@ -1837,7 +1846,7 @@ leg_permission_caret() {
     start=$(now)
     while :; do
         settle
-        box_text | grep -qF -- "$PERMISSION_PROMPT" || break
+        holds "$PERMISSION_PROMPT" "$(box_text)" || break
         if ! under "$(elapsed "$start" "$(now)")" "$WAIT_SECS"; then
             fail "the permission question is still up ${WAIT_SECS}s after the digit the caret was standing on"
             return 1
@@ -1875,7 +1884,7 @@ leg_transcript_reflow() {
     send_text "$head $body$tail"
     send_key Enter
     wait_in_box "$head" "$WAIT_SECS" "the submitted entry" >/dev/null
-    box_text_joined | grep -qF -- "$tail" || {
+    holds "$tail" "$(box_text_joined)" || {
         fail "the submitted entry is on screen without its own tail ('$tail'), so it was cut rather than wrapped"
         return 1
     }
@@ -1901,14 +1910,14 @@ leg_transcript_reflow() {
         fail "the entry went from $wide rows to $narrow on a narrower pane, which is fewer rows for less width"
         return 1
     }
-    box_text_joined | grep -qF -- "$tail" || {
+    holds "$tail" "$(box_text_joined)" || {
         fail "the entry lost its tail ('$tail') when the pane narrowed, so the re-wrap dropped text rather than re-laying it"
         return 1
     }
     # the head is the anchor: an entry re-wrapped into more rows than the
     # panel has left would push its own beginning off the top, and the user
     # would watch the thing they were reading leave the screen on a resize
-    if ! box_text | grep -qF -- "$head"; then
+    if ! holds "$head" "$(box_text)"; then
         fail "the entry's first row ('$head') left the panel when the pane narrowed, so the resize scrolled the user off what they were reading"
         return 1
     fi

@@ -137,6 +137,19 @@ under() { awk -v v="$1" -v hi="$2" 'BEGIN { exit !(v <= hi) }'; }
 
 pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
 
+# Whether `haystack` holds `needle`, literally.
+#
+# `case` rather than a pipe into `grep -q`: `grep -q` exits at its first
+# match and kills whatever is feeding it with SIGPIPE, which `set -o
+# pipefail` then reports as a failed pipeline -- so a match reads as no
+# match and the assertion built on it passes for the wrong reason. A
+# captured string has no pipe to fail.
+holds() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+
+# Whether `haystack` matches the extended regular expression `needle`. The
+# no-pipe form of `grep -qE`, for the same reason `holds` is `grep -qF`'s.
+matches() { [[ $2 =~ $1 ]]; }
+
 # The pane with the panel column cut away: on every row, everything left of
 # the first vertical border.
 #
@@ -155,7 +168,7 @@ buffer_region() { pane | sed 's/│.*//' || true; }
 # is cutting something off rather than passing the whole pane through and
 # leaving every in-buffer assertion answered from anywhere.
 assert_panel_is_framed() {
-    if ! pane | grep -q '│'; then
+    if ! holds '│' "$(pane)"; then
         fail 'no panel border is on screen, so the buffer region is the whole pane and an in-buffer assertion would prove nothing about where the review is drawn'
         return 1
     fi
@@ -239,7 +252,7 @@ wait_in() {
     local reader="$1" where="$2" text="$3" budget="$4" what="$5" start el
     start=$(now)
     while :; do
-        if "$reader" | grep -qF -- "$text"; then
+        if holds "$text" "$("$reader")"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -285,7 +298,7 @@ wait_for_re() {
     local pattern="$1" budget="$2" what="$3" start el
     start=$(now)
     while :; do
-        if pane | grep -qE -- "$pattern"; then
+        if matches "$pattern" "$(pane)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -305,7 +318,7 @@ until_gone() {
     local text="$1" budget="$2" what="$3" start el
     start=$(now)
     while :; do
-        if ! pane | grep -qF -- "$text"; then
+        if ! holds "$text" "$(pane)"; then
             elapsed "$start" "$(now)"
             return 0
         fi
@@ -320,7 +333,7 @@ until_gone() {
 
 refute() {
     local text="$1" what="$2"
-    if pane | grep -qF -- "$text"; then
+    if holds "$text" "$(pane)"; then
         fail "$what (found '$text' on screen)"
         return 1
     fi
@@ -453,11 +466,11 @@ leg_session_lifecycle() {
     # happens on the way to the handshake, so this budget carries it.
     took=$(wait_for_log 'ai SessionReady' "$PROVISION_SECS" \
         "the pinned adapter's session")
-    if ! find "$ADAPTER_CACHE" -maxdepth 8 -type d -name node_modules | grep -q .; then
+    if [ -z "$(find "$ADAPTER_CACHE" -maxdepth 8 -type d -name node_modules -print -quit)" ]; then
         fail 'the adapter was launched without the dependencies its entry script imports'
         return 1
     fi
-    if ! find "$ADAPTER_CACHE" -maxdepth 4 -type d -name "*$PINNED_VERSION*" | grep -q .; then
+    if [ -z "$(find "$ADAPTER_CACHE" -maxdepth 4 -type d -name "*$PINNED_VERSION*" -print -quit)" ]; then
         fail "the provisioned adapter is not the pinned $PINNED_VERSION"
         return 1
     fi
@@ -472,7 +485,7 @@ leg_session_lifecycle() {
     # below reads as a short reply: "the reply arrived in 1 chunk(s)" sends
     # the next reader at the streaming loop when the host is what said no.
     # So the stop reason is read first, and the refusal names its own cause.
-    local stop_reason said refused
+    local stop_reason said said_lower refused
     stop_reason=$(grep -oE 'ai TurnEnded \{ stop_reason: [A-Za-z]+' "$ROOT/view.log" |
         tail -1 | grep -oE '[A-Za-z]+$') || true
     said=$(grep -E 'ai MessageChunk .*from_agent: true' "$ROOT/view.log" |
@@ -482,9 +495,10 @@ leg_session_lifecycle() {
     # same rule two lines above: a model's words are its own, so a turn the
     # adapter ended normally is never a host verdict however the model
     # happened to phrase it.
+    said_lower=$(tr '[:upper:]' '[:lower:]' <<<"$said")
     if [ "$stop_reason" = "Refusal" ] ||
         { [ "$stop_reason" != "EndTurn" ] &&
-            printf '%s' "$said" | grep -qiE 'authentication|not logged in'; }; then
+            { holds authentication "$said_lower" || holds 'not logged in' "$said_lower"; }; }; then
         refused="the real adapter refused the turn (stop_reason: ${stop_reason:-none logged}), saying: ${said:-nothing}"
         refused="$refused -- one-line repro on this host: claude -p 'say hi'"
         if [ "$(uname -s)" = Darwin ]; then
@@ -1241,7 +1255,7 @@ TERMINAL_STATUSES='Completed|Failed'
 # whichever `SPINNER_FRAMES` entry the tick has reached, already read into
 # `SPINNER_ALTERNATION` above, so the arm is proved to still animate rather
 # than to name a glyph.
-grep -A 3 -E 'ToolCallStatus::InProgress =>' "$TRANSCRIPT_RS" | grep -q SPINNER_FRAMES || {
+holds SPINNER_FRAMES "$(grep -A 3 -E 'ToolCallStatus::InProgress =>' "$TRANSCRIPT_RS")" || {
     printf 'FAIL: ToolCallStatus::InProgress no longer renders a spinner frame in %s\n' \
         "$TRANSCRIPT_RS" >&2
     exit 1
