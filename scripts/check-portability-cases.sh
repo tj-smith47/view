@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Case matrix for check-portability.sh. Every case builds a scratch tree,
 # points the scanner at it, and asserts BOTH the exit status and the exact
-# set of file:line pairs reported: a case expecting one finding has to fail
+# set of file:line:category tokens reported: a case expecting one finding has to fail
 # when a second one is reported, and a case expecting silence has to fail
 # when the scan narrows itself and reports nothing for the wrong reason.
 #
@@ -10,9 +10,9 @@
 #
 # Written to stock POSIX-ish bash: macOS ships /bin/bash 3.2, and the
 # scanner's own portability (BSD awk, BSD sed, BSD grep) is only proven by
-# running this there. The scanner has caught three of its own blind spots in
-# three rounds of throwaway fixtures; the cases below are those fixtures
-# frozen, so the fourth trips here instead.
+# running this there. Every blind spot this scanner has had was found with
+# throwaway fixtures; the cases below are those fixtures frozen, so the next
+# one trips here instead of being found by hand again.
 set -uo pipefail
 
 SCANNER=""
@@ -65,17 +65,31 @@ write() { cat > "$CASE/$1"; }
 # A refusal prints one header naming the file and then the offending lines,
 # numbered by the pass that found them: the two content passes emit a bare
 # `N:` prefix under their header, the call-site pass emits `file:N:`. Both
-# collapse to the same file:line token so a case states one expected set.
+# collapse to a file:line:category token so a case states one expected set.
+# The category comes from the header's message, because a location alone does
+# not say WHY the line was refused: a regression that reports the right line
+# under the wrong check would otherwise grade as a pass. The message text
+# itself is not compared -- rewording a diagnostic is not a regression, so the
+# four messages collapse to the four checks that emit them.
 findings() {
   awk '
+    /^PORTABILITY-SELF-FAIL: / { print $2 ":selffail"; next }
     /^PORTABILITY FAIL: / {
-      f = $0
-      sub(/^PORTABILITY FAIL: /, "", f)
+      h = $0
+      sub(/^PORTABILITY FAIL: /, "", h)
+      f = h
       sub(/ -- .*$/, "", f)
+      m = h
+      sub(/^[^ ]* -- /, "", m)
+      cat = "other"
+      if (index(m, "a [[ =~ ]] pattern") == 1) cat = "inline"
+      else if (substr(m, 1, 1) == "$") cat = "var"
+      else if (index(m, "a GNU-only utility") == 1) cat = "util"
+      else if (index(m, "a literal argument to") == 1) cat = "literal"
       next
     }
-    /^[0-9]+:/ { k = $0; sub(/:.*$/, "", k); print f ":" k; next }
-    /^[^:]+:[0-9]+:/ { split($0, a, ":"); print a[1] ":" a[2]; next }
+    /^[0-9]+:/ { k = $0; sub(/:.*$/, "", k); print f ":" k ":" cat; next }
+    /^[^:]+:[0-9]+:/ { split($0, a, ":"); print a[1] ":" a[2] ":" cat; next }
   ' | sort -u | tr '\n' ' ' | sed 's/ *$//'
 }
 
@@ -124,7 +138,7 @@ write scripts/case.sh <<'SH'
 x=$1
 if [[ $x =~ \bfoo ]]; then :; fi
 SH
-expect 1 'scripts/case.sh:3' 'a glibc word class written inline on the match line'
+expect 1 'scripts/case.sh:3:inline' 'a glibc word class written inline on the match line'
 
 new_case
 write scripts/case.sh <<'SH'
@@ -132,7 +146,7 @@ write scripts/case.sh <<'SH'
 PAT='\bfoo'
 if [[ $x =~ $PAT ]]; then :; fi
 SH
-expect 1 'scripts/case.sh:2' 'a named variable carrying the word class into the match'
+expect 1 'scripts/case.sh:2:var' 'a named variable carrying the word class into the match'
 
 new_case
 plant_readers
@@ -140,7 +154,7 @@ write scripts/case.sh <<'SH'
 #!/usr/bin/env bash
 matches '\bfoo' "$CAP"
 SH
-expect 1 'scripts/case.sh:2' 'a literal handed to a reader that puts its own positional into the match'
+expect 1 'scripts/case.sh:2:literal' 'a literal handed to a reader that puts its own positional into the match'
 
 new_case
 plant_readers
@@ -148,7 +162,7 @@ write scripts/case.sh <<'SH'
 #!/usr/bin/env bash
 wait_for_re '\sbar' 5
 SH
-expect 1 'scripts/case.sh:2' 'a literal handed to a forwarder, one hop from the reader'
+expect 1 'scripts/case.sh:2:literal' 'a literal handed to a forwarder, one hop from the reader'
 
 new_case
 write scripts/case.sh <<'SH'
@@ -159,7 +173,7 @@ grep -P foo f
 readlink -f f
 date -d yesterday
 SH
-expect 1 'scripts/case.sh:2 scripts/case.sh:3 scripts/case.sh:4 scripts/case.sh:5 scripts/case.sh:6' 'all five GNU-only utility spellings'
+expect 1 'scripts/case.sh:2:util scripts/case.sh:3:util scripts/case.sh:4:util scripts/case.sh:5:util scripts/case.sh:6:util' 'all five GNU-only utility spellings'
 
 new_case
 write scripts/case.sh <<'SH'
@@ -184,7 +198,7 @@ case "$1" in
   a) [[ $x =~ \bfoo ]] ;;
 esac
 SH
-expect 1 'scripts/case.sh:3' 'a real match hidden inside a case arm'
+expect 1 'scripts/case.sh:3:inline' 'a real match hidden inside a case arm'
 
 new_case
 plant_readers
@@ -236,7 +250,7 @@ cat <<-EOF
 	EOF
 	[[ $x =~ \bfoo ]]
 SH
-expect 1 'scripts/case.sh:5' 'a tab-indented body is skipped while a tab-indented call site is not'
+expect 1 'scripts/case.sh:5:inline' 'a tab-indented body is skipped while a tab-indented call site is not'
 
 new_case
 write scripts/case.sh <<'SH'
@@ -244,7 +258,7 @@ write scripts/case.sh <<'SH'
 read -r v <<<"literal" ; [[ $v =~ \bfoo ]]
 [[ $y =~ \sbar ]]
 SH
-expect 1 'scripts/case.sh:2 scripts/case.sh:3' 'a here-string opens no body, so its own line and the next stay scanned'
+expect 1 'scripts/case.sh:2:inline scripts/case.sh:3:inline' 'a here-string opens no body, so its own line and the next stay scanned'
 
 new_case
 write scripts/case.sh <<'SH'
@@ -256,7 +270,7 @@ body of B carries \sbar on a =~ line
 B
 [[ $x =~ \wbaz ]]
 SH
-expect 1 'scripts/case.sh:7' 'two tags on one line consume two bodies, in the order written'
+expect 1 'scripts/case.sh:7:inline' 'two tags on one line consume two bodies, in the order written'
 
 new_case
 write scripts/case.sh <<'SH'
@@ -269,7 +283,7 @@ cat <<-\EOF
 	EOF
 [[ $x =~ \wbaz ]]
 SH
-expect 1 'scripts/case.sh:8' 'the backslash-escaped tag form is a here-doc like the other three'
+expect 1 'scripts/case.sh:8:inline' 'the backslash-escaped tag form is a here-doc like the other three'
 
 # ---------------------------------------------------------------------------
 # a `<<` the shell does not read as an opener must not be read as one here:
@@ -283,7 +297,7 @@ msg="the operator is <<EOF, see the manual"
 PAT='\bshould_not_be_hidden'
 [[ $x =~ $PAT ]]
 SH
-expect 1 'scripts/case.sh:3' 'a tag spelling inside a quoted string opens nothing'
+expect 1 'scripts/case.sh:3:var' 'a tag spelling inside a quoted string opens nothing'
 
 new_case
 write scripts/case.sh <<'SH'
@@ -292,7 +306,39 @@ echo hi # see <<EOF for the syntax
 PAT='\bshould_not_be_hidden'
 [[ $x =~ $PAT ]]
 SH
-expect 1 'scripts/case.sh:3' 'a tag spelling inside a trailing comment opens nothing'
+expect 1 'scripts/case.sh:3:var' 'a tag spelling inside a trailing comment opens nothing'
+
+# an ANSI-C string keeps its own escapes: `\'` inside `$'...'` is a literal
+# quote that does not end the string, so a tag spelling after one is still
+# inside the string
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+msg=$'don\'t<<EOF really'
+[[ $x =~ \bfoo ]]
+SH
+expect 1 'scripts/case.sh:3:inline' 'a tag spelling inside an ANSI-C string opens nothing, escaped quote and all'
+
+# ---------------------------------------------------------------------------
+# `<<` inside an arithmetic context is a left shift, and the operand after it
+# is a number rather than a tag
+# ---------------------------------------------------------------------------
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+n=$((a<<3))
+SH
+expect 0 '' 'an arithmetic left shift opens no body and does not stop the run'
+
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+n=$((a<<3))
+[[ $x =~ \bfoo ]]
+3
+[[ $y =~ \sbar ]]
+SH
+expect 1 'scripts/case.sh:3:inline scripts/case.sh:5:inline' 'a later line spelling the shift operand terminates nothing, so both call sites stay scanned'
 
 # ---------------------------------------------------------------------------
 # a file ending inside an unclosed function must not carry that function name
@@ -313,7 +359,7 @@ write scripts/case.sh <<'SH'
 #!/usr/bin/env bash
 matches '\bfoo' "$CAP"
 SH
-expect 1 'scripts/case.sh:2' 'an unclosed function in one file does not retag the next file'
+expect 1 'scripts/case.sh:2:literal' 'an unclosed function in one file does not retag the next file'
 
 # ---------------------------------------------------------------------------
 # a tag that no later line closes is this tokenizer reading an opener the
@@ -325,7 +371,19 @@ write scripts/case.sh <<'SH'
 cat <<NEVERCLOSED
 still body
 SH
-expect 2 '' 'an unterminated tag stops the scan instead of narrowing it'
+expect 2 'scripts/case.sh:2:selffail' 'an unterminated tag stops the scan instead of narrowing it'
+
+# the same refusal at the other end of the scan: a tag left open by the last
+# file in scan order is caught when the scan runs out of input rather than
+# when it reaches the next file
+new_case
+write Taskfile.yml <<'YML'
+version: '3'
+tasks:
+  age:
+    cmd: cat <<NEVERCLOSED
+YML
+expect 2 'Taskfile.yml:4:selffail' 'a tag left open by the last file scanned stops the run at the end of the scan'
 
 # ---------------------------------------------------------------------------
 # the whole scan set: Taskfile.yml is a target too, and the guard revision
@@ -338,7 +396,7 @@ tasks:
   age:
     cmd: stat -c %Y f
 YML
-expect 1 'Taskfile.yml:4' 'a banned spelling in a task command line'
+expect 1 'Taskfile.yml:4:util' 'a banned spelling in a task command line'
 
 new_case
 write .claude/hooks/validate-commands.sh <<'HISTORIC_GUARD'
@@ -440,7 +498,7 @@ if [[ $FLAT =~ $MEASUREMENT ]]; then
 fi
 exit 0
 HISTORIC_GUARD
-expect 1 '.claude/hooks/validate-commands.sh:73 .claude/hooks/validate-commands.sh:78 .claude/hooks/validate-commands.sh:90 .claude/hooks/validate-commands.sh:92' 'the guard revision this scan was written for, reporting its four spellings and nothing else'
+expect 1 '.claude/hooks/validate-commands.sh:73:var .claude/hooks/validate-commands.sh:78:var .claude/hooks/validate-commands.sh:90:var .claude/hooks/validate-commands.sh:92:util' 'the guard revision this scan was written for, reporting its four spellings and nothing else'
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

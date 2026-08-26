@@ -59,29 +59,43 @@ SEP=$'\034'
 # `#` that starts a trailing comment, is not an opener at all: reading one as
 # an opener swallows the remainder of the file as data and hides the real call
 # sites behind it, which is the one direction this scan must never fail in.
-# `<<<` is a here-string -- one line of data, no body to skip -- and a left
-# shift or a bare `<<` yields an empty tag, which is no here-doc either. The
-# introducing line still gets scanned; only the body and its terminator are
-# dropped. A tag still open when a file ends means this tokenizer read
-# something as an opener that the shell does not, so it stops the run loudly
-# instead of narrowing the scan in silence.
-SKIP='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out) {
+# `<<<` is a here-string -- one line of data, no body to skip -- and a bare
+# `<<` yields an empty tag, which is no here-doc either. Inside `(( ))` or
+# `$(( ))` a `<<` is a left shift and its operand is a number, not a tag, so
+# arithmetic depth is tracked and openers are not looked for below it. An
+# ANSI-C string (`$'...'`) escapes with backslashes the way a double-quoted
+# one does, so a `\'` in it does not end the string and a tag spelling after
+# that quote is still inside it. The introducing line still gets scanned; only
+# the body and its terminator are dropped. A tag still open when a file ends
+# means this tokenizer read something as an opener that the shell does not, so
+# it stops the run loudly instead of narrowing the scan in silence.
+SKIP='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
   out = ""
   n = length(line)
   q = ""
+  ansi = 0
+  adepth = 0
   i = 1
   while (i <= n) {
     c = substr(line, i, 1)
     if (q != "") {
-      if (q == DQ && c == "\\") { i += 2; continue }
-      if (c == q) q = ""
+      if ((q == DQ || ansi) && c == "\\") { i += 2; continue }
+      if (c == q) { q = ""; ansi = 0 }
       i += 1
       continue
     }
     if (c == "\\") { i += 2; continue }
-    if (c == SQ || c == DQ) { q = c; i += 1; continue }
+    if (c == SQ || c == DQ) {
+      q = c
+      ansi = (c == SQ && i > 1 && substr(line, i - 1, 1) == "$")
+      i += 1
+      continue
+    }
     if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;&|(]/)) break
+    if (c == "(" && substr(line, i + 1, 1) == "(") { adepth += 1; i += 2; continue }
+    if (c == ")" && substr(line, i + 1, 1) == ")" && adepth > 0) { adepth -= 1; i += 2; continue }
     if (c != "<" || substr(line, i + 1, 1) != "<") { i += 1; continue }
+    if (adepth > 0) { i += 2; continue }
     rest = substr(line, i + 2)
     if (substr(rest, 1, 1) == "<") { i += 3; continue }
     dash = ""
