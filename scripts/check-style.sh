@@ -348,6 +348,24 @@ check_string_literal_width() {
   return 0
 }
 
+# The two width walks alone, run against a scratch crate root rather than
+# this tree: the walks read only crates/view-engine, so grading them does
+# not need the README, the scripts directory or the god-file classifier the
+# full run below reads. The root is a positional argument, the form
+# scripts/check-portability.sh takes for the same purpose.
+if [ "${1:-}" = "--widths" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --widths ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  widthfail=0
+  check_lua_chunk_width || widthfail=1
+  check_string_literal_width || widthfail=1
+  exit $widthfail
+fi
+
 fail=0
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1

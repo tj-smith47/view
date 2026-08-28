@@ -98,8 +98,10 @@ tasks:
       - bash scripts/reader-cases.sh
 
   style:
-    desc: Enforce comment and doc style rules
-    cmd: bash scripts/check-style.sh
+    desc: Enforce comment and doc style rules, and the width-check case matrix
+    cmds:
+      - bash scripts/check-style.sh
+      - bash scripts/check-style-cases.sh
 
   loc:
     desc: Enforce the god-file ceiling (production code lines per file; split modules, separate tests)
