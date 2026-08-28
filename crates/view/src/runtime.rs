@@ -4229,38 +4229,52 @@ mod tests {
     /// sent on time as one sent at once. What the reply cost is measured
     /// against the instant the effect was handed over, so a host that
     /// stalls moves both ends of the measurement together.
+    ///
+    /// A stall lands inside that span as readily, though, and there it
+    /// makes an arm that stopped sleeping read as punctual -- so a sample
+    /// this thread slept through is discarded and the dispatch repeated,
+    /// rather than concluded from. The grace itself shrinking to nothing
+    /// is caught without any clock at all, on the constants, by view-ai's
+    /// `the_grace_outlasts_the_absence_a_save_can_leave`; what is left for
+    /// a measurement to cover is the arm no longer spending it.
     #[test]
     fn the_re_probe_waits_out_the_save_before_looking_again() {
         let ops = FakeOps::default();
         let (msg_tx, msg_rx) = std::sync::mpsc::sync_channel(8);
         let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
+        let path = std::path::PathBuf::from("/proj/src/lib.rs");
 
-        let dispatched = std::time::Instant::now();
-        let flow = executor.run(Effect::ReprobeExternalWrite {
-            path: std::path::PathBuf::from("/proj/src/lib.rs"),
-        });
+        for _ in 0..5 {
+            let dispatched = std::time::Instant::now();
+            let flow = executor.run(Effect::ReprobeExternalWrite { path: path.clone() });
+            let entered = std::time::Instant::now();
 
-        assert!(matches!(flow, Flow::Continue));
-        let answer = msg_rx
-            .recv_timeout(view_test_support::host_deadline(
-                std::time::Duration::from_secs(5),
-            ))
-            .expect("the grace has to end in a second look, not in silence");
-        let elapsed = dispatched.elapsed();
-        assert!(
-            elapsed >= std::time::Duration::from_millis(60),
-            "answered {elapsed:?} after the effect with {answer:?}: nothing \
-             may reach the loop before the save the second look waits out \
-             could have finished"
-        );
-        match answer {
-            Msg::ConfirmExternalRemoval { path } => assert_eq!(
-                path,
-                std::path::PathBuf::from("/proj/src/lib.rs"),
-                "the path looked at again is the one that answered gone"
-            ),
-            other => panic!("expected the path to be looked at again, got {other:?}"),
+            assert!(matches!(flow, Flow::Continue));
+            let answer = msg_rx
+                .recv_timeout(view_test_support::host_deadline(
+                    std::time::Duration::from_secs(5),
+                ))
+                .expect("the grace has to end in a second look, not in silence");
+            if entered.duration_since(dispatched) >= std::time::Duration::from_millis(60) {
+                continue;
+            }
+            let elapsed = dispatched.elapsed();
+            assert!(
+                elapsed >= std::time::Duration::from_millis(60),
+                "answered {elapsed:?} after the effect with {answer:?}: nothing \
+                 may reach the loop before the save the second look waits out \
+                 could have finished"
+            );
+            match answer {
+                Msg::ConfirmExternalRemoval { path: looked } => assert_eq!(
+                    looked, path,
+                    "the path looked at again is the one that answered gone"
+                ),
+                other => panic!("expected the path to be looked at again, got {other:?}"),
+            }
+            return;
         }
+        panic!("the host never left this thread awake across a dispatch in five tries");
     }
 
     /// A second look that could not be scheduled is a removal that is never

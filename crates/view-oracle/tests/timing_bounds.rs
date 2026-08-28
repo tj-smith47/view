@@ -93,6 +93,39 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
                   to stay under",
     },
     DeclaredAbsolute {
+        file: "view/src/runtime.rs",
+        line: "if entered.duration_since(dispatched) >= std::time::Duration::from_millis(60) {",
+        grounds: "it asks whether this thread stayed awake across a path \
+                  whose own cost is microseconds, and a bound that grew \
+                  with the host's load would accept the stalled sample it \
+                  exists to throw away",
+    },
+    DeclaredAbsolute {
+        file: "view/src/runtime.rs",
+        line: "observed_for >= std::time::Duration::from_millis(20),",
+        grounds: "it restates the sleep two lines above it, and the \
+                  episode's clock opened before that sleep, so a slow host \
+                  can only overshoot the floor -- the only reading that \
+                  fails is a readout that went backwards",
+    },
+    DeclaredAbsolute {
+        file: "view/src/remote_guard.rs",
+        line: "waited < Duration::from_secs(5),",
+        grounds: "it discriminates between the 200ms bound under test and \
+                  the 30s the fixture client sits for, and sits an order of \
+                  magnitude from each, so the host would have to be slower \
+                  than the failure it is telling apart",
+    },
+    DeclaredAbsolute {
+        file: "view-native/src/picker/matcher.rs",
+        line:
+            "if state != last_state || now.duration_since(last_entry) >= Duration::from_secs(5) {",
+        grounds: "it throttles how often a hot diagnostic loop records a \
+                  line, so what it bounds is the size of the output rather \
+                  than any verdict, and scaling it with the host would \
+                  thin the record exactly when the record is wanted",
+    },
+    DeclaredAbsolute {
         file: "view/tests/supervision_live.rs",
         line: "if quiet_since.elapsed() >= bound + WATCHDOG_MARGIN {",
         grounds: "the margin past the derived bound is the runaway guard \
@@ -221,6 +254,11 @@ mod tests {
     }
 
     #[test]
+    fn a_floor_on_a_span_the_walk_cannot_name_is_still_a_bound() {
+        assert!(observed_for >= Duration::from_millis(20), "the episode clock");
+    }
+
+    #[test]
     fn converting_the_span_hides_the_type_not_the_clock() {
         assert!(start.elapsed().as_millis() < 50, "took {elapsed:?}");
     }
@@ -254,15 +292,16 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
         .iter()
         .map(|found| found.number)
         .collect();
-    // the nine deliberately wrong lines: the named constant, the
+    // the ten deliberately wrong lines: the named constant, the
     // rustfmt-wrapped comparison, the deadline built from `now`, the
     // inclusive bound, the same bound written backwards, the floor with
-    // its sides swapped, the one whose span is converted to a number
-    // first, and the two waits handed a wall clock they spend rather than
+    // its sides swapped, the floor whose span carries none of the names
+    // the walk knows, the one whose span is converted to a number first,
+    // and the two waits handed a wall clock they spend rather than
     // compare
     assert_eq!(
         found,
-        vec![9, 16, 23, 29, 34, 39, 44, 49, 50],
+        vec![9, 16, 23, 29, 34, 39, 44, 49, 54, 55],
         "the walk read {found:?} of the fixture. Every line it missed is a \
          shape the population can carry unnoticed; every extra line is a \
          shape the rule asks for being reported as a violation"
@@ -324,18 +363,24 @@ struct AbsoluteBound {
 
 /// Every absolute bound in `source`, in the order they appear.
 ///
-/// Three shapes count. A comparison between a measured span (`elapsed`,
-/// `took`) and an unscaled duration, whichever side each sits on -- a floor
-/// (`elapsed >= ...`) is the same hand-picked wall clock as a ceiling and
-/// fails on a host that stalls just as readily; a
-/// deadline built as `Instant::now() + <unscaled duration>`, which is the
-/// same wall clock with the subtraction moved; and a wall clock handed to a
-/// blocking wait (`recv_timeout`, `wait_timeout`), where the comparison
-/// happens inside the standard library and the failure it produces on a
-/// loaded host is a timed-out receive rather than a failed assertion. All
-/// three read through the statement rather than the line, so wrapping hides
-/// none of them, and all three resolve a bare constant against the file's
-/// own `const` declarations, so naming the literal does not launder it.
+/// Three shapes count. A comparison between a measured span (per
+/// [`MEASURED_SPANS`]) and an unscaled
+/// duration, whichever side each sits on -- a floor (`elapsed >= ...`) needs
+/// declared grounds for the opposite reason a ceiling does: a stalled host
+/// inflates the span, so a floor whose delay has gone *passes*, and nothing
+/// in the suite is left to notice. A deadline built as `Instant::now() +
+/// <unscaled duration>`, which is the same wall clock with the subtraction
+/// moved. And a wall clock handed to a blocking wait (`recv_timeout`,
+/// `wait_timeout`), where the comparison happens inside the standard library
+/// and the failure it produces on a loaded host is a timed-out receive
+/// rather than a failed assertion. All three read through the statement
+/// rather than the line, so wrapping hides none of them, and all three
+/// resolve a bare constant against the file's own `const` declarations, so
+/// naming the literal does not launder it.
+///
+/// Which side is the span is settled by what it is called, per
+/// [`MEASURED_SPANS`], which is where this rule stops: a bound on a span
+/// named outside that list is not read at all.
 fn absolute_span_bounds(source: &str) -> Vec<AbsoluteBound> {
     let lines: Vec<&str> = source.lines().collect();
     let statements = statements(source);
@@ -352,7 +397,7 @@ fn absolute_span_bounds(source: &str) -> Vec<AbsoluteBound> {
     };
     for statement in &statements {
         for (at, span, bound) in comparisons(&statement.text) {
-            if (span.contains("elapsed") || span.contains("took")) && is_absolute(bound, &consts) {
+            if names_a_measured_span(span) && is_absolute(bound, &consts) {
                 push(at, statement);
             }
         }
@@ -387,6 +432,29 @@ fn is_absolute(expr: &str, consts: &HashSet<String>) -> bool {
     holds_a_duration_literal(expr)
         || is_a_bare_number(expr)
         || identifiers(expr).any(|name| consts.contains(&name))
+}
+
+/// What this tree calls a span it measured, which is how the walk tells
+/// one side of a comparison from the other.
+///
+/// A list of names and not a type, because the walk reads text: a span is
+/// recognisable only by what it is called. That is this rule's boundary
+/// and it is written down rather than left to be discovered -- a floor or
+/// a ceiling on a span named anything else is invisible here, and the fix
+/// when one appears is to name it out of this list or to add its name to
+/// it. `after` is deliberately absent: it is a substring of too many
+/// identifiers to tell a span from a sentence.
+const MEASURED_SPANS: &[&str] = &[
+    "elapsed",
+    "took",
+    "waited",
+    "observed_for",
+    "duration_since",
+];
+
+/// Whether `text` names a span some clock produced, per [`MEASURED_SPANS`].
+fn names_a_measured_span(text: &str) -> bool {
+    MEASURED_SPANS.iter().any(|name| text.contains(name))
 }
 
 /// The names of every `const NAME: Duration` in `statements` whose value is
