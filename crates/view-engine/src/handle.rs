@@ -2372,8 +2372,8 @@ mod tests {
                 error: Value::from("method not supported"),
                 result: Value::Nil,
             },
-            "barrier request must get the ordinary auto-reply before the reader is trusted \
-             to be idle and waiting for the next message"
+            "barrier request must get the ordinary auto-reply before the \
+             reader is trusted to be idle and waiting for the next message"
         );
 
         tx.try_send(Msg::Resized {
@@ -2992,8 +2992,8 @@ mod tests {
             .unwrap();
         assert!(
             matches!(msg, Msg::HiddenBufferLoaded { buf: Some(_), .. }),
-            "the late reply must still route to the pump even though its hold was \
-             already gone by the time it arrived, got {msg:?}"
+            "the late reply must still route to the pump even though its hold \
+             was already gone by the time it arrived, got {msg:?}"
         );
     }
 
@@ -3423,8 +3423,8 @@ mod tests {
                 error: Value::from("method not supported"),
                 result: Value::Nil,
             },
-            "barrier request must get the ordinary auto-reply before the reader is trusted \
-             to be idle and waiting for the next message"
+            "barrier request must get the ordinary auto-reply before the \
+             reader is trusted to be idle and waiting for the next message"
         );
 
         tx.try_send(Msg::Resized {
@@ -3454,8 +3454,9 @@ mod tests {
                     .unwrap(),
                 Msg::Resized { .. }
             ),
-            "dummy fill must be the first message drained, proving the real event above \
-             genuinely lost its try_send race instead of landing in the channel"
+            "dummy fill must be the first message drained, proving the real \
+             event above genuinely lost its try_send race instead of landing \
+             in the channel"
         );
 
         let clean_notif = RpcMessage::Notification {
@@ -3480,8 +3481,8 @@ mod tests {
         };
         assert!(
             desynced,
-            "the event following a drop-at-sink must carry desynced: true, the same as a \
-             decode failure would"
+            "the event following a drop-at-sink must carry desynced: true, the \
+             same as a decode failure would"
         );
     }
 
@@ -3510,8 +3511,8 @@ mod tests {
                 error: Value::from("method not supported"),
                 result: Value::Nil,
             },
-            "barrier request must get the ordinary auto-reply before the reader is trusted \
-             to be idle and waiting for the next message"
+            "barrier request must get the ordinary auto-reply before the \
+             reader is trusted to be idle and waiting for the next message"
         );
 
         tx.try_send(Msg::Resized {
@@ -3534,8 +3535,9 @@ mod tests {
                     .unwrap(),
                 Msg::Resized { .. }
             ),
-            "dummy fill must be the first message drained, proving the detach above \
-             genuinely lost its try_send race instead of landing in the channel"
+            "dummy fill must be the first message drained, proving the detach \
+             above genuinely lost its try_send race instead of landing in the \
+             channel"
         );
 
         // any other routed message -- a view_bridge notification, nothing
@@ -3607,8 +3609,9 @@ mod tests {
                     .unwrap(),
                 Msg::Resized { .. }
             ),
-            "dummy fill must be the first message drained, proving the answer above \
-             genuinely lost its try_send race instead of landing in the channel"
+            "dummy fill must be the first message drained, proving the answer \
+             above genuinely lost its try_send race instead of landing in the \
+             channel"
         );
 
         let bridge_notif = RpcMessage::Notification {
@@ -3673,8 +3676,9 @@ mod tests {
                     .unwrap(),
                 Msg::Resized { .. }
             ),
-            "dummy fill must be the first message drained, proving the reply above \
-             genuinely lost its try_send race instead of landing in the channel"
+            "dummy fill must be the first message drained, proving the reply \
+             above genuinely lost its try_send race instead of landing in the \
+             channel"
         );
 
         let bridge_notif = RpcMessage::Notification {

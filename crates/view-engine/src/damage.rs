@@ -1742,8 +1742,9 @@ mod tests {
                 assert_eq!(
                     grid_state(&compacted_model),
                     grid_state(&raw_model),
-                    "seed {seed}: grid state diverged after a mid-schedule take(); \
-                     compacted batch={compacted_batch:?} raw batch={raw_batch:?}"
+                    "seed {seed}: grid state diverged after a mid-schedule \
+                     take(); compacted batch={compacted_batch:?} raw \
+                     batch={raw_batch:?}"
                 );
 
                 let compacted_other: Vec<&UiEvent> = compacted_batch

@@ -317,10 +317,10 @@ fn a_rename_through_a_symlinked_directory_still_follows_the_open_buffer() {
     assert_eq!(
         canon(std::path::Path::new(&buf_name)),
         canon(&new_path),
-        "the buffer must follow the rename onto the new, symlink-aliased path -- a \
-         retarget whose canon is computed from a post-rename buffer name (the \
-         pre-fix ordering) can no longer resolve the now-renamed-away old path and \
-         silently leaves this buffer orphaned instead"
+        "the buffer must follow the rename onto the new, symlink-aliased path \
+         -- a retarget whose canon is computed from a post-rename buffer name \
+         (the pre-fix ordering) can no longer resolve the now-renamed-away old \
+         path and silently leaves this buffer orphaned instead"
     );
 
     let after_modified = engine

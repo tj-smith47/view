@@ -743,9 +743,9 @@ fn prepare_empty_dir(path: &Path) -> io::Result<()> {
     if let Some(entry) = std::fs::read_dir(path)?.next() {
         let name = entry?.file_name();
         return Err(io::Error::other(format!(
-            "the hermetic search path {} holds {:?}: a child pointed at it would source \
-             whatever is planted there, so the spawn is refused rather than silently \
-             measured against it",
+            "the hermetic search path {} holds {:?}: a child pointed at it \
+             would source whatever is planted there, so the spawn is refused \
+             rather than silently measured against it",
             path.display(),
             name
         )));

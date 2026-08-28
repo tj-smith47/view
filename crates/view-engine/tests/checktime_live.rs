@@ -188,8 +188,8 @@ fn next_checktime_reply(rx: &mpsc::Receiver<Msg>) -> CheckTimeReply {
             }
             Ok(_other) => continue,
             Err(mpsc::RecvTimeoutError::Timeout) => panic!(
-                "no Msg::CheckTimeReply arrived within 5s -- nvim's main loop is \
-                 blocked inside the chunk"
+                "no Msg::CheckTimeReply arrived within 5s -- nvim's main loop \
+                 is blocked inside the chunk"
             ),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("the engine channel closed before a CheckTimeReply arrived")
@@ -528,8 +528,8 @@ fn a_forced_reload_that_raises_reports_failure_rather_than_a_completed_discard()
             "nvim_exec_lua",
             vec![
                 rmpv::Value::from(
-                    "vim.api.nvim_create_autocmd('BufReadPost', \
-                     { buffer = ..., callback = function() error('reload refused') end })",
+                    "vim.api.nvim_create_autocmd('BufReadPost', { buffer = \
+                     ..., callback = function() error('reload refused') end })",
                 ),
                 rmpv::Value::Array(vec![rmpv::Value::from(buf)]),
             ],

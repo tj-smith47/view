@@ -366,9 +366,10 @@ fn an_already_open_file_resolves_to_the_buffer_already_holding_it() {
         .expect("buffer handle is an integer");
     assert_eq!(
         cur_buf, open_buf,
-        "nvim's own nvim_buf_delete does not refuse a window-visible buffer -- it \
-         substitutes a fresh one into the window instead, so release_hidden must skip \
-         the delete outright rather than trust a refusal that never comes"
+        "nvim's own nvim_buf_delete does not refuse a window-visible buffer -- \
+         it substitutes a fresh one into the window instead, so release_hidden \
+         must skip the delete outright rather than trust a refusal that never \
+         comes"
     );
 }
 
@@ -1066,8 +1067,8 @@ fn a_buffer_this_connection_created_survives_release_once_the_user_adopts_it() {
         .expect("release the one hold this test took");
     assert!(
         buf_still_listed_as_a_buffer(&engine, buf),
-        "a buffer the user adopted after this connection created it must survive \
-         release even once no window shows it"
+        "a buffer the user adopted after this connection created it must \
+         survive release even once no window shows it"
     );
 }
 
@@ -1133,8 +1134,8 @@ fn two_spellings_of_the_same_path_share_one_hold() {
         .expect("first spelling releases");
     assert!(
         buf_still_listed_as_a_buffer(&engine, buf),
-        "one hold remains -- the two spellings must share a single refcount entry, \
-         not race each other's cleanup"
+        "one hold remains -- the two spellings must share a single refcount \
+         entry, not race each other's cleanup"
     );
 
     engine
@@ -1211,8 +1212,8 @@ fn two_spellings_of_a_not_yet_existing_path_share_one_hold() {
         .expect("first spelling releases");
     assert!(
         buf_still_listed_as_a_buffer(&engine, buf),
-        "one hold remains -- an unnormalized fallback key would let this release \
-         delete the buffer the second spelling's hold still needs"
+        "one hold remains -- an unnormalized fallback key would let this \
+         release delete the buffer the second spelling's hold still needs"
     );
 
     engine
@@ -1256,7 +1257,8 @@ fn two_spellings_through_a_symlinked_directory_with_no_dot_component_share_one_h
     assert!(
         !via_link.contains("/./") && !via_link.contains("/../"),
         "the symlinked spelling must carry no '.'/'..' component -- that is \
-         exactly the case fnamemodify(':p') leaves unresolved but bufadd does not"
+         exactly the case fnamemodify(':p') leaves unresolved but bufadd does \
+         not"
     );
     assert!(
         std::fs::canonicalize(link_dir.join("brand-new.rs")).is_err(),
@@ -1686,14 +1688,15 @@ fn a_foreign_buffer_reached_through_a_symlinked_spelling_is_neither_owned_nor_de
     let via_link = link_dir.join("foreign.rs").to_string_lossy().into_owned();
     assert!(
         !via_link.contains("/./") && !via_link.contains("/../"),
-        "the symlinked spelling must carry no '.'/'..' component -- that is exactly \
-         the case the old canon() left unresolved"
+        "the symlinked spelling must carry no '.'/'..' component -- that is \
+         exactly the case the old canon() left unresolved"
     );
     assert!(
         std::fs::canonicalize(&real_path).is_err(),
-        "the leaf must not exist on disk: with the file there, fs_realpath resolves \
-         both spellings outright and the parent-only fallback -- the half that was \
-         broken, and the only half this test exists to pin -- never runs at all"
+        "the leaf must not exist on disk: with the file there, fs_realpath \
+         resolves both spellings outright and the parent-only fallback -- the \
+         half that was broken, and the only half this test exists to pin -- \
+         never runs at all"
     );
 
     let mut engine = spawn();

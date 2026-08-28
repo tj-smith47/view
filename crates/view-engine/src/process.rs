@@ -726,9 +726,10 @@ pub struct Engine {
 #[cfg(all(feature = "bench-no-heartbeat", not(debug_assertions)))]
 const _: () = assert!(
     option_env!("VIEW_BENCH_NO_HEARTBEAT").is_some(),
-    "bench-no-heartbeat compiles out read-side hang supervision and must never ship: set \
-     VIEW_BENCH_NO_HEARTBEAT=1 in the build environment (as `task heartbeat-ab` does) if this \
-     optimized build really is the paired campaign's counterfactual arm"
+    "bench-no-heartbeat compiles out read-side hang supervision and must never \
+     ship: set VIEW_BENCH_NO_HEARTBEAT=1 in the build environment (as `task \
+     heartbeat-ab` does) if this optimized build really is the paired \
+     campaign's counterfactual arm"
 );
 
 /// Starts the one thread that owns the heartbeat cadence, ticking `prober`
@@ -2669,8 +2670,8 @@ mod config_tests {
                 !plan
                     .iter()
                     .any(|(planned, _)| crate::env::env_names_eq(planned, OsStr::new(name))),
-                "{name} is allowlisted and the isolated plan touches it anyway; \
-                 plan {plan:?}"
+                "{name} is allowlisted and the isolated plan touches it \
+                 anyway; plan {plan:?}"
             );
         }
     }
@@ -3193,7 +3194,8 @@ mod config_tests {
             assert!(
                 plan.contains(&(OsString::from(*name), None)),
                 "{name} is not removed on the remote path, so a remote login \
-                 environment that exports it redirects the editor; plan {plan:?}"
+                 environment that exports it redirects the editor; plan \
+                 {plan:?}"
             );
         }
     }
@@ -3224,8 +3226,8 @@ mod config_tests {
             assert!(
                 plan.contains(&(OsString::from(*name), None)),
                 "{name} is not removed on the remote path, so a remote login \
-                 profile that exports it moves every standard path the far-side \
-                 editor resolves; plan {plan:?}"
+                 profile that exports it moves every standard path the \
+                 far-side editor resolves; plan {plan:?}"
             );
         }
     }

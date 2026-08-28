@@ -816,8 +816,8 @@ mod tests {
             assert_eq!(
                 watch.observe_at(false, now),
                 Liveness::Alive,
-                "probe {n} read as a wedge against an engine answering every one of them \
-                 in {}s",
+                "probe {n} read as a wedge against an engine answering every \
+                 one of them in {}s",
                 (INTERVAL * lag).as_secs()
             );
         }
@@ -972,8 +972,8 @@ mod tests {
         assert_eq!(
             armed,
             Some(THRESHOLD),
-            "the wakeup was dated from the anchor the mid-read tick stored, not from \
-             the probe it sent"
+            "the wakeup was dated from the anchor the mid-read tick stored, \
+             not from the probe it sent"
         );
         // the same instant the outstanding branch times that probe's own
         // window to, which is what "never slept past" means here

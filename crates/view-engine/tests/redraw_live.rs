@@ -364,7 +364,8 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
         i64::from(grid_cursor_row),
         expected_cursor_row,
         "compacted damage's final grid cursor row does not match nvim's own \
-         reported cursor line (nvim_cursor_line={nvim_cursor_line}, top_line={top_line})"
+         reported cursor line (nvim_cursor_line={nvim_cursor_line}, \
+         top_line={top_line})"
     );
     assert_eq!(
         i64::from(grid_cursor_col),

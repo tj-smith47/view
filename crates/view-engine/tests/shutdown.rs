@@ -141,10 +141,10 @@ fn within_liveness_bound<T: Send + 'static>(
         let _ = tx.send(work());
     });
     let wedged = format!(
-        "{subject} produced nothing within {GRACEFUL_EXIT_LIVENESS_BOUND:?}: nvim never exited \
-         after qa!, so it is wedged rather than merely slow to be scheduled. The child was \
-         killed on the way out of this failure, since nothing here can reach a shutdown that \
-         never returned"
+        "{subject} produced nothing within {GRACEFUL_EXIT_LIVENESS_BOUND:?}: \
+         nvim never exited after qa!, so it is wedged rather than merely slow \
+         to be scheduled. The child was killed on the way out of this failure, \
+         since nothing here can reach a shutdown that never returned"
     );
     let produced = rx
         .recv_timeout(GRACEFUL_EXIT_LIVENESS_BOUND)
@@ -387,8 +387,8 @@ fn a_restart_teardown_kills_the_child_rather_than_asking_it_to_quit() {
     assert_eq!(
         status.signal(),
         Some(9),
-        "the child left on its own terms, so the teardown asked it to quit and took the \
-         user's swap files with it: {status:?}"
+        "the child left on its own terms, so the teardown asked it to quit and \
+         took the user's swap files with it: {status:?}"
     );
 }
 

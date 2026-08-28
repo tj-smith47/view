@@ -3864,8 +3864,9 @@ mod tests {
         for (const_name, _) in PUBLISHED {
             assert!(
                 pinned.contains(const_name),
-                "no docs/*-wire-capture.md fence is marked verbatim `{const_name}` any more: \
-                 the pin was dropped rather than the doc"
+                "no docs/*-wire-capture.md fence is marked verbatim \
+                 `{const_name}` any more: the pin was dropped rather than the \
+                 doc"
             );
         }
     }
@@ -4047,8 +4048,8 @@ mod tests {
         assert_eq!(
             entries.len(),
             default_maps().len() + command_only_forms().len(),
-            "the command completes every entry point this build has, whatever this session \
-             mapped -- including the forms no key reaches at all"
+            "the command completes every entry point this build has, whatever \
+             this session mapped -- including the forms no key reaches at all"
         );
         assert!(
             entries.contains(&Value::Map(vec![
@@ -4136,8 +4137,8 @@ mod tests {
         let second = sent[1].as_map().expect("a mark is a map");
         assert!(
             !second.iter().any(|(k, _)| k == &Value::from("header")),
-            "a hunk with no header sends no key at all -- msgpack nil reaches Lua as \
-             `vim.NIL`, which `ipairs` cannot walk: {second:?}"
+            "a hunk with no header sends no key at all -- msgpack nil reaches \
+             Lua as `vim.NIL`, which `ipairs` cannot walk: {second:?}"
         );
         let keys = args[6].as_array().expect("the keys cross as an array");
         assert_eq!(keys.len(), review_keys().len());
@@ -4256,8 +4257,8 @@ mod tests {
                 .matches("vim.rpcnotify(channel, 'view_bridge'")
                 .count(),
             4,
-            "colorscheme through the shared relay, plus diagnostics/git/buffer each sending \
-             their own richer payload instead of a bare match"
+            "colorscheme through the shared relay, plus diagnostics/git/buffer \
+             each sending their own richer payload instead of a bare match"
         );
     }
 
@@ -4452,8 +4453,9 @@ mod tests {
         assert!(HOLD_OPTION_CHUNK.contains("'OptionSet'"));
         assert!(
             HOLD_OPTION_CHUNK.contains("'SafeState'"),
-            "without the idle backstop the guard cannot see a write made inside \
-             another autocommand, which is how a superseded plugin re-asserts"
+            "without the idle backstop the guard cannot see a write made \
+             inside another autocommand, which is how a superseded plugin \
+             re-asserts"
         );
         assert!(
             HOLD_OPTION_CHUNK.contains("{ clear = true }"),
@@ -4537,8 +4539,8 @@ mod tests {
         assert_eq!(
             nvim_style_absolute(&path),
             std::path::PathBuf::from("/a"),
-            "root's parent is root -- '/..' must resolve trivially rather than being \
-             left unresolved the way a nonexistent parent is"
+            "root's parent is root -- '/..' must resolve trivially rather than \
+             being left unresolved the way a nonexistent parent is"
         );
     }
 
@@ -4575,9 +4577,9 @@ mod tests {
         assert_eq!(
             hidden_path_refusal("/tmp/a/b.rs\\"),
             Some(HiddenPathRefusal::TrailingSeparator),
-            "the Lua chunk refuses a trailing backslash on every platform, so this \
-             must too -- on Unix it is a readable file bufadd would bind, and a hold \
-             taken on it comes back buf = 0 one round-trip later"
+            "the Lua chunk refuses a trailing backslash on every platform, so \
+             this must too -- on Unix it is a readable file bufadd would bind, \
+             and a hold taken on it comes back buf = 0 one round-trip later"
         );
         // the refusals above are platform-independent (the blank and
         // trailing-separator checks answer before absoluteness is asked at

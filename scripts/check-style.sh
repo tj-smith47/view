@@ -259,15 +259,18 @@ check_lua_chunk_width() {
   return 0
 }
 
-# The other shape: Lua handed to nvim from a multi-line string literal, which
-# is every live test's way of driving nvim and reads the same way a chunk
-# does. A literal continued with a trailing backslash and no `\n` before it
-# is Rust prose (an assert message), which rustfmt owns and this does not.
-check_lua_literal_width() {
+# The other shape: a multi-line string literal, which is how every live test
+# hands Lua to nvim and how the crate carries its longer messages. rustfmt
+# holds the line it opens on and nothing else about it, so the same 80
+# columns apply to every line of one -- no test of what the literal holds,
+# which is what let a Lua chunk broken with a trailing backslash
+# (checktime_live.rs) and a fixture row (inline_review_live.rs) read as
+# prose and go unchecked.
+check_string_literal_width() {
   local files
   files=$(find crates/view-engine/src crates/view-engine/tests -name '*.rs' 2>/dev/null | sort)
   if [ -z "$files" ]; then
-    echo "STYLE FAIL: no view-engine sources found; the Lua literal width check did not run"
+    echo "STYLE FAIL: no view-engine sources found; the literal width check did not run"
     return 1
   fi
   local report
@@ -282,39 +285,40 @@ check_lua_literal_width() {
       }
       return n
     }
-    function is_prose(line) {
-      return (line ~ /\\$/ && line !~ /\\n\\$/ && line !~ /^[[:space:]]*"\\$/)
-    }
-    function flush(   i) {
-      if (!prose) {
-        for (i = 1; i <= held; i++) {
-          if (length(body[i]) > 80) {
-            printf "%s:%d: %d columns\n", file[i], line[i], length(body[i])
-            over++
-          }
-        }
+    function check_width(line) {
+      if (length(line) > 80) {
+        printf "%s:%d: %d columns\n", FILENAME, FNR, length(line)
+        over++
       }
-      held = 0; prose = 0
     }
-    inlua {
-      held++; body[held] = $0; line[held] = FNR; file[held] = FILENAME
-      if (quotes($0) > 0) { flush(); inlua = 0; next }
-      if (is_prose($0)) { prose = 1 }
+    inlit {
+      check_width($0)
+      if (quotes($0) > 0) { inlit = 0 }
       next
     }
-    /^[[:space:]]*"/ {
+    # the literal opens on its own line, or shares the line with the
+    # assignment that carries it (`const NAME: &str = "\`)
+    /^[[:space:]]*"/ || /= "\\$/ {
       if (quotes($0) == 1) {
-        inlua = 1
-        held = 1; body[1] = $0; line[1] = FNR; file[1] = FILENAME
-        prose = is_prose($0)
+        found++
+        check_width($0)
+        inlit = 1
       }
     }
-    END { exit (over > 0) ? 1 : 0 }
+    END { printf "LITERALS %d\n", found; exit (over > 0 || found != 259) ? 1 : 0 }
   ' $files) || {
-    printf '%s\n' "$report"
-    echo "STYLE FAIL: a Lua line in a string literal is over 80 columns"
-    echo "  Wrap it the way nvim_api.rs's chunks are: break at an operator or"
-    echo "  after a comma, keep the Lua's own indentation."
+    printf '%s\n' "$report" | grep -v '^LITERALS '
+    local literals
+    literals=$(printf '%s\n' "$report" | sed -n 's/^LITERALS //p')
+    if [ "$literals" != "259" ]; then
+      echo "STYLE FAIL: found $literals of the 259 multi-line string literals;"
+      echo "  a literal shape stopped matching, or one was added or removed --"
+      echo "  re-count and update the number if the change is deliberate."
+    else
+      echo "STYLE FAIL: a line inside a string literal is over 80 columns"
+      echo "  Wrap it the way nvim_api.rs's chunks are: break at an operator or"
+      echo "  after a comma, keep the literal's own indentation."
+    fi
     return 1
   }
   return 0
@@ -324,7 +328,7 @@ fail=0
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1
   check_lua_chunk_width || fail=1
-  check_lua_literal_width || fail=1
+  check_string_literal_width || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi

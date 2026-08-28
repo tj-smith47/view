@@ -214,8 +214,9 @@ fn a_shown_review_decorates_the_rows_it_replaces_and_nothing_else() {
     );
     assert_eq!(
         marks[1],
-        "1:nil:nil:\u{25b6} :false:hunk 1/2 -- <leader>ha accept/ViewReviewHeader|\
-         ]c next  <leader>hq leave/ViewReviewHeader|+TWO/ViewReviewAdded",
+        "1:nil:nil:\u{25b6} :false:hunk 1/2 -- <leader>ha \
+         accept/ViewReviewHeader|]c next  <leader>hq \
+         leave/ViewReviewHeader|+TWO/ViewReviewAdded",
         "the current hunk carries every header row, the sign, and the proposed line: {marks:?}"
     );
     assert_eq!(marks[2], "5:5:ViewReviewRemoved:nil:nil:");
@@ -363,8 +364,8 @@ fn decorating_a_buffer_changes_neither_its_text_nor_its_modified_flag() {
     assert_eq!(
         state(&s),
         before,
-        "an extmark is not an edit: neither the text, nor b:changedtick, nor the modified \
-         flag the user would be asked to save may move"
+        "an extmark is not an edit: neither the text, nor b:changedtick, nor \
+         the modified flag the user would be asked to save may move"
     );
 }
 

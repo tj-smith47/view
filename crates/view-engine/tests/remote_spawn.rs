@@ -498,9 +498,10 @@ fn a_killed_client_process_reads_as_a_dead_connection() {
     while engine.heartbeat.observe(engine.handle.is_closed()) != Liveness::Dead {
         assert!(
             Instant::now() < deadline,
-            "the read side still reports a live connection {HEARTBEAT_PROBE_INTERVAL:?} \
-             after the client process was killed: a dropped connection no longer \
-             surfaces as EOF, and every recovery built on that verdict is unreachable"
+            "the read side still reports a live connection \
+             {HEARTBEAT_PROBE_INTERVAL:?} after the client process was killed: \
+             a dropped connection no longer surfaces as EOF, and every \
+             recovery built on that verdict is unreachable"
         );
     }
 }
