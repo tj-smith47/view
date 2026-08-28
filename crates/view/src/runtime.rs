@@ -4222,29 +4222,38 @@ mod tests {
     /// take, zero included, and zero is exactly the regression. 60ms is one
     /// coalesce window and change -- above the window a save's two halves
     /// can straddle, below the real grace.
+    ///
+    /// It is timed from the dispatch and not from the start of a wait: a
+    /// loaded host can leave this thread off-CPU for longer than the grace
+    /// between the two, and a window opened after that stall reads a reply
+    /// sent on time as one sent at once. What the reply cost is measured
+    /// against the instant the effect was handed over, so a host that
+    /// stalls moves both ends of the measurement together.
     #[test]
     fn the_re_probe_waits_out_the_save_before_looking_again() {
         let ops = FakeOps::default();
         let (msg_tx, msg_rx) = std::sync::mpsc::sync_channel(8);
         let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
 
+        let dispatched = std::time::Instant::now();
         let flow = executor.run(Effect::ReprobeExternalWrite {
             path: std::path::PathBuf::from("/proj/src/lib.rs"),
         });
 
         assert!(matches!(flow, Flow::Continue));
-        assert!(
-            msg_rx
-                .recv_timeout(std::time::Duration::from_millis(60))
-                .is_err(),
-            "re-asking this soon answers from inside the save it is waiting out"
-        );
-        match msg_rx
+        let answer = msg_rx
             .recv_timeout(view_test_support::host_deadline(
                 std::time::Duration::from_secs(5),
             ))
-            .expect("the grace has to end in a second look, not in silence")
-        {
+            .expect("the grace has to end in a second look, not in silence");
+        let elapsed = dispatched.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(60),
+            "answered {elapsed:?} after the effect with {answer:?}: nothing \
+             may reach the loop before the save the second look waits out \
+             could have finished"
+        );
+        match answer {
             Msg::ConfirmExternalRemoval { path } => assert_eq!(
                 path,
                 std::path::PathBuf::from("/proj/src/lib.rs"),

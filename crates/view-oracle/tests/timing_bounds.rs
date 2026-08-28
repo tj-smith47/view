@@ -87,10 +87,17 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
     },
     DeclaredAbsolute {
         file: "view/src/runtime.rs",
-        line: ".recv_timeout(std::time::Duration::from_millis(60))",
+        line: "elapsed >= std::time::Duration::from_millis(60),",
         grounds: "it sits above one coalesce window and below the re-probe \
                   grace, and a scaled one straddles the grace it is there \
                   to stay under",
+    },
+    DeclaredAbsolute {
+        file: "view/tests/supervision_live.rs",
+        line: "if quiet_since.elapsed() >= bound + WATCHDOG_MARGIN {",
+        grounds: "the margin past the derived bound is the runaway guard \
+                  that ends a wait the watch failed to bound, so scaling it \
+                  with the host only makes the stray it catches live longer",
     },
     DeclaredAbsolute {
         file: "view-engine/tests/shutdown.rs",
@@ -209,6 +216,11 @@ mod tests {
     }
 
     #[test]
+    fn a_floor_is_the_same_wall_clock_with_the_sides_swapped() {
+        assert!(elapsed >= Duration::from_millis(60), "took {elapsed:?}");
+    }
+
+    #[test]
     fn converting_the_span_hides_the_type_not_the_clock() {
         assert!(start.elapsed().as_millis() < 50, "took {elapsed:?}");
     }
@@ -242,14 +254,15 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
         .iter()
         .map(|found| found.number)
         .collect();
-    // the eight deliberately wrong lines: the named constant, the
+    // the nine deliberately wrong lines: the named constant, the
     // rustfmt-wrapped comparison, the deadline built from `now`, the
-    // inclusive bound, the same bound written backwards, the one whose
-    // span is converted to a number first, and the two waits handed a wall
-    // clock they spend rather than compare
+    // inclusive bound, the same bound written backwards, the floor with
+    // its sides swapped, the one whose span is converted to a number
+    // first, and the two waits handed a wall clock they spend rather than
+    // compare
     assert_eq!(
         found,
-        vec![9, 16, 23, 29, 34, 39, 44, 45],
+        vec![9, 16, 23, 29, 34, 39, 44, 49, 50],
         "the walk read {found:?} of the fixture. Every line it missed is a \
          shape the population can carry unnoticed; every extra line is a \
          shape the rule asks for being reported as a violation"
@@ -311,8 +324,10 @@ struct AbsoluteBound {
 
 /// Every absolute bound in `source`, in the order they appear.
 ///
-/// Three shapes count. A comparison whose left side names a measured span
-/// (`elapsed`, `took`) and whose right side is an unscaled duration; a
+/// Three shapes count. A comparison between a measured span (`elapsed`,
+/// `took`) and an unscaled duration, whichever side each sits on -- a floor
+/// (`elapsed >= ...`) is the same hand-picked wall clock as a ceiling and
+/// fails on a host that stalls just as readily; a
 /// deadline built as `Instant::now() + <unscaled duration>`, which is the
 /// same wall clock with the subtraction moved; and a wall clock handed to a
 /// blocking wait (`recv_timeout`, `wait_timeout`), where the comparison
@@ -467,11 +482,8 @@ fn comparisons(text: &str) -> Vec<(usize, &str, &str)> {
         let len = if after == Some(b'=') { 2 } else { 1 };
         let left = &text[..at];
         let right = first_argument(&text[at + len..]);
-        found.push(if c == '<' {
-            (at, left, right)
-        } else {
-            (at, right, left)
-        });
+        found.push((at, left, right));
+        found.push((at, right, left));
     }
     found
 }
