@@ -223,7 +223,14 @@ check_lua_chunk_width() {
     return 1
   fi
   local declared report status walked
-  declared=$(grep -c '_CHUNK: &str' "$file")
+  # a grep that matches nothing exits non-zero, and that outcome is data
+  # here rather than an error: without this the guard below never speaks
+  declared=$(grep -c '_CHUNK: &str' "$file") || declared=0
+  if [ "$declared" -eq 0 ]; then
+    echo "STYLE FAIL: no _CHUNK declaration found in $file;"
+    echo "  the width check walked nothing and cannot vouch for the file."
+    return 1
+  fi
   status=0
   report=$(awk '
     function check_width(line) {
@@ -275,7 +282,7 @@ check_lua_chunk_width() {
 # prose and go unchecked.
 check_string_literal_width() {
   local files
-  files=$(find crates/view-engine/src crates/view-engine/tests -name '*.rs' 2>/dev/null | sort)
+  files=$(find crates/view-engine/src crates/view-engine/tests -name '*.rs' 2>/dev/null | sort) || files=""
   if [ -z "$files" ]; then
     echo "STYLE FAIL: no view-engine sources found; the literal width check did not run"
     return 1
@@ -284,7 +291,12 @@ check_string_literal_width() {
   # the same two opening shapes the awk matches, plus the one it cannot
   # follow (a quote left at the end of an assignment, with no backslash):
   # a shape the walk stops reaching is still counted here
-  declared=$(grep -hE '^[[:space:]]*"[^"]+$|= "\\?$' $files | wc -l | tr -d ' ')
+  declared=$(grep -hE '^[[:space:]]*"[^"]+$|= "\\?$' $files | wc -l | tr -d ' ') || declared=0
+  if [ "$declared" -eq 0 ]; then
+    echo "STYLE FAIL: no multi-line string literal found under view-engine;"
+    echo "  the width check walked nothing and cannot vouch for the tree."
+    return 1
+  fi
   status=0
   report=$(awk '
     function quotes(line,   n, i, len, c) {
