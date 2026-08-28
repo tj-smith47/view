@@ -25,7 +25,7 @@ unix socket, and issues `nvim_exec_lua` as a **request** (this call, unlike
 nothing nvim is blocked inside). No UI attach is needed: the buffer list is
 not redraw-derived state.
 
-The Lua chunk under test:
+The Lua chunk under test, verbatim `BUFFER_LIST_CHUNK`:
 
 ```lua
 local out = {}

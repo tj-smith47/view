@@ -746,8 +746,10 @@ fn read_diagnostic_entries_decodes_every_severity() {
                     "\
 local ns = vim.api.nvim_create_namespace('ai-context-read-test')
 vim.diagnostic.set(ns, 0, {
-  { lnum = 0, col = 2, severity = vim.diagnostic.severity.ERROR, message = 'error message' },
-  { lnum = 1, col = 0, severity = vim.diagnostic.severity.WARN, message = 'warn message' },
+  { lnum = 0, col = 2, severity = vim.diagnostic.severity.ERROR,
+    message = 'error message' },
+  { lnum = 1, col = 0, severity = vim.diagnostic.severity.WARN,
+    message = 'warn message' },
 })",
                 ),
                 rmpv::Value::Array(vec![]),

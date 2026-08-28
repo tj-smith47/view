@@ -285,6 +285,8 @@ or splits anything.
 
 ## Production chunk shape: review_show
 
+Verbatim `REVIEW_SHOW_CHUNK`:
+
 ```lua
 local buf, marks, cursor_row, focus, target, channel, keys = ...
 local ns = vim.api.nvim_create_namespace('view_review')
@@ -438,6 +440,8 @@ carries no header: msgpack nil decodes to `vim.NIL`, which `ipairs` cannot walk,
 so a present-but-nil key would throw inside the loop that draws every hunk.
 
 ## Production chunk shape: review_clear
+
+Verbatim `REVIEW_CLEAR_CHUNK`:
 
 ```lua
 local buf, keys = ...

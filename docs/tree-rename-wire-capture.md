@@ -26,7 +26,7 @@ below as a Lua function and calls it with the same two positional
 arguments (`old_path`, `new_path`) `nvim_exec_lua`'s vararg convention
 passes, exercising byte-for-byte the same source `nvim_api.rs` embeds.
 
-The Lua chunk under test:
+The Lua chunk under test, verbatim `RENAME_CHUNK`:
 
 ```lua
 local old_path, new_path = ...

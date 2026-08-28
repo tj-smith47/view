@@ -681,6 +681,8 @@ Two consequences the tests are built on:
 
 ## Production chunk shape
 
+Verbatim `CHECKTIME_CHUNK`:
+
 ```lua
 local paths, force = ...
 local function canon(p)

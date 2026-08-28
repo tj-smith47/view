@@ -344,7 +344,8 @@ the low bound specifically; the high bound's existing use of the scalar
 (end cell) form was already correct, unchanged:
 
 ```lua
-local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1], vim.fn.virtcol('.', 1)[1])
+local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1],
+  vim.fn.virtcol('.', 1)[1])
 local hi_vcol = math.max(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
 ```
 

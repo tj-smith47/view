@@ -35,7 +35,7 @@ misparsing the path as ex-command syntax, so the capture drives the chunk
 against every hostile-character case `OPEN_FILE_CHUNK`'s doc names and
 observes the resulting buffer.
 
-The Lua chunk under test (verbatim `OPEN_FILE_CHUNK`):
+The Lua chunk under test, verbatim `OPEN_FILE_CHUNK`:
 
 ```lua
 local path = ...

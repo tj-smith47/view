@@ -201,15 +201,18 @@ if [ "${1:-}" = "--file" ]; then
   exit 0
 fi
 
-# Every embedded Lua chunk in nvim_api.rs -- every `const ..._CHUNK: &str`
-# declaration, in each of its shapes (`concat!( ... );`, `"\` ... `";`, a
-# one-line literal, and an alias that re-exports another chunk's const) --
-# wraps at 80 columns. The chunks are read beside rustfmt-held Rust and
-# rustfmt does not reach inside a string literal, so nothing else in the
-# toolchain catches a line past that width; two of the chunks are also
-# published byte-for-byte inside a fence in
-# docs/inline-review-wire-capture.md, which does not wrap, and pinned there
-# by a test.
+# Every embedded Lua chunk wraps at 80 columns. The chunks are read beside
+# rustfmt-held Rust and rustfmt does not reach inside a string literal, so
+# nothing else in the toolchain catches a line past that width, and every
+# chunk a docs/*-wire-capture.md fence publishes verbatim -- pinned
+# byte-for-byte by the walk in nvim_api.rs's tests -- is republished at
+# whatever width the source carries, into a fence that does not wrap.
+#
+# Two shapes carry Lua, and each has its own walk below: a
+# `const ..._CHUNK: &str` declaration in nvim_api.rs (`concat!( ... );`,
+# `"\` ... `";`, a one-line literal, or an alias re-exporting another
+# chunk's const), and a multi-line string literal anywhere under
+# view-engine's src/ or tests/.
 check_lua_chunk_width() {
   local file='crates/view-engine/src/nvim_api.rs'
   if [ ! -f "$file" ]; then
@@ -226,7 +229,9 @@ check_lua_chunk_width() {
     }
     inchunk {
       check_width($0)
-      if ($0 ~ /^\);$/ || $0 ~ /";$/) { inchunk = 0 }
+      # an escaped quote inside the Lua does not close the Rust literal, so
+      # it must not end the walk either -- it would skip the rest silently
+      if ($0 ~ /^\);$/ || $0 ~ /^";$/ || $0 ~ /[^\\]";$/) { inchunk = 0 }
       next
     }
     /^(pub(\(crate\))? )?const [A-Z_]+_CHUNK: &str =/ {
@@ -254,10 +259,72 @@ check_lua_chunk_width() {
   return 0
 }
 
+# The other shape: Lua handed to nvim from a multi-line string literal, which
+# is every live test's way of driving nvim and reads the same way a chunk
+# does. A literal continued with a trailing backslash and no `\n` before it
+# is Rust prose (an assert message), which rustfmt owns and this does not.
+check_lua_literal_width() {
+  local files
+  files=$(find crates/view-engine/src crates/view-engine/tests -name '*.rs' 2>/dev/null | sort)
+  if [ -z "$files" ]; then
+    echo "STYLE FAIL: no view-engine sources found; the Lua literal width check did not run"
+    return 1
+  fi
+  local report
+  report=$(awk '
+    function quotes(line,   n, i, len, c) {
+      n = 0; i = 1; len = length(line)
+      while (i <= len) {
+        c = substr(line, i, 1)
+        if (c == "\\") { i += 2; continue }
+        if (c == "\"") { n++ }
+        i++
+      }
+      return n
+    }
+    function is_prose(line) {
+      return (line ~ /\\$/ && line !~ /\\n\\$/ && line !~ /^[[:space:]]*"\\$/)
+    }
+    function flush(   i) {
+      if (!prose) {
+        for (i = 1; i <= held; i++) {
+          if (length(body[i]) > 80) {
+            printf "%s:%d: %d columns\n", file[i], line[i], length(body[i])
+            over++
+          }
+        }
+      }
+      held = 0; prose = 0
+    }
+    inlua {
+      held++; body[held] = $0; line[held] = FNR; file[held] = FILENAME
+      if (quotes($0) > 0) { flush(); inlua = 0; next }
+      if (is_prose($0)) { prose = 1 }
+      next
+    }
+    /^[[:space:]]*"/ {
+      if (quotes($0) == 1) {
+        inlua = 1
+        held = 1; body[1] = $0; line[1] = FNR; file[1] = FILENAME
+        prose = is_prose($0)
+      }
+    }
+    END { exit (over > 0) ? 1 : 0 }
+  ' $files) || {
+    printf '%s\n' "$report"
+    echo "STYLE FAIL: a Lua line in a string literal is over 80 columns"
+    echo "  Wrap it the way nvim_api.rs's chunks are: break at an operator or"
+    echo "  after a comma, keep the Lua's own indentation."
+    return 1
+  }
+  return 0
+}
+
 fail=0
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1
   check_lua_chunk_width || fail=1
+  check_lua_literal_width || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi

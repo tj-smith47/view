@@ -26,7 +26,7 @@ path as a positional vararg, the same calling convention
 source, no interpolated caller data). No UI attach is needed: buffer content
 is not redraw-derived state.
 
-The Lua chunk under test:
+The Lua chunk under test, verbatim `PREVIEW_CHUNK`:
 
 ```lua
 local path = ...

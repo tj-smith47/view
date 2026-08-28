@@ -1265,7 +1265,7 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// `docs/checktime-wire-capture.md`'s production chunk (reproduced here
 /// byte-for-byte -- that doc is the source of truth this const must never
 /// drift from, which
-/// [`the_checktime_chunk_matches_its_capture_doc_byte_for_byte`] is what
+/// [`every_wire_capture_fence_matches_its_chunk_byte_for_byte`] is what
 /// keeps checkable). Takes `paths` and `force` as its two positional
 /// varargs and answers a positional `results` array.
 ///
@@ -3776,37 +3776,98 @@ mod tests {
     use crate::rpc::RpcMessage;
     use std::io::{BufReader, Write};
 
-    /// The chunk this crate ships and the chunk the capture doc records are
-    /// the same bytes. Both this const's own doc and the design claim it,
-    /// and nothing checked it: the last drift (a dropped `local ok =`) was
-    /// found by hand, and the next one would have been silent too. The doc
-    /// is the source; a mismatch means the code drifted from the capture,
-    /// not the other way round.
+    /// The chunks a `docs/*-wire-capture.md` fence publishes and the chunks
+    /// this crate ships are the same bytes. The doc is the source: it is
+    /// the only statement about a wire that a real nvim ever answered, so a
+    /// mismatch means the code drifted from the capture, never the reverse.
+    ///
+    /// Every such fence carries a marker line naming its const, and the
+    /// walk covers all of them at once: a doc that publishes a chunk on
+    /// grep discipline alone was how the last drift stayed invisible, and a
+    /// fence naming a const this table does not carry fails here rather
+    /// than dropping out of the walk unnoticed.
     #[test]
-    fn the_checktime_chunk_matches_its_capture_doc_byte_for_byte() {
-        let doc = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../docs/checktime-wire-capture.md"),
-        )
-        .expect("the capture doc must be readable");
-        let marker = "## Production chunk shape";
-        let after = doc
-            .split_once(marker)
-            .expect("the capture doc must carry a production chunk section")
-            .1;
-        let fenced = after
-            .split_once("```lua\n")
-            .expect("the production chunk must be a lua fence")
-            .1;
-        let captured = fenced
-            .split_once("```")
-            .expect("the lua fence must be closed")
-            .0;
-        assert_eq!(
-            captured.trim_end_matches('\n'),
-            CHECKTIME_CHUNK,
-            "CHECKTIME_CHUNK has drifted from docs/checktime-wire-capture.md"
+    fn every_wire_capture_fence_matches_its_chunk_byte_for_byte() {
+        const PUBLISHED: &[(&str, &str)] = &[
+            ("BUFFER_LIST_CHUNK", BUFFER_LIST_CHUNK),
+            ("CHECKTIME_CHUNK", CHECKTIME_CHUNK),
+            ("OPEN_FILE_CHUNK", OPEN_FILE_CHUNK),
+            ("PREVIEW_CHUNK", PREVIEW_CHUNK),
+            ("RENAME_CHUNK", RENAME_CHUNK),
+            ("REVIEW_CLEAR_CHUNK", REVIEW_CLEAR_CHUNK),
+            ("REVIEW_SHOW_CHUNK", REVIEW_SHOW_CHUNK),
+        ];
+        // the const a fence names, out of `... verbatim `NAME`:` -- the one
+        // marker every capture doc puts on the line above such a fence
+        fn named_const(line: &str) -> Option<&str> {
+            let (before, name) = line.trim_end().strip_suffix("`:")?.rsplit_once('`')?;
+            before
+                .to_ascii_lowercase()
+                .ends_with("verbatim ")
+                .then_some(name)
+        }
+
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+        let mut captures: Vec<std::path::PathBuf> = std::fs::read_dir(&docs)
+            .expect("the docs directory must be readable")
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.ends_with("-wire-capture.md"))
+            })
+            .collect();
+        captures.sort();
+        assert!(
+            !captures.is_empty(),
+            "no docs/*-wire-capture.md was walked; the pins checked nothing"
         );
+
+        let mut pinned: Vec<&str> = Vec::new();
+        for path in &captures {
+            let doc = std::fs::read_to_string(path).expect("a capture doc must be readable");
+            let name = path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or_default();
+            let mut rest = doc.as_str();
+            while let Some((above, fenced)) = rest.split_once("```lua\n") {
+                let (body, tail) = fenced
+                    .split_once("```")
+                    .expect("a lua fence must be closed");
+                rest = tail;
+                let Some(marked) = above
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .and_then(named_const)
+                else {
+                    continue;
+                };
+                let chunk = PUBLISHED
+                    .iter()
+                    .find(|(const_name, _)| *const_name == marked);
+                assert!(
+                    chunk.is_some(),
+                    "docs/{name} publishes a fence verbatim `{marked}`, which names no chunk this walk carries"
+                );
+                if let Some((const_name, source)) = chunk {
+                    assert_eq!(
+                        body.trim_end_matches('\n'),
+                        *source,
+                        "{marked} has drifted from docs/{name}"
+                    );
+                    pinned.push(*const_name);
+                }
+            }
+        }
+        for (const_name, _) in PUBLISHED {
+            assert!(
+                pinned.contains(const_name),
+                "no docs/*-wire-capture.md fence is marked verbatim `{const_name}` any more: \
+                 the pin was dropped rather than the doc"
+            );
+        }
     }
 
     /// Every outcome the wire can describe, decoded from the exact reply
@@ -4115,44 +4176,6 @@ mod tests {
                 "the draw is total: what is on screen is this payload alone"
             );
         }
-    }
-
-    /// What the capture doc recorded and what the crate ships are the same
-    /// bytes, for both chunks. The doc is the source: it is the only
-    /// statement about this wire that a real nvim ever answered, so a
-    /// mismatch means the code drifted from the capture, never the reverse.
-    #[test]
-    fn the_review_chunks_match_their_capture_doc_byte_for_byte() {
-        let doc = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../docs/inline-review-wire-capture.md"),
-        )
-        .expect("the capture doc must be readable");
-        let captured = |marker: &str| {
-            let after = doc
-                .split_once(marker)
-                .expect("the capture doc must carry a section per production chunk")
-                .1;
-            after
-                .split_once("```lua\n")
-                .expect("the production chunk must be a lua fence")
-                .1
-                .split_once("```")
-                .expect("the lua fence must be closed")
-                .0
-                .trim_end_matches('\n')
-                .to_owned()
-        };
-        assert_eq!(
-            captured("## Production chunk shape: review_show"),
-            REVIEW_SHOW_CHUNK,
-            "REVIEW_SHOW_CHUNK has drifted from docs/inline-review-wire-capture.md"
-        );
-        assert_eq!(
-            captured("## Production chunk shape: review_clear"),
-            REVIEW_CLEAR_CHUNK,
-            "REVIEW_CLEAR_CHUNK has drifted from docs/inline-review-wire-capture.md"
-        );
     }
 
     /// The channel id crosses as an argument, not interpolated, and the

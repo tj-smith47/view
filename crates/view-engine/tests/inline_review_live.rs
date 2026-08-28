@@ -108,7 +108,8 @@ impl Session {
             "local buf = ...
 local ns = vim.api.nvim_create_namespace('view_review')
 local out = {}
-for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
+for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1,
+  { details = true })) do
   local d = m[4]
   local virt = {}
   for _, line in ipairs(d.virt_lines or {}) do
@@ -119,7 +120,8 @@ for _, m in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = tru
     virt[#virt + 1] = text
   end
   out[#out + 1] = string.format('%d:%s:%s:%s:%s:%s', m[2], tostring(d.end_row),
-    tostring(d.line_hl_group), tostring(d.sign_text), tostring(d.virt_lines_above),
+    tostring(d.line_hl_group), tostring(d.sign_text),
+    tostring(d.virt_lines_above),
     table.concat(virt, '|'))
 end
 return out",
@@ -348,7 +350,8 @@ fn decorating_a_buffer_changes_neither_its_text_nor_its_modified_flag() {
             s.text(buf),
             s.lua(
                 "local buf = ...\n\
-                 return { vim.api.nvim_buf_get_changedtick(buf), vim.bo[buf].modified }",
+                 return { vim.api.nvim_buf_get_changedtick(buf),\n\
+                 vim.bo[buf].modified }",
                 vec![rmpv::Value::from(buf.0)],
             ),
         )
@@ -453,8 +456,10 @@ fn a_review_hands_back_the_buffer_local_maps_it_displaced() {
     s.show_in_current_window(buf);
     s.lua(
         "local buf = ...
-vim.keymap.set('n', ']c', ':echo \"gitsigns\"<CR>', { buffer = buf, desc = 'user next hunk' })
-vim.keymap.set('n', '\\\\hR', function() vim.g.view_test_hit = 'user' end, { buffer = buf })",
+vim.keymap.set('n', ']c', ':echo \"gitsigns\"<CR>',
+  { buffer = buf, desc = 'user next hunk' })
+vim.keymap.set('n', '\\\\hR', function() vim.g.view_test_hit = 'user' end,
+  { buffer = buf })",
         vec![rmpv::Value::from(buf.0)],
     );
 
@@ -679,7 +684,8 @@ impl Session {
         self.lua(
             "local hl = vim.api.nvim_get_hl(0, { name = ..., link = false })
 local hex = function(c) return c and string.format('%06x', c) or 'nil' end
-return string.format('%s/%s/%s', hex(hl.bg), hex(hl.fg), tostring(hl.reverse == true))",
+return string.format('%s/%s/%s', hex(hl.bg), hex(hl.fg),
+  tostring(hl.reverse == true))",
             vec![rmpv::Value::from(name)],
         )
         .as_str()
@@ -696,7 +702,8 @@ return string.format('%s/%s/%s', hex(hl.bg), hex(hl.fg), tostring(hl.reverse == 
 local cell = vim.api.nvim__inspect_cell(1, ...)
 local a = cell[2] or {}
 local hex = function(c) return c and string.format('%06x', c) or 'nil' end
-return string.format('%s:%s/%s/%s', cell[1], hex(a.background), hex(a.foreground),
+return string.format('%s:%s/%s/%s', cell[1], hex(a.background),
+  hex(a.foreground),
   tostring(a.reverse == true))",
             vec![rmpv::Value::from(row), rmpv::Value::from(col)],
         )
@@ -835,7 +842,8 @@ fn a_diff_group_with_no_color_at_all_falls_back_to_normals_foreground() {
     let s = start();
     s.lua(
         "vim.cmd('hi Normal guifg=#F8F8F2 guibg=#282A36')
-vim.cmd('hi DiffDelete guifg=NONE guibg=NONE gui=NONE ctermfg=NONE ctermbg=NONE cterm=NONE')",
+vim.cmd('hi DiffDelete guifg=NONE guibg=NONE gui=NONE '
+  .. 'ctermfg=NONE ctermbg=NONE cterm=NONE')",
         vec![],
     );
     let buf = s.buffer();
@@ -947,7 +955,8 @@ fn every_colorscheme_the_pinned_nvim_ships_paints_a_review_that_reads() {
     let report = s.strings(
         "local names = {}
 for _, pat in ipairs({ '*.vim', '*.lua' }) do
-  for _, f in ipairs(vim.fn.globpath(vim.env.VIMRUNTIME .. '/colors', pat, false, true)) do
+  for _, f in ipairs(vim.fn.globpath(vim.env.VIMRUNTIME .. '/colors', pat,
+    false, true)) do
     names[#names + 1] = vim.fn.fnamemodify(f, ':t:r')
   end
 end
@@ -976,9 +985,11 @@ for _, name in ipairs(names) do
     fail('%s: does not load', name)
   else
     local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
-    local base = normal.bg or (vim.o.background == 'light' and 0xffffff or 0x000000)
+    local base = normal.bg
+      or (vim.o.background == 'light' and 0xffffff or 0x000000)
     local seen, derived = {}, {}
-    for _, g in ipairs({ 'ViewReviewRemoved', 'ViewReviewStale', 'ViewReviewAdded', 'ViewReviewHeader' }) do
+    for _, g in ipairs({ 'ViewReviewRemoved', 'ViewReviewStale',
+        'ViewReviewAdded', 'ViewReviewHeader' }) do
       local hl = vim.api.nvim_get_hl(0, { name = g, link = false })
       derived[g] = hl.bg
       if hl.bg == nil or hl.bg == base then
@@ -988,17 +999,23 @@ for _, name in ipairs(names) do
       -- regressed to nil would raise `table index is nil` here and lose
       -- every per-scheme diagnostic this walk exists to report
       if seen[hex(hl.bg)] ~= nil then
-        fail('%s: %s and %s are the same color (%s)', name, seen[hex(hl.bg)], g, hex(hl.bg))
+        fail('%s: %s and %s are the same color (%s)', name,
+          seen[hex(hl.bg)], g, hex(hl.bg))
       end
       seen[hex(hl.bg)] = g
       if hl.reverse or hl.bold or hl.italic or hl.underline then
         fail('%s: %s borrowed an attribute from the diff group', name, g)
       end
     end
-    local sign = vim.api.nvim_get_hl(0, { name = 'ViewReviewSign', link = false })
+    -- read apart from the four row groups above, and never against their
+    -- distinctness check: the marker takes the header's own fill by design,
+    -- so sharing a color with it is the contract rather than a collision
+    local sign = vim.api.nvim_get_hl(0,
+      { name = 'ViewReviewSign', link = false })
     derived['ViewReviewSign'] = sign.bg
     if sign.bg == nil or sign.bg == base then
-      fail('%s: ViewReviewSign carries no fill of its own (%s)', name, hex(sign.bg))
+      fail('%s: ViewReviewSign carries no fill of its own (%s)', name,
+        hex(sign.bg))
     end
     local surfaces, marker = {}, {}
     vim.wo.signcolumn = 'yes'
@@ -1087,7 +1104,9 @@ for _, name in ipairs(names) do
         fail('%s: %s is painted with no foreground at all', name, where)
       else
         local r = ratio(fg, bg)
-        if r < worst then worst, worst_at = r, string.format('%s, %s', name, where) end
+        if r < worst then
+          worst, worst_at = r, string.format('%s, %s', name, where)
+        end
         if r < 3 then
           fail('%s: %s is %s on %s -- %.2f:1, under the 3:1 floor', name, where,
             hex(fg), hex(bg), r)
@@ -1096,7 +1115,8 @@ for _, name in ipairs(names) do
     end
   end
 end
-table.insert(out, 2, string.format('worst contrast %.2f:1 (%s)', worst, worst_at))
+table.insert(out, 2,
+  string.format('worst contrast %.2f:1 (%s)', worst, worst_at))
 return out",
         vec![],
     );
@@ -1220,8 +1240,10 @@ fn a_cleared_review_releases_the_derivation_it_installed() {
 
     assert_eq!(
         s.lua(
-            "local ok = pcall(vim.api.nvim_get_autocmds, { group = 'view_review' })
-return string.format('%s/%s', tostring(_G.view_review_derived), ok and 'present' or 'gone')",
+            "local ok = pcall(vim.api.nvim_get_autocmds,
+  { group = 'view_review' })
+return string.format('%s/%s', tostring(_G.view_review_derived),
+  ok and 'present' or 'gone')",
             vec![]
         )
         .as_str()
