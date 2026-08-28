@@ -212,14 +212,19 @@ fi
 # `const ..._CHUNK: &str` declaration in nvim_api.rs (`concat!( ... );`,
 # `"\` ... `";`, a one-line literal, or an alias re-exporting another
 # chunk's const), and a multi-line string literal anywhere under
-# view-engine's src/ or tests/.
+# view-engine's src/ or tests/. Each walk cross-checks what it reached
+# against a plain grep for the same declarations: the grep is blind to
+# where the declaration sits and to what closes it, so a shape that drifts
+# out of the walk's own match is still counted, and the two numbers part.
 check_lua_chunk_width() {
   local file='crates/view-engine/src/nvim_api.rs'
   if [ ! -f "$file" ]; then
     echo "STYLE FAIL: $file missing; cannot check Lua chunk width"
     return 1
   fi
-  local report
+  local declared report status walked
+  declared=$(grep -c '_CHUNK: &str' "$file")
+  status=0
   report=$(awk '
     function check_width(line) {
       if (length(line) > 80) {
@@ -242,20 +247,22 @@ check_lua_chunk_width() {
       if ($0 ~ /";$/) { next }
       inchunk = 1
     }
-    END { printf "CHUNKS %d\n", found; exit (over > 0 || found != 26) ? 1 : 0 }
-  ' "$file") || {
-    printf '%s\n' "$report" | grep -v '^CHUNKS '
-    local chunks
-    chunks=$(printf '%s\n' "$report" | sed -n 's/^CHUNKS //p')
-    if [ "$chunks" != "26" ]; then
-      echo "STYLE FAIL: found $chunks of the 26 Lua chunks; the width check did not run"
-    else
-      echo "STYLE FAIL: a Lua chunk line is over 80 columns"
-      echo "  Wrap it the way the rest of nvim_api.rs's chunks are: break at"
-      echo "  an operator or after a comma, keep the chunk's indentation."
-    fi
+    END { printf "CHUNKS %d\n", found; exit (over > 0) ? 1 : 0 }
+  ' "$file") || status=$?
+  walked=$(printf '%s\n' "$report" | sed -n 's/^CHUNKS //p')
+  if [ "$walked" != "$declared" ]; then
+    echo "STYLE FAIL: the width check walked $walked Lua chunks in $file,"
+    echo "  but grep counts $declared _CHUNK declarations there: a declaration"
+    echo "  shape stopped matching the walk. Widen the walk to reach it."
     return 1
-  }
+  fi
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$report" | grep -v '^CHUNKS '
+    echo "STYLE FAIL: a Lua chunk line is over 80 columns"
+    echo "  Wrap it the way the rest of nvim_api.rs's chunks are: break at"
+    echo "  an operator or after a comma, keep the chunk's indentation."
+    return 1
+  fi
   return 0
 }
 
@@ -273,7 +280,12 @@ check_string_literal_width() {
     echo "STYLE FAIL: no view-engine sources found; the literal width check did not run"
     return 1
   fi
-  local report
+  local declared report status walked
+  # the same two opening shapes the awk matches, plus the one it cannot
+  # follow (a quote left at the end of an assignment, with no backslash):
+  # a shape the walk stops reaching is still counted here
+  declared=$(grep -hE '^[[:space:]]*"[^"]+$|= "\\?$' $files | wc -l | tr -d ' ')
+  status=0
   report=$(awk '
     function quotes(line,   n, i, len, c) {
       n = 0; i = 1; len = length(line)
@@ -305,22 +317,22 @@ check_string_literal_width() {
         inlit = 1
       }
     }
-    END { printf "LITERALS %d\n", found; exit (over > 0 || found != 259) ? 1 : 0 }
-  ' $files) || {
-    printf '%s\n' "$report" | grep -v '^LITERALS '
-    local literals
-    literals=$(printf '%s\n' "$report" | sed -n 's/^LITERALS //p')
-    if [ "$literals" != "259" ]; then
-      echo "STYLE FAIL: found $literals of the 259 multi-line string literals;"
-      echo "  a literal shape stopped matching, or one was added or removed --"
-      echo "  re-count and update the number if the change is deliberate."
-    else
-      echo "STYLE FAIL: a line inside a string literal is over 80 columns"
-      echo "  Wrap it the way nvim_api.rs's chunks are: break at an operator or"
-      echo "  after a comma, keep the literal's own indentation."
-    fi
+    END { printf "LITERALS %d\n", found; exit (over > 0) ? 1 : 0 }
+  ' $files) || status=$?
+  walked=$(printf '%s\n' "$report" | sed -n 's/^LITERALS //p')
+  if [ "$walked" != "$declared" ]; then
+    echo "STYLE FAIL: the width check walked $walked multi-line string literals,"
+    echo "  but grep counts $declared opening lines under view-engine: a literal"
+    echo "  shape stopped matching the walk. Widen the walk to reach it."
     return 1
-  }
+  fi
+  if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$report" | grep -v '^LITERALS '
+    echo "STYLE FAIL: a line inside a string literal is over 80 columns"
+    echo "  Wrap it the way nvim_api.rs's chunks are: break at an operator or"
+    echo "  after a comma, keep the literal's own indentation."
+    return 1
+  fi
   return 0
 }
 
