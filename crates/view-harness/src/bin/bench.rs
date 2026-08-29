@@ -1266,6 +1266,24 @@ fn main() -> Result<()> {
     }
 
     if gating {
+        // what this leg actually measured, unratcheted and beside the
+        // baseline it gates against: seating a cell an earlier record left
+        // empty, or re-sizing a sidecar entry, otherwise means re-typing
+        // numbers out of a log at whatever precision the log printed them
+        let measured_path = path.with_extension("measured.toml");
+        let measured_plan = baselines::plan_record(
+            None,
+            baselines::RecordMode::FullMatrix,
+            &cli.class,
+            &pin,
+            &measured,
+            &headroom,
+        );
+        baselines::save(&measured_path, &measured_plan.file)?;
+        println!(
+            "gate measurements written to {} (raw, not ratcheted)",
+            measured_path.display()
+        );
         let file = baselines::load(&path).with_context(|| {
             format!("gating requires a recorded baseline at {}", path.display())
         })?;
@@ -1289,6 +1307,11 @@ fn main() -> Result<()> {
         // would otherwise leave that bar silently ungated -- deleting one
         // key must be as loud as deleting the cell
         let mut unrecorded_metric = Vec::new();
+        // reported, never a finding: a cell an earlier record seated empty
+        // by refusal holds no bar for a runner that clears the row's own
+        // honesty check to have lost, so the first number it takes is a
+        // seat waiting to be written, not a coverage gap
+        let mut unseated_metrics = 0_usize;
         let unrecorded = baselines::unrecorded_cells(&file, &measured);
         for cell in &measured {
             // named by unrecorded_cells above and reported with the rest of
@@ -1319,8 +1342,22 @@ fn main() -> Result<()> {
                     unmeasured.push((cell.id.clone(), metric));
                 }
             }
-            for metric in baselines::unrecorded_metrics(cell, recorded) {
-                unrecorded_metric.push((cell.id.clone(), metric));
+            let (seating, unbarred) = baselines::unbarred_metrics(cell, recorded);
+            for (metric, value) in unbarred {
+                match seating {
+                    baselines::Unbarred::Unseated => {
+                        println!(
+                            "GATE UNSEATED [{}.{}] {metric}: measured {value:.4}; the cell was \
+                             seated empty by a refusal at record time, so no bar exists yet -- \
+                             seat it from this run's measured cells",
+                            cell.id.scenario, cell.id.fixture
+                        );
+                        unseated_metrics += 1;
+                    }
+                    baselines::Unbarred::Unrecorded => {
+                        unrecorded_metric.push((cell.id.clone(), metric));
+                    }
+                }
             }
         }
         for breach in &breaches {
@@ -1486,7 +1523,8 @@ fn main() -> Result<()> {
             println!(
                 "gate OK: {} cell(s) measured, {gated_metrics} metric(s) compared against \
                  recorded bars{exempt}, {} metric(s) checked against spec 3.1 budgets, {held} \
-                 accepted shortfall(s) still held{spread}",
+                 accepted shortfall(s) still held{spread}, {unseated_metrics} metric(s) measured \
+                 against a cell seated empty by a refusal",
                 measured.len(),
                 findings.len()
             );
@@ -2412,6 +2450,47 @@ mod tests {
             );
             if !barless.is_empty() {
                 println!("{class} holds a bar-less cell for: {}", barless.join(", "));
+            }
+        }
+    }
+
+    /// Every committed cell classifies at runtime the way the coverage pin
+    /// above reads it through the TOML: an empty cell is unseated, a cell
+    /// with bars is one whose missing keys were lost.
+    ///
+    /// The pin above proves only that the reader treats an empty cell as
+    /// bar-less. The gate reaches the same cell through
+    /// `baselines::unbarred_metrics`, which until it learned the same rule
+    /// reported the first number a quieter runner took against a
+    /// refusal-seated cell as a coverage failure and exited 1 (bench run
+    /// 33238348497, gh-macos `input_path.minimal`).
+    #[test]
+    fn an_empty_committed_cell_classifies_as_unseated_at_runtime() {
+        // a name no row records, so the classification is exercised on
+        // every committed cell rather than only on the ones whose recorded
+        // keys happen to differ from the probe
+        const PROBE: &str = "a_metric_no_row_records";
+        for class in COMPLETE_CLASSES {
+            let baseline =
+                baselines::load(&baseline_path(class)).expect("the class baseline must load");
+            for (scenario, fixtures) in &baseline.cells {
+                for (fixture, recorded) in fixtures {
+                    let id = baselines::CellId::new(scenario, fixture);
+                    let measured = baselines::MeasuredCell {
+                        id: id.clone(),
+                        metrics: std::iter::once((PROBE.to_string(), 1.0)).collect(),
+                    };
+                    let expected = if recorded.is_empty() {
+                        baselines::Unbarred::Unseated
+                    } else {
+                        baselines::Unbarred::Unrecorded
+                    };
+                    assert_eq!(
+                        baselines::unbarred_metrics(&measured, recorded),
+                        (expected, vec![(PROBE.to_string(), 1.0)]),
+                        "{class} {scenario}.{fixture} must classify as {expected:?}"
+                    );
+                }
             }
         }
     }

@@ -87,7 +87,19 @@ jobs:
 
       # A row that refuses its own measurement (the tap-overhead bar on the
       # shared macOS runner, today) holds an empty cell in the committed
-      # baseline: the gate compares nothing for it and reports no coverage
-      # gap, so a refusal is neither a regression nor a missing recording
+      # baseline: the gate compares nothing for it and reports GATE
+      # UNSEATED rather than a coverage gap, so a refusal is neither a
+      # regression nor a missing recording
       - name: Gate bench matrix (${{ matrix.class }})
         run: task bench -- --all --class ${{ matrix.class }} --gate
+
+      # This leg's own measured cells, unratcheted: how an unseated cell
+      # gets its first bar, and how a headroom entry gets re-sized, without
+      # re-typing numbers out of the log at the precision the log printed.
+      # Uploaded even on a breach, whose draws are exactly the ones wanted
+      - name: Upload measured cells (${{ matrix.class }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-measured-${{ matrix.class }}
+          path: crates/view-bench/baselines/${{ matrix.class }}.measured.toml

@@ -807,10 +807,10 @@ pub fn headroom_path(baseline_path: &Path) -> std::path::PathBuf {
 /// one host's measured spread to another), and
 /// [`BaselineError::UnusableHeadroom`] on a factor no gate can apply.
 pub fn load_headroom(path: &Path, class: &str) -> Result<HeadroomTable, BaselineError> {
-    let display = path.display().to_string();
     let Some(file) = read_sidecar(path, class)? else {
         return Ok(HeadroomTable::new());
     };
+    let display = path.display().to_string();
     for (metric, &factor) in &file.headroom {
         if !factor.is_finite() || factor <= 1.0 {
             return Err(BaselineError::UnusableHeadroom {
@@ -1135,7 +1135,7 @@ pub fn unrecorded_cells(baseline: &BaselineFile, measured: &[MeasuredCell]) -> V
 /// Same asymmetric argument types as [`gate_cell`], for the same reason:
 /// a swap here would report full coverage for a cell that stopped
 /// producing a gated number. The reversed direction is
-/// [`unrecorded_metrics`].
+/// [`unbarred_metrics`].
 #[must_use]
 pub fn unmeasured_metrics(measured: &MeasuredCell, recorded: &CellMetrics) -> Vec<String> {
     recorded
@@ -1145,24 +1145,54 @@ pub fn unmeasured_metrics(measured: &MeasuredCell, recorded: &CellMetrics) -> Ve
         .collect()
 }
 
+/// Why a measured metric has no recorded bar, which decides whether it is
+/// a coverage failure.
+// deliberately exhaustive: the pivot is whether the recorded cell holds
+// any bar at all, so a third state would be a new question, and the gate's
+// match must stop compiling until someone answers it there
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unbarred {
+    /// The recorded cell holds no metric at all, which is a cell a record
+    /// run seated by refusal: [`plan_record`] upserts exactly the metrics
+    /// a cell produced, and a row that refuses its own honesty check
+    /// produces none (`require_record_survives_refusal` keeps a
+    /// single-cell record from writing one over existing bars, so a
+    /// full-matrix record is the only writer of an empty cell). No bar was
+    /// ever taken here, so there is nothing to compare and nothing was
+    /// lost.
+    Unseated,
+    /// The recorded cell holds bars and this metric is not among them: a
+    /// bar lost or never armed. Deleting a single key from a recorded cell
+    /// must be as loud as deleting the whole cell, so a metric new to an
+    /// existing row fails a gate until a record run arms it.
+    Unrecorded,
+}
+
 /// Metrics `measured` produced that the recorded cell holds no bar for,
-/// in sorted order.
+/// with their measured values, in sorted order -- tagged with how the
+/// caller must read them.
 ///
 /// The mirror of [`unmeasured_metrics`], and [`unrecorded_cells`] one
-/// level down: a baseline cell that exists but has lost (or never gained)
-/// one of its row's metrics would otherwise leave that metric silently
-/// ungated -- deleting a single key from a recorded cell must be as loud
-/// as deleting the whole cell. A metric new to an existing row therefore
-/// fails a gate until a record run arms it, the same discipline a new
-/// cell already goes through.
+/// level down. The tag is the whole cell's, not the metric's: an empty
+/// recorded cell is unseated for every metric the row produces, and a cell
+/// with any bar at all is a cell whose missing keys were lost.
 #[must_use]
-pub fn unrecorded_metrics(measured: &MeasuredCell, recorded: &CellMetrics) -> Vec<String> {
-    measured
+pub fn unbarred_metrics(
+    measured: &MeasuredCell,
+    recorded: &CellMetrics,
+) -> (Unbarred, Vec<(String, f64)>) {
+    let seating = if recorded.is_empty() {
+        Unbarred::Unseated
+    } else {
+        Unbarred::Unrecorded
+    };
+    let metrics = measured
         .metrics
-        .keys()
-        .filter(|metric| !recorded.contains_key(*metric))
-        .cloned()
-        .collect()
+        .iter()
+        .filter(|(metric, _)| !recorded.contains_key(*metric))
+        .map(|(metric, value)| (metric.clone(), *value))
+        .collect();
+    (seating, metrics)
 }
 
 /// Loads and validates `path`.
@@ -2893,12 +2923,12 @@ mod tests {
     #[test]
     fn gate_cell_leaves_unrecorded_metrics_to_the_coverage_check() {
         // no recorded bar means nothing for the breach scan to compare, so
-        // the finding belongs to unrecorded_metrics, which must name it
+        // the finding belongs to unbarred_metrics, which must name it
         let recorded = metrics(&[("ratio_p50", 1.0)]);
         let measured = metrics(&[("ratio_p50", 0.9), ("new_metric", 99.0)]);
         assert!(gate_cell("echo", "minimal", &measured, &recorded, "dev-linux").is_empty());
         assert_eq!(
-            unrecorded_metrics(
+            unbarred_metrics(
                 &measured_cell(
                     "echo",
                     "minimal",
@@ -2906,7 +2936,37 @@ mod tests {
                 ),
                 &recorded
             ),
-            vec!["new_metric"]
+            (Unbarred::Unrecorded, vec![("new_metric".to_string(), 99.0)])
+        );
+    }
+
+    /// A cell the record run seated by refusal holds no bar for anything,
+    /// so a runner that later clears the row's own honesty check and
+    /// measures it has produced the first number, not lost one.
+    ///
+    /// Reading that as a missing bar is what failed bench run 33238348497
+    /// on gh-macos: `input_path.minimal` was seated empty by the tap
+    /// overhead refusal at record time, a quieter runner measured
+    /// `key_to_rpc_p99_us`, and the gate reported a coverage failure for a
+    /// bar it would have skipped as tail-derived anyway.
+    #[test]
+    fn a_cell_seated_empty_by_a_refusal_is_unseated_not_unrecorded() {
+        let cell = measured_cell("input_path", "minimal", &[("key_to_rpc_p99_us", 191.0)]);
+        assert_eq!(
+            unbarred_metrics(&cell, &CellMetrics::new()),
+            (
+                Unbarred::Unseated,
+                vec![("key_to_rpc_p99_us".to_string(), 191.0)]
+            ),
+            "an empty recorded cell has no bar to have lost"
+        );
+        assert_eq!(
+            unbarred_metrics(&cell, &metrics(&[("some_other_metric", 1.0)])),
+            (
+                Unbarred::Unrecorded,
+                vec![("key_to_rpc_p99_us".to_string(), 191.0)]
+            ),
+            "a cell holding any bar at all lost the one it does not hold"
         );
     }
 
@@ -2923,7 +2983,7 @@ mod tests {
         ];
         let full = metrics(MEASURED);
         let cell = measured_cell("picker", "minimal", MEASURED);
-        assert!(unrecorded_metrics(&cell, &full).is_empty());
+        assert!(unbarred_metrics(&cell, &full).1.is_empty());
         let mut one_deleted = full;
         one_deleted.remove("match_paint_p99_ms");
         assert!(
@@ -2938,8 +2998,11 @@ mod tests {
             "the deleted bar cannot breach, which is why coverage must catch it"
         );
         assert_eq!(
-            unrecorded_metrics(&cell, &one_deleted),
-            vec!["match_paint_p99_ms"]
+            unbarred_metrics(&cell, &one_deleted),
+            (
+                Unbarred::Unrecorded,
+                vec![("match_paint_p99_ms".to_string(), 5.1)]
+            )
         );
     }
 

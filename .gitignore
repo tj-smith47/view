@@ -30,6 +30,11 @@
 # baseline; committing one would put unratcheted numbers in the repo
 *.partial.toml
 
+# every gate run's own measured cells, uploaded as a CI artifact for
+# seating a cell or re-sizing a headroom entry; same reason as above,
+# these are raw draws and never a recorded bar
+*.measured.toml
+
 # cpython's own bytecode cache. Running scripts/test-fixtures/delay-relay
 # (this tree's only Python fixture; its siblings are /bin/sh) directly as
 # __main__ writes none, so this is a safety net for anyone who later

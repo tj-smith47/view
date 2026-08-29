@@ -73,8 +73,8 @@ machine_class = "gh-macos"
 # could only tighten the bar, never license a wider one. What no
 # permitted factor reaches is the ratchet: the seat may fall to 3.298
 # (well above its own refusal floor), and clearing the 6.416 the band has
-# produced from that seat asks 1.95x, which is neither half's answer.
-# Publishing 1.95 to bridge that gap is the failure a characterization
+# produced from that seat asks 1.945x, which is neither half's answer.
+# Publishing 1.945 to bridge that gap is the failure a characterization
 # exists to remove, and publishing 1.42 seats a bar the next honest draw
 # breaches. The default is not crossed today (6.416 against a 7.212 bar),
 # so absence masks nothing while the band waits for draws enough to
