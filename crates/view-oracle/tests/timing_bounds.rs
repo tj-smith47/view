@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn a_floor_on_a_span_the_walk_cannot_name_is_still_a_bound() {
+    fn a_floor_on_a_span_the_list_names_is_still_a_bound() {
         assert!(observed_for >= Duration::from_millis(20), "the episode clock");
     }
 
@@ -283,6 +283,11 @@ mod tests {
         let answer = rx.recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)));
         let held = cvar.wait_timeout(guard, SETTLE).unwrap();
     }
+
+    #[test]
+    fn a_span_named_outside_the_list_is_where_this_walk_stops() {
+        assert!(spent < Duration::from_secs(4), "an unlisted span");
+    }
 }
 "#;
 
@@ -295,10 +300,15 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
     // the ten deliberately wrong lines: the named constant, the
     // rustfmt-wrapped comparison, the deadline built from `now`, the
     // inclusive bound, the same bound written backwards, the floor with
-    // its sides swapped, the floor whose span carries none of the names
-    // the walk knows, the one whose span is converted to a number first,
-    // and the two waits handed a wall clock they spend rather than
-    // compare
+    // its sides swapped, the floor on a span the list names beyond the
+    // two it started with, the one whose span is converted to a number
+    // first, and the two waits handed a wall clock they spend rather
+    // than compare.
+    //
+    // The tail of the fixture is the other half of the pin: no line from
+    // `these_are_the_shapes_the_rule_asks_for` or from the unlisted span
+    // below it may appear, and an expected vector that grew a line is the
+    // walk reporting a shape the rule allows.
     assert_eq!(
         found,
         vec![9, 16, 23, 29, 34, 39, 44, 49, 54, 55],
@@ -443,7 +453,10 @@ fn is_absolute(expr: &str, consts: &HashSet<String>) -> bool {
 /// a ceiling on a span named anything else is invisible here, and the fix
 /// when one appears is to name it out of this list or to add its name to
 /// it. `after` is deliberately absent: it is a substring of too many
-/// identifiers to tell a span from a sentence.
+/// identifiers to tell a span from a sentence. The boundary is pinned from
+/// the other side too: `a_span_named_outside_the_list_is_where_this_walk_stops`
+/// in [`ESCAPING_SHAPES`] is a bound this list does not reach, and it fails
+/// the moment the walk starts reporting it.
 const MEASURED_SPANS: &[&str] = &[
     "elapsed",
     "took",

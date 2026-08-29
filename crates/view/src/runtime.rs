@@ -4243,8 +4243,15 @@ mod tests {
         let (msg_tx, msg_rx) = std::sync::mpsc::sync_channel(8);
         let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
         let path = std::path::PathBuf::from("/proj/src/lib.rs");
+        // five and not three because a host quiet enough to measure on
+        // needs only one round, and not ten because every round costs a
+        // whole grace plus, in the worst case, the receive's own host
+        // deadline -- the ceiling this puts on the test is
+        // REPROBE_MEASURE_ATTEMPTS x host_deadline(5s)
+        const REPROBE_MEASURE_ATTEMPTS: u32 = 5;
+        let mut discarded = None;
 
-        for _ in 0..5 {
+        for _ in 0..REPROBE_MEASURE_ATTEMPTS {
             let dispatched = std::time::Instant::now();
             let flow = executor.run(Effect::ReprobeExternalWrite { path: path.clone() });
             let entered = std::time::Instant::now();
@@ -4256,6 +4263,7 @@ mod tests {
                 ))
                 .expect("the grace has to end in a second look, not in silence");
             if entered.duration_since(dispatched) >= std::time::Duration::from_millis(60) {
+                discarded = Some(answer);
                 continue;
             }
             let elapsed = dispatched.elapsed();
@@ -4274,7 +4282,11 @@ mod tests {
             }
             return;
         }
-        panic!("the host never left this thread awake across a dispatch in five tries");
+        panic!(
+            "the host never left this thread awake across a dispatch in \
+             {REPROBE_MEASURE_ATTEMPTS} tries; the last round it slept \
+             through answered {discarded:?}"
+        );
     }
 
     /// A second look that could not be scheduled is a removal that is never
