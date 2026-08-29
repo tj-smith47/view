@@ -2470,16 +2470,33 @@ mod tests {
         // every committed cell rather than only on the ones whose recorded
         // keys happen to differ from the probe
         const PROBE: &str = "a_metric_no_row_records";
+        let probe_cell = |id: &baselines::CellId| baselines::MeasuredCell {
+            id: id.clone(),
+            metrics: std::iter::once((PROBE.to_string(), 1.0)).collect(),
+        };
+        // the walk below reads its expectation off the committed files, so
+        // it asserts the unseated arm only while some class still holds a
+        // refusal-seated cell -- today none do, and a run that seats the
+        // last one must not quietly stop testing the arm the gate was
+        // fixed for
+        let seated_by_refusal = baselines::CellId::new("input_path", "minimal");
+        assert_eq!(
+            baselines::unbarred_metrics(
+                &probe_cell(&seated_by_refusal),
+                &baselines::CellMetrics::new()
+            ),
+            (
+                baselines::Unbarred::Unseated,
+                vec![(PROBE.to_string(), 1.0)]
+            ),
+            "a cell holding no metric at all is one a record run seated by refusal"
+        );
         for class in COMPLETE_CLASSES {
             let baseline =
                 baselines::load(&baseline_path(class)).expect("the class baseline must load");
             for (scenario, fixtures) in &baseline.cells {
                 for (fixture, recorded) in fixtures {
-                    let id = baselines::CellId::new(scenario, fixture);
-                    let measured = baselines::MeasuredCell {
-                        id: id.clone(),
-                        metrics: std::iter::once((PROBE.to_string(), 1.0)).collect(),
-                    };
+                    let measured = probe_cell(&baselines::CellId::new(scenario, fixture));
                     let expected = if recorded.is_empty() {
                         baselines::Unbarred::Unseated
                     } else {
