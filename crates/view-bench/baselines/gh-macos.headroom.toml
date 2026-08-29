@@ -79,8 +79,8 @@ machine_class = "gh-macos"
 # could only tighten the bar, never license a wider one. What no
 # permitted factor reaches is the ratchet: the seat may fall to 3.298
 # (well above its own refusal floor), and clearing the 6.416 the band has
-# produced from that seat asks 1.95x, which is neither half's answer.
-# Publishing 1.95 to bridge that gap is the failure a characterization
+# produced from that seat asks 1.945x, which is neither half's answer.
+# Publishing 1.945 to bridge that gap is the failure a characterization
 # exists to remove, and publishing 1.44 seats a bar the next honest draw
 # breaches. The default is not crossed today (6.416 against a 7.212 bar),
 # so absence masks nothing while the band waits for draws enough to
@@ -107,9 +107,10 @@ machine_class = "gh-macos"
 # files only.
 #
 # What makes this band the widest gated median in the matrix is its
-# sample count, not its host: a first page is 12 samples (+2 warmup) per
-# trial where every other gated median takes 900 to 1000, and the same
-# statistic on gh-linux resolves to 25.2% against this class's 35.4%.
+# sample count, not its host: every draw above was taken at 12 samples
+# (+2 warmup) per trial where every other gated median takes 900 to 1000,
+# and the same statistic on gh-linux resolves to 25.2% against this
+# class's 35.4%.
 # The 5.117 leg carried the heaviest runner load on record here (6.91 at
 # start, 12.36 at end, against 1.55..6.23 across every other leg) and all
 # three of its trials read high (6.80, 5.12, 3.59), while its paired
@@ -130,6 +131,18 @@ machine_class = "gh-macos"
 # a rounding. Five draws is what exists post-step; the entry is written
 # because the default is crossed and leaving it absent leaves the class
 # red, not because the band is resolved.
+#
+# The scan phase now takes 100 measured opens (+10 warmup) per trial
+# instead of 12 (+2), which is the sample count named above being fixed
+# rather than the row's boundary changing: the statistic is the same
+# quantity read about 2.9x more finely (sampling error goes as
+# 1/sqrt(n)). The seat and the factor therefore stand as written -- the
+# draws they were sized on bound the tighter estimator's spread from
+# above, so the entry cannot be masking a regression it would have caught
+# before, and `--gate` never rewrites a seat. What it does mean is that a
+# band re-derived from post-change legs should come out narrower than the
+# 35.38% above, and the entry is due a re-sizing once a record run
+# reseats the row and enough legs exist to characterize it again.
 "picker.minimal.first_page_p50_ms" = 1.84
 
 # echo.ratio_p50 is deliberately absent, and what is missing now is the

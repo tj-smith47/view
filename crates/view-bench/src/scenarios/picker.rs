@@ -81,16 +81,43 @@ const OPEN_COMMAND: &[u8] = b":View picker files";
 /// overlay's own row budget at the bench grid size.
 const FIRST_PAGE_ROWS: usize = 5;
 
-/// Measured/warmup picker opens per scan trial. Scenario-owned rather
-/// than read off the protocol (the same split flood makes): one sample
-/// here costs a picker open against a million-file walk, so a
-/// 1000-sample protocol run would spend most of an hour measuring a
-/// boundary that stabilizes within a dozen opens.
-const SCAN_SAMPLES: usize = 12;
+/// Measured picker opens per scan trial: the resolution the gated
+/// `first_page_p50_ms` is read at.
+///
+/// Sized from what the statistic has to resolve, not from a guess at what
+/// a sample costs. A median of `n` samples carries sampling error
+/// proportional to `1/sqrt(n)`, so 100 opens read the same boundary
+/// `sqrt(100/12) = 2.89x` tighter than the twelve this row used to take.
+/// Twelve is where one hosted leg produced trial medians of 6.80, 5.12
+/// and 3.59 ms with nothing between them but the draw, so the claim this
+/// count once carried -- that the boundary "stabilizes within a dozen
+/// opens" -- was a statement about an estimator too coarse to see its own
+/// spread, and is retracted. The resampling check below holds both sides
+/// of that: this count resolves the median inside the band, twelve does
+/// not.
+///
+/// Scenario-owned still, and now for a measured reason rather than an
+/// asserted one. The whole picker cell has taken at most 248 s on the
+/// slowest hosted class, of which the match phase's own inter-sample
+/// sleeps are 30 s, so no open there cost more than `(248 - 30) / 42 =
+/// 5.2 s` even charging the scan phase's one-time warm walk to it. The
+/// 288 opens this count adds are at most 25 min under that bound, on a
+/// 98-minute leg against a 180-minute job timeout, and are seconds at
+/// what the samples themselves report (a first page of 3 to 7 ms,
+/// [`Protocol::inter_sample`] of 10 ms, a close wait of the same order).
+/// The protocol's own 1000 samples is what the bound refuses: the same
+/// arithmetic prices this row above four hours.
+const SCAN_SAMPLES: usize = 100;
 
 /// Warmup opens per scan trial, excluded from every statistic; public so
 /// the report can state the discipline the numbers were taken under.
-pub const SCAN_WARMUP: usize = 2;
+///
+/// A tenth of the measured count, which is the share the protocol keeps
+/// between its own warmup and samples: what a warmup absorbs on this
+/// phase is the first open after a close, whose teardown the sample
+/// before it may still have been finishing, and a scan open has no reason
+/// to need a different share of its trial than a keystroke does.
+pub const SCAN_WARMUP: usize = SCAN_SAMPLES / 10;
 
 /// Bound on one picker open reaching its first page before the run is
 /// declared desynced; generous against the 100 ms budget because a
@@ -631,7 +658,114 @@ fn observe_streaming(
 
 #[cfg(test)]
 mod tests {
-    use super::debounced;
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::{debounced, SCAN_SAMPLES, SCAN_WARMUP};
+    use crate::sampling::Distribution;
+
+    /// The count whose estimator this row shipped on, kept here as the
+    /// thing the check below refuses rather than as history: a bar that
+    /// only the passing side ever meets cannot say whether it bars
+    /// anything.
+    const REFUSED_SAMPLES: usize = 12;
+
+    /// How wide the sampling spread of the gated median is allowed to be,
+    /// as a share of the population's own median. Both counts below are
+    /// asserted against it from their own sides, so the number is pinned
+    /// between them rather than chosen: an eighth sits above what the
+    /// count taken resolves to (0.091) and below what the refused count
+    /// does (0.237), where the estimator's own draw would otherwise be the
+    /// widest term in a hosted class's headroom band and the row would
+    /// characterize the sampler rather than the picker.
+    const RESOLUTION_BAND: f64 = 0.12;
+
+    /// Resamples per estimator; odd, so the band's own percentiles land on
+    /// samples rather than between them.
+    const RESAMPLES: usize = 2001;
+
+    /// One draw from a population shaped like the readings this row
+    /// records: nine parts first page a few ms apart, one part tail an
+    /// order of magnitude out, matching the per-trial p50/p99/max the scan
+    /// phase reports on a hosted class (3.6..6.8 ms against ~31 ms). An
+    /// LCG rather than a crate, because the point is that the two counts
+    /// see the identical population.
+    fn draw(state: &mut u64) -> f64 {
+        let mut next = || {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((*state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let (pick, position) = (next(), next());
+        if pick < 0.9 {
+            2.5 + position * 6.0
+        } else {
+            9.0 + position * 24.0
+        }
+    }
+
+    /// The 5..95 spread of the median of `n` draws, as a share of the
+    /// median those draws are taken around: the sampling error the gated
+    /// statistic carries at that count, measured rather than assumed.
+    fn median_band(n: usize) -> f64 {
+        let mut state = 0x5eed;
+        let mut medians = Vec::with_capacity(RESAMPLES);
+        for _ in 0..RESAMPLES {
+            let samples: Vec<f64> = (0..n).map(|_| draw(&mut state)).collect();
+            medians.push(Distribution::from_samples(&samples, 0).unwrap().p50());
+        }
+        let spread = Distribution::from_samples(&medians, 0).unwrap();
+        (spread.percentile(95.0) - spread.percentile(5.0)) / 2.0 / spread.p50()
+    }
+
+    // The row's breach was the estimator and not the boundary, which is a
+    // claim about a sample count and is therefore checkable without a
+    // host: over one population, the count the scan trials take resolves
+    // its median inside the band and the count they used to take does not.
+    #[test]
+    fn the_scan_count_resolves_its_median_where_a_dozen_opens_did_not() {
+        let refused = median_band(REFUSED_SAMPLES);
+        assert!(
+            refused > RESOLUTION_BAND,
+            "the count this row refuses must be shown to miss the band, not asserted to: \
+             {REFUSED_SAMPLES} samples resolved to {refused:.3} against {RESOLUTION_BAND}"
+        );
+        let taken = median_band(SCAN_SAMPLES);
+        assert!(
+            taken <= RESOLUTION_BAND,
+            "the gated median must resolve inside the band at the count the phase takes: \
+             {SCAN_SAMPLES} samples resolved to {taken:.3} against {RESOLUTION_BAND}"
+        );
+    }
+
+    // The count was sized on the 1/sqrt(n) law, so the law is what has to
+    // hold between the two counts -- a tightening that failed to arrive
+    // would leave the size arbitrary even with the band met.
+    #[test]
+    fn the_scan_count_tightens_the_median_by_the_root_n_law() {
+        let tightening = median_band(REFUSED_SAMPLES) / median_band(SCAN_SAMPLES);
+        let law = (SCAN_SAMPLES as f64 / REFUSED_SAMPLES as f64).sqrt();
+        assert!(
+            (tightening - law).abs() / law < 0.2,
+            "sampling error goes as 1/sqrt(n), so {SCAN_SAMPLES} against {REFUSED_SAMPLES} \
+             samples must tighten the median by about {law:.3}x; measured {tightening:.3}x"
+        );
+    }
+
+    // Warmup is a share of the trial rather than a fixed pair of opens:
+    // the protocol keeps a tenth of its samples as warmup, and a scan open
+    // has no reason to want a different share.
+    #[test]
+    fn scan_warmup_keeps_the_protocol_share_of_its_measured_count() {
+        let protocol = crate::scenarios::Protocol::default();
+        assert_eq!(
+            SCAN_WARMUP * protocol.samples,
+            protocol.warmup * SCAN_SAMPLES,
+            "scan warmup {SCAN_WARMUP} of {SCAN_SAMPLES} must hold the protocol's own \
+             {} of {}",
+            protocol.warmup,
+            protocol.samples
+        );
+    }
 
     // Two reads of the same torn frame must not register as growth --
     // a slow/chunked pty read is indistinguishable at the byte level
