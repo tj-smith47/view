@@ -1101,10 +1101,10 @@ FLOAT_BG=$(probed_bg NormalFloat) || exit 1
 REVIEW_ADDED_BG=$(probed_bg ViewReviewAdded) || exit 1
 REVIEW_REMOVED_BG=$(probed_bg ViewReviewRemoved) || exit 1
 REVIEW_HEADER_BG=$(probed_bg ViewReviewHeader) || exit 1
-# read for the gate below rather than for a leg: it is what a stale hunk
-# paints with and what `StyleRole::GitModified` resolves to in the tree
-# float, so a scheme that let it collide with another group would be found
-# by whichever leg reads it next rather than here
+# what a stale hunk paints with, read by `leg_review_stale` and by the
+# distinctness gate below. It is also what `StyleRole::GitModified`
+# resolves to in the tree float, so a scheme that let it collide with
+# another group fails the gate before any leg has to notice.
 REVIEW_STALE_BG=$(probed_bg ViewReviewStale) || exit 1
 # A derived group with no background is not a scheme this sweep can read a
 # transparent case out of -- it is `derive` having stopped setting one,
@@ -1909,9 +1909,13 @@ $end"
 # this file. The claim here is the user's own: the proposal is visible,
 # where the code is, in colors view derived from the colorscheme's own diff
 # groups.
-leg_inline_review() {
-    CURRENT_LEG=inline-review
-    local proposed='+BETA' replaced='beta' header='hunk 1/1' key
+# The proposal both review legs start from, and the row it replaces.
+REVIEW_PROPOSED='+BETA'
+REVIEW_REPLACED='beta'
+
+# Drives the stub to propose an edit and waits until it is drawn in the
+# buffer, leaving the cursor where the review put it -- on the hunk.
+open_inline_review() {
     start_session review 'visual sweep seed line'
     # The file the stub's `propose` offers edits to, seeded with what its own
     # `oldText` claims it holds. Deliberately not the file the session
@@ -1927,7 +1931,13 @@ leg_inline_review() {
     # has focus here and the prompt is what it takes
     send_text 'propose'
     send_key Enter
-    wait_for "$proposed" "$WAIT_SECS" "the agent's proposed line" >/dev/null
+    wait_for "$REVIEW_PROPOSED" "$WAIT_SECS" "the agent's proposed line" >/dev/null
+}
+
+leg_inline_review() {
+    CURRENT_LEG=inline-review
+    local proposed=$REVIEW_PROPOSED replaced=$REVIEW_REPLACED header='hunk 1/1' key
+    open_inline_review
 
     # The proposed line and the header naming the keys are virtual lines --
     # nvim's, drawn between the buffer's own rows, which is why the text
@@ -1973,6 +1983,40 @@ leg_inline_review() {
         return 1
     fi
     pass 'the accepted review takes its whole decoration off the screen with it'
+
+    dismiss ai
+    end_session
+}
+
+# The one review color no other leg paints: a hunk the buffer moved out
+# from under, still drawn, on `ViewReviewStale`.
+#
+# It is the value a colorscheme is most likely to get wrong on its own --
+# the other three derive from `DiffDelete`/`DiffAdd`/`DiffText` while this
+# one comes from `DiffChange`, which habamax states with no foreground and
+# a transparent config leaves at the terminal default. The probe decides
+# what it should be here, as it does for the others; nothing in this file
+# names a color.
+leg_review_stale() {
+    CURRENT_LEG=review-stale
+    local staled="$REVIEW_REPLACED STALE"
+    open_inline_review
+
+    # what makes a hunk stale: the user types into the very rows it was
+    # computed against, so its `oldText` no longer names what is there.
+    # `2G` is the row the proposal replaces -- the review opened with the
+    # cursor on it already, but saying which row is what keeps this leg
+    # readable when the payload grows a second hunk.
+    send_text '2G'
+    send_text 'A STALE'
+    send_key Escape
+    wait_for "$staled" "$WAIT_SECS" "the typed-over row" >/dev/null
+
+    # read with the cursor moved off, for the reason the removed-row read in
+    # `leg_inline_review` gives: `CursorLine` runs the full width and would
+    # be answering instead of the decoration
+    send_text 'G'
+    assert_buffer_bg "$staled" "$REVIEW_STALE_BG" "the staled row ('$staled')" || return 1
 
     dismiss ai
     end_session
@@ -2272,7 +2316,7 @@ leg_transcript_reflow() {
 
 LEGS=(leg_entry_points leg_toast_and_history leg_toast_over_panel leg_panel_typing
     leg_panel_paste leg_narrow_title leg_inline_review leg_resize_chord
-    leg_permission_caret leg_transcript_reflow)
+    leg_permission_caret leg_transcript_reflow leg_review_stale)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else
