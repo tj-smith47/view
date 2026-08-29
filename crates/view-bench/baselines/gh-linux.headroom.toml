@@ -142,10 +142,9 @@ machine_class = "gh-linux"
 # Every draw above was taken at 12 measured opens (+2 warmup) per trial;
 # the scan phase now takes 100 (+10), which reads the same quantity about
 # 2.9x more finely (sampling error goes as 1/sqrt(n)) and is where a good
-# part of this cell's 25.2% half-width came from. Absence is unaffected
-# either way: a tighter estimator can only narrow the band, and the
-# ratchet hole this note describes closes or does not on post-change legs
-# rather than on a factor written now.
+# part of this cell's 25.2% half-width came from. The absence argument
+# rests on neither count: a tighter estimator can only narrow the band,
+# and both halves above already clear the compiled default.
 
 # first_paint.marker_ratio_p50 is deliberately absent. Its pooled draws
 # (minimal 0.147 0.173 0.126 0.140 on 2026-08-03/04, then 0.211 0.214

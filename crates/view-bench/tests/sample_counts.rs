@@ -94,6 +94,11 @@ const DECLARED_COUNTS: &[DeclaredCount] = &[
 /// one of these is a workload size and is walked.
 const COUNT_MARKERS: &[&str] = &["SAMPLES", "TRIALS", "WARMUP"];
 
+/// Types a count can be declared at. Read from the source rather than
+/// assumed, since a workload sized in `u32` is the same workload and a
+/// walk that matched one spelling would let the next one past.
+const COUNT_TYPES: &[&str] = &["usize", "u8", "u16", "u32", "u64", "u128"];
+
 fn scenarios_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
@@ -122,8 +127,8 @@ fn scenario_sources(dir: &Path) -> Vec<(String, String)> {
     found
 }
 
-/// The `const <NAME>: usize = <value>;` declarations a file carries above
-/// its test module, whose name marks them a workload size.
+/// The integer `const` declarations a file carries above its test module,
+/// whose name marks them a workload size.
 fn declared_counts(source: &str) -> Vec<(String, String)> {
     let mut found = Vec::new();
     for line in source.lines() {
@@ -137,9 +142,15 @@ fn declared_counts(source: &str) -> Vec<(String, String)> {
         else {
             continue;
         };
-        let Some((name, value)) = rest.split_once(": usize = ") else {
+        let Some((name, typed)) = rest.split_once(": ") else {
             continue;
         };
+        let Some((declared_type, value)) = typed.split_once(" = ") else {
+            continue;
+        };
+        if !COUNT_TYPES.contains(&declared_type) {
+            continue;
+        }
         if !COUNT_MARKERS.iter().any(|marker| name.contains(marker)) {
             continue;
         }
@@ -149,6 +160,25 @@ fn declared_counts(source: &str) -> Vec<(String, String)> {
         ));
     }
     found
+}
+
+// What the walk reads and what it does not, on a source it holds whole:
+// the width a count is declared at is not what makes it a count, a name
+// carrying none of the markers is not one, and a declaration below the
+// test boundary belongs to a test rather than to a bench row.
+#[test]
+fn the_walk_reads_a_count_at_any_integer_width() {
+    let source = "const SCAN_SAMPLES: u32 = 100;\n                  pub const SCAN_WARMUP: usize = SCAN_SAMPLES / 10;\n                  const FILES_PER_DIR: u64 = 1000;\n                  #[cfg(test)]\n                  const RESAMPLES: u32 = 2001;\n";
+    let found = declared_counts(source);
+    assert_eq!(
+        found,
+        vec![
+            ("SCAN_SAMPLES".to_string(), "100".to_string()),
+            ("SCAN_WARMUP".to_string(), "SCAN_SAMPLES / 10".to_string()),
+        ],
+        "a count declared at any integer width is a count the pin must see, a name \
+         carrying no marker is not one, and nothing below the test boundary is either"
+    );
 }
 
 #[test]

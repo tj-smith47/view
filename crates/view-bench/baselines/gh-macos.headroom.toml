@@ -139,10 +139,9 @@ machine_class = "gh-macos"
 # 1/sqrt(n)). The seat and the factor therefore stand as written -- the
 # draws they were sized on bound the tighter estimator's spread from
 # above, so the entry cannot be masking a regression it would have caught
-# before, and `--gate` never rewrites a seat. What it does mean is that a
-# band re-derived from post-change legs should come out narrower than the
-# 35.38% above, and the entry is due a re-sizing once a record run
-# reseats the row and enough legs exist to characterize it again.
+# before, and `--gate` never rewrites a seat. The 35.38% half-width above
+# is a property of the count those draws were taken at, not of what the
+# row measures now.
 "picker.minimal.first_page_p50_ms" = 1.84
 
 # echo.ratio_p50 is deliberately absent, and what is missing now is the

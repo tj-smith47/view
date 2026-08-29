@@ -668,15 +668,22 @@ mod tests {
     /// anything.
     const REFUSED_SAMPLES: usize = 12;
 
+    /// The leg-to-leg half-width the tighter of the two hosted classes
+    /// publishes for this statistic (gh-linux 25.2%, against gh-macos
+    /// 35.4%): the spread a headroom factor for the row is sized on.
+    const CLASS_HALF_WIDTH: f64 = 0.252;
+
     /// How wide the sampling spread of the gated median is allowed to be,
-    /// as a share of the population's own median. Both counts below are
-    /// asserted against it from their own sides, so the number is pinned
-    /// between them rather than chosen: an eighth sits above what the
-    /// count taken resolves to (0.091) and below what the refused count
-    /// does (0.237), where the estimator's own draw would otherwise be the
-    /// widest term in a hosted class's headroom band and the row would
-    /// characterize the sampler rather than the picker.
-    const RESOLUTION_BAND: f64 = 0.12;
+    /// as a share of the population's own median.
+    ///
+    /// Derived rather than drawn around the outcomes it separates: an
+    /// estimator whose own draw is the widest term in what a class
+    /// publishes makes that band a characterization of the sampler, so
+    /// the draw is allowed at most half of the tighter class's own
+    /// half-width. That is a bar the count taken can miss on its own
+    /// merits -- a count resolving to 0.15 would fail it while still
+    /// beating the refused count comfortably.
+    const RESOLUTION_BAND: f64 = CLASS_HALF_WIDTH / 2.0;
 
     /// Resamples per estimator; odd, so the band's own percentiles land on
     /// samples rather than between them.
@@ -720,7 +727,10 @@ mod tests {
     // The row's breach was the estimator and not the boundary, which is a
     // claim about a sample count and is therefore checkable without a
     // host: over one population, the count the scan trials take resolves
-    // its median inside the band and the count they used to take does not.
+    // its median inside the band and the count they used to take does
+    // not. The refused side is what keeps the bar from being a bracket
+    // drawn after the fact -- at twelve the estimator's own draw is as
+    // wide as everything a hosted class publishes for the row.
     #[test]
     fn the_scan_count_resolves_its_median_where_a_dozen_opens_did_not() {
         let refused = median_band(REFUSED_SAMPLES);
