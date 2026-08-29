@@ -50,13 +50,24 @@ use view_core::native::picker::PickerItem;
 /// switching sources mid-scan would leave a thread walking a million-entry
 /// tree to completion in the background, pushing into an injector nothing
 /// reads.
+///
+/// `pace` runs ahead of every entry, immediately before that `cancel`
+/// check. Production supplies an empty closure, which monomorphises away
+/// and leaves the per-entry cost exactly the one atomic load it already
+/// paid; a cancellation test supplies a latch instead, so it can hold the
+/// walker between two entries while the act that must cancel it lands. A
+/// test without that hold can only build a tree large enough that the
+/// walker has probably not finished yet, which is a race the walker wins
+/// on a fast host whose metadata cache still holds the tree it just wrote.
 pub fn spawn_file_scan(
     root: PathBuf,
     injector: Injector<PickerItem>,
     cancel: Arc<AtomicBool>,
+    pace: impl Fn() + Send + 'static,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         for entry in ignore::WalkBuilder::new(&root).build() {
+            pace();
             if cancel.load(Ordering::Acquire) {
                 return;
             }
@@ -77,6 +88,27 @@ pub fn spawn_file_scan(
         }
     })
 }
+
+/// Ceiling on the total number of matched lines a single live-grep scan will
+/// push before stopping outright, independent of `cancel`. A query with
+/// almost no discriminating power (a single common letter, an empty needle
+/// mid-composition) run over a large tree has no other bound: unlike
+/// `Files`, where one entry costs one push, a single file here can contribute
+/// arbitrarily many matches, so the per-file `cancel` check in the walk loop
+/// below does nothing to bound a single pathological file, let alone a
+/// pathological *tree*. Chosen generously above what a human picker session
+/// scrolls through -- nucleo's own top-N ranking already narrows what's
+/// shown -- but far below "stream millions of `PickerItem`s that spend
+/// injector-push and channel cost for candidates nothing will ever look at."
+pub const LIVE_GREP_MATCH_LIMIT: usize = 5_000;
+
+/// Ceiling on a single matched line's rendered length, in `char`s.
+/// Minified/generated/binary-ish files can contain a single line many
+/// megabytes long; without this, one match on such a line turns into a
+/// `PickerItem` label large enough to cost real time just laying out and
+/// diffing on every keystroke, long before a human could usefully read that
+/// much text in a picker row.
+pub const LIVE_GREP_LINE_CHAR_LIMIT: usize = 300;
 
 /// Walks `root` the same way [`spawn_file_scan`] does, but pushes one
 /// `PickerItem` per matching *line* rather than per file: `needle` is
@@ -112,32 +144,15 @@ pub fn spawn_file_scan(
 /// live-grep query is replaced by nearly every keystroke, and without this
 /// a stale scan over a huge tree (or one huge file) would keep pushing into
 /// an injector nothing reads.
-/// Ceiling on the total number of matched lines a single live-grep scan will
-/// push before stopping outright, independent of `cancel`. A query with
-/// almost no discriminating power (a single common letter, an empty needle
-/// mid-composition) run over a large tree has no other bound: unlike
-/// `Files`, where one entry costs one push, a single file here can contribute
-/// arbitrarily many matches, so the per-file `cancel` check in the walk loop
-/// below does nothing to bound a single pathological file, let alone a
-/// pathological *tree*. Chosen generously above what a human picker session
-/// scrolls through -- nucleo's own top-N ranking already narrows what's
-/// shown -- but far below "stream millions of `PickerItem`s that spend
-/// injector-push and channel cost for candidates nothing will ever look at."
-pub const LIVE_GREP_MATCH_LIMIT: usize = 5_000;
-
-/// Ceiling on a single matched line's rendered length, in `char`s.
-/// Minified/generated/binary-ish files can contain a single line many
-/// megabytes long; without this, one match on such a line turns into a
-/// `PickerItem` label large enough to cost real time just laying out and
-/// diffing on every keystroke, long before a human could usefully read that
-/// much text in a picker row.
-pub const LIVE_GREP_LINE_CHAR_LIMIT: usize = 300;
-
+///
+/// `pace` runs ahead of every entry, on the same terms and for the same
+/// reason as [`spawn_file_scan`]'s.
 pub fn spawn_live_grep_scan(
     root: PathBuf,
     needle: String,
     injector: Injector<PickerItem>,
     cancel: Arc<AtomicBool>,
+    pace: impl Fn() + Send + 'static,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         #[cfg(test)]
@@ -152,6 +167,7 @@ pub fn spawn_live_grep_scan(
         #[cfg(test)]
         let mut visited = 0usize;
         for entry in ignore::WalkBuilder::new(&root).build() {
+            pace();
             if cancel.load(Ordering::Acquire) || matched >= LIVE_GREP_MATCH_LIMIT {
                 #[cfg(test)]
                 scan_probe::note(
@@ -368,7 +384,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
 
         let start = std::time::Instant::now();
-        let handle = spawn_live_grep_scan(root, "fn ".to_string(), injector, cancel);
+        let handle = spawn_live_grep_scan(root, "fn ".to_string(), injector, cancel, || {});
         handle.join().expect("grep scan thread panicked");
         let elapsed = start.elapsed();
 
@@ -435,8 +451,13 @@ mod tests {
             nucleo::Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1);
         let injector = nucleo.injector();
         let cancel = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
+        let handle = spawn_live_grep_scan(
+            root.clone(),
+            "needle".to_string(),
+            injector,
+            cancel.clone(),
+            || {},
+        );
         handle.join().expect("grep scan thread panicked");
 
         let deadline = std::time::Instant::now()
@@ -498,6 +519,7 @@ mod tests {
             "needlemark".to_string(),
             injector,
             cancel.clone(),
+            || {},
         );
         handle.join().expect("grep scan thread panicked");
 
@@ -550,8 +572,13 @@ mod tests {
             nucleo::Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1);
         let injector = nucleo.injector();
         let cancel = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
+        let handle = spawn_live_grep_scan(
+            root.clone(),
+            "needle".to_string(),
+            injector,
+            cancel.clone(),
+            || {},
+        );
         handle.join().expect("grep scan thread panicked");
 
         let deadline = std::time::Instant::now()
@@ -618,8 +645,13 @@ mod tests {
             nucleo::Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1);
         let injector = nucleo.injector();
         let cancel = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
+        let handle = spawn_live_grep_scan(
+            root.clone(),
+            "needle".to_string(),
+            injector,
+            cancel.clone(),
+            || {},
+        );
         handle.join().expect("grep scan thread panicked");
 
         let deadline = std::time::Instant::now()
@@ -690,6 +722,7 @@ mod tests {
             "needle".to_string(),
             injector.clone(),
             cancel.clone(),
+            || {},
         );
 
         let start_deadline = std::time::Instant::now()

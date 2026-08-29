@@ -1,9 +1,11 @@
 //! Fixtures shared across every crate whose tests need them: `ScratchDir`,
 //! a panic-safe temp directory; `settle_mtime`, the sleep a second write
 //! needs to land on an mtime the first one is distinguishable from;
-//! `CountingAllocator`, for an allocation-count budget; and [`HostBudget`],
+//! `CountingAllocator`, for an allocation-count budget; [`HostBudget`],
 //! the wall clock a test may give a live process without gating on what
-//! else the host is doing.
+//! else the host is doing; and [`ScanGate`], the latch that holds a
+//! background walker mid-walk so a cancellation test observes what the
+//! walker does next instead of racing it.
 //!
 //! Before this crate existed, `view-native::config`, `view::native`, and
 //! the `cli_live`/`supersede_live` integration tests each hand-rolled the
@@ -29,6 +31,7 @@ use std::cell::Cell;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 /// A directory under the OS temp root, owned for the fixture's lifetime and
@@ -392,6 +395,118 @@ pub fn watchdog() -> Watchdog {
         }
     });
     Watchdog(done)
+}
+
+/// Holds a background walker between two entries, so a cancellation test
+/// can perform the act that must cancel it -- dropping the session that
+/// owns the walk, replacing it, issuing a follow-up query -- while the walk
+/// is provably still in flight, and then observe what the walker does next
+/// instead of inferring it.
+///
+/// The walked function consults the gate ahead of every entry, immediately
+/// before its own `cancel` check (`view_native::picker::sources`'s `pace`
+/// parameter, `view_native::tree::fs`'s). Once released, a walker that
+/// honours the flag ends its walk with no further consult, and one that
+/// ignores it records every entry it goes on to take -- which is
+/// [`steps_after_release`](ScanGate::steps_after_release), an exact count
+/// rather than an inference from how much of a tree got walked.
+///
+/// What this exists to replace: a fixture "large enough that a cancel lands
+/// mid-walk". That is a race against the walker, and the walker wins it on
+/// a small, loaded host whose metadata cache still holds the tree the test
+/// just wrote -- a 20,000-entry tree walked in ~83 ms on a loaded macOS
+/// host, well inside the time a descheduled test thread takes to flip a
+/// flag, so a correct cancellation read as a missing one.
+pub struct ScanGate {
+    park_at: usize,
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    consults: usize,
+    parked: bool,
+    released: bool,
+    steps_after_release: usize,
+}
+
+impl ScanGate {
+    /// The gate and the hook to hand the walker, paired rather than derived
+    /// from one another so a gate cannot be held without the walker also
+    /// holding it. `park_at` is which consult parks the walker, counted
+    /// from one: pick it past the entries the fixture needs walked for the
+    /// scan to be meaningfully in flight, and leave entries behind it so a
+    /// walker that ignored its cancel flag has something left to consult
+    /// the gate about.
+    #[must_use]
+    pub fn new(park_at: usize) -> (Arc<Self>, Arc<dyn Fn() + Send + Sync>) {
+        let gate = Arc::new(Self {
+            park_at,
+            state: Mutex::new(GateState::default()),
+            changed: Condvar::new(),
+        });
+        let walker = Arc::clone(&gate);
+        (gate, Arc::new(move || walker.consult()))
+    }
+
+    fn consult(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.released {
+            state.steps_after_release += 1;
+            return;
+        }
+        state.consults += 1;
+        if state.consults < self.park_at {
+            return;
+        }
+        state.parked = true;
+        self.changed.notify_all();
+        while !state.released {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Blocks until the walker is parked on the gate. Panics rather than
+    /// returning if it never arrives: a walk that ran out of entries before
+    /// reaching `park_at` proves nothing about cancellation, and a test
+    /// that quietly proceeded from there would assert on an already
+    /// finished walker.
+    pub fn wait_until_parked(&self) {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let (_state, wait) = self
+            .changed
+            .wait_timeout_while(state, host_deadline(Duration::from_secs(10)), |state| {
+                !state.parked
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            !wait.timed_out(),
+            "the walk never reached the gate: it must consult the hook ahead \
+             of every entry, and the fixture must hold more than {} of them",
+            self.park_at
+        );
+    }
+
+    /// Lets the parked walker run on. Every consult after this is counted.
+    pub fn release(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.released = true;
+        self.changed.notify_all();
+    }
+
+    /// Entries the walker went on to take after the release -- zero for a
+    /// walker that honoured the cancel flag it was held on.
+    #[must_use]
+    pub fn steps_after_release(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .steps_after_release
+    }
 }
 
 /// What a 1-minute load average of `load` multiplies the host's share by.

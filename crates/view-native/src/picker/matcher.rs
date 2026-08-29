@@ -124,6 +124,16 @@ struct Session {
     /// field does not exist in a production build.
     #[cfg(test)]
     scan_race_window: Option<Box<dyn Fn() + Send>>,
+    /// When set, every scan this session spawns consults it ahead of every
+    /// entry it walks (see `sources::spawn_file_scan`'s `pace`). The seam a
+    /// cancellation test holds a walker on, so the walk is provably still
+    /// in flight when the close, the replacement or the follow-up query
+    /// lands, rather than racing it. `Arc` rather than the `Box` above
+    /// because a `LiveGrep` session spawns a fresh scan on every query and
+    /// the hook has to outlive any one of them; the field does not exist
+    /// in a production build.
+    #[cfg(test)]
+    scan_pace: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Session {
@@ -142,6 +152,8 @@ impl Session {
             probe_key: None,
             #[cfg(test)]
             scan_race_window: None,
+            #[cfg(test)]
+            scan_pace: None,
         }
     }
 
@@ -165,6 +177,28 @@ impl Session {
             scan_handle: None,
             probe_key: None,
             scan_race_window: None,
+            scan_pace: None,
+        }
+    }
+
+    /// The pacing hook this session's scans consult ahead of every entry
+    /// they walk (see `sources::spawn_file_scan`'s `pace`). Empty in a
+    /// production build, where it monomorphises into the walk and costs
+    /// nothing; a cancellation test installs a latch in `scan_pace` and
+    /// gets it back through here, so neither the walk nor this call site
+    /// carries a branch that only a test reaches.
+    #[cfg(not(test))]
+    fn pace(&self) -> impl Fn() + Send + 'static {
+        || {}
+    }
+
+    #[cfg(test)]
+    fn pace(&self) -> impl Fn() + Send + 'static {
+        let hook = self.scan_pace.clone();
+        move || {
+            if let Some(hook) = hook.as_deref() {
+                hook();
+            }
         }
     }
 }
@@ -318,6 +352,7 @@ fn seed_or_scan(active: &mut Session, resolved: Option<Vec<PickerItem>>, needle:
                     root.clone(),
                     active.nucleo.injector(),
                     active.cancel.clone(),
+                    active.pace(),
                 );
                 active.scan_handle = Some(handle);
             }
@@ -355,6 +390,7 @@ fn restart_live_grep(active: &mut Session, root: std::path::PathBuf, needle: &st
         needle.to_string(),
         active.nucleo.injector(),
         active.cancel.clone(),
+        active.pace(),
     );
     active.scan_handle = Some(handle);
 }
@@ -858,15 +894,32 @@ mod tests {
     /// via `CARGO_MANIFEST_DIR` rather than the shared system temp
     /// directory, since `CARGO_TARGET_TMPDIR` is only set for
     /// integration-test/bench binaries, never for a `#[cfg(test)]` unit
-    /// test inside a lib target -- see `build()` below) -- large enough
-    /// that a walk cancelled shortly after it starts still has most of the
-    /// tree left unvisited, so the disconfirm below stays accurate
-    /// regardless of how fast disk I/O is on the host running it. Removed
-    /// on drop so a failed run does not leave 20,000 files behind.
+    /// test inside a lib target -- see `build()` below). Flat, and filled
+    /// with content matching the needle the live-grep cancellation test
+    /// searches for, so one fixture serves both the `Files` walks (which
+    /// only enumerate paths) and the `LiveGrep` walk (which has to read and
+    /// match content for a cancellation mid-scan to mean anything). Its
+    /// size carries no part of the property under test -- the
+    /// [`view_test_support::ScanGate`] the tests hold its walker on does
+    /// -- so it need only leave entries unvisited behind the gate. Removed
+    /// on drop.
     struct CancelTestTree {
         root: std::path::PathBuf,
-        total: u32,
     }
+
+    /// Files in a [`CancelTestTree`]: comfortably more than
+    /// [`GATE_PARKS_AT`] consults, so a walker that ignored its cancel flag
+    /// has several entries left to consult the gate about, and small enough
+    /// that building the tree costs nothing worth measuring.
+    const CANCEL_TREE_FILES: u32 = 8;
+
+    /// Which consult parks the walker on its [`view_test_support::ScanGate`].
+    /// `ignore`'s walk yields the root itself before the files under it, so
+    /// parking on the fourth leaves at least two files behind the gate;
+    /// every test that parks then asserts the injected count is non-zero,
+    /// so a walk order that stopped holding that would fail by name rather
+    /// than quietly test nothing.
+    const GATE_PARKS_AT: usize = 4;
 
     impl CancelTestTree {
         fn build() -> Self {
@@ -886,19 +939,13 @@ mod tests {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/tmp")
                 .join(format!("picker-cancel-{nonce}"));
-            let dirs = 200u32;
-            let files_per_dir = 100u32;
-            let mut total = 0u32;
-            for d in 0..dirs {
-                let dir = root.join(format!("d{d}"));
-                std::fs::create_dir_all(&dir).expect("create synthetic cancel-test dir");
-                for f in 0..files_per_dir {
-                    std::fs::write(dir.join(format!("f{f}.rs")), [])
-                        .expect("create synthetic cancel-test file");
-                    total += 1;
-                }
+            std::fs::create_dir_all(&root).expect("create synthetic cancel-test dir");
+            for f in 0..CANCEL_TREE_FILES {
+                let body = "one target line\nanother target line\nno match here\n";
+                std::fs::write(root.join(format!("f{f}.rs")), body)
+                    .expect("create synthetic cancel-test file");
             }
-            Self { root, total }
+            Self { root }
         }
     }
 
@@ -908,21 +955,21 @@ mod tests {
         }
     }
 
-    /// A falsifiable cancellation check: starts a real `Files` scan,
-    /// replaces its session the way `run()` does on every request whose
-    /// source no longer matches the cached one, and proves the old
-    /// session's walker thread actually stopped rather than running on in
-    /// the background pushing into an injector nothing reads anymore.
-    /// Deterministic rather than a sleep-and-hope: `Injector::injected_items`
-    /// only ever equals `tree.total` once the walk has visited every entry,
-    /// so an observed count strictly below it, once the count has stopped
-    /// growing, can only mean the walk exited early -- disabling the
-    /// `cancel` check in `sources::spawn_file_scan` makes this fail by
-    /// name, since the old session's walker would then run to completion
-    /// and settle at exactly `tree.total`.
+    /// A falsifiable cancellation check: starts a real `Files` scan, holds
+    /// its walker mid-walk on a [`view_test_support::ScanGate`], replaces the session the way
+    /// `run()` does on every request whose source no longer matches the
+    /// cached one, then releases the walker and joins it -- proving the old
+    /// session's walker actually stopped rather than running on in the
+    /// background pushing into an injector nothing reads anymore. The gate
+    /// is what makes that a fact rather than a race: the walker consults it
+    /// ahead of every entry, so a walker that honoured the cancel flag
+    /// records no consult after the release and one that ignored it records
+    /// at least one. Disabling the `cancel` check in
+    /// `sources::spawn_file_scan` makes this fail by name.
     #[test]
     fn replacing_a_session_cancels_its_files_scan_in_flight() {
         let tree = CancelTestTree::build();
+        let (gate, pace) = view_test_support::ScanGate::new(GATE_PARKS_AT);
         let serial = session_serial::acquire();
         let mut session: Option<Session> = None;
         // bounded (see `spawn_bounded`'s doc): this test never reparses a
@@ -941,45 +988,34 @@ mod tests {
         let active = session
             .as_mut()
             .expect("ensure_session_bounded always populates session");
+        active.scan_pace = Some(pace);
         let injector = active.nucleo.injector();
         seed_or_scan(active, None, "");
+        let scan = active
+            .scan_handle
+            .take()
+            .expect("seed_or_scan must have spawned the Files scan");
 
-        let start_deadline =
-            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
-        while injector.injected_items() == 0 {
-            assert!(
-                Instant::now() < start_deadline,
-                "the scan never produced a single item"
-            );
-        }
+        gate.wait_until_parked();
+        assert!(
+            injector.injected_items() > 0,
+            "the gate must park the walker with items already pushed, or no \
+             scan in flight is under test"
+        );
 
         // the shape `run()` takes on every request whose source no longer
         // matches the cached one: replaces the session outright, which must
         // drop -- and so cancel -- the old one's still-running Files scan
         ensure_session_bounded_serial(&serial, &mut session, &Source::Buffers, 1);
 
-        let settle_deadline =
-            Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
-        let mut last = injector.injected_items();
-        loop {
-            std::thread::sleep(Duration::from_millis(20));
-            let now = injector.injected_items();
-            if now == last {
-                break;
-            }
-            last = now;
-            assert!(
-                Instant::now() < settle_deadline,
-                "the injected item count never stopped growing after the \
-                 session was replaced"
-            );
-        }
-        assert!(
-            last < tree.total,
-            "expected the old session's scan to stop before walking the \
-             whole {}-entry tree once its session was replaced, got {last} \
-             items",
-            tree.total
+        gate.release();
+        scan.join().expect("files scan thread panicked");
+        assert_eq!(
+            gate.steps_after_release(),
+            0,
+            "expected the old session's walker to end its walk at the cancel \
+             check it was held on once the session was replaced, but it went \
+             on to take further entries"
         );
     }
 
@@ -995,11 +1031,11 @@ mod tests {
     /// files_scan_in_flight` uses -- and `run`'s own `WorkerRequest::Close`
     /// arm calls this exact function, so the test exercises production
     /// code rather than a look-alike. Disabling the `cancel` check in
-    /// `sources::spawn_file_scan` makes this fail by name the same way, at
-    /// exactly `tree.total`.
+    /// `sources::spawn_file_scan` makes this fail by name the same way.
     #[test]
     fn closing_the_picker_cancels_its_files_scan_in_flight() {
         let tree = CancelTestTree::build();
+        let (gate, pace) = view_test_support::ScanGate::new(GATE_PARKS_AT);
         let serial = session_serial::acquire();
         let mut session: Option<Session> = None;
         // bounded (see `spawn_bounded`'s doc): this test never reparses a
@@ -1018,17 +1054,20 @@ mod tests {
         let active = session
             .as_mut()
             .expect("ensure_session_bounded always populates session");
+        active.scan_pace = Some(pace);
         let injector = active.nucleo.injector();
         seed_or_scan(active, None, "");
+        let scan = active
+            .scan_handle
+            .take()
+            .expect("seed_or_scan must have spawned the Files scan");
 
-        let start_deadline =
-            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
-        while injector.injected_items() == 0 {
-            assert!(
-                Instant::now() < start_deadline,
-                "the scan never produced a single item"
-            );
-        }
+        gate.wait_until_parked();
+        assert!(
+            injector.injected_items() > 0,
+            "the gate must park the walker with items already pushed, or no \
+             scan in flight is under test"
+        );
 
         // the shape `run()` takes on a `WorkerRequest::Close`: drops the
         // session outright, which must cancel the old one's still-running
@@ -1039,71 +1078,15 @@ mod tests {
             "close_session must leave no session behind"
         );
 
-        let settle_deadline =
-            Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
-        let mut last = injector.injected_items();
-        loop {
-            std::thread::sleep(Duration::from_millis(20));
-            let now = injector.injected_items();
-            if now == last {
-                break;
-            }
-            last = now;
-            assert!(
-                Instant::now() < settle_deadline,
-                "the injected item count never stopped growing after the \
-                 picker was closed"
-            );
-        }
-        assert!(
-            last < tree.total,
-            "expected the scan to stop before walking the whole \
-             {}-entry tree once the picker was closed, got {last} items",
-            tree.total
+        gate.release();
+        scan.join().expect("files scan thread panicked");
+        assert_eq!(
+            gate.steps_after_release(),
+            0,
+            "expected the walker to end its walk at the cancel check it was \
+             held on once the picker was closed, but it went on to take \
+             further entries"
         );
-    }
-
-    /// A real, on-disk tree whose every file's content matches the same
-    /// needle (`"target"`), so a `LiveGrep` scan against it has plenty of
-    /// matching lines still left to find when a follow-up query preempts it
-    /// -- the content analogue of `CancelTestTree`'s "large enough that a
-    /// cancel lands mid-walk" property, needed because `LiveGrep`'s scan
-    /// must actually be reading and matching file content, not merely
-    /// enumerating paths, for a cancellation mid-scan to be meaningful.
-    struct GrepCancelTestTree {
-        root: std::path::PathBuf,
-    }
-
-    impl GrepCancelTestTree {
-        fn build() -> Self {
-            let nonce = format!(
-                "{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or_default()
-            );
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/tmp")
-                .join(format!("picker-grep-cancel-{nonce}"));
-            for d in 0..200u32 {
-                let dir = root.join(format!("d{d}"));
-                std::fs::create_dir_all(&dir).expect("create synthetic grep-cancel dir");
-                for f in 0..20u32 {
-                    let body = "one target line\nanother target line\nno match here\n";
-                    std::fs::write(dir.join(format!("f{f}.rs")), body)
-                        .expect("create synthetic grep-cancel file");
-                }
-            }
-            Self { root }
-        }
-    }
-
-    impl Drop for GrepCancelTestTree {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
     }
 
     /// The same falsifiable cancellation shape
@@ -1114,10 +1097,11 @@ mod tests {
     /// not let it keep pushing matches for a needle the picker no longer
     /// shows. Disabling the `cancel` check in `sources::spawn_live_grep_scan`
     /// makes this fail by name, the same way disabling it in
-    /// `spawn_file_scan` makes the `Files` cancellation test fail.
+    /// `spawn_file_scan` makes the `Files` cancellation tests fail.
     #[test]
     fn a_new_live_grep_query_cancels_the_previous_scan_in_flight() {
-        let tree = GrepCancelTestTree::build();
+        let tree = CancelTestTree::build();
+        let (gate, pace) = view_test_support::ScanGate::new(GATE_PARKS_AT);
         let serial = session_serial::acquire();
         let mut session: Option<Session> = None;
         // bounded (see `Session::new_bounded`'s doc): this test asserts on
@@ -1135,6 +1119,7 @@ mod tests {
         let active = session
             .as_mut()
             .expect("ensure_session always populates session");
+        active.scan_pace = Some(pace);
         seed_or_scan(active, None, "target");
         // obtained AFTER the scan starts, not before: `Nucleo::restart`
         // (which `seed_or_scan`'s `LiveGrep` arm calls on every query, see
@@ -1143,45 +1128,35 @@ mod tests {
         // -- `seed_resolved`'s own restart-then-`injector()` order is the
         // same precedent.
         let injector = active.nucleo.injector();
+        let scan = active
+            .scan_handle
+            .take()
+            .expect("seed_or_scan must have spawned the LiveGrep scan");
 
-        let start_deadline =
-            Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));
-        while injector.injected_items() == 0 {
-            assert!(
-                Instant::now() < start_deadline,
-                "the grep scan never produced a single match"
-            );
-        }
+        gate.wait_until_parked();
+        assert!(
+            injector.injected_items() > 0,
+            "the gate must park the walker with matches already pushed, or no \
+             scan in flight is under test"
+        );
 
+        // only the scan being cancelled is under test: the follow-up query
+        // spawns a walker of its own, and its consults would read as the
+        // held one having resumed
+        active.scan_pace = None;
         // the shape `run()` takes on every subsequent query against a
         // session whose source is unchanged: `seed_or_scan` itself must
         // cancel the previous query's scan before starting the new one
         seed_or_scan(active, None, "no-such-needle-anywhere");
 
-        let settle_deadline =
-            Instant::now() + view_test_support::host_deadline(Duration::from_secs(5));
-        let mut last = injector.injected_items();
-        loop {
-            std::thread::sleep(Duration::from_millis(20));
-            let now = injector.injected_items();
-            if now == last {
-                break;
-            }
-            last = now;
-            assert!(
-                Instant::now() < settle_deadline,
-                "the injected item count never stopped growing after the \
-                 query changed"
-            );
-        }
-        // 200 dirs * 20 files * 2 matching lines each = 8,000 possible
-        // matches for "target"; the second query's needle matches nothing,
-        // so any growth past this point can only be the stale first scan
-        // still running
-        assert!(
-            last < 8_000,
-            "expected the first query's scan to stop before matching every \
-             line in the tree once a new query preempted it, got {last} items"
+        gate.release();
+        scan.join().expect("live-grep scan thread panicked");
+        assert_eq!(
+            gate.steps_after_release(),
+            0,
+            "expected the first query's walker to end its walk at the cancel \
+             check it was held on once a new query preempted it, but it went \
+             on to take further entries"
         );
     }
 

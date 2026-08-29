@@ -34,11 +34,25 @@ use view_core::native::tree::TreeEntry;
 /// as long as it takes.
 #[must_use]
 pub fn scan(root: &Path, cancel: &AtomicBool) -> Vec<TreeEntry> {
+    scan_paced(root, cancel, || {})
+}
+
+/// [`scan`] with a hook run ahead of every entry, immediately before the
+/// `cancel` check. `scan` supplies an empty closure, which monomorphises
+/// away and leaves the per-entry cost exactly the one atomic load it
+/// already paid; a cancellation test supplies a latch, so it can hold the
+/// walk between two entries while it flips the flag. A test without that
+/// hold can only flip the flag and hope the walk has not already run out
+/// of tree, which is a race the walk wins whenever the test thread loses
+/// the CPU for as long as the walk takes -- 20,100 entries in ~83 ms on a
+/// loaded macOS host.
+fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntry> {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
         .sort_by_file_name(std::ffi::OsStr::cmp)
         .build();
     for entry in walker {
+        pace();
         if cancel.load(Ordering::Acquire) {
             break;
         }
@@ -147,40 +161,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // proves the `cancel` check actually stops the walk early rather than
-    // merely existing unused: disabling it (e.g. removing the `if
-    // cancel.load(..) { break; }` line) makes `scan` run to completion
-    // regardless, and this test then deterministically fails, since
-    // `entries.len()` would equal `total` instead of falling short of it.
+    /// Which consult parks the walk on its [`view_test_support::ScanGate`].
+    /// `ignore` yields the root itself first (`scan` skips it) and then the
+    /// files under it in name order, so parking on the fourth leaves two
+    /// entries already collected behind the gate and five ahead of it.
+    const GATE_PARKS_AT: usize = 4;
+
+    /// Proves the `cancel` check stops the walk early rather than merely
+    /// existing unused, and proves it per entry: the walk is held on a gate
+    /// with entries still ahead of it, the flag is flipped while it is
+    /// held, and the walk is then released and joined. Removing the `if
+    /// cancel.load(..) { break; }` line makes this fail by name, because
+    /// the released walk goes on to consult the gate for every remaining
+    /// entry instead of ending there.
+    ///
+    /// The gate is what makes that a fact rather than a race. Flipping the
+    /// flag right after the spawn and asserting the walk stopped short is
+    /// only correct while the test thread wins a footrace against the whole
+    /// walk -- and on a loaded 3-core macOS runner it does not, which is
+    /// how the picker's twin of this test read a correct cancellation as a
+    /// missing one.
     #[test]
     fn a_cancelled_scan_stops_short_of_the_full_tree() {
         let root = scratch("cancel");
-        let dirs = 200;
-        let files_per_dir = 100;
-        for d in 0..dirs {
-            let dir = root.join(format!("d{d}"));
-            std::fs::create_dir_all(&dir).expect("mkdir");
-            for f in 0..files_per_dir {
-                std::fs::write(dir.join(format!("f{f}.txt")), "").expect("write file");
-            }
+        for f in 0..8 {
+            std::fs::write(root.join(format!("f{f}.txt")), "").expect("write file");
         }
-        let total = dirs * (files_per_dir + 1);
 
+        let (gate, pace) = view_test_support::ScanGate::new(GATE_PARKS_AT);
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let scan_root = root.clone();
         let scan_cancel = std::sync::Arc::clone(&cancel);
-        let handle = std::thread::spawn(move || scan(&scan_root, &scan_cancel));
-        // no sleep: flipping the flag immediately, with no coordination
-        // beyond the spawn itself, is what makes this deterministic --
-        // whichever of the walk or this store runs first, the walk's very
-        // next per-entry check sees `true` and stops there
+        let handle = std::thread::spawn(move || scan_paced(&scan_root, &scan_cancel, || pace()));
+
+        gate.wait_until_parked();
         cancel.store(true, Ordering::Release);
+        gate.release();
         let entries = handle.join().expect("scan thread joins");
 
         assert!(
-            entries.len() < total,
-            "a cancelled scan must stop short of the full tree ({} of {total} entries)",
-            entries.len()
+            !entries.is_empty(),
+            "the gate must park the walk with entries already collected, or \
+             no scan in flight is under test"
+        );
+        assert_eq!(
+            gate.steps_after_release(),
+            0,
+            "expected the walk to end at the cancel check it was held on, \
+             but it went on to take further entries"
         );
 
         let _ = std::fs::remove_dir_all(&root);
