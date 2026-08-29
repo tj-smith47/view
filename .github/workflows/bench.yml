@@ -15,10 +15,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Shared-runner bench legs. These record rather than gate until a
-  # reviewed gh-* baseline is committed; once it is, every row gates its
-  # view/nvim median ratio and its view-side absolute p99 against that
-  # baseline, while tail statistics stay recorded but ungated because gh-*
+  # Shared-runner bench legs. Every row gates its view/nvim median ratio
+  # and its view-side absolute p99 against the committed gh-* baseline
+  # (recorded on run 33204611952, reviewed cell by cell), while tail
+  # statistics stay recorded but ungated because gh-*
   # runners are not controlled classes (spec section 3.1). The null-pair
   # calibration refuses a record or a gate alike if ambient runner noise
   # exceeds the measured floor, rather than writing or comparing numbers
@@ -85,20 +85,9 @@ jobs:
           ENGINE_PIN=$(cat .engine-pin)
           nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
 
-      # The committed gh baselines' input_path/output_path cells predate
-      # the sample-anchoring correction (samples now close on the
-      # keystroke's own handoff), so honest numbers would read as
-      # regressions against them. Those cells are deleted in the commit
-      # that flips this leg to --record — the baseline ratchet refuses
-      # seating a worse number, so a stale cell would silently keep its
-      # old bar — and the leg flips back to --gate in the commit that
-      # lands the reviewed refreshed TOMLs, upload step removed with it
-      - name: Record bench matrix baseline (${{ matrix.class }})
-        run: task bench -- --all --class ${{ matrix.class }} --record
-
-      - name: Upload recorded baseline
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-baseline-${{ matrix.class }}
-          path: crates/view-bench/baselines/${{ matrix.class }}.toml
-          if-no-files-found: error
+      # A row that refuses its own measurement (the tap-overhead bar on the
+      # shared macOS runner, today) holds an empty cell in the committed
+      # baseline: the gate compares nothing for it and reports no coverage
+      # gap, so a refusal is neither a regression nor a missing recording
+      - name: Gate bench matrix (${{ matrix.class }})
+        run: task bench -- --all --class ${{ matrix.class }} --gate

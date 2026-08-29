@@ -2371,38 +2371,49 @@ mod tests {
         }
     }
 
-    /// The class whose baseline records the whole matrix: the host this
-    /// repo is developed and gated on, where every row's platform and
-    /// scoping allow a bar. The other classes record what their own host
-    /// can witness -- `dev-macos` starts no agent turn, `gh-*` run on
-    /// shared runners -- so completeness is a claim about this one.
-    const COMPLETE_CLASS: &str = "dev-linux";
+    /// The classes whose baseline records the whole matrix: the host this
+    /// repo is developed and gated on, and the two shared runner legs,
+    /// which gate every row they arm against a committed baseline of their
+    /// own. The remaining classes record what their own host can witness --
+    /// `dev-macos` has no speculated-echo or remote leg recorded,
+    /// `controlled-linux` is armed a row at a time -- so completeness is a
+    /// claim about these three.
+    const COMPLETE_CLASSES: &[&str] = &["dev-linux", "gh-linux", "gh-macos"];
 
     #[test]
-    fn every_cell_the_matrix_arms_on_the_complete_class_has_a_bar() {
-        let path = baseline_path(COMPLETE_CLASS);
-        let baseline = baselines::load(&path).expect("the class baseline must load");
-        let mut missing = Vec::new();
-        for (scenario, fixture) in MATRIX {
-            if platform_block(scenario).is_some() || class_block(scenario, COMPLETE_CLASS).is_some()
-            {
-                continue;
+    fn every_cell_the_matrix_arms_on_a_complete_class_has_a_bar() {
+        for class in COMPLETE_CLASSES {
+            let path = baseline_path(class);
+            let baseline = baselines::load(&path).expect("the class baseline must load");
+            let mut missing = Vec::new();
+            let mut barless = Vec::new();
+            for (scenario, fixture) in MATRIX {
+                if platform_block(scenario).is_some() || class_block(scenario, class).is_some() {
+                    continue;
+                }
+                // a row that refused its own measurement records the cell
+                // with no metrics in it. That is a cell holding no bar, not
+                // a cell the baseline lost: the gate compares nothing for
+                // it and reports no coverage gap either way, so it must not
+                // read here as a recording that never happened
+                match baseline.cell(&baselines::CellId::new(scenario, fixture)) {
+                    None => missing.push(format!("{scenario}.{fixture}")),
+                    Some(cell) if cell.is_empty() => barless.push(format!("{scenario}.{fixture}")),
+                    Some(_) => {}
+                }
             }
-            if baseline
-                .cell(&baselines::CellId::new(scenario, fixture))
-                .is_none()
-            {
-                missing.push(format!("{scenario}.{fixture}"));
+            assert!(
+                missing.is_empty(),
+                "{} has no cell for these, so a --gate run on {class} \
+                 reports GATE COVERAGE FAIL for each and exits non-zero -- \
+                 record them on a quiet host before gating:\n  {}",
+                path.display(),
+                missing.join("\n  ")
+            );
+            if !barless.is_empty() {
+                println!("{class} holds a bar-less cell for: {}", barless.join(", "));
             }
         }
-        assert!(
-            missing.is_empty(),
-            "{} has no cell for these, so a --gate run on {COMPLETE_CLASS} \
-             reports GATE COVERAGE FAIL for each and exits non-zero -- \
-             record them on a quiet host before gating:\n  {}",
-            path.display(),
-            missing.join("\n  ")
-        );
     }
 
     #[test]
