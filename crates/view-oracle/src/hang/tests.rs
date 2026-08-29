@@ -19,15 +19,10 @@ use view_engine::process::EngineConfig;
 
 use super::{
     detection_deadline, observation_slack, restart_bound, run_schedule, slack_scale, HangRun,
-    HangSchedule, HangSession, DETECTION_BOUND, FOLD_INTERVAL, SHUTDOWN, WEDGE_LOOP,
+    HangSchedule, HangSession, DETECTION_BOUND, FOLD_INTERVAL, SHUTDOWN, SURVIVAL_FOLD_FLOOR,
+    SURVIVAL_WINDOW, WEDGE_LOOP,
 };
 use crate::{snapshot, OracleError, Probe};
-
-/// How many folds a run must have completed for its survival claim to mean
-/// anything. A harness that hung alongside the engine would report a
-/// handful; a healthy one at the fold cadence reports orders of magnitude
-/// more over any of the bounds below.
-const SURVIVAL_FOLDS: u64 = 100;
 
 /// A session over an isolated engine, spawned the way every schedule here
 /// spawns one.
@@ -191,10 +186,13 @@ fn a_read_side_wedge_is_reported_wedged_within_the_probe_and_threshold_bound() {
     assert_eq!(report.wedge, Some(WedgeKind::ReadSide));
     assert_eq!(report.banner.as_deref(), Some(WedgeKind::ReadSide.notice()));
     assert!(
-        report.folds >= SURVIVAL_FOLDS,
-        "the observing side completed only {} folds while the engine was wedged, \
-         so it did not survive the wedge it was watching",
-        report.folds
+        report.survived(),
+        "the observing side completed only {} folds over the {:?} survival \
+         window while the engine was wedged, under the {SURVIVAL_FOLD_FLOOR} a \
+         thread that is still being scheduled fits into it, so it did not \
+         survive the wedge it was watching",
+        report.survival_folds,
+        SURVIVAL_WINDOW
     );
     assert!(
         report.restarted_after.is_none(),
@@ -370,9 +368,12 @@ fn an_unattended_session_replaces_a_dead_engine_and_recovers_its_swap() {
          predecessor: {report:?}"
     );
     assert!(
-        report.folds >= SURVIVAL_FOLDS,
-        "the observing side completed only {} folds",
-        report.folds
+        report.survived(),
+        "the observing side completed only {} folds over the {:?} survival \
+         window, under the {SURVIVAL_FOLD_FLOOR} a thread that is still being \
+         scheduled fits into it",
+        report.survival_folds,
+        SURVIVAL_WINDOW
     );
 }
 
@@ -539,6 +540,7 @@ fn report(schedule: HangSchedule, detected: Option<Duration>) -> super::HangRepo
         wedge: None,
         detected_after: detected,
         folds: 1,
+        survival_folds: SURVIVAL_FOLD_FLOOR,
         banner: None,
         offered: None,
         offered_readout: None,
@@ -582,6 +584,69 @@ fn a_control_held_for_less_than_the_wedge_bound_reads_as_missed() {
         Some(DETECTION_BOUND - Duration::from_millis(1))
     )
     .is_success());
+}
+
+/// The folds one survival window held on a 3-core macOS runner executing
+/// the whole `--lib` suite at once: the slowest cadence this project has
+/// measured, and the ceiling the bar has to stay under to keep passing a
+/// host that is merely loaded.
+const STRETCHED_WINDOW_FOLDS: u64 = 68;
+
+/// The survival claim is read from the window's own folds, so a host that
+/// stretched the cadence six-fold still passes and an observer that stopped
+/// folding does not -- however many folds the phases before the window
+/// happened to accumulate.
+#[test]
+fn survival_is_read_from_the_window_and_not_from_the_run_total() {
+    let mut stretched = report(HangSchedule::ReadSideWedge, Some(detection_deadline()));
+    stretched.survival_folds = STRETCHED_WINDOW_FOLDS;
+    stretched.folds = STRETCHED_WINDOW_FOLDS;
+    assert!(stretched.survived());
+    assert!(stretched.is_success());
+    assert!(stretched
+        .report_line()
+        .contains("68 of them in the survival window"));
+
+    let mut stalled = report(HangSchedule::ReadSideWedge, Some(detection_deadline()));
+    stalled.survival_folds = 1;
+    // a run whose earlier phases folded for a long time before the observer
+    // stopped: the count a bar read off the run total would have passed
+    stalled.folds = 4_000;
+    assert!(!stalled.survived());
+    assert!(
+        !stalled.is_success(),
+        "a run that folded once over the whole survival window did not survive \
+         anything, whatever its phases before the window totalled"
+    );
+    assert!(stalled.report_line().contains("MISSED"));
+}
+
+/// The bar's two sides, held against the constants it is derived from: it
+/// has to sit above the single fold a stopped observer reports and under
+/// the slowest cadence a live host has been measured at.
+#[test]
+fn the_survival_bar_sits_between_a_stopped_observer_and_a_stretched_one() {
+    const {
+        assert!(
+            SURVIVAL_FOLD_FLOOR > 1,
+            "the bar cannot tell an observer that folded once from one that \
+             kept folding"
+        );
+    }
+    const {
+        assert!(
+            SURVIVAL_FOLD_FLOOR < STRETCHED_WINDOW_FOLDS,
+            "the bar fails the slowest cadence a live host has been measured \
+             at, which is a loaded host and not a hung harness"
+        );
+    }
+    let budget = SURVIVAL_WINDOW / u32::try_from(SURVIVAL_FOLD_FLOOR).unwrap();
+    assert!(
+        budget >= FOLD_INTERVAL * 100,
+        "the bar allows {budget:?} per fold against the {FOLD_INTERVAL:?} \
+         cadence the loop asks for, which no longer leaves a loaded host room \
+         to be slow without being hung"
+    );
 }
 
 /// A restart that produced an engine the same watch does not read as alive

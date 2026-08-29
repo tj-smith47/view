@@ -175,6 +175,33 @@ pub fn restart_bound() -> Duration {
 /// not completes thousands.
 const SURVIVAL_WINDOW: Duration = HEARTBEAT_PROBE_INTERVAL;
 
+/// The fewest folds inside [`SURVIVAL_WINDOW`] that still read as an
+/// observing side that kept running.
+///
+/// Derived from the window and the largest stall this module allows a
+/// single observation to cost: at one [`OBSERVATION_SLACK`] per cycle --
+/// a hundred times the [`FOLD_INTERVAL`] the loop actually asks for -- the
+/// window still holds this many folds. Under it, the average cycle spent
+/// more than the whole headroom a gated run has, which describes a host
+/// that stopped scheduling the thread rather than a harness that hung with
+/// its engine.
+///
+/// What makes it evidence is the distance to either side. A harness that
+/// hung folds once and stops; every live host measured folds two orders of
+/// magnitude past this bar, and none of that distance is the fold's own
+/// work. Over this window an idle 10-core macOS host completes 268-302
+/// folds while spending 2.3ms of the 2s inside `fold()` itself -- the rest
+/// is the [`FOLD_INTERVAL`] sleep costing ~7.4ms of wall clock for the 5ms
+/// it asks for -- and a 3-core runner executing the whole `--lib` suite at
+/// once completes 68, the same sleep costing ~29ms there.
+///
+/// It does not scale with [`SLACK_SCALE_VAR`]. A wider slack lowers this
+/// bar toward the single fold a stopped observer reports, which is the one
+/// thing it has to stay clear of; the counts a live host reaches do not
+/// move with the variable at all.
+pub const SURVIVAL_FOLD_FLOOR: u64 =
+    (SURVIVAL_WINDOW.as_millis() / OBSERVATION_SLACK.as_millis()) as u64;
+
 /// How long [`HangSchedule::ReadSideWedge`]'s Lua loop spins for.
 ///
 /// Comfortably past every bound any schedule here waits out, so a verdict
@@ -299,10 +326,15 @@ pub struct HangReport {
     /// it started with.
     pub detected_after: Option<Duration>,
     /// How many folds the harness completed between the schedule firing and
-    /// the run ending. Evidence that the observing side kept running while
-    /// the engine did not: a harness that hung with the engine would report
-    /// a handful, not thousands.
+    /// the run ending, across every phase of the run.
     pub folds: u64,
+    /// How many of those folds landed inside [`SURVIVAL_WINDOW`], the run's
+    /// last phase and the only one whose length is fixed. This is the
+    /// evidence that the observing side kept running while the engine did
+    /// not, and [`SURVIVAL_FOLD_FLOOR`] is the bar it is read against: a
+    /// count over the whole run says nothing on its own, since the phases
+    /// before it are as long as the engine's deaths and restarts made them.
+    pub survival_folds: u64,
     /// The sticky banner's text at the end of the run, if one was raised.
     pub banner: Option<String>,
     /// The wedge the modal was opened for, if the escalation reached one.
@@ -353,10 +385,19 @@ impl HangReport {
                 .is_some_and(|elapsed| elapsed <= detection_deadline()),
         };
         timing
+            && self.survived()
             && self.verdict == self.schedule.expected()
             && self
                 .replacement_verdict
                 .is_none_or(|verdict| verdict == Liveness::Alive)
+    }
+
+    /// Whether the observing side kept folding through the survival window
+    /// instead of hanging alongside the engine it was watching, per
+    /// [`SURVIVAL_FOLD_FLOOR`].
+    #[must_use]
+    pub fn survived(&self) -> bool {
+        self.survival_folds >= SURVIVAL_FOLD_FLOOR
     }
 
     /// One run's report line, in the corpus runner's own report shape.
@@ -371,11 +412,13 @@ impl HangReport {
             format!(", replacement answered after {elapsed:?}")
         });
         format!(
-            "oracle: hang {} ... {status} ({:?} after {:?}, {} folds{restart})",
+            "oracle: hang {} ... {status} ({:?} after {:?}, {} folds, {} of \
+             them in the survival window{restart})",
             self.schedule.label(),
             self.verdict,
             self.detected_after,
             self.folds,
+            self.survival_folds,
         )
     }
 }
@@ -755,13 +798,21 @@ impl HangSession {
     }
 
     /// Keeps folding for `window`, so a caller can prove a verdict *stays*
-    /// what it was rather than catching one instant of it.
-    pub fn fold_for(&mut self, window: Duration) {
+    /// what it was rather than catching one instant of it, and returns how
+    /// many folds fitted inside it.
+    ///
+    /// The count is the caller's only way to say what the folding cost on
+    /// this host: the session's running total spans phases whose length the
+    /// engine's own deaths decide, while `window` is fixed.
+    pub fn fold_for(&mut self, window: Duration) -> u64 {
         let until = Instant::now() + window;
+        let mut folds = 0;
         while Instant::now() < until {
             let _ = self.fold();
+            folds += 1;
             std::thread::sleep(FOLD_INTERVAL);
         }
+        folds
     }
 
     /// Whether a fold has produced `Effect::RestartEngine` since the last
@@ -1020,11 +1071,13 @@ pub fn run_schedule(run: HangRun) -> Result<HangReport, OracleError> {
         (session, None, None)
     };
 
-    // read last, and only after the survival window: what makes the fold
-    // count evidence is that it was still climbing after everything else the
-    // run did, and what makes a replacement's verdict evidence is that the
-    // same watch had time to probe it
-    session.fold_for(SURVIVAL_WINDOW);
+    // folded last, and over a window of its own: what makes the count
+    // evidence is that it was still climbing after everything else the run
+    // did, and a fixed window is the only thing a bar can be derived from,
+    // since every earlier phase is as long as the engine's death made it.
+    // The replacement's verdict is read after the same window, so the watch
+    // that condemned its predecessor has had time to probe it
+    let survival_folds = session.fold_for(SURVIVAL_WINDOW);
     let replacement_verdict = requested.then(|| session.liveness());
 
     Ok(HangReport {
@@ -1033,6 +1086,7 @@ pub fn run_schedule(run: HangRun) -> Result<HangReport, OracleError> {
         wedge,
         detected_after,
         folds: session.folds(),
+        survival_folds,
         banner,
         offered,
         offered_readout,
