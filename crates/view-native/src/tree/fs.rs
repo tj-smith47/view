@@ -167,6 +167,12 @@ mod tests {
     /// entries already collected behind the gate and five ahead of it.
     const GATE_PARKS_AT: usize = 4;
 
+    /// Files under the cancel fixture: comfortably more than
+    /// [`GATE_PARKS_AT`] consults, so a walker that ignored its cancel flag
+    /// has several entries left to consult the gate about, and small enough
+    /// that writing them costs nothing worth measuring.
+    const CANCEL_TREE_FILES: u32 = 8;
+
     /// Proves the `cancel` check stops the walk early rather than merely
     /// existing unused, and proves it per entry: the walk is held on a gate
     /// with entries still ahead of it, the flag is flipped while it is
@@ -184,7 +190,7 @@ mod tests {
     #[test]
     fn a_cancelled_scan_stops_short_of_the_full_tree() {
         let root = scratch("cancel");
-        for f in 0..8 {
+        for f in 0..CANCEL_TREE_FILES {
             std::fs::write(root.join(format!("f{f}.txt")), "").expect("write file");
         }
 
