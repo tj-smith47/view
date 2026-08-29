@@ -1360,10 +1360,22 @@ pub fn characterize_overhead(
     Ok(dist)
 }
 
-/// How many times [`characterize_overhead_adaptive`] may back its pace off.
-/// Each attempt doubles, so five attempts span 20us to 320us and bound the
-/// characterization's wall time at roughly seven seconds.
-const OVERHEAD_PACE_ATTEMPTS: u32 = 5;
+/// The widest spacing [`characterize_overhead_adaptive`] will back off to
+/// before refusing the host.
+///
+/// The pace is the gap between writes, never the quantity being measured,
+/// so a wide one characterizes the tap's own cost exactly as faithfully as
+/// a narrow one -- the ceiling exists only so a doubling ladder terminates.
+/// 1ms is 200x the 5us bar the rows hold the tap to, and the delivery it
+/// buys is what sets it: the smallest pipe buffer measured on the classes
+/// this project runs holds ~330 of these records (8 KiB on macOS 26
+/// against 64 KiB on Linux), so 1ms spacing gives the reader thread a
+/// third of a second of scheduling stall per buffer-full. A host that
+/// still drops writes with that much slack is not one a slower pace fixes.
+///
+/// Doubling from a 1us floor reaches it in 11 passes, bounding the
+/// characterization's wall time at roughly four seconds per row.
+const OVERHEAD_PACE_CAP: Duration = Duration::from_millis(1);
 
 /// Characterizes the tap's cost at the slowest pace the host needs, and
 /// reports which pace that was.
@@ -1383,33 +1395,53 @@ const OVERHEAD_PACE_ATTEMPTS: u32 = 5;
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] if full delivery is not achieved within
-/// [`OVERHEAD_PACE_ATTEMPTS`], naming the best delivery seen -- a host that
-/// cannot deliver every write at 320us apart has something wrong with it
-/// that a slower pace will not fix, and the row must not report a number
-/// measured through a lossy pipe.
+/// Returns [`BenchError::Desync`] if full delivery is not achieved by
+/// [`OVERHEAD_PACE_CAP`], naming the best delivery seen and the pace it was
+/// seen at -- a host that cannot deliver every write at that spacing has
+/// something wrong with it that a slower pace will not fix, and the row
+/// must not report a number measured through a lossy pipe.
 pub fn characterize_overhead_adaptive(
     pipe: &TapPipe,
     iterations: usize,
     base_pace: Duration,
 ) -> Result<(Distribution, Duration), BenchError> {
+    escalate_to_full_delivery(iterations, base_pace, |pace| {
+        characterize_once(pipe, iterations, pace)
+    })
+}
+
+/// The pace ladder itself, over whatever performs one pass: doubles from
+/// `base_pace` until a pass delivers every record, and refuses at
+/// [`OVERHEAD_PACE_CAP`]. Separated from the FIFO so the ceiling is pinned
+/// by a test against a reader whose loss threshold is chosen, rather than
+/// against whatever spacing the host running the suite happens to need.
+fn escalate_to_full_delivery(
+    iterations: usize,
+    base_pace: Duration,
+    mut pass: impl FnMut(Duration) -> Result<(Distribution, usize), BenchError>,
+) -> Result<(Distribution, Duration), BenchError> {
     // a zero base would never escape by doubling
-    let mut pace = base_pace.max(Duration::from_micros(1));
+    let mut pace = base_pace
+        .max(Duration::from_micros(1))
+        .min(OVERHEAD_PACE_CAP);
     let mut best = 0_usize;
-    for _ in 0..OVERHEAD_PACE_ATTEMPTS {
-        let (dist, delivered) = characterize_once(pipe, iterations, pace)?;
+    loop {
+        let (dist, delivered) = pass(pace)?;
         if delivered >= iterations {
             return Ok((dist, pace));
         }
         best = best.max(delivered);
-        pace = pace.saturating_mul(2);
+        if pace >= OVERHEAD_PACE_CAP {
+            break;
+        }
+        pace = pace.saturating_mul(2).min(OVERHEAD_PACE_CAP);
     }
     Err(BenchError::Desync {
         context: format!(
             "tap overhead characterization never achieved full delivery: best {best} of \
-             {iterations} records across {OVERHEAD_PACE_ATTEMPTS} attempts, up to {pace:?} \
-             apart; a pipe this lossy would understate the instrumentation the rows measure \
-             through"
+             {iterations} records, escalating to {pace:?} apart against a \
+             {OVERHEAD_PACE_CAP:?} cap; a pipe this lossy would understate the \
+             instrumentation the rows measure through"
         ),
     })
 }
@@ -2299,6 +2331,58 @@ mod tests {
             "the escalated pace must be reported, got {pace:?}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// One characterization pass against a reader that drops records below
+    /// a chosen spacing, so the ladder's ceiling is what the assertion
+    /// reads rather than the spacing the host running this suite needs.
+    fn lossy_below(
+        threshold: Duration,
+        iterations: usize,
+    ) -> impl FnMut(Duration) -> Result<(Distribution, usize), BenchError> {
+        move |pace| {
+            // the shape a shared macOS runner produced: 1990 of 2000
+            // records at 16us apart, full delivery only once wider
+            let delivered = if pace >= threshold { iterations } else { 1_990 };
+            Ok((
+                Distribution::from_samples(&vec![1.0; iterations], iterations / 10)?,
+                delivered,
+            ))
+        }
+    }
+
+    #[test]
+    fn the_pace_ladder_escalates_to_whatever_spacing_the_reader_needs() {
+        let threshold = Duration::from_micros(120);
+        let (dist, pace) =
+            escalate_to_full_delivery(2_000, Duration::ZERO, lossy_below(threshold, 2_000))
+                .expect("the ladder must reach the spacing the reader needs");
+        assert_eq!(dist.len(), 2_000 - 2_000 / 10);
+        assert!(
+            pace >= threshold,
+            "the ladder stopped short of the spacing full delivery needed: {pace:?}"
+        );
+    }
+
+    #[test]
+    fn a_reader_still_lossy_at_the_cap_is_refused_naming_the_pace_and_the_cap() {
+        let err = escalate_to_full_delivery(
+            2_000,
+            Duration::ZERO,
+            lossy_below(OVERHEAD_PACE_CAP * 2, 2_000),
+        )
+        .expect_err("a reader lossy at the cap must not report a percentile");
+        let message = err.to_string();
+        for needle in [
+            "best 1990 of 2000".to_string(),
+            format!("escalating to {OVERHEAD_PACE_CAP:?}"),
+            format!("{OVERHEAD_PACE_CAP:?} cap"),
+        ] {
+            assert!(
+                message.contains(&needle),
+                "the refusal must name {needle}, got: {message}"
+            );
+        }
     }
 
     #[test]
