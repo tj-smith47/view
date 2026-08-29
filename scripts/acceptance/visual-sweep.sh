@@ -33,10 +33,11 @@
 # What it is pointed at: `VIEW_SWEEP_CONFIG`, an XDG_CONFIG_HOME directory
 # holding `nvim/` (default: the themed fixture), and `VIEW_SWEEP_DATA`, an
 # XDG_DATA_HOME whose installed plugin set the run borrows. Borrowing links
-# in that home's `nvim/lazy` and nothing else, so a plugin manager finds
-# every plugin already installed while every byte anything writes -- a tool
-# installer's downloads, a session file, a project history -- lands in this
-# run's own scratch instead of in the home it was borrowed from.
+# in that home's `nvim/lazy` and nothing else, and neuters the module that
+# installs, so a plugin manager finds every plugin already installed and has
+# no way to write one -- while every byte anything else writes (a tool
+# installer's downloads, a session file, a project history) lands in this
+# run's own scratch instead of in the home it came from.
 #
 # The entry points driven are read out of `DEFAULT_MAPS` on the same terms
 # as the colors: a feature that gains a key gains a leg here on the same
@@ -121,6 +122,9 @@ CAP=$WORK/pane.esc
 CELLS=$WORK/pane.cells
 SCREEN=$WORK/pane.txt
 BEFORE=$WORK/before.txt
+# Whatever the palette probe wrote to stderr, kept for the failure that
+# names an unanswered group.
+PROBE_ERR=$WORK/probe.err
 : >"$SCREEN"
 : >"$BEFORE"
 
@@ -445,11 +449,18 @@ command_line() {
 # Long brackets around both arguments so a leader nvim spells with a
 # backslash reaches Lua as the character it is.
 mapping_desc() {
-    local key="$1" answer=$WORK/mapping-desc.txt lua start el
-    rm -f "$answer"
+    local key="$1" answer=$WORK/mapping-desc.txt lua start el read
+    rm -f "$answer" "$answer.part"
+    # written aside and renamed into place: `writefile` creates the file and
+    # then fills it, so a reader that waits on existence alone can take a
+    # zero-byte answer -- which reads as a description of `''`, and an empty
+    # description is what the caller treats as "the config owns this key".
+    # A rename is the one step nothing can observe half of.
     lua=":lua local m = vim.fn.maparg([==[$key]==], 'n', false, true)"
-    lua="$lua vim.fn.writefile({ next(m) == nil and '-none-'"
-    lua="$lua or (m.desc or '-nodesc-') }, [==[$answer]==])"
+    lua="$lua local d = next(m) == nil and '-none-' or m.desc"
+    lua="$lua if d == nil or d == '' then d = '-nodesc-' end"
+    lua="$lua vim.fn.writefile({ d }, [==[$answer.part]==])"
+    lua="$lua os.rename([==[$answer.part]==], [==[$answer]==])"
     command_line "$lua"
     start=$(now)
     while [ ! -f "$answer" ]; do
@@ -460,7 +471,12 @@ mapping_desc() {
         }
         sleep "$POLL"
     done
-    head -n 1 "$answer"
+    read=$(head -n 1 "$answer")
+    [ -n "$read" ] || {
+        fail "the session answered nothing at all for the mapping on $key, which must not be read as a config own key"
+        return 1
+    }
+    printf '%s' "$read"
 }
 
 # Waits for `text` to be on screen, answering how long that took.
@@ -898,17 +914,33 @@ SWEEP_CONFIG=$(cd -- "$SWEEP_CONFIG" && pwd)
 
 # The XDG environment every session below runs under, and the probe with
 # it: one home per kind, built once, so a leg's cache hit and the probe's
-# palette are readings of the same configured editor.
-CONFIG_OVERRIDE=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-cfg-XXXXXX")
+# palette are readings of the same configured editor. `RUN_SUPPORT` is not
+# one of those homes -- the XDG_CONFIG_HOME is the borrowed `SWEEP_CONFIG`
+# -- it is where this run keeps the files it composes for itself: the
+# `view.toml` it drives with, the engine prelude, the launcher.
+RUN_SUPPORT=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-support-XXXXXX")
 DATA_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-data-XXXXXX")
 STATE_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-state-XXXXXX")
-ROOTS+=("$CONFIG_OVERRIDE" "$DATA_HOME" "$STATE_HOME")
-# The plugin set, linked in rather than pointed at: `nvim/lazy` is where a
-# plugin manager finds what is already installed, and it is the only path
-# under a borrowed data home this run can reach. Everything else a plugin
-# writes -- a tool installer's downloads, an auto-saved session, a project
-# history -- has nowhere to land but the scratch directory above, which is
-# what makes "borrowed" mean read-only rather than merely intended to be.
+ROOTS+=("$RUN_SUPPORT" "$DATA_HOME" "$STATE_HOME")
+# The plugin set, linked in: `nvim/lazy` is where a plugin manager finds
+# what is already installed, and it is the only path under a borrowed data
+# home this run can reach. Everything a plugin writes elsewhere -- a tool
+# installer's downloads, an auto-saved session, a project history -- has
+# nowhere to land but the scratch homes above.
+#
+# The link is to the directory, so it is writable, and what closes that is
+# the prelude below rather than the link: a plugin manager asked to install
+# a spec it cannot find would clone straight through it, and its own clean
+# step deletes the directory first. Stubbing the module that installs is
+# what makes the borrow read-only -- a link nothing can be written through
+# because nothing that writes exists in the session. What still reaches the
+# borrowed home is a plugin writing inside its own directory at runtime (a
+# compiled treesitter parser, a plugin-local cache), which is named here
+# rather than claimed away.
+#
+# `cleanup` wipes these roots with `rm -rf`, which unlinks a symlink instead
+# of walking into it; there is no glob and no `find -delete` anywhere near
+# them, and that is what keeps a scratch teardown off the user's plugins.
 if [ -n "$SWEEP_DATA" ]; then
     [ -d "$SWEEP_DATA/nvim/lazy" ] || {
         printf 'FAIL: %s holds no nvim/lazy, so there is no installed plugin set to borrow\n' \
@@ -921,17 +953,22 @@ fi
 # What the engine is told before a borrowed config runs.
 #
 # A plugin set meant for daily use keeps itself current in the background:
-# it fetches its own updates and installs tool binaries at startup. An
-# acceptance run must do neither -- each is a network round trip and a
-# write, on every launch, into the very home this run has only borrowed,
-# and one of them puts a notification float on screen in the middle of a
-# leg. The modules that do it answer as no-ops instead. Named one at a time
-# rather than switched off wholesale, so a borrowed config still loads
-# every plugin whose paint this sweep exists to observe.
-PRELUDE_LUA=$CONFIG_OVERRIDE/prelude.lua
+# it installs what a spec added, fetches its own updates, and installs tool
+# binaries at startup. An acceptance run must do none of it -- each is a
+# network round trip and a write, on every launch, into the very home this
+# run has only borrowed, and one of them puts a notification float on
+# screen in the middle of a leg. `lazy.manage` is the whole of the install,
+# update, clean and build machinery, which is what makes the borrowed
+# `nvim/lazy` link read-only in practice as well as in intent. The modules
+# answer as no-ops instead, named one at a time rather than switched off
+# wholesale, so a borrowed config still loads every plugin whose paint this
+# sweep exists to observe.
+PRELUDE_LUA=$RUN_SUPPORT/prelude.lua
 cat >"$PRELUDE_LUA" <<'PRELUDE'
 local noop = setmetatable({}, { __index = function() return function() end end })
-for _, module in ipairs({ 'lazy.manage.checker', 'mason-tool-installer' }) do
+for _, module in ipairs({
+  'lazy.manage', 'lazy.manage.checker', 'mason-tool-installer',
+}) do
   package.preload[module] = function()
     return noop
   end
@@ -941,7 +978,7 @@ ENGINE_PRELUDE=()
 [ -z "$SWEEP_DATA" ] || ENGINE_PRELUDE=(--cmd "luafile $PRELUDE_LUA")
 # view.toml is composed rather than read in place: the run appends the stub
 # agent to it, and a borrowed config is not this script's to write into.
-VIEW_TOML=$CONFIG_OVERRIDE/view.toml
+VIEW_TOML=$RUN_SUPPORT/view.toml
 if [ -f "$SWEEP_CONFIG/view/view.toml" ]; then
     cp "$SWEEP_CONFIG/view/view.toml" "$VIEW_TOML"
 else
@@ -950,7 +987,7 @@ fi
 # Every session starts through this rather than through the binary, because
 # what a leg has to hand tmux is one command line: the engine arguments
 # below carry spaces of their own, and a tmux command string re-splits them.
-LAUNCHER=$CONFIG_OVERRIDE/launch.sh
+LAUNCHER=$RUN_SUPPORT/launch.sh
 {
     printf '#!/usr/bin/env bash\nexec %q --config %q' "$VIEW_BIN" "$VIEW_TOML"
     # guarded rather than left to the expansion: bash's `%q` with no
@@ -978,7 +1015,12 @@ chmod +x "$LAUNCHER"
 probe_palette() {
     local derive=$WORK/derive.lua out
     awk '/^local function derive\(\)$/, /^end$/' "$NVIM_API_RS" >"$derive"
-    grep -qx 'local function derive()' "$derive" && grep -qx 'end' "$derive" || {
+    # a floor on what came out, not just its first and last lines: any
+    # truncation ending on a column-0 `end` would satisfy those two while
+    # lifting an arithmetic missing most of the groups it sets
+    grep -qx 'local function derive()' "$derive" &&
+        grep -qx 'end' "$derive" &&
+        [ "$(grep -c nvim_set_hl "$derive")" -ge 5 ] || {
         printf 'FAIL: no `derive()` to lift out of %s any more, so this sweep would have to re-implement the review'"'"'s own arithmetic\n' \
             "$NVIM_API_RS" >&2
         return 1
@@ -1002,10 +1044,14 @@ end
 out[#out + 1] = 'mapleader ' .. (vim.g.mapleader or '\\')
 io.stdout:write(table.concat(out, '\n') .. '\n')
 PROBE
+    # stderr kept rather than dropped: a probe that dies for a reason of
+    # the config's -- a Lua error on startup, no `nvim` on PATH at all --
+    # otherwise reaches the reader only as "answered nothing for Normal",
+    # which sends them looking at the group instead of at the config
     out=$(env XDG_CONFIG_HOME="$SWEEP_CONFIG" XDG_DATA_HOME="$DATA_HOME" \
-        XDG_STATE_HOME="$STATE_HOME" XDG_CACHE_HOME="$CONFIG_OVERRIDE/cache" \
+        XDG_STATE_HOME="$STATE_HOME" XDG_CACHE_HOME="$RUN_SUPPORT/cache" \
         nvim --headless ${ENGINE_PRELUDE[@]+"${ENGINE_PRELUDE[@]}"} \
-        -c "luafile $derive" -c 'qa!' 2>/dev/null) || true
+        -c "luafile $derive" -c 'qa!' 2>"$PROBE_ERR") || true
     printf '%s\n' "$out"
 }
 
@@ -1018,6 +1064,10 @@ probed_bg() {
         END { exit !found }') || {
         printf 'FAIL: the probe of %s answered nothing for %s, so no assertion about it could be made\n' \
             "$SWEEP_CONFIG" "$group" >&2
+        [ ! -s "$PROBE_ERR" ] || {
+            printf '      the probe wrote to stderr:\n' >&2
+            tail -5 "$PROBE_ERR" >&2
+        }
         return 1
     }
     printf '%s' "$value"
@@ -1141,6 +1191,21 @@ esac
 # What the tree's create prompt asks with, read out of the engine call that
 # primes `vim.fn.input()` with it: the paste leg has to know the prompt is
 # up before it pastes, or it would be pasting at the tree instead.
+# How view names a mapping it registered, read out of the format that
+# builds it: the entry-points leg tells its own default apart from one the
+# driven config bound to the same key by this description, and a leg holding
+# a stale copy of it would read every entry point as the config's and skip
+# the lot while still reporting green.
+DESC_FORMAT=$(grep -oE "desc = string\\.format\\('[^']+'" "$NVIM_API_RS" |
+    sed -E "s/.*'(.*)'/\\1/" | head -1) || true
+case $DESC_FORMAT in
+*%s*%s*) ;;
+*)
+    printf 'FAIL: %s no longer builds its mapping descriptions from a two-slot format (got %s), so no leg can tell view own key from the config own\n' \
+        "$NVIM_API_RS" "${DESC_FORMAT:-nothing}" >&2
+    exit 1
+    ;;
+esac
 CREATE_PROMPT=$(grep -A 6 'pub fn tree_create_prompt' "$NVIM_API_RS" |
     grep -oE 'Value::from\("[^"]+"\)' | sed -E 's/.*"(.*)".*/\1/' | head -1) || true
 [ -n "$CREATE_PROMPT" ] || {
@@ -1374,19 +1439,26 @@ BARE
     assert_caret_after QRY 'the picker query' || return 1
     dismiss picker
 
-    local desc
+    local desc want_desc pressed=0 skipped=0
     while read -r feature lhs verb; do
         key=$(tmux_key "$lhs") || return 1
         marker=$(marker_for "$feature" "$verb") || return 1
         desc=$(mapping_desc "$key") || return 1
-        if [ "$desc" != "view: $feature $verb" ]; then
+        # built from the engine's own format string rather than spelled
+        # again here: a description that gains a field would otherwise match
+        # nothing, every entry point would read as the config's, and the leg
+        # would skip its way to green
+        want_desc=$(printf "$DESC_FORMAT" "$feature" "$verb")
+        if [ "$desc" != "$want_desc" ]; then
             [ "$desc" != -none- ] || {
                 fail "nothing maps $lhs in this session, so view's $feature $verb default never registered"
                 return 1
             }
             skip "$lhs is this config's own key (\"$desc\"), which outranks view's $feature $verb default; :View $feature above proves the surface"
+            skipped=$((skipped + 1))
             continue
         fi
+        pressed=$((pressed + 1))
         mark
         send_text "$key"
         took=$(wait_change "$REACTION_SECS" "$lhs")
@@ -1397,6 +1469,14 @@ BARE
     done <<ENTRIES
 $ENTRY_POINTS
 ENTRIES
+    # a floor under the skips: every entry point being the config's own key
+    # is indistinguishable, in a green log, from a leg that stopped matching
+    # view's mappings at all -- and this is the leg that proves the keys
+    # users actually press
+    [ "$pressed" -gt 0 ] || {
+        fail "no default key reached view at all ($skipped of $skipped rebound by $SWEEP_CONFIG), so nothing here pressed a key a user would"
+        return 1
+    }
 
     end_session
 }
@@ -1807,27 +1887,15 @@ $end"
     assert_chrome 'the create prompt holding a pasted name'
     pass "a paste into a blocked vim.fn.input() prompt is typed into it (${echoed}s)"
 
-    # Escape cancels the input, creating nothing -- and then Escape again,
-    # until nothing is framed. A `Prompt` overlay forwards the key that
-    # cancels it to the engine and closes lazily, on the first key observed
-    # once the engine has actually hidden its cmdline (`Focus::Native`'s
-    # rule in view-core's model), so retiring the box and closing the tree
-    # beneath it are further keystrokes by design -- and whether a given one
-    # lands before or after the engine's hide is a race a loaded host loses.
-    # Pressed until the screen is clear rather than a fixed number of times
-    # and hoped: a product that stopped closing on the key still fails here,
-    # on the budget, with the box named.
-    local cancelled
-    cancelled=$(now)
-    while :; do
-        send_key Escape
-        settle
-        grep -q '┌' "$SCREEN" || break
-        if ! under "$(elapsed "$cancelled" "$(now)")" "$WAIT_SECS"; then
-            fail "the cancelled create prompt is still framed after ${WAIT_SECS}s of Escapes"
-            return 1
-        fi
-    done
+    # One Escape, and the box is gone with it. A `Prompt` overlay retires
+    # on the `cmdline_hide` the cancelling key comes back as, not on some
+    # later keystroke, so a second key here would hide a regression to the
+    # lazy close this asserts against.
+    send_key Escape
+    wait_gone "$CREATE_PROMPT" "$WAIT_SECS" "the cancelled create prompt" >/dev/null
+    pass 'one Escape cancels the blocked prompt and takes its box with it'
+    dismiss
+
     end_session
 }
 

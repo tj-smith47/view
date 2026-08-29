@@ -1214,8 +1214,8 @@ fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, 
 /// dimmed variant of the interior's own `msg_area` foreground when one is
 /// set, visibly distinct from the full-brightness interior text with no
 /// further highlight lookup or RPC round trip. Never falls back to a
-/// dimmed `msg.bg`: the border sits ON that background, so dimming it
-/// paints a frame that is merely a darker shade of the surface it is
+/// dimmed `MsgArea` background: the border sits ON that background, so
+/// dimming it paints a frame that is merely a darker shade of the surface it is
 /// supposed to stand out from -- on a black-bg/no-fg theme this dims pure
 /// black to itself, an invisible border around a box the user cannot tell
 /// apart from empty screen. The floor is the plain (undimmed) neutral grey
@@ -3209,8 +3209,8 @@ mod tests {
     /// A theme with no `MsgArea` foreground -- e.g. a colorscheme that
     /// only sets `guibg` on `MsgArea`, or a pre-attach/no-colorscheme
     /// `Theme::default()` -- must still get a visible border. Disconfirm:
-    /// reverting `message_border_color` to its pre-fix `.or(msg.bg)`
-    /// chain and setting `msg.bg` to black here makes this assert
+    /// reverting `message_border_color` to its pre-fix chain ending in the
+    /// `MsgArea` background, with that background black, makes this assert
     /// `0` instead of the grey constant -- an invisible black-on-black
     /// frame around a black background.
     #[test]
@@ -5515,10 +5515,15 @@ mod tests {
             rgb(HABAMAX_FLOAT_BG),
             "an unselected popup row is not the float body the menu is drawn on"
         );
-        assert_ne!(
+        // the exact value, not merely "not the buffer": an unstated
+        // `PmenuSel` falls back to the emphasis style, whose reverse
+        // `selection_style` resolves by swapping -- so the selected row
+        // wears the emphasis foreground as its background, and a
+        // regression that lands on some third color is a regression
+        assert_eq!(
             buf[(3, 3)].bg,
-            rgb(HABAMAX_BUFFER_BG),
-            "the selected popup row shows the buffer through the menu"
+            rgb(0x00C7_C7C7),
+            "the selected popup row is the emphasis foreground, swapped in"
         );
     }
 

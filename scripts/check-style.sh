@@ -348,6 +348,30 @@ check_string_literal_width() {
   return 0
 }
 
+# An acceptance assertion's expected color is read from the live scheme by
+# probe, never from a config's text (scripts/acceptance/artifacts.sh).
+#
+# Two literals, banned outright, rather than a pattern that names a reader
+# and a path together: the code this exists to stop held the path in a
+# variable assigned on one line and ran the `sed` on another, wrapped over
+# a third with a `\` -- and grep is line-oriented, so every such pattern
+# misses the only shape that ever carried the defect. A colorscheme file is
+# not an acceptance script's to name at all (a `cp -R .../nvim dst` of a
+# whole config still is), and a `#rrggbb` inside one is an expectation that
+# outlives whichever scheme it was copied out of. Fixtures are excluded by
+# the include filter: a colorscheme is made of the literals this bans.
+check_acceptance_expectations() {
+  local acceptfail=0
+  [ -d scripts/acceptance ] || return 0
+  if grep -rn --include='*.sh' -- 'nvim/colors' scripts/acceptance; then
+    echo "STYLE FAIL: an acceptance script names a colorscheme file (probe the live scheme instead)"; acceptfail=1
+  fi
+  if grep -rnE --include='*.sh' '#[0-9a-fA-F]{6}' scripts/acceptance; then
+    echo "STYLE FAIL: a color literal in an acceptance script (probe the live scheme instead)"; acceptfail=1
+  fi
+  return $acceptfail
+}
+
 # The two width walks alone, run against a scratch crate root rather than
 # this tree: the walks read only crates/view-engine, so grading them does
 # not need the README, the scripts directory or the god-file classifier the
@@ -364,6 +388,18 @@ if [ "${1:-}" = "--widths" ]; then
   check_lua_chunk_width || widthfail=1
   check_string_literal_width || widthfail=1
   exit $widthfail
+fi
+# The acceptance-expectation ban alone, graded the same way and for the same
+# reason: a rule with no case matrix is a rule nobody has watched fail.
+if [ "${1:-}" = "--acceptance" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --acceptance ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_acceptance_expectations
+  exit $?
 fi
 
 fail=0
@@ -514,20 +550,7 @@ if [ -d scripts ]; then
     echo "STYLE FAIL: review-finding reference in script comment"; fail=1
   fi
 fi
-if [ -d scripts/acceptance ]; then
-  # an acceptance assertion's expected color is read from the live scheme by
-  # probe, never from a config's text (scripts/acceptance/artifacts.sh). A
-  # `sed` over a fixture's colorscheme asserts the one scheme this repo
-  # ships and keeps asserting it after the run has been pointed at another,
-  # which is how the visual sweep came to prove overlay chrome on a single
-  # opaque palette while the defect it exists for lived on the user's own.
-  # Matched on the read, not on the path alone: an acceptance script may
-  # legitimately copy or list a fixture's colors, only never parse one for a
-  # value it then asserts.
-  if grep -rnE '(sed|grep|awk|rg)[^|;&]*fixtures/[^ ]*/nvim/colors' scripts/acceptance; then
-    echo "STYLE FAIL: acceptance expectation read out of a fixture colorscheme's text (probe the live scheme instead)"; fail=1
-  fi
-fi
+check_acceptance_expectations || fail=1
 if [ -f README.md ]; then
   doc_targets=(README.md)
   [ -d docs ] && doc_targets+=(docs)

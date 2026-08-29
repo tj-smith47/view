@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Case matrix for the two width walks in check-style.sh (the Lua chunk walk
-# and the multi-line string literal walk). Every case builds a scratch crate
-# tree, points the walks at it, and asserts BOTH the exit status and the
+# and the multi-line string literal walk) and for its acceptance-expectation
+# ban. Every case builds a scratch tree, points the check at it, and asserts
+# BOTH the exit status and the
 # exact set of reported lines: a case expecting one over-width line has to
 # fail when a second one is reported, and a case expecting silence has to
 # fail when a walk narrows itself and reports nothing for the wrong reason.
@@ -219,6 +220,77 @@ expect 1 'lit-none' 'a view-engine carrying no multi-line string literal at all'
 new_case
 rm -rf "$CASE/crates"
 expect 1 'chunk-missing lit-missing' 'a tree with no crate path for either walk to read'
+
+# ---------------------------------------------------------------------------
+# the acceptance-expectation ban: an expected color comes from a probe of the
+# live scheme, never out of a config's text. The three evasions below are the
+# shapes the deleted code actually had -- a path behind a variable, a reader
+# wrapped onto its own line, a pipe between the two -- each of which slips
+# past any pattern that tries to see a reader and a path on one line
+# ---------------------------------------------------------------------------
+ACC='scripts/acceptance/leg.sh'
+
+new_accept_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/scripts/acceptance/fixtures/themed/nvim/colors"
+  printf "vim.api.nvim_set_hl(0, 'Normal', { bg = '#282a36' })\n" \
+    > "$CASE/scripts/acceptance/fixtures/themed/nvim/colors/scheme.lua"
+}
+
+expect_accept() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --acceptance "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^STYLE FAIL: an acceptance script names a colorscheme file/ {
+      print "names-scheme"; next
+    }
+    /^STYLE FAIL: a color literal in an acceptance script/ {
+      print "color-literal"; next
+    }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got" "$out"
+}
+
+new_accept_case
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'SCHEME=$DIR/fixtures/themed/nvim/colors/scheme.lua\n'
+  printf 'bg=$(sed -n "s/.*bg = .\\(......\\)./\\1/p" \\\n'
+  printf '    "$SCHEME")\n'
+} > "$CASE/$ACC"
+expect_accept 1 'names-scheme' 'a path in a variable, its reader wrapped onto another line'
+
+new_accept_case
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'bg=$(cat fixtures/themed/nvim/colors/scheme.lua | sed -n 1p)\n'
+} > "$CASE/$ACC"
+expect_accept 1 'names-scheme' 'a reader with a pipe between it and the path'
+
+new_accept_case
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'want=%s\n' '"#282a36"'
+} > "$CASE/$ACC"
+expect_accept 1 'color-literal' 'an expected color written into the script itself'
+
+new_accept_case
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'cp -R "$FIXTURE/nvim" "$CONFIG_HOME/nvim"\n'
+  printf 'PALETTE=$(nvim --headless -c "luafile $probe" -c qa!)\n'
+} > "$CASE/$ACC"
+expect_accept 0 '' 'a leg that copies a whole config and probes the live scheme'
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
