@@ -514,6 +514,20 @@ if [ -d scripts ]; then
     echo "STYLE FAIL: review-finding reference in script comment"; fail=1
   fi
 fi
+if [ -d scripts/acceptance ]; then
+  # an acceptance assertion's expected color is read from the live scheme by
+  # probe, never from a config's text (scripts/acceptance/artifacts.sh). A
+  # `sed` over a fixture's colorscheme asserts the one scheme this repo
+  # ships and keeps asserting it after the run has been pointed at another,
+  # which is how the visual sweep came to prove overlay chrome on a single
+  # opaque palette while the defect it exists for lived on the user's own.
+  # Matched on the read, not on the path alone: an acceptance script may
+  # legitimately copy or list a fixture's colors, only never parse one for a
+  # value it then asserts.
+  if grep -rnE '(sed|grep|awk|rg)[^|;&]*fixtures/[^ ]*/nvim/colors' scripts/acceptance; then
+    echo "STYLE FAIL: acceptance expectation read out of a fixture colorscheme's text (probe the live scheme instead)"; fail=1
+  fi
+fi
 if [ -f README.md ]; then
   doc_targets=(README.md)
   [ -d docs ] && doc_targets+=(docs)

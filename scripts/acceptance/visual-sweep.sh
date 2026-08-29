@@ -16,17 +16,37 @@
 # colorscheme, because an unthemed session cannot tell an overlay that owns
 # its cells from one that never had to.
 #
-# The three background values the assertions turn on are the fixture's own
-# (scripts/acceptance/fixtures/themed) and are read out of it here, so a
-# retuned fixture moves the assertions with it rather than leaving them
-# matching a color nothing paints any more. The entry points driven are read
-# out of `DEFAULT_MAPS` for the same reason: a feature that gains a key
-# gains a leg here on the same commit, and one whose key stops doing
-# anything fails loudly instead of quietly going unswept.
+# An acceptance assertion's expected color is read from the live scheme by
+# probe, never from a config's text. Every background the assertions turn
+# on comes back from a headless nvim started under the very XDG environment
+# the driven session will use, resolved through `nvim_get_hl` -- and, for
+# the groups a review is drawn with, through `REVIEW_SHOW_CHUNK`'s own
+# `derive`, lifted out of the engine source and run rather than
+# re-implemented here, so there is one arithmetic and not two. Reading a
+# `#rrggbb` out of a colorscheme file with `sed` could only ever assert the
+# single scheme this repo ships (and cost a BSD-`sed` word-boundary
+# footnote to do it); a probe asserts whichever scheme the run was pointed
+# at, transparent ones included -- a group with no background of its own
+# reads back as `-`, the terminal default, which is what a capture shows
+# for it.
 #
-# Needs `tmux` and the pinned `nvim`. No network and no agent: the panel is
-# opened against the stub agent the conformance leg already builds, since
-# what is under test is the paint, never the conversation.
+# What it is pointed at: `VIEW_SWEEP_CONFIG`, an XDG_CONFIG_HOME directory
+# holding `nvim/` (default: the themed fixture), and `VIEW_SWEEP_DATA`, an
+# XDG_DATA_HOME whose installed plugin set the run borrows. Borrowing links
+# in that home's `nvim/lazy` and nothing else, so a plugin manager finds
+# every plugin already installed while every byte anything writes -- a tool
+# installer's downloads, a session file, a project history -- lands in this
+# run's own scratch instead of in the home it was borrowed from.
+#
+# The entry points driven are read out of `DEFAULT_MAPS` on the same terms
+# as the colors: a feature that gains a key gains a leg here on the same
+# commit, and one whose key stops doing anything fails loudly instead of
+# quietly going unswept.
+#
+# Needs `tmux` and the pinned `nvim`. No agent: the panel is opened against
+# the stub agent the conformance leg already builds, since what is under
+# test is the paint, never the conversation. No network either, unless a
+# borrowed config's own plugins reach for one.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -36,7 +56,11 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 VIEW_BIN=${VIEW_BIN:-$TARGET_ROOT/release/view}
 STUB_BIN=${STUB_BIN:-$TARGET_ROOT/release/view-ai-stub-agent}
 FIXTURE=$SCRIPT_DIR/fixtures/themed
-COLORSCHEME=$FIXTURE/nvim/colors/view-dracula.lua
+# The XDG_CONFIG_HOME the driven sessions read, and the XDG_DATA_HOME whose
+# installed plugins they borrow. Both are directories rather than files:
+# nothing here reads a config's text.
+SWEEP_CONFIG=${VIEW_SWEEP_CONFIG:-$FIXTURE}
+SWEEP_DATA=${VIEW_SWEEP_DATA:-}
 MAPPINGS_RS=$REPO_ROOT/crates/view-core/src/native/mappings.rs
 PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
 PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
@@ -408,6 +432,37 @@ command_line() {
     send_key Enter
 }
 
+# What holds `key` in normal mode in the running session: the description
+# the live mapping carries, `-nodesc-` for a mapping registered without
+# one, or `-none-` when nothing maps the key at all.
+#
+# A user's own mapping outranks a default, correctly, so a config that
+# binds a key view also binds owns it -- and a leg pressing that key would
+# drive the config's feature rather than the surface under test. view
+# registers its defaults with a description of its own (`view: <feature>
+# <verb>`, `nvim_api.rs`), which is what lets the caller tell the two apart
+# from the live session instead of from an assumption about the config.
+# Long brackets around both arguments so a leader nvim spells with a
+# backslash reaches Lua as the character it is.
+mapping_desc() {
+    local key="$1" answer=$WORK/mapping-desc.txt lua start el
+    rm -f "$answer"
+    lua=":lua local m = vim.fn.maparg([==[$key]==], 'n', false, true)"
+    lua="$lua vim.fn.writefile({ next(m) == nil and '-none-'"
+    lua="$lua or (m.desc or '-nodesc-') }, [==[$answer]==])"
+    command_line "$lua"
+    start=$(now)
+    while [ ! -f "$answer" ]; do
+        el=$(elapsed "$start" "$(now)")
+        under "$el" "$REACTION_SECS" || {
+            fail "the session never answered which mapping holds $key"
+            return 1
+        }
+        sleep "$POLL"
+    done
+    head -n 1 "$answer"
+}
+
 # Waits for `text` to be on screen, answering how long that took.
 wait_for() {
     local text="$1" budget="$2" what="$3" start el
@@ -744,7 +799,7 @@ start_session() {
     SESSION="view-visual-$$-$tag"
     ROOT=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-$tag-XXXXXX")
     ROOTS+=("$ROOT")
-    mkdir -p "$ROOT/xdg_data_home" "$ROOT/xdg_cache_home"
+    mkdir -p "$ROOT/xdg_cache_home"
     # long enough that the cursor can sit in the middle of the window: a
     # centered overlay has to be drawn over the cursor row's full-width
     # highlight for the interior check to have anything to catch, and a
@@ -759,16 +814,24 @@ start_session() {
     # started in $ROOT, which is both the project root view offers to trust
     # and a directory no trust store here has ever heard of
     tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$ROOT" \
-        "env XDG_CONFIG_HOME=$CONFIG_HOME \
-             XDG_DATA_HOME=$ROOT/xdg_data_home \
+        "env XDG_CONFIG_HOME=$SWEEP_CONFIG \
+             XDG_DATA_HOME=$DATA_HOME \
              XDG_STATE_HOME=$STATE_HOME \
              XDG_CACHE_HOME=$ROOT/xdg_cache_home \
              VIEW_LOG=$ROOT/view.log \
              TERM=xterm-256color COLORTERM=truecolor \
-             $VIEW_BIN $ROOT/scratch.txt"
+             $LAUNCHER $ROOT/scratch.txt"
 
     wait_for "$seed" "$WAIT_SECS" "the seeded buffer" >/dev/null || return 1
     watch_view "$SESSION" || return 1
+    # One window, no floats: a config with a file explorer or a startup
+    # notice of its own opens both, and every assertion here that reads
+    # "the framed box on this row" or "left of every frame" would answer
+    # for a plugin's window rather than for the surface under test. `only`
+    # and a close of every relative window say that in nvim's own terms, so
+    # no plugin is named and none has to be.
+    command_line ':silent! only'
+    command_line ':lua for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.api.nvim_win_get_config(w).relative ~= "" then pcall(vim.api.nvim_win_close, w, true) end end'
     # anchored on the ruler rather than on any buffer text, which was
     # already on screen before the motion and so would report the cursor
     # moved whether it had or not
@@ -822,78 +885,208 @@ ensure_artifact "$STUB_BIN" "$TARGET_ROOT/release/view-ai-stub-agent" \
     printf 'FAIL: the themed fixture is missing at %s\n' "$FIXTURE" >&2
     exit 1
 }
+[ -d "$SWEEP_CONFIG/nvim" ] || {
+    printf 'FAIL: %s is not an XDG_CONFIG_HOME (no nvim/ under it), so there is no colorscheme for this run to be driven against\n' \
+        "$SWEEP_CONFIG" >&2
+    exit 1
+}
+# absolute from here on: both of these are handed to nvim as XDG homes, and
+# a relative one resolves against whatever directory each process happens
+# to have -- the sessions are started from tmux with a root of their own
+SWEEP_CONFIG=$(cd -- "$SWEEP_CONFIG" && pwd)
+[ -z "$SWEEP_DATA" ] || SWEEP_DATA=$(cd -- "$SWEEP_DATA" && pwd)
 
-# The `#rrggbb` a fixture group gives `field` (`bg` or `fg`). Matched on
-# the field's own key rather than on where the hex sits in the call, since
-# a group written `bg` before `fg` would otherwise read one as the other.
-# The key is anchored on the `{` or `,` that opens it rather than on `\b`,
-# which BSD `sed -E` reads as a literal `b` -- a word class there would
-# match nothing on macOS and fail this sweep for a fixture that is fine.
-fixture_hex() {
-    local group="$1" field="$2" hex
-    hex=$(sed -nE "s/.*'$group', [^}]*[{,][[:space:]]*$field = '(#[0-9a-f]{6})'.*/\1/p" \
-        "$COLORSCHEME" | tail -1) || true
-    if [ -z "$hex" ]; then
-        printf 'FAIL: %s has no %s in %s any more\n' "$group" "$field" "$COLORSCHEME" >&2
+# The XDG environment every session below runs under, and the probe with
+# it: one home per kind, built once, so a leg's cache hit and the probe's
+# palette are readings of the same configured editor.
+CONFIG_OVERRIDE=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-cfg-XXXXXX")
+DATA_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-data-XXXXXX")
+STATE_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-state-XXXXXX")
+ROOTS+=("$CONFIG_OVERRIDE" "$DATA_HOME" "$STATE_HOME")
+# The plugin set, linked in rather than pointed at: `nvim/lazy` is where a
+# plugin manager finds what is already installed, and it is the only path
+# under a borrowed data home this run can reach. Everything else a plugin
+# writes -- a tool installer's downloads, an auto-saved session, a project
+# history -- has nowhere to land but the scratch directory above, which is
+# what makes "borrowed" mean read-only rather than merely intended to be.
+if [ -n "$SWEEP_DATA" ]; then
+    [ -d "$SWEEP_DATA/nvim/lazy" ] || {
+        printf 'FAIL: %s holds no nvim/lazy, so there is no installed plugin set to borrow\n' \
+            "$SWEEP_DATA" >&2
+        exit 1
+    }
+    mkdir -p "$DATA_HOME/nvim"
+    ln -s "$SWEEP_DATA/nvim/lazy" "$DATA_HOME/nvim/lazy"
+fi
+# What the engine is told before a borrowed config runs.
+#
+# A plugin set meant for daily use keeps itself current in the background:
+# it fetches its own updates and installs tool binaries at startup. An
+# acceptance run must do neither -- each is a network round trip and a
+# write, on every launch, into the very home this run has only borrowed,
+# and one of them puts a notification float on screen in the middle of a
+# leg. The modules that do it answer as no-ops instead. Named one at a time
+# rather than switched off wholesale, so a borrowed config still loads
+# every plugin whose paint this sweep exists to observe.
+PRELUDE_LUA=$CONFIG_OVERRIDE/prelude.lua
+cat >"$PRELUDE_LUA" <<'PRELUDE'
+local noop = setmetatable({}, { __index = function() return function() end end })
+for _, module in ipairs({ 'lazy.manage.checker', 'mason-tool-installer' }) do
+  package.preload[module] = function()
+    return noop
+  end
+end
+PRELUDE
+ENGINE_PRELUDE=()
+[ -z "$SWEEP_DATA" ] || ENGINE_PRELUDE=(--cmd "luafile $PRELUDE_LUA")
+# view.toml is composed rather than read in place: the run appends the stub
+# agent to it, and a borrowed config is not this script's to write into.
+VIEW_TOML=$CONFIG_OVERRIDE/view.toml
+if [ -f "$SWEEP_CONFIG/view/view.toml" ]; then
+    cp "$SWEEP_CONFIG/view/view.toml" "$VIEW_TOML"
+else
+    : >"$VIEW_TOML"
+fi
+# Every session starts through this rather than through the binary, because
+# what a leg has to hand tmux is one command line: the engine arguments
+# below carry spaces of their own, and a tmux command string re-splits them.
+LAUNCHER=$CONFIG_OVERRIDE/launch.sh
+{
+    printf '#!/usr/bin/env bash\nexec %q --config %q' "$VIEW_BIN" "$VIEW_TOML"
+    # guarded rather than left to the expansion: bash's `%q` with no
+    # argument at all prints `''`, and an empty argument reaches view as a
+    # path to open -- which resolves to the working directory and puts a
+    # directory listing where the seeded buffer should be
+    [ "${#ENGINE_PRELUDE[@]}" -eq 0 ] || printf ' %q' "${ENGINE_PRELUDE[@]}"
+    printf ' "$@"\n'
+} >"$LAUNCHER"
+chmod +x "$LAUNCHER"
+
+# Every background the assertions turn on, out of the live scheme.
+#
+# A headless nvim under this run's own XDG environment, which resolves the
+# groups exactly as the driven sessions will -- plugins, lazy-loading and
+# `ColorScheme` autocommands included -- and then runs the review's own
+# `derive`, lifted verbatim out of `REVIEW_SHOW_CHUNK`. That lift is what
+# keeps one arithmetic in the tree: the fifth-of-a-foreground blend a
+# fg-only diff group is drawn with is written once, in the engine, and read
+# back here through the groups it sets rather than repeated in shell.
+#
+# `-c luafile` rather than `nvim -l`, which runs its script instead of the
+# user's config and would answer with nvim's built-in scheme for every
+# config on earth.
+probe_palette() {
+    local derive=$WORK/derive.lua out
+    awk '/^local function derive\(\)$/, /^end$/' "$NVIM_API_RS" >"$derive"
+    grep -qx 'local function derive()' "$derive" && grep -qx 'end' "$derive" || {
+        printf 'FAIL: no `derive()` to lift out of %s any more, so this sweep would have to re-implement the review'"'"'s own arithmetic\n' \
+            "$NVIM_API_RS" >&2
         return 1
-    fi
-    printf '%s' "$hex"
+    }
+    cat >>"$derive" <<'PROBE'
+derive()
+local out = {}
+for _, group in ipairs({
+  'Normal', 'CursorLine', 'NormalFloat',
+  'ViewReviewAdded', 'ViewReviewRemoved', 'ViewReviewHeader',
+  'ViewReviewStale',
+}) do
+  local hl = vim.api.nvim_get_hl(0, { name = group, link = false })
+  local bg = '-'
+  if hl.bg ~= nil then
+    bg = string.format('%d;%d;%d', math.floor(hl.bg / 65536) % 256,
+      math.floor(hl.bg / 256) % 256, hl.bg % 256)
+  end
+  out[#out + 1] = group .. ' ' .. bg
+end
+out[#out + 1] = 'mapleader ' .. (vim.g.mapleader or '\\')
+io.stdout:write(table.concat(out, '\n') .. '\n')
+PROBE
+    out=$(env XDG_CONFIG_HOME="$SWEEP_CONFIG" XDG_DATA_HOME="$DATA_HOME" \
+        XDG_STATE_HOME="$STATE_HOME" XDG_CACHE_HOME="$CONFIG_OVERRIDE/cache" \
+        nvim --headless ${ENGINE_PRELUDE[@]+"${ENGINE_PRELUDE[@]}"} \
+        -c "luafile $derive" -c 'qa!' 2>/dev/null) || true
+    printf '%s\n' "$out"
 }
 
-# A fixture group's background as the decimal triple a truecolor escape
-# spells it with. Read rather than repeated so a retuned fixture cannot
-# leave the assertions matching a color nothing paints.
-fixture_bg() {
-    local hex
-    hex=$(fixture_hex "$1" bg) || return 1
-    printf '%d;%d;%d' "0x${hex:1:2}" "0x${hex:3:2}" "0x${hex:5:2}"
+# One probed group's background, or nothing when the probe did not answer
+# for it at all -- which is a run that cannot assert anything and fails
+# where it stands rather than comparing against an empty string.
+probed_bg() {
+    local group="$1" value
+    value=$(printf '%s\n' "$PALETTE" | awk -v g="$group" '$1 == g { print $2; found = 1 }
+        END { exit !found }') || {
+        printf 'FAIL: the probe of %s answered nothing for %s, so no assertion about it could be made\n' \
+            "$SWEEP_CONFIG" "$group" >&2
+        return 1
+    }
+    printf '%s' "$value"
 }
 
-# What the review derives from a diff group that has no background to hand
-# over: a fifth of its foreground over `Normal`'s background, which is the
-# arithmetic `REVIEW_SHOW_CHUNK`'s `derive` does inside nvim. Integer
-# rounding, in the shell rather than in awk, so the leg needs no more of a
-# host than every other assertion here does.
-review_blend() {
-    local hex base out= i c b
-    hex=$(fixture_hex "$1" fg) || return 1
-    base=$(fixture_hex Normal bg) || return 1
-    for i in 1 3 5; do
-        c=$((16#${hex:i:2}))
-        b=$((16#${base:i:2}))
-        out="${out:+$out;}$(((10 * b + 2 * (c - b) + 5) / 10))"
-    done
-    printf '%s' "$out"
+PALETTE=$(probe_palette) || exit 1
+# What `<leader>` types under this config, read off the config itself: a
+# rebound leader (a space, in most configs that rebind it at all) makes
+# every default mapping a different keystroke, and a leg typing nvim's
+# default would press nothing and report the feature as unreachable.
+#
+# Read with `sed` rather than through `probed_bg`, whose awk splits on
+# whitespace: a space is the very value this exists for, and a field split
+# would hand back an empty leader for it.
+LEADER=$(printf '%s\n' "$PALETTE" | sed -n 's/^mapleader //p')
+[ -n "$LEADER" ] || {
+    printf 'FAIL: the probe of %s answered no mapleader, so no leg here could type a default mapping\n' \
+        "$SWEEP_CONFIG" >&2
+    exit 1
 }
-
-NORMAL_BG=$(fixture_bg Normal) || exit 1
-CURSORLINE_BG=$(fixture_bg CursorLine) || exit 1
-FLOAT_BG=$(fixture_bg NormalFloat) || exit 1
+NORMAL_BG=$(probed_bg Normal) || exit 1
+CURSORLINE_BG=$(probed_bg CursorLine) || exit 1
+FLOAT_BG=$(probed_bg NormalFloat) || exit 1
 # What a review is drawn with: not the colorscheme's diff groups themselves
-# but the five view derives from them at show time (see `REVIEW_SHOW_CHUNK`),
+# but the four view derives from them at show time (see `REVIEW_SHOW_CHUNK`),
 # which carry none of those groups' attributes. A group that defines a
-# background hands it over as it stands, so those read back as the
-# fixture's own values -- which is why the fixture keeps `DiffDelete`
-# foreground-only and `reverse`, dracula's real shape: its derived value is
-# a color no group in the scheme defines, so a review that reverted to
-# painting with the diff groups themselves fails this leg rather than
-# matching it.
-REVIEW_ADDED_BG=$(fixture_bg DiffAdd) || exit 1
-REVIEW_REMOVED_BG=$(review_blend DiffDelete) || exit 1
-REVIEW_HEADER_BG=$(fixture_bg DiffText) || exit 1
+# background hands it over as it stands; one that does not is a fifth of its
+# foreground over `Normal`'s background, or over black or white by
+# `'background'` when `Normal` has none either. Both cases are the probe's
+# to answer, since both are what the engine's own `derive` just did.
+REVIEW_ADDED_BG=$(probed_bg ViewReviewAdded) || exit 1
+REVIEW_REMOVED_BG=$(probed_bg ViewReviewRemoved) || exit 1
+REVIEW_HEADER_BG=$(probed_bg ViewReviewHeader) || exit 1
 # read for the gate below rather than for a leg: it is what a stale hunk
 # paints with and what `StyleRole::GitModified` resolves to in the tree
-# float, so a fixture that let it collide with another group would be found
+# float, so a scheme that let it collide with another group would be found
 # by whichever leg reads it next rather than here
-REVIEW_STALE_BG=$(fixture_bg DiffChange) || exit 1
+REVIEW_STALE_BG=$(probed_bg ViewReviewStale) || exit 1
+# A derived group with no background is not a scheme this sweep can read a
+# transparent case out of -- it is `derive` having stopped setting one,
+# which every review assertion below would then match against the terminal
+# default and pass on a review that painted nothing.
+for derived in "$REVIEW_ADDED_BG" "$REVIEW_REMOVED_BG" "$REVIEW_HEADER_BG" "$REVIEW_STALE_BG"; do
+    [ "$derived" != - ] || {
+        printf 'FAIL: a ViewReview* group came back with no background at all, so the review derives nothing to paint with:\n%s\n' \
+            "$PALETTE" >&2
+        exit 1
+    }
+done
+# An overlay the user cannot tell from the buffer beneath it. A scheme is
+# free to leave `Normal` transparent -- that is the terminal's own
+# background showing through, and every assertion here can name it -- but a
+# float has to own its cells, and view derives its interior from this
+# group.
+[ "$FLOAT_BG" != - ] || {
+    printf 'FAIL: %s leaves NormalFloat with no background, so every overlay view paints reads as the buffer beneath it\n' \
+        "$SWEEP_CONFIG" >&2
+    exit 1
+}
 # Every one of them distinct from every other: two that shared a value would
 # leave a bleed through an overlay indistinguishable from correct paint, and
-# a proposed line indistinguishable from the row it replaces.
+# a proposed line indistinguishable from the row it replaces. Two groups
+# with no background at all share the loudest value of the lot -- the
+# terminal default, which a capture spells the same way for both.
 printf '%s\n' "Normal $NORMAL_BG" "CursorLine $CURSORLINE_BG" "NormalFloat $FLOAT_BG" \
     "ViewReviewAdded $REVIEW_ADDED_BG" "ViewReviewRemoved $REVIEW_REMOVED_BG" \
     "ViewReviewHeader $REVIEW_HEADER_BG" "ViewReviewStale $REVIEW_STALE_BG" |
-    awk -v scheme="$COLORSCHEME" '
-        { if ($2 in owner) { printf "FAIL: %s gives %s and %s the same background (%s), so this sweep cannot tell them apart\n", scheme, owner[$2], $1, $2 > "/dev/stderr"; bad = 1 }
+    awk -v scheme="$SWEEP_CONFIG" '
+        { if ($2 in owner) { printf "FAIL: the scheme %s resolves to gives %s and %s the same background (%s), so this sweep cannot tell them apart\n", scheme, owner[$2], $1, $2 > "/dev/stderr"; bad = 1 }
           owner[$2] = $1 }
         END { exit bad }' || exit 1
 
@@ -1054,21 +1247,22 @@ DEFAULT_VERBS=$(printf '%s\n' "$ENTRY_POINTS" | awk '!seen[$1]++ { print $1, $3 
 
 printf 'view acceptance: visual sweep (%s, %s, %sx%s)\n' \
     "${VIEW_BIN#"$REPO_ROOT/"}" "$(nvim --version | head -1)" "$COLS" "$ROWS"
+printf '  config %s\n  palette %s\n' "$SWEEP_CONFIG" \
+    "$(printf '%s\n' "$PALETTE" | tr '\n' ' ')"
+[ -z "$SWEEP_DATA" ] || printf '  plugins borrowed from %s/nvim/lazy\n' "$SWEEP_DATA"
 
-# The config and state a real returning user has: a session that has already
-# run once against this colorscheme and left its derived theme on disk. Both
-# are built here rather than per leg because the cache is keyed by the
-# resolved config path (crates/view/src/theme_cache.rs), so the path must be
-# the same one on every launch that is meant to hit it.
-CONFIG_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-config-XXXXXX")
-STATE_HOME=$(mktemp -d "${TMPDIR:-/tmp}/view-visual-state-XXXXXX")
-ROOTS+=("$CONFIG_HOME" "$STATE_HOME")
-cp -R "$FIXTURE/nvim" "$FIXTURE/view" "$CONFIG_HOME/"
 # The resume path the stub holds a reply at, handed to it the way the
 # conformance suite hands it: a leg that needs the panel in a known state
 # before the agent answers creates the file when it is ready.
+#
+# Appended to the composed `view.toml` rather than to the config's own,
+# which a borrowed config would not have this run's stub agent in and is
+# not this script's to edit either. The path stays the same on every launch
+# because the theme cache is keyed by it (crates/view/src/theme_cache.rs),
+# so a per-leg copy would key a different cache file and every leg would
+# run its first frames unthemed.
 RESUME_FILE=$(mktemp -u "${TMPDIR:-/tmp}/view-visual-resume-$$-XXXXXX")
-printf '\n[ai]\nagent = ["%s", "%s"]\n' "$STUB_BIN" "$RESUME_FILE" >>"$CONFIG_HOME/view/view.toml"
+printf '\n[ai]\nagent = ["%s", "%s"]\n' "$STUB_BIN" "$RESUME_FILE" >>"$VIEW_TOML"
 
 CURRENT_LEG=theme-cache
 SESSION="view-visual-$$-warm"
@@ -1077,17 +1271,17 @@ ROOTS+=("$warm_root")
 # this preamble drives its own session rather than going through
 # `start_session`, so `fail` is told where its log is the same way
 ROOT=$warm_root
-mkdir -p "$warm_root/xdg_data_home" "$warm_root/xdg_cache_home"
+mkdir -p "$warm_root/xdg_cache_home"
 printf 'warm the theme cache\n' >"$warm_root/scratch.txt"
 SESSIONS+=("$SESSION")
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$warm_root" \
-    "env XDG_CONFIG_HOME=$CONFIG_HOME \
-         XDG_DATA_HOME=$warm_root/xdg_data_home \
+    "env XDG_CONFIG_HOME=$SWEEP_CONFIG \
+         XDG_DATA_HOME=$DATA_HOME \
          XDG_STATE_HOME=$STATE_HOME \
          XDG_CACHE_HOME=$warm_root/xdg_cache_home \
          VIEW_LOG=$warm_root/view.log \
          TERM=xterm-256color COLORTERM=truecolor \
-         $VIEW_BIN $warm_root/scratch.txt"
+         $LAUNCHER $warm_root/scratch.txt"
 wait_for 'warm the theme cache' "$WAIT_SECS" "the warming session's buffer" >/dev/null
 watch_view "$SESSION"
 # Every assertion below compares a decimal triple, which only a truecolor
@@ -1180,9 +1374,19 @@ BARE
     assert_caret_after QRY 'the picker query' || return 1
     dismiss picker
 
+    local desc
     while read -r feature lhs verb; do
         key=$(tmux_key "$lhs") || return 1
         marker=$(marker_for "$feature" "$verb") || return 1
+        desc=$(mapping_desc "$key") || return 1
+        if [ "$desc" != "view: $feature $verb" ]; then
+            [ "$desc" != -none- ] || {
+                fail "nothing maps $lhs in this session, so view's $feature $verb default never registered"
+                return 1
+            }
+            skip "$lhs is this config's own key (\"$desc\"), which outranks view's $feature $verb default; :View $feature above proves the surface"
+            continue
+        fi
         mark
         send_text "$key"
         took=$(wait_change "$REACTION_SECS" "$lhs")
@@ -1603,10 +1807,27 @@ $end"
     assert_chrome 'the create prompt holding a pasted name'
     pass "a paste into a blocked vim.fn.input() prompt is typed into it (${echoed}s)"
 
-    # the prompt first (Escape cancels the input, creating nothing), then
-    # the tree that raised it
-    send_key Escape
-    dismiss
+    # Escape cancels the input, creating nothing -- and then Escape again,
+    # until nothing is framed. A `Prompt` overlay forwards the key that
+    # cancels it to the engine and closes lazily, on the first key observed
+    # once the engine has actually hidden its cmdline (`Focus::Native`'s
+    # rule in view-core's model), so retiring the box and closing the tree
+    # beneath it are further keystrokes by design -- and whether a given one
+    # lands before or after the engine's hide is a race a loaded host loses.
+    # Pressed until the screen is clear rather than a fixed number of times
+    # and hoped: a product that stopped closing on the key still fails here,
+    # on the budget, with the box named.
+    local cancelled
+    cancelled=$(now)
+    while :; do
+        send_key Escape
+        settle
+        grep -q '┌' "$SCREEN" || break
+        if ! under "$(elapsed "$cancelled" "$(now)")" "$WAIT_SECS"; then
+            fail "the cancelled create prompt is still framed after ${WAIT_SECS}s of Escapes"
+            return 1
+        fi
+    done
     end_session
 }
 

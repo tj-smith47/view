@@ -18,6 +18,16 @@
 # verdict either way.
 #
 # Callers must define `REPO_ROOT` before sourcing.
+#
+# One convention every acceptance script sourcing this file holds to: an
+# acceptance assertion's expected color is read from the live scheme by
+# probe, never from a config's text. A `sed` over a colorscheme's Lua can
+# only ever assert the one scheme the repo ships, and it goes on asserting
+# it after the run has been pointed somewhere else -- so what a group
+# resolves to comes back from a headless nvim started under the very XDG
+# environment the driven session uses. `scripts/check-style.sh` fails any
+# script here that reads a fixture's colors with `sed` or `grep`, and
+# `visual-sweep.sh`'s own header carries the long form.
 
 # The macOS power assertion every timed run in this repo is held awake by,
 # taken here in the sourcing leg's own shell so it is released when that leg
@@ -538,14 +548,22 @@ matches() {
     return 1
 }
 
+# What `<leader>` expands to when a caller has not read one off the config
+# it is driving: nvim's own default, which every fixture here leaves alone.
+# A caller that drives someone else's config sets this from `vim.g.mapleader`
+# -- a config that rebinds it (a space, almost always) types every mapped
+# key differently, and a leg typing the default would press nothing and
+# report the feature as unreachable.
+LEADER=${LEADER:-\\}
+
 # A key in nvim notation as a terminal must type it, with `<leader>`
-# expanded to nvim's own default -- which every fixture here leaves alone.
+# expanded per [`LEADER`].
 #
 # A notation this cannot spell fails loudly rather than being skipped: an
 # entry point nothing drives is the hole the legs that press keys exist to
 # close.
 tmux_key() {
-    local lhs="$1" typed="${1/<leader>/\\}"
+    local lhs="$1" typed=${1/<leader>/"$LEADER"}
     case "$typed" in
     *'<'* | *'>'*)
         printf 'FAIL: %s carries a key notation this script cannot type; teach tmux_key to spell it\n' "$lhs" >&2
@@ -570,6 +588,14 @@ end_session() {
 
 # One assertion that held, named with the leg that was running.
 pass() { printf 'ok   [%s] %s\n' "$CURRENT_LEG" "$1"; }
+
+# One assertion the driven config put out of reach, named with the leg and
+# with the reason it could not be made. A skip is not a pass: it prints on
+# its own marker so a reader counting green legs cannot read it as one, and
+# it exists so that a config which owns a key or a surface view also wants
+# leaves a line saying exactly that rather than a leg failing for a reason
+# the log does not carry.
+skip() { printf 'skip [%s] %s\n' "$CURRENT_LEG" "$1"; }
 
 # Waits for `pattern` to be on the pane, answering how long that took, and
 # for it to leave again.

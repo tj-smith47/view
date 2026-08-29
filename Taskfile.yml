@@ -173,7 +173,7 @@ tasks:
       # a paint test asserts on resolved styles in a `ratatui::Buffer`, and
       # every overlay-chrome defect the first dogfood session reported was
       # invisible at that layer and plain in one `capture-pane -e`
-      - bash scripts/acceptance/visual-sweep.sh
+      - task: acceptance:visual:matrix
       - bash scripts/acceptance/remote-reconnect.sh
       - bash scripts/acceptance/remote-rtt.sh
       # the one leg of this target that reaches the network: its first leg
@@ -189,6 +189,28 @@ tasks:
     # host, and it does not wait out any threshold. The full target's other
     # legs want all three, which is how a standing gate comes to be skipped.
     cmd: bash scripts/acceptance/visual-sweep.sh {{.CLI_ARGS}}
+
+  acceptance:visual:matrix:
+    desc: The overlay-chrome visual sweep over three colorschemes -- the themed fixture, habamax, and this machine's own ~/.config/nvim (~4 min; needs tmux and the pinned nvim, no network)
+    # the sweep asserts on colors it reads back from whichever scheme it was
+    # pointed at, so pointing it at more than one costs a loop and proves
+    # three schemes instead of the single opaque one this repo ships. The
+    # third entry is the one that has found defects: a real config brings a
+    # transparent `Normal`, its own `<leader>`, and forty plugins that open
+    # windows of their own, none of which a fixture can imitate. It is
+    # skipped, named, where that config does not exist -- a CI runner has no
+    # `~/.config/nvim`, and a leg silently reduced to two schemes is how a
+    # matrix comes to prove one.
+    cmds:
+      - bash scripts/acceptance/visual-sweep.sh
+      - VIEW_SWEEP_CONFIG=scripts/acceptance/fixtures/habamax bash scripts/acceptance/visual-sweep.sh
+      - |
+        if [ -d "$HOME/.config/nvim" ]; then
+          VIEW_SWEEP_CONFIG=$HOME/.config VIEW_SWEEP_DATA=$HOME/.local/share \
+            bash scripts/acceptance/visual-sweep.sh
+        else
+          printf 'visual sweep: SKIPPED (%s/.config/nvim, this machine has no nvim config of its own)\n' "$HOME"
+        fi
 
   acceptance:acp:
     desc: The ACP conformance legs that need no network or credentials (legs 2-9, driven by the local stub agent; needs tmux and the pinned nvim)
