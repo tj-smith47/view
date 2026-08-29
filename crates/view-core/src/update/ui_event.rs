@@ -175,6 +175,21 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         }
         UiEvent::CmdlineHide => {
             model.engine.cmdline = None;
+            // the answer landing, so the box goes with it: nvim sends no
+            // msg_clear when a confirm-class prompt resolves, and the only
+            // other `cmdline_hide` a prompt overlay can see is the re-arm
+            // an unmatched key produces -- which `note_answer` has already
+            // told apart by the key that was forwarded. Retiring here
+            // rather than on some later keystroke is what keeps a cancelled
+            // question off the screen the moment it is cancelled.
+            if model
+                .focused_overlay_mut()
+                .map(|ov| &ov.kind)
+                .is_some_and(|kind| matches!(kind, OverlayKind::Prompt(p) if p.answered()))
+            {
+                super::dismiss_top_prompt(model);
+                model.dirty = true;
+            }
             Vec::new()
         }
         UiEvent::MsgShow {

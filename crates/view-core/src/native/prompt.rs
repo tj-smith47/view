@@ -122,6 +122,11 @@ pub struct PromptState {
     message: String,
     answer: Answer,
     origin: Origin,
+    /// Whether the key already forwarded to the engine is one that ends
+    /// this prompt, so the `cmdline_hide` it causes can be told apart from
+    /// the wire-identical one an unmatched key's re-arm produces. See
+    /// [`PromptState::note_answer`].
+    answered: bool,
 }
 
 impl PromptState {
@@ -139,6 +144,7 @@ impl PromptState {
             message: e.lines().join("\n"),
             answer: Answer::Pending,
             origin: Origin::Engine,
+            answered: false,
         })
     }
 
@@ -170,6 +176,7 @@ impl PromptState {
                 },
             ]),
             origin: Origin::AiTrust { project_root, verb },
+            answered: false,
         }
     }
 
@@ -201,6 +208,7 @@ impl PromptState {
                 },
             ]),
             origin: Origin::ExternalWriteConflict { path },
+            answered: false,
         }
     }
 
@@ -268,6 +276,10 @@ impl PromptState {
     /// an unmatched key, since the two look identical on the wire (captured
     /// in `docs/prompt-overlay-wire-capture.md`).
     pub(crate) fn learn_cmdline(&mut self, cmdline: &CmdlineState) {
+        // a re-armed question is unanswered again: the `cmdline_show` that
+        // brings the choices back is nvim saying the last key did not end
+        // it after all
+        self.answered = false;
         self.answer = match parse_choices(&cmdline.prompt) {
             Some(choices) => Answer::Choices(choices),
             None => Answer::FreeText {
@@ -348,6 +360,45 @@ impl PromptState {
                         .is_some_and(|c| notation.chars().count() == 1 && !c.is_control())
             }
         }
+    }
+
+    /// Whether an [`accepts`](Self::accepts)-ed `notation` ends this prompt
+    /// rather than re-arming it.
+    ///
+    /// nvim answers both with the same `cmdline_hide`
+    /// (`docs/prompt-overlay-wire-capture.md` section 1: an unmatched key
+    /// re-arms via `cmdline_hide` + `cmdline_show` alone), so which one a
+    /// hide is cannot be read off the wire and is named here instead. Every
+    /// key a choice prompt accepts resolves it; a free-text `input()` echoes
+    /// each printable it takes and ends only on `<CR>` or `<Esc>`, with
+    /// `inputlist()` adding the `q` its own prompt text documents.
+    #[must_use]
+    fn resolves(&self, notation: &str) -> bool {
+        match &self.answer {
+            Answer::Pending => false,
+            Answer::Choices(_) => self.accepts(notation),
+            Answer::FreeText {
+                digits_only: true, ..
+            } => matches!(notation, "<CR>" | "<Esc>" | "q"),
+            Answer::FreeText {
+                digits_only: false, ..
+            } => matches!(notation, "<CR>" | "<Esc>"),
+        }
+    }
+
+    /// Records the key about to be forwarded to the blocked engine, so the
+    /// `cmdline_hide` that key causes retires this overlay instead of it
+    /// waiting for some later, unrelated keystroke to notice.
+    pub(crate) fn note_answer(&mut self, notation: &str) {
+        self.answered = self.resolves(notation);
+    }
+
+    /// Whether the last key forwarded from this prompt was one that ends
+    /// it, which is what makes the next `cmdline_hide` a resolution rather
+    /// than a re-arm.
+    #[must_use]
+    pub(crate) fn answered(&self) -> bool {
+        self.answered
     }
 
     /// Where this prompt sits on the terminal: a centered modal no wider

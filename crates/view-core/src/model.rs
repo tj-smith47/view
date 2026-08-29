@@ -1651,6 +1651,20 @@ impl Messages {
         self.entries.len() != before
     }
 
+    /// Drops the question an answered prompt was asking, so its box leaves
+    /// with the prompt instead of lingering over the buffer as ordinary
+    /// text. The counterpart to the `cmdline_open` guard in
+    /// [`Self::dismiss_transient_on_keypress`], which holds that question
+    /// up for exactly as long as the cmdline asking it is open: this is
+    /// what ends it at the same moment, rather than at whatever unrelated
+    /// keystroke happens next.
+    #[must_use]
+    pub fn dismiss_answered_prompt(&mut self) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| !e.is_prompt());
+        self.entries.len() != before
+    }
+
     /// Drops every standing error/warning entry -- the deliberate way out of
     /// a sticky toast. Returns whether anything was actually dropped, so the
     /// caller knows whether to mark the model dirty for a repaint.
@@ -1779,10 +1793,14 @@ pub enum Focus {
     /// engine. Closing it is overlay-kind-specific rather than a generic
     /// `<Esc>` rule: a `Prompt` overlay forwards a key it accepts (its
     /// choice letters, `<CR>`, `<Esc>`) to the engine instead of closing
-    /// itself, since the engine, not view, owns resolving it; it closes
-    /// later, lazily, on the first key observed once the engine has
-    /// actually hidden its cmdline. Mouse input is the exception, routing
-    /// by position through [`Model::overlay_at`] rather than by focus.
+    /// itself, since the engine, not view, owns resolving it, and retires
+    /// on the `cmdline_hide` that key comes back as -- the event, not a
+    /// later keystroke, so a cancelled question leaves the screen the
+    /// moment it is cancelled. A prompt nvim's own Lua answered, with no
+    /// key of view's forwarded to it, has no such event to be told apart
+    /// from a re-arm and still closes lazily on the next key. Mouse input
+    /// is the exception, routing by position through [`Model::overlay_at`]
+    /// rather than by focus.
     Native(OverlayId),
 }
 

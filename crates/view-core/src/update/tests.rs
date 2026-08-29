@@ -1903,14 +1903,6 @@ fn a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does() {
         content: vec![(0, "Save changes?".into())],
         replace_last: false,
     };
-    let shown = |m: &Model| {
-        m.engine
-            .messages
-            .visible_lines(4)
-            .into_iter()
-            .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
-            .collect::<Vec<_>>()
-    };
 
     let _ = update(&mut m, Msg::Redraw(vec![question(), UiEvent::Flush]));
     let _ = update(&mut m, Msg::Redraw(vec![prompt(), UiEvent::Flush]));
@@ -1954,6 +1946,170 @@ fn a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does() {
     assert!(
         shown(&m).is_empty(),
         "with the prompt closed the question is ordinary transient text"
+    );
+}
+
+/// The message lines a four-row message area would paint, joined per row --
+/// what the user can actually read, rather than what the entry list holds.
+fn shown(m: &Model) -> Vec<String> {
+    m.engine
+        .messages
+        .visible_lines(4)
+        .into_iter()
+        .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
+        .collect()
+}
+
+/// The `msg_show` half of nvim's confirm-class prompt, as
+/// `docs/prompt-overlay-wire-capture.md` section 1 captured it.
+fn confirm_question() -> UiEvent {
+    UiEvent::MsgShow {
+        kind: "confirm".into(),
+        content: vec![(0, "Save changes?".into())],
+        replace_last: false,
+    }
+}
+
+/// Its paired `cmdline_show`, which carries the choices.
+fn confirm_choices() -> UiEvent {
+    UiEvent::CmdlineShow {
+        content: vec![],
+        pos: 0,
+        firstc: String::new(),
+        prompt: "[Y]es, (N)o: ".into(),
+        indent: 0,
+        level: 1,
+    }
+}
+
+#[test]
+fn a_cancelled_prompt_retires_on_the_cmdline_hide_that_key_causes() {
+    // the ordering a real session has: view forwards the cancel, and the
+    // `cmdline_hide` it caused comes back afterwards. The box goes with
+    // that event -- pressing something else to make it leave is a
+    // cancelled question sitting over the buffer until the user happens to
+    // touch the keyboard again.
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![confirm_question(), UiEvent::Flush]),
+    );
+    let _ = update(&mut m, Msg::Redraw(vec![confirm_choices(), UiEvent::Flush]));
+    assert!(
+        matches!(
+            m.overlays().last().map(|ov| &ov.kind),
+            Some(OverlayKind::Prompt(_))
+        ),
+        "the confirm must be on screen before it can be cancelled"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".into(),
+        }),
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+    );
+    assert!(
+        m.overlays().is_empty(),
+        "the cancelled prompt must leave on its own cmdline_hide"
+    );
+    assert!(
+        shown(&m).is_empty(),
+        "and the question goes with it, or the box is traded for a toast \
+         reading the same words: {:?}",
+        shown(&m)
+    );
+}
+
+#[test]
+fn a_tree_prompt_reply_takes_the_question_with_the_box() {
+    // the other resolution channel: a `vim.fn.input()` the tree asked
+    // answers over its own RPC reply, which lands before any `cmdline_hide`
+    // view can attribute. Both channels close through `dismiss_top_prompt`,
+    // so both drop the question -- a reply that popped only the overlay
+    // left "New file: " sitting over the buffer as a toast.
+    let (mut m, generation) = model_with_open_tree();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, "New file: ".into())],
+                replace_last: false,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    let _ = update(&mut m, Msg::Redraw(vec![confirm_choices(), UiEvent::Flush]));
+    assert!(
+        matches!(
+            m.overlays().last().map(|ov| &ov.kind),
+            Some(OverlayKind::Prompt(_))
+        ),
+        "the create prompt must be on screen before the reply resolves it"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::TreeCreatePromptReply {
+            generation,
+            name: None,
+        },
+    );
+    assert!(
+        !m.overlays()
+            .iter()
+            .any(|ov| matches!(ov.kind, OverlayKind::Prompt(_))),
+        "the reply retires the box, leaving the tree it was asked from"
+    );
+    assert!(
+        shown(&m).is_empty(),
+        "and the question with it: {:?}",
+        shown(&m)
+    );
+}
+
+#[test]
+fn a_cmdline_hide_before_any_key_of_ours_leaves_the_prompt_for_the_next_key() {
+    // the other ordering: the hide arrives with no key of view's behind it
+    // -- nvim's own Lua answering its own question -- which is
+    // indistinguishable on the wire from the re-arm an unmatched key
+    // produces. Retiring on it would take a live question off the screen,
+    // so this one waits for the keystroke that proves the cmdline stayed
+    // closed. Pinned beside the case above so a change that collapses the
+    // two has to say which of them it broke.
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![confirm_question(), UiEvent::Flush]),
+    );
+    let _ = update(&mut m, Msg::Redraw(vec![confirm_choices(), UiEvent::Flush]));
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|ov| &ov.kind),
+            Some(OverlayKind::Prompt(_))
+        ),
+        "a hide view sent no answer for could be a re-arm, so the box stays"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "j".into(),
+        }),
+    );
+    assert!(
+        m.overlays().is_empty(),
+        "and the next key retires it, so it cannot linger either way"
     );
 }
 

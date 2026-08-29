@@ -1043,17 +1043,14 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
     {
         model.dirty = true;
     }
-    // a resolved prompt's overlay follows the same lazy-dismiss
-    // timing as its underlying MessageEntry (see
-    // dismiss_transient_on_keypress): nvim sends no msg_clear on
-    // resolution, and cmdline_hide alone cannot tell "resolved"
-    // apart from "about to re-arm" (both start with the identical
-    // cmdline_hide + flush; the wire only disambiguates once a
-    // later, separate redraw batch either does or doesn't bring a
-    // new cmdline_show), so the overlay closes on the first
-    // keypress observed after the cmdline has actually stayed
-    // closed, exactly when the toast falls back to ordinary
-    // transient rules
+    // the fallback, not the rule: a prompt view itself answered retires on
+    // the `cmdline_hide` that key causes (see `UiEvent::CmdlineHide`), and
+    // this catches only the prompt nothing view sent resolved -- nvim's own
+    // Lua answering its own question, where view forwarded no key to set
+    // the flag that arm reads. Such a prompt's overlay
+    // follows the same lazy-dismiss timing as its underlying MessageEntry
+    // (see dismiss_transient_on_keypress), since nvim sends no msg_clear on
+    // resolution and there is nothing else left to notice it by.
     // excludes the AI trust prompt and the external-write conflict prompt:
     // neither has a paired cmdline_show to have gone quiet, so
     // `cmdline_open` reads `false` for either from the moment it opens, and
@@ -1187,6 +1184,10 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                         force: true,
                     })];
                 }
+                // recorded before the key leaves, so the `cmdline_hide` it
+                // causes can tell a resolution from the wire-identical
+                // re-arm an unmatched key produces
+                p.note_answer(&notation);
                 vec![Effect::Rpc(RpcCall::Input { notation })]
             }
             // every other key edits the query and re-asks the
@@ -1398,18 +1399,23 @@ fn picker_query(p: &crate::native::picker::PickerState, generation: u64) -> Effe
     }
 }
 
-/// Pops the Prompt overlay if it is the topmost one -- the shared first
-/// step every tree prompt-reply arm takes, since each of the three
-/// (create/rename/delete) resolves the same way: a definitive async RPC
-/// reply, not the lazy next-keypress dismissal `Msg::Key` uses for the
-/// engine's own confirm() dialogs, which carry no reply of their own to
-/// hook into.
+/// Retires the Prompt overlay if it is the topmost one, and the question it
+/// was asking with it -- the shared close every definitive resolution takes,
+/// whether it arrives as a tree prompt-reply RPC (create/rename/delete) or as
+/// the `cmdline_hide` an answered engine prompt comes back as.
+///
+/// The question goes with the box because it is a message entry like any
+/// other, held on screen only by the cmdline that was asking it: leaving it
+/// behind trades a lingering overlay for a lingering toast reading the same
+/// words. nvim sends no `msg_clear` when a prompt resolves, so this is the
+/// only point that ends it.
 fn dismiss_top_prompt(model: &mut Model) {
     if matches!(
         model.focused_overlay_mut().map(|ov| &ov.kind),
         Some(OverlayKind::Prompt(_))
     ) {
         model.pop_focused_overlay();
+        let _ = model.engine.messages.dismiss_answered_prompt();
     }
 }
 
