@@ -1095,8 +1095,8 @@ fn paint_messages(
         return;
     }
 
-    let msg_area = theme.chrome(ChromeGroup::MsgArea);
-    let style = ratatui_style(msg_area);
+    let msg = theme.float_chrome(ChromeGroup::MsgArea, theme.float_bg());
+    let style = ratatui_style(msg);
     let blank = " ".repeat(usize::from(area.width));
     for row in (0..area.height).filter(|&row| damage.covers_row_of(area, row)) {
         paint_text_row(&blank, style, area, row, buf);
@@ -1104,7 +1104,7 @@ fn paint_messages(
 
     let border_style = ratatui_style(ResolvedStyle {
         fg: Some(message_border_color(theme)),
-        bg: msg_area.bg,
+        bg: msg.bg,
         ..ResolvedStyle::default()
     });
     paint_message_border(area, border_style, damage, buf);
@@ -1214,7 +1214,7 @@ fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, 
 /// dimmed variant of the interior's own `msg_area` foreground when one is
 /// set, visibly distinct from the full-brightness interior text with no
 /// further highlight lookup or RPC round trip. Never falls back to a
-/// dimmed `msg_area.bg`: the border sits ON that background, so dimming it
+/// dimmed `msg.bg`: the border sits ON that background, so dimming it
 /// paints a frame that is merely a darker shade of the surface it is
 /// supposed to stand out from -- on a black-bg/no-fg theme this dims pure
 /// black to itself, an invisible border around a box the user cannot tell
@@ -1247,17 +1247,16 @@ fn border_color(interior: ResolvedStyle) -> u32 {
 /// to swap, and the flag stays as the one selection signal any terminal can
 /// still carry.
 fn selection_style(theme: &Theme, base: ResolvedStyle) -> ResolvedStyle {
-    let sel = theme.chrome(ChromeGroup::PmenuSel);
+    let sel = theme.float_chrome(ChromeGroup::PmenuSel, base.bg);
     let fg = sel.fg.or(base.fg);
-    let bg = sel.bg.or(base.bg);
     if !sel.reverse {
-        return ResolvedStyle { fg, bg, ..sel };
+        return ResolvedStyle { fg, ..sel };
     }
-    if fg.is_none() && bg.is_none() {
+    if fg.is_none() && sel.bg.is_none() {
         return sel;
     }
     ResolvedStyle {
-        fg: bg,
+        fg: sel.bg,
         bg: fg,
         reverse: false,
         ..sel
@@ -1338,7 +1337,7 @@ fn paint_popupmenu(
     damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let base = theme.chrome(ChromeGroup::Pmenu);
+    let base = theme.float_chrome(ChromeGroup::Pmenu, theme.float_bg());
     let blank = " ".repeat(usize::from(area.width));
     for (i, item) in state.items.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
@@ -1422,9 +1421,6 @@ fn paint_native_overlay(
     };
     let base = theme.chrome(group);
     let interior = ratatui_style(base);
-    // the one background an overlay must never paint (see the per-span
-    // resolve below), read once for the whole layer rather than per row
-    let buffer_bg = theme.normal().bg;
     let selected = ratatui_style(selection_style(theme, base));
     let frame = ratatui_style(ResolvedStyle {
         fg: Some(border_color(base)),
@@ -1510,13 +1506,8 @@ fn paint_native_overlay(
             //
             // "Names none" is read by comparison rather than off an
             // `Option`, because by here there is no `Option` left to read:
-            // `Theme::style_for` resolves a chrome group the way nvim
-            // resolves a grid cell, filling an unset background from the
-            // buffer's own -- correct on the grid, and a hole through every
-            // float. The buffer's background is exactly the value an
-            // overlay must never paint, so a colorscheme that named it
-            // deliberately is asking for the same hole and is answered the
-            // same way.
+            // see `Theme::float_chrome`, which every float in this
+            // module resolves its chrome through.
             //
             // A group's `reverse` is dropped on the roles that borrow a
             // diff group, per `StyleRole::keeps_group_reverse`: what a
@@ -1525,9 +1516,8 @@ fn paint_native_overlay(
             // derived groups of its own.
             let resolve = |role: StyleRole| -> Style {
                 role.chrome_group().map_or(interior, |group| {
-                    let style = theme.chrome(group);
+                    let style = theme.float_chrome(group, base.bg);
                     ratatui_style(ResolvedStyle {
-                        bg: style.bg.filter(|bg| Some(*bg) != buffer_bg).or(base.bg),
                         reverse: style.reverse && role.keeps_group_reverse(),
                         ..style
                     })
@@ -3219,8 +3209,8 @@ mod tests {
     /// A theme with no `MsgArea` foreground -- e.g. a colorscheme that
     /// only sets `guibg` on `MsgArea`, or a pre-attach/no-colorscheme
     /// `Theme::default()` -- must still get a visible border. Disconfirm:
-    /// reverting `message_border_color` to its pre-fix `.or(msg_area.bg)`
-    /// chain and setting `msg_area.bg` to black here makes this assert
+    /// reverting `message_border_color` to its pre-fix `.or(msg.bg)`
+    /// chain and setting `msg.bg` to black here makes this assert
     /// `0` instead of the grey constant -- an invisible black-on-black
     /// frame around a black background.
     #[test]
@@ -5412,6 +5402,124 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A model whose colorscheme states a float body and leaves the two
+    /// float-drawn chrome groups (`MsgArea`, `Pmenu`) alone -- habamax's
+    /// own shape, and every scheme that themes floats without theming
+    /// nvim's message area or completion menu.
+    fn model_with_a_float_body_only(width: u16, height: u16) -> Model {
+        let mut model = caps_model(true, true, true);
+        model.engine.apply_grid(GridOp::Resize { width, height });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00C7_C7C7),
+                bg: Some(HABAMAX_BUFFER_BG),
+                sp: None,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 21,
+                fg: Some(0x00C7_C7C7),
+                bg: Some(HABAMAX_FLOAT_BG),
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlGroupSet {
+                name: ChromeGroup::NormalFloat.hl_name().to_string(),
+                hl_id: 21,
+            },
+        );
+        model
+    }
+
+    /// habamax's `Normal` and `NormalFloat` backgrounds, the pair the
+    /// acceptance sweep drives that scheme for.
+    const HABAMAX_BUFFER_BG: u32 = 0x001C_1C1C;
+    const HABAMAX_FLOAT_BG: u32 = 0x003A_3A3A;
+
+    /// A toast is a float, so a colorscheme that says nothing about
+    /// `MsgArea` gets one painted on the float body rather than on the
+    /// buffer.
+    ///
+    /// The live defect, found driving the sweep against habamax: nvim
+    /// resolves an unstated background from `Normal`'s own, which is
+    /// correct for a message area drawn at the bottom of the screen and a
+    /// hole through a box drawn over the text. Every cell of the toast came
+    /// back the buffer's color, leaving the user a box they could only find
+    /// by its border.
+    #[test]
+    fn a_toast_on_a_scheme_that_states_no_msg_area_paints_on_the_float_body() {
+        let model = model_with_a_float_body_only(40, 12);
+        let tier = model.caps.tier;
+        let rect = Rect::new(0, 8, 13, 3);
+        let lines = vec![vec![Span::plain("saved".to_string())]];
+        let buf = paint_layer_alone(
+            &model,
+            Layer::new(rect, LayerKind::Messages(lines), tier),
+            40,
+            12,
+        );
+        for row in rect.row..rect.row + rect.height {
+            for col in rect.col..rect.col + rect.width {
+                assert_eq!(
+                    buf[(col, row)].bg,
+                    rgb(HABAMAX_FLOAT_BG),
+                    "({col},{row}) is not the float body the toast is drawn on"
+                );
+            }
+        }
+    }
+
+    /// The same contract for the completion menu, the other float this
+    /// module paints from a group of its own rather than from the float
+    /// body: a scheme that leaves `Pmenu` alone must not get a popup in the
+    /// buffer's color.
+    #[test]
+    fn a_popup_menu_on_a_scheme_that_states_no_pmenu_paints_on_the_float_body() {
+        let mut model = model_with_a_float_body_only(20, 6);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::PopupmenuShow {
+                items: vec![
+                    view_core::events::PmItem {
+                        word: "foo".into(),
+                        ..Default::default()
+                    },
+                    view_core::events::PmItem {
+                        word: "bar".into(),
+                        ..Default::default()
+                    },
+                ],
+                selected: 1,
+                row: 2,
+                col: 3,
+                grid: 0,
+            },
+        );
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(20, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        assert_eq!(
+            buf[(3, 2)].bg,
+            rgb(HABAMAX_FLOAT_BG),
+            "an unselected popup row is not the float body the menu is drawn on"
+        );
+        assert_ne!(
+            buf[(3, 3)].bg,
+            rgb(HABAMAX_BUFFER_BG),
+            "the selected popup row shows the buffer through the menu"
+        );
     }
 
     /// The same opacity contract for the message toast, which is where the

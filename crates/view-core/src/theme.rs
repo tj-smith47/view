@@ -386,6 +386,35 @@ impl Theme {
         }
     }
 
+    /// The float body's own background: what a float is painted with, and
+    /// the base every chrome group drawn inside one falls back to.
+    #[must_use]
+    pub fn float_bg(&self) -> Option<u32> {
+        self.chrome(ChromeGroup::NormalFloat).bg
+    }
+
+    /// `group`'s resolved style as chrome drawn inside a float wears it:
+    /// its own background, or `base_bg` when its own is the buffer's.
+    ///
+    /// [`Theme::style_for`] resolves a chrome group the way nvim resolves a
+    /// grid cell, filling an unset background in from the buffer's own --
+    /// correct on the grid, and a hole through every float. The buffer's
+    /// background is exactly the value a float must never paint, so a
+    /// colorscheme that named it deliberately is asking for the same hole
+    /// and is answered the same way. A colorscheme that themes floats and
+    /// says nothing about nvim's message area -- habamax, and it is far
+    /// from alone -- is what makes this the common case rather than the
+    /// exotic one: without it, such a scheme gets a toast whose interior is
+    /// the buffer's color, a box the user can only find by its border.
+    #[must_use]
+    pub fn float_chrome(&self, group: ChromeGroup, base_bg: Option<u32>) -> ResolvedStyle {
+        let mut style = self.chrome(group);
+        if style.bg == self.bg {
+            style.bg = base_bg;
+        }
+        style
+    }
+
     /// Chrome's "this row stands out" style: `normal`'s colors plus the
     /// `reverse` flag, which -- unlike pre-swapping color values -- stays
     /// visibly distinct even before any theme color is known (an unset
@@ -867,6 +896,47 @@ mod tests {
         assert_eq!(status_line.fg, Some(0x123456));
         assert_eq!(status_line.bg, Some(0x654321));
         assert_ne!(status_line, theme.normal());
+    }
+
+    /// Chrome drawn inside a float never paints the buffer's background,
+    /// whether the colorscheme left the group alone or named that exact
+    /// color: both are a hole through the box, and both are answered with
+    /// the base the float is painted on.
+    #[test]
+    fn float_chrome_replaces_the_buffers_background_with_the_float_body() {
+        let buffer = 0x001C_1C1C;
+        let body = Some(0x003A_3A3A);
+        let mut hl = table_with(Some(0xC7C7C7), Some(buffer), 3, no_attrs());
+        hl.define_attr(
+            4,
+            HlAttr {
+                bg: Some(0x00FF_0000),
+                ..no_attrs()
+            },
+        );
+        hl.set_group("MsgArea".to_string(), 3);
+        hl.set_group("Pmenu".to_string(), 4);
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(
+            theme.chrome(ChromeGroup::MsgArea).bg,
+            Some(buffer),
+            "the fixture's own premise: an unstated background resolves to the buffer's"
+        );
+        assert_eq!(
+            theme.float_chrome(ChromeGroup::MsgArea, body).bg,
+            body,
+            "a group stating no background of its own must take the float body's"
+        );
+        assert_eq!(
+            theme.float_chrome(ChromeGroup::Pmenu, body).bg,
+            Some(0x00FF_0000),
+            "a group with a background of its own must keep it"
+        );
+        assert_eq!(
+            theme.float_chrome(ChromeGroup::MsgArea, None).bg,
+            None,
+            "a float with no body background of its own has none to hand over"
+        );
     }
 
     /// The other half of the same property: a selection-style group with
