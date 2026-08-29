@@ -187,3 +187,38 @@ ratio_p50 = 1.06
 # ratio design exists to cancel; both are record-only here and carry no
 # entry.
 "remote_memory.remote_local_ratio" = 1.03
+
+# The campaign numbers behind the factors above, in the form the
+# characterization walk re-checks them in: a draws key names one cell,
+# `recorded` is the seat the factor was sized against -- which a later
+# ratchet may have moved since -- and `values` are the kept draws the
+# entry's own comment lists. Four entries above carry no draws here
+# because their campaigns published summary statistics rather than
+# per-replicate readings; the walk names them so a new entry cannot
+# join them by omission.
+[draws."flood.minimal.cadence_p99_ms"]
+recorded = 14.566
+values = [14.577, 14.529, 14.500, 14.491, 14.655, 14.515, 14.525, 14.539]
+
+[draws."input_path.minimal.key_to_rpc_p99_us"]
+recorded = 80.682
+values = [
+  80.155, 80.554, 80.579, 80.727, 81.643,
+  81.834, 82.721, 83.752, 85.529, 90.922,
+]
+
+[draws."echo_speculated.minimal.speculated_ratio_p50"]
+recorded = 0.3943397109890326
+values = [0.412, 0.392, 0.385, 0.429, 0.418, 0.419, 0.414, 0.422, 0.3943]
+
+[draws."echo_speculated.minimal.speculated_paint_p99_ms"]
+recorded = 0.301
+values = [0.301, 0.335, 0.328, 0.299, 0.298, 0.299, 0.299, 0.306, 0.370]
+
+[draws."remote_memory.minimal.pss_mb"]
+recorded = 3.7109
+values = [3.734, 3.707, 3.762, 3.746, 3.812, 3.730, 3.730, 3.773, 3.711]
+
+[draws."remote_memory.minimal.remote_local_ratio"]
+recorded = 1.0245
+values = [1.001, 1.013, 1.006, 1.022, 1.013, 1.017, 1.023, 0.997, 1.0245]

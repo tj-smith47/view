@@ -66,3 +66,15 @@ machine_class = "dev-macos"
 # draws repeat above it, re-characterize from the new campaign -- never
 # nudge this number without replicates.
 "scroll.ratio_p50" = 1.024
+
+# No [draws] table here, and that is a statement about how this factor was
+# sized rather than about the campaign's record-keeping: its draws are in
+# the comment above, but the number was set by "worst reading over the
+# recorded value, worse fixture governing", not by the two-half-width rule
+# the characterization walk recomputes, and the 2026-08-08 ruling fixes it
+# until a new replicate campaign on this hardware. Recomputing a rule this
+# entry never claimed would fail it on arithmetic it was never sized to.
+# The minimal fixture's own knife edge is stated above and is the thing a
+# new campaign has to resolve: at the current seat the ceiling clears the
+# worst included draw by 0.03%, and one ratchet step down (to 2.380, still
+# above the refusal floor 2.3244) turns that margin negative.

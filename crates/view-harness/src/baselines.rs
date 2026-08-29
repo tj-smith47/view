@@ -730,6 +730,48 @@ pub enum BaselineError {
 /// would fail to load.
 pub type HeadroomTable = BTreeMap<String, f64>;
 
+/// One characterization campaign's own numbers, beside the factor they
+/// sized.
+///
+/// A published factor is an arithmetic claim about a band: it covers the
+/// band's worst reading, it covers the two-half-width rule the sidecars
+/// state, and it still covers the worst reading once the recorded value
+/// ratchets as far down as the band's own published spread lets it. Prose
+/// cannot be re-checked, so the draws behind the claim sit beside it in a
+/// form a walk reads directly, and the provenance comment stays what it
+/// always was -- the account of where the draws came from and what rules
+/// out a code trend in them.
+///
+/// The sidecar shape, keyed exactly as `[headroom]` is:
+///
+/// ```toml
+/// [headroom]
+/// "scroll.ratio_p50" = 1.42
+///
+/// [draws."scroll.minimal.ratio_p50"]
+/// recorded = 1.9668940310173837
+/// values = [2.107, 2.295, 2.086, 1.809, 1.897]
+/// ```
+///
+/// A draws key always names one cell, because a draw is a reading of one
+/// cell however wide the scope of the factor it supports; the factor it is
+/// checked against is the one [`headroom_for`]'s precedence resolves for
+/// that cell.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrawSet {
+    /// The recorded value the factor was sized against, which is not
+    /// always the one recorded today: a baseline ratchets underneath a
+    /// factor, and the arithmetic a campaign published is about the seat
+    /// it published it for.
+    pub recorded: f64,
+    /// Every draw the campaign kept, in any order.
+    pub values: Vec<f64>,
+}
+
+/// Campaign draws per cell-scoped key (see [`DrawSet`]).
+pub type DrawsTable = BTreeMap<String, DrawSet>;
+
 /// The deserialization shape of the sidecar documented on
 /// [`HeadroomTable`]. Unknown fields are refused so a recorded cell pasted
 /// in here is a load error rather than a table that silently binds nothing.
@@ -739,6 +781,8 @@ struct HeadroomFile {
     machine_class: String,
     #[serde(default)]
     headroom: HeadroomTable,
+    #[serde(default)]
+    draws: DrawsTable,
 }
 
 /// Where one class's measured-headroom sidecar lives: next to its baseline,
@@ -763,8 +807,44 @@ pub fn headroom_path(baseline_path: &Path) -> std::path::PathBuf {
 /// one host's measured spread to another), and
 /// [`BaselineError::UnusableHeadroom`] on a factor no gate can apply.
 pub fn load_headroom(path: &Path, class: &str) -> Result<HeadroomTable, BaselineError> {
-    if !path.exists() {
+    let display = path.display().to_string();
+    let Some(file) = read_sidecar(path, class)? else {
         return Ok(HeadroomTable::new());
+    };
+    for (metric, &factor) in &file.headroom {
+        if !factor.is_finite() || factor <= 1.0 {
+            return Err(BaselineError::UnusableHeadroom {
+                path: display,
+                metric: metric.clone(),
+                factor,
+            });
+        }
+    }
+    Ok(file.headroom)
+}
+
+/// Loads the campaign draws at `path` for `class` (see [`DrawSet`]).
+///
+/// Separate from [`load_headroom`] because the two answer different
+/// questions: the gate needs the factors and never the draws, while the
+/// walk that re-checks a published factor against its own campaign needs
+/// both. A missing file carries no draws, exactly as it carries no
+/// factors.
+///
+/// # Errors
+///
+/// The same read, parse and class-mismatch failures [`load_headroom`]
+/// returns, from the same file.
+pub fn load_draws(path: &Path, class: &str) -> Result<DrawsTable, BaselineError> {
+    Ok(read_sidecar(path, class)?
+        .map(|file| file.draws)
+        .unwrap_or_default())
+}
+
+/// The parsed sidecar at `path`, or `None` where the class has none.
+fn read_sidecar(path: &Path, class: &str) -> Result<Option<HeadroomFile>, BaselineError> {
+    if !path.exists() {
+        return Ok(None);
     }
     let display = path.display().to_string();
     let text = std::fs::read_to_string(path).map_err(|source| BaselineError::Read {
@@ -782,16 +862,7 @@ pub fn load_headroom(path: &Path, class: &str) -> Result<HeadroomTable, Baseline
             current: class.to_string(),
         });
     }
-    for (metric, &factor) in &file.headroom {
-        if !factor.is_finite() || factor <= 1.0 {
-            return Err(BaselineError::UnusableHeadroom {
-                path: display,
-                metric: metric.clone(),
-                factor,
-            });
-        }
-    }
-    Ok(file.headroom)
+    Ok(Some(file))
 }
 
 /// Rejects a headroom table whose entries name metrics no cell of
@@ -1821,6 +1892,214 @@ mod tests {
         assert!(
             checked > 0,
             "dev-linux ships a characterization, so this walk must find at least one sidecar"
+        );
+    }
+
+    /// The `[headroom]` entries whose campaigns cannot be re-checked
+    /// against the published-spread rule, with the grounds their own
+    /// sidecars state:
+    ///
+    /// - dev-linux's `ratio_p50`, `scroll.ratio_p50`,
+    ///   `first_paint.shell_visible_cold_ms` and
+    ///   `first_paint.marker_cold_ms` published per-fixture medians and
+    ///   half-widths rather than per-replicate readings, so there is no
+    ///   draw list to recompute from.
+    /// - dev-macos's `scroll.ratio_p50` was sized by a different, stated
+    ///   rule -- worst reading over the recorded value, worse fixture
+    ///   governing -- that a 2026-08-08 ruling fixes until a new
+    ///   replicate campaign on that hardware. Its draws are in its
+    ///   comment; recomputing a rule it never claimed would fail it on
+    ///   arithmetic it was never sized to.
+    ///
+    /// Every other entry carries its draws, so a factor nothing can
+    /// re-check cannot join the population by omission.
+    const CAMPAIGNS_WITHOUT_DRAWS: [(&str, &str); 5] = [
+        ("dev-linux", "ratio_p50"),
+        ("dev-linux", "scroll.ratio_p50"),
+        ("dev-linux", "first_paint.shell_visible_cold_ms"),
+        ("dev-linux", "first_paint.marker_cold_ms"),
+        ("dev-macos", "scroll.ratio_p50"),
+    ];
+
+    /// The cell and metric a draws key names, or `None` where the key is
+    /// not the `scenario.fixture.metric` a draw is always a reading of.
+    fn draws_cell(key: &str) -> Option<(CellId, &str)> {
+        match key.split('.').collect::<Vec<_>>()[..] {
+            [scenario, fixture, metric] => Some((CellId::new(scenario, fixture), metric)),
+            _ => None,
+        }
+    }
+
+    /// Whether a draws key at cell scope falls inside `entry`'s scope, by
+    /// the same three levels [`headroom_for`] resolves.
+    fn covers(entry: &str, key: &str) -> bool {
+        let (Some((cell, metric)), parts) = (draws_cell(key), entry.split('.').count()) else {
+            return false;
+        };
+        match parts {
+            1 => entry == metric,
+            2 => entry == format!("{}.{metric}", cell.scenario),
+            _ => entry == key,
+        }
+    }
+
+    /// Where `headroom` fails the arithmetic its own campaign publishes:
+    /// one message per violated half of the published-spread rule, plus
+    /// the ratchet-survival check the sidecar comments claim in prose.
+    ///
+    /// The worst-excursion half can never fire alone -- the median is
+    /// never below the lowest draw, so `median + 2 * half_width` is never
+    /// below the worst draw -- and it is reported separately anyway so a
+    /// failure names which claim the factor broke rather than only the
+    /// wider of the two.
+    fn spread_violations(key: &str, headroom: Headroom, draws: &DrawSet) -> Vec<String> {
+        let mut sorted = draws.values.clone();
+        sorted.sort_by(f64::total_cmp);
+        let (Some(&low), Some(&high)) = (sorted.first(), sorted.last()) else {
+            return vec![format!(
+                "{key} publishes no draws to check its factor against"
+            )];
+        };
+        let mid = sorted.len() / 2;
+        let median = if sorted.len().is_multiple_of(2) {
+            (sorted[mid - 1] + sorted[mid]) / 2.0
+        } else {
+            sorted[mid]
+        };
+        let two_half_widths = median + (high - low);
+        let recorded = draws.recorded;
+        let bar = headroom.bar(recorded);
+        // a record ratchets the seat down to the lowest draw the published
+        // band still admits; one below the floor is refused rather than
+        // seated, so it never becomes the value a later bar is built from
+        let floor = headroom.record_floor(recorded);
+        let seat = sorted
+            .iter()
+            .copied()
+            .filter(|value| *value > floor)
+            .fold(recorded, f64::min);
+        let mut out = Vec::new();
+        if bar < high {
+            out.push(format!(
+                "{key}: {recorded} {headroom} bars at {bar}, under the campaign's own \
+                 worst draw {high}"
+            ));
+        }
+        if bar < two_half_widths {
+            out.push(format!(
+                "{key}: {recorded} {headroom} bars at {bar}, under the 2x half-width \
+                 rule's {two_half_widths}"
+            ));
+        }
+        if headroom.bar(seat) < high {
+            out.push(format!(
+                "{key}: a seat ratcheted to {seat} bars at {}, under the worst draw \
+                 {high}",
+                headroom.bar(seat)
+            ));
+        }
+        out
+    }
+
+    /// A published factor is an arithmetic claim about a band, and nothing
+    /// re-ran that arithmetic: the sidecars state a worst excursion, a 2x
+    /// half-width rule and a survives-its-own-ratchet check in prose, so a
+    /// factor edited away from what its draws support surfaced one CI
+    /// bench leg later, as a breach or as a regression admitted in
+    /// silence. The draws now ship beside the factors and every entry is
+    /// recomputed against its own campaign here.
+    #[test]
+    fn every_published_factor_still_follows_from_its_own_draws() {
+        let dir = crate::fixture::workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("baselines");
+        let mut violations: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("the baselines directory must exist") {
+            let path = entry.expect("readable directory entry").path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(class) = name.strip_suffix(".headroom.toml") else {
+                continue;
+            };
+            let table = load_headroom(&path, class).expect("every shipped sidecar must load");
+            let draws = load_draws(&path, class).expect("every shipped sidecar must load");
+            for (key, set) in &draws {
+                let Some((cell, metric)) = draws_cell(key) else {
+                    violations.push(format!(
+                        "{class}: draws key {key} is not a scenario.fixture.metric cell"
+                    ));
+                    continue;
+                };
+                let Some(headroom) = declared_headroom(&table, &cell, metric) else {
+                    violations.push(format!(
+                        "{class}: draws key {key} supports no published factor"
+                    ));
+                    continue;
+                };
+                violations.extend(spread_violations(&format!("{class} {key}"), headroom, set));
+                checked += 1;
+            }
+            for key in table.keys() {
+                if CAMPAIGNS_WITHOUT_DRAWS.contains(&(class, key.as_str()))
+                    || draws.keys().any(|drawn| covers(key, drawn))
+                {
+                    continue;
+                }
+                violations.push(format!(
+                    "{class}: {key} publishes a factor with no draws to re-check it, and is \
+                     not one of the campaigns that published summary statistics only"
+                ));
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "published factors their own draws refuse:\n{}",
+            violations.join("\n")
+        );
+        assert!(
+            checked > 2,
+            "the shipped sidecars carry draws for several cells, so this walk must reach them"
+        );
+    }
+
+    /// The walk above passing on the shipped files does not prove it can
+    /// fail, so each half of the rule is put a factor its draws refuse.
+    #[test]
+    fn a_factor_its_own_draws_refuse_fails_the_half_it_breaks() {
+        let refused = |factor: f64, recorded: f64, values: &[f64]| {
+            spread_violations(
+                "case",
+                Headroom::Proportional(factor),
+                &DrawSet {
+                    recorded,
+                    values: values.to_vec(),
+                },
+            )
+        };
+
+        let every_half = refused(1.2, 1.0, &[1.0, 1.4]);
+        assert_eq!(every_half.len(), 3, "{every_half:?}");
+
+        let two_half_widths = refused(1.2, 2.0, &[1.0, 1.9, 2.0]);
+        assert_eq!(two_half_widths.len(), 1, "{two_half_widths:?}");
+        assert!(
+            two_half_widths[0].contains("2x half-width"),
+            "a band wider than the bar must name that half: {two_half_widths:?}"
+        );
+
+        let ratchet = refused(1.6, 2.1, &[1.0, 2.0, 2.1]);
+        assert_eq!(ratchet.len(), 1, "{ratchet:?}");
+        assert!(
+            ratchet[0].contains("ratcheted"),
+            "a factor a reseat breaks must name the ratchet: {ratchet:?}"
+        );
+
+        assert!(
+            refused(1.6, 2.0, &[1.9, 2.0, 2.1]).is_empty(),
+            "a factor its draws support must pass every half"
         );
     }
 

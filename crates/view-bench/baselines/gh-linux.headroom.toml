@@ -61,30 +61,103 @@ machine_class = "gh-linux"
 # that turns either margin negative is a re-sizing, not a rounding.
 "scroll.ratio_p50" = 1.42
 
-# picker.first_page_p50_ms is deliberately absent, and its evidence is not
-# merely thin: it is self-contradictory. Six draws, runs 32531092866,
-# 32533279176, 32534348333, 32537625267, 32619785446 and 32784781768
-# (2026-08-21/24; the cell entered the matrix after the 08-03/04 legs):
-# 14.702, 6.123, 6.519, 11.072, 2.739, 3.376. Median 6.321, half-width
-# 5.9815 (94.6% of median), worst excursion above the recorded 11.0723
-# only 1.328x, and the 2x half-width rule asks 1.651x. No factor satisfies
-# both halves of the published-spread contract on a band that wide:
-# refusing the 6.123 draw as a recorded seat needs
-# 11.0723 x (2 - f) > 6.123, i.e. f < 1.447, while the 2x rule asks
-# f >= 1.651. Anything sized in between seats a bar one honest improving
-# draw later that the next honest draw breaches -- the very failure a
-# characterization exists to remove. The compiled absolute default (1.5)
-# is never crossed by the observed excursion, so absence masks nothing
-# today, and the entry waits for draws enough to resolve the band rather
-# than for a factor chosen to bridge the contradiction.
+# 9 CI bench legs, runs 32531092866, 32533279176, 32534348333,
+# 32537625267, 32619785446 and 32784781768 (2026-08-21/24) plus
+# 33204611952, 33235574037 and 33238348497 (2026-08-28/29), runner load
+# at start 1.19 to 3.18, picker/minimal, gated statistic per leg (median
+# match_paint_p50_ms of 3 trials):
+#   3.192 3.198 3.216 3.297 3.435 3.704 3.113 3.430 4.746:
+#     median 3.297, half-width 0.8165 (24.76%)
+# Worst excursion above the recorded value 1.525x (4.746 against 3.1130);
+# the 2x half-width rule asks 1.584x (3.297 + 2 x 0.8165 against 3.1130).
+# 1.59 clears both, and replaces a default of 1.5 that run 33238348497
+# breached on a picker no commit between the recorded 68b06a4 and the
+# breaching 63ba8b2 touches.
+#
+# The 4.746 draw is the runner, not view. That leg's warm-path absolutes
+# are the worst of the nine across scenarios sharing nothing with the
+# picker but the host -- echo/minimal view p99 1.201 ms and echo/heavy
+# 1.956 ms against campaign ranges 0.644..0.945 and 1.471..1.801,
+# echo_control/minimal 1.205 ms against 0.606..0.836, the predicted
+# paint p99 0.587 ms against 0.433..0.558 -- and nvim's own side moved
+# with them, echo/minimal nvim p99 reading 0.983..1.119 ms across the
+# leg's three trials against 0.560..0.628 ms on the leg before. Every
+# paired ratio stayed where it was (echo/minimal ratio_p50 1.184 against
+# a campaign median 1.161), which is the shape of a host that slowed
+# uniformly; the picker has no nvim leg to cancel against, so on this
+# row the same slowdown can only appear as an absolute. Nothing here
+# trends: the cell's own p99 moved up with the p50 and back down
+# (6.322 against a 3.638..4.677 range), and the two legs before the
+# breach read 3.113 and 3.430.
+#
+# The factor also survives its own ratchet. The recorded value is
+# already the campaign's lowest draw, and 3.113 x 1.59 = 4.9497 still
+# clears the worst reading 4.746 -- by 4.3%, thin enough to state rather
+# than leave to be rediscovered. A draw below 3.113 reseats the bar
+# under a reading this band has already produced, which is a re-sizing
+# and not a rounding.
+"picker.minimal.match_paint_p50_ms" = 1.59
+
+
+# picker.first_page_p50_ms is deliberately absent, and the three legs
+# since have changed why. Nine draws, runs 32531092866, 32533279176,
+# 32534348333, 32537625267, 32619785446 and 32784781768 (2026-08-21/24)
+# plus 33204611952, 33235574037 and 33238348497 (2026-08-28/29): 14.702,
+# 6.123, 6.519, 11.072, 2.739, 3.376, 3.486, 3.052, 3.221. Pooled, the
+# band is 172% of its own median wide and no factor satisfies the
+# published-spread contract on it: the worst excursion above the
+# recorded 3.4862 is 4.217x, the 2x half-width rule asks 4.432x, and the
+# lowest draw 2.739 taken as a seat would need 5.37x before the bar
+# cleared 14.702.
+#
+# Pooling is the error. These are two non-overlapping levels split in
+# time, not one spread: every reading at or above 6.123 comes from
+# 32531092866..32537625267 and every reading at or below 3.486 from
+# 32619785446 on, no leg straddles, and the cell's p99 stepped with its
+# p50 -- 26.319..27.925 ms to 5.178..5.642 ms, with no overlap there
+# either. gh-macos steps at the same commit boundary (8.193, 7.397,
+# 30.666 through 32537625267, then 3.294, 2.786, 3.065, 3.582), and no
+# account of runner weather has two hosted classes changing level
+# together at one commit. The only window between the levels is
+# ebc2812..e432867, which reworked the overlay stack and the paint path
+# a first page arrives through; nothing in it names the picker, so the
+# attribution is to the window and not to a diff.
+#
+# A statistic that steps between two levels is a finding for the
+# recorded bar to keep reporting, not a spread for a factor to absorb.
+# The step improved, the recorded value ratcheted down onto the lower
+# level with it, and the seat 3.4862 is that level's own worst reading,
+# so the compiled absolute default (1.5) stands above every draw the
+# class has produced since and masks nothing. An entry waits for a
+# spread this row shows at one level, which five draws do not resolve.
 
 # first_paint.marker_ratio_p50 is deliberately absent. Its pooled draws
 # (minimal 0.147 0.173 0.126 0.140 on 2026-08-03/04, then 0.211 0.214
-# 0.211 0.216 0.204 0.202 on 08-21/24; heavy 0.366 0.426 0.321 0.359, then
-# 0.440 0.459 0.440 0.450 0.446 0.439) would ask 1.70 and 1.36 under the
-# same rule, but neither fixture's two groups overlap and the cause is on
-# view's side: view's own cold marker p50 steps from 15.2..21.9 ms to
-# 25.9..27.4 ms while nvim's holds 121..128 ms across all ten legs. The
-# recorded 0.1733 predates that step, so the gap between it and today's
-# readings is a measurement to explain, not a band to widen. The default
-# keeps reporting it, which is the point.
+# 0.211 0.216 0.204 0.202 on 08-21/24, then 0.189 0.181 0.160 on
+# 08-28/29; heavy 0.366 0.426 0.321 0.359, then 0.440 0.459 0.440 0.450
+# 0.446 0.439, then 0.434 0.425 0.400) are a walk and not a spread: view's
+# own cold marker p50 rose from 15.2..21.9 ms to 25.9..27.4 ms and has
+# since come back to 19.96..24.21 ms, while nvim's holds 121..128 ms
+# across all thirteen legs. The recorded 0.1733 predates the rise and the
+# newest draw (0.160) has now passed under it, so what separates a draw
+# from the seat is which commit produced it -- a measurement to explain,
+# not a band to widen. The worst excursion above the seat is 1.246x
+# (0.216) and the compiled ratio default is 1.25, so the default keeps
+# reporting this row without masking anything, which is the point.
+
+# The campaign numbers behind each factor above, in the form the
+# characterization walk re-checks them in: a draws key names one cell,
+# `recorded` is the seat the factor was sized against, and `values` are
+# the kept draws the comment lists. The prose stays the account of where
+# they came from; these are what a later session's arithmetic runs on.
+[draws."scroll.minimal.ratio_p50"]
+recorded = 1.9668940310173837
+values = [2.107, 2.295, 2.086, 1.809, 1.897, 2.057, 2.045, 1.967, 1.987, 2.537]
+
+[draws."scroll.heavy.ratio_p50"]
+recorded = 2.0310597156276176
+values = [2.203, 2.429, 2.176, 2.301, 2.067, 2.200, 2.121, 2.094, 2.156, 2.553]
+
+[draws."picker.minimal.match_paint_p50_ms"]
+recorded = 3.113045
+values = [3.192, 3.198, 3.216, 3.297, 3.435, 3.704, 3.113, 3.430, 4.746]
