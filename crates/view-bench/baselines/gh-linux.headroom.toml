@@ -25,19 +25,23 @@
 machine_class = "gh-linux"
 
 [headroom]
-# 10 CI bench legs, runs 30856641597, 30861044267, 30874125937 and
-# 30879797693 (2026-08-03/04) plus 32531092866, 32533279176, 32534348333,
-# 32537625267, 32619785446 and 32784781768 (2026-08-21/24), runner load at
-# start 1.03 to 3.64, both scroll fixtures, gated statistic per leg (median
-# ratio_p50 of 3 trials). Scoped to scroll because the spread is the
-# scenario's and not this runner's ratio resolution: echo's ratio_p50 from
-# the very same legs stays inside 4.1% (1.113..1.209).
-#   minimal 2.107 2.295 2.086 1.809 1.897 2.057 2.045 1.967 1.987 2.537:
-#     median 2.051, half-width 0.364 (17.75%)
-#   heavy   2.203 2.429 2.176 2.301 2.067 2.200 2.121 2.094 2.156 2.553:
-#     median 2.188, half-width 0.243 (11.11%)
+# 14 CI bench legs, runs 30856641597, 30861044267, 30874125937 and
+# 30879797693 (2026-08-03/04), 32531092866, 32533279176, 32534348333,
+# 32537625267, 32619785446 and 32784781768 (2026-08-21/24), then
+# 33204611952, 33235574037, 33238348497 and 33244439984 (2026-08-28/29),
+# runner load at start 1.03 to 3.64, both scroll fixtures, gated
+# statistic per leg (median ratio_p50 of 3 trials). Scoped to scroll
+# because the spread is the scenario's and not this runner's ratio
+# resolution: echo's ratio_p50 from the very same legs stays inside 4.1%
+# (1.113..1.209).
+#   minimal 2.107 2.295 2.086 1.809 1.897 2.057 2.045 1.967 1.987 2.537
+#           1.972 1.974 2.130 1.972:
+#     median 2.016, half-width 0.364 (18.06%)
+#   heavy   2.203 2.429 2.176 2.301 2.067 2.200 2.121 2.094 2.156 2.553
+#           2.031 2.124 2.262 2.140:
+#     median 2.166, half-width 0.261 (12.05%)
 # Worst excursion above a recorded value 1.290x (minimal 2.537 against
-# 1.9669); the 2x half-width rule asks 1.413x (2.051 + 2 x 0.364 against
+# 1.9669); the 2x half-width rule asks 1.395x (2.016 + 2 x 0.364 against
 # 1.9669). 1.42 clears both, and replaces a default of 1.25 that the
 # runner's own spread crosses on unchanged behaviour.
 #
@@ -45,8 +49,9 @@ machine_class = "gh-linux"
 # against a 1.605 bar on the coordinated quiet dev-linux host, and that
 # leg's operands moved together -- the trial behind the 2.537 median read
 # view p50 1.801 ms against nvim p50 0.710 ms, and the leg's per-operand
-# medians (view 1.783 ms, nvim 0.697 ms) were both the slowest of the ten
-# legs, against campaign ranges of 0.793..1.783 and 0.383..0.697. A
+# medians (view 1.783 ms, nvim 0.697 ms) were both the slowest of the
+# fourteen legs, against campaign ranges of 0.793..1.783 and
+# 0.383..0.697. A
 # per-sample interleaved ratio cancels the shared slowdown but not view's
 # scroll degrading faster than nvim's as the runner slows, and that
 # residual is what this factor covers. Nothing here trends: the second leg
@@ -57,19 +62,20 @@ machine_class = "gh-linux"
 # lowest draw is what the min-ratchet seats, and 1.809 x 1.42 = 2.5688
 # still clears the campaign's worst reading 2.537 -- by 1.2%, thin enough
 # to state rather than leave to be rediscovered; the heavy fixture's
-# equivalent is 2.067 x 1.42 = 2.935 against a 2.553 worst. A later draw
+# equivalent is 2.031 x 1.42 = 2.884 against a 2.553 worst. A later draw
 # that turns either margin negative is a re-sizing, not a rounding.
 "scroll.ratio_p50" = 1.42
 
-# 9 CI bench legs, runs 32531092866, 32533279176, 32534348333,
+# 10 CI bench legs, runs 32531092866, 32533279176, 32534348333,
 # 32537625267, 32619785446 and 32784781768 (2026-08-21/24) plus
-# 33204611952, 33235574037 and 33238348497 (2026-08-28/29), runner load
-# at start 1.19 to 3.18, picker/minimal, gated statistic per leg (median
-# match_paint_p50_ms of 3 trials):
-#   3.192 3.198 3.216 3.297 3.435 3.704 3.113 3.430 4.746:
-#     median 3.297, half-width 0.8165 (24.76%)
+# 33204611952, 33235574037, 33238348497 and 33244439984 (2026-08-28/29),
+# runner load at start 1.19 to 3.18, picker/minimal, gated statistic per
+# leg (median match_paint_p50_ms of 3 trials):
+#   3.192 3.198 3.216 3.297 3.435 3.704 3.113 3.430 4.746 3.268:
+#     median 3.2825, half-width 0.8165 (24.87%)
 # Worst excursion above the recorded value 1.525x (4.746 against 3.1130);
-# the 2x half-width rule asks 1.584x (3.297 + 2 x 0.8165 against 3.1130).
+# the 2x half-width rule asks 1.579x (3.2825 + 2 x 0.8165 against
+# 3.1130).
 # 1.59 clears both, and replaces a default of 1.5 that run 33238348497
 # breached on a picker no commit between the recorded 68b06a4 and the
 # breaching 63ba8b2 touches.
@@ -87,8 +93,8 @@ machine_class = "gh-linux"
 # uniformly; the picker has no nvim leg to cancel against, so on this
 # row the same slowdown can only appear as an absolute. Nothing here
 # trends: the cell's own p99 moved up with the p50 and back down
-# (6.322 against a 3.638..4.677 range), and the two legs before the
-# breach read 3.113 and 3.430.
+# (6.322 against a 3.638..4.677 range), the two legs before the breach
+# read 3.113 and 3.430, and the leg after it read 3.268 at load 1.37.
 #
 # The factor also survives its own ratchet. The recorded value is
 # already the campaign's lowest draw, and 3.113 x 1.59 = 4.9497 still
@@ -99,37 +105,39 @@ machine_class = "gh-linux"
 "picker.minimal.match_paint_p50_ms" = 1.59
 
 
-# picker.first_page_p50_ms is deliberately absent, and the three legs
-# since have changed why. Nine draws, runs 32531092866, 32533279176,
-# 32534348333, 32537625267, 32619785446 and 32784781768 (2026-08-21/24)
-# plus 33204611952, 33235574037 and 33238348497 (2026-08-28/29): 14.702,
-# 6.123, 6.519, 11.072, 2.739, 3.376, 3.486, 3.052, 3.221. Pooled, the
-# band is 172% of its own median wide and no factor satisfies the
-# published-spread contract on it: the worst excursion above the
-# recorded 3.4862 is 4.217x, the 2x half-width rule asks 4.432x, and the
-# lowest draw 2.739 taken as a seat would need 5.37x before the bar
-# cleared 14.702.
-#
-# Pooling is the error. These are two non-overlapping levels split in
-# time, not one spread: every reading at or above 6.123 comes from
-# 32531092866..32537625267 and every reading at or below 3.486 from
-# 32619785446 on, no leg straddles, and the cell's p99 stepped with its
-# p50 -- 26.319..27.925 ms to 5.178..5.642 ms, with no overlap there
-# either. gh-macos steps at the same commit boundary (8.193, 7.397,
-# 30.666 through 32537625267, then 3.294, 2.786, 3.065, 3.582), and no
+# picker.first_page_p50_ms is deliberately absent. Ten draws, runs
+# 32531092866, 32533279176, 32534348333, 32537625267, 32619785446 and
+# 32784781768 (2026-08-21/24) plus 33204611952, 33235574037, 33238348497
+# and 33244439984 (2026-08-28/29): 14.702, 6.123, 6.519, 11.072, 2.739,
+# 3.376, 3.486, 3.052, 3.221, 4.401. They are two non-overlapping levels
+# split in time, not one spread: every reading at or above 6.123 comes
+# from 32531092866..32537625267 and every reading at or below 4.401 from
+# 32619785446 on, no leg straddles, and the cell's p99 steps with its p50
+# -- 26.319..27.925 ms to 5.178..6.724 ms, with no overlap there either.
+# gh-macos steps at the same commit boundary (8.193, 7.397, 30.666
+# through 32537625267, then 3.294, 2.786, 3.065, 3.582, 5.117), and no
 # account of runner weather has two hosted classes changing level
 # together at one commit. The only window between the levels is
-# ebc2812..e432867, which reworked the overlay stack and the paint path
-# a first page arrives through; nothing in it names the picker, so the
-# attribution is to the window and not to a diff.
+# ebc2812..e432867, which reworked the overlay stack and the paint path a
+# first page arrives through; nothing in it names the picker, so the
+# attribution is to the window and not to a diff. Pooling the two levels
+# is therefore the error, and no factor sized on the pool holds: the
+# worst excursion above the recorded 3.4862 is 4.217x, the 2x half-width
+# rule asks 4.563x, and the lowest draw 2.739 taken as a seat would need
+# 5.37x before the bar cleared 14.702.
 #
-# A statistic that steps between two levels is a finding for the
-# recorded bar to keep reporting, not a spread for a factor to absorb.
-# The step improved, the recorded value ratcheted down onto the lower
-# level with it, and the seat 3.4862 is that level's own worst reading,
-# so the compiled absolute default (1.5) stands above every draw the
-# class has produced since and masks nothing. An entry waits for a
-# spread this row shows at one level, which five draws do not resolve.
+# The lower level alone is six draws -- 2.739, 3.376, 3.486, 3.052,
+# 3.221, 4.401, median 3.2985, half-width 0.831 -- and asks 1.263x for
+# its worst excursion and 1.423x for the 2x rule, both of which the
+# compiled absolute default (1.5) already covers. An entry would only
+# tighten the bar and could not close the hole that matters: a seat
+# ratcheted to 2.739 needs 1.607x before it clears 4.401, which is
+# neither half's answer. So the default keeps reporting this row, and it
+# masks nothing today -- 4.401 against a 5.229 bar, on a leg whose runner
+# load (1.37) sits mid-band inside the campaign's 1.19..3.18.
+# gh-macos's counterpart
+# entry exists because there the same statistic crossed its default;
+# here it has not.
 
 # first_paint.marker_ratio_p50 is deliberately absent. Its pooled draws
 # (minimal 0.147 0.173 0.126 0.140 on 2026-08-03/04, then 0.211 0.214
@@ -152,12 +160,21 @@ machine_class = "gh-linux"
 # they came from; these are what a later session's arithmetic runs on.
 [draws."scroll.minimal.ratio_p50"]
 recorded = 1.9668940310173837
-values = [2.107, 2.295, 2.086, 1.809, 1.897, 2.057, 2.045, 1.967, 1.987, 2.537]
+values = [
+  2.107, 2.295, 2.086, 1.809, 1.897, 2.057, 2.045,
+  1.967, 1.987, 2.537, 1.972, 1.974, 2.130, 1.972,
+]
 
 [draws."scroll.heavy.ratio_p50"]
 recorded = 2.0310597156276176
-values = [2.203, 2.429, 2.176, 2.301, 2.067, 2.200, 2.121, 2.094, 2.156, 2.553]
+values = [
+  2.203, 2.429, 2.176, 2.301, 2.067, 2.200, 2.121,
+  2.094, 2.156, 2.553, 2.031, 2.124, 2.262, 2.140,
+]
 
 [draws."picker.minimal.match_paint_p50_ms"]
 recorded = 3.113045
-values = [3.192, 3.198, 3.216, 3.297, 3.435, 3.704, 3.113, 3.430, 4.746]
+values = [
+  3.192, 3.198, 3.216, 3.297, 3.435,
+  3.704, 3.113, 3.430, 4.746, 3.268,
+]
