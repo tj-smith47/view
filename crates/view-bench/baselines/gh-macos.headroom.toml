@@ -111,6 +111,11 @@ machine_class = "gh-macos"
 # (+2 warmup) per trial where every other gated median takes 900 to 1000,
 # and the same statistic on gh-linux resolves to 25.2% against this
 # class's 35.4%.
+# Draws taken since the statistic moved to 100 samples (+10 warmup) per
+# trial, kept here until there are as many of them as the five above so
+# the factor can be re-sized on the tighter estimator alone rather than
+# on a table that mixes the two: 3.960 (run 33256006805), 3.249
+# (33268735828); worst excursion so far 1.292x against 3.0648.
 # The 5.117 leg carried the heaviest runner load on record here (6.91 at
 # start, 12.36 at end, against 1.55..6.23 across every other leg) and all
 # three of its trials read high (6.80, 5.12, 3.59), while its paired
