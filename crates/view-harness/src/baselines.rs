@@ -1934,21 +1934,14 @@ mod tests {
     ///   `first_paint.marker_cold_ms` published per-fixture medians and
     ///   half-widths rather than per-replicate readings, so there is no
     ///   draw list to recompute from.
-    /// - dev-macos's `scroll.ratio_p50` was sized by a different, stated
-    ///   rule -- worst reading over the recorded value, worse fixture
-    ///   governing -- that a 2026-08-08 ruling fixes until a new
-    ///   replicate campaign on that hardware. Its draws are in its
-    ///   comment; recomputing a rule it never claimed would fail it on
-    ///   arithmetic it was never sized to.
     ///
     /// Every other entry carries its draws, so a factor nothing can
     /// re-check cannot join the population by omission.
-    const CAMPAIGNS_WITHOUT_DRAWS: [(&str, &str); 5] = [
+    const CAMPAIGNS_WITHOUT_DRAWS: [(&str, &str); 4] = [
         ("dev-linux", "ratio_p50"),
         ("dev-linux", "scroll.ratio_p50"),
         ("dev-linux", "first_paint.shell_visible_cold_ms"),
         ("dev-linux", "first_paint.marker_cold_ms"),
-        ("dev-macos", "scroll.ratio_p50"),
     ];
 
     /// The cell and metric a draws key names, or `None` where the key is

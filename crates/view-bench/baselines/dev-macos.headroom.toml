@@ -34,47 +34,75 @@ machine_class = "dev-macos"
 # honestly-sized tighter factor could only false-fail honest draws.
 # Absence stands as the ruling, not as unfinished work.
 
-# 8 interleaved report-only replicates per scroll fixture plus 4 later
-# minimal-only replicates, 2026-08-03, real mbp hardware, one unchanged
-# binary pair at the recorded commit (gated ratio_p50, median of 3 trials).
-# The pre-registered load exclusion (pre-replicate 1-min load > 2.0) keeps
-# heavy {2.362, 2.370, 2.402} and minimal {2.136, 2.380, 2.398, 2.414,
-# 2.438}. No replicate, included or excluded, exceeds the worst included
-# reading of its fixture (excluded heavy 2.308-2.364 against 2.402;
-# excluded minimal 2.137-2.161 and 2.349 against 2.438). The minimal draws
-# fall in two bands, 2.136-2.161 and 2.349-2.438, and band membership does
-# not track load -- the lowest draw landed at load 1.39 -- so the low band
-# is flattering scheduling luck, not a contention artifact to correct for;
-# only the high band presses the bar, and the recorded 2.3816 is itself a
-# high-band draw. Factor = worst reading over the recorded value, worse
-# fixture governing: max(2.402/2.3932, 2.438/2.3816) = max(1.0037, 1.0237),
-# rounded up at the third decimal. Replaces a 1.2 characterized on the
-# pre-cleanup loaded host (loads 2.60-8.89) against a since-superseded
-# recording; the quiet-host spread does not support a factor that wide.
+# 23 replicates across the two scroll fixtures, 2026-08-30, real mbp
+# hardware (MacBookPro18,2, macOS 26.2) at 87ef37b, one unchanged binary
+# pair per replicate, gated ratio_p50 (median of 3 trials, 1000 samples
+# plus 100 warmup per trial). The pre-registered load exclusion
+# (pre-replicate 1-min load > 2.0) keeps 9 of 10 minimal and 8 of 13
+# heavy; replicates were repeated until each fixture carried at least 8
+# included draws, and every excluded draw is listed here rather than
+# dropped.
+#   minimal 2.2473 2.2534 2.2630 2.2690 2.2725 2.2804 2.2868 2.3043
+#           2.3094:
+#     median 2.2725, half-width 0.0311 (1.37%)
+#     excluded 2.3003 (load 3.15)
+#   heavy   2.2813 2.3085 2.3155 2.3166 2.3219 2.3219 2.3259 2.3371:
+#     median 2.3192, half-width 0.0279 (1.20%)
+#     excluded 2.3284 (2.04), 2.3548 (2.05), 2.3174 (2.16), 2.3323
+#     (4.13), 2.3626 (2.13)
+# No excluded draw exceeds 2.3626, so the exclusion removed nothing the
+# included bands do not already bound within 1.1%, and the null-pair
+# calibration stayed clean on all 23 (worst deviation 1.0492 against a
+# 1.15 floor), so no replicate is a mis-paired run.
 #
-# Scoped to the scenario rather than to either scroll fixture, though the
-# key grammar admits both: the campaign characterized minimal and heavy
-# together and neither asks for its own factor, so one key governing both
-# is the honest statement.
+# Against the seats recorded today the rule asks for nothing: the worst
+# excursion is 0.970x (minimal 2.3094 against 2.3816) and 0.976x (heavy
+# 2.3371 against 2.3932), and the 2x half-width rule asks 0.980x and
+# 0.992x. Every one of the 23 readings, included or excluded, falls
+# below its fixture's recorded value, which is the campaign's finding
+# and not a licence to publish 1.0: both seats are stale. 2.3816 sits
+# 4.80% above this band's minimal median and 3.13% above its worst
+# draw; 2.3932 sits 3.19% and 2.40% above heavy's. The 2026-08-03
+# campaign's high minimal band (2.349-2.438) does not reproduce in ten
+# replicates.
 #
-# The minimal ceiling this factor produces (2.3816 x 1.024 = 2.4387) sits
-# 0.03% above the worst included quiet draw (2.438): a knife-edge that is a
-# property of the recorded value being itself a high-band draw, not of the
-# factor being wrong (ruling of 2026-08-08, see
-# .claude/measurements/2026-08-08-measurement-layer-rulings.md section 3).
-# A gate draw above the ceiling is new evidence: rerun quiet, and if quiet
-# draws repeat above it, re-characterize from the new campaign -- never
-# nudge this number without replicates.
-"scroll.ratio_p50" = 1.024
+# The factor is therefore sized to survive the reseat that finding
+# calls for -- a hand-record at this campaign's medians, which the
+# refusal floor leaves as the only route: at any factor this band
+# supports the floor sits above the whole band, so a --record refuses
+# every draw and holds the stale seat, and reaching under 2.2473 from
+# 2.3816 would take a 1.056 factor, sized to bridge a gap rather than
+# to a spread. Seated at the medians the rule asks 1.0276 for minimal
+# (a seat ratcheted to 2.2473 clearing 2.3094) and 1.0245 for heavy
+# (2.2813 clearing 2.3371), worse fixture governing. 1.03 clears both
+# by 0.23% and 0.54%, thin enough to state rather than leave to be
+# rediscovered, and clears every half at the seats recorded today as
+# well, so the entry holds either side of the reseat. The 1.024 it
+# replaces does not: at the proposed minimal seat it bars at 2.3012
+# against a 2.3094 this campaign already drew.
+#
+# Still scoped to the scenario rather than to either fixture: the two
+# fixtures resolve the rule to 1.0276 and 1.0245, within 0.3% of each
+# other, so one key governing both remains the honest statement.
+"scroll.ratio_p50" = 1.03
 
-# No [draws] table here, and that is a statement about how this factor was
-# sized rather than about the campaign's record-keeping: its draws are in
-# the comment above, but the number was set by "worst reading over the
-# recorded value, worse fixture governing", not by the two-half-width rule
-# the characterization walk recomputes, and the 2026-08-08 ruling fixes it
-# until a new replicate campaign on this hardware. Recomputing a rule this
-# entry never claimed would fail it on arithmetic it was never sized to.
-# The minimal fixture's own knife edge is stated above and is the thing a
-# new campaign has to resolve: at the current seat the ceiling clears the
-# worst included draw by 0.03%, and one ratchet step down (to 2.380, still
-# above the refusal floor 2.3244) turns that margin negative.
+# The campaign numbers behind the factor above, in the form the
+# characterization walk re-checks them in: a draws key names one cell,
+# `recorded` is the seat the factor was sized against -- the one
+# recorded today, which the comment above argues is stale -- and
+# `values` are the included draws.
+[draws."scroll.minimal.ratio_p50"]
+recorded = 2.381585467443348
+values = [
+  2.2472809621131984, 2.253427803653809, 2.2629560726876936,
+  2.26901825526434, 2.272541802721265, 2.2803571695994007,
+  2.286816213214881, 2.3042971025670593, 2.3093864336309866,
+]
+
+[draws."scroll.heavy.ratio_p50"]
+recorded = 2.393156602249975
+values = [
+  2.281312637480817, 2.3084768627114762, 2.3154541332038194,
+  2.3166218135929815, 2.321867380902642, 2.321914359358111,
+  2.3259334006054493, 2.3371097683786504,
+]
