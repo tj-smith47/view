@@ -464,6 +464,31 @@ fn native_toml_override(state: &ScenarioStateEntry) -> Option<String> {
     }
 }
 
+/// The environment variable a fixture's `init.lua` reads to decide whether
+/// to apply its accommodations. Rides the same path [`run_scenario`] already
+/// proves reaches the nvim grandchild with `VIEW_COMPAT_SOCK`: set on the
+/// `view` builder, kept by `make_hermetic`'s sweep (which drops a name only
+/// while the builder still holds the host's own value for it, and the host
+/// exports neither), inherited by the engine nvim spawns.
+const ACCOMMODATIONS_VAR: &str = "VIEW_COMPAT_ACCOMMODATIONS";
+
+/// The value [`ACCOMMODATIONS_VAR`] should carry for `state`, or `None` to
+/// leave the variable unset entirely.
+///
+/// Unset is the accommodating case rather than an explicit `"1"`: a fixture
+/// reached outside this runner (a hand-run `nvim -u`, a bisect) then behaves
+/// exactly as it did before the switch existed, and only a state that
+/// actually declared `accommodations = false` changes what the fixture does.
+/// Keyed on the field, never on the state's name -- see
+/// `scenario::RawState`'s own doc comment for why.
+fn accommodations_env(state: &ScenarioStateEntry) -> Option<&'static str> {
+    if state.accommodations {
+        None
+    } else {
+        Some("0")
+    }
+}
+
 /// Drives one `(scenario, state)` pair end to end: resolves the state's
 /// effective fixture, materializes its `[native]` table into a hermetic
 /// `view.toml` and spawns `view --config <that path>` against it (the same
@@ -534,6 +559,9 @@ fn run_scenario(
     cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
     cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
     cmd.env("VIEW_COMPAT_SOCK", &sock_path);
+    if let Some(value) = accommodations_env(state) {
+        cmd.env(ACCOMMODATIONS_VAR, value);
+    }
     cmd.arg("--config");
     cmd.arg(&view_config_path);
     // view's own process cwd seeds `model.cwd` (see main.rs), which the
@@ -866,6 +894,7 @@ mod tests {
             name: ScenarioState::Present,
             native: None,
             fixture: None,
+            accommodations: true,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -902,6 +931,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_unaccommodated_state_clears_the_accommodation_env() {
+        // Named `superseded` on purpose: the switch must follow the field,
+        // not the state's name, or `deferred` could never prove a remedy
+        // works on a config nobody pre-adjusted.
+        let declining = ScenarioStateEntry {
+            name: ScenarioState::Superseded,
+            native: None,
+            fixture: None,
+            accommodations: false,
+            steps: Vec::new(),
+        };
+        assert_eq!(accommodations_env(&declining), Some("0"));
+    }
+
+    #[test]
+    fn a_state_that_asks_for_accommodations_keeps_them() {
+        // Likewise named for the opposite side of the same point.
+        let accommodating = ScenarioStateEntry {
+            name: ScenarioState::Unaccommodated,
+            native: None,
+            fixture: None,
+            accommodations: true,
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            accommodations_env(&accommodating),
+            None,
+            "the variable must stay unset, so a fixture run outside this runner is unchanged"
+        );
+    }
+
     /// Every other state -- `superseded`/`deferred`/`native-only`, and even
     /// a hypothetical `present` state that does set `native` -- keeps its
     /// longstanding materialization: an explicit table renders as given,
@@ -915,6 +976,7 @@ mod tests {
             name: ScenarioState::Deferred,
             native: Some(explicit.clone()),
             fixture: None,
+            accommodations: true,
             steps: Vec::new(),
         };
         assert_eq!(
@@ -926,6 +988,7 @@ mod tests {
             name: ScenarioState::Superseded,
             native: None,
             fixture: None,
+            accommodations: true,
             steps: Vec::new(),
         };
         assert_eq!(

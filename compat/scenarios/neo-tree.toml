@@ -12,6 +12,30 @@ plugin = "neo-tree"
 class = "ui-owning"
 fixture = "heavy"
 
+# neo-tree exactly as its README installs it -- netrw hijack included,
+# which the accommodated states turn off -- under view's own defaults.
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded[\"neo-tree\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # Backslash is nvim's default leader; the fixture leaves it unchanged.
+  { send = "\\e" },
+  # lazy-lock.json lives only in the fixture directory the harness now
+  # launches view from (see oracle.rs's `cmd.cwd`), so this pins the
+  # native sidebar actually rendering that directory's listing.
+  { wait_for = "lazy-lock.json", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"neo-tree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+]
+
+
 [[states]]
 name = "superseded"
 steps = [

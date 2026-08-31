@@ -16,6 +16,34 @@ plugin = "nvim-notify"
 class = "ui-owning"
 fixture = "heavy"
 
+# nvim-notify's own defaults under view's own defaults: the notification
+# surface as a migrating user's config actually leaves it.
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.notify ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua require('notify')('notify-compat-marker')<CR>" },
+  # The notification's body text rendered in the grid by nvim-notify's own
+  # floating window. Without the plugin the require() fails with E5108
+  # instead, so no fallback path can render this text.
+  { wait_for = "notify-compat-marker", timeout_ms = 15000 },
+  # The float times out and disappears; the message persisting in
+  # nvim-notify's own history API is the durable plugin-specific fact.
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 5000 },
+  { send = "<Esc>" },
+]
+
+
 [[states]]
 name = "superseded"
 steps = [

@@ -26,10 +26,18 @@ use view_oracle::compat::{
     SendConfirm, Step,
 };
 
-/// The three state names a [`PluginClass::UiOwning`] scenario must declare
+/// The four state names a [`PluginClass::UiOwning`] scenario must declare
 /// between them (order fixed for a stable, reviewable error message; not a
 /// requirement on the file's own `[[states]]` ordering).
-const REQUIRED_UI_OWNING_STATES: [&str; 3] = ["superseded", "deferred", "native-only"];
+///
+/// `"unaccommodated"` is the load-bearing one: the other three all run a
+/// configuration already adapted to the engine, so a suite carrying only
+/// them cannot fail on a migration defect at all. A fixture accommodation
+/// with no paired unaccommodated state is a suppressed defect, and this
+/// array is what makes the pairing a load-time failure rather than a
+/// reviewer's habit.
+const REQUIRED_UI_OWNING_STATES: [&str; 4] =
+    ["unaccommodated", "superseded", "deferred", "native-only"];
 
 /// The one scenario file stem `cold_bootstrap = true` is honored for. Tying
 /// the exemption to a filename rather than trusting the flag on its face
@@ -70,10 +78,18 @@ struct RawScenario {
 }
 
 /// One `[[states]]` entry's wire shape: the reconciliation state's own name
-/// (`"present"` / `"superseded"` / `"deferred"` / `"native-only"`), an
-/// optional `[native]` override, an optional per-state fixture override (a
-/// `native-only` state commonly swaps to a plugin-free fixture), and this
+/// (`"present"` / `"unaccommodated"` / `"superseded"` / `"deferred"` /
+/// `"native-only"`), an optional `[native]` override, an optional per-state
+/// fixture override (a `native-only` state commonly swaps to a plugin-free
+/// fixture), whether this state wants the fixture's accommodations, and this
 /// state's own steps.
+///
+/// `accommodations` is a field rather than a property read off the state's
+/// name because keying it on `name == "unaccommodated"` would leave exactly
+/// one state per scenario able to prove anything about an unadjusted config
+/// -- and `deferred`, the state that carries the remedy a conflict notice
+/// points a user at, is the one that most needs to prove the remedy works on
+/// a config nobody pre-adjusted.
 ///
 /// `native` is `Option` rather than a plain, default-empty map because the
 /// two absent cases mean different things and the runner needs to tell
@@ -89,7 +105,15 @@ struct RawState {
     name: String,
     native: Option<BTreeMap<String, bool>>,
     fixture: Option<String>,
+    #[serde(default = "accommodations_default")]
+    accommodations: bool,
     steps: Vec<RawStep>,
+}
+
+/// `true`: every state that says nothing keeps the fixture's accommodations,
+/// so the states that predate the field are unchanged by its arrival.
+fn accommodations_default() -> bool {
+    true
 }
 
 /// One step's wire shape. Exactly one of `send` / `wait_for` /
@@ -173,6 +197,10 @@ pub struct ScenarioStateEntry {
     pub name: ScenarioState,
     pub native: Option<BTreeMap<String, bool>>,
     pub fixture: Option<String>,
+    /// Whether this state runs the fixture's accommodations (`true` unless
+    /// the file says otherwise). See [`RawState`] for why this is a field
+    /// and not a property of the state's name.
+    pub accommodations: bool,
     pub steps: Vec<Step>,
 }
 
@@ -198,9 +226,9 @@ pub enum ScenarioError {
     /// config-reconciliation classes.
     #[error("unknown class {0:?} (expected one of \"semantic\", \"ui-adjacent\", \"ui-owning\")")]
     UnknownClass(String),
-    /// A `[[states]]` entry's `name` did not match one of the four
+    /// A `[[states]]` entry's `name` did not match one of the five
     /// recognized reconciliation states -- see [`parse_state_name`].
-    #[error("unsupported state {0:?} (expected one of \"present\", \"superseded\", \"deferred\", \"native-only\")")]
+    #[error("unsupported state {0:?} (expected one of \"present\", \"unaccommodated\", \"superseded\", \"deferred\", \"native-only\")")]
     UnsupportedState(String),
     /// A scenario declared zero `[[states]]` entries: there is nothing for
     /// the runner to drive.
@@ -212,12 +240,12 @@ pub enum ScenarioError {
     DuplicateStateName { name: String },
     /// A `ui-owning` scenario (one whose plugin the engine can supersede,
     /// and that is not exempted by `cold_bootstrap`) declared fewer than
-    /// the three states [`REQUIRED_UI_OWNING_STATES`] names: a ui-owning
-    /// plugin's coverage is incomplete until superseded/deferred/native-only
-    /// are all asserted.
+    /// the four states [`REQUIRED_UI_OWNING_STATES`] names: a ui-owning
+    /// plugin's coverage is incomplete until
+    /// unaccommodated/superseded/deferred/native-only are all asserted.
     #[error(
         "ui-owning scenario is missing required states: {missing:?} \
-         (needs superseded, deferred, native-only)"
+         (needs unaccommodated, superseded, deferred, native-only)"
     )]
     IncompleteUiOwningStates { missing: Vec<String> },
     /// `cold_bootstrap = true` was set on a scenario file whose stem is not
@@ -442,6 +470,7 @@ fn validate_state_entry(raw: RawState) -> Result<ScenarioStateEntry, ScenarioErr
         name,
         native: raw.native,
         fixture: raw.fixture,
+        accommodations: raw.accommodations,
         steps,
     })
 }
@@ -467,7 +496,7 @@ fn check_cold_bootstrap_authorization(
 /// states share a name, and a `ui-owning` scenario (unless exempted by
 /// `cold_bootstrap`, whose network-bound bootstrap cost is already paid once
 /// and should not triple for orthogonal supersession-state coverage)
-/// declares all of [`REQUIRED_UI_OWNING_STATES`]. Callers must run
+/// declares all four of [`REQUIRED_UI_OWNING_STATES`]. Callers must run
 /// [`check_cold_bootstrap_authorization`] first: this function trusts
 /// `cold_bootstrap` at face value, the same way it always has.
 fn validate_state_completeness(
@@ -565,7 +594,7 @@ pub fn load_file(path: &Path) -> Result<ScenarioFile, ScenarioError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     const VALID: &str = r#"
@@ -584,12 +613,18 @@ steps = [
 ]
 "#;
 
-    /// A minimal `ui-owning` scenario declaring all three required states,
+    /// A minimal `ui-owning` scenario declaring all four required states,
     /// for the completeness-enforcement tests below.
     const VALID_UI_OWNING: &str = r#"
 schema = 1
 plugin = "lualine"
 class = "ui-owning"
+
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [ { wait_for_cell = { row = 29, col = 1, expected = "N" } } ]
 
 [[states]]
 name = "superseded"
@@ -769,21 +804,21 @@ states = []
     }
 
     #[test]
-    fn a_ui_owning_scenario_with_all_three_required_states_parses() {
+    fn a_ui_owning_scenario_with_all_four_required_states_parses() {
         let scenario =
-            parse(VALID_UI_OWNING).expect("a ui-owning scenario with 3 states must parse");
-        assert_eq!(scenario.states.len(), 3);
+            parse(VALID_UI_OWNING).expect("a ui-owning scenario with 4 states must parse");
+        assert_eq!(scenario.states.len(), 4);
     }
 
     #[test]
     fn a_ui_owning_scenario_missing_a_required_state_is_rejected() {
-        // Drop the "native-only" state, leaving only superseded/deferred --
-        // the completeness check this whole schema exists to enforce.
-        let (two_state_toml, _) = VALID_UI_OWNING
+        // Drop the "native-only" state, leaving the other three -- the
+        // completeness check this whole schema exists to enforce.
+        let (three_state_toml, _) = VALID_UI_OWNING
             .split_once("\n[[states]]\nname = \"native-only\"")
             .expect("VALID_UI_OWNING must contain a native-only state to split off");
-        let err = parse(two_state_toml)
-            .expect_err("a ui-owning scenario declaring fewer than 3 states must be a hard error");
+        let err = parse(three_state_toml)
+            .expect_err("a ui-owning scenario declaring fewer than 4 states must be a hard error");
         assert!(
             matches!(
                 err,
@@ -795,24 +830,143 @@ states = []
     }
 
     #[test]
+    fn a_ui_owning_scenario_missing_its_unaccommodated_state_is_rejected() {
+        // The one state that can fail on a migration defect: without this
+        // arm the loader would accept the three adjusted-config states as
+        // complete coverage, which is the finding this schema closes.
+        let (head, rest) = VALID_UI_OWNING
+            .split_once("[[states]]\nname = \"unaccommodated\"")
+            .expect("VALID_UI_OWNING must contain an unaccommodated state to split off");
+        let (_, tail) = rest
+            .split_once("[[states]]")
+            .expect("a further state must follow the unaccommodated one");
+        let toml = format!("{head}[[states]]{tail}");
+        let err = parse(&toml)
+            .expect_err("a ui-owning scenario with no unaccommodated state must fail to load");
+        assert!(
+            matches!(
+                err,
+                ScenarioError::IncompleteUiOwningStates { ref missing }
+                    if missing == &vec!["unaccommodated".to_string()]
+            ),
+            "expected IncompleteUiOwningStates{{[\"unaccommodated\"]}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_state_that_says_nothing_about_accommodations_keeps_them() {
+        let scenario = parse(VALID).expect("VALID must parse as a scenario");
+        assert!(
+            scenario.states[0].accommodations,
+            "a state omitting the field must default to keeping the fixture's accommodations"
+        );
+    }
+
+    #[test]
+    fn a_state_can_decline_accommodations_under_any_name() {
+        let scenario = parse(VALID_UI_OWNING).expect("VALID_UI_OWNING must parse");
+        let by_name = |want: ScenarioState| {
+            scenario
+                .states
+                .iter()
+                .find(|state| state.name == want)
+                .expect("VALID_UI_OWNING declares every required state")
+        };
+        assert!(!by_name(ScenarioState::Unaccommodated).accommodations);
+        assert!(by_name(ScenarioState::Deferred).accommodations);
+
+        let deferred_unadjusted = VALID_UI_OWNING.replace(
+            "name = \"deferred\"\nnative = { statusline = false }",
+            "name = \"deferred\"\naccommodations = false\nnative = { statusline = false }",
+        );
+        let scenario =
+            parse(&deferred_unadjusted).expect("deferred may decline accommodations too");
+        assert!(
+            !scenario
+                .states
+                .iter()
+                .find(|state| state.name == ScenarioState::Deferred)
+                .expect("the deferred state must survive the rewrite")
+                .accommodations
+        );
+    }
+
+    /// Walks the real `compat/scenarios/` directory rather than a hand-built
+    /// fixture: the rule has to hold for the files that actually run, and a
+    /// scenario added later joins this walk by existing.
+    #[test]
+    fn every_ui_owning_scenario_declares_an_unaccommodated_state() {
+        let dir = crate::fixture::workspace_root()
+            .join("compat")
+            .join("scenarios");
+        let mut checked = 0_usize;
+        for entry in std::fs::read_dir(&dir).expect("compat/scenarios must be readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let scenario = load_file(&path).unwrap_or_else(|err| {
+                panic!("{} must load: {err}", path.display());
+            });
+            if scenario.class != PluginClass::UiOwning || scenario.cold_bootstrap {
+                continue;
+            }
+            let state = scenario
+                .states
+                .iter()
+                .find(|state| state.name == ScenarioState::Unaccommodated)
+                .unwrap_or_else(|| {
+                    panic!("{} declares no unaccommodated state", path.display());
+                });
+            assert!(
+                !state.accommodations,
+                "{}'s unaccommodated state must set accommodations = false",
+                path.display()
+            );
+            // A state that opted out of the accommodations but turned a
+            // native feature off would be the same suppression in a new
+            // place: the defaults case is only honest under the defaults.
+            if let Some(native) = &state.native {
+                let disabled: Vec<&String> = native
+                    .iter()
+                    .filter(|(_, on)| !**on)
+                    .map(|(key, _)| key)
+                    .collect();
+                assert!(
+                    disabled.is_empty(),
+                    "{}'s unaccommodated state turns {disabled:?} off; it must run view's own \
+                     defaults",
+                    path.display()
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no ui-owning scenario was reached in {} -- the walk found nothing to enforce",
+            dir.display()
+        );
+    }
+
+    #[test]
     fn a_ui_owning_scenario_cannot_self_exempt_via_cold_bootstrap() {
         // Drop the "native-only" state (as above) but also set
         // cold_bootstrap = true: without the stem check, this would dodge
         // IncompleteUiOwningStates entirely. parse()'s source_stem is
         // always None, so no file can claim the exemption through it.
-        let (two_state_toml, _) = VALID_UI_OWNING
+        let (partial_toml, _) = VALID_UI_OWNING
             .split_once("\n[[states]]\nname = \"native-only\"")
             .expect("VALID_UI_OWNING must contain a native-only state to split off");
         // cold_bootstrap must precede the first [[states]] table -- TOML
         // attaches a bare top-level key to the nearest preceding
         // array-of-tables entry, not to the document root, if it trails one.
-        let toml = two_state_toml.replacen(
+        let toml = partial_toml.replacen(
             "class = \"ui-owning\"",
             "class = \"ui-owning\"\ncold_bootstrap = true",
             1,
         );
         let err = parse(&toml).expect_err(
-            "cold_bootstrap = true must not let a ui-owning scenario dodge the three-state gate \
+            "cold_bootstrap = true must not let a ui-owning scenario dodge the completeness gate \
              through parse(), which never carries a file stem",
         );
         assert!(
@@ -823,13 +977,13 @@ states = []
 
     #[test]
     fn cold_bootstrap_is_authorized_only_for_the_cold_bootstrap_stem() {
-        let (two_state_toml, _) = VALID_UI_OWNING
+        let (partial_toml, _) = VALID_UI_OWNING
             .split_once("\n[[states]]\nname = \"native-only\"")
             .expect("VALID_UI_OWNING must contain a native-only state to split off");
         // cold_bootstrap must precede the first [[states]] table -- TOML
         // attaches a bare top-level key to the nearest preceding
         // array-of-tables entry, not to the document root, if it trails one.
-        let toml = two_state_toml.replacen(
+        let toml = partial_toml.replacen(
             "class = \"ui-owning\"",
             "class = \"ui-owning\"\ncold_bootstrap = true",
             1,
@@ -848,7 +1002,7 @@ states = []
         assert!(scenario.cold_bootstrap);
         assert_eq!(
             scenario.states.len(),
-            2,
+            3,
             "authorization must exempt from IncompleteUiOwningStates, not just from the flag check"
         );
     }

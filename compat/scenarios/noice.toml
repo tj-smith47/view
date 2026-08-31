@@ -19,6 +19,34 @@ plugin = "noice"
 class = "ui-owning"
 fixture = "heavy"
 
+# The first launch of record: noice exactly as its own README configures it,
+# under view's own defaults. Every string asserted below that belongs to
+# noice is reproduced from the pinned source this fixture installs
+# (compat/.cache/<lockfile hash>/nvim/lazy/noice.nvim at commit 7bfd9424) --
+# lua/noice/health.lua builds "You're using a GUI that uses <ext>. Noice
+# can't work when the GUI has <ext> enabled." once per externalized ext, and
+# lua/noice/config/init.lua defines is_running().
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.noice ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # What a defaults user must see: view's own single notice, carrying the
+  # exact key that hands the surface back.
+  { wait_for = "noice.nvim is using the command line", timeout_ms = 30000 },
+  { wait_for = "[native] palette = false", timeout_ms = 5000 },
+  # And what they must not see: noice's own three complaints stacked on top
+  # of it, one per externalized ext.
+  { assert_absent = "Noice can't work when the GUI has" },
+  # Not discarded, though -- the message history still holds them verbatim,
+  # one key away, for a user who goes looking.
+  { send = "\\fm" },
+  { wait_for = "Noice can't work when the GUI has", timeout_ms = 5000 },
+  { send = "<Esc>" },
+]
+
 [[states]]
 name = "superseded"
 steps = [
@@ -45,12 +73,19 @@ steps = [
   { send = "<Esc>" },
 ]
 
+# The remedy the unaccommodated state's notice points at, proven on the same
+# unadjusted config: turning the two features off is what a user actually
+# does, and it has to work without the fixture having pre-adapted anything.
 [[states]]
 name = "deferred"
-native = { notifications = false }
+accommodations = false
+native = { palette = false, notifications = false }
 steps = [
   { wait_for_probe = "luaeval('package.loaded.noice ~= nil and require(\"noice.config\").is_running()')", expect = "true", timeout_ms = 180000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # The remedy's whole point: neither complaint survives it.
+  { assert_absent = "Noice can't work when the GUI has" },
+  { assert_absent = "noice.nvim is using the command line" },
   { send = ":lua vim.notify('noice-compat-marker')<CR>" },
   { wait_for = "noice-compat-marker", timeout_ms = 15000 },
   { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },

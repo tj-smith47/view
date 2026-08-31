@@ -13,6 +13,38 @@ plugin = "lualine"
 class = "ui-owning"
 fixture = "heavy"
 
+# The statusline fight as a user meets it: lualine's own defaults under
+# view's own defaults, with nothing in the fixture smoothing either side.
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "ihello<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # every substring assertion below keeps passing against the literal text
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # noice's startup health notifications overlay the upper grid rows for
+  # the first few seconds after launch; the timeout must outlast their
+  # dismissal.
+  { wait_for = "hello", timeout_ms = 15000 },
+  { assert_absent = "E5108" },
+  # laststatus = 0 removes nvim's own status row from the grid nvim draws,
+  # and view resizes nvim's attached grid one row shorter at load so its
+  # own statusline can take the vacated physical row back rather than the
+  # buffer growing into it -- row 29 stays the statusline row either way.
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+]
+
+
 [[states]]
 name = "superseded"
 steps = [

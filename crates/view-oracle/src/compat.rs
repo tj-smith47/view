@@ -140,7 +140,7 @@ pub enum PluginClass {
 /// plugin coexists untouched
 /// regardless of `[native]`, has exactly one entry ([`Self::Present`]); a
 /// ui-owning scenario's plugin occupies a surface the engine can supersede,
-/// so its coverage is only complete once all three reconciliation states are
+/// so its coverage is only complete once all four reconciliation states are
 /// asserted -- [`view_harness::scenario`]'s loader enforces that completeness
 /// at load time, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +148,13 @@ pub enum ScenarioState {
     /// The plugin is present and loaded; no supersession assertion is made
     /// (a semantic/ui-adjacent scenario's sole state).
     Present,
+    /// The user's configuration exactly as they wrote it: no fixture
+    /// accommodation of any kind, under the engine's own default `[native]`
+    /// settings. What a migrating user sees on their first launch, and the
+    /// only state that can fail on a migration defect -- every other state
+    /// runs a config already adapted to the engine, which is the inverse of
+    /// the migration contract.
+    Unaccommodated,
     /// `[native]` leaves the feature on (its default): the engine takes the
     /// surface over and the plugin's own rendering of it must not appear.
     Superseded,
@@ -163,11 +170,12 @@ pub enum ScenarioState {
 /// The set of TOML state names the loader recognizes, paired with
 /// [`state_name`] so a scenario file's `states[].name` and the loader's own
 /// error/report text never drift into two independently-maintained spellings
-/// of the same four states.
+/// of the same five states.
 #[must_use]
 pub fn parse_state_name(s: &str) -> Option<ScenarioState> {
     match s {
         "present" => Some(ScenarioState::Present),
+        "unaccommodated" => Some(ScenarioState::Unaccommodated),
         "superseded" => Some(ScenarioState::Superseded),
         "deferred" => Some(ScenarioState::Deferred),
         "native-only" => Some(ScenarioState::NativeOnly),
@@ -181,6 +189,7 @@ pub fn parse_state_name(s: &str) -> Option<ScenarioState> {
 pub fn state_name(state: ScenarioState) -> &'static str {
     match state {
         ScenarioState::Present => "present",
+        ScenarioState::Unaccommodated => "unaccommodated",
         ScenarioState::Superseded => "superseded",
         ScenarioState::Deferred => "deferred",
         ScenarioState::NativeOnly => "native-only",
@@ -1228,9 +1237,10 @@ mod tests {
     use crate::testenv;
 
     #[test]
-    fn state_name_and_parse_state_name_round_trip_every_variant() {
+    fn parse_state_name_round_trips_all_five_states() {
         for state in [
             ScenarioState::Present,
+            ScenarioState::Unaccommodated,
             ScenarioState::Superseded,
             ScenarioState::Deferred,
             ScenarioState::NativeOnly,

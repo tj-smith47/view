@@ -20,6 +20,40 @@ plugin = "dressing"
 class = "ui-owning"
 fixture = "heavy"
 
+# dressing's own defaults under view's own defaults: the vim.ui.input
+# surface as a migrating user's config actually leaves it.
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.dressing ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
+  { wait_for = "dressing-prompt", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 10000 },
+  # dressing opens its input float in insert mode; the first <Esc> drops
+  # to normal mode inside the float, the second dismisses it.
+  { send = "<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, the session stays in the
+  # input float's insert mode while later assertions keep passing
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+  # config-level cross-check, not a dressing behavior: native wins here, so
+  # row 29 stays the statusline row and lualine's own separator glyph never
+  # reaches column 85 (see lualine.toml).
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+]
+
+
 [[states]]
 name = "superseded"
 steps = [

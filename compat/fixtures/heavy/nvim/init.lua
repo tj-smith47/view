@@ -12,7 +12,17 @@
 -- XDG_DATA_HOME, not anything this file sets itself: lazy.nvim's own
 -- "already installed? skip; else clone" check on that path is the entire
 -- "network on first run only" property, no bespoke caching logic needed.
+--
+-- Every adjustment this fixture makes on view's behalf sits behind
+-- `accommodate` below and carries a `view-compat-accommodation:` marker.
+-- A state that declares `accommodations = false` clears the variable, and
+-- what remains is the configuration a migrating user actually wrote --
+-- the only shape the suite can detect a migration defect in.
+-- scripts/check-compat-accommodations.sh enforces both halves of that
+-- pairing; the marker is not decoration.
 vim.fn.serverstart(vim.env.VIEW_COMPAT_SOCK)
+
+local accommodate = vim.env.VIEW_COMPAT_ACCOMMODATIONS ~= "0"
 
 local uv = vim.uv or vim.loop
 local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
@@ -100,35 +110,56 @@ require("lazy").setup({
       -- these three exts. That marks only those three specific messages as
       -- already-sent -- every other health.check diagnostic, including the
       -- 1s interval's later runs, is untouched and stays live.
+      -- The three messages below are reproduced from the pinned noice's own
+      -- lua/noice/health.lua (commit 7bfd9424, the tree under
+      -- compat/.cache/<lockfile hash>/nvim/lazy/noice.nvim): the string it
+      -- builds there is what `_once` is keyed by, so a paraphrase silences
+      -- nothing.
       config = function(_, opts)
-        local once = require("noice.util")._once
-        for _, ext in ipairs({ "ext_cmdline", "ext_popupmenu", "ext_messages" }) do
-          local msg = "You're using a GUI that uses "
-            .. ext
-            .. ". Noice can't work when the GUI has "
-            .. ext
-            .. " enabled."
-          once[vim.log.levels.ERROR .. msg] = true
+        -- view-compat-accommodation: noice health.check ext_* errors (#1137)
+        if accommodate then
+          local once = require("noice.util")._once
+          for _, ext in ipairs({ "ext_cmdline", "ext_popupmenu", "ext_messages" }) do
+            local msg = "You're using a GUI that uses "
+              .. ext
+              .. ". Noice can't work when the GUI has "
+              .. ext
+              .. " enabled."
+            once[vim.log.levels.ERROR .. msg] = true
+          end
         end
         require("noice").setup(opts)
       end,
-      opts = {
+      -- view-compat-accommodation: noice's own supported-GUI component opts
+      opts = accommodate and {
         cmdline = { enabled = false },
         messages = { enabled = false },
         popupmenu = { enabled = false },
-      },
+      } or {},
     },
     -- Both tree plugins default to hijacking netrw via
     -- `silent! autocmd! FileExplorer *`, which runs before netrw's own
     -- plugin phase has created that augroup: `silent!` hides the E216 but
     -- still writes it into v:errmsg, where the harness's zero-error
     -- epilogue reads it. Hijacking netrw is irrelevant to what these rows
-    -- assert (sidebar rendering), so both hijacks stay off.
-    { "nvim-tree/nvim-tree.lua", opts = { hijack_netrw = false } },
+    -- assert (sidebar rendering), so both hijacks stay off wherever this
+    -- fixture is allowed to accommodate -- and come back, defaults and all,
+    -- wherever it is not. That E216 then reaches the epilogue in every
+    -- unaccommodated state, not just the two tree rows, because this stack
+    -- is shared; the pinned engine writes the identical v:errmsg with no
+    -- view in the picture at all (reproduced headless against this same
+    -- config), so it is the epilogue's own missing reference leg that the
+    -- red rows name, not a supersession fault.
+    {
+      "nvim-tree/nvim-tree.lua",
+      -- view-compat-accommodation: netrw-hijack E216 in the zero-error epilogue
+      opts = accommodate and { hijack_netrw = false } or {},
+    },
     {
       "nvim-neo-tree/neo-tree.nvim",
       dependencies = { "nvim-lua/plenary.nvim", "MunifTanjim/nui.nvim" },
-      opts = { filesystem = { hijack_netrw_behavior = "disabled" } },
+      -- view-compat-accommodation: netrw-hijack E216 in the zero-error epilogue
+      opts = accommodate and { filesystem = { hijack_netrw_behavior = "disabled" } } or {},
     },
     { "j-hui/fidget.nvim", opts = {} },
     {
