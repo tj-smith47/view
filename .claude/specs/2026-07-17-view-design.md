@@ -271,8 +271,10 @@ Dependency rules (audit-enforced, cfgd-style):
   early blocking prompts (swapfile ATTENTION, `:confirm` during init) behave
   exactly as in bare nvim. view attaches immediately; config sources with the
   UI already live.
-- Attach requesting `ext_linegrid`, `ext_cmdline`, `ext_popupmenu`,
-  `ext_messages`, `ext_tabline`. `ext_multigrid` joins the set at P6 (§17)
+- Attach requesting `ext_linegrid` and `ext_tabline` unconditionally, plus
+  `ext_cmdline`/`ext_popupmenu` with `palette` and `ext_messages` with
+  `notifications` — the set follows the `[native]` switches, read before
+  attach (§5.5). `ext_multigrid` joins the set at P6 (§17)
   when pane composition lands — until then view runs single-grid by design,
   so every phase ships against the attach mode it actually uses; both modes
   are oracle-covered from P3 on. (Multigrid is the protocol's roughest
@@ -326,21 +328,70 @@ Compat has three classes; only the first is "by construction":
 | UI-adjacent (draw inside the grid, own no surface view owns) | telescope, which-key, floating plugins | Coexist untouched; non-colliding mappings keep working |
 | UI-owning (occupy a surface view renders natively) | lualine/`statusline` setters, noice, nvim-notify, tree sidebars (nvim-tree, neo-tree) | **Native wins by default** — view supersedes the overlapping surface at runtime; per-feature opt-out returns it |
 
-- **Supersession is runtime-only and reversible.** Applied post-`VimEnter`,
-  only while the native feature is enabled: statusline → `laststatus=0`
-  (lualine still loads; its surface goes unused); notifications →
-  `vim.notify` re-pointed at the engine default so messages flow through
-  `ext_messages` into view's toasts; tree/picker → view claims its default
-  keys (§5.3). **Nothing in the user's config files is ever edited, and
-  nothing needs to be removed or disabled in `init.lua` for native features
-  to win.** Superseded plugins keep loading; their cost is memory, not
-  conflict.
+- **Supersession is runtime-only and reversible.** Applied
+  post-`VimEnter`, only while the native feature is enabled: statusline →
+  `laststatus=0` (lualine still loads; its surface goes unused);
+  notifications → `vim.notify` re-pointed at the engine default, held
+  against a plugin re-patching it later, so messages flow through
+  `ext_messages` into view's toasts; tree/picker → view claims its
+  default keys (§5.3). **Nothing in the user's config files is ever
+  edited, and nothing needs to be removed or disabled in `init.lua` for
+  native features to win.** Superseded plugins keep loading; their cost
+  is memory, not conflict.
+- **Externalization follows the `[native]` switches (amended 2026-08-21,
+  C2).** The `ext_*` set view requests at `nvim_ui_attach` is not a
+  constant: `ext_cmdline`/`ext_popupmenu` are attached only with
+  `palette` enabled, `ext_messages` only with `notifications` enabled.
+  `ext_linegrid` is unconditional (it is the grid protocol, not a
+  surface) and `ext_tabline` is attached unconditionally today, with no
+  native feature of its own to switch it — recorded in the surface
+  matrix rather than left implicit. This is what makes "disabling
+  returns that surface to the user's plugins" (§9) literally true: a
+  plugin that inspects the attached UI's `ext_*` flags and refuses to run
+  sees a UI it supports, and the user's config runs unchanged. Reading
+  `[native]` therefore happens before attach, not after it. The opt-out
+  has to be view's, because it cannot be the plugin's: noice raises one
+  ERROR per externalized ext from a health check that `setup()` runs
+  *before* it parses the user's options (in the pinned `lua/noice/init.lua`), and
+  that check's ext loop is unconditional, so no noice option can suppress
+  a first launch's errors (upstream `folke/noice.nvim#1137`, unfixed).
+- **Surface-ownership conflicts are detected, not left to the user.** The
+  set view claims is fixed and small, so the conflict *class* is
+  detectable generically even for plugins nobody has tested: a floating
+  window whose geometry lands on a surface view owns (the cmdline row,
+  the message area) is claiming that surface, whatever plugin opened it.
+  On detection view says one thing, naming the surface, the plugin as far
+  as the window identifies it, and the exact line that resolves it —
+  never a second, silently overlapping chrome. **The default first launch
+  is where this contract is worth the most.** view's defaults keep the
+  surfaces, so a config carrying a plugin that refuses to coexist with
+  them starts with a real conflict, and that conflict is view's to
+  explain: a first launch that hits a surface conflict shows **one**
+  notice per claiming plugin, naming the surfaces it took and carrying
+  the `[native]` lines that yield them. It stands for the session — the
+  conflict is true until the remedy is applied and view restarts — and
+  the user takes it down from the notification history (§9), which is
+  where the notice itself points. The plugin's own startup complaints are the same finding
+  in the plugin's voice, so they are recorded to the notification history
+  rather than stacked as toasts beside it, and the notice says where they
+  are. Nothing is discarded and the history is one key away — what a
+  first launch must never be is a wall of somebody else's errors with no
+  remedy in any of them. Per-surface policy is
+  recorded in the surface-ownership matrix (`docs/surface-ownership.md`),
+  which names, for each externalized surface, the plugin classes that
+  claim it, view's policy (own / yield / absorb), and the compat scenario
+  that proves that policy. A surface with no proving scenario is a
+  coverage gap the matrix shows rather than hides.
 - `doctor` lists every active supersession and the exact `[native]` key that
   reverses it. Overrides are per-feature (`picker = false` keeps your
   telescope; everything else stays native) — never all-or-nothing.
-- Every UI-owning plugin in the §13.3 matrix is asserted in all three states:
-  superseded (default), deferred (`feature = false` with the plugin
-  present), and native-without-plugin.
+- Every UI-owning plugin in the §13.3 matrix is asserted in all four
+  states: **unaccommodated** (the plugin's own default/documented config,
+  with no fixture adjustment of any kind), superseded (default),
+  deferred (`feature = false` with the plugin present), and
+  native-without-plugin. Amended 2026-08-21 (C3): three states all ran
+  configs already adjusted for view, which is the inverse of the compat
+  contract.
 
 ### 5.6 CLI & process surface
 
@@ -787,8 +838,8 @@ single_grid = false
 picker = true
 tree = true
 statusline = true
-notifications = true
-palette = true
+notifications = true       # false also detaches ext_messages (§5.5)
+palette = true             # false also detaches ext_cmdline/ext_popupmenu (§5.5)
 tree_width = 30            # tree sidebar's share of the terminal width, 15..70
 
 [keys]
