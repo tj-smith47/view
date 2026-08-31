@@ -60,9 +60,7 @@ fn a_guard_armed_on_a_tail_alone_releases_when_that_tail_resolves() {
          must stop on it rather than call it residue"
     );
 
-    let mut input =
-        InputSource::open_after_probe(outcome.caps, outcome.fence_seen, outcome.partial_reply)
-            .unwrap();
+    let mut input = InputSource::open_after_probe(&outcome).unwrap();
     let size = TermSizeCell::default();
     assert!(
         input.still_listening(),

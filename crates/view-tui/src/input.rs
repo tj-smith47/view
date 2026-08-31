@@ -255,6 +255,16 @@ struct LateReplyGuard {
     /// changes the session's capabilities from one that only restates
     /// them.
     caps: TermCaps,
+    /// Whether a cursor-position report still answers the box-glyph
+    /// question rather than being a keypress that looks like one.
+    ///
+    /// Inherited from the probe and cleared for good by the first CPR any
+    /// sweep consumes, because `scan_replies` starts over on a buffer this
+    /// guard drains between sweeps and would otherwise re-ask a question
+    /// already answered on every read for the rest of the cap. `\x1b[1;2R`
+    /// is tmux's `Shift-F3`; once the answer is in, those six bytes are the
+    /// user's.
+    cpr_wanted: bool,
 }
 
 /// The signals that must end the session through view's own teardown
@@ -290,14 +300,17 @@ impl InputSource {
     /// capability probe, with the late-reply guard armed unless the probe
     /// ended with nothing outstanding.
     ///
-    /// The three arguments are the whole of
-    /// [`ProbeOutcome`](crate::tiers::ProbeOutcome) that concerns the input
-    /// path: `settled` is what the probe resolved, the floor every later
-    /// answer is folded onto; `fence_seen` is whether the DA1 fence arrived;
-    /// `partial_reply` is the run the probe's scan stopped on, still a live
-    /// prefix of some answer grammar, carried across the handover so the
-    /// read that brings its tail completes an answer rather than scanning a
-    /// headless one.
+    /// Four things in [`ProbeOutcome`](crate::tiers::ProbeOutcome) concern
+    /// the input path, and the whole outcome is taken rather than picked
+    /// apart so that a fifth reaches here by existing: `caps` is what the
+    /// probe resolved, the floor every later answer is folded onto;
+    /// `fence_seen` is whether the DA1 fence arrived; `partial_reply` is
+    /// the run the probe's scan stopped on, still a live prefix of some
+    /// answer grammar, carried across the handover so the read that brings
+    /// its tail completes an answer rather than scanning a headless one;
+    /// and `cpr_seen` is the box-glyph question's own bound, without which
+    /// the guard re-asks on every sweep a question the probe already had
+    /// answered.
     ///
     /// Either a missing fence or a non-empty tail arms it, and the caller is
     /// not asked which. Neither condition proves the terminal owes anything:
@@ -388,19 +401,16 @@ impl InputSource {
     ///
     /// Returns the underlying `std::io::Error` if the terminal fd or the
     /// signal pipe cannot be set up.
-    pub fn open_after_probe(
-        settled: TermCaps,
-        fence_seen: bool,
-        partial_reply: Vec<u8>,
-    ) -> std::io::Result<Self> {
-        if fence_seen && partial_reply.is_empty() {
+    pub fn open_after_probe(outcome: &crate::tiers::ProbeOutcome) -> std::io::Result<Self> {
+        if outcome.fence_seen && outcome.partial_reply.is_empty() {
             return Self::open_with(None);
         }
         Self::open_with(Some(LateReplyGuard {
             until: std::time::Instant::now() + crate::tiers::PROBE_HARD_CAP,
-            buf: partial_reply,
-            caps: settled,
-            fence_owed: !fence_seen,
+            buf: outcome.partial_reply.clone(),
+            caps: outcome.caps,
+            fence_owed: !outcome.fence_seen,
+            cpr_wanted: !outcome.cpr_seen,
         }))
     }
 
@@ -510,7 +520,10 @@ impl InputSource {
         while let Some(chunk) = read_ready(self.tty.as_fd()) {
             guard.buf.extend_from_slice(&chunk);
         }
-        let mut replies = crate::tiers::scan_replies(&guard.buf);
+        let mut replies = crate::tiers::scan_replies(&guard.buf, guard.cpr_wanted);
+        // a question answered stays answered, whichever sweep answered it:
+        // the buffer is drained below, so nothing else remembers
+        guard.cpr_wanted &= replies.unicode_boxes.is_none();
         // the answer's payload, not only its bytes: this is the whole
         // reason the probe may hand the terminal over before the fence --
         // what it would have waited for is recognized here instead, and

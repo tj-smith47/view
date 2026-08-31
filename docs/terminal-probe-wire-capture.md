@@ -126,7 +126,7 @@ Read as:
 | DA1 | `\x1b[?1;2;4c` | class 1, last on the wire |
 
 tmux declines the truecolor readback whether or not it is told the outer
-terminal is RGB-capable, and it renders 24-bit color in both cases. Inside
+terminal is RGB-capable. Inside
 tmux the probe cannot establish truecolor and `COLORTERM` is the only signal
 left, which is why `0$r` is read as *no answer* rather than as an answer of
 "no": the hint decides only where the probe was silent, and a declined

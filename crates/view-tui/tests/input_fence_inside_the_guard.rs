@@ -22,10 +22,10 @@
 
 mod common;
 
-use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 /// The DA1 fence and, behind it, an introducer with no final byte yet: a
 /// live prefix of a cursor-key sequence and of several answer grammars.
@@ -53,7 +53,7 @@ fn a_fence_reaching_the_guard_does_not_hand_back_the_keypress_behind_it() {
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
     // no fence at the probe, so the guard is armed on the fence itself
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
     let size = TermSizeCell::default();
 
     let write = |bytes: &[u8]| {

@@ -20,10 +20,10 @@
 
 mod common;
 
-use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 #[test]
 fn an_alt_prefixed_p_is_typed_through_rather_than_read_as_the_probes_answer() {
@@ -32,7 +32,7 @@ fn an_alt_prefixed_p_is_typed_through_rather_than_read_as_the_probes_answer() {
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
     let size = TermSizeCell::default();
 
     let drained = |input: &mut InputSource| {

@@ -22,10 +22,10 @@
 
 mod common;
 
-use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 /// What the drain returned, as plain key notations.
 fn drained(input: &mut InputSource, size: &TermSizeCell) -> Vec<String> {
@@ -45,7 +45,7 @@ fn an_introducer_split_from_its_reply_costs_neither_the_reply_nor_the_typing() {
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
     let size = TermSizeCell::default();
 
     let write = |bytes: &[u8]| {

@@ -21,10 +21,10 @@
 
 mod common;
 
-use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 /// A DECRPM answer whole, as one read delivers it.
 const WHOLE_LATE_REPLY: &[u8] = b"\x1b[?2026;1$y";
@@ -36,7 +36,7 @@ fn a_reply_that_lands_whole_after_the_first_keystroke_still_answers_the_probe() 
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
 
     rustix::io::write(&master, b"a").unwrap();
     assert!(

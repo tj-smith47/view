@@ -908,10 +908,10 @@ fn main() -> Result<()> {
     // attach's last step blocks on, the attach, the first content -- is
     // held for a terminal that answers a network round trip late. What it
     // still owes arrives on the input path instead (`open_after_probe`).
-    let probe = term
+    let mut probe = term
         .settle_probe()
         .context("failed to take the terminal capability probe off the terminal")?;
-    attach.send_residue(probe.residue);
+    attach.send_residue(std::mem::take(&mut probe.residue));
     model.caps = probe.caps;
     // `fence_seen` is on the line because the tier on it is not necessarily
     // final: false means the terminal still owes replies, and a later
@@ -945,17 +945,14 @@ fn main() -> Result<()> {
     // is capturing what the user types (see `ProbeOutcome::residue`).
     //
     // Whether anything the terminal still owes has to be kept off
-    // crossterm's parser is the callee's to decide, from the same two
-    // fields it would be decided from here: a missing fence, or a reply cut
-    // in half by the settle. Whatever the terminal does answer reaches the
-    // loop as `Msg::CapsUpgraded` rather than being waited for.
+    // crossterm's parser is the callee's to decide, and it decides from the
+    // outcome whole rather than from fields picked out here: a missing
+    // fence, a reply cut in half by the settle, a box-glyph question the
+    // probe already had answered. Whatever the terminal does answer reaches
+    // the loop as `Msg::CapsUpgraded` rather than being waited for.
     #[cfg(unix)]
-    let mut input_source = view_tui::input::InputSource::open_after_probe(
-        model.caps,
-        probe.fence_seen,
-        probe.partial_reply,
-    )
-    .context("failed to open the pollable terminal input handle")?;
+    let mut input_source = view_tui::input::InputSource::open_after_probe(&probe)
+        .context("failed to open the pollable terminal input handle")?;
     #[cfg(not(unix))]
     let mut input_source = ();
 

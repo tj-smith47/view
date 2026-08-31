@@ -69,9 +69,7 @@ fn the_head_of_an_answer_still_arriving_at_the_settle_crosses_the_handover() {
         "the live prefix of the answer must leave the probe with the outcome"
     );
 
-    let mut input =
-        InputSource::open_after_probe(outcome.caps, outcome.fence_seen, outcome.partial_reply)
-            .unwrap();
+    let mut input = InputSource::open_after_probe(&outcome).unwrap();
     let size = TermSizeCell::default();
     let mut settled = Vec::new();
     input.drain(&size, |msg| settled.push(msg));

@@ -18,10 +18,10 @@
 
 mod common;
 
-use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 #[test]
 fn an_introducer_ahead_of_the_first_keystroke_costs_only_what_completes_it() {
@@ -30,7 +30,7 @@ fn an_introducer_ahead_of_the_first_keystroke_costs_only_what_completes_it() {
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
     let size = TermSizeCell::default();
 
     let write = |bytes: &[u8]| {

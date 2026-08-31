@@ -64,9 +64,7 @@ fn a_tail_left_behind_an_answered_fence_still_arms_the_guard() {
         "an answered fence does not make the tail behind it the user's"
     );
 
-    let mut input =
-        InputSource::open_after_probe(outcome.caps, outcome.fence_seen, outcome.partial_reply)
-            .unwrap();
+    let mut input = InputSource::open_after_probe(&outcome).unwrap();
     let size = TermSizeCell::default();
 
     rustix::io::write(&master, REPLY_TAIL).unwrap();

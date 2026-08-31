@@ -31,6 +31,7 @@ use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 /// The whole batch a modern terminal owes, arriving in one burst long after
 /// the probe gave up, with a keystroke typed right behind it: the DECRPM
@@ -50,7 +51,7 @@ fn a_reply_arriving_after_the_probe_gave_up_never_reaches_the_engine() {
     // opened while the queue is empty, so crossterm's reader binds to this
     // terminal without consuming any of the burst written below
     // exactly what `main` opens for a probe whose fence never came
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
 
     rustix::io::write(&master, LATE_BATCH_THEN_KEY).unwrap();
     assert!(

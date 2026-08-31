@@ -24,10 +24,10 @@
 
 mod common;
 
-use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 /// A typed `a` and as much of a DECRPM answer as the first segment carried.
 const KEY_THEN_PARTIAL_REPLY: &[u8] = b"a\x1b[?2026";
@@ -42,7 +42,7 @@ fn a_keystroke_ahead_of_a_split_reply_does_not_hand_the_rest_of_it_to_crossterm(
     // this test's failure mode is a block, not a wrong answer
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
 
     rustix::io::write(&master, KEY_THEN_PARTIAL_REPLY).unwrap();
     assert!(

@@ -15,10 +15,10 @@
 
 mod common;
 
-use view_core::model::TermCaps;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
+use view_tui::tiers::ProbeOutcome;
 
 #[test]
 fn a_resize_under_the_guard_reports_the_shape_the_terminal_actually_has() {
@@ -38,7 +38,7 @@ fn a_resize_under_the_guard_reports_the_shape_the_terminal_actually_has() {
 
     // armed: no DA1 fence, so the terminal may still owe a reply and
     // crossterm may not read
-    let mut input = InputSource::open_after_probe(TermCaps::default(), false, Vec::new()).unwrap();
+    let mut input = InputSource::open_after_probe(&ProbeOutcome::default()).unwrap();
 
     // the signal a resize arrives as. The hook registered above writes the
     // self-pipe from the handler, on this thread, so the byte is queued by

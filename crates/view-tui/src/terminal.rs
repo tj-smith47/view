@@ -464,6 +464,7 @@ impl Term {
                 caps: self.caps,
                 residue: Vec::new(),
                 fence_seen: true,
+                cpr_seen: true,
                 partial_reply: Vec::new(),
             });
         };

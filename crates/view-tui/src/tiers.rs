@@ -70,8 +70,11 @@ const QUERY_TRUECOLOR: &[u8] = b"\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m";
 /// This asks about cell accounting, which is the question the border
 /// charset needs answered and the one no environment variable carries: a
 /// terminal decoding UTF-8 advances one column for the three bytes of `╭`,
-/// and one that is not advances three, having drawn them as three
-/// characters. Live captures of both are in
+/// and one that is not advances further, having taken them for something
+/// other than one box-drawing cell. How much further is the terminal's
+/// business and is not predicted here: the only capture of a non-UTF-8
+/// terminal reports column 3, not the 4 that drawing three characters
+/// would give. Live captures of both are in
 /// `docs/terminal-probe-wire-capture.md` sections D and E, which differ in
 /// nothing else -- `TERM`, `COLORTERM` and every other reply are identical
 /// between them.
@@ -83,14 +86,29 @@ const QUERY_TRUECOLOR: &[u8] = b"\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m";
 ///
 /// The leading `\r` is what makes column 2 the expected answer whatever
 /// else has been printed on the line, and the trailing `\r ESC [ K` puts
-/// the cursor back and erases the glyph, so the batch leaves the screen as
-/// it found it. All of it runs before the alternate screen exists.
+/// the cursor back and clears from there to the end of the line -- the
+/// glyph, and anything else that line was carrying. All of it runs before
+/// the alternate screen exists, on a line the startup path has not yet
+/// written to, so what the erase can reach is the shell prompt the user
+/// launched from rather than anything this program painted.
 const QUERY_BOX_GLYPH: &[u8] = "\r╭\x1b[6n\r\x1b[K".as_bytes();
 
 /// The cursor column a terminal that advanced [`QUERY_BOX_GLYPH`]'s glyph
 /// by exactly one cell reports, the `\r` in front of the glyph having put
 /// it at column 1.
 const BOX_GLYPH_ONE_CELL_COLUMN: u32 = 2;
+
+/// The columns [`QUERY_BOX_GLYPH`] has been answered with, and therefore the
+/// only ones a CPR is read as its answer at all.
+///
+/// Two, across every terminal captured: 2 where the glyph took one cell and
+/// 3 where its three bytes took three, and "no capture here reports a column
+/// past 3". The bound matters because a modified `F3` wears the same
+/// grammar -- `Ctrl-F3` under tmux is `\x1b[1;5R` -- so a column no glyph
+/// can produce is a keypress, and reading it as an answer would spend the
+/// probe's one question on it and leave the terminal's real reply to be
+/// typed into the buffer.
+const BOX_GLYPH_ANSWERED_COLUMNS: std::ops::RangeInclusive<u32> = 2..=3;
 
 const QUERY_DA1_FENCE: &[u8] = b"\x1b[c";
 
@@ -153,6 +171,10 @@ impl<S: ReplySource + ?Sized> ReplySource for &mut S {
 }
 
 /// Everything one finished capability probe hands its caller.
+///
+/// `Default` is the shape of a caller that ran no probe at all: nothing
+/// answered, nothing read, and every question still open.
+#[derive(Default)]
 pub struct ProbeOutcome {
     /// The capabilities every reply that arrived resolves to.
     pub caps: TermCaps,
@@ -164,6 +186,16 @@ pub struct ProbeOutcome {
     /// them off the input path (see
     /// [`InputSource::open_after_probe`](crate::input::InputSource::open_after_probe)).
     pub fence_seen: bool,
+    /// Whether the box-glyph question has been answered, and so must not be
+    /// asked of anything that arrives later.
+    ///
+    /// The probe's own bound on a CPR -- one match, and every later one is a
+    /// keypress -- can only hold within a single scan, because the buffer it
+    /// scans ends here. The fact travels on so that the guard reading the
+    /// rest of the replies inherits it rather than starting over: `\x1b[1;2R`
+    /// is both a cursor at row 1 column 2 and tmux's `Shift-F3`, and a
+    /// question already answered is what makes those six bytes the user's.
+    pub cpr_seen: bool,
     /// The buffer tail the scan stopped on: a run that is still a live
     /// prefix of some answer grammar, so it is neither resolved nor
     /// residue.
@@ -250,14 +282,14 @@ impl<'a> Probe<'a> {
     /// The capabilities the replies seen so far resolve to.
     #[must_use]
     pub fn caps(&self) -> TermCaps {
-        self.caps_from(&scan_replies(&self.buf))
+        self.caps_from(&scan_replies(&self.buf, true))
     }
 
     /// Whether the DA1 fence has arrived, i.e. whether the terminal still
     /// owes this probe anything.
     #[must_use]
     pub fn fence_seen(&self) -> bool {
-        scan_replies(&self.buf).da1
+        scan_replies(&self.buf, true).da1
     }
 
     /// Waits out whatever is left of `hard_cap` (measured from the query
@@ -273,11 +305,15 @@ impl<'a> Probe<'a> {
     #[must_use]
     pub fn finish(mut self, hard_cap: Duration) -> ProbeOutcome {
         self.read_until(hard_cap);
-        let replies = scan_replies(&self.buf);
+        // true, unconditionally: a probe's own buffer is never drained
+        // before this point, so every scan it runs sees the whole window
+        // from the beginning and the "one match" bound holds inside it
+        let replies = scan_replies(&self.buf, true);
         let partial_reply = self.buf.split_off(replies.consumed);
         ProbeOutcome {
             caps: self.caps_from(&replies),
             fence_seen: replies.da1,
+            cpr_seen: replies.unicode_boxes.is_some(),
             residue: replies.residue,
             partial_reply,
         }
@@ -299,7 +335,7 @@ impl<'a> Probe<'a> {
 
     fn read_until(&mut self, deadline: Duration) {
         loop {
-            if scan_replies(&self.buf).da1 {
+            if scan_replies(&self.buf, true).da1 {
                 break;
             }
             let elapsed = self.started.elapsed();
@@ -399,24 +435,39 @@ fn unicode_boxes_hint(locale: Option<&str>) -> bool {
 /// would strip every tmux session of color it demonstrably has.
 ///
 /// The echoed parameters are searched rather than compared whole because a
-/// terminal may report its entire SGR state (`0;48;2;1;2;3`), both `;` and
-/// `:` are accepted between the components -- the two separators are
-/// interchangeable in the spec and terminals differ over which they echo --
-/// and empty fields are dropped before the search, because the T.416
-/// spelling carries an empty colour-space id between the introducer and the
-/// components (`48:2::1:2:3`, what Windows ConPTY answers in capture H).
+/// terminal may report its entire SGR state (`0;48;2;1;2;3`), and both `;`
+/// and `:` are accepted between the components -- the two separators are
+/// interchangeable in the spec and terminals differ over which they echo.
+///
+/// Two run lengths are accepted, which is the whole of the T.416 question.
+/// The legacy spelling puts the components straight behind the introducer
+/// (`48;2;1;2;3`); the ITU-T T.416 one carries a colour-space id between
+/// them (`48:2:<id>:1:2:3`), and Windows ConPTY sends that field empty
+/// (`48:2::1:2:3`, capture H). The id's own value is not this function's
+/// business -- what it is asked is whether the terminal kept the triple --
+/// so the six-field run accepts anything in that slot, empty included.
+///
+/// Recall is load-bearing here in a way it was not when this reading was
+/// OR'd with `COLORTERM`: an answer now outranks the hint, so a spelling
+/// this fails to recognize does not fall back, it reports a truecolor
+/// terminal as a 256-color one.
 fn truecolor_from_decrqss(body: &[u8]) -> Option<bool> {
+    const INTRODUCER: usize = 2;
     let sgr = body
         .strip_prefix(b"1$r")
         .and_then(|rest| rest.strip_suffix(b"m"))?;
     let sgr = std::str::from_utf8(sgr).ok()?;
-    Some(
-        sgr.split([';', ':'])
-            .filter(|field| !field.is_empty())
-            .collect::<Vec<_>>()
-            .windows(TRUECOLOR_SGR_PARAMS.len())
-            .any(|window| window == TRUECOLOR_SGR_PARAMS),
-    )
+    let fields: Vec<&str> = sgr.split([';', ':']).collect();
+    let legacy = fields
+        .windows(TRUECOLOR_SGR_PARAMS.len())
+        .any(|window| window == TRUECOLOR_SGR_PARAMS);
+    let with_colour_space_id = fields
+        .windows(TRUECOLOR_SGR_PARAMS.len() + 1)
+        .any(|window| {
+            window[..INTRODUCER] == TRUECOLOR_SGR_PARAMS[..INTRODUCER]
+                && window[INTRODUCER + 1..] == TRUECOLOR_SGR_PARAMS[INTRODUCER..]
+        });
+    Some(legacy || with_colour_space_id)
 }
 
 /// Splits a DCS at its string terminator, returning the body before it and
@@ -451,7 +502,7 @@ pub(crate) struct Replies {
     truecolor: Option<bool>,
     /// The terminal's own answer about box-glyph cell accounting, `None`
     /// where it gave none, on the same terms as `truecolor`.
-    unicode_boxes: Option<bool>,
+    pub(crate) unicode_boxes: Option<bool>,
     pub(crate) residue: Vec<u8>,
     /// How many leading bytes of the buffer this scan accounted for.
     /// Everything past it is a reply the terminal has only half delivered,
@@ -552,12 +603,21 @@ enum AnswerHead {
 /// `ESC [ 1 ; 2 R` is a CPR from a cursor on row 1 column 2 and is
 /// byte-identical to tmux's `Shift-F3`, captured side by side in
 /// `docs/terminal-probe-wire-capture.md`, "A keypress that is a CPR reply".
-/// Nothing in the byte stream separates them, so what separates them is
-/// where they arrive: `cpr_wanted` is true only inside a probe window that
-/// asked the question and only until it has been answered once, which
-/// bounds the cost to a single `Shift-F3` pressed in the first moments of a
-/// launch under tmux. Every later one is a keypress and reaches the user's
-/// buffer as one.
+/// Nothing in the byte stream separates them, so two things outside the
+/// stream do. `cpr_wanted` is true only inside a probe window that asked
+/// the question and only until it has been answered once -- a fact that
+/// travels from the probe to the late-reply guard on
+/// [`ProbeOutcome::cpr_seen`], so the bound is one answer per session and
+/// not one per read. And the column has to be one the glyph could have
+/// produced ([`BOX_GLYPH_ANSWERED_COLUMNS`]), which is what keeps
+/// `Ctrl-F3` (`\x1b[1;5R`) a keypress.
+///
+/// What is left is exact: a `Shift-F3` (column 2) or an `Alt-F3`
+/// (column 3) pressed under tmux before the terminal's own CPR arrives, in
+/// the first moments of a launch. That keypress is lost and answers the
+/// question in the terminal's place. kitty does not encode modified `F3`
+/// in this grammar at all (`\x1b[13;2~`), so the collision is a property
+/// of the terminal's key encoding rather than of CPR.
 fn answer_head(buf: &[u8], cpr_wanted: bool) -> AnswerHead {
     match buf {
         [0x1b, b'[', b'?', params @ ..] => private_csi_head(params),
@@ -588,7 +648,9 @@ fn cpr_head(params: &[u8], cpr_wanted: bool) -> AnswerHead {
     for (at, &byte) in params.iter().enumerate() {
         if (0x40..=0x7e).contains(&byte) {
             if cpr_wanted && byte == b'R' {
-                if let Some(column) = cpr_column(&params[..at]) {
+                if let Some(column) =
+                    cpr_column(&params[..at]).filter(|c| BOX_GLYPH_ANSWERED_COLUMNS.contains(c))
+                {
                     return AnswerHead::Complete {
                         len: INTRODUCER + at + 1,
                         kind: AnswerKind::Cpr(column == BOX_GLYPH_ONE_CELL_COLUMN),
@@ -700,16 +762,17 @@ fn is_da1_class(params: &[u8]) -> bool {
 /// in the buffer when the user presses `c`) is split rather than taken
 /// whole: the run in front is the terminal's and goes, the byte that ended
 /// it is the user's and stays.
-pub(crate) fn scan_replies(buf: &[u8]) -> Replies {
+pub(crate) fn scan_replies(buf: &[u8], cpr_wanted: bool) -> Replies {
     let mut sync = false;
     let mut kitty = false;
     let mut da1 = false;
     let mut truecolor = None;
     let mut unicode_boxes = None;
+    let mut cpr_wanted = cpr_wanted;
     let mut residue = Vec::new();
     let mut i = 0;
     while i < buf.len() {
-        match answer_head(&buf[i..], unicode_boxes.is_none()) {
+        match answer_head(&buf[i..], cpr_wanted) {
             AnswerHead::Complete { len, kind } => {
                 match kind {
                     AnswerKind::Decrpm(supported) => sync |= supported,
@@ -719,7 +782,10 @@ pub(crate) fn scan_replies(buf: &[u8]) -> Replies {
                     // query in the batch once, and a second run of the same
                     // shape is something else that looks like it
                     AnswerKind::Decrqss(answer) => truecolor = truecolor.or(answer),
-                    AnswerKind::Cpr(one_cell) => unicode_boxes = Some(one_cell),
+                    AnswerKind::Cpr(one_cell) => {
+                        unicode_boxes = Some(one_cell);
+                        cpr_wanted = false;
+                    }
                 }
                 i += len;
             }
@@ -964,7 +1030,7 @@ fn no_probe_caps(hints: &EnvHints) -> TermCaps {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use std::collections::VecDeque;
 
@@ -1163,6 +1229,45 @@ mod tests {
         assert!(caps.truecolor);
     }
 
+    /// The batch `docs/terminal-probe-wire-capture.md` records on its
+    /// `sent:` line, unescaped out of the document rather than copied into
+    /// this file.
+    ///
+    /// Every `received:` line in that document is some terminal's answer to
+    /// exactly these bytes, so a batch that drifts from it is reading
+    /// answers to a question nobody asked -- and a copy sitting here would
+    /// let the two drift apart silently, which is the whole failure this
+    /// reads the doc to prevent.
+    fn captured_batch() -> Vec<u8> {
+        const DOC: &str = include_str!("../../../docs/terminal-probe-wire-capture.md");
+        let line = DOC
+            .lines()
+            .find_map(|line| line.strip_prefix("sent:"))
+            .expect("the capture doc must record the batch it sent")
+            .trim();
+        let mut bytes = Vec::new();
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                let mut utf8 = [0u8; 4];
+                bytes.extend_from_slice(ch.encode_utf8(&mut utf8).as_bytes());
+                continue;
+            }
+            match chars.next() {
+                Some('r') => bytes.push(b'\r'),
+                Some('\\') => bytes.push(b'\\'),
+                Some('x') => {
+                    let hex: String = chars.by_ref().take(2).collect();
+                    let byte = u8::from_str_radix(&hex, 16)
+                        .expect("the doc's `sent:` line must escape bytes as two hex digits");
+                    bytes.push(byte);
+                }
+                other => panic!("unknown escape in the capture doc's `sent:` line: {other:?}"),
+            }
+        }
+        bytes
+    }
+
     #[test]
     fn writes_the_query_batch_before_reading_any_reply() {
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[?62c".as_slice())]);
@@ -1170,12 +1275,7 @@ mod tests {
         detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert_eq!(
             sink,
-            // the capture doc's `sent:` line, byte for byte: every reply
-            // this module decodes was captured against exactly this batch,
-            // so a batch that drifts from it is reading answers to a
-            // question nobody asked
-            "\x1b[?2026$p\x1b[?u\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m\r╭\x1b[6n\r\x1b[K\x1b[c"
-                .as_bytes(),
+            captured_batch(),
             "the DA1 fence must stay last -- it is what proves every earlier \
              query has been answered -- the truecolor readback must be \
              bracketed by the SGR set and its reset, and the box glyph must \
@@ -1376,7 +1476,7 @@ mod tests {
 
     #[test]
     fn decrqss_grammar_decides_truecolor_from_what_the_terminal_echoed() {
-        let cases: [(&str, &[u8], Option<bool>); 8] = [
+        let cases: [(&str, &[u8], Option<bool>); 9] = [
             (
                 "semicolon separators, whole SGR state echoed",
                 b"1$r0;48;2;1;2;3m",
@@ -1417,6 +1517,15 @@ mod tests {
                 // field is present and empty
                 "empty colour-space id (Windows ConPTY)",
                 b"1$r0;48:2::1:2:3m",
+                Some(true),
+            ),
+            (
+                // the same grammar with the id filled in. Unobserved, but
+                // one field away from a form that was: since an answer now
+                // outranks the hint, a spelling this parser fails to
+                // recognize costs a truecolor terminal its color outright
+                "colour-space id present",
+                b"1$r0;48:2:0:1:2:3m",
                 Some(true),
             ),
         ];
@@ -1623,7 +1732,11 @@ mod tests {
                 "{}: a reply is not typed input: {residue:?}",
                 case.section
             );
-            assert!(scan_replies(case.replies).da1, "{}: fence", case.section);
+            assert!(
+                scan_replies(case.replies, true).da1,
+                "{}: fence",
+                case.section
+            );
         }
     }
 
@@ -1744,6 +1857,28 @@ mod tests {
     }
 
     #[test]
+    fn a_modified_f3_the_glyph_could_not_have_produced_is_not_an_answer() {
+        // capture page, "A keypress that is a CPR reply": Ctrl-F3 under tmux
+        // is `\x1b[1;5R`. Column 5 is a column no capture reports and the
+        // glyph cannot produce, so reading it as an answer would eat the
+        // key, pin unicode_boxes for the session on a keypress, and leave
+        // the terminal's own reply behind a spent arm -- where it falls out
+        // of every grammar and is typed into the buffer
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[1;5R\x1b[1;2R\x1b[?62c".as_slice())]);
+        let mut sink = Vec::new();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
+        assert_eq!(
+            residue, b"\x1b[1;5R",
+            "the keypress must reach the engine whole"
+        );
+        assert!(
+            caps.unicode_boxes,
+            "the terminal's own reply arrived behind it and is the answer"
+        );
+    }
+
+    #[test]
     fn a_keystroke_typed_during_the_dcs_reply_is_still_returned_as_residue() {
         // the residue contract under the two new arms: a user typing while
         // the terminal is mid-batch loses nothing
@@ -1766,7 +1901,7 @@ mod tests {
         for key in *b"cuyh:" {
             let mut buf = b"\x1b[?2026".to_vec();
             buf.push(key);
-            let replies = scan_replies(&buf);
+            let replies = scan_replies(&buf, true);
             assert_eq!(
                 replies.residue,
                 vec![key],
@@ -1792,34 +1927,34 @@ mod tests {
             (b"\x1bP1$r0;48;2;1;2;3m\x1b\\".as_slice(), "DECRQSS"),
             (b"\x1b[1;2R".as_slice(), "CPR"),
         ] {
-            let replies = scan_replies(answer);
+            let replies = scan_replies(answer, true);
             assert!(
                 replies.residue.is_empty() && replies.consumed == answer.len(),
                 "{name} must leave nothing behind: {replies:?}",
                 replies = replies.residue
             );
         }
-        assert!(scan_replies(b"\x1b[?2026;1$y").sync);
-        assert!(scan_replies(b"\x1b[?0u").kitty);
-        assert!(scan_replies(b"\x1b[?62;4c").da1);
+        assert!(scan_replies(b"\x1b[?2026;1$y", true).sync);
+        assert!(scan_replies(b"\x1b[?0u", true).kitty);
+        assert!(scan_replies(b"\x1b[?62;4c", true).da1);
         assert_eq!(
-            scan_replies(b"\x1bP1$r0;48;2;1;2;3m\x1b\\").truecolor,
+            scan_replies(b"\x1bP1$r0;48;2;1;2;3m\x1b\\", true).truecolor,
             Some(true)
         );
-        assert_eq!(scan_replies(b"\x1b[1;2R").unicode_boxes, Some(true));
+        assert_eq!(scan_replies(b"\x1b[1;2R", true).unicode_boxes, Some(true));
     }
 
     #[test]
     fn a_parameter_outside_its_grammars_range_is_not_that_answer() {
         // the kitty field is five bits and DA1's class is a small number;
         // past either bound the run is a stalled reply with a key on it
-        assert!(!scan_replies(b"\x1b[?32u").kitty);
-        assert!(!scan_replies(b"\x1b[?66c").da1);
-        assert!(scan_replies(b"\x1b[?31u").kitty);
-        assert!(scan_replies(b"\x1b[?65c").da1);
+        assert!(!scan_replies(b"\x1b[?32u", true).kitty);
+        assert!(!scan_replies(b"\x1b[?66c", true).da1);
+        assert!(scan_replies(b"\x1b[?31u", true).kitty);
+        assert!(scan_replies(b"\x1b[?65c", true).da1);
         // DECRPM without its `$`, and with a state outside 0..=4
-        assert_eq!(scan_replies(b"\x1b[?2026;1y").residue, b"y");
-        assert_eq!(scan_replies(b"\x1b[?2026;5$y").residue, b"y");
+        assert_eq!(scan_replies(b"\x1b[?2026;1y", true).residue, b"y");
+        assert_eq!(scan_replies(b"\x1b[?2026;5$y", true).residue, b"y");
     }
 
     #[test]
@@ -1839,7 +1974,7 @@ mod tests {
         // the terminal stopped mid-answer and the user typed `h`, whose
         // byte is a legal CSI final: the answer is the terminal's, the key
         // is not, and only one of them is anyone's input
-        let replies = scan_replies(b"\x1b[?2026h");
+        let replies = scan_replies(b"\x1b[?2026h", true);
         assert_eq!(replies.residue, b"h");
         assert_eq!(replies.consumed, 8);
         assert!(!replies.sync, "`h` answers nothing the batch asked");
