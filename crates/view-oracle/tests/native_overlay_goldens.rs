@@ -1,9 +1,11 @@
 //! Committed screen dumps of every native overlay at every terminal tier.
 //!
 //! A native overlay's frame is the part of `view` a user sees before they
-//! see anything else, and it degrades by tier: rounded box-drawing where
-//! the terminal proved it can sync, plain box-drawing where it proved only
-//! color, ASCII everywhere else. Unit assertions on individual rows cannot
+//! see anything else, and it degrades in exactly one step: rounded
+//! box-drawing wherever the terminal draws box-drawing glyphs, ASCII where
+//! it does not. The `full` and `standard` dumps here are therefore
+//! byte-identical by design -- a diff that parts them is the regression
+//! this file exists to catch. Unit assertions on individual rows cannot
 //! say whether the whole picture is right; a committed dump can, and
 //! reviewing a diff of one is how a change to framing gets noticed instead
 //! of silently shipping.
@@ -318,4 +320,35 @@ fn basic_crashed_ai_panel() {
         "basic-crashed-ai-panel",
         &dump(Tier::Basic, 30, 7, crashed_ai_panel()),
     );
+}
+
+/// Walks the committed dumps rather than naming them: a `standard-` golden
+/// added for a surface invented later joins this pin by existing, and the
+/// day a tier is allowed to change corner glyphs again, every pair fails
+/// here at once instead of one dump quietly diverging.
+#[test]
+fn every_standard_golden_is_byte_identical_to_its_full_sibling() {
+    let dir = golden_path("full-picker")
+        .parent()
+        .expect("goldens live in a directory")
+        .to_path_buf();
+    let mut pairs = 0;
+    for entry in std::fs::read_dir(&dir).expect("goldens directory is readable") {
+        let path = entry.expect("a readable directory entry").path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix("standard-") else {
+            continue;
+        };
+        let full = dir.join(format!("full-{rest}"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("standard golden is readable"),
+            std::fs::read_to_string(&full)
+                .unwrap_or_else(|err| panic!("{} has no full sibling: {err}", path.display())),
+            "{name} parts from its full sibling; corner glyphs are font coverage, not a tier"
+        );
+        pairs += 1;
+    }
+    assert!(pairs >= 8, "only {pairs} standard goldens were walked");
 }

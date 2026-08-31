@@ -27,13 +27,12 @@ use view_core::native::views::{
 
 use crate::LayerKind;
 
-/// The horizontal edge glyph shared by every box-drawing border. Named once
-/// because [`BorderSet::ROUNDED`] and [`BorderSet::PLAIN`] differ only in
-/// their corners: a second literal would let the two drift into visibly
-/// different edges for no reason a user could name.
+/// The horizontal edge glyph of the box-drawing border. Named beside
+/// [`LINE_V`] because the two are one decision: a frame whose edges came
+/// from separate literals could drift into a horizontal and a vertical run
+/// drawn at different weights, which no user could name but everyone sees.
 const LINE_H: char = '─';
-/// The vertical edge glyph shared by every box-drawing border; see
-/// [`LINE_H`].
+/// The vertical edge glyph of the box-drawing border; see [`LINE_H`].
 const LINE_V: char = '│';
 
 /// The character a prompt line opens with, on every tier: one ASCII cell,
@@ -64,27 +63,13 @@ pub struct BorderSet {
 }
 
 impl BorderSet {
-    /// Rounded box-drawing corners: the frame a terminal with the full
-    /// capability set gets.
+    /// Rounded box-drawing corners: the frame every terminal that draws
+    /// box-drawing glyphs gets, whatever else it can or cannot do.
     pub const ROUNDED: Self = Self {
         top_left: '╭',
         top_right: '╮',
         bottom_left: '╰',
         bottom_right: '╯',
-        horizontal: LINE_H,
-        vertical: LINE_V,
-    };
-
-    /// Square box-drawing corners: the same layout and the same edges as
-    /// [`BorderSet::ROUNDED`], without the rounded joins. Degradation here
-    /// is a deliberate second look, not a fallback apology: the box keeps
-    /// its size, its title, and its content rows, so nothing reflows
-    /// between tiers.
-    pub const PLAIN: Self = Self {
-        top_left: '┌',
-        top_right: '┐',
-        bottom_left: '└',
-        bottom_right: '┘',
         horizontal: LINE_H,
         vertical: LINE_V,
     };
@@ -103,16 +88,18 @@ impl BorderSet {
 
     /// The border charset for `tier`.
     ///
-    /// Tier is the right predicate here, unlike the synchronized-update and
-    /// color decisions that gate on their own probed bit: nothing in the
-    /// capability probe reports whether a terminal renders box-drawing
-    /// glyphs, so the coarse tier is the only signal that exists for this
-    /// choice rather than a stand-in for a finer one.
+    /// Corner glyphs are font coverage, not a terminal capability: a
+    /// terminal that draws `┌` draws `╭`, so square corners are no
+    /// fallback for rounded ones and view ships no third set.
+    /// The honest predicate is whether the terminal draws box-drawing
+    /// glyphs at all, which is a capability of its own rather than
+    /// anything the color-depth and synchronization bits behind a tier can
+    /// answer; until that bit is probed, `basic` -- the tier that answered
+    /// no capability query at all -- is the closest stand-in for it.
     #[must_use]
     pub fn for_tier(tier: Tier) -> Self {
         match tier {
-            Tier::Full => Self::ROUNDED,
-            Tier::Standard => Self::PLAIN,
+            Tier::Full | Tier::Standard => Self::ROUNDED,
             Tier::Basic => Self::ASCII,
             // `Tier` is `#[non_exhaustive]`; a tier this build predates
             // draws the frame every terminal can render rather than one it

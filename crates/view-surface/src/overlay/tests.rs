@@ -54,44 +54,59 @@ fn every_row_of_a_framed_overlay_is_exactly_the_rect_wide_and_the_rect_is_filled
 }
 
 #[test]
+fn standard_tier_draws_the_same_frame_as_full() {
+    let full = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Full));
+    let standard = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Standard));
+
+    assert_eq!(
+        line_text(&standard.lines[0]).chars().next(),
+        Some('╭'),
+        "a corner glyph is font coverage, not a color depth"
+    );
+    assert_eq!(
+        BorderSet::for_tier(Tier::Standard),
+        BorderSet::for_tier(Tier::Full),
+        "the two charsets differ in nothing, corners included"
+    );
+    assert_eq!(full, standard, "the whole frame is identical");
+}
+
+#[test]
+fn basic_tier_draws_ascii() {
+    let basic = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Basic));
+
+    assert_eq!(BorderSet::for_tier(Tier::Basic), BorderSet::ASCII);
+    assert!(
+        line_text(&basic.lines[0]).starts_with('+'),
+        "{:?}",
+        basic.lines[0]
+    );
+    for line in &basic.lines {
+        let text = line_text(line);
+        assert!(
+            !text.chars().any(|c| "╭╮╰╯─│".contains(c)),
+            "a box-drawing glyph reached an ASCII frame: {text:?}"
+        );
+    }
+}
+
+#[test]
 fn a_tier_swaps_the_border_glyphs_without_moving_any_content() {
-    let full = rows(28, 8, &picker(), BorderSet::ROUNDED);
-    let standard = rows(28, 8, &picker(), BorderSet::PLAIN);
-    let basic = rows(28, 8, &picker(), BorderSet::ASCII);
+    let full = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Full));
+    let basic = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Basic));
 
     assert!(
         line_text(&full.lines[0]).starts_with('╭'),
         "{:?}",
         full.lines[0]
     );
-    assert!(
-        line_text(&standard.lines[0]).starts_with('┌'),
-        "{:?}",
-        standard.lines[0]
-    );
-    assert!(
-        line_text(&basic.lines[0]).starts_with('+'),
-        "{:?}",
-        basic.lines[0]
-    );
-
-    // corners aside, full and standard draw the same edges, so a change to
-    // the shared glyph moves both tiers and leaves ASCII alone
     assert_eq!(
-        line_text(&full.lines[1]),
-        line_text(&standard.lines[1]),
-        "interior rows are identical"
-    );
-    assert_eq!(
-        full.selected, standard.selected,
+        full.selected, basic.selected,
         "selection lands on the same row at every tier"
     );
-    assert_eq!(full.selected, basic.selected);
 
     let strip = |line: &str| -> String {
-        line.chars()
-            .filter(|c| !"╭╮╰╯┌┐└┘+-|─│".contains(*c))
-            .collect()
+        line.chars().filter(|c| !"╭╮╰╯+-|─│".contains(*c)).collect()
     };
     for (a, b) in full.lines.iter().zip(basic.lines.iter()) {
         assert_eq!(
@@ -1163,13 +1178,8 @@ fn a_panel_with_no_cells_names_no_caret() {
 #[test]
 fn a_tier_maps_to_exactly_one_border_charset() {
     assert_eq!(BorderSet::for_tier(Tier::Full), BorderSet::ROUNDED);
-    assert_eq!(BorderSet::for_tier(Tier::Standard), BorderSet::PLAIN);
+    assert_eq!(BorderSet::for_tier(Tier::Standard), BorderSet::ROUNDED);
     assert_eq!(BorderSet::for_tier(Tier::Basic), BorderSet::ASCII);
-    assert_eq!(
-        BorderSet::ROUNDED.horizontal,
-        BorderSet::PLAIN.horizontal,
-        "the two box-drawing tiers differ only at the corners"
-    );
     assert_ne!(BorderSet::ASCII.horizontal, BorderSet::ROUNDED.horizontal);
 }
 
@@ -1187,7 +1197,7 @@ fn a_layers_charset_is_derived_from_its_kind_and_tier() {
     };
     let layer = crate::Layer::new(rect, picker(), Tier::Standard);
     assert_eq!(layer.rect, rect);
-    assert_eq!(layer.borders, Some(BorderSet::PLAIN));
+    assert_eq!(layer.borders, Some(BorderSet::ROUNDED));
     assert!(layer.kind.is_native_overlay());
 
     for kind in [LayerKind::EngineGrid, LayerKind::Shell] {
