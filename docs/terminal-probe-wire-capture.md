@@ -151,6 +151,31 @@ probe exists for, and it is the only signal in this whole matrix that
 separates E from D -- `TERM`, `COLORTERM` and every other reply are identical
 between them.
 
+### What D and E prove, and what they do not
+
+The box-glyph probe is proven here on **one axis only: the locale**. E is a
+terminal taken out of UTF-8 mode, and that is the whole of the difference
+between the two captures. Every other emulator in this matrix, on all three
+operating systems, advanced `╭` by exactly one cell while in UTF-8 mode, so
+the population contains exactly one positive and one negative and they differ
+by `defutf8`/`LANG` alone.
+
+Unobserved, and not to be claimed on this evidence:
+
+- a UTF-8 terminal whose **font** lacks the glyph. None was captured; a
+  tofu box or a fallback glyph may still advance one cell, in which case the
+  CPR column says "fine" about a frame the user cannot read.
+- a terminal whose **wcwidth** disagrees, drawing the glyph double-width. No
+  capture here reports a column past 3.
+- the emulators recorded unavailable above (Terminal.app, Windows Terminal,
+  Termius), none of which contributed a box-glyph column.
+
+So the probe discriminates -- it is not a query every terminal answers alike
+-- but what it is *shown* to detect is a terminal not decoding UTF-8, not the
+general question "can this terminal draw a rounded border." A consumer that
+treats a column of 2 as proof the border will render is extrapolating past
+this capture set.
+
 ## F. mbp over ssh, terminal is kitty on dev-linux
 
 ```
@@ -233,7 +258,9 @@ The probe discriminates in this population: A/F answer DECRQSS affirmatively
 with the triple intact, B/C/G answer it negatively, D/E ignore it, and the
 box-glyph column separates E from D where nothing else does. A capture set in
 which every terminal answered alike would not be evidence, and this one is
-not that.
+not that. The box-glyph half of that claim is bounded to the locale axis --
+see "What D and E prove, and what they do not" above for what stays
+unobserved.
 
 ## The DA1 fence answers last
 
@@ -283,7 +310,10 @@ produce this shape is false, and these captures are why.
    what a current Windows ConPTY sends, and the shipped
    `truecolor_from_decrqss` rejects it.
 2. The box-glyph probe's signal is the CPR **column**, not its presence: D
-   and E both answer, and only the column differs.
+   and E both answer, and only the column differs. What it is shown to
+   detect is a terminal not decoding UTF-8; a font gap and a double-width
+   wcwidth are unobserved here, so neither may be claimed from a column of
+   2.
 3. `Pm=0` on DECRPM is a real answer meaning unsupported, not a missing one.
    Treating "no reply" and `;0$y` alike loses the distinction H provides.
 4. Nothing arrives after the DA1 fence, so it remains usable as one.
