@@ -1934,6 +1934,17 @@ pub struct TermCaps {
     pub sync: bool,
     pub truecolor: bool,
     pub kitty_kbd: bool,
+    /// Whether the terminal accounts for a box-drawing glyph as one cell,
+    /// which is what the border charset asks about.
+    ///
+    /// A cell-accounting fact, not a legibility one: the probe behind it
+    /// writes one `╭` and reads the cursor column back, so a terminal not
+    /// decoding UTF-8 is what a `false` here has actually been shown to
+    /// mean. A font that lacks the glyph still advances one column and
+    /// renders tofu, and no capture has separated that case from a working
+    /// one -- see `docs/terminal-probe-wire-capture.md`, "What D and E
+    /// prove, and what they do not".
+    pub unicode_boxes: bool,
 }
 
 impl Default for TermCaps {
@@ -1974,6 +1985,24 @@ impl TermCaps {
             sync,
             truecolor,
             kitty_kbd,
+            unicode_boxes: false,
+        }
+    }
+
+    /// The same capabilities with [`Self::unicode_boxes`] set to what the
+    /// box-glyph probe answered.
+    ///
+    /// Set beside [`Self::from_probe`] rather than through it because
+    /// `tier` does not derive from it: the border charset is the one thing
+    /// this bit gates, and a terminal's cell accounting is independent of
+    /// the color depth, synchronization and keyboard-protocol answers a
+    /// tier is made of. Left `false` by every caller that never asked the
+    /// question, which is the same floor an unanswered probe resolves to.
+    #[must_use]
+    pub fn with_unicode_boxes(self, unicode_boxes: bool) -> Self {
+        Self {
+            unicode_boxes,
+            ..self
         }
     }
 }

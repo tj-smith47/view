@@ -3218,7 +3218,9 @@ mod tests {
             "a terminal that answered no probe frames its toast in ASCII"
         );
         assert_eq!(
-            framed(view_core::model::TermCaps::from_probe(true, true, true)),
+            framed(
+                view_core::model::TermCaps::from_probe(true, true, true).with_unicode_boxes(true)
+            ),
             ["╭──╮", "│hi│", "╰──╯"],
             "a terminal that draws box glyphs gets the same rounded frame every other float has"
         );

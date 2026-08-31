@@ -18,7 +18,7 @@ use std::time::Duration;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
-use view_tui::tiers::{Probe, PROBE_DEADLINE};
+use view_tui::tiers::{EnvHints, Probe, PROBE_DEADLINE};
 
 /// The DA1 fence, then an introducer with no final byte yet: a live prefix
 /// of a cursor-key sequence, and of several answer grammars besides.
@@ -42,7 +42,13 @@ fn a_guard_armed_on_a_tail_alone_releases_when_that_tail_resolves() {
     );
 
     let mut queries = Vec::new();
-    let probe = Probe::start(common::SlaveSource, &mut queries, PROBE_DEADLINE, None).unwrap();
+    let probe = Probe::start(
+        common::SlaveSource,
+        &mut queries,
+        PROBE_DEADLINE,
+        &EnvHints::default(),
+    )
+    .unwrap();
     let outcome = probe.finish(Duration::ZERO);
     assert!(
         outcome.fence_seen,

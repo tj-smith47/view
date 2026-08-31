@@ -19,7 +19,7 @@ use std::time::Duration;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
-use view_tui::tiers::{Probe, PROBE_DEADLINE};
+use view_tui::tiers::{EnvHints, Probe, PROBE_DEADLINE};
 
 /// The DA1 fence, then as much of a DECRPM answer as the segment carried.
 const FENCE_THEN_REPLY_HEAD: &[u8] = b"\x1b[?1;2c\x1b[?2026;";
@@ -42,7 +42,13 @@ fn a_tail_left_behind_an_answered_fence_still_arms_the_guard() {
     );
 
     let mut queries = Vec::new();
-    let probe = Probe::start(common::SlaveSource, &mut queries, PROBE_DEADLINE, None).unwrap();
+    let probe = Probe::start(
+        common::SlaveSource,
+        &mut queries,
+        PROBE_DEADLINE,
+        &EnvHints::default(),
+    )
+    .unwrap();
     let outcome = probe.finish(Duration::ZERO);
     assert!(
         outcome.fence_seen,

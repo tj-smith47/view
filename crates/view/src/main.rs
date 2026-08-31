@@ -707,11 +707,13 @@ fn seed_ai_enabled(
 fn caps_notice(cli: &Cli, caps: TermCaps, source: CapsSource) -> Option<String> {
     (cli.print_caps || cli.tier.is_some()).then(|| {
         format!(
-            "view: terminal capabilities: tier={:?} sync={} truecolor={} kitty_kbd={} ({})",
+            "view: terminal capabilities: tier={:?} sync={} truecolor={} \
+             kitty_kbd={} unicode_boxes={} ({})",
             caps.tier,
             caps.sync,
             caps.truecolor,
             caps.kitty_kbd,
+            caps.unicode_boxes,
             source.label()
         )
     })
@@ -917,12 +919,14 @@ fn main() -> Result<()> {
     // `VIEW_LOG` takes the first verdict for the session's.
     vlog::log_with("startup", || {
         format!(
-            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} fence_seen={} source={} term={width}x{height}",
+            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} \
+             unicode_boxes={} fence_seen={} source={} term={width}x{height}",
             VERSION,
             model.caps.tier,
             model.caps.sync,
             model.caps.truecolor,
             model.caps.kitty_kbd,
+            model.caps.unicode_boxes,
             probe.fence_seen,
             term.caps_source().label()
         )

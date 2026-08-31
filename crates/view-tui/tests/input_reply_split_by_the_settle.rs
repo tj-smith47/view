@@ -18,7 +18,7 @@ use std::time::Duration;
 use view_core::msg::Msg;
 use view_tui::input::InputSource;
 use view_tui::terminal::TermSizeCell;
-use view_tui::tiers::{Probe, PROBE_DEADLINE};
+use view_tui::tiers::{EnvHints, Probe, PROBE_DEADLINE};
 
 /// As much of a DECRPM answer as the segment before the settle carried.
 const REPLY_HEAD: &[u8] = b"\x1b[?2026;";
@@ -41,7 +41,13 @@ fn the_head_of_an_answer_still_arriving_at_the_settle_crosses_the_handover() {
     );
 
     let mut queries = Vec::new();
-    let probe = Probe::start(common::SlaveSource, &mut queries, PROBE_DEADLINE, None).unwrap();
+    let probe = Probe::start(
+        common::SlaveSource,
+        &mut queries,
+        PROBE_DEADLINE,
+        &EnvHints::default(),
+    )
+    .unwrap();
     let outcome = probe.finish(Duration::ZERO);
     assert!(
         !outcome.fence_seen,

@@ -13,10 +13,15 @@ The wire strings this doc traces:
 | `QUERY_KITTY` | `\x1b[?u` | every capture below |
 | `QUERY_TRUECOLOR` | `\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m` | every capture below |
 | `QUERY_DA1_FENCE` | `\x1b[c` | every capture below |
-| box-glyph width probe | `\r` `╭` `\x1b[6n` `\r\x1b[K` | every capture below |
+| `QUERY_BOX_GLYPH` | `\r` `╭` `\x1b[6n` `\r\x1b[K` | every capture below |
 
-The box-glyph probe has no constant yet: it is the question the
-`unicode_boxes` capability is owed, captured here before any code sends it.
+Captured before any code sent it: the batch above was the question the
+`unicode_boxes` capability was owed, and `QUERY_BOX_GLYPH` is that question
+as `Probe::start` now writes it.
+`writes_the_query_batch_before_reading_any_reply` asserts the whole batch
+against the `sent:` line below, byte for byte, so a query that drifts from
+these captures fails rather than decoding answers to a question nobody
+asked.
 
 ## Capture method
 
@@ -116,14 +121,17 @@ Read as:
 |---|---|---|
 | DECRPM | *absent* | `sync = false` |
 | kitty flags | *absent* | `kitty_kbd = false` |
-| DECRQSS | `\x1bP0$r\x1b\\` | `0$r` -- the terminal calls the request invalid. `truecolor_from_decrqss` requires the `1$r` prefix, so `truecolor = false` from the probe |
+| DECRQSS | `\x1bP0$r\x1b\\` | `0$r` -- the terminal calls the request invalid. `truecolor_from_decrqss` requires the `1$r` prefix, so the probe answers nothing here |
 | CPR | `\x1b[1;2R` | `╭` advanced one cell |
 | DA1 | `\x1b[?1;2;4c` | class 1, last on the wire |
 
-tmux answers the truecolor readback *negatively* whether or not it is told
-the outer terminal is RGB-capable. Inside tmux the probe cannot establish
-truecolor and `COLORTERM` is the only signal left, which is why the two are
-OR'd rather than ranked.
+tmux declines the truecolor readback whether or not it is told the outer
+terminal is RGB-capable, and it renders 24-bit color in both cases. Inside
+tmux the probe cannot establish truecolor and `COLORTERM` is the only signal
+left, which is why `0$r` is read as *no answer* rather than as an answer of
+"no": the hint decides only where the probe was silent, and a declined
+request is silence about the color. An explicit answer -- `1$r` echoing a
+quantized setting -- is a different fact and outranks the hint.
 
 ## D. GNU screen 4.09.01 inside kitty, UTF-8
 
@@ -307,8 +315,10 @@ produce this shape is false, and these captures are why.
 ## What the captures oblige
 
 1. `48:2::1:2:3` must parse as truecolor. The empty colour-space-id field is
-   what a current Windows ConPTY sends, and the shipped
-   `truecolor_from_decrqss` rejects it.
+   what a current Windows ConPTY sends, and the `truecolor_from_decrqss`
+   shipped when this was captured rejected it. It now drops empty fields
+   before matching, and capture H's reply is a row of that function's table
+   test.
 2. The box-glyph probe's signal is the CPR **column**, not its presence: D
    and E both answer, and only the column differs. What it is shown to
    detect is a terminal not decoding UTF-8; a font gap and a double-width

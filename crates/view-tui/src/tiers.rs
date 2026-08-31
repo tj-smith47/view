@@ -62,6 +62,36 @@ const QUERY_KITTY: &[u8] = b"\x1b[?u";
 /// No cell is painted by this: the set and the reset are adjacent, with no
 /// text between them, and both run before the alternate screen exists.
 const QUERY_TRUECOLOR: &[u8] = b"\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m";
+
+/// Writes one rounded box-drawing corner from a known column and asks the
+/// terminal where the cursor ended up (a CPR, `ESC [ 6 n`), then erases the
+/// line it borrowed.
+///
+/// This asks about cell accounting, which is the question the border
+/// charset needs answered and the one no environment variable carries: a
+/// terminal decoding UTF-8 advances one column for the three bytes of `╭`,
+/// and one that is not advances three, having drawn them as three
+/// characters. Live captures of both are in
+/// `docs/terminal-probe-wire-capture.md` sections D and E, which differ in
+/// nothing else -- `TERM`, `COLORTERM` and every other reply are identical
+/// between them.
+///
+/// It is not a question about the font. A terminal whose font lacks the
+/// glyph advances one column and renders tofu, and no capture separates
+/// that from a legible frame; [`TermCaps::unicode_boxes`] says what the
+/// answer is owed to mean.
+///
+/// The leading `\r` is what makes column 2 the expected answer whatever
+/// else has been printed on the line, and the trailing `\r ESC [ K` puts
+/// the cursor back and erases the glyph, so the batch leaves the screen as
+/// it found it. All of it runs before the alternate screen exists.
+const QUERY_BOX_GLYPH: &[u8] = "\r╭\x1b[6n\r\x1b[K".as_bytes();
+
+/// The cursor column a terminal that advanced [`QUERY_BOX_GLYPH`]'s glyph
+/// by exactly one cell reports, the `\r` in front of the glyph having put
+/// it at column 1.
+const BOX_GLYPH_ONE_CELL_COLUMN: u32 = 2;
+
 const QUERY_DA1_FENCE: &[u8] = b"\x1b[c";
 
 /// The SGR parameters [`QUERY_TRUECOLOR`] sets, as the DECRQSS reply must
@@ -69,6 +99,42 @@ const QUERY_DA1_FENCE: &[u8] = b"\x1b[c";
 /// background introducer (`48;2`) followed by the three components in
 /// order.
 const TRUECOLOR_SGR_PARAMS: [&str; 5] = ["48", "2", "1", "2", "3"];
+
+/// What the environment claims about capabilities the terminal can be
+/// asked about directly.
+///
+/// Hints, never oracles. Each field is read only where the probe stayed
+/// silent, because an environment variable describes the emulator someone
+/// configured rather than the one on the far end of this fd: `COLORTERM` is
+/// unset in every ssh login whose client does not forward it, and set to
+/// `truecolor` inside a tmux that answers the readback negatively (captures
+/// F and G). A terminal that answered is the authority on itself.
+///
+/// Carried as one value rather than as parameters so that a probe reading
+/// two of them cannot be handed them in the wrong order.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct EnvHints {
+    /// `COLORTERM`, the truecolor hint.
+    pub colorterm: Option<String>,
+    /// The locale that decides the terminal's character encoding, from
+    /// `LC_ALL`, `LC_CTYPE` or `LANG` in the precedence POSIX gives them.
+    /// The `unicode_boxes` hint.
+    pub locale: Option<String>,
+}
+
+impl EnvHints {
+    /// Reads the hints out of this process's environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            colorterm: std::env::var("COLORTERM").ok(),
+            locale: ["LC_ALL", "LC_CTYPE", "LANG"]
+                .into_iter()
+                .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty())),
+        }
+    }
+}
 
 /// A source of capability-probe reply bytes, abstracting the real terminal
 /// read so the detection loop in [`detect`] is unit-testable against
@@ -137,16 +203,16 @@ pub struct Probe<'a> {
     source: Box<dyn ReplySource + 'a>,
     buf: Vec<u8>,
     started: Instant,
-    colorterm: Option<String>,
+    hints: EnvHints,
 }
 
 impl<'a> Probe<'a> {
     /// Writes the query batch to `writer` and reads replies for at most
     /// `first_window`, stopping early the moment the DA1 fence arrives.
     ///
-    /// `colorterm` is the `COLORTERM` environment value (or `None`), passed
-    /// in rather than read here so this stays deterministic and safe to
-    /// call from parallel unit tests.
+    /// `hints` is what the environment claims (see [`EnvHints`]), passed in
+    /// rather than read here so this stays deterministic and safe to call
+    /// from parallel unit tests.
     ///
     /// # Errors
     ///
@@ -156,11 +222,15 @@ impl<'a> Probe<'a> {
         source: impl ReplySource + 'a,
         writer: &mut impl Write,
         first_window: Duration,
-        colorterm: Option<&str>,
+        hints: &EnvHints,
     ) -> io::Result<Self> {
         writer.write_all(QUERY_SYNC)?;
         writer.write_all(QUERY_KITTY)?;
         writer.write_all(QUERY_TRUECOLOR)?;
+        // behind the truecolor readback's own `ESC [ 0 m`, so the glyph it
+        // prints is drawn in the terminal's default colors rather than the
+        // 24-bit background that query just set
+        writer.write_all(QUERY_BOX_GLYPH)?;
         // last, and that is the whole point: a terminal answers queries in
         // the order it received them, so this reply arriving proves every
         // earlier one either arrived or is never coming
@@ -171,7 +241,7 @@ impl<'a> Probe<'a> {
             source: Box::new(source),
             buf: Vec::new(),
             started: Instant::now(),
-            colorterm: colorterm.map(str::to_owned),
+            hints: hints.clone(),
         };
         probe.read_until(first_window);
         Ok(probe)
@@ -213,10 +283,18 @@ impl<'a> Probe<'a> {
         }
     }
 
+    /// The capabilities `replies` resolve to, each unanswered question
+    /// falling back to its hint and no answered one consulting a hint at
+    /// all -- see [`EnvHints`] for why that order and not the other.
     fn caps_from(&self, replies: &Replies) -> TermCaps {
-        let truecolor =
-            truecolor_from_colorterm(self.colorterm.as_deref()) || replies.truecolor_reply;
+        let truecolor = replies
+            .truecolor
+            .unwrap_or_else(|| truecolor_hint(self.hints.colorterm.as_deref()));
+        let unicode_boxes = replies
+            .unicode_boxes
+            .unwrap_or_else(|| unicode_boxes_hint(self.hints.locale.as_deref()));
         TermCaps::from_probe(replies.sync, truecolor, replies.kitty)
+            .with_unicode_boxes(unicode_boxes)
     }
 
     fn read_until(&mut self, deadline: Duration) {
@@ -252,21 +330,25 @@ pub fn detect<S: ReplySource>(
     source: &mut S,
     writer: &mut impl Write,
     deadline: Duration,
-    colorterm: Option<&str>,
+    hints: &EnvHints,
 ) -> io::Result<(TermCaps, Vec<u8>)> {
-    let outcome = Probe::start(source, writer, deadline, colorterm)?.finish(deadline);
+    let outcome = Probe::start(source, writer, deadline, hints)?.finish(deadline);
     Ok((outcome.caps, outcome.residue))
 }
 
 /// Derives capabilities from a `--tier` override: deterministic, not
 /// half-probed, so the booleans are picked directly rather than partially
-/// trusting a probe. `full` sets every boolean, `standard` sets only
-/// `truecolor`, `basic` sets none.
+/// trusting a probe. `full` sets every boolean, `standard` sets
+/// `truecolor` and `unicode_boxes`, `basic` sets none.
+///
+/// An override is a claim about the terminal, and both Unicode tiers claim
+/// glyphs: a session told it is `standard` is told it can be drawn the way
+/// `standard` looks, which is with a rounded frame.
 #[must_use]
 pub fn caps_for_override(tier: Tier) -> TermCaps {
     match tier {
-        Tier::Full => TermCaps::from_probe(true, true, true),
-        Tier::Standard => TermCaps::from_probe(false, true, false),
+        Tier::Full => TermCaps::from_probe(true, true, true).with_unicode_boxes(true),
+        Tier::Standard => TermCaps::from_probe(false, true, false).with_unicode_boxes(true),
         Tier::Basic => TermCaps::from_probe(false, false, false),
         // `Tier` is `#[non_exhaustive]`; an override the caller passed a
         // future variant for degrades to the same all-false floor as an
@@ -275,39 +357,66 @@ pub fn caps_for_override(tier: Tier) -> TermCaps {
     }
 }
 
-/// Reads `COLORTERM` as the truecolor signal: `truecolor` or `24bit` (case
-/// sensitive, matching the values terminals actually emit) means truecolor
-/// is supported. Its absence proves nothing -- see [`QUERY_TRUECOLOR`] for
-/// the question that does -- so the two are OR'd, never ranked.
-fn truecolor_from_colorterm(value: Option<&str>) -> bool {
+/// Reads `COLORTERM` as a truecolor hint: `truecolor` or `24bit` (case
+/// sensitive, matching the values terminals actually emit).
+///
+/// A hint, and consulted only where [`QUERY_TRUECOLOR`]'s readback went
+/// unanswered. The terminal is the authority on itself and this variable
+/// is not: capture F is a truecolor terminal reached over ssh with
+/// `COLORTERM` unset, and capture G is the same machine's tmux answering
+/// the readback negatively with `COLORTERM=truecolor` set.
+fn truecolor_hint(value: Option<&str>) -> bool {
     matches!(value, Some("truecolor") | Some("24bit"))
+}
+
+/// Reads the locale as a box-glyph hint: a charset of UTF-8, which is what
+/// [`QUERY_BOX_GLYPH`]'s two captured outcomes turn on.
+///
+/// A hint, and consulted only where the CPR went unanswered. The locale
+/// belongs to the process, not to the emulator drawing for it, so it can
+/// disagree with the terminal in either direction; every terminal captured
+/// so far answers the CPR, which is what makes this the rarely-taken arm.
+fn unicode_boxes_hint(locale: Option<&str>) -> bool {
+    locale.is_some_and(|value| {
+        let charset = value.rsplit('.').next().unwrap_or_default();
+        charset.eq_ignore_ascii_case("UTF-8") || charset.eq_ignore_ascii_case("UTF8")
+    })
 }
 
 /// Whether a DECRQSS reply body (everything between the `ESC P` introducer
 /// and the string terminator) is the terminal reporting that it kept
 /// [`QUERY_TRUECOLOR`]'s 24-bit background.
 ///
+/// `None` where the reply answers no such question, which is a different
+/// fact from a terminal reporting that it did not keep the color: only the
+/// first may fall back to [`truecolor_hint`].
+///
 /// A valid response opens `1 $ r` and closes with the final byte of the
-/// setting it echoes (`m`, for SGR); `0 $ r` is the terminal saying the
-/// request was invalid. The echoed parameters are searched rather than
-/// compared whole because a terminal may report its entire SGR state
-/// (`0;48;2;1;2;3`), and both `;` and `:` are accepted between the
-/// components -- the two separators are interchangeable in the spec and
-/// terminals differ over which they echo.
-fn truecolor_from_decrqss(body: &[u8]) -> bool {
-    let Some(sgr) = body
+/// setting it echoes (`m`, for SGR). `0 $ r` is the terminal declining the
+/// request as invalid -- an answer about the request, not about the color,
+/// and the shape tmux gives whether or not the terminal underneath it
+/// renders 24-bit (captures B, C and G), so reading it as "no truecolor"
+/// would strip every tmux session of color it demonstrably has.
+///
+/// The echoed parameters are searched rather than compared whole because a
+/// terminal may report its entire SGR state (`0;48;2;1;2;3`), both `;` and
+/// `:` are accepted between the components -- the two separators are
+/// interchangeable in the spec and terminals differ over which they echo --
+/// and empty fields are dropped before the search, because the T.416
+/// spelling carries an empty colour-space id between the introducer and the
+/// components (`48:2::1:2:3`, what Windows ConPTY answers in capture H).
+fn truecolor_from_decrqss(body: &[u8]) -> Option<bool> {
+    let sgr = body
         .strip_prefix(b"1$r")
-        .and_then(|rest| rest.strip_suffix(b"m"))
-    else {
-        return false;
-    };
-    let Ok(sgr) = std::str::from_utf8(sgr) else {
-        return false;
-    };
-    sgr.split([';', ':'])
-        .collect::<Vec<_>>()
-        .windows(TRUECOLOR_SGR_PARAMS.len())
-        .any(|window| window == TRUECOLOR_SGR_PARAMS)
+        .and_then(|rest| rest.strip_suffix(b"m"))?;
+    let sgr = std::str::from_utf8(sgr).ok()?;
+    Some(
+        sgr.split([';', ':'])
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>()
+            .windows(TRUECOLOR_SGR_PARAMS.len())
+            .any(|window| window == TRUECOLOR_SGR_PARAMS),
+    )
 }
 
 /// Splits a DCS at its string terminator, returning the body before it and
@@ -336,8 +445,13 @@ pub(crate) struct Replies {
     kitty: bool,
     pub(crate) da1: bool,
     /// The terminal's own answer about 24-bit color, independent of
-    /// `COLORTERM`.
-    truecolor_reply: bool,
+    /// `COLORTERM`. `None` where it gave none: "did not answer" and
+    /// "answered no" are different facts, and only the first defers to a
+    /// hint (see [`EnvHints`]).
+    truecolor: Option<bool>,
+    /// The terminal's own answer about box-glyph cell accounting, `None`
+    /// where it gave none, on the same terms as `truecolor`.
+    unicode_boxes: Option<bool>,
     pub(crate) residue: Vec<u8>,
     /// How many leading bytes of the buffer this scan accounted for.
     /// Everything past it is a reply the terminal has only half delivered,
@@ -350,15 +464,18 @@ impl Replies {
     ///
     /// Only ever adds: a capability the terminal already answered for is
     /// not withdrawn by a later read that says nothing about it, and
-    /// `known` carries the `COLORTERM` reading that no reply can restate
-    /// (see [`truecolor_from_colorterm`]).
+    /// `known` carries the hints no reply restates (see [`EnvHints`]). A
+    /// late answer of "no" therefore cannot demote a session mid-flight --
+    /// what it can do is arrive as an upgrade, which is the whole reason
+    /// the probe may hand the terminal over before the fence.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn upgraded(&self, known: TermCaps) -> TermCaps {
         TermCaps::from_probe(
             known.sync || self.sync,
-            known.truecolor || self.truecolor_reply,
+            known.truecolor || self.truecolor == Some(true),
             known.kitty_kbd || self.kitty,
         )
+        .with_unicode_boxes(known.unicode_boxes || self.unicode_boxes == Some(true))
     }
 }
 
@@ -373,7 +490,7 @@ impl Replies {
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn is_terminal_only_remainder(buf: &[u8]) -> bool {
     matches!(
-        answer_head(buf),
+        answer_head(buf, true),
         AnswerHead::Partial {
             keyboard_possible: false
         }
@@ -386,8 +503,12 @@ enum AnswerKind {
     Decrpm(bool),
     Kitty,
     Da1,
-    /// A DECRQSS readback, and whether it echoed the 24-bit background.
-    Decrqss(bool),
+    /// A DECRQSS readback, and what it says about the 24-bit background --
+    /// `None` where it declined the request rather than answering it.
+    Decrqss(Option<bool>),
+    /// A cursor-position report, and whether the column it names is the one
+    /// a box glyph occupying a single cell leaves the cursor in.
+    Cpr(bool),
 }
 
 /// How the head of a byte run stands against the probe's answer grammars.
@@ -409,7 +530,7 @@ enum AnswerHead {
     NotAnAnswer { terminal_prefix: usize },
 }
 
-/// Matches the head of `buf` against the four shapes the probe's batch can
+/// Matches the head of `buf` against the five shapes the probe's batch can
 /// be answered with, and only those:
 ///
 /// | Answer | Grammar |
@@ -418,21 +539,31 @@ enum AnswerHead {
 /// | kitty flags (`QUERY_KITTY`) | `ESC [ ? flags u`, `flags` a five-bit field |
 /// | DA1 fence (`QUERY_DA1_FENCE`) | `ESC [ ? class ; ... c`, digits and `;`, `class` <= 65 |
 /// | DECRQSS (`QUERY_TRUECOLOR`) | `ESC P 0/1 $ r ... ESC \` (or `BEL`) |
+/// | CPR (`QUERY_BOX_GLYPH`) | `ESC [ row ; col R`, and only while `cpr_wanted` |
 ///
-/// One acceptor for all four, because every rule that guessed from a
+/// One acceptor for all five, because every rule that guessed from a
 /// shorter prefix has been wrong about some keypress: `ESC P` is
 /// Alt+Shift+P, a `c` behind a stalled `?2026` is a change operator rather
 /// than a DA1 fence, and a `u` behind the same stall is not a kitty
 /// terminal. A byte that leaves every grammar ends the answer, whatever
 /// that byte is.
-fn answer_head(buf: &[u8]) -> AnswerHead {
+///
+/// The CPR is the one answer whose bytes a keyboard can also produce:
+/// `ESC [ 1 ; 2 R` is a CPR from a cursor on row 1 column 2 and is
+/// byte-identical to tmux's `Shift-F3`, captured side by side in
+/// `docs/terminal-probe-wire-capture.md`, "A keypress that is a CPR reply".
+/// Nothing in the byte stream separates them, so what separates them is
+/// where they arrive: `cpr_wanted` is true only inside a probe window that
+/// asked the question and only until it has been answered once, which
+/// bounds the cost to a single `Shift-F3` pressed in the first moments of a
+/// launch under tmux. Every later one is a keypress and reaches the user's
+/// buffer as one.
+fn answer_head(buf: &[u8], cpr_wanted: bool) -> AnswerHead {
     match buf {
+        [0x1b, b'[', b'?', params @ ..] => private_csi_head(params),
         // `ESC [` alone is where an answer and an arrow key are the same
         // two bytes; the read after it decides which
-        [0x1b, b'['] => AnswerHead::Partial {
-            keyboard_possible: true,
-        },
-        [0x1b, b'[', b'?', params @ ..] => private_csi_head(params),
+        [0x1b, b'[', params @ ..] => cpr_head(params, cpr_wanted),
         [0x1b, b'P', b'0' | b'1', b'$', b'r', ..] => match dcs_body(&buf[2..]) {
             Some((body, past)) => AnswerHead::Complete {
                 len: 2 + past,
@@ -444,6 +575,46 @@ fn answer_head(buf: &[u8]) -> AnswerHead {
         },
         _ => AnswerHead::NotAnAnswer { terminal_prefix: 0 },
     }
+}
+
+/// The CPR grammar, from the byte after the `ESC [` introducer that every
+/// arrow and modified function key shares with it.
+///
+/// Nothing here is ever claimed as provably the terminal's: `terminal_prefix`
+/// stays 0 on every exit, because a run that reaches this function could be
+/// a keypress in a way that one behind `ESC [ ?` could not.
+fn cpr_head(params: &[u8], cpr_wanted: bool) -> AnswerHead {
+    const INTRODUCER: usize = 2;
+    for (at, &byte) in params.iter().enumerate() {
+        if (0x40..=0x7e).contains(&byte) {
+            if cpr_wanted && byte == b'R' {
+                if let Some(column) = cpr_column(&params[..at]) {
+                    return AnswerHead::Complete {
+                        len: INTRODUCER + at + 1,
+                        kind: AnswerKind::Cpr(column == BOX_GLYPH_ONE_CELL_COLUMN),
+                    };
+                }
+            }
+            return AnswerHead::NotAnAnswer { terminal_prefix: 0 };
+        }
+        if !matches!(byte, b'0'..=b'9' | b';') {
+            return AnswerHead::NotAnAnswer { terminal_prefix: 0 };
+        }
+    }
+    AnswerHead::Partial {
+        keyboard_possible: true,
+    }
+}
+
+/// The column a CPR reply's parameters (`row ; col`, between the introducer
+/// and the final `R`) report, which is the whole of what the box-glyph
+/// probe reads: the row is where the cursor happened to be sitting when the
+/// batch went out (row 1 in most captures, row 7 in the Windows one) and
+/// says nothing about the glyph.
+fn cpr_column(params: &[u8]) -> Option<u32> {
+    let sep = params.iter().position(|&b| b == b';')?;
+    parse_ascii_u32(&params[..sep])?;
+    parse_ascii_u32(&params[sep + 1..])
 }
 
 /// The three private-mode grammars, from the byte after their shared
@@ -533,17 +704,22 @@ pub(crate) fn scan_replies(buf: &[u8]) -> Replies {
     let mut sync = false;
     let mut kitty = false;
     let mut da1 = false;
-    let mut truecolor_reply = false;
+    let mut truecolor = None;
+    let mut unicode_boxes = None;
     let mut residue = Vec::new();
     let mut i = 0;
     while i < buf.len() {
-        match answer_head(&buf[i..]) {
+        match answer_head(&buf[i..], unicode_boxes.is_none()) {
             AnswerHead::Complete { len, kind } => {
                 match kind {
                     AnswerKind::Decrpm(supported) => sync |= supported,
                     AnswerKind::Kitty => kitty = true,
                     AnswerKind::Da1 => da1 = true,
-                    AnswerKind::Decrqss(truecolor) => truecolor_reply |= truecolor,
+                    // first answer wins, for both: a terminal answers each
+                    // query in the batch once, and a second run of the same
+                    // shape is something else that looks like it
+                    AnswerKind::Decrqss(answer) => truecolor = truecolor.or(answer),
+                    AnswerKind::Cpr(one_cell) => unicode_boxes = Some(one_cell),
                 }
                 i += len;
             }
@@ -559,7 +735,8 @@ pub(crate) fn scan_replies(buf: &[u8]) -> Replies {
         sync,
         kitty,
         da1,
-        truecolor_reply,
+        truecolor,
+        unicode_boxes,
         residue,
         consumed: i,
     }
@@ -741,7 +918,7 @@ pub fn resolve(
 
 #[cfg(unix)]
 fn probe_real_terminal() -> io::Result<(TermCaps, Option<Probe<'static>>)> {
-    let colorterm = std::env::var("COLORTERM").ok();
+    let hints = EnvHints::from_env();
     // A `tcgetattr` failure means stdin is not a real tty (e.g. redirected
     // from `/dev/null`, as a headless launch or a test harness might do):
     // there is no raw-mode state to probe through and no escape reply will
@@ -754,14 +931,9 @@ fn probe_real_terminal() -> io::Result<(TermCaps, Option<Probe<'static>>)> {
     // rather than a hard failure the caller must special-case.
     let source = match StdinReplySource::new() {
         Ok(source) => source,
-        Err(_) => return Ok((no_probe_caps(colorterm.as_deref()), None)),
+        Err(_) => return Ok((no_probe_caps(&hints), None)),
     };
-    let probe = Probe::start(
-        source,
-        &mut io::stdout(),
-        PROBE_DEADLINE,
-        colorterm.as_deref(),
-    )?;
+    let probe = Probe::start(source, &mut io::stdout(), PROBE_DEADLINE, &hints)?;
     Ok((probe.caps(), Some(probe)))
 }
 
@@ -769,23 +941,25 @@ fn probe_real_terminal() -> io::Result<(TermCaps, Option<Probe<'static>>)> {
 fn probe_real_terminal() -> io::Result<(TermCaps, Option<Probe<'static>>)> {
     // Bounding a raw stdin read without a background thread that could
     // outlive the probe needs a termios VMIN/VTIME equivalent this crate
-    // only has for unix; COLORTERM is still honored since that's a plain
-    // env read, not an escape probe. No stdin read happens here at all, so
-    // there is no residue to return either.
-    let colorterm = std::env::var("COLORTERM").ok();
-    Ok((no_probe_caps(colorterm.as_deref()), None))
+    // only has for unix; the environment hints are still honored since
+    // those are plain env reads, not escape probes. No stdin read happens
+    // here at all, so there is no residue to return either.
+    Ok((no_probe_caps(&EnvHints::from_env()), None))
 }
 
 /// The capabilities floor for a launch shape where no escape-sequence probe
 /// can run at all: sync and kitty_kbd are always false (both need a real
-/// reply), but truecolor still honors `COLORTERM` -- stdout can be a real
-/// truecolor tty independent of whether stdin is probeable, since the two
-/// are independent fds. Shared by both `probe_real_terminal` arms: the
-/// unix arm's `tcgetattr`-failure fallback (non-tty stdin, e.g.
+/// reply), but truecolor and unicode_boxes still honor their hints --
+/// stdout can be a real truecolor tty independent of whether stdin is
+/// probeable, since the two are independent fds. A probe that was never
+/// written is the purest case of the question going unanswered, which is
+/// exactly when a hint decides. Shared by both `probe_real_terminal` arms:
+/// the unix arm's `tcgetattr`-failure fallback (non-tty stdin, e.g.
 /// `/dev/null`) and the `cfg(not(unix))` arm (no termios equivalent to
 /// bound a raw read with at all).
-fn no_probe_caps(colorterm: Option<&str>) -> TermCaps {
-    TermCaps::from_probe(false, truecolor_from_colorterm(colorterm), false)
+fn no_probe_caps(hints: &EnvHints) -> TermCaps {
+    TermCaps::from_probe(false, truecolor_hint(hints.colorterm.as_deref()), false)
+        .with_unicode_boxes(unicode_boxes_hint(hints.locale.as_deref()))
 }
 
 #[cfg(test)]
@@ -814,6 +988,23 @@ mod tests {
     impl ReplySource for ScriptedSource {
         fn next_chunk(&mut self, _budget: Duration) -> Option<Vec<u8>> {
             self.script.pop_front().flatten()
+        }
+    }
+
+    /// The hints a session whose emulator set `COLORTERM` starts with, and
+    /// nothing else.
+    fn colorterm(value: &str) -> EnvHints {
+        EnvHints {
+            colorterm: Some(value.to_owned()),
+            locale: None,
+        }
+    }
+
+    /// The hints a session whose locale names UTF-8 starts with.
+    fn utf8_locale() -> EnvHints {
+        EnvHints {
+            colorterm: None,
+            locale: Some("en_US.UTF-8".to_owned()),
         }
     }
 
@@ -927,7 +1118,11 @@ mod tests {
         for case in cases {
             let mut source = ScriptedSource::new(vec![Some(case.replies)]);
             let mut sink = Vec::new();
-            let (caps, _residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, case.colorterm)
+            let hints = EnvHints {
+                colorterm: case.colorterm.map(str::to_owned),
+                locale: None,
+            };
+            let (caps, _residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, &hints)
                 .expect("detect should not error against an in-memory writer");
             assert_eq!(caps.sync, case.expect_sync, "{}: sync", case.name);
             assert_eq!(
@@ -956,8 +1151,13 @@ mod tests {
             Some(b"1u\x1b[?62c".as_slice()),
         ]);
         let mut sink = Vec::new();
-        let (caps, _residue) =
-            detect(&mut source, &mut sink, PROBE_DEADLINE, Some("truecolor")).unwrap();
+        let (caps, _residue) = detect(
+            &mut source,
+            &mut sink,
+            PROBE_DEADLINE,
+            &colorterm("truecolor"),
+        )
+        .unwrap();
         assert!(caps.sync);
         assert!(caps.kitty_kbd);
         assert!(caps.truecolor);
@@ -967,12 +1167,19 @@ mod tests {
     fn writes_the_query_batch_before_reading_any_reply() {
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[?62c".as_slice())]);
         let mut sink = Vec::new();
-        detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert_eq!(
-            sink, b"\x1b[?2026$p\x1b[?u\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m\x1b[c",
+            sink,
+            // the capture doc's `sent:` line, byte for byte: every reply
+            // this module decodes was captured against exactly this batch,
+            // so a batch that drifts from it is reading answers to a
+            // question nobody asked
+            "\x1b[?2026$p\x1b[?u\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m\r╭\x1b[6n\r\x1b[K\x1b[c"
+                .as_bytes(),
             "the DA1 fence must stay last -- it is what proves every earlier \
-             query has been answered -- and the truecolor readback must be \
-             bracketed by the SGR set and its reset"
+             query has been answered -- the truecolor readback must be \
+             bracketed by the SGR set and its reset, and the box glyph must \
+             be printed behind that reset and erased behind its own CPR"
         );
     }
 
@@ -989,6 +1196,10 @@ mod tests {
         let basic = caps_for_override(Tier::Basic);
         assert!(!basic.sync && !basic.truecolor && !basic.kitty_kbd);
         assert_eq!(tier_name(basic.tier), "basic");
+
+        // an override is a claim about the terminal, and both Unicode tiers
+        // claim glyphs; `basic` is the one that claims none
+        assert!(full.unicode_boxes && standard.unicode_boxes && !basic.unicode_boxes);
     }
 
     #[test]
@@ -996,7 +1207,8 @@ mod tests {
         let mut source = ScriptedSource::new(vec![None]);
         let mut sink = Vec::new();
         let start = Instant::now();
-        let (caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(
             start.elapsed() < view_test_support::host_deadline(Duration::from_millis(500)),
             "detect blocked for {:?} against a source that reported itself \
@@ -1014,7 +1226,8 @@ mod tests {
         let short_deadline = Duration::from_millis(5);
         let mut sink = Vec::new();
         let start = Instant::now();
-        let (caps, residue) = detect(&mut source, &mut sink, short_deadline, None).unwrap();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, short_deadline, &EnvHints::default()).unwrap();
         assert!(
             start.elapsed() < view_test_support::host_deadline(Duration::from_millis(200)),
             "detect took {:?} against a source that never stops offering \
@@ -1035,8 +1248,13 @@ mod tests {
             Some(b"\x1b[?2026;1$y\x1b[?1u\x1b[?62c".as_slice()),
         ]);
         let mut sink = Vec::new();
-        let (caps, residue) =
-            detect(&mut source, &mut sink, PROBE_DEADLINE, Some("truecolor")).unwrap();
+        let (caps, residue) = detect(
+            &mut source,
+            &mut sink,
+            PROBE_DEADLINE,
+            &colorterm("truecolor"),
+        )
+        .unwrap();
         assert!(caps.sync && caps.truecolor && caps.kitty_kbd);
         assert_eq!(residue, b"ityped-before-reply");
     }
@@ -1049,7 +1267,8 @@ mod tests {
         // one of the probe's own DA1/DECRPM/kitty replies
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[A\x1b[?62c".as_slice())]);
         let mut sink = Vec::new();
-        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (_caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert_eq!(residue, b"\x1b[A");
     }
 
@@ -1060,7 +1279,8 @@ mod tests {
         // Escape plus a literal `[` into the engine as if typed
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[".as_slice()), None]);
         let mut sink = Vec::new();
-        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (_caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(
             residue.is_empty(),
             "residue should be empty, got {residue:?}"
@@ -1074,7 +1294,8 @@ mod tests {
         // confirmed CSI introducer is treated as an in-flight reply
         let mut source = ScriptedSource::new(vec![Some(b"\x1b".as_slice()), None]);
         let mut sink = Vec::new();
-        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (_caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert_eq!(residue, b"\x1b", "a typed Escape must survive the probe");
     }
 
@@ -1085,7 +1306,8 @@ mod tests {
         // an Escape followed by a literal `[` typed into the buffer
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[".as_slice()), None]);
         let mut sink = Vec::new();
-        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (_caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(
             residue.is_empty(),
             "residue should be empty, got {residue:?}"
@@ -1100,7 +1322,8 @@ mod tests {
         // if a user had typed it
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[?62".as_slice()), None]);
         let mut sink = Vec::new();
-        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (_caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(
             residue.is_empty(),
             "residue should be empty, got {residue:?}"
@@ -1111,7 +1334,8 @@ mod tests {
     fn residue_bytes_before_an_incomplete_trailing_reply_still_survive() {
         let mut source = ScriptedSource::new(vec![Some(b"typed\x1b[?62".as_slice()), None]);
         let mut sink = Vec::new();
-        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (_caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert_eq!(residue, b"typed");
     }
 
@@ -1152,42 +1376,66 @@ mod tests {
 
     #[test]
     fn decrqss_grammar_decides_truecolor_from_what_the_terminal_echoed() {
-        let cases: [(&str, &[u8], bool); 7] = [
+        let cases: [(&str, &[u8], Option<bool>); 8] = [
             (
                 "semicolon separators, whole SGR state echoed",
                 b"1$r0;48;2;1;2;3m",
-                true,
+                Some(true),
             ),
             (
                 "colon separators (the other form terminals echo)",
                 b"1$r48:2:1:2:3m",
-                true,
+                Some(true),
             ),
             (
                 "a terminal that quantized the request to 256 colors",
                 b"1$r48;5;17m",
-                false,
+                Some(false),
             ),
             (
+                // captures B, C and G: tmux declines the request whether or
+                // not the terminal under it renders 24-bit color, so this
+                // shape must leave the question open for COLORTERM rather
+                // than answering it negatively
                 "an invalid-request answer carries no setting at all",
                 b"0$r",
-                false,
+                None,
             ),
             (
                 "the components must be the ones that were set",
                 b"1$r48;2;9;9;9m",
-                false,
+                Some(false),
             ),
             (
                 "a reply about some other setting is not an SGR answer",
                 b"1$r2 q",
-                false,
+                None,
             ),
-            ("an empty body decides nothing", b"", false),
+            ("an empty body decides nothing", b"", None),
+            (
+                // capture H, the ITU-T T.416 spelling: the colour-space id
+                // field is present and empty
+                "empty colour-space id (Windows ConPTY)",
+                b"1$r0;48:2::1:2:3m",
+                Some(true),
+            ),
         ];
         for (name, body, want) in cases {
             assert_eq!(truecolor_from_decrqss(body), want, "{name}");
         }
+    }
+
+    #[test]
+    fn the_box_glyph_reply_is_the_probes_own_and_never_typed_input() {
+        // docs/terminal-probe-wire-capture.md section E, verbatim
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[1;3R\x1b[?1;2c".as_slice())]);
+        let mut sink = Vec::new();
+        let (_caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
+        assert!(
+            residue.is_empty(),
+            "the CPR is the box-glyph probe's answer, not a keypress: {residue:?}"
+        );
     }
 
     #[test]
@@ -1196,7 +1444,8 @@ mod tests {
             b"\x1b[?2026;1$y\x1b[?1u\x1bP1$r0;48;2;1;2;3m\x1b\\\x1b[?62c".as_slice(),
         )]);
         let mut sink = Vec::new();
-        let (caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(
             caps.truecolor,
             "the terminal itself said it kept a 24-bit background; an unset \
@@ -1214,10 +1463,298 @@ mod tests {
     fn colorterm_still_decides_truecolor_when_the_terminal_never_answers_it() {
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[?2026;1$y\x1b[?1u\x1b[?62c")]);
         let mut sink = Vec::new();
-        let (caps, _residue) =
-            detect(&mut source, &mut sink, PROBE_DEADLINE, Some("truecolor")).unwrap();
+        let (caps, _residue) = detect(
+            &mut source,
+            &mut sink,
+            PROBE_DEADLINE,
+            &colorterm("truecolor"),
+        )
+        .unwrap();
         assert!(caps.truecolor, "COLORTERM keeps its own, unchanged say");
         assert_eq!(tier_name(caps.tier), "full");
+    }
+
+    /// Every terminal `docs/terminal-probe-wire-capture.md` was captured
+    /// against, as the bytes it put on the wire and the environment the
+    /// session that read them had.
+    ///
+    /// Copied from the capture doc's `received:` lines rather than written
+    /// here, section by section, so the detection path is pinned to what
+    /// terminals were observed to say and not to what a plan expected them
+    /// to say.
+    struct Capture {
+        section: &'static str,
+        replies: &'static [u8],
+        hints: fn() -> EnvHints,
+        expect_tier: &'static str,
+        expect_sync: bool,
+        expect_truecolor: bool,
+        expect_kitty: bool,
+        expect_boxes: bool,
+    }
+
+    fn live_captures() -> [Capture; 8] {
+        [
+            Capture {
+                section: "A. kitty 0.45.0, dev-linux",
+                replies: b"\x1b[?2026;2$y\x1b[?0u\x1bP1$r0;48:2:1:2:3m\x1b\\\x1b[1;2R\x1b[?62;52;c",
+                hints: || colorterm("truecolor"),
+                expect_tier: "full",
+                expect_sync: true,
+                expect_truecolor: true,
+                expect_kitty: true,
+                expect_boxes: true,
+            },
+            Capture {
+                section: "B. tmux 3.6 inside kitty, dev-linux",
+                replies: b"\x1bP0$r\x1b\\\x1b[1;2R\x1b[?1;2;4c",
+                hints: || colorterm("truecolor"),
+                expect_tier: "standard",
+                expect_sync: false,
+                // the readback was declined, not answered: COLORTERM is the
+                // only signal left and tmux does render 24-bit here
+                expect_truecolor: true,
+                expect_kitty: false,
+                expect_boxes: true,
+            },
+            Capture {
+                section: "C. tmux with terminal-features RGB, dev-linux",
+                replies: b"\x1bP0$r\x1b\\\x1b[1;2R\x1b[?1;2;4c",
+                hints: || colorterm("truecolor"),
+                expect_tier: "standard",
+                expect_sync: false,
+                expect_truecolor: true,
+                expect_kitty: false,
+                expect_boxes: true,
+            },
+            Capture {
+                section: "D. GNU screen inside kitty, UTF-8",
+                replies: b"\x1b[1;2R\x1b[?1;2c",
+                hints: || colorterm("truecolor"),
+                expect_tier: "standard",
+                expect_sync: false,
+                expect_truecolor: true,
+                expect_kitty: false,
+                expect_boxes: true,
+            },
+            Capture {
+                // the whole discrimination the box-glyph probe exists for:
+                // identical to D in TERM, COLORTERM and every other reply
+                section: "E. GNU screen, defutf8 off, LANG=C",
+                replies: b"\x1b[1;3R\x1b[?1;2c",
+                hints: || colorterm("truecolor"),
+                expect_tier: "standard",
+                expect_sync: false,
+                expect_truecolor: true,
+                expect_kitty: false,
+                expect_boxes: false,
+            },
+            Capture {
+                // the observed defect this whole charter answers: ssh does
+                // not forward COLORTERM, and the readback is the only thing
+                // on this login that knows the terminal renders 24-bit
+                section: "F. mbp over ssh, COLORTERM unset",
+                replies: b"\x1b[?2026;2$y\x1b[?0u\x1bP1$r0;48:2:1:2:3m\x1b\\\x1b[1;2R\x1b[?62;52;c",
+                hints: EnvHints::default,
+                expect_tier: "full",
+                expect_sync: true,
+                expect_truecolor: true,
+                expect_kitty: true,
+                expect_boxes: true,
+            },
+            Capture {
+                section: "G. tmux 3.6a on macOS inside F",
+                replies: b"\x1bP0$r\x1b\\\x1b[1;2R\x1b[?1;2;4c",
+                hints: || colorterm("truecolor"),
+                expect_tier: "standard",
+                expect_sync: false,
+                expect_truecolor: true,
+                expect_kitty: false,
+                expect_boxes: true,
+            },
+            Capture {
+                section: "H. Windows ConPTY over OpenSSH",
+                replies: b"\x1b[?2026;0$y\x1bP1$r0;48:2::1:2:3m\x1b\\\x1b[7;2R\
+                           \x1b[?61;6;7;21;22;23;24;28;32;42c",
+                hints: EnvHints::default,
+                expect_tier: "standard",
+                // Pm=0 is an answer, not a silence: the mode is not
+                // recognized
+                expect_sync: false,
+                // the T.416 spelling, and no COLORTERM to recover it with
+                expect_truecolor: true,
+                expect_kitty: false,
+                expect_boxes: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn every_live_capture_resolves_to_what_the_doc_reads_it_as() {
+        for case in live_captures() {
+            let mut source = ScriptedSource::new(vec![Some(case.replies)]);
+            let mut sink = Vec::new();
+            let (caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, &(case.hints)())
+                .expect("detect should not error against an in-memory writer");
+            assert_eq!(caps.sync, case.expect_sync, "{}: sync", case.section);
+            assert_eq!(
+                caps.truecolor, case.expect_truecolor,
+                "{}: truecolor",
+                case.section
+            );
+            assert_eq!(
+                caps.kitty_kbd, case.expect_kitty,
+                "{}: kitty_kbd",
+                case.section
+            );
+            assert_eq!(
+                caps.unicode_boxes, case.expect_boxes,
+                "{}: unicode_boxes",
+                case.section
+            );
+            assert_eq!(
+                tier_name(caps.tier),
+                case.expect_tier,
+                "{}: tier",
+                case.section
+            );
+            assert!(
+                residue.is_empty(),
+                "{}: a reply is not typed input: {residue:?}",
+                case.section
+            );
+            assert!(scan_replies(case.replies).da1, "{}: fence", case.section);
+        }
+    }
+
+    #[test]
+    fn a_ssh_session_without_colorterm_still_probes_truecolor() {
+        // capture F, the regression test of record: the same terminal as A,
+        // reached from another machine whose ssh client forwards no
+        // COLORTERM at all
+        let capture = &live_captures()[5];
+        let mut source = ScriptedSource::new(vec![Some(capture.replies)]);
+        let mut sink = Vec::new();
+        let (caps, _residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
+        assert!(
+            caps.truecolor,
+            "the terminal answered that it kept the 24-bit background"
+        );
+        assert_eq!(tier_name(caps.tier), "full");
+    }
+
+    #[test]
+    fn a_quantizing_terminal_reports_no_truecolor_despite_colorterm() {
+        // the terminal parsed the readback and reported it kept 256 colors:
+        // an answer, and one an environment variable may not overrule
+        let mut source =
+            ScriptedSource::new(vec![Some(b"\x1bP1$r0;48;5;17m\x1b\\\x1b[?62c".as_slice())]);
+        let mut sink = Vec::new();
+        let (caps, _residue) = detect(
+            &mut source,
+            &mut sink,
+            PROBE_DEADLINE,
+            &colorterm("truecolor"),
+        )
+        .unwrap();
+        assert!(!caps.truecolor, "the hint must not override an answer");
+        assert_eq!(tier_name(caps.tier), "basic");
+    }
+
+    #[test]
+    fn a_declined_readback_leaves_the_colorterm_hint_deciding() {
+        // captures B, C and G: `0$r` is the terminal declining the request,
+        // which says nothing about color -- reading it as "no" would strip
+        // every tmux session of the color it demonstrably renders
+        let mut source = ScriptedSource::new(vec![Some(b"\x1bP0$r\x1b\\\x1b[?1;2;4c".as_slice())]);
+        let mut sink = Vec::new();
+        let (caps, _residue) = detect(
+            &mut source,
+            &mut sink,
+            PROBE_DEADLINE,
+            &colorterm("truecolor"),
+        )
+        .unwrap();
+        assert!(caps.truecolor);
+    }
+
+    #[test]
+    fn box_glyph_cpr_of_column_two_reads_as_supported() {
+        // capture D
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[1;2R\x1b[?1;2c".as_slice())]);
+        let mut sink = Vec::new();
+        let (caps, _residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
+        assert!(caps.unicode_boxes, "one cell for the glyph");
+    }
+
+    #[test]
+    fn box_glyph_cpr_of_column_three_reads_as_unsupported() {
+        // capture E, and the locale hint on top of it: an answered probe
+        // decides, so a session whose LANG says UTF-8 inside a screen that
+        // is not decoding it still gets ASCII
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[1;3R\x1b[?1;2c".as_slice())]);
+        let mut sink = Vec::new();
+        let (caps, _residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &utf8_locale()).unwrap();
+        assert!(
+            !caps.unicode_boxes,
+            "three columns for three bytes is a terminal not decoding UTF-8"
+        );
+    }
+
+    #[test]
+    fn the_locale_hint_decides_only_where_the_cpr_went_unanswered() {
+        for (hints, want, name) in [
+            (utf8_locale(), true, "a UTF-8 locale"),
+            (EnvHints::default(), false, "no locale at all"),
+            (
+                EnvHints {
+                    colorterm: None,
+                    locale: Some("C".to_owned()),
+                },
+                false,
+                "the C locale",
+            ),
+        ] {
+            let mut source = ScriptedSource::new(vec![Some(b"\x1b[?62c".as_slice())]);
+            let mut sink = Vec::new();
+            let (caps, _residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, &hints).unwrap();
+            assert_eq!(caps.unicode_boxes, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_modified_f3_after_the_cpr_reply_survives_as_residue() {
+        // `\x1b[1;2R` is a CPR from row 1 column 2 and is byte-identical to
+        // tmux's Shift-F3 (the capture doc's "A keypress that is a CPR
+        // reply"). The probe consumes one, and one only: the second is the
+        // user's, so the ambiguity costs exactly one sequence rather than
+        // every `...R` in the window
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[1;2R\x1b[1;2R\x1b[?62c".as_slice())]);
+        let mut sink = Vec::new();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
+        assert!(caps.unicode_boxes);
+        assert_eq!(
+            residue, b"\x1b[1;2R",
+            "the second one is a keypress and must reach the engine whole"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_typed_during_the_dcs_reply_is_still_returned_as_residue() {
+        // the residue contract under the two new arms: a user typing while
+        // the terminal is mid-batch loses nothing
+        let mut source = ScriptedSource::new(vec![Some(
+            b"\x1bP1$r0;48:2:1:2:3m\x1b\\iw\x1b[1;2R\x1b[?62c".as_slice(),
+        )]);
+        let mut sink = Vec::new();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
+        assert!(caps.truecolor && caps.unicode_boxes);
+        assert_eq!(residue, b"iw");
     }
 
     #[test]
@@ -1253,6 +1790,7 @@ mod tests {
             (b"\x1b[?0u".as_slice(), "kitty flags"),
             (b"\x1b[?62;4c".as_slice(), "DA1"),
             (b"\x1bP1$r0;48;2;1;2;3m\x1b\\".as_slice(), "DECRQSS"),
+            (b"\x1b[1;2R".as_slice(), "CPR"),
         ] {
             let replies = scan_replies(answer);
             assert!(
@@ -1264,7 +1802,11 @@ mod tests {
         assert!(scan_replies(b"\x1b[?2026;1$y").sync);
         assert!(scan_replies(b"\x1b[?0u").kitty);
         assert!(scan_replies(b"\x1b[?62;4c").da1);
-        assert!(scan_replies(b"\x1bP1$r0;48;2;1;2;3m\x1b\\").truecolor_reply);
+        assert_eq!(
+            scan_replies(b"\x1bP1$r0;48;2;1;2;3m\x1b\\").truecolor,
+            Some(true)
+        );
+        assert_eq!(scan_replies(b"\x1b[1;2R").unicode_boxes, Some(true));
     }
 
     #[test]
@@ -1309,7 +1851,8 @@ mod tests {
         // produce `ESC P`, so this is never something to replay into nvim
         let mut source = ScriptedSource::new(vec![Some(b"\x1bP1$r0;48;2;1;2"), None]);
         let mut sink = Vec::new();
-        let (caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(!caps.truecolor, "half an answer answers nothing");
         assert!(residue.is_empty(), "residue should be empty: {residue:?}");
     }
@@ -1318,7 +1861,8 @@ mod tests {
     fn a_bel_terminated_decrqss_answer_is_read_and_consumed() {
         let mut source = ScriptedSource::new(vec![Some(b"\x1bP1$r48;2;1;2;3m\x07typed")]);
         let mut sink = Vec::new();
-        let (caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let (caps, residue) =
+            detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(caps.truecolor);
         assert_eq!(
             residue, b"typed",
@@ -1335,7 +1879,7 @@ mod tests {
             b"\x1b[?2026;1$y\x1b[?1u\x1bP1$r0;48;2;1;2;3m\x1b\\\x1b[?62c",
         );
         let mut sink = Vec::new();
-        let probe = Probe::start(source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let probe = Probe::start(source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert_eq!(
             tier_name(probe.caps().tier),
             "basic",
@@ -1356,7 +1900,8 @@ mod tests {
         // wait for, so `finish` never sleeps out the hard cap
         let mut source = ScriptedSource::new(vec![Some(TRUECOLOR_REPLY), Some(b"\x1b[?62c")]);
         let mut sink = Vec::new();
-        let probe = Probe::start(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        let probe =
+            Probe::start(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
         assert!(probe.fence_seen());
         let start = Instant::now();
         let outcome = probe.finish(PROBE_HARD_CAP);
@@ -1372,31 +1917,39 @@ mod tests {
     fn an_unanswered_probe_reports_its_fence_missing_so_the_caller_can_guard() {
         let mut source = ScriptedSource::new(vec![None]);
         let mut sink = Vec::new();
-        let probe = Probe::start(&mut source, &mut sink, Duration::from_millis(5), None)
-            .expect("start must not error against an in-memory writer");
+        let probe = Probe::start(
+            &mut source,
+            &mut sink,
+            Duration::from_millis(5),
+            &EnvHints::default(),
+        )
+        .expect("start must not error against an in-memory writer");
         assert!(!probe.fence_seen());
         assert!(!probe.finish(Duration::from_millis(10)).fence_seen);
     }
 
     #[test]
-    fn no_probe_caps_honors_colorterm_even_though_sync_and_kitty_stay_false() {
+    fn no_probe_caps_honors_its_hints_even_though_sync_and_kitty_stay_false() {
         // covers both `probe_real_terminal` arms that can never get a real
         // escape reply (unix tcgetattr failure on a non-tty stdin, and the
-        // cfg(not(unix)) arm): truecolor must still reflect COLORTERM since
-        // stdout can be a real truecolor tty independent of stdin.
-        let none = no_probe_caps(None);
-        assert!(!none.sync && !none.truecolor && !none.kitty_kbd);
+        // cfg(not(unix)) arm). A probe that was never written is the purest
+        // unanswered question, so every hint decides here: stdout can be a
+        // real truecolor tty independent of stdin.
+        let none = no_probe_caps(&EnvHints::default());
+        assert!(!none.sync && !none.truecolor && !none.kitty_kbd && !none.unicode_boxes);
         assert_eq!(tier_name(none.tier), "basic");
 
-        let truecolor = no_probe_caps(Some("truecolor"));
+        let truecolor = no_probe_caps(&colorterm("truecolor"));
         assert!(!truecolor.sync && truecolor.truecolor && !truecolor.kitty_kbd);
         assert_eq!(tier_name(truecolor.tier), "standard");
 
-        let bit24 = no_probe_caps(Some("24bit"));
+        let bit24 = no_probe_caps(&colorterm("24bit"));
         assert!(bit24.truecolor);
 
-        let unrecognized = no_probe_caps(Some("bogus"));
+        let unrecognized = no_probe_caps(&colorterm("bogus"));
         assert!(!unrecognized.truecolor);
+
+        assert!(no_probe_caps(&utf8_locale()).unicode_boxes);
     }
 
     #[test]
