@@ -74,8 +74,8 @@ fn measured(metrics: CellMetrics) -> MeasuredCell {
 }
 
 /// Every class baseline in the repo, as `(class, file)`, skipping the
-/// sidecars that are not baselines (`*.headroom.toml`) and the partial
-/// fixture a recorder test writes.
+/// sidecars and scratch files that live beside them by the one rule that
+/// tells the two apart ([`baselines::baseline_class`]).
 fn class_baselines() -> Vec<(String, PathBuf)> {
     let dir = workspace_root()
         .join("crates")
@@ -85,10 +85,10 @@ fn class_baselines() -> Vec<(String, PathBuf)> {
     for entry in std::fs::read_dir(&dir).expect("the baselines directory must be readable") {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if !name.ends_with(".toml") || name.contains(".headroom.") || name.contains(".partial.") {
+        let Some(class) = baselines::baseline_class(&name) else {
             continue;
-        }
-        found.push((name.trim_end_matches(".toml").to_string(), path));
+        };
+        found.push((class.to_string(), path));
     }
     assert!(
         !found.is_empty(),

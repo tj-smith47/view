@@ -352,7 +352,10 @@ pub fn headroom_for(
     controlled: bool,
 ) -> Option<Headroom> {
     let policy = gate_headroom(metric, controlled)?;
-    Some(declared_factor(table, cell, metric).map_or(policy, |factor| resized(policy, factor)))
+    Some(
+        declared_factor(table, cell, metric)
+            .map_or(policy, |factor| resized_headroom(policy, factor)),
+    )
 }
 
 /// The factor `table` states for `cell`'s `metric` under the scope
@@ -368,7 +371,12 @@ fn declared_factor(table: &HeadroomTable, cell: &CellId, metric: &str) -> Option
 
 /// `policy` carrying `factor` instead of its own, keeping the shape the
 /// metric's kind demands.
-fn resized(policy: Headroom, factor: f64) -> Headroom {
+///
+/// Public because a campaign sizes a factor for a metric and must then
+/// re-check it under exactly the policy the gate will read it as, rather
+/// than assembling a second [`Headroom`] beside this one.
+#[must_use]
+pub fn resized_headroom(policy: Headroom, factor: f64) -> Headroom {
     match policy {
         Headroom::Signed { floor, .. } => Headroom::Signed { factor, floor },
         Headroom::Proportional(_) => Headroom::Proportional(factor),
@@ -422,7 +430,7 @@ fn resized(policy: Headroom, factor: f64) -> Headroom {
 #[must_use]
 pub fn declared_headroom(table: &HeadroomTable, cell: &CellId, metric: &str) -> Option<Headroom> {
     let factor = declared_factor(table, cell, metric)?;
-    Some(resized(gate_headroom(metric, true)?, factor))
+    Some(resized_headroom(gate_headroom(metric, true)?, factor))
 }
 
 /// Whether `metric` names a statistic whose value is a function of a tail
@@ -792,6 +800,25 @@ struct HeadroomFile {
 #[must_use]
 pub fn headroom_path(baseline_path: &Path) -> std::path::PathBuf {
     baseline_path.with_extension("headroom.toml")
+}
+
+/// The class `name` is the baseline of, or `None` where it names one of the
+/// files that merely live in the same directory.
+///
+/// The baselines directory holds a class's committed bars beside its
+/// hand-curated sidecar and three machine-local scratch files a run can
+/// leave there (`<class>.headroom.toml`, `.partial.toml`, `.measured.toml`,
+/// `.campaign.toml`). Every walk over that directory has to tell them
+/// apart, and each one that spelled its own blocklist gained a way to be
+/// wrong the next time a mode started writing a file there -- the campaign
+/// mode's proposal was read as a class baseline by a walk whose list
+/// predated it. The rule is derived instead of listed: a machine class is
+/// hyphen-delimited and never carries a dot, so anything still holding one
+/// once `.toml` comes off is a sidecar whatever it is called.
+#[must_use]
+pub fn baseline_class(name: &str) -> Option<&str> {
+    let class = name.strip_suffix(".toml")?;
+    (!class.contains('.')).then_some(class)
 }
 
 /// Loads the measured-headroom sidecar at `path` for `class`.
@@ -1306,12 +1333,13 @@ pub enum RatchetOutcome {
     /// ratchet-only-tightens makes a lucky draw permanent: a bar pinned
     /// below the class's own honest band fails a large fraction of later
     /// honest runs on unchanged code. The legitimate path to a bar this
-    /// low is a replicate campaign's median hand-edited into the baseline
-    /// file: the floor is measured off the held recorded value, so a
+    /// low is a replicate campaign's median (`bench --campaign N`)
+    /// reviewed into the baseline file: the floor is measured off the held
+    /// recorded value, so a
     /// `--record` of the median refuses identically, by design -- an
     /// automated acceptance would be the same single-draw trust the guard
-    /// exists to withdraw. The record report names the command, the cell
-    /// and the file beside the values.
+    /// exists to withdraw. The record report names the campaign command,
+    /// the cell and the file beside the values.
     RefusedBelowSpread {
         metric: String,
         recorded: f64,
@@ -1361,7 +1389,8 @@ pub enum RatchetOutcome {
 /// recorded value ([`Headroom::record_floor`]): a single draw past it is
 /// refused ([`RatchetOutcome::RefusedBelowSpread`]) and the recorded bar
 /// held, so moving a bar further than the class's honest runs move takes a
-/// replicate campaign's median, hand-recorded. A class without a published
+/// replicate campaign's median (`bench --campaign N`), reviewed and
+/// committed. A class without a published
 /// spread keeps the pure min-ratchet -- a compiled default is a guess, not
 /// a measurement to mirror -- and its shared-class breach stays the
 /// documented loud-breach-then-rerun regime.
@@ -1474,7 +1503,7 @@ pub struct RecordPlan {
     pub file: BaselineFile,
     pub cells: Vec<CellRatchet>,
     /// The machine class recorded, carried so a below-spread refusal can
-    /// name the exact replicate-campaign command in its own message.
+    /// name the exact `--campaign` invocation in its own message.
     pub class: String,
     /// Set when a full-matrix record found an existing baseline it could
     /// not ratchet against (different pin or class) and recorded fresh
@@ -1580,7 +1609,7 @@ impl RecordPlan {
     /// The number of metrics the record refused to move further below their
     /// recorded values than the class's published spread admits. Each held
     /// its recorded bar, the refused values are not in the file, and the
-    /// operator's path to the lower bar is the replicate-campaign command
+    /// operator's path to the lower bar is the `--campaign` invocation
     /// in the metric's own alert line.
     #[must_use]
     pub fn spread_refusals(&self) -> usize {
@@ -1648,14 +1677,15 @@ impl RecordPlan {
                              {measured:.4} is further below the recorded {recorded:.4} than the \
                              published spread ({spread}) admits (record floor {floor:.4}); one \
                              draw this deep pins a bar honest runs fail, so the recorded value \
-                             was held and the measured one was not written. To move the bar, \
-                             re-run `task bench -- --scenario {scenario} --fixture {fixture} \
-                             --class {class}` repeatedly on a quiet host, take the replicate \
-                             median, and hand-edit {metric} under [{scenario}.{fixture}] in \
-                             {target} to it. The floor is measured off the recorded value this \
-                             refusal holds, so `--record` will refuse the median the same way, \
-                             by design: only a hand edit carries a campaign's median into the \
-                             file",
+                             was held and the measured one was not written. To move the bar, run \
+                             `task bench -- --scenario {scenario} --fixture {fixture} --class \
+                             {class} --campaign 8` on a quiet host: it takes the replicate median \
+                             for you and writes the seat, the re-sized factor and the draws \
+                             behind both to baselines/{class}.campaign.toml. Review that file and \
+                             commit {metric} under [{scenario}.{fixture}] in {target} from it. \
+                             The floor is measured off the recorded value this refusal holds, so \
+                             `--record` will refuse the median the same way, by design: only a \
+                             reviewed edit carries a campaign's median into the file",
                             floor = spread.record_floor(*recorded),
                             class = self.class,
                         ));
@@ -1867,6 +1897,31 @@ mod tests {
         );
     }
 
+    /// A walk over the baselines directory that reads one of the files
+    /// living beside a class baseline as if it were one either fails on a
+    /// parse or, worse, gates a class that does not exist. Every file kind
+    /// that directory can hold is put to the rule here, so a mode that
+    /// starts writing a fifth one is covered by the same sentence rather
+    /// than by the next walk's blocklist.
+    #[test]
+    fn only_a_dotless_class_name_reads_as_a_baseline() {
+        assert_eq!(baseline_class("dev-linux.toml"), Some("dev-linux"));
+        assert_eq!(
+            baseline_class("controlled-linux.toml"),
+            Some("controlled-linux")
+        );
+        for beside in [
+            "dev-linux.headroom.toml",
+            "dev-linux.partial.toml",
+            "dev-linux.measured.toml",
+            "dev-linux.campaign.toml",
+            "dev-linux.toml.bak",
+            "README.md",
+        ] {
+            assert_eq!(baseline_class(beside), None, "{beside} is not a baseline");
+        }
+    }
+
     /// A `[headroom]` table inside the baseline is exactly what the next
     /// `--record` destroys, so it is refused at load with the sidecar named.
     #[test]
@@ -1944,86 +1999,6 @@ mod tests {
         ("dev-linux", "first_paint.marker_cold_ms"),
     ];
 
-    /// The cell and metric a draws key names, or `None` where the key is
-    /// not the `scenario.fixture.metric` a draw is always a reading of.
-    fn draws_cell(key: &str) -> Option<(CellId, &str)> {
-        match key.split('.').collect::<Vec<_>>()[..] {
-            [scenario, fixture, metric] => Some((CellId::new(scenario, fixture), metric)),
-            _ => None,
-        }
-    }
-
-    /// Whether a draws key at cell scope falls inside `entry`'s scope, by
-    /// the same three levels [`headroom_for`] resolves.
-    fn covers(entry: &str, key: &str) -> bool {
-        let (Some((cell, metric)), parts) = (draws_cell(key), entry.split('.').count()) else {
-            return false;
-        };
-        match parts {
-            1 => entry == metric,
-            2 => entry == format!("{}.{metric}", cell.scenario),
-            _ => entry == key,
-        }
-    }
-
-    /// Where `headroom` fails the arithmetic its own campaign publishes:
-    /// one message per violated half of the published-spread rule, plus
-    /// the ratchet-survival check the sidecar comments claim in prose.
-    ///
-    /// The worst-excursion half can never fire alone -- the median is
-    /// never below the lowest draw, so `median + 2 * half_width` is never
-    /// below the worst draw -- and it is reported separately anyway so a
-    /// failure names which claim the factor broke rather than only the
-    /// wider of the two.
-    fn spread_violations(key: &str, headroom: Headroom, draws: &DrawSet) -> Vec<String> {
-        let mut sorted = draws.values.clone();
-        sorted.sort_by(f64::total_cmp);
-        let (Some(&low), Some(&high)) = (sorted.first(), sorted.last()) else {
-            return vec![format!(
-                "{key} publishes no draws to check its factor against"
-            )];
-        };
-        let mid = sorted.len() / 2;
-        let median = if sorted.len().is_multiple_of(2) {
-            (sorted[mid - 1] + sorted[mid]) / 2.0
-        } else {
-            sorted[mid]
-        };
-        let two_half_widths = median + (high - low);
-        let recorded = draws.recorded;
-        let bar = headroom.bar(recorded);
-        // a record ratchets the seat down to the lowest draw the published
-        // band still admits; one below the floor is refused rather than
-        // seated, so it never becomes the value a later bar is built from
-        let floor = headroom.record_floor(recorded);
-        let seat = sorted
-            .iter()
-            .copied()
-            .filter(|value| *value > floor)
-            .fold(recorded, f64::min);
-        let mut out = Vec::new();
-        if bar < high {
-            out.push(format!(
-                "{key}: {recorded} {headroom} bars at {bar}, under the campaign's own \
-                 worst draw {high}"
-            ));
-        }
-        if bar < two_half_widths {
-            out.push(format!(
-                "{key}: {recorded} {headroom} bars at {bar}, under the 2x half-width \
-                 rule's {two_half_widths}"
-            ));
-        }
-        if headroom.bar(seat) < high {
-            out.push(format!(
-                "{key}: a seat ratcheted to {seat} bars at {}, under the worst draw \
-                 {high}",
-                headroom.bar(seat)
-            ));
-        }
-        out
-    }
-
     /// A published factor is an arithmetic claim about a band, and nothing
     /// re-ran that arithmetic: the sidecars state a worst excursion, a 2x
     /// half-width rule and a survives-its-own-ratchet check in prose, so a
@@ -2050,7 +2025,7 @@ mod tests {
             let table = load_headroom(&path, class).expect("every shipped sidecar must load");
             let draws = load_draws(&path, class).expect("every shipped sidecar must load");
             for (key, set) in &draws {
-                let Some((cell, metric)) = draws_cell(key) else {
+                let Some((cell, metric)) = crate::campaign::draws_cell(key) else {
                     violations.push(format!(
                         "{class}: draws key {key} is not a scenario.fixture.metric cell"
                     ));
@@ -2062,12 +2037,18 @@ mod tests {
                     ));
                     continue;
                 };
-                violations.extend(spread_violations(&format!("{class} {key}"), headroom, set));
+                violations.extend(crate::campaign::spread_violations(
+                    &format!("{class} {key}"),
+                    headroom,
+                    set,
+                ));
                 checked += 1;
             }
             for key in table.keys() {
                 if CAMPAIGNS_WITHOUT_DRAWS.contains(&(class, key.as_str()))
-                    || draws.keys().any(|drawn| covers(key, drawn))
+                    || draws
+                        .keys()
+                        .any(|drawn| crate::campaign::scope_covers(key, drawn))
                 {
                     continue;
                 }
@@ -2085,44 +2066,6 @@ mod tests {
         assert!(
             checked > 2,
             "the shipped sidecars carry draws for several cells, so this walk must reach them"
-        );
-    }
-
-    /// The walk above passing on the shipped files does not prove it can
-    /// fail, so each half of the rule is put a factor its draws refuse.
-    #[test]
-    fn a_factor_its_own_draws_refuse_fails_the_half_it_breaks() {
-        let refused = |factor: f64, recorded: f64, values: &[f64]| {
-            spread_violations(
-                "case",
-                Headroom::Proportional(factor),
-                &DrawSet {
-                    recorded,
-                    values: values.to_vec(),
-                },
-            )
-        };
-
-        let every_half = refused(1.2, 1.0, &[1.0, 1.4]);
-        assert_eq!(every_half.len(), 3, "{every_half:?}");
-
-        let two_half_widths = refused(1.2, 2.0, &[1.0, 1.9, 2.0]);
-        assert_eq!(two_half_widths.len(), 1, "{two_half_widths:?}");
-        assert!(
-            two_half_widths[0].contains("2x half-width"),
-            "a band wider than the bar must name that half: {two_half_widths:?}"
-        );
-
-        let ratchet = refused(1.6, 2.1, &[1.0, 2.0, 2.1]);
-        assert_eq!(ratchet.len(), 1, "{ratchet:?}");
-        assert!(
-            ratchet[0].contains("ratcheted"),
-            "a factor a reseat breaks must name the ratchet: {ratchet:?}"
-        );
-
-        assert!(
-            refused(1.6, 2.0, &[1.9, 2.0, 2.1]).is_empty(),
-            "a factor its draws support must pass every half"
         );
     }
 
@@ -3783,14 +3726,15 @@ mod tests {
             .expect("a refusal must produce its own alert line");
         for needle in [
             "RECORD REFUSED [echo.heavy] ratio_p50:",
-            "task bench -- --scenario echo --fixture heavy --class dev-linux",
+            "task bench -- --scenario echo --fixture heavy --class dev-linux --campaign 8",
             "(x headroom 1.1)",
             "record floor 1.0026",
             "1.1140",
             "0.9740",
             "quiet host",
             "replicate median",
-            "hand-edit ratio_p50 under [echo.heavy] in dev-linux.toml",
+            "baselines/dev-linux.campaign.toml",
+            "commit ratio_p50 under [echo.heavy] in dev-linux.toml",
             "will refuse the median the same way, by design",
         ] {
             assert!(

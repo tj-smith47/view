@@ -14,6 +14,7 @@
 pub mod baselines;
 pub mod budgets;
 pub mod builds;
+pub mod campaign;
 pub mod corpus;
 pub mod fixture;
 pub mod fuzz;

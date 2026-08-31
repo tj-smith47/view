@@ -6,6 +6,7 @@
 //! bench --scenario echo --fixture minimal --class dev-linux
 //! bench --all --class dev-linux --record   # writes baselines/<class>.toml
 //! bench --all --class dev-linux --gate     # exit 1 on any breach
+//! bench --scenario scroll --class dev-linux --fixture minimal --campaign 8
 //! ```
 //!
 //! The machine class is a required argument: shared-runner numbers must
@@ -13,12 +14,19 @@
 //! harness refuses to run at all without an explicit class naming where
 //! the numbers came from.
 //!
-//! `--record` and `--gate` are the two modes and neither ever stands in for
-//! the other. A class with no committed baseline is armed by a `--record`
-//! run whose output is reviewed and committed; `--gate` against a class
-//! without one refuses before it measures anything, because a gate with
-//! nothing to compare cannot fail and its exit 0 is indistinguishable from
-//! a gate that compared everything and passed.
+//! `--record` and `--gate` are two of the three modes and neither ever
+//! stands in for the other. A class with no committed baseline is armed by
+//! a `--record` run whose output is reviewed and committed; `--gate`
+//! against a class without one refuses before it measures anything,
+//! because a gate with nothing to compare cannot fail and its exit 0 is
+//! indistinguishable from a gate that compared everything and passed.
+//!
+//! `--campaign N` is the third: N gate-grade replicates of the same cells,
+//! a pre-registered load exclusion, and one proposal file carrying the
+//! seats their medians reach, the headroom factors those seats and draws
+//! size, and the draws themselves. It writes nothing a gate reads -- a
+//! seat below a published spread's own floor is a value `--record` refuses
+//! by design, so the campaign proposes and the review commits.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -62,6 +70,11 @@ use cell_world::SideSetup;
 #[path = "bench/rows.rs"]
 mod rows;
 use rows::run_cell;
+
+// The replicate-campaign mode's own loop, split out for the same reason.
+#[path = "bench/replicates.rs"]
+mod replicates;
+use replicates::measure_pass;
 
 use view_bench::session::{NvimSpec, SpawnSpec, ViewSpec};
 use view_harness::baselines::{self, CellId, CellMetrics};
@@ -219,6 +232,24 @@ const NULL_CAL_WARMUP: usize = 20;
 /// moved identical-pair medians past 1.14 under load.
 const NULL_RATIO_FLOOR: f64 = 1.15;
 
+/// The load a campaign replicate is excluded at, pre-registered rather
+/// than chosen once the draws are in: an exclusion picked after seeing the
+/// band is an exclusion sized to the answer.
+///
+/// 2.0 is the threshold the 2026-08-30 dev-macos scroll campaign
+/// registered and published (23 replicates, 17 included). It held there:
+/// no excluded draw exceeded the included bands by more than 1.1%, so the
+/// rule removed contaminated readings without removing the band's own
+/// shape. Overridable per campaign with `--max-load`, because a host with
+/// more cores carries more load at the same quiet.
+const MAX_CAMPAIGN_LOAD: f64 = 2.0;
+
+/// How many runs one campaign may spend per included replicate it wants.
+/// Every excluded or refused replicate is replaced, so an unbounded
+/// campaign on a permanently busy host runs forever; at this cap it
+/// refuses instead, naming every load it saw.
+const CAMPAIGN_RUN_CAP: usize = 2;
+
 static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Parent of every per-cell scratch world; why `target/` and not the
@@ -304,6 +335,20 @@ struct Cli {
     /// Interleaved trials per cell; the gated statistic is the median
     #[arg(long, default_value_t = 3)]
     trials: usize,
+    /// Run this many included replicates of the selected cell(s) and write
+    /// baselines/<class>.campaign.toml: the seats their medians propose,
+    /// the headroom factors those seats and draws size, and the `[draws]`
+    /// tables the characterization walk re-checks a factor against. Every
+    /// replicate is a full gate-grade measurement, so this neither records
+    /// nor gates -- it proposes, and the review of the file it writes is
+    /// what commits a seat or a factor
+    #[arg(long, conflicts_with_all = ["record", "gate"])]
+    campaign: Option<usize>,
+    /// Pre-registered load exclusion for --campaign: a replicate whose
+    /// pre-run 1-minute load exceeds this is published as an excluded draw
+    /// and replaced rather than folded into the band
+    #[arg(long, default_value_t = MAX_CAMPAIGN_LOAD, requires = "campaign")]
+    max_load: f64,
 }
 
 /// Where one machine class's baselines live, inside the repo so recorded
@@ -895,11 +940,13 @@ fn main() -> Result<()> {
     // the same cores would corrupt each other's latency numbers.
     let _ = std::fs::remove_dir_all(scratch_root());
 
-    if (cli.record || cli.gate)
+    // a campaign replicate is a gate-grade measurement whose median becomes
+    // a seat, so it answers the sampling floor exactly as a record does
+    if (cli.record || cli.gate || cli.campaign.is_some())
         && (cli.samples < MIN_RECORDED_SAMPLES || cli.warmup < MIN_RECORDED_WARMUP)
     {
         bail!(
-            "--record/--gate require at least {MIN_RECORDED_SAMPLES} samples and \
+            "--record/--gate/--campaign require at least {MIN_RECORDED_SAMPLES} samples and \
              {MIN_RECORDED_WARMUP} warmup per side (got --samples {} --warmup {})",
             cli.samples,
             cli.warmup
@@ -998,11 +1045,12 @@ fn main() -> Result<()> {
                     .join(", ")
             );
         }
-        if cell_named(DIAGNOSTIC_MATRIX) && (cli.record || cli.gate) {
+        if cell_named(DIAGNOSTIC_MATRIX) && (cli.record || cli.gate || cli.campaign.is_some()) {
             bail!(
                 "{scenario}/{fixture} is a report-only diagnostic cell: it decomposes another \
                  row on the instrumented build and holds no bar of its own, so it can be \
-                 neither recorded nor gated"
+                 neither recorded nor gated, and a campaign over it would propose a seat for a \
+                 bar that does not exist"
             );
         }
         if let Some(reason) = platform_block(&scenario) {
@@ -1011,7 +1059,7 @@ fn main() -> Result<()> {
         // named by hand rather than by --all, so this is a refusal rather
         // than a skip: a run that asked for one cell and silently measured
         // nothing reports success having done no work
-        if cli.record || cli.gate {
+        if cli.record || cli.gate || cli.campaign.is_some() {
             if let Some(reason) = class_block(&scenario, &cli.class) {
                 bail!("{scenario}/{fixture} cannot be recorded or gated on this class: {reason}");
             }
@@ -1030,6 +1078,14 @@ fn main() -> Result<()> {
         trials: cli.trials,
         ..Protocol::default()
     };
+
+    // its own mode, and one that never reaches the record or gate paths
+    // below: a campaign runs each replicate's calibration brackets itself,
+    // writes only its own proposal file, and leaves every committed
+    // baseline and sidecar exactly as it found them
+    if let Some(target) = cli.campaign {
+        return replicates::run(target, &cli, &cells, &bins, &protocol, controlled, &pin);
+    }
 
     announce_load("start");
 
@@ -1090,41 +1146,8 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut measured: Vec<baselines::MeasuredCell> = Vec::new();
-    let mut refused: Vec<CellId> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
-    for cell in &cells {
-        let (scenario, fixture) = (&cell.scenario, &cell.fixture);
-        match run_cell(cell, &bins, &protocol, controlled) {
-            Ok(outcome) => {
-                if let Some(reason) = &outcome.refused {
-                    // a refusal is quieter than a failure by design, so on CI
-                    // it gets the same checks-page annotation a platform skip
-                    // does: visible without opening the run log
-                    if under_gha {
-                        println!(
-                            "::warning::bench cell {scenario}/{fixture} refused its own \
-                             measurement: {reason}"
-                        );
-                    }
-                    refused.push(cell.clone());
-                }
-                measured.push(baselines::MeasuredCell {
-                    id: cell.clone(),
-                    metrics: outcome.metrics,
-                });
-            }
-            // one cell failing says nothing about the cells that already
-            // measured, and the cells still queued behind it are worth the
-            // minutes the matrix has already spent getting here: keep
-            // going, and refuse the run once, at the end, with the whole
-            // picture rather than only the first thing that broke
-            Err(err) => {
-                eprintln!("CELL FAILED [{scenario}.{fixture}]: {err:#}");
-                failed.push(format!("{scenario}.{fixture}: {err:#}"));
-            }
-        }
-    }
+    let pass = measure_pass(&cells, &bins, &protocol, controlled, under_gha);
+    let (measured, refused, failed) = (pass.measured, pass.refused, pass.failed);
 
     if !failed.is_empty() {
         // never written into the authoritative baseline: a full-matrix
@@ -1627,7 +1650,7 @@ const EXIT_INCOMPLETE_MATRIX: i32 = 4;
 /// A record run refused to move at least one bar further below its
 /// recorded value than the class's published spread admits: the file was
 /// written with those bars held, none of the refused values are in it, and
-/// each refusal's alert names the replicate-campaign command that
+/// each refusal's alert names the `--campaign` invocation that
 /// legitimately re-records the cell. Non-zero because the operator asked
 /// for a record the run declined to fully perform; distinct from the
 /// masked-regression 3 because the required follow-up is different in kind
@@ -1641,7 +1664,7 @@ const EXIT_RECORD_SPREAD_REFUSED: i32 = 5;
 /// whole record pipeline to produce both surprises on the same run.
 ///
 /// One record can produce both surprises on different metrics; the refusal
-/// wins because its next step (the replicate-campaign command) exists only
+/// wins because its next step (a `--campaign` run) exists only
 /// in this run's output, while a masked regression re-announces itself at
 /// the very next gate.
 fn record_exit_code(spread_refusals: usize, masked_regressions: usize) -> Option<i32> {

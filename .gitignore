@@ -35,6 +35,12 @@
 # these are raw draws and never a recorded bar
 *.measured.toml
 
+# a replicate campaign's proposal: the seats, factors and draws N gated
+# replicates resolve to, for review. Same reason again -- what a campaign
+# writes is a proposal nothing reads, and what gets committed is the
+# reviewed content of it inside the real baseline and its sidecar
+*.campaign.toml
+
 # cpython's own bytecode cache. Running scripts/test-fixtures/delay-relay
 # (this tree's only Python fixture; its siblings are /bin/sh) directly as
 # __main__ writes none, so this is a safety net for anyone who later

@@ -19,7 +19,9 @@ use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
     scratch_root, target_root, verify_nvim_matches_pin, workspace_root,
 };
-use view_harness::results::{write_results, ResultsFile, ScenarioResult, ScenarioStatus};
+use view_harness::results::{
+    today_date_string, write_results, ResultsFile, ScenarioResult, ScenarioStatus,
+};
 use view_harness::scenario::{self, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
     reset_hermetic_home, state_name, CompatSession, ErrorBaseline, PluginClass, ScenarioState,
@@ -96,37 +98,6 @@ fn ensure_view_bin() -> Result<PathBuf> {
         bail!("cargo build -p view failed");
     }
     Ok(path)
-}
-
-/// `YYYY-MM-DD` for the current instant, in UTC. Hand-rolled rather than a
-/// `chrono`/`time` dependency: this is the only date computation anywhere
-/// in the workspace, for one report-row stamp
-/// ([`view_harness::results::ScenarioResult::date`]).
-fn today_date_string() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// Howard Hinnant's days-since-epoch -> proleptic Gregorian civil date
-/// algorithm (public domain: <http://howardhinnant.github.io/date_algorithms.html>),
-/// pinned by [`civil_from_days_matches_known_dates`] against independently
-/// computed reference values rather than trusted from transcription alone.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
 
 /// Removes the scratch state a compat scenario run created once the
@@ -862,23 +833,6 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use view_test_support::ScratchDir;
-    /// Reference values independently computed via Python's
-    /// `datetime.date` (`epoch + timedelta(days=N)`), not transcribed from
-    /// the Hinnant algorithm's own worked examples -- an independent
-    /// derivation path, per this codebase's own re-derive-don't-recognize
-    /// standard, catches a transcription bug a self-referential check
-    /// would not.
-    #[test]
-    fn civil_from_days_matches_known_dates() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(1), (1970, 1, 2));
-        assert_eq!(civil_from_days(365), (1971, 1, 1));
-        assert_eq!(civil_from_days(366), (1971, 1, 2));
-        assert_eq!(civil_from_days(1000), (1972, 9, 27));
-        assert_eq!(civil_from_days(19570), (2023, 8, 1));
-        assert_eq!(civil_from_days(20653), (2026, 7, 19));
-    }
-
     /// The committed heavy fixture pins nvim-tree under its real repo name
     /// `nvim-tree.lua`, while the scenario names the plugin `nvim-tree`:
     /// the lockfile lookup must bridge the `.lua` repo-naming convention

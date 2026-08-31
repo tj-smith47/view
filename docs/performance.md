@@ -231,3 +231,36 @@ Where a metric does not yet meet its spec budget, it is listed in
 `crates/view-bench/budgets.toml` with the value it was accepted at and a
 written reason. The build fails if a new shortfall appears, if a listed one
 gets worse, or if a listed one is fixed but left on the list.
+
+## Re-seating a bar, or re-sizing the spread it gates under
+
+A recorded bar only ratchets down as far as the class's published spread
+says honest runs move; a measurement further below it than that is one
+lucky draw, and `--record` refuses it rather than pinning a bar most honest
+runs would then fail. Moving such a bar takes a campaign -- N gated
+replicates of the same cells on a quiet host -- and that campaign is a mode
+of the tool that already measures:
+
+```
+$ task bench -- --scenario scroll --fixture minimal --class dev-macos --campaign 8
+CAMPAIGN scroll/minimal dev-macos: replicate 1/8  load 1.42  ratio_p50 2.2810  INCLUDED
+CAMPAIGN scroll/minimal dev-macos: replicate 2/8  load 2.31  ratio_p50 2.4020  EXCLUDED (load > 2), replacing
+...
+CAMPAIGN dev-macos: 8 included of 11 run
+  scroll/minimal ratio_p50: median 2.2725  half-width 1.37%  worst 2.3094  proposes "scroll.minimal.ratio_p50" = 1.03
+CAMPAIGN wrote crates/view-bench/baselines/dev-macos.campaign.toml (seats, factors, draws)
+```
+
+Each replicate is a full `--record`-grade measurement, null-pair
+calibration brackets included; a replicate whose pre-run load exceeds
+`--max-load` (2.0 by default) is published as an excluded draw and
+replaced, and one that refuses its own measurement is replaced too. Past
+twice the wanted replicates the campaign refuses, naming every load it saw.
+
+The file it writes is a proposal and nothing reads it: it carries each
+cell's proposed seat (its median), the headroom factor that seat and its
+draws size under the same three-leg rule the characterization walk
+re-checks a published factor with, and the `[draws]` tables that let the
+walk do so. Committing a campaign means reviewing that file and moving its
+contents into `baselines/<class>.toml` and `baselines/<class>.headroom.toml`
+-- the tool proposes, the diff decides.
