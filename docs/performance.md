@@ -243,8 +243,10 @@ of the tool that already measures:
 
 ```
 $ task bench -- --scenario scroll --fixture minimal --class dev-macos --campaign 8
-CAMPAIGN scroll/minimal dev-macos: replicate 1/8  load 1.42  ratio_p50 2.2810  INCLUDED
-CAMPAIGN scroll/minimal dev-macos: replicate 2/8  load 2.31  ratio_p50 2.4020  EXCLUDED (load > 2), replacing
+campaign on class dev-macos: 8 included replicate(s) wanted, at most 16 run(s) over 1 cell(s) = up to 16 cell measurement(s), excluding any replicate whose pre-run 1-min load exceeds 2
+CAMPAIGN scroll/minimal dev-macos: replicate 1 (included 1/8)  load 1.42  brackets 1.0204/1.0311  ratio_p50 2.2810  INCLUDED
+CAMPAIGN dev-macos: replicate 1 took 4m12s; 8 included ~= 33m36s, the 16-run cap ~= 1h07m
+CAMPAIGN scroll/minimal dev-macos: replicate 2 (included 1/8)  load 2.31  brackets 1.0290/1.0402  ratio_p50 2.4020  EXCLUDED (load > 2), replacing
 ...
 CAMPAIGN dev-macos: 8 included of 11 run
   scroll/minimal ratio_p50: median 2.2725  half-width 1.37%  worst 2.3094  proposes "scroll.minimal.ratio_p50" = 1.03
@@ -252,10 +254,19 @@ CAMPAIGN wrote crates/view-bench/baselines/dev-macos.campaign.toml (seats, facto
 ```
 
 Each replicate is a full `--record`-grade measurement, null-pair
-calibration brackets included; a replicate whose pre-run load exceeds
-`--max-load` (2.0 by default) is published as an excluded draw and
-replaced, and one that refuses its own measurement is replaced too. Past
-twice the wanted replicates the campaign refuses, naming every load it saw.
+calibration brackets included -- those brackets are printed and recorded
+per replicate, so an included draw that sat just under the floor is
+visible rather than indistinguishable from a clean one. A replicate whose
+pre-run load exceeds `--max-load` (2.0 by default) is published as an
+excluded draw and replaced, and one that refuses its own measurement is
+replaced too. Past twice the wanted replicates the campaign refuses,
+naming every load it saw.
+
+Nothing caps how many cells a campaign may span -- `--all` is a legal
+request -- so the tool states the magnitude instead: the start line gives
+the cell measurements the cap permits, and once the first replicate lands
+it projects the wanted band and the cap from that replicate's own measured
+cost.
 
 The file it writes is a proposal and nothing reads it: it carries each
 cell's proposed seat (its median), the headroom factor that seat and its

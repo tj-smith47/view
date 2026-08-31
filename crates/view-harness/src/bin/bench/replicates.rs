@@ -8,7 +8,9 @@
 //! [`view_harness::campaign`], the same code the characterization walk
 //! re-checks a published factor with.
 
-use view_harness::campaign::{self, Campaign, Replicate, ReplicateDraw, Verdict};
+use std::time::Duration;
+
+use view_harness::campaign::{self, Campaign, Progress, Replicate, ReplicateDraw, Verdict};
 use view_harness::results::today_date_string;
 
 use super::*;
@@ -81,10 +83,12 @@ fn replicate(
     bins: &Bins,
     protocol: &Protocol,
     controlled: bool,
+    under_gha: bool,
 ) -> ReplicateDraw {
     let load = host_load();
     let refusal = |reason: String| ReplicateDraw {
         load,
+        brackets: None,
         cells: Vec::new(),
         refusal: Some(reason),
     };
@@ -97,7 +101,7 @@ fn replicate(
             "start null-pair deviation {start:.4} exceeds the calibration floor {NULL_RATIO_FLOOR}"
         ));
     }
-    let pass = measure_pass(cells, bins, protocol, controlled, false);
+    let pass = measure_pass(cells, bins, protocol, controlled, under_gha);
     if !pass.failed.is_empty() {
         return refusal(format!("cell(s) failed: {}", pass.failed.join(", ")));
     }
@@ -122,46 +126,94 @@ fn replicate(
     }
     ReplicateDraw {
         load,
+        brackets: Some((start, end)),
         cells: pass.measured,
         refusal: None,
     }
 }
 
+/// A duration as a campaign's own projection states it: hours and minutes
+/// once there are hours, minutes and seconds otherwise. Whole units only --
+/// a projection built from one replicate is not precise to the second, and
+/// printing it as though it were would overstate what the tool knows.
+fn spell(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
 /// The campaign's own log line for one replicate as it lands.
-fn announce(landed: &Replicate, run: usize, target: usize, class: &str, max_load: f64) {
+fn announce(landed: &Replicate, at: Progress, class: &str, max_load: f64) {
     let load = landed
         .load
-        .map_or_else(|| "unavailable".to_string(), |load| format!("{load:.2}"));
+        // never "0.00": a load nobody could read and a load of zero are
+        // opposite statements about the host
+        .map_or_else(|| "unreadable".to_string(), |load| format!("{load:.2}"));
+    let brackets = landed.brackets.map_or_else(
+        || "brackets not taken".to_string(),
+        |(start, end)| format!("brackets {start:.4}/{end:.4}"),
+    );
     let verdict = match landed.verdict {
         Verdict::Included => "INCLUDED".to_string(),
         Verdict::LoadExcluded => format!("EXCLUDED (load > {max_load}), replacing"),
         Verdict::Refused => "REFUSED, replacing".to_string(),
     };
+    // the run index and the included count answer different questions and
+    // only the first advances on a replacement, so both are printed rather
+    // than one standing in for the other
+    let where_at = format!(
+        "replicate {} (included {}/{})",
+        at.run, at.included, at.target
+    );
     if let Some(reason) = &landed.refusal {
-        println!("CAMPAIGN {class}: replicate {run}/{target}  load {load}  {verdict}: {reason}");
-        return;
+        println!("CAMPAIGN {class}: {where_at}  load {load}  {verdict}: {reason}");
+    } else {
+        for cell in &landed.cells {
+            let readings = cell
+                .metrics
+                .iter()
+                .map(|(metric, value)| format!("{metric} {value:.4}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+            println!(
+                "CAMPAIGN {}/{} {class}: {where_at}  load {load}  {brackets}  {readings}  \
+                 {verdict}",
+                cell.id.scenario, cell.id.fixture
+            );
+        }
     }
-    for cell in &landed.cells {
-        let readings = cell
-            .metrics
-            .iter()
-            .map(|(metric, value)| format!("{metric} {value:.4}"))
-            .collect::<Vec<_>>()
-            .join("  ");
+    // once, off the first replicate: the cost of the rest of this campaign
+    // is now a measurement of this host rather than a guess, and an
+    // operator who asked for a full-matrix campaign learns what it costs
+    // before it has spent the afternoon
+    if at.run == 1 {
         println!(
-            "CAMPAIGN {}/{} {class}: replicate {run}/{target}  load {load}  {readings}  {verdict}",
-            cell.id.scenario, cell.id.fixture
+            "CAMPAIGN {class}: replicate 1 took {}; {} included ~= {}, the {}-run cap ~= {}",
+            spell(landed.elapsed),
+            at.target,
+            spell(landed.elapsed * u32::try_from(at.target).unwrap_or(u32::MAX)),
+            at.cap,
+            spell(landed.elapsed * u32::try_from(at.cap).unwrap_or(u32::MAX)),
         );
     }
 }
 
-/// The commit the campaign measured, where the tool can read one. A
-/// campaign's provenance names the tree its numbers came from, and a
-/// hand-typed sha is the kind of duplicated derivable value this mode
-/// exists to remove.
+/// The tree the campaign measured, where the tool can read one.
+///
+/// `--dirty` rather than a bare `rev-parse HEAD`: the binary under
+/// measurement is built from the working tree, not from the last commit, so
+/// a campaign run over an uncommitted change stamped with its parent sha
+/// would be a derived value that is wrong -- and a wrong derived value is
+/// worse than a hand-typed one, because it is trusted. Measuring a dirty
+/// tree is a legitimate campaign; it only has to say so, and a committed
+/// sidecar carrying `<sha>-dirty` states exactly what can and cannot be
+/// checked out again.
 fn measured_commit() -> Option<String> {
     let out = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+        .args(["describe", "--always", "--dirty"])
         .current_dir(workspace_root())
         .output()
         .ok()?;
@@ -184,17 +236,25 @@ pub(super) fn run(
     ensure!(target > 0, "--campaign needs at least one replicate");
     let class = &cli.class;
     let cap = target.saturating_mul(CAMPAIGN_RUN_CAP);
+    // the magnitude the operator just asked for, stated before it is spent:
+    // a campaign measures every selected cell in every replicate, so a
+    // full-matrix campaign is the cell count times the cap, and nothing but
+    // this line tells the operator that before the hours start
     println!(
-        "campaign on class {class}: {target} included replicate(s) wanted, at most {cap} run(s), \
-         excluding any replicate whose pre-run 1-min load exceeds {}",
+        "campaign on class {class}: {target} included replicate(s) wanted, at most {cap} run(s) \
+         over {} cell(s) = up to {} cell measurement(s), excluding any replicate whose pre-run \
+         1-min load exceeds {}",
+        cells.len(),
+        cap.saturating_mul(cells.len()),
         cli.max_load
     );
+    let under_gha = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true");
     let campaign = Campaign::collect(
         target,
         cap,
         cli.max_load,
-        |_| replicate(cells, bins, protocol, controlled),
-        |landed, run| announce(landed, run, target, class, cli.max_load),
+        |_| replicate(cells, bins, protocol, controlled, under_gha),
+        |landed, at| announce(landed, at, class, cli.max_load),
     )?;
 
     let proposals = campaign.proposals()?;
@@ -229,7 +289,7 @@ pub(super) fn run(
         trials: protocol.trials,
     };
     let path = baseline_path(class).with_extension("campaign.toml");
-    std::fs::write(&path, campaign::render(&campaign, &provenance, &proposals)?)
+    std::fs::write(&path, campaign::render(&campaign, &provenance, &proposals))
         .with_context(|| format!("writing the campaign proposal to {}", path.display()))?;
     println!(
         "CAMPAIGN wrote {} (seats, factors, draws). Nothing reads it: review it and commit its \

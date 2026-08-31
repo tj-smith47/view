@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -47,6 +48,12 @@ pub enum CampaignError {
         fixture: String,
         metric: String,
     },
+    #[error(
+        "{metric} carries no gate policy, so a campaign cannot size a factor for it; a row \
+         producing a metric name the policy rule does not classify is refused where it is \
+         produced, so reaching here means that refusal was bypassed"
+    )]
+    Unclassified { metric: String },
 }
 
 /// The estimators one cell-metric's draws resolve to.
@@ -286,6 +293,10 @@ struct Band {
 #[derive(Debug, Clone)]
 pub struct ReplicateDraw {
     pub load: Option<f64>,
+    /// The null-pair deviations bracketing this replicate's cells, once
+    /// both have been taken. A replicate the start bracket refused never
+    /// reaches the second, so this stays `None` there.
+    pub brackets: Option<(f64, f64)>,
     pub cells: Vec<MeasuredCell>,
     /// Set when the replicate refused its own measurement (a noisy
     /// calibration bracket, a row that withheld its number, a cell that
@@ -309,9 +320,28 @@ pub enum Verdict {
 #[non_exhaustive]
 pub struct Replicate {
     pub load: Option<f64>,
+    /// See [`ReplicateDraw::brackets`].
+    pub brackets: Option<(f64, f64)>,
     pub cells: Vec<MeasuredCell>,
     pub verdict: Verdict,
     pub refusal: Option<String>,
+    /// How long this replicate took, which is what makes the campaign's
+    /// own projection of its remaining cost a measurement rather than a
+    /// guess.
+    pub elapsed: Duration,
+}
+
+/// Where a campaign stands as one replicate lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// 1-based index of the run that just landed, which advances on every
+    /// replicate including the ones that are replaced.
+    pub run: usize,
+    /// How much of the band is filled, which advances only on an included
+    /// replicate.
+    pub included: usize,
+    pub target: usize,
+    pub cap: usize,
 }
 
 /// Every replicate one campaign ran, included or not.
@@ -327,9 +357,13 @@ impl Campaign {
     /// excluded or refused one, and refusing past `cap` total runs.
     ///
     /// `replicate` takes the 1-based run index and returns what that run
-    /// measured; `report` is handed each replicate as it lands, so a
+    /// measured; `report` is handed each replicate as it lands together
+    /// with its own run index and the included count so far, so a
     /// campaign's log names an exclusion at the moment it happens rather
-    /// than only in the summary.
+    /// than only in the summary. The two numbers are reported apart because
+    /// they answer different questions -- how much of the cap is spent
+    /// versus how much of the band is filled -- and only the first advances
+    /// on an exclusion.
     ///
     /// # Errors
     ///
@@ -340,12 +374,14 @@ impl Campaign {
         cap: usize,
         max_load: f64,
         mut replicate: impl FnMut(usize) -> ReplicateDraw,
-        mut report: impl FnMut(&Replicate, usize),
+        mut report: impl FnMut(&Replicate, Progress),
     ) -> Result<Self, CampaignError> {
         let mut replicates: Vec<Replicate> = Vec::new();
         let mut included = 0usize;
         while included < target && replicates.len() < cap {
-            let draw = replicate(replicates.len() + 1);
+            let run = replicates.len() + 1;
+            let started = Instant::now();
+            let draw = replicate(run);
             let verdict = if draw.refusal.is_some() {
                 Verdict::Refused
             } else if draw.load.is_some_and(|load| load > max_load) {
@@ -356,11 +392,21 @@ impl Campaign {
             };
             let landed = Replicate {
                 load: draw.load,
+                brackets: draw.brackets,
                 cells: draw.cells,
                 verdict,
                 refusal: draw.refusal,
+                elapsed: started.elapsed(),
             };
-            report(&landed, included);
+            report(
+                &landed,
+                Progress {
+                    run,
+                    included,
+                    target,
+                    cap,
+                },
+            );
             replicates.push(landed);
         }
         if included < target {
@@ -419,13 +465,36 @@ impl Campaign {
             }
         }
 
+        // the widest scope this campaign's own cells justify: a statistic
+        // several fixtures of one scenario measured is one entry governing
+        // them all, which is how a hand campaign publishes one
+        let mut fixtures: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for (cell, metric) in bands.keys() {
+            *fixtures
+                .entry((cell.scenario.as_str(), metric.as_str()))
+                .or_default() += 1;
+        }
+        let keys: BTreeMap<(CellId, String), String> = bands
+            .keys()
+            .map(|(cell, metric)| {
+                let key = if fixtures
+                    .get(&(cell.scenario.as_str(), metric.as_str()))
+                    .is_some_and(|count| *count > 1)
+                {
+                    format!("{}.{metric}", cell.scenario)
+                } else {
+                    format!("{}.{}.{metric}", cell.scenario, cell.fixture)
+                };
+                ((cell.clone(), metric.clone()), key)
+            })
+            .collect();
+
         let mut sized = Vec::new();
         for ((cell, metric), Band { values, excluded }) in bands {
-            let shape = gate_headroom(&metric, true).ok_or_else(|| CampaignError::NoDraws {
-                scenario: cell.scenario.clone(),
-                fixture: cell.fixture.clone(),
-                metric: metric.clone(),
-            })?;
+            let shape =
+                gate_headroom(&metric, true).ok_or_else(|| CampaignError::Unclassified {
+                    metric: metric.clone(),
+                })?;
             let stats = DrawStats::of(&values).ok_or_else(|| CampaignError::NoDraws {
                 scenario: cell.scenario.clone(),
                 fixture: cell.fixture.clone(),
@@ -437,10 +506,18 @@ impl Campaign {
                     fixture: cell.fixture.clone(),
                     metric: metric.clone(),
                 })?;
+            // ascending, as every committed sidecar lists a band: the
+            // arithmetic sorts anyway, and a reviewer reads the band's
+            // edges off the ends. Which replicate produced which draw is
+            // in the per-replicate provenance lines above, not here
             let mut values = values;
             values.sort_by(f64::total_cmp);
+            let key = keys
+                .get(&(cell.clone(), metric.clone()))
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}.{metric}", cell.scenario, cell.fixture));
             sized.push(Proposal {
-                key: String::new(),
+                key,
                 published: factor.factor,
                 shape,
                 cell,
@@ -451,34 +528,18 @@ impl Campaign {
             });
         }
 
-        // the key each factor is published under, and the factor that key
-        // publishes: the widest scope the campaign's own cells justify,
-        // with the fixture that asks most governing it
-        let mut fixtures: BTreeMap<(String, String), usize> = BTreeMap::new();
-        for proposal in &sized {
-            *fixtures
-                .entry((proposal.cell.scenario.clone(), proposal.metric.clone()))
-                .or_default() += 1;
-        }
+        // one key, one factor: where several cells share a key the fixture
+        // that asks most governs, so the entry covers every band under it
         let mut published: BTreeMap<String, f64> = BTreeMap::new();
-        for proposal in &mut sized {
-            let scenario_key = format!("{}.{}", proposal.cell.scenario, proposal.metric);
-            proposal.key = if fixtures
-                .get(&(proposal.cell.scenario.clone(), proposal.metric.clone()))
-                .is_some_and(|count| *count > 1)
-            {
-                scenario_key
-            } else {
-                format!(
-                    "{}.{}.{}",
-                    proposal.cell.scenario, proposal.cell.fixture, proposal.metric
-                )
-            };
+        for proposal in &sized {
             let held = published.entry(proposal.key.clone()).or_insert(0.0);
             *held = held.max(proposal.sized.factor);
         }
         for proposal in &mut sized {
-            proposal.published = published.get(&proposal.key).copied().unwrap_or(1.01);
+            proposal.published = published
+                .get(&proposal.key)
+                .copied()
+                .unwrap_or(proposal.sized.factor);
         }
 
         // the sizing is only worth publishing if the walk that re-checks a
@@ -571,14 +632,13 @@ pub struct Provenance {
 /// as it stands, with the estimators, the binding leg and the margins that
 /// sized every factor in the comment above it.
 ///
-/// # Errors
-///
-/// Propagates [`Campaign::proposals`]'s refusals.
-pub fn render(
-    campaign: &Campaign,
-    provenance: &Provenance,
-    proposals: &[Proposal],
-) -> Result<String, CampaignError> {
+/// Every refusal a campaign can produce is raised by
+/// [`Campaign::proposals`], which is what builds the arithmetic this
+/// renders; by the time proposals exist there is nothing left to fail on,
+/// so this returns the text itself rather than a `Result` whose error arm
+/// no caller can reach.
+#[must_use]
+pub fn render(campaign: &Campaign, provenance: &Provenance, proposals: &[Proposal]) -> String {
     let runs = campaign.replicates.len();
     let included = campaign.included().count();
     let excluded = campaign
@@ -591,6 +651,19 @@ pub fn render(
         .iter()
         .filter(|r| r.verdict == Verdict::Refused)
         .count();
+    // an unreadable load is not a quiet host: the exclusion could not judge
+    // that replicate at all, and a provenance block that stated the rule
+    // without stating where it could not run would read as though every
+    // included draw had passed it
+    let unjudged = campaign.included().filter(|r| r.load.is_none()).count();
+    let exclusion = if unjudged == 0 {
+        String::new()
+    } else {
+        format!(
+            "\n#   {unjudged} included replicate(s) reported no load reading, so the exclusion \
+             above could not be applied to them"
+        )
+    };
     let mut out = String::new();
     let class = &provenance.class;
     let _ = write!(
@@ -611,12 +684,13 @@ pub fn render(
 #   {os}/{arch}; the host's own hardware model is not something the tool
 #   reads, so name it by hand beside this line
 #   {runs} replicate(s) run: {included} included, {excluded} load-excluded, {refused} refused
-#   pre-registered load exclusion: pre-replicate 1-min load > {max_load}
+#   pre-registered load exclusion: pre-replicate 1-min load > {max_load}{exclusion}
 #   protocol per replicate: {samples} samples, {warmup} warmup, {trials} trials,
 #   one unchanged binary pair throughout
-machine_class = \"{class}\"
+{ledger}machine_class = \"{class}\"
 
 [headroom]",
+        ledger = replicate_ledger(campaign),
         pin = provenance.engine_pin,
         date = provenance.date,
         commit = provenance
@@ -716,7 +790,58 @@ machine_class = \"{class}\"
         }
         let _ = writeln!(out, "]");
     }
-    Ok(out)
+    out
+}
+
+/// One line per replicate the campaign ran: what the host was doing before
+/// it, what its calibration brackets read, and what became of it.
+///
+/// The brackets are the stronger quiet signal of the two a replicate takes
+/// -- the load is ambient, the null pair is this host's own pairing noise
+/// measured by the same machinery the draws come from -- and a bracket
+/// computed, used for a pass/fail and dropped is a measurement nobody wrote
+/// down. A reviewer reading a committed factor can then tell an included
+/// replicate whose brackets sat at 1.02 from one that scraped the floor.
+fn replicate_ledger(campaign: &Campaign) -> String {
+    let mut out = String::from("#\n#   per replicate, in run order:\n");
+    for (index, replicate) in campaign.replicates.iter().enumerate() {
+        let load = replicate
+            .load
+            .map_or_else(|| "unreadable".to_string(), |load| format!("{load:.2}"));
+        let brackets = replicate.brackets.map_or_else(
+            || "not taken".to_string(),
+            |(start, end)| format!("{start:.4}/{end:.4}"),
+        );
+        let verdict = match replicate.verdict {
+            Verdict::Included => "included",
+            Verdict::LoadExcluded => "load-excluded",
+            Verdict::Refused => "refused",
+        };
+        let _ = writeln!(
+            out,
+            "#     {}: load {load}, null-pair brackets {brackets}, {verdict}",
+            index + 1
+        );
+        // the draw beside the conditions it was taken under: the `values`
+        // arrays below are sorted into bands, which is the shape the walk
+        // reads and every committed sidecar states a spread in, so run order
+        // is the one thing they cannot carry -- and pairing a draw back to
+        // its load is exactly what auditing a near-threshold replicate needs
+        for cell in &replicate.cells {
+            let readings = cell
+                .metrics
+                .iter()
+                .map(|(metric, value)| format!("{metric} {value:.4}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let _ = writeln!(
+                out,
+                "#        {}/{}: {readings}",
+                cell.id.scenario, cell.id.fixture
+            );
+        }
+    }
+    out
 }
 
 /// The factor the compiled default publishes for `shape`, against which a

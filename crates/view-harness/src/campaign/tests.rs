@@ -44,6 +44,7 @@ fn cell(scenario: &str, fixture: &str, metric: &str, value: f64) -> MeasuredCell
 fn draw(load: f64, cells: Vec<MeasuredCell>) -> ReplicateDraw {
     ReplicateDraw {
         load: Some(load),
+        brackets: Some((1.02, 1.03)),
         cells,
         refusal: None,
     }
@@ -177,7 +178,7 @@ fn the_emitted_file_survives_the_walk_that_recomputes_it() {
         ("scroll", "heavy", "ratio_p50", &HEAVY),
     ]);
     let proposals = campaign.proposals().unwrap();
-    let text = render(&campaign, &provenance(), &proposals).unwrap();
+    let text = render(&campaign, &provenance(), &proposals);
 
     let dir = crate::fixture::scratch_root("campaign-tests");
     std::fs::create_dir_all(&dir).unwrap();
@@ -233,7 +234,7 @@ fn the_emitted_file_survives_the_walk_that_recomputes_it() {
 fn a_load_excluded_replicate_is_replaced_and_its_draw_still_published() {
     let loads = [1.0, 3.15, 1.1];
     let values = [2.25, 2.3003, 2.26];
-    let mut reported: Vec<(Verdict, usize)> = Vec::new();
+    let mut reported: Vec<(Verdict, usize, usize)> = Vec::new();
     let campaign = Campaign::collect(
         2,
         4,
@@ -244,20 +245,23 @@ fn a_load_excluded_replicate_is_replaced_and_its_draw_still_published() {
                 vec![cell("scroll", "minimal", "ratio_p50", values[run - 1])],
             )
         },
-        |replicate, included| reported.push((replicate.verdict.clone(), included)),
+        |replicate, at| reported.push((replicate.verdict.clone(), at.run, at.included)),
     )
     .unwrap();
 
     assert_eq!(campaign.replicates.len(), 3, "the exclusion is replaced");
     assert_eq!(campaign.included().count(), 2);
+    // the run index advances on every replicate and the included count only
+    // on an included one: a log that printed the second for both would show
+    // "replicate 1" twice and never say how much of the cap was spent
     assert_eq!(
         reported,
         vec![
-            (Verdict::Included, 1),
-            (Verdict::LoadExcluded, 1),
-            (Verdict::Included, 2),
+            (Verdict::Included, 1, 1),
+            (Verdict::LoadExcluded, 2, 1),
+            (Verdict::Included, 3, 2),
         ],
-        "every replicate is reported as it lands"
+        "every replicate is reported as it lands, run index and band apart"
     );
 
     let proposals = campaign.proposals().unwrap();
@@ -278,6 +282,7 @@ fn a_refused_replicate_is_replaced_and_never_becomes_a_draw() {
             if run == 1 {
                 return ReplicateDraw {
                     load: Some(0.4),
+                    brackets: None,
                     cells: vec![cell("scroll", "minimal", "ratio_p50", 9.9)],
                     refusal: Some("null-pair bracket 1.31 over floor 1.15".to_string()),
                 };
@@ -326,6 +331,7 @@ fn a_campaign_past_its_replacement_cap_refuses_naming_the_loads() {
         2.0,
         |_| ReplicateDraw {
             load: None,
+            brackets: None,
             cells: Vec::new(),
             refusal: Some("cell failed: engine never attached".to_string()),
         },
@@ -457,4 +463,86 @@ fn every_measured_metric_reaches_a_proposal() {
     let proposals = campaign.proposals().unwrap();
     let named: Vec<&str> = proposals.iter().map(|p| p.metric.as_str()).collect();
     assert_eq!(named, vec!["ratio_p50", "ratio_p99", "view_p50_ms"]);
+}
+
+/// A host with no load reader includes every replicate, because a load
+/// nobody could read cannot exceed a threshold. The emitted file states
+/// that rather than letting its own "pre-registered load exclusion" line
+/// read as evidence the host was quiet.
+#[test]
+fn a_replicate_with_no_load_reading_says_so_where_the_exclusion_is_claimed() {
+    let campaign = Campaign::collect(
+        2,
+        4,
+        2.0,
+        |run| ReplicateDraw {
+            load: (run == 1).then_some(0.4),
+            brackets: Some((1.01, 1.02)),
+            cells: vec![cell(
+                "scroll",
+                "minimal",
+                "ratio_p50",
+                2.25 + run as f64 * 0.01,
+            )],
+            refusal: None,
+        },
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        campaign.included().count(),
+        2,
+        "an unreadable load excludes nothing"
+    );
+
+    let proposals = campaign.proposals().unwrap();
+    let text = render(&campaign, &provenance(), &proposals);
+    assert!(
+        text.contains("1 included replicate(s) reported no load reading"),
+        "{text}"
+    );
+
+    let read = campaign_over(&[("scroll", "minimal", "ratio_p50", &MINIMAL)]);
+    let proposals = read.proposals().unwrap();
+    let text = render(&read, &provenance(), &proposals);
+    assert!(
+        !text.contains("no load reading"),
+        "a campaign that read every load must not qualify its own exclusion: {text}"
+    );
+}
+
+/// The `values` arrays are bands, so run order is the one thing they cannot
+/// carry -- the ledger carries it, pairing every draw with the load and the
+/// null-pair brackets it was taken under, excluded and refused ones included.
+#[test]
+fn the_ledger_pairs_every_draw_with_the_conditions_it_was_taken_under() {
+    let loads = [1.0, 3.15, 1.1];
+    let values = [2.25, 2.3003, 2.26];
+    let campaign = Campaign::collect(
+        2,
+        4,
+        2.0,
+        |run| {
+            draw(
+                loads[run - 1],
+                vec![cell("scroll", "minimal", "ratio_p50", values[run - 1])],
+            )
+        },
+        |_, _| {},
+    )
+    .unwrap();
+    let proposals = campaign.proposals().unwrap();
+    let text = render(&campaign, &provenance(), &proposals);
+
+    for line in [
+        "#     1: load 1.00, null-pair brackets 1.0200/1.0300, included",
+        "#     2: load 3.15, null-pair brackets 1.0200/1.0300, load-excluded",
+        "#     3: load 1.10, null-pair brackets 1.0200/1.0300, included",
+    ] {
+        assert!(text.contains(line), "{text}");
+    }
+    assert!(
+        text.contains("#        scroll/minimal: ratio_p50 2.3003"),
+        "the excluded draw is paired with the load that excluded it: {text}"
+    );
 }

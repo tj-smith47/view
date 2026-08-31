@@ -74,9 +74,11 @@ machine_class = "dev-macos"
 # reaching under 2.2473 from 2.3816 would take a 1.056 factor sized to
 # bridge a gap rather than to a spread. A hand-record of a replicate
 # campaign's median is the move the ratchet's own documentation names
-# for that case, and it is a hand edit because the bench binary measures
-# one replicate per invocation and never holds the campaign a median is
-# taken over.
+# for that case, and it was a hand edit because the bench binary then
+# measured one replicate per invocation and never held the campaign a
+# median is taken over. `bench --campaign N` now holds the campaign and
+# proposes both the seats and this factor, so the next re-seat of these
+# cells runs it rather than repeating the hand pipeline.
 #
 # The factor is sized against those re-set seats, where the rule is
 # load-bearing again: it asks 1.0276 for minimal (a seat ratcheted to

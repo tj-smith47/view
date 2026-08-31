@@ -1902,16 +1902,11 @@ classes = ["dev-macos"]
         let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
             .expect("the baselines directory must exist")
             .map(|entry| entry.expect("readable directory entry").path())
-            // a recorded baseline is exactly <class>.toml, so its stem
-            // carries no dot; selecting positively keeps headroom sidecars,
-            // partial-record diagnostics and any future dotted sibling out
-            // without a denylist that must learn each one
             .filter(|path| {
-                path.extension().is_some_and(|ext| ext == "toml")
-                    && path
-                        .file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .is_some_and(|stem| !stem.contains('.'))
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(crate::baselines::baseline_class)
+                    .is_some()
             })
             .collect();
         paths.sort();

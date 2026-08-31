@@ -41,9 +41,12 @@ pub struct ScenarioResult {
 }
 
 /// `YYYY-MM-DD` for the current instant, in UTC. Hand-rolled rather than a
-/// `chrono`/`time` dependency: this is the only date computation anywhere
-/// in the workspace, for one report-row stamp
-/// ([`view_harness::results::ScenarioResult::date`]).
+/// `chrono`/`time` dependency: this is the only date computation anywhere in
+/// the workspace, and it lives beside the [`ScenarioResult::date`] field
+/// whose shape it produces so a second stamp cannot grow a second
+/// implementation. Two stamps read it -- that field, and the provenance a
+/// replicate campaign writes into the proposal it emits.
+#[must_use]
 pub fn today_date_string() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
