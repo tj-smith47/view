@@ -60,94 +60,87 @@ machine_class = "gh-macos"
 # not a rounding.
 "first_paint.marker_ratio_p50" = 1.48
 
-# picker.match_paint_p50_ms is deliberately absent, and unlike gh-linux's
-# entry for the same statistic this class's arithmetic refuses one. Eight
-# draws, runs 32533279176, 32534348333, 32537625267, 32619785446 and
-# 32784781768 (2026-08-21/24) plus 33204611952, 33238348497 and
-# 33244439984 (2026-08-28/29; 33235574037 was cancelled before this cell
-# ran), runner load at start 2.09 to 6.91, gated statistic per leg
-# (median of 3 trials): 3.503, 3.508, 6.416, 3.298, 3.663, 4.808, 6.093,
-# 3.965. Median 3.814, half-width 1.559 (40.9% of median) -- well over
-# half again the same statistic's spread on gh-linux (24.9%), and
-# interleaved
-# rather than stepped: the two highest draws are the third and the
-# second-to-last.
+# picker.match_paint_p50_ms is deliberately absent, and the grounds for
+# that moved when the row's sample count did. Five draws at the 100
+# measured opens (+10 warmup) per trial this scenario resolves at today
+# -- runs 33256006805 (6b5ae0c) and 33268735828 (081ee78) on 2026-08-29,
+# 33299534481 (d4a2f6b) on 08-30, and both attempts of 33357087449
+# (265fbc3) on 08-31 -- gated statistic per leg (median of 3 trials):
+# 3.516, 3.297, 3.547, 3.675, 3.841. Median 3.547, half-width 0.272
+# (7.67% of median), against the 40.9% the eight 12-sample draws showed
+# (3.503, 3.508, 6.416, 3.298, 3.663, 4.808, 6.093, 3.965 over runs
+# 32533279176, 32534348333, 32537625267, 32619785446, 32784781768,
+# 33204611952, 33238348497 and 33244439984).
 #
-# Worst excursion above the recorded 4.8083 is 1.334x and the 2x
-# half-width rule asks 1.442x, so both halves are satisfied by a factor
-# the compiled absolute default (1.5) already exceeds -- an entry here
-# could only tighten the bar, never license a wider one. What no
-# permitted factor reaches is the ratchet: the seat may fall to 3.298
-# (well above its own refusal floor), and clearing the 6.416 the band has
-# produced from that seat asks 1.945x, which is neither half's answer.
-# Publishing 1.945 to bridge that gap is the failure a characterization
-# exists to remove, and publishing 1.44 seats a bar the next honest draw
-# breaches. The default is not crossed today (6.416 against a 7.212 bar),
-# so absence masks nothing while the band waits for draws enough to
-# resolve it. The 08-29 draw moved the rule's answer (1.411x to 1.442x)
-# and left the ratchet hole exactly where it was: the band's lowest and
-# highest draws are both unchanged.
+# What refused an entry on the coarse band was the ratchet: the seat
+# could fall to 3.298 and clearing the 6.416 that band produced from
+# there asked 1.945x, which neither the worst-excursion leg (1.334x) nor
+# the 2x half-width rule (1.442x) answered. The finer estimator closes
+# that hole and opens the opposite one. Worst excursion 0.799x and the
+# 2x rule 0.851x against the recorded 4.8083 -- both under 1, so the
+# recorded value already stands above everything this row now produces --
+# and the ratchet asks 1.165x, so the smallest publishable factor is
+# 1.17. A bar that tight mirrors down to a record floor of 3.991, above
+# the band's own lowest draw 3.297: the entry would refuse as a lucky
+# draw a reading its own campaign took three times. A factor cannot be
+# published that its draws cannot be seated under, and the compiled
+# absolute default (1.5) is what admits them -- floor 2.404, bar 7.212
+# against a 3.841 worst, and 4.946 from a seat ratcheted to 3.297. The
+# default is not crossed and cannot be reached by this band, so absence
+# masks nothing; a re-seat onto the tighter estimator's median is what
+# would make an entry here sizable, and `--record` never rewrites this
+# file.
 
-# 5 CI bench legs and not a campaign: this statistic stepped level at
-# ebc2812..e432867 on both hosted classes (the step is documented in
-# gh-linux's own first_page note), so only the post-step legs
-# characterize what the class measures today -- 32619785446 and
-# 32784781768 (2026-08-23/24) plus 33204611952, 33238348497 and
-# 33244439984 (2026-08-28/29), runner load at start 2.09 to 6.91,
-# picker/minimal, gated statistic per leg (median first_page_p50_ms of 3
-# trials):
-#   3.294 2.786 3.065 3.582 5.117:
-#     median 3.294, half-width 1.1655 (35.38%)
-# Worst excursion above the recorded value 1.670x (5.117 against 3.0648);
-# the 2x half-width rule asks 1.836x (3.294 + 2 x 1.1655 against 3.0648);
-# the ratchet asks 1.837x (a seat at the lowest draw 2.786 clearing
-# 5.117). 1.84 clears all three, and replaces a default of 1.5 that run
-# 33244439984 breached on a picker no commit since the recorded 68b06a4
-# touches -- 63ba8b2..6826058 is bench harness, baselines and oracle
-# files only.
+# 5 CI bench legs and not a campaign. Two changes rule a draw out of this
+# band: the statistic stepped level at ebc2812..e432867 on both hosted
+# classes (documented in gh-linux's own first_page note), and the scan
+# phase went from 12 measured opens (+2 warmup) per trial to 100 (+10) at
+# a7725cd..025fae4. Only legs past both measure what this row is, and
+# five of them exist -- 33256006805 (6b5ae0c) and 33268735828 (081ee78)
+# on 2026-08-29, 33299534481 (d4a2f6b) on 08-30, then both attempts of
+# 33357087449 (265fbc3) on 08-31 -- picker/minimal, gated statistic per
+# leg (median first_page_p50_ms of 3 trials):
+#   3.960 3.249 2.980 3.509 3.772:
+#     median 3.509, half-width 0.4900 (13.96%)
+# The last two draws are one tree measured twice, which is the
+# run-to-run spread this band is a statement about rather than a second
+# tree's.
 #
-# What makes this band the widest gated median in the matrix is its
-# sample count, not its host: every draw above was taken at 12 samples
-# (+2 warmup) per trial where every other gated median takes 900 to 1000,
-# and the same statistic on gh-linux resolves to 25.2% against this
-# class's 35.4%.
-# Draws taken since the statistic moved to 100 samples (+10 warmup) per
-# trial, kept here until there are as many of them as the five above so
-# the factor can be re-sized on the tighter estimator alone rather than
-# on a table that mixes the two: 3.960 (run 33256006805), 3.249
-# (33268735828); worst excursion so far 1.292x against 3.0648.
-# The 5.117 leg carried the heaviest runner load on record here (6.91 at
-# start, 12.36 at end, against 1.55..6.23 across every other leg) and all
-# three of its trials read high (6.80, 5.12, 3.59), while its paired
-# ratios stayed inside their bands (echo/minimal ratio_p50 1.154 against
-# 1.133..1.176, scroll/minimal 1.888 against 1.742..1.909) and its
-# null-pair calibration stayed clean (1.0151 start, 1.0367 end, floor
-# 1.15). Unlike gh-linux's match_paint draw, this leg's other absolutes
-# did not all read worst-of-campaign -- echo/minimal view p99 3.834
-# against 2.186..5.464, flood cadence p99 14.893 against 12.994..14.948,
-# cold marker 73.328 against 66.053..81.794 -- so the claim here is the
-# sample count under load, not a host that slowed uniformly.
+# Worst excursion above the recorded value 1.293x (3.960 against 3.0648);
+# the 2x half-width rule asks 1.465x (3.509 + 2 x 0.4900 against 3.0648);
+# the ratchet asks 1.329x (a seat at the lowest draw 2.980 clearing
+# 3.960). 1.47 clears all three and is the smallest factor at the two
+# decimals a factor is published in that does.
 #
-# The factor survives its own ratchet by very little, which is what five
-# draws buy: a seat ratcheted to 2.786 bars at 5.1262 against the 5.117
-# worst, 0.18%, and the recorded seat bars at 5.6393 against the 2x
-# rule's 5.625, 0.25%. Both margins are stated rather than left to be
-# rediscovered, and a draw that turns either negative is a re-sizing, not
-# a rounding. Five draws is what exists post-step; the entry is written
-# because the default is crossed and leaving it absent leaves the class
-# red, not because the band is resolved.
+# 1.47 replaces 1.84, and the estimator moved rather than the picker.
+# 1.84 was sized on five draws taken at 12 samples (+2 warmup) --
+# 3.294 2.786 3.065 3.582 5.117 over runs 32619785446, 32784781768,
+# 33204611952, 33238348497 and 33244439984 -- whose 35.38% half-width was
+# the widest gated median in the matrix and a property of that count, not
+# of what a first page costs: sampling error goes as 1/sqrt(n), 2.9x more
+# samples resolve the same quantity to 13.96%, and the coarse band
+# contains the fine one at both ends. That containment is why 1.84 masked
+# nothing while it stood and why it cannot stay: a bar sized on the coarse
+# estimator admits a regression the fine one would report. The seat is
+# untouched -- `--gate` never rewrites one, `--record` rewrites
+# gh-macos.toml and not this file, and 3.0648 still sits below every draw
+# here.
 #
-# The scan phase now takes 100 measured opens (+10 warmup) per trial
-# instead of 12 (+2), which is the sample count named above being fixed
-# rather than the row's boundary changing: the statistic is the same
-# quantity read about 2.9x more finely (sampling error goes as
-# 1/sqrt(n)). The seat and the factor therefore stand as written -- the
-# draws they were sized on bound the tighter estimator's spread from
-# above, so the entry cannot be masking a regression it would have caught
-# before, and `--gate` never rewrites a seat. The 35.38% half-width above
-# is a property of the count those draws were taken at, not of what the
-# row measures now.
-"picker.minimal.first_page_p50_ms" = 1.84
+# Where 1.84 was written because the compiled absolute default (1.5) was
+# breached, 1.47 tightens that default instead. An entry below the
+# default still belongs here: absence in this file states that a class's
+# run-to-run spread has not been established, and this one's now has
+# been, so falling back to 1.5 would claim less than the draws support.
+# The bar stays seatable -- at 1.47 the record floor is 1.6244, and the
+# band's own lowest draw 2.980 clears it by a wide margin, unlike
+# match_paint's above.
+#
+# The margins are stated rather than left to be rediscovered. The binding
+# leg is the 2x rule and it is the thin one: the recorded seat bars at
+# 4.5053 against its 4.4893, 0.36%. The worst draw clears by 13.8% and a
+# seat ratcheted to 2.980 bars at 4.3806 against the 3.960 worst, 10.6%.
+# A draw that turns the first negative is a re-sizing, not a rounding.
+"picker.minimal.first_page_p50_ms" = 1.47
 
 # echo.ratio_p50 is deliberately absent, and what is missing now is the
 # record run rather than the key grammar. echo/minimal is one of the
@@ -183,4 +176,4 @@ values = [
 
 [draws."picker.minimal.first_page_p50_ms"]
 recorded = 3.0648329999999997
-values = [3.294, 2.786, 3.065, 3.582, 5.117]
+values = [3.960, 3.249, 2.980, 3.509, 3.772]

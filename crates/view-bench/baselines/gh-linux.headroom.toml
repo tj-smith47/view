@@ -135,9 +135,12 @@ machine_class = "gh-linux"
 # neither half's answer. So the default keeps reporting this row, and it
 # masks nothing today -- 4.401 against a 5.229 bar, on a leg whose runner
 # load (1.37) sits mid-band inside the campaign's 1.19..3.18.
-# gh-macos's counterpart
-# entry exists because there the same statistic crossed its default;
-# here it has not.
+# gh-macos's counterpart entry exists because the same statistic's spread
+# is established there, and it now sits under its own default too. What
+# still parts the two classes is the ratchet: gh-macos's band asks less
+# of a seat at its lowest draw (1.329x) than its own 2x rule does
+# (1.465x), so one factor answers all three legs, while this hole stays
+# open at 1.607x against a 1.423x rule.
 #
 # Every draw above was taken at 12 measured opens (+2 warmup) per trial;
 # the scan phase now takes 100 (+10), which reads the same quantity about
