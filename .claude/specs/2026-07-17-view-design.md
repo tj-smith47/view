@@ -674,13 +674,24 @@ directly). Rules first, catalogue second:
    ease-out for enters, ease-in for exits, quantized to cell steps for
    position and theme steps for fades. Anything longer than 120 ms is
    latency wearing a costume.
+5. **Position-aware, and pausable.** A stacked surface's dismissal timer
+   belongs to the *slot*, not to the notice: only the top slot's timer
+   runs, and a notice's timer starts when it arrives there, never when it
+   was created. The pause key stops every slot timer at once and the
+   stack holds for as long as pause is on; turning it off arms the top
+   slot for a full timeout rather than the remainder, because a notice
+   that was paused mid-read has not been read yet — pause is the same
+   timer, not a second mechanism. Below the `full` tier there is no
+   interpolation (rule 1's state-first frame is the only frame), and the
+   slot timers and the pause key behave identically: motion is
+   presentation, timing is behavior.
 
 | Surface event | Motion |
 |---|---|
 | Palette / picker open | bg and border fade up through 3 theme steps at final geometry, `fast` ease-out; no position animation on open |
 | Palette / picker close | instant — dismissal returns focus and must feel like release, not choreography |
-| Toast enter | slides 3 cells in from the right edge, `fast` ease-out |
-| Toast exit | fades to backdrop over `slow`, then the row collapses |
+| Toast enter | slides 3 cells in from the right edge, `fast` ease-out; enters at the bottom of the stack |
+| Toast exit | the top slot's toast slides out to the right edge, `slow` ease-in, and the toasts beneath it slide up one slot over the same interval — one motion, not two (amended 2026-08-21, C4) |
 | Tree expand | children reveal top-down over `fast` |
 | Tree collapse | instant |
 | List scroll / selection move | instant, always — smoothness in a list is latency, not interpolation |
@@ -728,7 +739,7 @@ engine state drift).
 | Fuzzy picker | telescope | files / buffers / live-grep; `nucleo` matcher; streaming results; preview pane via RPC buffer read |
 | File tree | neo-tree / netrw | toggleable sidebar, git status decorations, file ops via RPC/fs effects |
 | Statusline | lualine | mode (`msg_showmode`, incl. macro `recording @q`), pending `showcmd`, file, diagnostics (RPC), git branch, ruler/position; single-line |
-| Notifications | nvim-notify / noice messages | `ext_messages` with kind-aware routing (table below); kills "Press ENTER" without ever eating a prompt |
+| Notifications | nvim-notify / noice messages | `ext_messages` with kind-aware routing (table below), `vim.notify` re-pointed at the engine default (§5.5) so a plugin's own float never composites over view's chrome; a slot-timed toast stack, a pause key, and a scrollable history with per-entry copy and dismissal (§7.1 motion, table below); kills "Press ENTER" without ever eating a prompt |
 | Command palette | noice cmdline | `ext_cmdline` → centered floating palette with completion rendering (`ext_popupmenu` when sourced from cmdline) |
 
 Invented capabilities — also v0.1 core (ruled 2026-08-05; plans authored at
@@ -753,7 +764,28 @@ separate processes with view interposed on every keystroke and frame.
 | `confirm`, `return_prompt`, inputlist-class | Modal native prompt overlay: takes `Focus::Native`, replies via RPC. The engine is *blocked* on these — a timeout toast here would hang first-run plugin bootstraps. Also captured in history, matching the `emsg`/transient rows below — amended at the P4 exit drain (2026-08-09, coordinator ruling, reported to the user): a `:messages`-style scrollback that dropped the confirm prompt the user just answered would be the surprising behavior, not the documented one, and nvim `:messages` parity is the migration contract this row exists to honor |
 | `emsg` / `echoerr` | Sticky toast until dismissed; captured in history |
 | `msg_showmode` / `msg_showcmd` / `msg_ruler` / `search_count` | Statusline segments (macro recording must always be visible) |
-| everything else | Transient toast with timeout + scrollback history |
+| everything else | Transient toast, stacked; its dismissal timer runs **only while it occupies the top slot** — a notice that arrived behind others has not been read yet, and a timer that starts on arrival retires it before it was ever visible. Captured in scrollback history (amended 2026-08-21, C4). One exception, at startup only: while a surface conflict is being resolved, a transient goes to the history instead of the stack, per §5.5's first-launch contract — it is captured either way, and the exception ends at the first keystroke |
+
+**View's own notices choose their lifetime (amended 2026-08-21, C2).** A
+notice view raises about itself is transient like any other message
+unless it asserts a condition the user must act on — a surface conflict
+and its remedy line, which is worthless if it expires before it can be
+read. Those stand for as long as the condition does, and are retired from
+the history overlay, which lists what is standing and takes an entry down
+on request. Being persistent they take no stack slot, so a standing
+notice never freezes the transients behind it.
+
+**Reading a notice is a first-class operation (amended 2026-08-21, C4).**
+A notice can vanish mid-read, and the most common thing a user wants out
+of one is a path they cannot select in time. So: a pause key toggles
+expiry off for the whole stack, and it stays off while pause is on; a
+notice that stands until its condition ends is taken down from the same
+overlay that lists it; the history overlay is
+scrollable rather than a single screenful; and a per-entry copy key
+routes through the same clipboard path a `"+y` takes (system clipboard
+plus OSC 52, so a remote session copies to the local machine), reporting
+when no system clipboard is reachable rather than silently copying
+nowhere.
 
 Post-v0.1 candidates (recorded, not dropped — pitch before any is cut):
 which-key-style hint overlay, minimap, inline git hunks, popupmenu
