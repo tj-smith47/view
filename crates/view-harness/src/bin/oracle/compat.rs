@@ -24,7 +24,8 @@ use view_harness::results::{
 };
 use view_harness::scenario::{self, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
-    reset_hermetic_home, state_name, CompatSession, ErrorBaseline, PluginClass, ScenarioState,
+    engine_error_reference, reset_hermetic_home, state_name, CompatSession, ErrorBaseline,
+    PluginClass, ScenarioState,
 };
 
 /// Terminal size every compat scenario runs at: roomier than the
@@ -489,6 +490,43 @@ fn accommodations_env(state: &ScenarioStateEntry) -> Option<&'static str> {
     }
 }
 
+/// The [`ErrorBaseline`] the zero-error epilogue should subtract for
+/// `state`, or `None` for the strict, subtract-nothing form.
+///
+/// The seam is `accommodations`, not the state's name: a state running a
+/// config this harness adapted has a real guarantee that startup is
+/// error-free, and asserting it outright is what makes that guarantee
+/// worth something. A state running the user's own configuration has no
+/// such guarantee to assert -- so its epilogue takes the pinned engine's
+/// own reading of that same configuration as its reference and fails only
+/// on what `view` added to it.
+fn epilogue_reference(
+    state: &ScenarioStateEntry,
+    ready: &ReadyFixture,
+    nvim_bin: NvimBin<'_>,
+    sock_path: &Path,
+) -> Result<Option<ErrorBaseline>, view_oracle::compat::CompatError> {
+    if state.accommodations {
+        return Ok(None);
+    }
+    let NvimBin(nvim_bin) = nvim_bin;
+    let mut cmd = std::process::Command::new(nvim_bin);
+    cmd.env("XDG_CONFIG_HOME", &ready.xdg_config_home);
+    cmd.env("XDG_DATA_HOME", &ready.xdg_data_home);
+    cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
+    cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
+    // the fixture's first statement is a serverstart on this name; the
+    // reference run is never a probe client, but the call must still have
+    // somewhere to land, and a name of its own keeps it off the socket the
+    // session under test is about to open
+    cmd.env("VIEW_COMPAT_SOCK", sock_path.with_extension("reference"));
+    if let Some(value) = accommodations_env(state) {
+        cmd.env(ACCOMMODATIONS_VAR, value);
+    }
+    cmd.current_dir(ready.xdg_config_home.join("nvim"));
+    engine_error_reference(cmd).map(Some)
+}
+
 /// Drives one `(scenario, state)` pair end to end: resolves the state's
 /// effective fixture, materializes its `[native]` table into a hermetic
 /// `view.toml` and spawns `view --config <that path>` against it (the same
@@ -542,6 +580,31 @@ fn run_scenario(
             ));
         }
     };
+
+    // Before the session under test starts, so an engine that cannot even
+    // read this config is reported as that, rather than as whatever the
+    // session then fails on.
+    let reference = match epilogue_reference(state, &ready, NvimBin(nvim_bin), &sock_path) {
+        Ok(reference) => reference,
+        Err(err) => {
+            return Ok(scenario_result(
+                scenario_path,
+                scenario,
+                state,
+                pin,
+                ScenarioOutcome {
+                    status: ScenarioStatus::Failed,
+                    failing_step: None,
+                    detail: Some(err.to_string()),
+                    elapsed_ms: start.elapsed().as_millis(),
+                },
+            ));
+        }
+    };
+    let subtracted = reference
+        .as_ref()
+        .map(ErrorBaseline::subtracted_errors)
+        .unwrap_or_default();
 
     let view_config_path = ready.xdg_config_home.join("view").join("view.toml");
     if let Some(rendered) = native_toml_override(state) {
@@ -618,7 +681,7 @@ fn run_scenario(
     } else {
         session
             .await_probe_channel(PROBE_CHANNEL_TIMEOUT)
-            .map(|()| ErrorBaseline::default())
+            .map(|()| reference.unwrap_or_default())
     };
     let baseline = match channel_result {
         Ok(baseline) => baseline,
@@ -688,6 +751,16 @@ fn run_scenario(
     } else {
         ScenarioStatus::Ok
     };
+    // A passing row that only passed because the engine's own reading of
+    // this config excused something has to say so, in the report and in the
+    // evidence file: a subtraction nobody can see is the suppression this
+    // whole state exists to end, moved one layer down.
+    if status == ScenarioStatus::Ok && !subtracted.is_empty() {
+        detail = Some(format!(
+            "engine-noise subtracted: {}",
+            subtracted.join("; ")
+        ));
+    }
     Ok(scenario_result(
         scenario_path,
         scenario,
@@ -727,6 +800,77 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
         .collect()
 }
 
+/// The `(scenario stem, state, clearing task)` rows this suite expects to
+/// be red, each with the task whose landing turns it green:
+///
+/// - `noice`/`unaccommodated` asserts the single conflict notice `view`
+///   raises when a plugin claims a surface it has externalized, and the
+///   remedy that notice carries. Neither exists yet; **T19** builds them.
+/// - `noice`/`deferred` asserts that the remedy actually works on an
+///   unadjusted config. It cannot today: the externalized UI extensions
+///   stay attached regardless of `[native]`, which is the defect **T8**
+///   fixes.
+///
+/// A row here is not a waiver. Red-and-listed reports distinctly and does
+/// not fail the run; green-and-listed is a hard failure, so the task that
+/// turns a row green has to remove it in the same commit, and red-and-
+/// unlisted fails as it always did. What the list may never hold is a row
+/// red only because the engine makes the same noise on its own -- that is
+/// [`epilogue_reference`]'s job, and a row parked here instead would be
+/// exactly the suppression the unaccommodated state exists to end.
+const EXPECTED_RED: [(&str, &str, &str); 2] = [
+    ("noice", "unaccommodated", "T19"),
+    ("noice", "deferred", "T8"),
+];
+
+/// The scenario file's own stem -- not `plugin`, since two scenario files
+/// can name the same plugin (`lualine.toml` and `cold-bootstrap.toml` both
+/// do), which would make them indistinguishable to the report and to
+/// [`EXPECTED_RED`] alike.
+fn scenario_stem(result: &ScenarioResult) -> &str {
+    Path::new(&result.scenario_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(result.scenario_path.as_str())
+}
+
+/// The task that clears `result`'s row, if [`EXPECTED_RED`] names it.
+fn expected_red_task(result: &ScenarioResult) -> Option<&'static str> {
+    let stem = scenario_stem(result);
+    EXPECTED_RED
+        .iter()
+        .find(|(scenario, state, _)| *scenario == stem && *state == result.state)
+        .map(|(_, _, task)| *task)
+}
+
+/// Reconciles one row against [`EXPECTED_RED`], in place: a listed red
+/// becomes [`ScenarioStatus::ExpectedFailure`] carrying the task that
+/// clears it, and a listed row that passed becomes a
+/// [`ScenarioStatus::Failed`] naming the manifest as the thing to fix.
+/// Everything else is left exactly as the run reported it.
+fn apply_red_expectation(result: &mut ScenarioResult) {
+    let Some(task) = expected_red_task(result) else {
+        return;
+    };
+    match result.status {
+        ScenarioStatus::Failed => {
+            result.status = ScenarioStatus::ExpectedFailure;
+            result.detail = Some(format!(
+                "expected red until {task}: {}",
+                result.detail.as_deref().unwrap_or("unknown failure")
+            ));
+        }
+        ScenarioStatus::Ok => {
+            result.status = ScenarioStatus::Failed;
+            result.detail = Some(format!(
+                "listed in EXPECTED_RED as red until {task}, but this run passed; drop the row \
+                 from EXPECTED_RED in the commit that turned it green"
+            ));
+        }
+        ScenarioStatus::ExpectedFailure | ScenarioStatus::Skipped => {}
+    }
+}
+
 /// Prints one scenario's report line in a fixed shape:
 /// `compat: lualine (heavy, present) ... OK (4 steps, 2.1s)`.
 fn print_scenario_result(result: &ScenarioResult) {
@@ -742,8 +886,13 @@ fn print_scenario_result(result: &ScenarioResult) {
     let secs = result.elapsed_ms as f64 / 1000.0;
     match result.status {
         ScenarioStatus::Ok => println!(
-            "compat: {scenario} ({fixture}, {}) ... OK ({} steps, {secs:.1}s)",
-            result.state, result.steps_total
+            "compat: {scenario} ({fixture}, {}) ... OK ({} steps, {secs:.1}s){}",
+            result.state,
+            result.steps_total,
+            result
+                .detail
+                .as_deref()
+                .map_or_else(String::new, |detail| format!(" [{detail}]"))
         ),
         ScenarioStatus::Failed => {
             let step_label = result
@@ -751,6 +900,17 @@ fn print_scenario_result(result: &ScenarioResult) {
                 .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
             println!(
                 "compat: {scenario} ({fixture}, {}) ... FAILED at step {step_label} ({} steps total, {secs:.1}s): {}",
+                result.state,
+                result.steps_total,
+                result.detail.as_deref().unwrap_or("unknown failure")
+            );
+        }
+        ScenarioStatus::ExpectedFailure => {
+            let step_label = result
+                .failing_step
+                .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
+            println!(
+                "compat: {scenario} ({fixture}, {}) ... RED-AS-EXPECTED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.state,
                 result.steps_total,
                 result.detail.as_deref().unwrap_or("unknown failure")
@@ -770,7 +930,9 @@ fn print_scenario_result(result: &ScenarioResult) {
 /// Exit code: 0 unless at least one scenario reports
 /// [`ScenarioStatus::Failed`] -- a SKIPPED scenario (no daily config on
 /// this host, the expected state in CI) does not fail the run, since there
-/// is no daily config on that host for the scenario to actually exercise.
+/// is no daily config on that host for the scenario to actually exercise,
+/// and neither does a row [`EXPECTED_RED`] names, which reports
+/// RED-AS-EXPECTED with the task that clears it.
 ///
 /// # Errors
 ///
@@ -806,7 +968,7 @@ pub(crate) fn command(path: &Path) -> Result<()> {
     let mut any_failed = false;
     for (scenario_path, scenario) in &scenarios {
         for state in &scenario.states {
-            let result = match run_scenario(
+            let mut result = match run_scenario(
                 scenario_path,
                 scenario,
                 state,
@@ -828,6 +990,7 @@ pub(crate) fn command(path: &Path) -> Result<()> {
                     },
                 ),
             };
+            apply_red_expectation(&mut result);
             print_scenario_result(&result);
             if result.status == ScenarioStatus::Failed {
                 any_failed = true;
@@ -929,6 +1092,80 @@ mod tests {
             "with no run_scenario write, the copied view.toml must still read exactly what \
              compat/fixtures/minimal/view/view.toml commits"
         );
+    }
+
+    fn red_row(scenario: &str, state: &str, status: ScenarioStatus) -> ScenarioResult {
+        ScenarioResult {
+            scenario_path: format!("compat/scenarios/{scenario}.toml"),
+            plugin: scenario.to_string(),
+            plugin_version: None,
+            class: "ui-owning".to_string(),
+            fixture: Some("heavy".to_string()),
+            state: state.to_string(),
+            engine_pin: "v0.0.0".to_string(),
+            status,
+            failing_step: Some(2),
+            steps_total: 8,
+            detail: Some("some failure".to_string()),
+            elapsed_ms: 1,
+            date: "2026-08-31".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_listed_red_row_reports_as_expected_and_names_its_clearing_task() {
+        let mut result = red_row("noice", "unaccommodated", ScenarioStatus::Failed);
+        apply_red_expectation(&mut result);
+        assert_eq!(result.status, ScenarioStatus::ExpectedFailure);
+        let detail = result.detail.expect("an expected-red row keeps its detail");
+        assert!(
+            detail.contains("expected red until T19") && detail.contains("some failure"),
+            "the row must name its clearing task and keep the original failure: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_listed_row_that_passes_fails_the_run_as_a_stale_manifest() {
+        // The half that keeps the manifest from becoming a permanent
+        // waiver: a row nobody has to remove is a failure nobody has to fix.
+        let mut result = red_row("noice", "deferred", ScenarioStatus::Ok);
+        apply_red_expectation(&mut result);
+        assert_eq!(result.status, ScenarioStatus::Failed);
+        assert!(result
+            .detail
+            .expect("a stale-manifest row must explain itself")
+            .contains("EXPECTED_RED"));
+    }
+
+    #[test]
+    fn an_unlisted_red_row_still_fails() {
+        let mut result = red_row("lualine", "unaccommodated", ScenarioStatus::Failed);
+        apply_red_expectation(&mut result);
+        assert_eq!(result.status, ScenarioStatus::Failed);
+        assert_eq!(result.detail.as_deref(), Some("some failure"));
+    }
+
+    /// A manifest may only name rows that exist: a scenario renamed or a
+    /// state dropped would otherwise leave an entry that excuses nothing
+    /// and that no run can ever contradict.
+    #[test]
+    fn every_expected_red_row_names_a_state_that_actually_exists() {
+        for (scenario, state, task) in EXPECTED_RED {
+            let path = workspace_root()
+                .join("compat")
+                .join("scenarios")
+                .join(format!("{scenario}.toml"));
+            let loaded = scenario::load_file(&path)
+                .unwrap_or_else(|err| panic!("EXPECTED_RED names {scenario}.toml: {err}"));
+            assert!(
+                loaded
+                    .states
+                    .iter()
+                    .any(|entry| state_name(entry.name) == state),
+                "EXPECTED_RED names {scenario}/{state} (clears with {task}), which the scenario \
+                 file does not declare"
+            );
+        }
     }
 
     #[test]

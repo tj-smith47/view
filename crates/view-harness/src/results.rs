@@ -32,6 +32,12 @@ pub struct ScenarioResult {
     /// is [`ScenarioStatus::Failed`].
     pub failing_step: Option<usize>,
     pub steps_total: usize,
+    /// The failure text, the skip notice, or -- on a row that passed only
+    /// because the pinned engine's own reading of the same config excused
+    /// something -- what that reference leg subtracted. A pass with an
+    /// unexplained subtraction behind it is the suppression the
+    /// unaccommodated state exists to end, so the excuse travels with the
+    /// row rather than living in the runner's console output alone.
     pub detail: Option<String>,
     pub elapsed_ms: u128,
     /// `YYYY-MM-DD`, the day the run occurred -- the compat-evidence page's
@@ -80,6 +86,12 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 pub enum ScenarioStatus {
     Ok,
     Failed,
+    /// A row the suite knows is red and knows which task turns it green
+    /// (the runner's own expected-red manifest). Reported distinctly and
+    /// does not fail the run -- but a row on that manifest that comes back
+    /// green is a hard [`Self::Failed`], since a manifest nobody has to
+    /// update is a list of failures nobody has to fix.
+    ExpectedFailure,
     /// A fixture-less scenario with `$VIEW_DAILY_CONFIG` unset (the
     /// maintainer's standing daily-config scenario), reported
     /// SKIPPED-with-notice rather than failing a CI run that has no daily

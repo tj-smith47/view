@@ -361,6 +361,18 @@ pub enum CompatError {
     /// mid-run.
     #[error("unsupported key notation <{token}>: {reason}")]
     UnsupportedKeyNotation { token: String, reason: &'static str },
+    /// The epilogue's reference leg ([`engine_error_reference`]) ran the
+    /// pinned engine on the scenario's own config but never wrote both
+    /// marked surfaces: without it there is no way to tell the config's own
+    /// noise from a compat defect, so the scenario fails here rather than
+    /// falling back to a comparison that would report one as the other.
+    #[error("engine reference run produced no capture: {stderr}")]
+    EngineReferenceFailed { stderr: String },
+    /// The reference engine did not exit within its own bound and was
+    /// killed -- the config wedges the engine on its own, before `view` is
+    /// involved at all.
+    #[error("engine reference run did not exit within {timeout:?}")]
+    EngineReferenceTimedOut { timeout: Duration },
     /// The implicit zero-error epilogue found an E-numbered error or a Lua
     /// traceback in `:messages` or `v:errmsg`.
     #[error("zero-error epilogue violated ({origin}): {detail:?}")]
@@ -902,10 +914,128 @@ impl CompatSession {
 /// that appeared afterward to the steps. `Default` is the empty snapshot,
 /// against which every error is new -- the strict form
 /// [`CompatSession::zero_error_check`] applies to committed fixtures.
+///
+/// A snapshot can also come from a *different process* than the session it
+/// is subtracted from -- see [`engine_error_reference`], which takes one
+/// from the pinned engine running the same config with no `view` involved.
+/// That is the difference between subtracting a config's own noise and
+/// excusing a session its own errors: an error the engine alone never
+/// produces is absent from such a baseline and still fails the epilogue.
 #[derive(Debug, Default)]
 pub struct ErrorBaseline {
     messages: String,
     errmsg: String,
+}
+
+impl ErrorBaseline {
+    /// The error-looking lines this baseline will subtract, so a caller can
+    /// report exactly what a run excused rather than leaving the
+    /// subtraction invisible. Derived through the same [`is_error_line`]
+    /// predicate the epilogue itself applies, never a second spelling of
+    /// what counts as an error.
+    #[must_use]
+    pub fn subtracted_errors(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .messages
+            .lines()
+            .chain(self.errmsg.lines())
+            .filter(|line| is_error_line(line))
+            .map(str::to_string)
+            .collect();
+        out.dedup();
+        out
+    }
+}
+
+/// Delimiters [`engine_error_reference`]'s capture command writes its two
+/// surfaces between. A marker pair rather than a line offset: `:messages`
+/// is multi-line and its length is a property of the config under test, so
+/// nothing here may depend on how much of it there is.
+const REFERENCE_MESSAGES_MARK: &str = "<<<VIEW-COMPAT-MESSAGES";
+const REFERENCE_ERRMSG_MARK: &str = "<<<VIEW-COMPAT-ERRMSG";
+const REFERENCE_END_MARK: &str = ">>>VIEW-COMPAT-END";
+
+/// How long the reference run waits, after the config has finished
+/// sourcing, before reading its error surfaces. A plugin manager's specs
+/// commonly defer their own `setup()` past the config's return (noice does,
+/// and its deferred load is where its diagnostics are raised), so a capture
+/// taken the instant `init.lua` returns would characterize less noise than
+/// the session under test actually meets. Over-capturing here is safe by
+/// construction -- an extra line only ever excuses something the engine
+/// genuinely produced on its own -- while under-capturing leaves a false
+/// red, so this window is deliberately longer than the deferral it covers.
+const REFERENCE_SETTLE: Duration = Duration::from_millis(3_000);
+
+/// Bound on the whole reference run. Generous relative to the settle window
+/// above plus a warm plugin-manager startup, short enough that a config
+/// that wedges the engine outright fails this leg promptly instead of
+/// hanging the compat run behind it.
+const REFERENCE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Characterizes what the *engine alone* makes of a config: runs `cmd` --
+/// which the caller has pointed at the pinned `nvim` with the same
+/// environment and working directory a scenario's session gets -- headless,
+/// with no `view` in the picture, and returns its `:messages` and
+/// `v:errmsg` as an [`ErrorBaseline`].
+///
+/// This is the reference leg of the epilogue's differential, the same shape
+/// the corpus oracle runs its own comparisons in: an error both legs
+/// produce is the config's own property, and an error only the session
+/// under test produces is the compat defect the suite exists to catch. The
+/// alternative -- asserting zero errors outright -- is only correct for a
+/// configuration this harness adapted itself, and reads a plugin's own
+/// noise a plugin already made on its own as a `view` failure for every configuration it did
+/// not.
+///
+/// # Errors
+///
+/// Returns [`CompatError::Io`] if the engine cannot be spawned,
+/// [`CompatError::EngineReferenceFailed`] if it exits without writing both
+/// marked surfaces, and [`CompatError::EngineReferenceTimedOut`] if it does
+/// not exit within [`REFERENCE_TIMEOUT`].
+pub fn engine_error_reference(mut cmd: Command) -> Result<ErrorBaseline, CompatError> {
+    crate::pty::make_hermetic(&mut cmd)?;
+    let settle = REFERENCE_SETTLE.as_millis();
+    // -c runs after the config has been sourced, which is what makes the
+    // deferred-setup window above start where it should; the same command
+    // given to --cmd would arm before lazy.nvim's own synchronous LazyDone
+    // and measure a window that had not begun yet.
+    cmd.arg("--headless").arg("-c").arg(format!(
+        "lua vim.defer_fn(function() \
+           io.stdout:write('{REFERENCE_MESSAGES_MARK}\\n' .. vim.fn.execute('messages') .. \
+           '\\n{REFERENCE_ERRMSG_MARK}\\n' .. vim.v.errmsg .. '\\n{REFERENCE_END_MARK}\\n') \
+           vim.cmd('qa!') end, {settle})"
+    ));
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let output = wait_with_timeout(cmd.spawn()?, REFERENCE_TIMEOUT)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let Some(baseline) = parse_engine_reference(&stdout) else {
+        if output.status.code().is_none() && output.stdout.is_empty() {
+            return Err(CompatError::EngineReferenceTimedOut {
+                timeout: REFERENCE_TIMEOUT,
+            });
+        }
+        return Err(CompatError::EngineReferenceFailed {
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    };
+    Ok(baseline)
+}
+
+/// Splits [`engine_error_reference`]'s captured stdout on its three marks,
+/// or `None` if the run never wrote them. Separated from the spawn so the
+/// parse is testable without an engine on `PATH`.
+fn parse_engine_reference(stdout: &str) -> Option<ErrorBaseline> {
+    let after_messages = stdout.split_once(REFERENCE_MESSAGES_MARK)?.1;
+    let (messages, rest) = after_messages.split_once(REFERENCE_ERRMSG_MARK)?;
+    let (errmsg, _) = rest.split_once(REFERENCE_END_MARK)?;
+    Some(ErrorBaseline {
+        messages: messages.trim_matches('\n').to_string(),
+        errmsg: errmsg.trim_matches('\n').to_string(),
+    })
 }
 
 /// Scans `text` for an E-numbered Vim error (`E` followed by a digit,
@@ -1247,6 +1377,65 @@ mod tests {
         ] {
             assert_eq!(parse_state_name(state_name(state)), Some(state));
         }
+    }
+
+    #[test]
+    fn an_engine_reference_capture_splits_into_its_two_surfaces() {
+        let stdout = format!(
+            "startup chatter nobody marked\n{REFERENCE_MESSAGES_MARK}\nline one\nE216: No such \
+             group or event: FileExplorer *\n{REFERENCE_ERRMSG_MARK}\nE216: No such group or \
+             event: FileExplorer *\n{REFERENCE_END_MARK}\n"
+        );
+        let baseline = parse_engine_reference(&stdout).expect("both marks are present");
+        assert_eq!(
+            baseline.messages,
+            "line one\nE216: No such group or event: FileExplorer *"
+        );
+        assert_eq!(
+            baseline.errmsg,
+            "E216: No such group or event: FileExplorer *"
+        );
+        // the same line on both surfaces is subtracted once, and the
+        // unmarked chatter above the first mark is not subtracted at all
+        assert_eq!(
+            baseline.subtracted_errors(),
+            vec!["E216: No such group or event: FileExplorer *".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_engine_reference_capture_missing_a_mark_is_not_read_as_empty() {
+        // The dangerous failure: a truncated capture parsed as "the engine
+        // produced nothing" would turn every config's own noise back into a
+        // red row, silently.
+        let truncated = format!("{REFERENCE_MESSAGES_MARK}\nline one\n");
+        assert!(parse_engine_reference(&truncated).is_none());
+        assert!(parse_engine_reference("").is_none());
+    }
+
+    #[test]
+    fn a_reference_baseline_still_fails_an_error_only_the_session_produced() {
+        let reference = parse_engine_reference(&format!(
+            "{REFERENCE_MESSAGES_MARK}\nE216: No such group or event: FileExplorer \
+             *\n{REFERENCE_ERRMSG_MARK}\n{REFERENCE_END_MARK}\n"
+        ))
+        .expect("both marks are present");
+        // the engine's own line is subtracted...
+        assert_eq!(
+            new_error_line(
+                "E216: No such group or event: FileExplorer *",
+                &reference.messages
+            ),
+            None
+        );
+        // ...and a line only the session under test carries is not
+        assert_eq!(
+            new_error_line(
+                "E216: No such group or event: FileExplorer *\nE5108: Error executing lua",
+                &reference.messages
+            ),
+            Some("E5108: Error executing lua".to_string())
+        );
     }
 
     #[test]

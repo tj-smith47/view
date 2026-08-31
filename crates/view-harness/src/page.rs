@@ -156,7 +156,10 @@ fn scenario_stem(row: &ScenarioResult) -> &str {
 /// and the terminal report never tell different stories about one row.
 fn result_cell(row: &ScenarioResult) -> String {
     match row.status {
-        ScenarioStatus::Ok => "OK".to_string(),
+        ScenarioStatus::Ok => row
+            .detail
+            .as_deref()
+            .map_or_else(|| "OK".to_string(), |detail| format!("OK ({detail})")),
         ScenarioStatus::Failed => {
             let step_label = row
                 .failing_step
@@ -166,6 +169,10 @@ fn result_cell(row: &ScenarioResult) -> String {
                 row.detail.as_deref().unwrap_or("unknown failure")
             )
         }
+        ScenarioStatus::ExpectedFailure => format!(
+            "EXPECTED FAILURE: {}",
+            row.detail.as_deref().unwrap_or("no detail recorded")
+        ),
         ScenarioStatus::Skipped => format!(
             "SKIPPED: {}",
             row.detail.as_deref().unwrap_or("no detail recorded")
