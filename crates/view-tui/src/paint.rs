@@ -13,7 +13,7 @@ use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
 use view_core::native::speculate::PredictedCell;
 use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
-use view_surface::{Layer, LayerKind, Rect, Surface};
+use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 
 /// The terminal-space rows a frame's composite must repaint, so a redraw
 /// touches only the changed region instead of all ~4800 cells.
@@ -768,6 +768,7 @@ fn composite_layers(
     // lookup over already-decoded fields, not an RPC round trip, so
     // re-deriving on every paint costs nothing beyond this struct copy
     let theme = Theme::from_hl(model.engine.hl());
+    let borders = BorderSet::for_tier(model.caps.tier);
     for (index, layer) in surface.layers.iter().enumerate() {
         let area = clip_to_frame(layer.rect, frame_area);
         if area.width == 0 || area.height == 0 {
@@ -800,7 +801,7 @@ fn composite_layers(
                 );
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
-            LayerKind::Messages(entries) => paint_messages(entries, &theme, area, damage, buf),
+            LayerKind::Messages(msgs) => paint_messages(msgs, &theme, borders, area, damage, buf),
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
             LayerKind::Shell => paint_shell(&theme, area, damage, buf),
@@ -1087,6 +1088,7 @@ fn paint_cmdline(
 fn paint_messages(
     lines: &[Vec<Span>],
     theme: &Theme,
+    borders: BorderSet,
     area: ratatui::layout::Rect,
     damage: &Damage,
     buf: &mut Buffer,
@@ -1107,7 +1109,7 @@ fn paint_messages(
         bg: msg.bg,
         ..ResolvedStyle::default()
     });
-    paint_message_border(area, border_style, damage, buf);
+    paint_message_border(area, borders, border_style, damage, buf);
 
     let inner = inset_by_one(area);
     // every toast line is a single `StyleRole::Plain` span (see
@@ -1145,15 +1147,21 @@ fn inset_by_one(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     }
 }
 
-/// Draws box-drawing glyphs on all four edges of `area`, styled `style`.
+/// Draws `borders` on all four edges of `area`, styled `style`.
 /// A degenerate area narrower or shorter than 2 cells has no distinct edge
 /// cells to draw (the frame `view-surface` builds is never this small in
 /// practice, since it always adds a full 2-cell frame around at least a
 /// 1x1 content rect, but a direct unit-test caller could still construct
 /// one) and paints nothing rather than writing corner glyphs on top of
 /// each other.
+///
+/// The charset arrives from the caller rather than being spelled here: a
+/// toast is the one float `view-surface` hands over unframed, and a second
+/// literal set would have kept drawing box-drawing glyphs at a terminal
+/// that cannot render them long after every other float stopped.
 fn paint_message_border(
     area: ratatui::layout::Rect,
+    borders: BorderSet,
     style: Style,
     damage: &Damage,
     buf: &mut Buffer,
@@ -1167,9 +1175,9 @@ fn paint_message_border(
     let bottom_row = damage.covers_row_of(area, last_row);
     for col in 0..area.width {
         let (top, bottom) = match col {
-            0 => ('┌', '└'),
-            c if c == last_col => ('┐', '┘'),
-            _ => ('─', '─'),
+            0 => (borders.top_left, borders.bottom_left),
+            c if c == last_col => (borders.top_right, borders.bottom_right),
+            _ => (borders.horizontal, borders.horizontal),
         };
         if top_row {
             set_border_cell(buf, area.x + col, area.y, top, style);
@@ -1178,12 +1186,13 @@ fn paint_message_border(
             set_border_cell(buf, area.x + col, area.y + last_row, bottom, style);
         }
     }
+    let vert = borders.vertical;
     for row in 1..last_row {
         if !damage.covers_row_of(area, row) {
             continue;
         }
-        set_border_cell(buf, area.x, area.y + row, '│', style);
-        set_border_cell(buf, area.x + last_col, area.y + row, '│', style);
+        set_border_cell(buf, area.x, area.y + row, vert, style);
+        set_border_cell(buf, area.x + last_col, area.y + row, vert, style);
     }
 }
 
@@ -3012,8 +3021,8 @@ mod tests {
         // exactly fills its row with no leftover to clear, while the first
         // line's row has 18 cells of clear past "short" that must not
         // still show the grid's "X" stand-in
-        let expected_first_line = format!("X│{:<23}│", "short");
-        let expected_second_line = format!(" │{}│", "much longer second line");
+        let expected_first_line = format!("X|{:<23}|", "short");
+        let expected_second_line = format!(" |{}|", "much longer second line");
         assert_eq!(
             row_text(1),
             expected_first_line,
@@ -3087,12 +3096,12 @@ mod tests {
         let (x, y, w) = (messages.rect.col, messages.rect.row, messages.rect.width);
         assert_eq!(
             &buf[(x, y)].symbol(),
-            &"┌",
+            &"+",
             "top-left corner still closes the frame"
         );
         assert_eq!(
             &buf[(x + w - 1, y + messages.rect.height - 1)].symbol(),
-            &"┘",
+            &"+",
             "bottom-right corner still closes the frame"
         );
 
@@ -3168,42 +3177,51 @@ mod tests {
         );
     }
 
+    /// A toast is the one float `view-surface` hands over unframed, so its
+    /// frame is drawn here rather than by `overlay::rows` -- and it has to
+    /// degrade with the same charset every other float uses, or a terminal
+    /// that draws no box-drawing glyphs gets them anyway on the one surface
+    /// that reports errors.
     #[test]
     fn framed_toast_renders_border_glyphs_on_all_four_edges() {
-        let mut model = Model::new();
-        model.engine.apply_grid(GridOp::Resize {
-            width: 10,
-            height: 5,
-        });
-        apply(
-            &mut model,
-            view_core::events::UiEvent::MsgShow {
-                kind: "echomsg".into(),
-                content: vec![(0, "hi".into())],
-                replace_last: false,
-            },
-        );
-
-        let surface = view_surface::render(&model);
-        let backend = TestBackend::new(10, 5);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
-        let buf = terminal.backend().buffer().clone();
-
         // interior "hi" (2 wide, 1 tall) framed with a 2-cell border: box
         // is 4 wide x 3 tall, right-anchored at col 6 (10 - 4), top-
         // anchored at row 0 -- corners, horizontal edges, and vertical
         // edges must all be distinct border glyphs, not blank/text cells
-        assert_eq!(&buf[(6, 0)].symbol(), &"┌", "top-left corner");
-        assert_eq!(&buf[(9, 0)].symbol(), &"┐", "top-right corner");
-        assert_eq!(&buf[(6, 2)].symbol(), &"└", "bottom-left corner");
-        assert_eq!(&buf[(9, 2)].symbol(), &"┘", "bottom-right corner");
-        assert_eq!(&buf[(7, 0)].symbol(), &"─", "top edge");
-        assert_eq!(&buf[(8, 0)].symbol(), &"─", "top edge");
-        assert_eq!(&buf[(7, 2)].symbol(), &"─", "bottom edge");
-        assert_eq!(&buf[(8, 2)].symbol(), &"─", "bottom edge");
-        assert_eq!(&buf[(6, 1)].symbol(), &"│", "left edge");
-        assert_eq!(&buf[(9, 1)].symbol(), &"│", "right edge");
+        let framed = |caps: view_core::model::TermCaps| -> Vec<String> {
+            let mut model = Model::new();
+            model.caps = caps;
+            model.engine.apply_grid(GridOp::Resize {
+                width: 10,
+                height: 5,
+            });
+            apply(
+                &mut model,
+                view_core::events::UiEvent::MsgShow {
+                    kind: "echomsg".into(),
+                    content: vec![(0, "hi".into())],
+                    replace_last: false,
+                },
+            );
+            let surface = view_surface::render(&model);
+            let mut terminal = Terminal::new(TestBackend::new(10, 5)).unwrap();
+            terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..3)
+                .map(|y| (6..10).map(|x| buf[(x, y)].symbol()).collect())
+                .collect()
+        };
+
+        assert_eq!(
+            framed(view_core::model::TermCaps::default()),
+            ["+--+", "|hi|", "+--+"],
+            "a terminal that answered no probe frames its toast in ASCII"
+        );
+        assert_eq!(
+            framed(view_core::model::TermCaps::from_probe(true, true, true)),
+            ["╭──╮", "│hi│", "╰──╯"],
+            "a terminal that draws box glyphs gets the same rounded frame every other float has"
+        );
     }
 
     /// A theme with no `MsgArea` foreground -- e.g. a colorscheme that
@@ -3295,7 +3313,7 @@ mod tests {
                     &Damage::full(),
                     buf,
                 );
-                paint_messages(&[], &theme, area, &Damage::full(), buf);
+                paint_messages(&[], &theme, BorderSet::ASCII, area, &Damage::full(), buf);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
