@@ -363,6 +363,11 @@ pub struct Term {
     /// to the caller without re-running the (stdin-consuming, one-shot)
     /// detection probe.
     caps: TermCaps,
+    /// How [`Term::caps`] was reached, for the caller's own diagnostics.
+    /// Fixed at [`Term::init`]: a later upgrade revises the capabilities,
+    /// never the fact that they were probed rather than assumed or
+    /// overridden.
+    caps_source: tiers::CapsSource,
     /// The capability probe still in flight, if the terminal was given a
     /// batch to answer at all. [`Term::settle_probe`] takes whatever it has
     /// heard by then; a `--tier` override leaves it `None`.
@@ -388,7 +393,7 @@ impl Term {
     /// the backend terminal cannot be built.
     pub fn init(tier_override: Option<Tier>) -> std::io::Result<Self> {
         let guard = TerminalGuard::enter_raw_mode()?;
-        let (caps, probe) = tiers::resolve(tier_override)?;
+        let (caps, probe, caps_source) = tiers::resolve(tier_override)?;
         guard.finish_entering_alt_screen(caps.kitty_kbd)?;
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
         let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
@@ -401,6 +406,7 @@ impl Term {
             shadow: Shadow::new(),
             last_offset: None,
             caps,
+            caps_source,
             probe,
         })
     }
@@ -410,6 +416,14 @@ impl Term {
     #[must_use]
     pub fn caps(&self) -> TermCaps {
         self.caps
+    }
+
+    /// Where [`Term::caps`] came from, for the caller's own diagnostic line:
+    /// this crate owns the terminal, never a channel to report about it on
+    /// (see [`tiers::resolve`]).
+    #[must_use]
+    pub fn caps_source(&self) -> tiers::CapsSource {
+        self.caps_source
     }
 
     /// Takes the capability probe [`Term::init`] left in flight off the

@@ -2102,51 +2102,62 @@ fn minus_capital_o_opens_two_vertical_splits() {
     let _ = session.wait();
 }
 
-#[test]
-fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
-    // `ls | view -`'s defining property is that the child's fd 0 is a real
-    // pipe, not a tty: `main::maybe_relay_stdin` only arms when
-    // `std::io::stdin().is_terminal()` is false, and a pty's own fd 0 is
-    // always a terminal. `view_oracle::PtySession` /
-    // `portable_pty::SlavePty::spawn_command` always wires stdin to the
-    // same pty slave as stdout/stderr (confirmed in `portable-pty-0.9.0`'s
-    // own `unix.rs`, with no public hook to split them), so this test hand
-    // -rolls a pty (for a real controlling terminal on stdout/stderr, which
-    // crossterm's raw-mode and `/dev/tty` input still need) plus a plain
-    // pipe (for stdin) instead of going through that shared harness.
-    use std::io::{Read, Write};
+/// A `view` process on a pty this file rolled by hand, and the master end
+/// of that pty.
+///
+/// `view_oracle::PtySession` / `portable_pty::SlavePty::spawn_command`
+/// always wires stdin, stdout and stderr to the same slave (confirmed in
+/// `portable-pty-0.9.0`'s own `unix.rs`, with no public hook to split
+/// them), and each test below needs exactly one of the three to be
+/// something else: a pipe on stdin for the relay, a pipe on stderr for the
+/// descriptor a session is supposed to leave untouched.
+struct HandRolledPty {
+    child: std::process::Child,
+    master: std::fs::File,
+    /// The same `PTY_ISOLATION` read guard every `ViewPtySession` holds: a
+    /// session spawned outside it is an nvim starting on the cores a
+    /// timing-bound test is measuring itself on. Held until the whole
+    /// struct goes out of scope, which outlives a partial move of the two
+    /// fields above.
+    _isolation: Option<RwLockReadGuard<'static, ()>>,
+}
+
+/// Spawns the `view` binary on a fresh pty, hermetic and with native
+/// features off under `paths`, with `configure` adding the arguments and
+/// environment the caller's own session needs.
+///
+/// Descriptor 1 is always the pty slave and is the child's controlling
+/// terminal, which crossterm's raw mode and `/dev/tty` input both need;
+/// `stdin` and `stderr` take the same slave when `None`. `configure` runs
+/// after the hermetic setup, so a caller can override anything it put in
+/// place.
+fn spawn_view_on_hand_rolled_pty(
+    paths: &common::ScratchPaths,
+    stdin: Option<std::process::Stdio>,
+    stderr: Option<std::process::Stdio>,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> HandRolledPty {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let paths = common::ScratchPaths::new("smoke-stdin-relay");
-    let piped_content = "piped stdin content for view -";
-
+    let isolation = shared_isolation();
     let winsize = nix::pty::Winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let pty = nix::pty::openpty(Some(&winsize), None).expect("openpty for the piped-stdin test");
-    // Both ends close-on-exec, which `std::io::pipe` guarantees and
-    // `nix::unistd::pipe` does not: an inherited write-end duplicate
-    // survives this process's own fork+exec of `view` and again `view`'s
-    // fork+exec of nvim, so nvim's read on its relayed stdin never reaches
-    // EOF (the stdin-relay "deadlock" this test used to report was that
-    // leaked fd, not a `view` or nvim bug). std's own pipe rather than
-    // `nix::unistd::pipe2`, which nix gates off macOS entirely -- and a
-    // `pipe` plus a separate `fcntl` would reopen the same leak for any
-    // fork racing between the two calls. The read end still reaches the
-    // child, since `Stdio::from` redirects it onto fd 0 with a `dup2`
-    // during exec setup and a `dup2` result does not carry `FD_CLOEXEC`.
-    let (stdin_read, mut stdin_write) =
-        std::io::pipe().expect("cloexec pipe for the child's stdin");
+    let pty = nix::pty::openpty(Some(&winsize), None).expect("openpty for a hand-rolled session");
     let stdout_fd = nix::unistd::dup(&pty.slave).expect("dup pty slave for stdout");
-    let stderr_fd = nix::unistd::dup(&pty.slave).expect("dup pty slave for stderr");
+    let stdin = stdin.unwrap_or_else(|| {
+        Stdio::from(nix::unistd::dup(&pty.slave).expect("dup pty slave for stdin"))
+    });
+    let stderr = stderr.unwrap_or_else(|| {
+        Stdio::from(nix::unistd::dup(&pty.slave).expect("dup pty slave for stderr"))
+    });
 
     let mut cmd = std::process::Command::new(common::view_bin_path());
-    cmd.arg("-").arg(&paths.scratch);
-    view_oracle::make_hermetic(&mut cmd).expect("hermetic env for the piped-stdin child");
+    view_oracle::make_hermetic(&mut cmd).expect("hermetic env for the hand-rolled child");
     for var in [
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
@@ -2156,10 +2167,11 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
         cmd.env(var, common::xdg_home(&paths.isolated_home, var));
     }
     common::disable_native_features(&paths.isolated_home);
+    configure(&mut cmd);
 
-    cmd.stdin(Stdio::from(stdin_read));
+    cmd.stdin(stdin);
     cmd.stdout(Stdio::from(stdout_fd));
-    cmd.stderr(Stdio::from(stderr_fd));
+    cmd.stderr(stderr);
     // A pty slave is only a controlling terminal once the child both starts
     // a new session (`setsid`) and claims the slave as that session's
     // controlling terminal (`TIOCSCTTY`); `std::process::Command::setsid`
@@ -2184,42 +2196,40 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
         });
     }
 
-    let mut child = cmd
-        .spawn()
-        .expect("spawn view against a piped stdin and a hand-rolled pty");
+    let child = cmd.spawn().expect("spawn view on a hand-rolled pty");
     // The child now owns its own dup'd copies of the slave; holding this
     // one open in the parent too would keep the pty from ever hanging up,
-    // so the drain thread's read below would never see EOF once the child
-    // exits.
+    // so a drain thread's read would never see EOF once the child exits.
     drop(pty.slave);
 
-    stdin_write
-        .write_all(piped_content.as_bytes())
-        .expect("write piped content to the child's stdin");
-    // Closes the write end, so nvim's `stdin_fd` startup read reaches EOF
-    // and returns instead of blocking forever waiting for more.
-    drop(stdin_write);
+    HandRolledPty {
+        child,
+        master: std::fs::File::from(pty.master),
+        _isolation: isolation,
+    }
+}
 
-    let mut master = std::fs::File::from(pty.master);
+/// Drains `master` on a thread, answering the capability probe the way
+/// every `PtySession` does and accumulating the raw bytes for a failure
+/// report.
+///
+/// The shared responder rather than a second hand-rolled answer to "what
+/// does a real terminal reply": these ptys are hand-rolled only because
+/// `portable_pty` cannot split the child's three descriptors, not because
+/// they should behave any less like a terminal. Raw bytes, not a rendered
+/// screen -- there is no vt100 parser on this side.
+fn drain_and_answer(master: &std::fs::File) -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+    use std::io::{Read, Write};
+
+    let screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let screen_writer = std::sync::Arc::clone(&screen);
     let mut drain = master
         .try_clone()
         .expect("clone pty master for the drain thread");
-    // Captured (not just discarded) so a failure can report the last thing
-    // the child actually painted -- this hand-rolled pty has no vt100
-    // parser, so this is raw bytes rather than a rendered screen.
-    let screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let screen_writer = std::sync::Arc::clone(&screen);
-    // The same responder every `PtySession` runs, rather than a second
-    // hand-rolled answer to "what does a real terminal reply": this pty is
-    // hand-rolled only because `portable_pty` cannot split the child's stdin
-    // from its stdout, not because it should behave any less like a
-    // terminal. `AnswerFullTier` is what makes the capability assertion
-    // below falsifiable -- a probe that never reached a tty resolves the
-    // same all-false floor no matter what this pty would have answered.
-    let mut responder = view_oracle::QueryResponder::for_policy(QueryPolicy::AnswerFullTier);
     let mut answer = master
         .try_clone()
         .expect("clone pty master for the capability responder");
+    let mut responder = view_oracle::QueryResponder::for_policy(QueryPolicy::AnswerFullTier);
     std::thread::spawn(move || {
         let mut sink = [0_u8; 4096];
         while let Ok(n) = drain.read(&mut sink) {
@@ -2236,6 +2246,90 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
             }
         }
     });
+    screen
+}
+
+/// Everything the parent holds of a hand-rolled session's raw pty bytes, as
+/// a lossy string for a failure message.
+fn pty_dump(screen: &std::sync::Mutex<Vec<u8>>) -> String {
+    screen
+        .lock()
+        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .unwrap_or_default()
+}
+
+/// Waits for `child` to exit within `within`, killing it and returning
+/// `None` if it does not.
+///
+/// `Child::wait` has no built-in timeout, and a child that never exits must
+/// surface as a named, bounded failure rather than hang the whole suite --
+/// a hung one was already observed to survive external `task test`
+/// termination as an orphan.
+fn wait_bounded(
+    child: &mut std::process::Child,
+    within: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + view_test_support::host_deadline(within);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll view for exit") {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
+    // `ls | view -`'s defining property is that the child's fd 0 is a real
+    // pipe, not a tty: `main::maybe_relay_stdin` only arms when
+    // `std::io::stdin().is_terminal()` is false, and a pty's own fd 0 is
+    // always a terminal.
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let paths = common::ScratchPaths::new("smoke-stdin-relay");
+    let piped_content = "piped stdin content for view -";
+
+    // Both ends close-on-exec, which `std::io::pipe` guarantees and
+    // `nix::unistd::pipe` does not: an inherited write-end duplicate
+    // survives this process's own fork+exec of `view` and again `view`'s
+    // fork+exec of nvim, so nvim's read on its relayed stdin never reaches
+    // EOF (the stdin-relay "deadlock" this test used to report was that
+    // leaked fd, not a `view` or nvim bug). std's own pipe rather than
+    // `nix::unistd::pipe2`, which nix gates off macOS entirely -- and a
+    // `pipe` plus a separate `fcntl` would reopen the same leak for any
+    // fork racing between the two calls. The read end still reaches the
+    // child, since `Stdio::from` redirects it onto fd 0 with a `dup2`
+    // during exec setup and a `dup2` result does not carry `FD_CLOEXEC`.
+    let (stdin_read, mut stdin_write) =
+        std::io::pipe().expect("cloexec pipe for the child's stdin");
+    // The capability line is a diagnostic, so this is where it is read from
+    // -- the session under test writes it nowhere else (see
+    // `view_tui::tiers::resolve`).
+    let view_log = paths.isolated_home.join("view.log");
+    let session =
+        spawn_view_on_hand_rolled_pty(&paths, Some(Stdio::from(stdin_read)), None, |cmd| {
+            cmd.arg("-").arg(&paths.scratch).env("VIEW_LOG", &view_log);
+        });
+    let mut child = session.child;
+
+    stdin_write
+        .write_all(piped_content.as_bytes())
+        .expect("write piped content to the child's stdin");
+    // Closes the write end, so nvim's `stdin_fd` startup read reaches EOF
+    // and returns instead of blocking forever waiting for more.
+    drop(stdin_write);
+
+    let mut master = session.master;
+    // `AnswerFullTier` is what makes the capability assertion below
+    // falsifiable -- a probe that never reached a tty resolves the same
+    // all-false floor no matter what this pty would have answered.
+    let screen = drain_and_answer(&master);
 
     // Fixed sleep, not a screen-content wait: see the module doc and the
     // Silent-policy tests above for the same tradeoff this suite always
@@ -2254,36 +2348,16 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
         .write_all(write_cmd.as_bytes())
         .expect("write the explicit :w + :qa! sequence to the pty master");
 
-    // `Child::wait` has no built-in timeout, and a genuinely deadlocked
-    // stdin relay (the parent's own copy of the relay fd never closing, so
-    // the engine never sees EOF) must surface as a named, bounded failure
-    // rather than hang the whole suite -- a hung child was already observed
-    // to survive external `task test` termination as an orphan.
-    let deadline =
-        std::time::Instant::now() + view_test_support::host_deadline(Duration::from_secs(15));
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .expect("poll view for exit after :w + :qa!")
-        {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let dump = screen
-                .lock()
-                .map(|buf| String::from_utf8_lossy(&buf).into_owned());
-            panic!(
-                "view never exited within 15s of the stdin-relay :w + :qa! sequence \
-                 (stdin relay deadlock); last pty bytes:\n{dump:?}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    // A genuinely deadlocked stdin relay is the parent's own copy of the
+    // relay fd never closing, so the engine never sees EOF.
+    let Some(status) = wait_bounded(&mut child, Duration::from_secs(15)) else {
+        panic!(
+            "view never exited within 15s of the stdin-relay :w + :qa! sequence \
+             (stdin relay deadlock); last pty bytes:\n{:?}",
+            pty_dump(&screen)
+        );
     };
-    let dump = screen
-        .lock()
-        .map(|buf| String::from_utf8_lossy(&buf).into_owned());
+    let dump = pty_dump(&screen);
     assert!(
         status.success(),
         "view did not exit cleanly after :w + :qa!; status={status:?}; last pty bytes:\n{dump:?}"
@@ -2296,12 +2370,12 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     // produces. The keystrokes below it depend on the same fact, since
     // crossterm picks its input descriptor by asking whether fd 0 is a tty
     // and has no other hook to offer.
-    let caps_line = dump.as_deref().unwrap_or_default();
+    let logged = std::fs::read_to_string(&view_log).unwrap_or_default();
     assert!(
-        caps_line.contains("sync=true") && caps_line.contains("kitty_kbd=true"),
+        logged.contains("sync=true") && logged.contains("kitty_kbd=true"),
         "a piped-stdin session negotiated no capabilities with the terminal \
          answering every query, so its probe was reading the pipe rather than \
-         the tty; last pty bytes:\n{dump:?}"
+         the tty; VIEW_LOG:\n{logged}\nlast pty bytes:\n{dump:?}"
     );
 
     let saved =
@@ -2309,6 +2383,68 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     assert!(
         saved.contains(piped_content),
         "saved file did not contain the piped stdin content; contents:\n{saved:?}"
+    );
+}
+
+#[test]
+fn a_session_writes_nothing_to_its_own_stderr() {
+    // An editor owns the screen, so its stderr is the one descriptor a user
+    // can still redirect somewhere readable -- and every byte written there
+    // during a session is a byte the alternate screen hides until teardown
+    // scrolls it back, describing a session that has already ended. That is
+    // what the capability line used to do (`--tier`'s arm wrote it with no
+    // probe running at all), and this observes the real descriptor of a real
+    // launch rather than a sink no production code writes to.
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    let paths = common::ScratchPaths::new("smoke-stderr-silence");
+    let (mut stderr_read, stderr_write) =
+        std::io::pipe().expect("cloexec pipe for the child's stderr");
+    let session =
+        spawn_view_on_hand_rolled_pty(&paths, None, Some(Stdio::from(stderr_write)), |cmd| {
+            // `--tier basic` is the arm with the most to say and the least
+            // to probe; no `VIEW_LOG`, so nothing routes the line to a file
+            // either and stderr is the only place a regression could land.
+            cmd.arg("--tier")
+                .arg("basic")
+                .arg(&paths.scratch)
+                .env_remove("VIEW_LOG");
+        });
+    let mut child = session.child;
+    let mut master = session.master;
+    let screen = drain_and_answer(&master);
+
+    // Fixed sleep, not a screen-content wait: see the module doc for the
+    // same tradeoff every test in this file makes.
+    std::thread::sleep(Duration::from_millis(800));
+    master
+        .write_all(b"\x1b:qa!\r")
+        .expect("write :qa! to the pty master");
+    let Some(status) = wait_bounded(&mut child, Duration::from_secs(15)) else {
+        panic!(
+            "view never exited within 15s of :qa!; last pty bytes:\n{:?}",
+            pty_dump(&screen)
+        );
+    };
+    assert!(
+        status.success(),
+        "view did not exit cleanly after :qa!; status={status:?}; last pty bytes:\n{:?}",
+        pty_dump(&screen)
+    );
+
+    // Read to EOF, which the exit above already guarantees: this process
+    // handed its only copy of the write end to the child, so the last
+    // descriptor closed with it (nvim's inherited copy included).
+    let mut written = Vec::new();
+    stderr_read
+        .read_to_end(&mut written)
+        .expect("read the child's stderr to EOF");
+    assert!(
+        written.is_empty(),
+        "a session wrote to its own stderr, where the alternate screen hides \
+         it until teardown; stderr:\n{:?}",
+        String::from_utf8_lossy(&written)
     );
 }
 

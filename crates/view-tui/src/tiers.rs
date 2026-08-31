@@ -662,13 +662,62 @@ impl ReplySource for StdinReplySource {
     }
 }
 
+/// Where a session's capabilities came from, carried alongside them so the
+/// caller can say so in its own diagnostics.
+///
+/// A label, never a capability: what a terminal can do is [`TermCaps`], and
+/// two sessions with identical capabilities can still have reached them
+/// different ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CapsSource {
+    /// A real probe was written to the terminal and whatever answered it
+    /// was read back. Includes the launch shape whose `tcgetattr` fails on
+    /// a non-tty stdin: that is "probed, got nothing", the same all-false
+    /// floor an unresponsive real terminal produces.
+    Probed,
+    /// No escape probe was attempted at all -- see [`probe_real_terminal`]'s
+    /// `cfg(not(unix))` arm -- so calling the result probed would claim a
+    /// negotiation that never happened.
+    Assumed,
+    /// `--tier` decided them outright and no terminal I/O ran.
+    Override,
+}
+
+impl CapsSource {
+    /// The one-word answer to "where did these capabilities come from",
+    /// for a diagnostic line.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Probed => "probed",
+            Self::Assumed => "assumed",
+            Self::Override => "--tier override",
+        }
+    }
+}
+
+/// What a non-overridden result is: probed on unix, where a real probe
+/// always at least attempts terminal I/O; assumed everywhere else, where no
+/// terminal I/O is attempted at all.
+#[cfg(unix)]
+const PROBE_SOURCE: CapsSource = CapsSource::Probed;
+#[cfg(not(unix))]
+const PROBE_SOURCE: CapsSource = CapsSource::Assumed;
+
 /// Runs the full startup capability resolution: a `--tier` override wins
 /// outright and skips all terminal I/O; otherwise the real probe runs
-/// against stdin/stdout. Either way, logs the chosen capabilities and why
-/// to stderr before returning, so `Term::init` can call this between
-/// entering raw mode and entering the alternate screen: the log line must
-/// land while stderr is still the visible screen, not scrolled away under
-/// the alt-screen buffer.
+/// against stdin/stdout.
+///
+/// Writes nothing anywhere: a line about capabilities is a diagnostic, and
+/// this crate owns no diagnostic channel. What the caller needs to write
+/// one is returned instead -- the capabilities, and the [`CapsSource`] that
+/// says how they were reached. Whether the answer is final is a separate
+/// question the caller already has the answer to, since the probe returned
+/// here is what settles it: `fence_seen` false means the terminal still
+/// owes replies, and the `caps tier=` line a later
+/// [`Term::settle_probe`](crate::terminal::Term::settle_probe) produces
+/// supersedes the first.
 ///
 /// Returns the capabilities the first window resolved alongside the probe
 /// still in flight, if one is. The caller runs [`Probe::finish`] on it once
@@ -680,41 +729,15 @@ impl ReplySource for StdinReplySource {
 /// # Errors
 ///
 /// Returns the underlying `std::io::Error` if the probe's I/O fails.
-pub fn resolve(tier_override: Option<Tier>) -> io::Result<(TermCaps, Option<Probe<'static>>)> {
+pub fn resolve(
+    tier_override: Option<Tier>,
+) -> io::Result<(TermCaps, Option<Probe<'static>>, CapsSource)> {
     if let Some(tier) = tier_override {
-        let caps = caps_for_override(tier);
-        log_caps(&caps, "--tier override");
-        return Ok((caps, None));
+        return Ok((caps_for_override(tier), None, CapsSource::Override));
     }
     let (caps, probe) = probe_real_terminal()?;
-    let source = match &probe {
-        Some(probe) if !probe.fence_seen() => PROBE_PENDING_LABEL,
-        _ => PROBE_SOURCE_LABEL,
-    };
-    log_caps(&caps, source);
-    Ok((caps, probe))
+    Ok((caps, probe, PROBE_SOURCE))
 }
-
-/// [`log_caps`]'s label for a non-overridden result: `"probed"` on unix,
-/// where a real probe always at least attempts terminal I/O (even a
-/// `tcgetattr` failure on a non-tty stdin is "probed, got nothing" -- the
-/// same all-false-Basic outcome an unresponsive real terminal produces);
-/// `"assumed"` everywhere else, where no terminal I/O is attempted at all
-/// (see [`probe_real_terminal`]'s `cfg(not(unix))` arm), so labeling it
-/// "probed" would claim a negotiation that never happened.
-#[cfg(unix)]
-const PROBE_SOURCE_LABEL: &str = "probed";
-#[cfg(not(unix))]
-const PROBE_SOURCE_LABEL: &str = "assumed";
-
-/// [`log_caps`]'s label for a probe whose fence has not arrived yet. This
-/// line is written before the alternate screen goes up and can therefore
-/// never be revised on screen, so it says outright that the answer is not
-/// final; the last `caps tier=` line in the session's own `VIEW_LOG` is the
-/// record of what it settled on -- a reply the input path recognizes after
-/// the frame is already up writes another one (see
-/// [`Term::settle_probe`](crate::terminal::Term::settle_probe)).
-const PROBE_PENDING_LABEL: &str = "probed, still listening";
 
 #[cfg(unix)]
 fn probe_real_terminal() -> io::Result<(TermCaps, Option<Probe<'static>>)> {
@@ -763,18 +786,6 @@ fn probe_real_terminal() -> io::Result<(TermCaps, Option<Probe<'static>>)> {
 /// bound a raw read with at all).
 fn no_probe_caps(colorterm: Option<&str>) -> TermCaps {
     TermCaps::from_probe(false, truecolor_from_colorterm(colorterm), false)
-}
-
-fn log_caps(caps: &TermCaps, source: &str) {
-    // eprintln! ends the line with a bare `\n`; raw mode disables OPOST, so
-    // the terminal never translates that to a carriage return on its own,
-    // leaving this log line's next line starting mid-column instead of at
-    // the left margin. This runs while still in raw mode (pre-alt-screen),
-    // so the `\r` has to be explicit.
-    eprint!(
-        "view: terminal capabilities: tier={:?} sync={} truecolor={} kitty_kbd={} ({source})\r\n",
-        caps.tier, caps.sync, caps.truecolor, caps.kitty_kbd
-    );
 }
 
 #[cfg(test)]
@@ -1386,5 +1397,32 @@ mod tests {
 
         let unrecognized = no_probe_caps(Some("bogus"));
         assert!(!unrecognized.truecolor);
+    }
+
+    #[test]
+    fn caps_source_labels_match_the_probe_arm_taken() {
+        // The override arm is the one `resolve` can be run against here: it
+        // returns before any terminal I/O, while the probe arm reads the
+        // process's real stdin, which a test runner shares with every other
+        // test in the binary. What that arm would label its result is
+        // asserted through `PROBE_SOURCE` instead -- the same constant
+        // `resolve` hands back.
+        let (caps, probe, source) =
+            resolve(Some(Tier::Basic)).expect("an override resolves without terminal I/O");
+        assert_eq!(source, CapsSource::Override);
+        assert_eq!(source.label(), "--tier override");
+        assert!(probe.is_none(), "an override leaves nothing to wait for");
+        assert_eq!(caps, caps_for_override(Tier::Basic));
+
+        assert_eq!(
+            PROBE_SOURCE,
+            if cfg!(unix) {
+                CapsSource::Probed
+            } else {
+                CapsSource::Assumed
+            }
+        );
+        assert_eq!(CapsSource::Probed.label(), "probed");
+        assert_eq!(CapsSource::Assumed.label(), "assumed");
     }
 }

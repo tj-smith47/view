@@ -99,16 +99,15 @@ impl KeyRing {
 /// `VIEW_LOG` topic: the design spec's informal 50ms shell-paint target,
 /// measured here but not enforced (the formal budget gate lands with the
 /// bench harness). Routed through [`crate::vlog::log_with`] rather than a
-/// bare stderr write, unlike `view-tui`'s own `tiers::log_caps`: that log
-/// line runs before `Term::init` ever enters the alternate screen (raw mode
-/// only, still the visible screen -- see `terminal.rs`'s own doc comment on
-/// why its `\r\n` has to be explicit), while this one fires from inside
-/// `paint_shell_frame`, called only after `Term::init` has entered both raw
-/// mode and the alternate screen (see `main.rs`'s own call ordering); a
-/// bare stderr write at this point lands inside the frame this call just
-/// painted, not on any screen a developer could read it from. `vlog` is the
-/// zero-overhead-when-unset channel every other startup measurement in
-/// `main.rs` already uses for the same reason.
+/// bare stderr write: this fires from inside `paint_shell_frame`, called
+/// only after `Term::init` has entered both raw mode and the alternate
+/// screen (see `main.rs`'s own call ordering), so a bare stderr write here
+/// lands inside the frame this call just painted, on no screen a developer
+/// could read it from, and resurfaces at teardown describing a session that
+/// has already ended. `vlog` is the zero-overhead-when-unset channel every
+/// other startup measurement in `main.rs` already uses for the same reason
+/// -- the capability line `view-tui` used to write to stderr itself among
+/// them (see `view_tui::tiers::resolve`).
 ///
 /// # Errors
 ///

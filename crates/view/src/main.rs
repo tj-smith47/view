@@ -25,11 +25,12 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::sync::mpsc;
 use std::time::Instant;
-use view_core::model::{Model, Tier};
+use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::Effect;
 use view_core::theme::Theme;
 use view_engine::process::{stdin_operands, EngineConfig, RemoteSpec};
 use view_tui::terminal::Term;
+use view_tui::tiers::CapsSource;
 
 /// What this build calls itself, in `--version` and in its own startup
 /// diagnostics.
@@ -157,6 +158,12 @@ struct Cli {
     /// Override auto-detected terminal capabilities instead of probing
     #[arg(long)]
     tier: Option<TierArg>,
+    /// Report the terminal capabilities this session resolved and where
+    /// they came from, as a notice inside the session rather than a line on
+    /// the screen it is about to take over. Implied by `--tier`, whose whole
+    /// point is to change what that notice says.
+    #[arg(long)]
+    print_caps: bool,
     /// Spawns the bundled engine with no user config at all: `view.toml`
     /// and `init.lua` are both skipped, and every native feature stays on.
     /// This is view's own triage tool, and asks for something different from
@@ -689,6 +696,27 @@ fn seed_ai_enabled(
     }
 }
 
+/// The capability line for a session that asked to see it, or `None` for
+/// one that did not.
+///
+/// The same facts the `"startup"` `VIEW_LOG` line carries, phrased for a
+/// user rather than a log reader: a session is normally silent about its
+/// own capabilities, and asks for this either outright (`--print-caps`) or
+/// by overriding them (`--tier`, whose whole point is to change what this
+/// would have said).
+fn caps_notice(cli: &Cli, caps: TermCaps, source: CapsSource) -> Option<String> {
+    (cli.print_caps || cli.tier.is_some()).then(|| {
+        format!(
+            "view: terminal capabilities: tier={:?} sync={} truecolor={} kitty_kbd={} ({})",
+            caps.tier,
+            caps.sync,
+            caps.truecolor,
+            caps.kitty_kbd,
+            source.label()
+        )
+    })
+}
+
 fn main() -> Result<()> {
     // startup's own VIEW_LOG "startup" line (see startup::paint_shell_frame)
     // measures the shell-paint budget from this instant, not from
@@ -889,15 +917,23 @@ fn main() -> Result<()> {
     // `VIEW_LOG` takes the first verdict for the session's.
     vlog::log_with("startup", || {
         format!(
-            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} fence_seen={} term={width}x{height}",
+            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} fence_seen={} source={} term={width}x{height}",
             VERSION,
             model.caps.tier,
             model.caps.sync,
             model.caps.truecolor,
             model.caps.kitty_kbd,
-            probe.fence_seen
+            probe.fence_seen,
+            term.caps_source().label()
         )
     });
+    // a message, not a write: this runs with the alternate screen up, where
+    // a bare stderr line is invisible until teardown scrolls it back --
+    // which is where the unconditional capability line used to surface,
+    // long after the session it described
+    if let Some(notice) = caps_notice(&cli, model.caps, term.caps_source()) {
+        pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
+    }
 
     // strictly after the probe has stopped reading the terminal, and
     // strictly before the pre-attach wait: two readers of one tty cannot
@@ -1484,6 +1520,59 @@ mod tests {
             vec![OsString::from("notes.md")],
             "--tier and its value must never reach the engine, got {:?}",
             cfg.extra_args
+        );
+    }
+
+    #[test]
+    fn print_caps_flag_emits_exactly_one_notice() {
+        let mut model = Model::new();
+        let notice = caps_notice(
+            &Cli::parse_from(["view", "--print-caps"]),
+            model.caps,
+            CapsSource::Probed,
+        )
+        .expect("--print-caps asks for the capability line");
+        assert!(
+            notice.contains("tier=") && notice.contains("(probed)"),
+            "the notice must carry the tier and where it came from, got {notice:?}"
+        );
+        assert!(
+            !notice.contains('\n'),
+            "the notice is one message line, got {notice:?}"
+        );
+        model.engine.record_native_notice(notice, false);
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            1,
+            "a session that asked for the capability line gets it once, got {:?}",
+            model.engine.messages.entries
+        );
+
+        // the second way to ask: `--tier` changes what this line would have
+        // said, so the session that overrides is shown what it got
+        let overridden = caps_notice(
+            &Cli::parse_from(["view", "--tier", "basic"]),
+            model.caps,
+            CapsSource::Override,
+        )
+        .expect("--tier implies the capability line");
+        assert!(
+            overridden.contains("(--tier override)"),
+            "an overridden session must not be told its capabilities were probed, got {overridden:?}"
+        );
+    }
+
+    #[test]
+    fn print_caps_is_silent_without_the_flag() {
+        let model = Model::new();
+        let notice = caps_notice(
+            &Cli::parse_from(["view", "notes.md"]),
+            model.caps,
+            CapsSource::Probed,
+        );
+        assert!(
+            notice.is_none(),
+            "an ordinary session says nothing about its own capabilities, got {notice:?}"
         );
     }
 
