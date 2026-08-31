@@ -546,7 +546,7 @@ failure, not a review note.
 | `sync` | DECRQM mode 2026 (`ESC [ ? 2026 $ p`); the DECRPM reply `CSI ? 2026 ; Pm $ y` with `Pm` `1` or `2` | — | `false` | BSU/ESU bracketing |
 | `truecolor` | DECRQSS SGR readback: set a known 24-bit color, read `ESC P $ q m ESC \` back, reply preserves the RGB triple | `COLORTERM=truecolor\|24bit` (decides when the probe is silent; corroborates otherwise) | the `COLORTERM` hint decides | tier, color derivation |
 | `kitty_kbd` | Kitty keyboard progressive-enhancement query (`ESC [ ? u`) | — | `false` | key encoding |
-| `unicode_boxes` | Cursor-position readback (CPR) after writing one box-drawing glyph: advanced exactly one column ⇒ the terminal treats the sequence as one cell (a terminal that is not decoding UTF-8 advances three) | `LANG`/`LC_ALL` naming UTF-8 | `false` | border charset (§7.1) |
+| `unicode_boxes` | Cursor-position readback (CPR) after writing one box-drawing glyph: advanced exactly one column ⇒ the terminal treats the sequence as one cell (a terminal that is not decoding UTF-8 advances further) | `LANG`/`LC_ALL` naming UTF-8 (decides when the probe is silent; corroborates otherwise) | the locale hint decides | border charset (§7.1) |
 
 A probe answers the question it can actually ask. The `unicode_boxes`
 readback proves the terminal's cell accounting, not the font's coverage:
