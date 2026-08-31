@@ -561,11 +561,21 @@ expires, never repeated and never on the key-dispatch path. The probe's
 cost is inside the §3.1 `shell_visible_ms` budget, which is where a
 regression in it must show up.
 
-**Tier is derived from the register, and gates nothing on its own.** Tier
-is coarse UX vocabulary for the experience table above; behavior gates on
-the individual capability (`sync` for BSU/ESU, `unicode_boxes` for the
-border charset, `truecolor` for color derivation). A capability that a
-tier merely correlates with is not a probe for it.
+**Tier is derived from the register, and gates nothing on its own** —
+amended 2026-08-21 (C1), superseding "a tier governs what is *probed and
+assumed* … border charset, animation". Tier is coarse UX vocabulary for
+the experience table above; behavior gates on the individual capability
+(`sync` for BSU/ESU, `unicode_boxes` for the border charset (§7.1),
+`kitty_kbd` for key encoding, `truecolor` for color derivation). A
+capability that a tier merely correlates with is not a probe for it. The
+one thing a tier decides by itself is presentation: animation runs on the
+`full` tier only (§7.1 motion).
+
+Nor does a tier gate color: every tier emits 24-bit SGR, because the grid
+nvim hands over is 24-bit and a palette approximation applied to chrome
+alone would leave the two halves of the screen disagreeing. Terminals that
+cannot render truecolor degrade the SGR themselves, uniformly, which is the
+only place the approximation can be consistent.
 
 **The capability line is a diagnostic, not startup output.** The resolved
 register is written to `VIEW_LOG` with the other startup diagnostics on
@@ -576,26 +586,14 @@ in raw mode before the alternate screen is entered is invisible at
 startup and reappears as debug spew on quit, which is worse than no
 diagnostic at all.
 
-A tier summarizes that register; it is never an input to it (amended
-2026-08-21, C1). Every capability is probed on its own and behavior gates on
-that capability — BSU/ESU on `sync`, the border charset on `unicode_boxes`
-(§7.1), key encoding on `kitty_kbd`. The one thing a tier decides by itself
-is presentation: animation runs on `full` only (§7.1 motion). It does not
-gate color: every tier emits 24-bit SGR, because the grid nvim hands over is
-24-bit and a palette approximation applied to chrome alone would leave the
-two halves of the screen disagreeing. Terminals that cannot render truecolor
-degrade the SGR themselves, uniformly, which is the only place the
-approximation can be consistent.
-
 Degradation is a first-class tested surface (golden snapshots per tier, §13),
 not a fallback apology.
 
 ### 7.1 Design language (drafted 2026-08-04; pending user ratification)
 
-The tier table above names "cell-eased animations"
-without defining it; this section is the concrete visual system P4
-builds to, so candidate surfaces are judged against renderings rather than
-adjectives. Reference renderings (Dracula, `full` tier) live in
+The tier table above names "cell-eased animations" without defining it; this
+section is the concrete visual system P4 builds to, so candidate surfaces are
+judged against renderings rather than adjectives. Reference renderings (Dracula, `full` tier) live in
 `assets/mockups/`; Dracula is the reference *rendering*, not the theme —
 every token below derives from the user's live colorscheme via the §7
 bridge, and every derivation is overridable in `view.toml`. Golden
@@ -629,8 +627,9 @@ register's `unicode_boxes` row (§7) is the only input to this choice. A
 terminal that does not draw them falls back to ASCII `+ - |`, which is the
 honest degradation: square Unicode corners (`┌ ┐ └ ┘`) are not a fallback
 for rounded ones, since any terminal that draws `┌` draws `╭`, and view
-ships no third border set (amended 2026-08-21, C1). Border fg is `accent` blended 50% toward the
-surface's bg (`FloatBorder` when the scheme defines it). A float's title
+ships no third border set (amended 2026-08-21, C1). Border fg is `accent`
+blended 50% toward the surface's bg (`FloatBorder` when the scheme defines
+it). A float's title
 renders inside the top border run, space-padded, in **`FloatTitle` fg,
 bold** — amended from `accent` fg at the P4 exit drain (2026-08-09,
 coordinator ruling, reported to the user): the `accent` vocabulary below is
