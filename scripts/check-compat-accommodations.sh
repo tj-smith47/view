@@ -52,8 +52,11 @@ REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # accumulated status cannot outlive it
 scan() {
   scan_status=0
+  scanned_files=0
+  walked_markers=0
   while read -r file; do
-    awk -v file="$file" '
+    scanned_files=$((scanned_files + 1))
+    findings=$(awk -v file="$file" '
       function indent_of(line,   n) {
         n = match(line, /[^ \t]/)
         return n == 0 ? 0 : n - 1
@@ -62,6 +65,10 @@ scan() {
       # than it; anything at or left of that indent has closed it
       gated && indent_of($0) <= gate_indent && $0 ~ /[^ \t]/ { gated = 0 }
       /--[ \t]*view-compat-accommodation:/ {
+        # counted on the walk so the caller can hold it against an
+        # independent count of the same markers: a walk that stops reaching
+        # part of the tree otherwise reports a clean scan of nothing
+        print "MARKER"
         pending = NR
         next
       }
@@ -90,8 +97,32 @@ scan() {
         }
         exit bad ? 1 : 0
       }
-    ' "$file" || scan_status=1
+    ' "$file") || scan_status=1
+    while read -r line; do
+      case "$line" in
+        MARKER) walked_markers=$((walked_markers + 1)) ;;
+        '') ;;
+        *) printf '%s\n' "$line" >&2 ;;
+      esac
+    done <<EOF
+$findings
+EOF
   done < <(find "$1" -name '*.lua' -type f | sort)
+
+  if [ "$scanned_files" -eq 0 ]; then
+    printf 'ACCOMMODATION FAIL: no .lua file under %s -- the scan enforced nothing\n' "$1" >&2
+    return 1
+  fi
+  # the same markers counted a second way, by a tool that shares no code with
+  # the walk above: the two numbers parting is how a walk that has stopped
+  # reaching part of the tree says so, instead of passing it silently
+  grepped=$(find "$1" -name '*.lua' -type f -exec \
+    grep -hoE -- '--[[:space:]]*view-compat-accommodation:' {} + | wc -l | tr -d ' ')
+  if [ "$walked_markers" -ne "$grepped" ]; then
+    printf 'ACCOMMODATION FAIL: the walk reached %s accommodation markers under %s but a plain grep finds %s\n' \
+      "$walked_markers" "$1" "$grepped" >&2
+    return 1
+  fi
   return "$scan_status"
 }
 
@@ -112,10 +143,13 @@ for case_file in "$CASES"/*.lua; do
     printf 'ACCOMMODATION FAIL: no case fixtures under %s\n' "$CASES" >&2
     exit 1
   }
-  case_dir=$(dirname -- "$case_file")
   name=$(basename -- "$case_file")
-  # one file per scan, so a case cannot pass on another case's output
-  work=$(mktemp -d) || exit 1
+  # one file per scan, so a case cannot pass on another case's output.
+  # Scratch under the repo's own target/ rather than $TMPDIR: this host
+  # shares a small tmpfs between parallel jobs that clobber each other.
+  work="$REPO_ROOT/target/compat-accommodation-cases/$$-$name"
+  rm -rf -- "$work"
+  mkdir -p -- "$work" || exit 1
   cp -- "$case_file" "$work/"
   bash "$0" --root "$work" >/dev/null 2>&1
   rc=$?
@@ -139,4 +173,18 @@ for case_file in "$CASES"/*.lua; do
       ;;
   esac
 done
+
+# The case matrix cannot express this one: a directory holding no Lua at all
+# has no file to name after `good-`/`bad-`, and a scan of it passing would be
+# the checker reporting on a tree it never read.
+empty="$REPO_ROOT/target/compat-accommodation-cases/$$-empty"
+rm -rf -- "$empty"
+mkdir -p -- "$empty" || exit 1
+bash "$0" --root "$empty" >/dev/null 2>&1
+rc=$?
+rm -rf -- "$empty"
+if [ "$rc" -eq 0 ]; then
+  printf 'ACCOMMODATION FAIL: a scan that reached no .lua file must not pass\n' >&2
+  status=1
+fi
 exit "$status"

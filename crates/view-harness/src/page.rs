@@ -108,6 +108,18 @@ pub fn render_page(results: &ResultsFile, current_pin: &str) -> Result<RenderedP
          whose scenario has no fixture or whose fixture lockfile does not \
          name the plugin.\n\n",
     );
+    page.push_str("## Reading a result cell\n\n");
+    page.push_str(
+        "`OK (engine-noise subtracted: ...)` is a row whose state runs the \
+         user's own configuration unadjusted: its epilogue subtracts exactly \
+         the errors the pinned engine raises on that same configuration with \
+         no `view` involved, and the cell names every line it subtracted. \
+         `EXPECTED FAILURE` is a row the suite expects red today, listed in \
+         the runner's own expected-red manifest and carrying what has to \
+         become true for it to go green; the run fails if such a row passes, \
+         so the manifest cannot outlive the defect. `FAILED` is an unplanned \
+         red and fails the run.\n\n",
+    );
     page.push_str("## Staleness rule\n\n");
     page.push_str(
         "Every engine-pin bump re-runs the matrix and re-dates this page. \
@@ -221,8 +233,18 @@ mod tests {
         skipped.plugin_version = None;
         skipped.fixture = None;
         skipped.detail = Some("VIEW_DAILY_CONFIG is unset".to_string());
+        let mut expected = row("fidget", "fidget");
+        expected.state = "unaccommodated".to_string();
+        expected.status = ScenarioStatus::ExpectedFailure;
+        expected.failing_step = Some(3);
+        expected.detail = Some(
+            "expected red until view raises its own notice: E5108 in the notifier".to_string(),
+        );
+        let mut subtracted = row("neo-tree", "neo-tree");
+        subtracted.state = "unaccommodated".to_string();
+        subtracted.detail = Some("engine-noise subtracted: E216: No such group".to_string());
         ResultsFile {
-            results: vec![ok, failed, skipped],
+            results: vec![ok, failed, skipped, expected, subtracted],
         }
     }
 
@@ -264,7 +286,7 @@ mod tests {
     #[test]
     fn renders_one_table_row_per_result_in_run_order() {
         let page = render_page(&sample(), "v0.12.4").expect("matching pin must render");
-        assert_eq!(page.rows, 3);
+        assert_eq!(page.rows, 5);
         assert_eq!(page.engine_pin, "v0.12.4");
         assert!(page
             .markdown
@@ -279,6 +301,19 @@ mod tests {
         assert!(page.markdown.contains(
             "| daily-config | - | v0.12.4 | daily-config | present | \
              SKIPPED: VIEW_DAILY_CONFIG is unset | 2026-07-19 |"
+        ));
+        // A planned red and a subtraction are only evidence if the committed
+        // page says so in its own words -- a row that renders as a plain
+        // FAILED or a plain OK is the suppression these two states exist to
+        // end, moved into the artifact.
+        assert!(page.markdown.contains(
+            "| fidget | abc1234 | v0.12.4 | fidget | unaccommodated | \
+             EXPECTED FAILURE: expected red until view raises its own notice: \
+             E5108 in the notifier | 2026-07-19 |"
+        ));
+        assert!(page.markdown.contains(
+            "| neo-tree | abc1234 | v0.12.4 | neo-tree | unaccommodated | \
+             OK (engine-noise subtracted: E216: No such group) | 2026-07-19 |"
         ));
         let lualine_pos = page
             .markdown

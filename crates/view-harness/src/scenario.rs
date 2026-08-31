@@ -50,6 +50,26 @@ const REQUIRED_UI_OWNING_STATES: [&str; 4] =
 /// unmistakably reviewable act, not a quiet flag flip.
 const COLD_BOOTSTRAP_STEM: &str = "cold-bootstrap";
 
+/// The `(scenario file stem, state name)` pairs authorized to run without
+/// the fixture's accommodations *besides* `"unaccommodated"`, which declines
+/// them by definition.
+///
+/// `accommodations = false` is not a preference: it swaps the zero-error
+/// epilogue from "this config raises nothing" to "this config raises nothing
+/// the pinned engine did not already raise on its own", and the second bar
+/// is the weaker of the two. Left as an open boolean, one word in a TOML
+/// file could relax any state's epilogue with nothing in the tree recording
+/// that it happened -- so the population that may take the differential form
+/// is enumerated here, keyed on a filename the way
+/// [`COLD_BOOTSTRAP_STEM`] is, and a state joining it is an edit to this
+/// array rather than to a line nobody re-reads.
+///
+/// `noice`'s `deferred` state is the one member: it carries the remedy a
+/// conflict notice points a user at, and a remedy proven only on a config
+/// this harness had already adapted proves nothing about the config the user
+/// is actually holding.
+const UNADJUSTED_STATES: [(&str, &str); 1] = [("noice", "deferred")];
+
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
 
@@ -258,6 +278,27 @@ pub enum ScenarioError {
          cold_bootstrap and declare the required ui-owning states instead"
     )]
     UnauthorizedColdBootstrap,
+    /// A state other than `unaccommodated` set `accommodations = false`
+    /// without its `(file stem, state)` pair appearing in
+    /// [`UNADJUSTED_STATES`]: the differential epilogue that flag selects is
+    /// the weaker of the two bars, so which states run under it is an
+    /// enumerated population rather than a per-file choice.
+    #[error(
+        "state {state:?} sets accommodations = false, which is authorized only for \
+         \"unaccommodated\" and for the (file, state) pairs UNADJUSTED_STATES names \
+         (this file's stem: {stem:?})"
+    )]
+    UnauthorizedAccommodationDecline { state: String, stem: String },
+    /// A state set `accommodations = false` in a scenario with no fixture at
+    /// all: there are no accommodations to decline, and the epilogue's
+    /// reference leg has no fixture config to read, so the state would
+    /// silently fall back to baselining the session under test against its
+    /// own startup -- the suppression the unadjusted states exist to end.
+    #[error(
+        "state {state:?} sets accommodations = false but its scenario names no fixture; \
+         a state can only decline accommodations a fixture actually makes"
+    )]
+    AccommodationDeclineWithoutFixture { state: String },
     /// A step set zero, or more than one, of its mutually exclusive action
     /// fields (`send` / `wait_for` / `wait_for_cell` / `assert_absent` /
     /// `assert_cell_not` / `probe` / `wait_for_probe`).
@@ -529,6 +570,40 @@ fn validate_state_completeness(
     Ok(())
 }
 
+/// Fails unless every state that declines the fixture's accommodations is
+/// authorized to: `unaccommodated` always is, any other state only through
+/// [`UNADJUSTED_STATES`], and none of them in a scenario with no fixture to
+/// decline accommodations from (`fixture` being the scenario's own, which a
+/// state may override with one of its own).
+fn check_accommodation_declines(
+    fixture: Option<&str>,
+    source_stem: Option<&str>,
+    states: &[ScenarioStateEntry],
+) -> Result<(), ScenarioError> {
+    for state in states.iter().filter(|state| !state.accommodations) {
+        let name = state_name(state.name);
+        if fixture.is_none() && state.fixture.is_none() {
+            return Err(ScenarioError::AccommodationDeclineWithoutFixture {
+                state: name.to_string(),
+            });
+        }
+        if state.name == ScenarioState::Unaccommodated {
+            continue;
+        }
+        let stem = source_stem.unwrap_or_default();
+        if !UNADJUSTED_STATES
+            .iter()
+            .any(|(listed_stem, listed_state)| *listed_stem == stem && *listed_state == name)
+        {
+            return Err(ScenarioError::UnauthorizedAccommodationDecline {
+                state: name.to_string(),
+                stem: stem.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Parses and validates one scenario from its raw TOML text, `source_stem`
 /// being the filename stem [`check_cold_bootstrap_authorization`] checks a
 /// `cold_bootstrap = true` flag against.
@@ -544,6 +619,7 @@ fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile,
         .map(validate_state_entry)
         .collect::<Result<Vec<_>, _>>()?;
     check_cold_bootstrap_authorization(raw.cold_bootstrap, source_stem)?;
+    check_accommodation_declines(raw.fixture.as_deref(), source_stem, &states)?;
     validate_state_completeness(class, raw.cold_bootstrap, &states)?;
 
     Ok(ScenarioFile {
@@ -568,7 +644,7 @@ fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile,
 /// field, [`ScenarioError::UnsupportedSchema`] if `schema` is not
 /// [`SUPPORTED_SCHEMA`], [`ScenarioError::UnknownClass`]/[`ScenarioError::UnsupportedState`]
 /// if `class`/a state's `name` do not name a recognized value,
-/// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]/[`ScenarioError::UnauthorizedColdBootstrap`]
+/// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]/[`ScenarioError::UnauthorizedColdBootstrap`]/[`ScenarioError::UnauthorizedAccommodationDecline`]/[`ScenarioError::AccommodationDeclineWithoutFixture`]
 /// if the `states` list itself is invalid, or any of the per-step errors
 /// [`validate_step`] can raise.
 pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
@@ -619,6 +695,7 @@ steps = [
 schema = 1
 plugin = "lualine"
 class = "ui-owning"
+fixture = "heavy"
 
 [[states]]
 name = "unaccommodated"
@@ -862,8 +939,17 @@ states = []
         );
     }
 
+    /// `VALID_UI_OWNING` with its `deferred` state declining accommodations,
+    /// the shape [`UNADJUSTED_STATES`] authorizes for one named file.
+    fn ui_owning_with_unadjusted_deferred() -> String {
+        VALID_UI_OWNING.replace(
+            "name = \"deferred\"\nnative = { statusline = false }",
+            "name = \"deferred\"\naccommodations = false\nnative = { statusline = false }",
+        )
+    }
+
     #[test]
-    fn a_state_can_decline_accommodations_under_any_name() {
+    fn a_state_beyond_unaccommodated_declines_accommodations_only_where_listed() {
         let scenario = parse(VALID_UI_OWNING).expect("VALID_UI_OWNING must parse");
         let by_name = |want: ScenarioState| {
             scenario
@@ -875,12 +961,23 @@ states = []
         assert!(!by_name(ScenarioState::Unaccommodated).accommodations);
         assert!(by_name(ScenarioState::Deferred).accommodations);
 
-        let deferred_unadjusted = VALID_UI_OWNING.replace(
-            "name = \"deferred\"\nnative = { statusline = false }",
-            "name = \"deferred\"\naccommodations = false\nnative = { statusline = false }",
+        // The one-word relaxation the enumerated population exists to catch:
+        // the same edit is a hard load error in a file the array does not
+        // name, and loads in the file it does.
+        let toml = ui_owning_with_unadjusted_deferred();
+        let err = parse_from(&toml, Some("lualine")).expect_err(
+            "an unlisted file must not relax its deferred state's epilogue by one TOML word",
         );
-        let scenario =
-            parse(&deferred_unadjusted).expect("deferred may decline accommodations too");
+        assert!(
+            matches!(
+                err,
+                ScenarioError::UnauthorizedAccommodationDecline { ref state, ref stem }
+                    if state == "deferred" && stem == "lualine"
+            ),
+            "expected UnauthorizedAccommodationDecline for lualine/deferred, got {err:?}"
+        );
+        let scenario = parse_from(&toml, Some("noice"))
+            .expect("UNADJUSTED_STATES names noice/deferred, which must load");
         assert!(
             !scenario
                 .states
@@ -888,6 +985,44 @@ states = []
                 .find(|state| state.name == ScenarioState::Deferred)
                 .expect("the deferred state must survive the rewrite")
                 .accommodations
+        );
+    }
+
+    #[test]
+    fn a_stemless_parse_cannot_claim_an_unadjusted_state() {
+        // parse() carries no filename, so the authorization it would have to
+        // match against is unavailable -- the same closure
+        // cold_bootstrap = true gets.
+        let err = parse(&ui_owning_with_unadjusted_deferred())
+            .expect_err("parse() must not authorize a listed pair it cannot identify");
+        assert!(
+            matches!(err, ScenarioError::UnauthorizedAccommodationDecline { .. }),
+            "expected UnauthorizedAccommodationDecline, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_fixtureless_scenario_cannot_decline_accommodations() {
+        // The fixture-less arm primes a live daily config and baselines the
+        // session against its own startup; a state declining accommodations
+        // there would take the differential epilogue's name with none of its
+        // reference leg behind it.
+        let toml = VALID.replace("fixture = \"heavy\"\n", "").replace(
+            "[[states]]\nname = \"present\"",
+            "[[states]]\nname = \"present\"\naccommodations = false",
+        );
+        assert!(
+            !toml.contains("fixture ="),
+            "the rewrite must leave no fixture for this test to mean anything"
+        );
+        let err = parse(&toml).expect_err("a fixture-less state has no accommodations to decline");
+        assert!(
+            matches!(
+                err,
+                ScenarioError::AccommodationDeclineWithoutFixture { ref state }
+                    if state == "present"
+            ),
+            "expected AccommodationDeclineWithoutFixture, got {err:?}"
         );
     }
 
@@ -946,6 +1081,65 @@ states = []
             "no ui-owning scenario was reached in {} -- the walk found nothing to enforce",
             dir.display()
         );
+    }
+
+    /// The other half of the walk above: every scenario of every class, and
+    /// every state in it, held to [`UNADJUSTED_STATES`]. The loader already
+    /// refuses an unlisted decline, so this is the population's own census --
+    /// it fails on a listed pair whose file or state has since gone, which is
+    /// how a stale entry that would silently authorize nothing gets found.
+    #[test]
+    fn only_the_listed_states_run_without_the_fixtures_accommodations() {
+        let dir = crate::fixture::workspace_root()
+            .join("compat")
+            .join("scenarios");
+        let mut declining: Vec<(String, &'static str)> = Vec::new();
+        let mut states_seen = 0_usize;
+        for entry in std::fs::read_dir(&dir).expect("compat/scenarios must be readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("a scenario file has a UTF-8 stem")
+                .to_string();
+            let scenario = load_file(&path).unwrap_or_else(|err| {
+                panic!("{} must load: {err}", path.display());
+            });
+            for state in &scenario.states {
+                states_seen += 1;
+                if state.accommodations {
+                    continue;
+                }
+                assert!(
+                    state.name == ScenarioState::Unaccommodated
+                        || UNADJUSTED_STATES
+                            .iter()
+                            .any(|(s, n)| *s == stem && *n == state_name(state.name)),
+                    "{} runs its {:?} state without the fixture's accommodations; add the pair \
+                     to UNADJUSTED_STATES with its grounds, or restore them",
+                    path.display(),
+                    state_name(state.name)
+                );
+                declining.push((stem.clone(), state_name(state.name)));
+            }
+        }
+        assert!(
+            states_seen > 0,
+            "no scenario state was reached in {} -- the walk found nothing to enforce",
+            dir.display()
+        );
+        for (stem, state) in UNADJUSTED_STATES {
+            assert!(
+                declining
+                    .iter()
+                    .any(|(seen_stem, seen_state)| seen_stem == stem && *seen_state == state),
+                "UNADJUSTED_STATES names {stem}/{state}, which no scenario file declares as \
+                 declining accommodations"
+            );
+        }
     }
 
     #[test]

@@ -490,6 +490,15 @@ fn accommodations_env(state: &ScenarioStateEntry) -> Option<&'static str> {
     }
 }
 
+/// `home` with `-reference` appended: the reference leg's own copy of one of
+/// the session's XDG homes, a sibling inside the same hermetic directory so
+/// the scenario's existing scratch cleanup reclaims it too.
+fn reference_sibling(home: &Path) -> PathBuf {
+    let mut name = home.file_name().unwrap_or_default().to_os_string();
+    name.push("-reference");
+    home.with_file_name(name)
+}
+
 /// The [`ErrorBaseline`] the zero-error epilogue should subtract for
 /// `state`, or `None` for the strict, subtract-nothing form.
 ///
@@ -512,9 +521,14 @@ fn epilogue_reference(
     let NvimBin(nvim_bin) = nvim_bin;
     let mut cmd = std::process::Command::new(nvim_bin);
     cmd.env("XDG_CONFIG_HOME", &ready.xdg_config_home);
+    // The same config and the same plugin cache the session under test
+    // reads, so the two legs answer the same question -- but its own state
+    // and cache homes: the reference runs first, and a shared state home
+    // would let it write the shada and plugin-manager state that make the
+    // session's own launch no longer the first one this config ever had.
     cmd.env("XDG_DATA_HOME", &ready.xdg_data_home);
-    cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
-    cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
+    cmd.env("XDG_STATE_HOME", reference_sibling(&ready.xdg_state_home));
+    cmd.env("XDG_CACHE_HOME", reference_sibling(&ready.xdg_cache_home));
     // the fixture's first statement is a serverstart on this name; the
     // reference run is never a probe client, but the call must still have
     // somewhere to land, and a name of its own keeps it off the socket the
@@ -581,6 +595,31 @@ fn run_scenario(
         }
     };
 
+    // The fixture-less arm has no fixture whose accommodations a state could
+    // decline, and it baselines against the session's own startup instead of
+    // a reference leg -- so a state pairing the two would carry the
+    // differential epilogue's name with none of its evidence. The scenario
+    // loader rejects that pairing outright; this arm is what keeps the two
+    // halves from drifting apart quietly if it ever stops.
+    if ready.needs_priming && !state.accommodations {
+        return Ok(scenario_result(
+            scenario_path,
+            scenario,
+            state,
+            pin,
+            ScenarioOutcome {
+                status: ScenarioStatus::Failed,
+                failing_step: None,
+                detail: Some(
+                    "a fixture-less scenario cannot decline accommodations: there is no \
+                     reference leg to subtract, and self-baselining would answer the \
+                     question with the session under test"
+                        .to_string(),
+                ),
+                elapsed_ms: start.elapsed().as_millis(),
+            },
+        ));
+    }
     // Before the session under test starts, so an engine that cannot even
     // read this config is reported as that, rather than as whatever the
     // session then fails on.
@@ -756,10 +795,14 @@ fn run_scenario(
     // evidence file: a subtraction nobody can see is the suppression this
     // whole state exists to end, moved one layer down.
     if status == ScenarioStatus::Ok && !subtracted.is_empty() {
-        detail = Some(format!(
-            "engine-noise subtracted: {}",
-            subtracted.join("; ")
-        ));
+        let note = format!("engine-noise subtracted: {}", subtracted.join("; "));
+        // appended, never assigned: whatever else a row has to say about
+        // itself is the row's own evidence too, and a note that overwrites
+        // it trades one visible fact for another
+        detail = Some(match detail {
+            Some(existing) => format!("{existing}; {note}"),
+            None => note,
+        });
     }
     Ok(scenario_result(
         scenario_path,
@@ -800,8 +843,9 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
         .collect()
 }
 
-/// The `(scenario stem, state, clearing task)` rows this suite expects to
-/// be red, each with the task whose landing turns it green:
+/// The `(scenario stem, state, clearing task, what clearing it means)` rows
+/// this suite expects to be red, each with the task whose landing turns it
+/// green:
 ///
 /// - `noice`/`unaccommodated` asserts the single conflict notice `view`
 ///   raises when a plugin claims a surface it has externalized, and the
@@ -818,9 +862,25 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
 /// red only because the engine makes the same noise on its own -- that is
 /// [`epilogue_reference`]'s job, and a row parked here instead would be
 /// exactly the suppression the unaccommodated state exists to end.
-const EXPECTED_RED: [(&str, &str, &str); 2] = [
-    ("noice", "unaccommodated", "T19"),
-    ("noice", "deferred", "T8"),
+///
+/// The fourth field is what a reader of the published evidence page needs:
+/// the row's cell there says what has to become true for it to go green, in
+/// terms of the product, since the plan marker beside it means nothing
+/// outside this repo's own planning notes.
+const EXPECTED_RED: [(&str, &str, &str, &str); 2] = [
+    (
+        "noice",
+        "unaccommodated",
+        "T19",
+        "view raises its own conflict notice on a default first launch",
+    ),
+    (
+        "noice",
+        "deferred",
+        "T8",
+        "the engine's externalized UI extensions follow [native], so an \
+         opted-out surface attaches nothing",
+    ),
 ];
 
 /// The scenario file's own stem -- not `plugin`, since two scenario files
@@ -834,40 +894,55 @@ fn scenario_stem(result: &ScenarioResult) -> &str {
         .unwrap_or(result.scenario_path.as_str())
 }
 
-/// The task that clears `result`'s row, if [`EXPECTED_RED`] names it.
-fn expected_red_task(result: &ScenarioResult) -> Option<&'static str> {
+/// What has to become true for `result`'s row to go green, if
+/// [`EXPECTED_RED`] names it -- the row's own words, not the plan marker
+/// beside them, since these strings are stamped into an evidence page read
+/// outside this repo's planning notes.
+fn expected_red_clears_when(result: &ScenarioResult) -> Option<&'static str> {
     let stem = scenario_stem(result);
     EXPECTED_RED
         .iter()
-        .find(|(scenario, state, _)| *scenario == stem && *state == result.state)
-        .map(|(_, _, task)| *task)
+        .find(|(scenario, state, _, _)| *scenario == stem && *state == result.state)
+        .map(|(_, _, _, clears_when)| *clears_when)
 }
 
 /// Reconciles one row against [`EXPECTED_RED`], in place: a listed red
-/// becomes [`ScenarioStatus::ExpectedFailure`] carrying the task that
-/// clears it, and a listed row that passed becomes a
-/// [`ScenarioStatus::Failed`] naming the manifest as the thing to fix.
-/// Everything else is left exactly as the run reported it.
+/// becomes [`ScenarioStatus::ExpectedFailure`] carrying what clears it, and
+/// a listed row that passed becomes a [`ScenarioStatus::Failed`] naming the
+/// manifest as the thing to fix. Everything else is left exactly as the run
+/// reported it.
 fn apply_red_expectation(result: &mut ScenarioResult) {
-    let Some(task) = expected_red_task(result) else {
+    let Some(clears_when) = expected_red_clears_when(result) else {
         return;
     };
     match result.status {
         ScenarioStatus::Failed => {
             result.status = ScenarioStatus::ExpectedFailure;
             result.detail = Some(format!(
-                "expected red until {task}: {}",
+                "expected red until {clears_when}: {}",
                 result.detail.as_deref().unwrap_or("unknown failure")
             ));
         }
         ScenarioStatus::Ok => {
             result.status = ScenarioStatus::Failed;
             result.detail = Some(format!(
-                "listed in EXPECTED_RED as red until {task}, but this run passed; drop the row \
-                 from EXPECTED_RED in the commit that turned it green"
+                "listed in EXPECTED_RED as red until {clears_when}, but this run passed; drop \
+                 the row from EXPECTED_RED in the commit that turned it green"
             ));
         }
-        ScenarioStatus::ExpectedFailure | ScenarioStatus::Skipped => {}
+        ScenarioStatus::Skipped => {
+            // A manifest row has to name a state that actually runs. Honoring
+            // a skip would let a row survive its own scenario becoming
+            // unrunnable, and the manifest would then be asserting a red
+            // nothing has produced in months.
+            result.status = ScenarioStatus::Failed;
+            result.detail = Some(format!(
+                "listed in EXPECTED_RED as red until {clears_when}, but this run skipped it \
+                 ({}); a manifest row must name a state that runs",
+                result.detail.as_deref().unwrap_or("no reason given")
+            ));
+        }
+        ScenarioStatus::ExpectedFailure => {}
     }
 }
 
@@ -1118,9 +1193,10 @@ mod tests {
         apply_red_expectation(&mut result);
         assert_eq!(result.status, ScenarioStatus::ExpectedFailure);
         let detail = result.detail.expect("an expected-red row keeps its detail");
+        let (_, _, _, clears_when) = EXPECTED_RED[0];
         assert!(
-            detail.contains("expected red until T19") && detail.contains("some failure"),
-            "the row must name its clearing task and keep the original failure: {detail}"
+            detail.contains(clears_when) && detail.contains("some failure"),
+            "the row must say what clears it and keep the original failure: {detail}"
         );
     }
 
@@ -1138,6 +1214,24 @@ mod tests {
     }
 
     #[test]
+    fn a_listed_row_that_skips_fails_rather_than_counting_as_its_own_red() {
+        // The row asserts something about a run; a state that did not run
+        // asserts nothing, and honoring the skip would let the manifest
+        // outlive the scenario it names.
+        let mut result = red_row("noice", "deferred", ScenarioStatus::Skipped);
+        result.detail = Some("VIEW_DAILY_CONFIG is unset".to_string());
+        apply_red_expectation(&mut result);
+        assert_eq!(result.status, ScenarioStatus::Failed);
+        let detail = result
+            .detail
+            .expect("a skipped listed row must explain itself");
+        assert!(
+            detail.contains("skipped") && detail.contains("VIEW_DAILY_CONFIG is unset"),
+            "the row must say it skipped and keep the skip's own reason: {detail}"
+        );
+    }
+
+    #[test]
     fn an_unlisted_red_row_still_fails() {
         let mut result = red_row("lualine", "unaccommodated", ScenarioStatus::Failed);
         apply_red_expectation(&mut result);
@@ -1150,7 +1244,7 @@ mod tests {
     /// and that no run can ever contradict.
     #[test]
     fn every_expected_red_row_names_a_state_that_actually_exists() {
-        for (scenario, state, task) in EXPECTED_RED {
+        for (scenario, state, task, _) in EXPECTED_RED {
             let path = workspace_root()
                 .join("compat")
                 .join("scenarios")

@@ -362,12 +362,24 @@ pub enum CompatError {
     #[error("unsupported key notation <{token}>: {reason}")]
     UnsupportedKeyNotation { token: String, reason: &'static str },
     /// The epilogue's reference leg ([`engine_error_reference`]) ran the
-    /// pinned engine on the scenario's own config but never wrote both
-    /// marked surfaces: without it there is no way to tell the config's own
-    /// noise from a compat defect, so the scenario fails here rather than
+    /// pinned engine on the scenario's own config but did not write both of
+    /// its marked captures: without them there is no way to tell the config's
+    /// own noise from a compat defect, so the scenario fails here rather than
     /// falling back to a comparison that would report one as the other.
-    #[error("engine reference run produced no capture: {stderr}")]
-    EngineReferenceFailed { stderr: String },
+    #[error("engine reference run produced {captures} of 2 captures: {stderr}")]
+    EngineReferenceFailed {
+        /// How many complete captures the run did write, which separates a
+        /// run that never started from one cut short mid-window.
+        captures: usize,
+        stderr: String,
+    },
+    /// The reference run's two captures disagree on which errors the config
+    /// raised: it was still raising them when the settle window closed, so
+    /// the window is too short for this config and the baseline it produced
+    /// would be an undercount -- subtracting it would leave the config's own
+    /// late noise looking exactly like a compat defect.
+    #[error("engine reference run had not settled: early [{early}] then [{settled}]")]
+    EngineReferenceUnsettled { early: String, settled: String },
     /// The reference engine did not exit within its own bound and was
     /// killed -- the config wedges the engine on its own, before `view` is
     /// involved at all.
@@ -935,15 +947,17 @@ impl ErrorBaseline {
     /// what counts as an error.
     #[must_use]
     pub fn subtracted_errors(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .messages
+        // a set, not a deduplicated Vec: the two surfaces are chained, so
+        // the same line arriving from both is only adjacent when nothing
+        // else sits between them, and this text is the row's own evidence
+        self.messages
             .lines()
             .chain(self.errmsg.lines())
             .filter(|line| is_error_line(line))
             .map(str::to_string)
-            .collect();
-        out.dedup();
-        out
+            .collect::<std::collections::BTreeSet<String>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -964,7 +978,20 @@ const REFERENCE_END_MARK: &str = ">>>VIEW-COMPAT-END";
 /// construction -- an extra line only ever excuses something the engine
 /// genuinely produced on its own -- while under-capturing leaves a false
 /// red, so this window is deliberately longer than the deferral it covers.
+///
+/// Nothing about that length is assumed: the run captures twice, and
+/// [`CompatError::EngineReferenceUnsettled`] fails the leg when the two
+/// captures disagree on which errors the config raised. A window too short
+/// for the config in front of it therefore says so on the run that met it,
+/// rather than leaving a false red that looks exactly like a compat defect.
 const REFERENCE_SETTLE: Duration = Duration::from_millis(3_000);
+
+/// When the reference run takes its *first* capture -- the other side of
+/// the pair [`REFERENCE_SETTLE`]'s adequacy is checked against. Early
+/// enough that a config still raising errors during the window is caught by
+/// the disagreement, late enough that the two captures are not simply taken
+/// in the same scheduler tick.
+const REFERENCE_SETTLE_EARLY: Duration = Duration::from_millis(500);
 
 /// Bound on the whole reference run. Generous relative to the settle window
 /// above plus a warm plugin-manager startup, short enough that a config
@@ -991,51 +1018,91 @@ const REFERENCE_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// Returns [`CompatError::Io`] if the engine cannot be spawned,
 /// [`CompatError::EngineReferenceFailed`] if it exits without writing both
-/// marked surfaces, and [`CompatError::EngineReferenceTimedOut`] if it does
-/// not exit within [`REFERENCE_TIMEOUT`].
+/// of its marked captures, [`CompatError::EngineReferenceUnsettled`] if the
+/// two captures disagree on which errors the config raised, and
+/// [`CompatError::EngineReferenceTimedOut`] if it does not exit within
+/// [`REFERENCE_TIMEOUT`].
 pub fn engine_error_reference(mut cmd: Command) -> Result<ErrorBaseline, CompatError> {
     crate::pty::make_hermetic(&mut cmd)?;
+    let early = REFERENCE_SETTLE_EARLY.as_millis();
     let settle = REFERENCE_SETTLE.as_millis();
     // -c runs after the config has been sourced, which is what makes the
     // deferred-setup window above start where it should; the same command
     // given to --cmd would arm before lazy.nvim's own synchronous LazyDone
     // and measure a window that had not begun yet.
     cmd.arg("--headless").arg("-c").arg(format!(
-        "lua vim.defer_fn(function() \
+        "lua local dump = function() \
            io.stdout:write('{REFERENCE_MESSAGES_MARK}\\n' .. vim.fn.execute('messages') .. \
-           '\\n{REFERENCE_ERRMSG_MARK}\\n' .. vim.v.errmsg .. '\\n{REFERENCE_END_MARK}\\n') \
-           vim.cmd('qa!') end, {settle})"
+           '\\n{REFERENCE_ERRMSG_MARK}\\n' .. vim.v.errmsg .. '\\n{REFERENCE_END_MARK}\\n') end \
+           vim.defer_fn(dump, {early}) \
+           vim.defer_fn(function() dump() vim.cmd('qa!') end, {settle})"
     ));
+    run_engine_reference(cmd, REFERENCE_TIMEOUT)
+}
+
+/// [`engine_error_reference`] minus the engine-specific arguments: spawns
+/// `cmd`, waits for it under `timeout`, and reads its captures. Split out so
+/// the three failure arms are reachable from a test with no engine on
+/// `PATH` and no 120-second wait.
+fn run_engine_reference(mut cmd: Command, timeout: Duration) -> Result<ErrorBaseline, CompatError> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let output = wait_with_timeout(cmd.spawn()?, REFERENCE_TIMEOUT)?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let Some(baseline) = parse_engine_reference(&stdout) else {
-        if output.status.code().is_none() && output.stdout.is_empty() {
-            return Err(CompatError::EngineReferenceTimedOut {
-                timeout: REFERENCE_TIMEOUT,
-            });
+    // wait_with_timeout speaks in the probe channel's own error, since that
+    // is its other caller; naming the cause here is what keeps this
+    // function's documented contract true, the same remap CompatSession's
+    // probe applies for its own expression
+    let output = wait_with_timeout(cmd.spawn()?, timeout).map_err(|err| match err {
+        CompatError::ProbeTimedOut { timeout, .. } => {
+            CompatError::EngineReferenceTimedOut { timeout }
         }
+        other => other,
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let captures = parse_engine_references(&stdout);
+    let [early, settled] = captures.as_slice() else {
         return Err(CompatError::EngineReferenceFailed {
+            captures: captures.len(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     };
-    Ok(baseline)
+    if early.subtracted_errors() != settled.subtracted_errors() {
+        return Err(CompatError::EngineReferenceUnsettled {
+            early: early.subtracted_errors().join("; "),
+            settled: settled.subtracted_errors().join("; "),
+        });
+    }
+    Ok(ErrorBaseline {
+        messages: settled.messages.clone(),
+        errmsg: settled.errmsg.clone(),
+    })
 }
 
-/// Splits [`engine_error_reference`]'s captured stdout on its three marks,
-/// or `None` if the run never wrote them. Separated from the spawn so the
-/// parse is testable without an engine on `PATH`.
-fn parse_engine_reference(stdout: &str) -> Option<ErrorBaseline> {
-    let after_messages = stdout.split_once(REFERENCE_MESSAGES_MARK)?.1;
-    let (messages, rest) = after_messages.split_once(REFERENCE_ERRMSG_MARK)?;
-    let (errmsg, _) = rest.split_once(REFERENCE_END_MARK)?;
-    Some(ErrorBaseline {
-        messages: messages.trim_matches('\n').to_string(),
-        errmsg: errmsg.trim_matches('\n').to_string(),
-    })
+/// Splits [`engine_error_reference`]'s captured stdout into one
+/// [`ErrorBaseline`] per complete mark triple it wrote, in order. Separated
+/// from the spawn so the parse is testable without an engine on `PATH`; a
+/// truncated trailing capture is dropped rather than half-read, so a run cut
+/// short reports as the wrong number of captures instead of as a config
+/// that raised nothing.
+fn parse_engine_references(stdout: &str) -> Vec<ErrorBaseline> {
+    let mut out = Vec::new();
+    let mut rest = stdout;
+    while let Some((_, after_messages)) = rest.split_once(REFERENCE_MESSAGES_MARK) {
+        let Some((messages, after_errmsg)) = after_messages.split_once(REFERENCE_ERRMSG_MARK)
+        else {
+            break;
+        };
+        let Some((errmsg, tail)) = after_errmsg.split_once(REFERENCE_END_MARK) else {
+            break;
+        };
+        out.push(ErrorBaseline {
+            messages: messages.trim_matches('\n').to_string(),
+            errmsg: errmsg.trim_matches('\n').to_string(),
+        });
+        rest = tail;
+    }
+    out
 }
 
 /// Scans `text` for an E-numbered Vim error (`E` followed by a digit,
@@ -1051,15 +1118,32 @@ fn error_marker(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// [`error_marker`] restricted to lines absent from `baseline`: the
-/// line-delta scan behind [`CompatSession::zero_error_check_since`].
-/// Whole-line set membership (not positional diffing) because `:messages`
-/// only ever appends, and an error line the baseline already held is by
-/// definition not the steps' doing wherever it now sits.
+/// [`error_marker`] restricted to error lines `baseline` does not already
+/// account for: the line-delta scan behind
+/// [`CompatSession::zero_error_check_since`].
+///
+/// Occurrence counts, not set membership. `:messages` only ever appends, so
+/// position carries no information and positional diffing would report
+/// noise -- but multiplicity does: a baseline holding one copy of a line
+/// excuses one copy of it, and the second is as much the session's own doing
+/// as a line the baseline never held at all. Membership alone would let an
+/// error the engine raises once be raised any number of times for free,
+/// which is the whole subtraction quietly inverted for exactly the lines it
+/// is most likely to matter for.
 fn new_error_line(text: &str, baseline: &str) -> Option<String> {
-    let seen: std::collections::HashSet<&str> = baseline.lines().collect();
+    let mut budget: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for line in baseline.lines().filter(|line| is_error_line(line)) {
+        *budget.entry(line).or_default() += 1;
+    }
     text.lines()
-        .find(|line| is_error_line(line) && !seen.contains(line))
+        .filter(|line| is_error_line(line))
+        .find(|line| match budget.get_mut(line) {
+            Some(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                false
+            }
+            _ => true,
+        })
         .map(str::to_string)
 }
 
@@ -1379,28 +1463,31 @@ mod tests {
         }
     }
 
+    /// One reference capture's worth of marked stdout, as the deferred Lua
+    /// dump writes it.
+    fn reference_capture(messages: &str, errmsg: &str) -> String {
+        format!(
+            "{REFERENCE_MESSAGES_MARK}\n{messages}\n{REFERENCE_ERRMSG_MARK}\n{errmsg}\n\
+             {REFERENCE_END_MARK}\n"
+        )
+    }
+
     #[test]
     fn an_engine_reference_capture_splits_into_its_two_surfaces() {
+        let error = "E216: No such group or event: FileExplorer *";
         let stdout = format!(
-            "startup chatter nobody marked\n{REFERENCE_MESSAGES_MARK}\nline one\nE216: No such \
-             group or event: FileExplorer *\n{REFERENCE_ERRMSG_MARK}\nE216: No such group or \
-             event: FileExplorer *\n{REFERENCE_END_MARK}\n"
+            "startup chatter nobody marked\n{}",
+            reference_capture(&format!("line one\n{error}"), error)
         );
-        let baseline = parse_engine_reference(&stdout).expect("both marks are present");
-        assert_eq!(
-            baseline.messages,
-            "line one\nE216: No such group or event: FileExplorer *"
-        );
-        assert_eq!(
-            baseline.errmsg,
-            "E216: No such group or event: FileExplorer *"
-        );
+        let captures = parse_engine_references(&stdout);
+        let [baseline] = captures.as_slice() else {
+            panic!("one complete capture, got {}", captures.len());
+        };
+        assert_eq!(baseline.messages, format!("line one\n{error}"));
+        assert_eq!(baseline.errmsg, error);
         // the same line on both surfaces is subtracted once, and the
         // unmarked chatter above the first mark is not subtracted at all
-        assert_eq!(
-            baseline.subtracted_errors(),
-            vec!["E216: No such group or event: FileExplorer *".to_string()]
-        );
+        assert_eq!(baseline.subtracted_errors(), vec![error.to_string()]);
     }
 
     #[test]
@@ -1409,17 +1496,26 @@ mod tests {
         // produced nothing" would turn every config's own noise back into a
         // red row, silently.
         let truncated = format!("{REFERENCE_MESSAGES_MARK}\nline one\n");
-        assert!(parse_engine_reference(&truncated).is_none());
-        assert!(parse_engine_reference("").is_none());
+        assert!(parse_engine_references(&truncated).is_empty());
+        assert!(parse_engine_references("").is_empty());
+        // a run cut short after its first capture is one capture, not two,
+        // which is what the run rejects rather than settling for
+        let cut_short = format!(
+            "{}{REFERENCE_MESSAGES_MARK}\nline two\n",
+            reference_capture("line one", "")
+        );
+        assert_eq!(parse_engine_references(&cut_short).len(), 1);
     }
 
     #[test]
     fn a_reference_baseline_still_fails_an_error_only_the_session_produced() {
-        let reference = parse_engine_reference(&format!(
-            "{REFERENCE_MESSAGES_MARK}\nE216: No such group or event: FileExplorer \
-             *\n{REFERENCE_ERRMSG_MARK}\n{REFERENCE_END_MARK}\n"
-        ))
-        .expect("both marks are present");
+        let captures = parse_engine_references(&reference_capture(
+            "E216: No such group or event: FileExplorer *",
+            "",
+        ));
+        let [reference] = captures.as_slice() else {
+            panic!("one complete capture, got {}", captures.len());
+        };
         // the engine's own line is subtracted...
         assert_eq!(
             new_error_line(
@@ -1501,6 +1597,89 @@ mod tests {
     fn new_error_line_against_an_empty_baseline_matches_error_marker() {
         let text = "ok line\nE121: Undefined variable: foo";
         assert_eq!(new_error_line(text, ""), error_marker(text));
+    }
+
+    #[test]
+    fn new_error_line_excuses_only_as_many_copies_as_the_baseline_held() {
+        // The masking shape: the engine raises E216 once on its own, and the
+        // session under test raises it twice. Excusing the line by identity
+        // rather than by count makes the second copy -- which only view's
+        // involvement produced -- free.
+        let baseline = "E216: No such group or event: FileExplorer *";
+        let doubled = format!("{baseline}\nsome chatter\n{baseline}");
+        assert_eq!(new_error_line(&doubled, baseline), Some(baseline.into()));
+        // and a baseline that genuinely held it twice still excuses both
+        let baseline_twice = format!("{baseline}\n{baseline}");
+        assert_eq!(new_error_line(&doubled, &baseline_twice), None);
+    }
+
+    #[test]
+    fn a_reference_baseline_names_each_subtracted_error_once() {
+        // The same line reaches subtracted_errors from both surfaces with
+        // another error between them, so nothing about the duplicate is
+        // adjacent.
+        let e216 = "E216: No such group or event: FileExplorer *";
+        let baseline = ErrorBaseline {
+            messages: format!("{e216}\nE121: Undefined variable: foo"),
+            errmsg: e216.to_string(),
+        };
+        assert_eq!(
+            baseline.subtracted_errors(),
+            vec![
+                "E121: Undefined variable: foo".to_string(),
+                e216.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_engine_reference_that_outlives_its_bound_reports_as_the_reference_timing_out() {
+        // Not the probe channel's timeout: the epilogue's caller distinguishes
+        // "this config wedges the engine on its own" from a probe that hung,
+        // and wait_with_timeout speaks in the probe's error for its other
+        // caller.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let result = run_engine_reference(cmd, Duration::from_millis(200));
+        assert!(
+            matches!(result, Err(CompatError::EngineReferenceTimedOut { .. })),
+            "expected EngineReferenceTimedOut, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_engine_reference_that_exits_clean_without_captures_reports_its_stderr() {
+        // Exit status 0 with no marks is the dangerous case: read as "the
+        // config produced nothing" it would turn every config's own noise
+        // into a red row, so the leg fails and hands back what the run said.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo boom >&2");
+        let result = run_engine_reference(cmd, Duration::from_secs(30));
+        let Err(CompatError::EngineReferenceFailed { captures, stderr }) = result else {
+            panic!("expected EngineReferenceFailed, got {result:?}");
+        };
+        assert_eq!(captures, 0);
+        assert!(stderr.contains("boom"), "stderr not carried: {stderr:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_engine_reference_whose_captures_disagree_fails_rather_than_baselining_the_later_one() {
+        // A settle window too short for the config in front of it: the errors
+        // are still arriving when it closes, so the baseline undercounts and
+        // the config's own late noise would look exactly like a compat defect.
+        let early = reference_capture("startup chatter", "");
+        let settled = reference_capture("E216: No such group or event: FileExplorer *", "");
+        let mut cmd = Command::new("printf");
+        cmd.arg("%s").arg(format!("{early}{settled}"));
+        let result = run_engine_reference(cmd, Duration::from_secs(30));
+        let Err(CompatError::EngineReferenceUnsettled { early, settled }) = result else {
+            panic!("expected EngineReferenceUnsettled, got {result:?}");
+        };
+        assert!(early.is_empty(), "early capture held errors: {early:?}");
+        assert!(settled.contains("E216"), "settled capture lost its error");
     }
 
     #[test]
