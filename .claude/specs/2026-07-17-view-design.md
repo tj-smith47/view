@@ -468,32 +468,81 @@ makes the core headless-testable and the oracle cheap.
   DECSCUSR), and the real terminal cursor is positioned at the logical
   cursor — required for IME preedit placement and screen readers, not
   cosmetics.
-- **Terminal capability tiers** (auto-detected via terminfo + capability
-  queries with timeouts; tmux and SSH are first-class detection cases —
-  query through rather than trusting `TERM=screen-256color`, with `doctor`
-  guidance on tmux `allow-passthrough`; overridable):
+- **Terminal capability tiers** (derived from the capability register
+  below, never from a tier guess; tmux and SSH are first-class detection
+  cases — query through rather than trusting `TERM=screen-256color` or a
+  forwarded environment variable, with `doctor` guidance on tmux
+  `allow-passthrough`; overridable via `--tier`/`[ui] tier`):
 
 | Tier | Assumes | Experience |
 |---|---|---|
-| `full` | kitty/ghostty/wezterm-class: synchronized output, truecolor, undercurl, kitty keyboard proto | Everything: rounded borders, animations (cell-eased), curly underlines |
+| `full` | kitty/ghostty/wezterm-class: synchronized output, truecolor, undercurl, kitty keyboard proto | Everything: animations (cell-eased), curly underlines |
 | `standard` | truecolor ANSI, no sync guarantee | Full layout/design, animations off, internal double-buffer against flicker |
-| `basic` | ASCII-safe, no capability replies | Correct and complete, plain borders, no probed refinements |
+| `basic` | no capability replies | Correct and complete, no probed refinements; border charset follows `unicode_boxes` (§7.1), not this tier |
 
-A tier governs what is *probed and assumed* — synchronized output, the kitty
-keyboard protocol, border charset, animation. It does not gate color: every
-tier emits 24-bit SGR, because the grid nvim hands over is 24-bit and a
-palette approximation applied to chrome alone would leave the two halves of
-the screen disagreeing. Terminals that cannot render truecolor degrade the
-SGR themselves, uniformly, which is the only place the approximation can be
-consistent.
+**Capability register (amended 2026-08-21, C1).** Every capability view
+consumes is decided by a probe that carries the fact being asked about.
+An environment variable may be a hint that shortens a probe, never the
+sole oracle: `ssh` forwards neither `COLORTERM` (it is in neither sshd's
+default `AcceptEnv` nor ssh's `SendEnv`) nor most of what a terminal
+knows about itself, so a capability bound to one is a capability that
+silently degrades on every remote session. A capability with no row here
+does not exist: adding one to `TermCaps` without its row is a build
+failure, not a review note.
+
+| Capability | Authoritative probe | Hint (never sole oracle) | Absent/unanswered ⇒ | Gates |
+|---|---|---|---|---|
+| `sync` | DECRQM mode 2026 (`ESC [ ? 2026 $ p`); the DECRPM reply `CSI ? 2026 ; Pm $ y` with `Pm` `1` or `2` | — | `false` | BSU/ESU bracketing |
+| `truecolor` | DECRQSS SGR readback: set a known 24-bit color, read `ESC P $ q m ESC \` back, reply preserves the RGB triple | `COLORTERM=truecolor\|24bit` (decides when the probe is silent; corroborates otherwise) | the `COLORTERM` hint decides | tier, color derivation |
+| `kitty_kbd` | Kitty keyboard progressive-enhancement query (`ESC [ ? u`) | — | `false` | key encoding |
+| `unicode_boxes` | Cursor-position readback (CPR) after writing one box-drawing glyph: advanced exactly one column ⇒ the terminal treats the sequence as one cell (a terminal that is not decoding UTF-8 advances three) | `LANG`/`LC_ALL` naming UTF-8 | `false` | border charset (§7.1) |
+
+A probe answers the question it can actually ask. The `unicode_boxes`
+readback proves the terminal's cell accounting, not the font's coverage:
+a terminal whose font lacks `╭` still advances one column and renders
+tofu. That is the best evidence obtainable from the wire, it is strictly
+better than an environment variable, and the honest reading is "this
+terminal treats a box glyph as one cell" — not "this glyph is legible".
+
+All four ride the one batched startup probe, fenced by DA1 (`ESC [ c`) —
+one write, replies read until the fence answers or the probe deadline
+expires, never repeated and never on the key-dispatch path. The probe's
+cost is inside the §3.1 `shell_visible_ms` budget, which is where a
+regression in it must show up.
+
+**Tier is derived from the register, and gates nothing on its own.** Tier
+is coarse UX vocabulary for the experience table above; behavior gates on
+the individual capability (`sync` for BSU/ESU, `unicode_boxes` for the
+border charset, `truecolor` for color derivation). A capability that a
+tier merely correlates with is not a probe for it.
+
+**The capability line is a diagnostic, not startup output.** The resolved
+register is written to `VIEW_LOG` with the other startup diagnostics on
+every launch. It is printed to the terminal only when the user asked for
+it — `--print-caps`, or a `--tier` override, which is a claim about the
+terminal that deserves an acknowledgement. A line printed unconditionally
+in raw mode before the alternate screen is entered is invisible at
+startup and reappears as debug spew on quit, which is worse than no
+diagnostic at all.
+
+A tier summarizes that register; it is never an input to it (amended
+2026-08-21, C1). Every capability is probed on its own and behavior gates on
+that capability — BSU/ESU on `sync`, the border charset on `unicode_boxes`
+(§7.1), key encoding on `kitty_kbd`. The one thing a tier decides by itself
+is presentation: animation runs on `full` only (§7.1 motion). It does not
+gate color: every tier emits 24-bit SGR, because the grid nvim hands over is
+24-bit and a palette approximation applied to chrome alone would leave the
+two halves of the screen disagreeing. Terminals that cannot render truecolor
+degrade the SGR themselves, uniformly, which is the only place the
+approximation can be consistent.
 
 Degradation is a first-class tested surface (golden snapshots per tier, §13),
 not a fallback apology.
 
 ### 7.1 Design language (drafted 2026-08-04; pending user ratification)
 
-The tier table above names "rounded borders" and "cell-eased animations"
-without defining either; this section is the concrete visual system P4
+The tier table above names "cell-eased animations"
+without defining it; this section is the concrete visual system P4
 builds to, so candidate surfaces are judged against renderings rather than
 adjectives. Reference renderings (Dracula, `full` tier) live in
 `assets/mockups/`; Dracula is the reference *rendering*, not the theme —
@@ -522,9 +571,14 @@ picker, confirm prompt), the grid beneath paints with fg blended 40% toward
 bg. Focus becomes legible at a glance instead of inferred from a cursor.
 Applies on every tier, since color is not tier-gated.
 
-**Borders and spacing.** Rounded corners `╭ ╮ ╰ ╯` on `full` and `standard`
-— corner glyphs are font coverage, not a terminal capability; `basic` falls
-back to ASCII `+ - |`. Border fg is `accent` blended 50% toward the
+**Borders and spacing.** Rounded corners `╭ ╮ ╰ ╯` whenever the terminal
+draws box-drawing glyphs, on every tier — corner glyphs are font coverage,
+not a color, synchronization, or keyboard-protocol capability, so the
+register's `unicode_boxes` row (§7) is the only input to this choice. A
+terminal that does not draw them falls back to ASCII `+ - |`, which is the
+honest degradation: square Unicode corners (`┌ ┐ └ ┘`) are not a fallback
+for rounded ones, since any terminal that draws `┌` draws `╭`, and view
+ships no third border set (amended 2026-08-21, C1). Border fg is `accent` blended 50% toward the
 surface's bg (`FloatBorder` when the scheme defines it). A float's title
 renders inside the top border run, space-padded, in **`FloatTitle` fg,
 bold** — amended from `accent` fg at the P4 exit drain (2026-08-09,
