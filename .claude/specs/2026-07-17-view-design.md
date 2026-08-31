@@ -911,12 +911,31 @@ The moat. CI-gated from P3 onward; nothing merges that fails it.
    inside view's engine; drive interactive flows; assert zero errors and
    expected UI. The matrix must include the UI-owning class (§5.5) — lualine,
    noice, nvim-notify, nvim-tree/neo-tree, dressing, fidget — each asserted
-   in all three §5.5 states, alongside the semantic class (telescope,
-   nvim-treesitter, nvim-cmp, mini.nvim, which-key). A fresh-machine
+   in all four §5.5 states, alongside the semantic class (telescope,
+   nvim-treesitter, nvim-cmp, mini.nvim, which-key). **The unaccommodated
+   state is first-class and load-bearing (amended 2026-08-21, C3):** it runs
+   the plugin's own default or documented configuration with zero fixture
+   adjustment, **under view's own default `[native]` settings**, and asserts
+   what the user actually sees on a first launch — including, where the
+   plugin claims a surface view attached, view's single conflict notice and
+   the absence of the plugin's own complaints from the toast stack.
+   The adjusted configuration remains as a second state, representing view's
+   *recommended* setup — it is evidence about a config already adapted to
+   view, which is the inverse of the migration contract, and it may never be
+   the only state. **A fixture accommodation with no paired unaccommodated
+   state is a suppressed migration defect.** The suite enforces this rather
+   than trusting review: a scenario state declares whether it wants
+   accommodations, every accommodation in a fixture must sit behind that
+   declaration, and a ui-owning scenario that declares no unaccommodated
+   state fails to load. A semantic-class scenario must additionally exercise
+   the surfaces view externalizes wherever the plugin touches them (a
+   completion plugin asserted only in insert mode leaves the cmdline path —
+   the one that breaks — untested). A fresh-machine
    scenario (cold lazy.nvim bootstrap including its interactive prompts) is
    mandatory. The maintainer's own daily config is a standing scenario
    (§5.4). The published compat-evidence page (anodizer docsite pattern) has
-   a defined row schema — plugin, version, engine pin, scenario, state,
+   a defined row schema — plugin, version, engine pin, scenario, state
+   (one of present / unaccommodated / superseded / deferred / native-only),
    result, date — a coverage model (top-N by plugin-manager download rank
    per compat class), and a staleness rule: every engine-pin bump re-runs
    the matrix and re-dates the page.
@@ -1054,7 +1073,7 @@ copyable ones (polish).
 |---|---|
 | `ext_multigrid` instability | Single-grid is the shipped mode until P6; multigrid oracle-covered before panes ship; upstream unification (PR #32691) tracked — `single_grid` knob lifespan re-evaluated at each engine-pin bump |
 | Agent out-of-band writes (shell tools bypass diff review) | Routed-where-possible + detected-always (§10.1): fs watch, checktime drive, conflict UI; documented honestly |
-| Native-wins supersession surprises a user's muscle memory | Every supersession reported (first-run toast + doctor) with the exact per-feature off switch; §13.3 asserts all three states per UI-owning plugin |
+| Native-wins supersession surprises a user's muscle memory | Every supersession reported (first-run toast + doctor) with the exact per-feature off switch; §13.3 asserts all four states per UI-owning plugin |
 | Blocked engine (sync Lua) still blocks editing | UI stays live with honest busy state + interrupt; positioning stays honest about it; strangler reduces exposure over time |
 | nvim core absorbing UI polish (0.12 extui) | view's delta is native perf + coherence + native features + AI, not borders; re-audit positioning each nvim release |
 | ACP churn (young protocol) | Version-pinned adapter behind a view-ai trait; verify spec at implementation time |
