@@ -1320,20 +1320,65 @@ mod tests {
         }
     }
 
+    /// Whether one scenario line asserts `ext`'s attach.
+    ///
+    /// The option name alone is not the test, and a bare substring match is
+    /// spoofable by anything that happens to spell it: a row is proof when
+    /// what it *queries* is the attach -- the `nvim_list_uis()[1].ext_*`
+    /// form every citation in the corpus takes -- and only the half of the
+    /// row before `expect` is read, so a value that echoes the query back is
+    /// a string rather than an assertion. Comment lines are skipped for the
+    /// same reason: several scenarios explain in prose which `ext_*` their
+    /// config detaches, and prose asserts nothing.
+    fn probes_attach(line: &str, ext: Ext) -> bool {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            return false;
+        }
+        let Some((_, probe)) = trimmed.split_once("probe = ") else {
+            return false;
+        };
+        let query = probe
+            .split_once("expect = ")
+            .map_or(probe, |(query, _)| query);
+        query.contains(&format!("nvim_list_uis()[1].{}", ext.as_str()))
+    }
+
+    /// Two shapes a bare substring rule cannot part from evidence, either of
+    /// which would put a citation on the page for a state that never
+    /// asserted the attach: a probe querying something else entirely that
+    /// merely mentions an `ext_*` name in the value it expects back, and one
+    /// that spells the whole query inside that value.
+    #[test]
+    fn a_probe_that_only_mentions_an_ext_name_is_not_proof() {
+        let real = r#"{ probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_messages == true)')", expect = "false" },"#;
+        assert!(probes_attach(real, Ext::Messages));
+        assert!(
+            !probes_attach(real, Ext::Cmdline),
+            "one option's probe is not another's"
+        );
+        assert!(!probes_attach(&format!("  # {real}"), Ext::Messages));
+
+        let mention =
+            r#"{ probe = "luaeval('vim.g.view_last_detached')", expect = "ext_messages" },"#;
+        assert!(!probes_attach(mention, Ext::Messages));
+
+        let echoed = r#"{ probe = "luaeval('vim.g.view_last_probe')", expect = "vim.api.nvim_list_uis()[1].ext_messages" },"#;
+        assert!(
+            !probes_attach(echoed, Ext::Messages),
+            "a query spelled in an expected value is a string, not an assertion"
+        );
+    }
+
     /// Every `scenario`/`state` whose probes assert `ext`'s attach, in
     /// scenario-file then state order.
     ///
-    /// A probe naming the option is what proves a row: the attach decides
-    /// whether view draws the surface at all, so a state asserting it on
-    /// proves the policy and one asserting it off proves the `[native]`
-    /// line that hands it back. Read out of the scenario files themselves
-    /// rather than written down here, so a state that is deleted or renamed
-    /// takes its citation with it instead of leaving the page naming
-    /// evidence that no longer runs.
-    ///
-    /// Comment lines are skipped even when they name the option: several
-    /// scenarios explain in prose which `ext_*` their config detaches, and
-    /// prose is not an assertion.
+    /// The attach decides whether view draws the surface at all, so a state
+    /// asserting it on proves the policy and one asserting it off proves the
+    /// `[native]` line that hands it back. Read out of the scenario files
+    /// themselves rather than written down here, so a state that is deleted
+    /// or renamed takes its citation with it instead of leaving the page
+    /// naming evidence that no longer runs.
     fn proving_states(ext: Ext) -> Vec<String> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/scenarios");
         let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
@@ -1356,11 +1401,7 @@ mod tests {
                     state = rest.split('"').next().map(str::to_owned);
                     continue;
                 }
-                let trimmed = line.trim_start();
-                if trimmed.starts_with('#')
-                    || !trimmed.contains("probe = ")
-                    || !trimmed.contains(ext.as_str())
-                {
+                if !probes_attach(line, ext) {
                     continue;
                 }
                 if let Some(state) = &state {
