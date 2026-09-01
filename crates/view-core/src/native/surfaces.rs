@@ -516,6 +516,21 @@ mod tests {
         );
     }
 
+    /// The other half of the cmdline rule, and the half a rect alone cannot
+    /// supply: view draws a command line only while one is open, so the same
+    /// rows carry nothing of view's the rest of the time and a float sitting
+    /// in them covers nothing. Dropping the conjunction turns every plugin
+    /// that parks a window at the foot of the screen into a false report.
+    #[test]
+    fn a_float_on_the_cmdline_row_with_no_cmdline_open_claims_nothing() {
+        let model = captured_session();
+        assert!(
+            model.owns(Ext::Cmdline),
+            "the ownership gate must not be what answers here"
+        );
+        assert_eq!(claims(&cmp_cmdline_menu(), &model), None);
+    }
+
     #[test]
     fn a_float_in_the_message_area_is_a_messages_claim() {
         let model = captured_session();
