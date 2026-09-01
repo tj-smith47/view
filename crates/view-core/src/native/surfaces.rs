@@ -944,8 +944,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        claims, row, FloatAnchor, FloatSighting, Surface, SurfaceConflicts, CONTENT_FILETYPES,
-        SURFACES,
+        claims, row, FloatAnchor, FloatSighting, Policy, Surface, SurfaceConflicts,
+        CONTENT_FILETYPES, SURFACES,
     };
     use crate::events::UiEvent;
     use crate::model::Model;
@@ -1300,6 +1300,218 @@ mod tests {
                 survives.get(column)
             );
         }
+    }
+
+    /// What a matrix cell says when the population it walks is empty.
+    ///
+    /// ASCII dashes: `scripts/check-style.sh` bans the em-dash outright in
+    /// source and in `docs/`, and a marker that cannot be written on the
+    /// page it is compared against is no marker at all.
+    const NONE_CELL: &str = "-- none --";
+
+    /// `cells` as one table cell, or [`NONE_CELL`] when there are none --
+    /// which is the whole point of the page: a surface nothing claims and a
+    /// surface no state proves read as gaps rather than as blanks.
+    fn or_none(cells: &[String]) -> String {
+        if cells.is_empty() {
+            NONE_CELL.to_string()
+        } else {
+            cells.join(", ")
+        }
+    }
+
+    /// Every `scenario`/`state` whose probes assert `ext`'s attach, in
+    /// scenario-file then state order.
+    ///
+    /// A probe naming the option is what proves a row: the attach decides
+    /// whether view draws the surface at all, so a state asserting it on
+    /// proves the policy and one asserting it off proves the `[native]`
+    /// line that hands it back. Read out of the scenario files themselves
+    /// rather than written down here, so a state that is deleted or renamed
+    /// takes its citation with it instead of leaving the page naming
+    /// evidence that no longer runs.
+    ///
+    /// Comment lines are skipped even when they name the option: several
+    /// scenarios explain in prose which `ext_*` their config detaches, and
+    /// prose is not an assertion.
+    fn proving_states(ext: Ext) -> Vec<String> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat/scenarios");
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("compat/scenarios must be readable")
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| path.extension().is_some_and(|suffix| suffix == "toml"))
+            .collect();
+        files.sort();
+        let mut found: Vec<String> = Vec::new();
+        for path in files {
+            let scenario = path
+                .file_stem()
+                .expect("a scenario file has a stem")
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(&path).expect("a scenario must be readable");
+            let mut state: Option<String> = None;
+            for line in text.lines() {
+                if let Some(rest) = line.strip_prefix("name = \"") {
+                    state = rest.split('"').next().map(str::to_owned);
+                    continue;
+                }
+                let trimmed = line.trim_start();
+                if trimmed.starts_with('#')
+                    || !trimmed.contains("probe = ")
+                    || !trimmed.contains(ext.as_str())
+                {
+                    continue;
+                }
+                if let Some(state) = &state {
+                    let cell = format!("`{scenario}`/`{state}`");
+                    if !found.contains(&cell) {
+                        found.push(cell);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The ownership matrix as `docs/surface-ownership.md` carries it, on
+    /// the pattern `docs/keymaps.md` already uses: the page is generated
+    /// from the tables in this module plus the loaded scenario set, and the
+    /// test below fails when the two disagree.
+    ///
+    /// Test-only, and private with it, for the reason `render_review_table`
+    /// is: the page carries the rendered block, and nothing but the drift
+    /// check needs to render it again.
+    fn render_matrix() -> String {
+        let mut out = String::from(
+            "| surface | `ext_*` option | policy | `[native]` switch that hands it back \
+             | claiming plugin classes | proving scenario / state |\n\
+             | --- | --- | --- | --- | --- | --- |\n",
+        );
+        for table_row in SURFACES {
+            let ext = table_row.ext.map_or_else(
+                || NONE_CELL.to_string(),
+                |ext| format!("`{}`", ext.as_str()),
+            );
+            let remedy = table_row
+                .remedy
+                .map_or_else(|| NONE_CELL.to_string(), |line| format!("`{line}`"));
+            let claimants: Vec<String> = super::SURFACE_CLAIMANTS
+                .iter()
+                .filter(|claimant| claimant.surfaces.contains(&table_row.surface))
+                .map(|claimant| {
+                    let identities: Vec<String> = claimant
+                        .identities
+                        .iter()
+                        .map(|identity| format!("`{identity}`"))
+                        .collect();
+                    format!("`{}` ({})", claimant.class, or_none(&identities))
+                })
+                .collect();
+            let proving = table_row.ext.map(proving_states).unwrap_or_default();
+            out.push_str(&format!(
+                "| {} | {ext} | `{:?}` | {remedy} | {} | {} |\n",
+                table_row.label,
+                table_row.policy,
+                or_none(&claimants),
+                or_none(&proving),
+            ));
+        }
+        out
+    }
+
+    /// The sentence the matrix owes about absorption, which no policy
+    /// column can carry on its own: the command line's own policy is
+    /// [`Policy::Own`], and the taking is decided one row down --
+    /// [`Surface::Popupmenu`]'s [`Policy::Absorb`] read against the
+    /// float's own filetype ([`super::absorbs`]). Generated from both
+    /// rows and from the menu list, so a policy that changes rewrites the
+    /// sentence rather than leaving it asserting the old arrangement.
+    fn render_absorb_note() -> String {
+        let menus: Vec<String> = super::COMPLETION_MENUS
+            .iter()
+            .map(|menu| format!("`{menu}`"))
+            .collect();
+        format!(
+            "A float whose rows land in the command line's band is taken into the palette \
+             instead of being reported, but only when it presents a completion menu's own \
+             filetype ({}). That is the completion menu's `{:?}` read at the moment of the \
+             claim; the command line's own policy stays `{:?}`.",
+            or_none(&menus),
+            row(Surface::Popupmenu)
+                .expect("the completion menu has a row")
+                .policy,
+            row(Surface::Cmdline)
+                .expect("the command line has a row")
+                .policy,
+        )
+    }
+
+    /// The page a user reads instead of this module, pinned to what the
+    /// module actually does. A policy, a switch, a claimant or a proving
+    /// state that changes here and not there fails naming the row that
+    /// drifted.
+    #[test]
+    fn the_surface_matrix_page_matches_the_policy_table() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/surface-ownership.md");
+        let page =
+            std::fs::read_to_string(path).expect("docs/surface-ownership.md must be readable");
+        let matrix = render_matrix();
+        for line in matrix.lines().skip(2) {
+            assert!(
+                page.contains(line),
+                "docs/surface-ownership.md is stale, this row drifted:\n{line}"
+            );
+        }
+        assert!(
+            page.contains(&matrix),
+            "docs/surface-ownership.md is stale, it must carry:\n{matrix}"
+        );
+        let note = render_absorb_note();
+        assert!(
+            page.contains(&note),
+            "docs/surface-ownership.md is stale, it must carry:\n{note}"
+        );
+    }
+
+    /// A surface view draws either names the `view.toml` line that hands it
+    /// back or says it has none, and the page says which. The tab line is
+    /// the honest none: view owns it unconditionally and no `[native]`
+    /// switch reaches it, so a notice about it says what happened and stops
+    /// rather than naming a setting that does not exist.
+    #[test]
+    fn every_owned_surface_names_its_off_switch_or_says_it_has_none() {
+        let matrix = render_matrix();
+        for table_row in SURFACES.iter().filter(|row| row.policy != Policy::Yield) {
+            assert!(
+                table_row
+                    .remedy
+                    .is_none_or(|line| line.starts_with("[native] ") && line.ends_with(" = false")),
+                "{}'s switch is not a [native] line a user can paste: {:?}",
+                table_row.label,
+                table_row.remedy
+            );
+            let cell = table_row
+                .remedy
+                .map_or_else(|| NONE_CELL.to_string(), |line| format!("`{line}`"));
+            assert!(
+                matrix.contains(&format!("| {cell} |")),
+                "{} renders no off-switch cell",
+                table_row.label
+            );
+        }
+        assert_eq!(
+            row(Surface::Tabline)
+                .expect("the tab line has a row")
+                .remedy,
+            None,
+            "the tab line is the matrix's honest none row"
+        );
+        assert!(
+            matrix.contains(NONE_CELL),
+            "the none marker never renders, so a coverage gap could not be seen"
+        );
     }
 
     #[test]
