@@ -55,8 +55,31 @@ into it through the harness probe channel and writes
 
 ```
 $ task compat -- scripts/acceptance/capture-surface-floats.toml
-compat: capture-surface-floats (heavy, present) ... OK (82 steps, 29.1s)
+compat: capture-surface-floats (heavy, present) ... OK (86 steps, 29.1s)
 ```
+
+**Every id in this document is a per-session allocation, not a plugin
+fact.** Window ids (`1003`) and extmark namespace ids (`16`, `27`) are
+handed out in the order a session happens to ask for them, and no id
+survives a re-run of this very scenario. Three runs, the same pins, the same
+six namespaces, every id different:
+
+| namespace | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| `nvim-notify` | 16 | 24 | 23 |
+| `notify-treesitter-override` | 19 | 27 | 26 |
+| `telescope_selection` | 27 | 11 | 12 |
+| `telescope_matching` | 30 | 14 | 15 |
+| `telescope_prompt` | 31 | 15 | 16 |
+| `telescope_prompt_prefix` | 32 | 16 | 17 |
+
+Id 27 named `telescope_selection` in the first run and
+`notify-treesitter-override` in the second, so a consumer keying on the
+number does not merely miss, it matches the wrong namespace. Window ids move
+the same way: the cmdline menu was 1003 in the run this document quotes and
+1002 in the next. The *names* are the identity and are bit-stable across
+runs; the numbers are printed only so the records inside one transcript can
+be read against each other.
 
 Three properties of that arrangement are load-bearing:
 
@@ -181,12 +204,15 @@ moves. The counts above are the cmp menu's.)
 The numbers the cadence bound is written from:
 
 ```
--- hide win 1003 config now: { ..., hide = true, height = 2, row = 26, ... }
--- reshow win=1003 result=still-hidden samples=277
-  same-window reconfigure: 26,0,20,2 -> 27,0,20,1 hide=true
-      keystroke->reconfigure=31.371ms  hide->reconfigure=50.355ms
+-- hide win 1003 (t=1768.539ms) config now: { ..., hide = true, height = 2, row = 26, ... }
+-- reshow win=1003 result=still-hidden samples=277 keystroke->reconfigure=n/ams hide->reconfigure=n/ams
+  same-window reconfigure: 26,0,20,2 -> 27,0,20,1 hide=true keystroke->reconfigure=31.371ms hide->reconfigure=50.355ms
   replacement: none observed
 ```
+
+Verbatim but for the `...` inside the config table. The `n/a` fields on the
+`reshow` line are the re-show outcome, which never happened; the intervals
+on the line below are the reconfigure, which did.
 
 - keys typed at `:`: **5**
 - distinct window ids across those 5 keys: **1** (1003, reused)
@@ -195,7 +221,12 @@ The numbers the cadence bound is written from:
 - re-shows observed: **0** (277 samples over ~1.2 s, `hide` still true)
 - replacement windows opened: **0**
 - same-window reconfigures observed while hidden: **1**
-- keystroke to that reconfiguration: **31.371 ms**
+- keystroke to that reconfiguration: **31.371 ms** (30.821 and 32.106 ms on
+  two later runs, sampler blind window 2.0 ms)
+
+That last figure times a window that already existed being moved. It is not
+how long a float takes to appear; that is measured separately below, and the
+two are different phenomena with different numbers.
 
 So cmp reconfigures rather than recreates, and its reconfiguration does not
 clear a `hide` view set: the style table cmp passes to
@@ -203,7 +234,40 @@ clear a `hide` view set: the style table cmp passes to
 `hide` key, and the pinned engine leaves the flag alone. A hide taken once
 per cmdline session holds for the whole session, and the double-chrome
 window a consumer has to close is the 31 ms between the key and the
-plugin's reaction, not a per-key race.
+plugin's reconfiguration of the window it already had, not a per-key race.
+
+### How long a float takes to appear
+
+A snapshot between two sends cannot answer this: it bounds the answer by the
+send interval, not by the plugin. So the appearance is sampled the same way
+the reconfigure is, by a 1 ms libuv sampler armed before the cmdline opens
+that timestamps both the typed character reaching `getcmdline()` and the
+first sighting of a float that was not already standing. Both endpoints come
+off that one sampler's clock, because opening the menu raises cmdline events
+of its own that land in the same millisecond as the window and cannot be
+told apart from the keystroke's.
+
+```
+-- open cmp-cmdline-colon win=1003 samples=554 cmdline="p" keystroke(t=605.162ms)->appearance=61.170ms armed->appearance=351.962ms sampler-blind-window=3.300ms
+-- open cmp-cmdline-search win=1007 samples=538 cmdline="p" keystroke(t=9619.523ms)->appearance=61.527ms armed->appearance=332.779ms sampler-blind-window=3.614ms
+```
+
+Those two lines are one run; a second run of the same scenario read 64.439
+and 62.638 ms. Four measurements over two runs, at `:` and at `/`: **61.170,
+61.527, 64.439 and 62.638 ms**. The 64.439 ms sample carries a 23.4 ms blind
+window and is the least trustworthy of the four; the other three were
+sampled with a blind window under 4 ms. (These two runs are later than the
+one the rest of this document quotes, which predates the sampler; everything
+else they recorded is unchanged, the geometry and identity values included.)
+
+That number is not a race, it is a setting: nvim-cmp's
+`performance.debounce` defaults to `60`
+(`lua/cmp/config/default.lua:20`), and `lua/cmp/core.lua:302` arms the
+filter with exactly that timeout while the menu is not yet visible. A
+consumer waiting on the cmdline events therefore has roughly 60 ms of
+notice, and gets it from the plugin's own configuration rather than from
+luck. A user who lowers `performance.debounce` shortens it by the same
+amount.
 
 The window identity is stable *within* a cmdline session and never across
 one: 1003, 1005, 1006, 1007 for the four cmdlines above. Each of those
@@ -231,7 +295,7 @@ announced its departure (see the cross-cutting section below).
                    virt_text_pos = "win_col", virt_text_win_col = 0 } }
       { 2, 0, 0, { ..., virt_text = { { " " }, { "05:32:25", "NotifyINFOTitle4" },
                     { " " } }, virt_text_pos = "right_align" } }
-      { 3, 1, 0, { ..., virt_text = { { "━━━ (50 cells) ━━━", "NotifyINFOBorder4" } },
+      { 3, 1, 0, { ..., virt_text = { { "<50 heavy-horizontal cells>", "NotifyINFOBorder4" } },
                    virt_text_pos = "win_col", virt_text_win_col = 0 } }
       { 4, 2, 0, { end_col = 19, end_row = 2, hl_group = "NotifyINFOBody4",
                    priority = 50 } }
@@ -239,7 +303,7 @@ announced its departure (see the cross-cutting section below).
 
 Top-right corner, anchored `NE` at `row = 0, col = 100` (the grid's own
 width), 50 by 3, `zindex = 50`. The title, timestamp and rule are virtual
-text in the `nvim-notify` namespace (id 16), not buffer lines: the buffer
+text in the `nvim-notify` namespace, not buffer lines: the buffer
 holds two empty lines and the message. Two reads 22.2 ms apart returned an
 identical config, so the default animation stage does not move the window
 between consecutive observations of a settled toast, though the window is
@@ -263,9 +327,10 @@ engine default:
              "Either disable the other plugin or set `config.notify.enabled = false` in your **Noice** config.",
              "  - plugin: unknown", "  - file: nvim>", "  - line: 1" }
     ns "notify-treesitter-override" (id 19): 21 marks
-    ns "nvim-notify" (id 16): 4 marks   (title virt_text "noice.nvim")
+    ns "nvim-notify" (id 16): 4 marks
 ```
 
+Its first `nvim-notify` mark carries the title virtual text `noice.nvim`.
 The second is the one the capture asked for, through noice's own notify
 path (`require('noice.util').notify(msg, vim.log.levels.ERROR)`):
 
@@ -277,9 +342,12 @@ path (`require('noice.util').notify(msg, vim.log.levels.ERROR)`):
               row = 0, style = "minimal", width = 50, zindex = 50 }
     filetype="markdown" buftype="nofile" name=""
     lines: { "", "", "float-capture-error" }
-    ns "nvim-notify" (id 16): 4 marks   (title virt_text "noice.nvim")
+    ns "nvim-notify" (id 16): 4 marks
     ns "notify-treesitter-override" (id 19): 1 marks
 ```
+
+Same title mark here: `virt_text = { { " " }, { " ", "NotifyERRORIcon5" },
+{ "noice.nvim", "NotifyERRORTitle5" } }`.
 
 noice's error float **is** an nvim-notify window: same anchor, same
 `zindex`, same namespace, same virtual-text furniture. Two fields part
@@ -302,8 +370,9 @@ once:
 | 1013 | (empty) | nofile | 24 | 10 | 80 | 3 | 50 | false |
 
 The two windows with no filetype are drawn border chrome: their buffer
-lines are the box-drawing characters themselves
-(`"╭─── Results ───╮"`, `"╭─── Help ───╮"`), and they are
+lines are the box-drawing characters themselves, an 80-cell top rule with a
+centered title (shortened here, the artifact carries the full 80 columns:
+`"╭─── Results ───╮"`, `"╭─── Help ───╮"`), and they are
 `focusable = false, mouse = false`.
 
 Selection, before and after one `<C-n>`:
@@ -323,7 +392,7 @@ Telescope's selection is carried by extmarks in its own
 `telescope_selection` namespace (the cursor moves with them; the marks are
 what renders), the inverse of cmp's cursor-plus-`cursorline` with no
 extmarks at all. The results buffer carries a second namespace,
-`telescope_matching` (id 30), holding one mark per matched character: 408
+`telescope_matching`, holding one mark per matched character: 408
 of them before the `<C-n>`, 416 after. The prompt window carries two more
 (`telescope_prompt`, holding the ` 50 / 13068` counter as right-aligned
 virtual text, and `telescope_prompt_prefix`). Four namespaces across the
@@ -348,29 +417,53 @@ cmp's menu.** Six `WinClosed` events in the whole capture: 1004 and 1009
 (noice), 1008 (notify), and 1010, 1012, 1013 (telescope). None for 1003,
 1005, 1006 or 1007, every one of which had vanished by the next observation
 without an event, and none for telescope's results border (1011) inside the
-observation window. That absence is not the engine suppressing the event on
-a `noautocmd` window: cmp closes with `nvim_win_hide`, and a direct check on
-this engine shows `nvim_win_hide` and `nvim_win_close` both fire `WinClosed`
-on a float opened with `noautocmd = true`.
+observation window.
+
+The mechanism is `:h autocmd-nested`, and it is reproducible on the pinned
+engine with no plugins and no config at all.
+`scripts/acceptance/winclosed-autocmd-nesting.lua` opens four floats: one
+without `noautocmd` (the opening control), then three with it, closed from
+the three contexts a plugin can close from.
 
 ```
-$ nvim --headless -c 'lua <open two floats, one noautocmd, hide one, close one>' -c 'qa!'
-w1=1003 w2=1004 w3=1005 | WinNew: WinClosed:1003 WinClosed:1004 WinClosed:1005
+$ nvim --headless --clean -c 'luafile scripts/acceptance/winclosed-autocmd-nesting.lua' -c 'qa!'
+announced=1001 top=1002 plain=1003 nested=1004
+events: WinNew: WinClosed:1002 |plain| |nested| WinClosed:1004
 ```
 
-The practical reading: cmp's menu is invisible to window autocmds at both
-ends of its life, so a watcher cannot learn of its arrival *or* its
-departure from `WinNew`/`WinClosed`. The other three floats announce only
-their departure.
+| what the window did | `WinNew` | `WinClosed` |
+|---|---|---|
+| opened without `noautocmd` (1001) | **fires** | |
+| opened with `noautocmd` (1002-1004) | suppressed | |
+| hidden from the top level (1002) | | **fires** |
+| hidden inside an autocmd callback, outer not `nested` (1003) | | **suppressed** |
+| hidden inside an autocmd callback, outer `nested = true` (1004) | | **fires** |
+
+So the engine does not suppress `WinClosed` on a `noautocmd` window, and
+`nvim_win_hide` is not the reason either. The reason is where the call sits.
+nvim-cmp registers every event it listens on without `nested`
+(`lua/cmp/utils/autocmd.lua:10-17`) and closes the menu from inside one of
+those callbacks (`lua/cmp/init.lua:403-405`, subscribing `InsertLeave` /
+`CmdlineLeave` / `CmdwinEnter` to `cmp.core.view:close()`), so the close is
+non-nested and the event is dropped. nvim-notify, noice and telescope close
+theirs from timers and scheduled callbacks, which is why theirs fire.
+
+That generalizes past cmp: **any plugin that closes a float from inside its
+own non-nested autocmd is invisible at teardown**, and view cannot make
+another plugin's autocmd nested. Practical reading: cmp's menu is invisible
+to window autocmds at both ends of its life, so a watcher cannot learn of
+its arrival *or* its departure from `WinNew`/`WinClosed`. The other three
+floats announce only their departure.
 
 **The events that do fire are cmdline and insert events, and they precede
 the window.** Every cmp float in this capture was preceded by a
-`CmdlineChanged` fired while the float set was still empty, and followed by
-the window existing at the next observation. The ordering is: keystroke,
-`CmdlineChanged`, then (about 31 ms later, per the churn measurement above)
-the window configured. Telescope's picker produced `CursorMovedI`,
-`TextChangedI` and `WinScrolled` on its own windows, never on the editing
-window.
+`CmdlineChanged` fired while that cmp float was not yet in the set (noice's
+health float was already standing for two of the four, so the set was not
+always empty), and followed by the window existing at the next observation.
+The ordering is: keystroke, `CmdlineChanged`, then about 61 ms later (cmp's
+own debounce, measured above) the window. Telescope's picker produced
+`CursorMovedI`, `TextChangedI` and `WinScrolled` on its own windows, never
+on the editing window.
 
 ## What distinguishes a claiming float
 
@@ -382,14 +475,28 @@ window.
 | `buftype` | `nofile` | `nofile` | `nofile` | `nofile`, prompt window `prompt` |
 | `anchor` | NW | **NE** | **NE** | NW |
 | `relative` | editor | editor | editor | editor |
-| rect (row..row+h-1, col..col+w-1) | 26..27, 0..19 | 0..2, 51..100 | 0..2, 51..100 | 1..26, 10..89 (four windows) |
+| grid rows covered | 26..27 | 0..2 | 0..2 | 1..26 (four windows) |
+| grid columns covered | 0..19 | 50..99 | 50..99 | 10..89 |
 | `focusable` | true | true | true | true on results, false on the other three |
 | `border` | `"none"` | rounded | rounded | `"none"`, drawn in a sibling window |
-| selection carrier | win cursor + `cursorline` | none | none | extmark ns `telescope_selection` |
+| selection carrier | win cursor + `cursorline` | none observed | none observed | extmark ns `telescope_selection` |
 | extmarks on the buffer | **none** | ns `nvim-notify` | ns `nvim-notify` + treesitter | 4 telescope namespaces |
 | plugin named by the float | no | no | **yes** (title virt_text `noice.nvim`) | by filetype prefix |
-| mode while open | **`c`** | any | any | `i` |
+| mode while captured | **`c`** | `n` | `n` | `i` |
 | survives view's `hide` | **yes** | not measured | not measured | not measured |
+
+Three of these rows need their derivation stated rather than assumed. The row and
+column spans are computed from each window's own `row`/`col`/`width`/
+`height`, and the two `NE`-anchored floats need the anchor read with them:
+`col = 100, width = 50` on a 100-column grid is a **right** edge, so the
+toast and the error float occupy columns 50..99, not 51..100. And three
+cells are observations of an absence rather than measurements: `mode while
+captured` is what stood at the snapshot, not a mode the float requires (the
+toast and the error float were both captured in normal mode and were never
+exercised in another), and `selection carrier: none observed` means no
+selection mark was present and no `<C-n>` was sent to either -- the
+per-subject selection walk was exercised on cmp and telescope, the two
+subjects that have a selection to move.
 
 **The falsifiable check is met, four times over.** A claiming float is
 distinguishable from the negative control by `zindex` (1001 against 50),
@@ -427,10 +534,13 @@ Two warnings for anything built on this, both of them geometric:
 - A float watcher cannot be built on `WinNew`, and for cmp's menu it cannot
   be built on `WinClosed` either. `CmdlineEnter` / `CmdlineChanged` /
   `CmdlineLeave` are the events that bracket that float, and the window
-  exists roughly 31 ms after the keystroke that summons it. `WinClosed` is a
-  teardown edge for the toast, the error float and the picker only.
-- Detection has to read identity (`filetype`, `zindex`) with the mode and
-  the surface ownership, not rect overlap with what view draws.
+  appears about 61 ms after the keystroke that summons it, which is cmp's
+  own `performance.debounce` and moves with it. `WinClosed` is a teardown
+  edge for the toast, the error float and the picker only, and the reason is
+  general: a float closed from inside a non-nested autocmd is silent.
+- Detection has to read identity (`filetype`, the namespace *names*,
+  `zindex`) with the mode and the surface ownership, never rect overlap with
+  what view draws and never a namespace id.
 - Naming the plugin is possible for noice (its own title virtual text) and
   for telescope (its filetype prefix), and impossible for cmp and
   nvim-notify beyond the filetype itself, which is what the best-effort

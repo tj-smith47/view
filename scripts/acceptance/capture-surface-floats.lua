@@ -66,6 +66,7 @@ local armed_at = uv.hrtime()
 local events = {}
 local drained = 0
 local hide_state = nil
+local open_state = nil
 
 local function float_wins()
   local list = {}
@@ -242,6 +243,107 @@ function M.tick(label)
   return "ok"
 end
 
+---Arms a 1 ms sampler that timestamps the first float to appear that is not
+---already standing. A per-key snapshot cannot answer when a window was
+---created -- it only bounds the answer by the gap between two observations,
+---which is the send interval and not the plugin -- so the appearance is
+---sampled inside the session the same way the reconfigure is.
+---@return string status
+function M.watch_open()
+  local known = {}
+  for _, win in ipairs(float_wins()) do
+    known[win] = true
+  end
+  local timer = uv.new_timer()
+  open_state = {
+    at_armed = uv.hrtime(),
+    known = known,
+    samples = 0,
+    timer = timer,
+  }
+  local st = open_state
+  st.text = vim.fn.getcmdline()
+  timer:start(0, 1, function()
+    vim.schedule(function()
+      st.samples = st.samples + 1
+      -- The API reads a sampler needs are refused in a fast event, so every
+      -- sample is taken in a scheduled callback, and a main loop busy with
+      -- the keystroke defers those. The widest gap between consecutive
+      -- samples is the sampler's blind window, and no interval it reports
+      -- can be trusted any finer than that.
+      local now = uv.hrtime()
+      local gap = now - (st.at_sample or st.at_armed)
+      st.at_sample = now
+      if gap > (st.max_gap or 0) then
+        st.max_gap = gap
+      end
+      if st.win then
+        return
+      end
+      -- Both endpoints are read by this one sampler, on one clock: an
+      -- autocmd reference cannot serve, because opening the menu raises
+      -- cmdline events of its own that arrive in the same millisecond as
+      -- the window and are indistinguishable from the keystroke's.
+      local text = vim.fn.getcmdline()
+      if text ~= st.text then
+        st.text = text
+        st.at_text = uv.hrtime()
+      end
+      for _, win in ipairs(float_wins()) do
+        if not st.known[win] then
+          st.win = win
+          st.at = uv.hrtime()
+          st.at_key = st.at_text
+          st.key_text = st.text
+          return
+        end
+      end
+    end)
+  end)
+  return "ok"
+end
+
+---What the appearance sampler saw, measured from the sampler first seeing
+---the summoning character in the cmdline to the sampler first seeing the
+---window, both on the sampler's own clock.
+---@param label string
+---@return string status
+function M.open_result(label)
+  if not open_state then
+    w("")
+    w("-- open skipped: nothing was armed")
+    return "ok"
+  end
+  local st = open_state
+  w("")
+  if st.win then
+    w(string.format(
+      "-- open %s win=%d samples=%d cmdline=%q keystroke(t=%sms)->appearance=%sms "
+        .. "armed->appearance=%sms sampler-blind-window=%sms",
+      label,
+      st.win,
+      st.samples,
+      st.key_text or "",
+      st.at_key and ms(st.at_key - armed_at) or "n/a",
+      st.at_key and ms(st.at - st.at_key) or "n/a",
+      ms(st.at - st.at_armed),
+      ms(st.max_gap or 0)
+    ))
+  else
+    w(string.format(
+      "-- open %s: no new float appeared (samples=%d)",
+      label,
+      st.samples
+    ))
+  end
+  st.timer:stop()
+  if not st.timer:is_closing() then
+    st.timer:close()
+  end
+  open_state = nil
+  return "ok"
+end
+
 ---Hides the lowest-numbered float the way the absorption would, then arms a
 ---1 ms sampler that watches for the plugin reconfiguring it back into view.
 ---The sampler runs on a libuv timer inside the session, so what it times is
@@ -289,6 +391,15 @@ function M.hide()
   timer:start(0, 1, function()
     vim.schedule(function()
       st.samples = st.samples + 1
+      -- The widest gap between consecutive samples: a scheduled callback
+      -- waits on a main loop busy with the keystroke, so this is the
+      -- resolution every interval below is actually measured at.
+      local now = uv.hrtime()
+      local gap = now - (st.at_sample or st.at)
+      st.at_sample = now
+      if gap > (st.max_gap or 0) then
+        st.max_gap = gap
+      end
       if not api.nvim_win_is_valid(st.win) then
         st.result = st.result or "closed"
         st.at_result = st.at_result or uv.hrtime()
@@ -357,12 +468,14 @@ function M.reshow()
   local from_key = (st.at_result and key_at) and ms(st.at_result - key_at) or "n/a"
   w("")
   w(string.format(
-    "-- reshow win=%d result=%s samples=%d keystroke->reconfigure=%sms hide->reconfigure=%sms",
+    "-- reshow win=%d result=%s samples=%d keystroke->reconfigure=%sms hide->reconfigure=%sms "
+      .. "sampler-blind-window=%sms",
     st.win,
     result,
     st.samples,
     from_key,
-    from_hide
+    from_hide,
+    ms(st.max_gap or 0)
   ))
   if st.at_reconfig then
     w(string.format(

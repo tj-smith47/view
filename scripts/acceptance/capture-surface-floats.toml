@@ -24,8 +24,19 @@
 # write delivers a multi-column jump that its own change handler treats as
 # paste-like input, which is also why the churn record below is a sequence
 # of single keys rather than one typed word.
+#
+# Living outside compat/scenarios/ costs this file the sweep's load-time
+# validation, which every other scenario gets for free; a test walks
+# scripts/acceptance/*.toml through the same loader so an edit that breaks
+# the schema still fails in `task ci` rather than the next time a human
+# runs it by path.
 schema = 1
 plugin = "surface-float-capture"
+# Not ui-owning despite three ui-owning subjects: that class requires the
+# four supersession states, and this file drives one session with view's
+# defaults on. The label also keeps the ui-owning population walk from
+# reaching a file that declares no unaccommodated state, should it ever
+# move under compat/scenarios/.
 class = "ui-adjacent"
 fixture = "heavy"
 
@@ -43,10 +54,14 @@ steps = [
   { send = "iprefabricated preflight<Esc>" },
   { probe = "mode()", expect = "n" },
 
-  # Five keys at ':', one at a time: the churn record.
+  # Five keys at ':', one at a time: the churn record. The appearance
+  # sampler is armed before the cmdline opens, because the window it times
+  # is created between two sends and a snapshot can only bound that.
+  { probe = "luaeval('VFC.watch_open()')", expect = "ok" },
   { send = ":" },
   { probe = "luaeval('VFC.tick(\"colon-0-enter\")')", expect = "ok" },
   { send = "p" },
+  { probe = "luaeval('VFC.open_result(\"cmp-cmdline-colon\")')", expect = "ok" },
   { probe = "luaeval('VFC.tick(\"colon-1-p\")')", expect = "ok" },
   { send = "r" },
   { probe = "luaeval('VFC.tick(\"colon-2-r\")')", expect = "ok" },
@@ -99,9 +114,15 @@ steps = [
   { probe = "luaeval('VFC.snap(\"cmp-cmdline-se-space\")')", expect = "ok" },
   { send = "<Esc>" },
 
-  # '/' -- the search cmdline, whose float sits over a different row.
+  # '/' -- the search cmdline, whose float sits over a different row. A
+  # second appearance measurement: one interval is an anecdote.
+  { probe = "luaeval('VFC.watch_open()')", expect = "ok" },
   { send = "/" },
   { send = "p" },
+  # Read after the first key, as at ':': the reference event has to be the
+  # keystroke's own change, and by the third key cmp is issuing changes of
+  # its own that arrive in the same millisecond as the window.
+  { probe = "luaeval('VFC.open_result(\"cmp-cmdline-search\")')", expect = "ok" },
   { send = "r" },
   { send = "e" },
   { wait_for_probe = "luaeval('VFC.any()')", expect = "float", timeout_ms = 15000 },
