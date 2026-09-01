@@ -1,0 +1,158 @@
+# Drives the capture chunk beside this file through the compat harness so
+# every float is opened by real keystrokes on a real pty, against a view
+# whose own native features are all on: the cmdline, the message area and
+# the popupmenu are view's, which is the only session in which a plugin's
+# float actually lands on a surface view owns.
+#
+# Not part of the committed scenario sweep: it asserts nothing about the
+# product, it writes an evidence file, and its subjects (cmp's menu,
+# nvim-notify's toast, noice's error, telescope's picker) already have
+# scenarios of their own under compat/scenarios/. Run it by path:
+#
+#   task compat -- scripts/acceptance/capture-surface-floats.toml
+#
+# and read target/surface-float-capture.txt afterwards. The chunk is found
+# by walking up from the session's cwd rather than named by a variable: a
+# pty spawn's environment is swept to an allowlist, so any variable set
+# outside is gone by the time the session reads it.
+#
+# A single-scenario compat run rewrites compat/results.json with only its
+# own rows, so restore that file (git checkout) or re-run the full sweep
+# afterwards.
+#
+# Keys go one per send: nvim-cmp reacts to CmdlineChanged, and a burst
+# write delivers a multi-column jump that its own change handler treats as
+# paste-like input, which is also why the churn record below is a sequence
+# of single keys rather than one typed word.
+schema = 1
+plugin = "surface-float-capture"
+class = "ui-adjacent"
+fixture = "heavy"
+
+[[states]]
+name = "present"
+native = {}
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.cmp ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { probe = "luaeval('dofile(vim.fs.dirname(vim.fs.find(\"scripts\", { upward = true, type = \"directory\", path = vim.fn.getcwd(), limit = 1 })[1]) .. \"/scripts/acceptance/capture-surface-floats.lua\")')", expect = "armed" },
+  { probe = "luaeval('VFC.header()')", expect = "ok" },
+
+  # Two words sharing a prefix, so the buffer source has candidates to
+  # offer at the cmdline and a second entry to select with <C-n>.
+  { send = "iprefabricated preflight<Esc>" },
+  { probe = "mode()", expect = "n" },
+
+  # Five keys at ':', one at a time: the churn record.
+  { send = ":" },
+  { probe = "luaeval('VFC.tick(\"colon-0-enter\")')", expect = "ok" },
+  { send = "p" },
+  { probe = "luaeval('VFC.tick(\"colon-1-p\")')", expect = "ok" },
+  { send = "r" },
+  { probe = "luaeval('VFC.tick(\"colon-2-r\")')", expect = "ok" },
+  { send = "e" },
+  { probe = "luaeval('VFC.tick(\"colon-3-e\")')", expect = "ok" },
+  { send = "f" },
+  { probe = "luaeval('VFC.tick(\"colon-4-f\")')", expect = "ok" },
+
+  { wait_for_probe = "luaeval('VFC.any()')", expect = "float", timeout_ms = 15000 },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-colon\")')", expect = "ok" },
+
+  # The hide the absorption performs, then the fifth key, then what the
+  # plugin's own next reconfiguration did with it. That key narrows two
+  # candidates to one, so the menu must change height and be re-set on its
+  # window: a run where nothing moves cannot be read as "the plugin left
+  # the hide alone".
+  { probe = "luaeval('VFC.hide()')", expect = "ok" },
+  { send = "a" },
+  { probe = "luaeval('VFC.tick(\"colon-5-a-after-hide\")')", expect = "ok" },
+  { probe = "luaeval('VFC.reshow()')", expect = "ok" },
+
+  # The selection delta, taken after the hide test so the confirmed text
+  # cannot empty the candidate list underneath it.
+  { send = "<C-n>" },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-colon-after-c-n\")')", expect = "ok" },
+  { send = "<Esc>" },
+  { probe = "luaeval('VFC.snap(\"colon-dismissed\")')", expect = "ok" },
+
+  # ':e ' -- the command-argument shape, with the prefix typed after the
+  # space so the buffer source has a keyword to match.
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { send = "r" },
+  { send = "e" },
+  { wait_for_probe = "luaeval('VFC.any()')", expect = "float", timeout_ms = 15000 },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-e-space\")')", expect = "ok" },
+  { send = "<Esc>" },
+
+  # ':se ' -- the option shape.
+  { send = ":" },
+  { send = "s" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { send = "r" },
+  { send = "e" },
+  { wait_for_probe = "luaeval('VFC.any()')", expect = "float", timeout_ms = 15000 },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-se-space\")')", expect = "ok" },
+  { send = "<Esc>" },
+
+  # '/' -- the search cmdline, whose float sits over a different row.
+  { send = "/" },
+  { send = "p" },
+  { send = "r" },
+  { send = "e" },
+  { wait_for_probe = "luaeval('VFC.any()')", expect = "float", timeout_ms = 15000 },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-search\")')", expect = "ok" },
+  # Two candidates stand here, so the selection the absorption has to read
+  # is captured moving between them rather than pinned at a single row.
+  { send = "<C-n>" },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-search-after-c-n\")')", expect = "ok" },
+  { send = "<C-n>" },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-search-after-two-c-n\")')", expect = "ok" },
+  { send = "<Esc>" },
+
+  # No candidates: a prefix no word in the buffer carries.
+  { send = ":" },
+  { send = "z" },
+  { send = "q" },
+  { send = "x" },
+  { probe = "luaeval('VFC.snap(\"cmp-cmdline-no-candidates\")')", expect = "ok" },
+  { send = "<Esc>" },
+
+  # nvim-notify's own toast, called directly so view's held vim.notify
+  # never routes it to view's toast instead.
+  { probe = "luaeval('VFC.wait_clear()')", expect = "ok" },
+  { send = ":lua require('notify')('float-capture-toast')<CR>" },
+  { wait_for_probe = "luaeval('VFC.any()')", expect = "float", timeout_ms = 15000 },
+  { probe = "luaeval('VFC.snap(\"nvim-notify-toast\")')", expect = "ok" },
+  # Twice: the default animation stage moves and blends the window, so one
+  # reading cannot say whether the geometry holds still.
+  { probe = "luaeval('VFC.snap(\"nvim-notify-toast-again\")')", expect = "ok" },
+
+  # noice's error float: its own notify path, which is the one the health
+  # check's errors take on a first launch.
+  { probe = "luaeval('VFC.wait_clear()')", expect = "ok" },
+  { send = ":lua require('noice.util').notify('float-capture-error', vim.log.levels.ERROR)<CR>" },
+  { wait_for_probe = "luaeval('VFC.any()')", expect = "float", timeout_ms = 15000 },
+  { probe = "luaeval('VFC.snap(\"noice-error\")')", expect = "ok" },
+
+  # The negative control: a picker that claims no surface view owns.
+  { probe = "luaeval('VFC.wait_clear()')", expect = "ok" },
+  { send = ":Telescope help_tags<CR>" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
+  # A query many help tags match, so the selection has somewhere to move
+  # when <C-n> arrives. The wait is on the results buffer holding rendered
+  # rows rather than on any one tag, which no query-independent assertion
+  # could name.
+  { send = "nvim_buf" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do local b = vim.api.nvim_win_get_buf(w) if vim.bo[b].filetype == \"TelescopeResults\" then for _, l in ipairs(vim.api.nvim_buf_get_lines(b, 0, -1, false)) do if l ~= \"\" then return \"rows\" end end end end return \"empty\" end)()')", expect = "rows", timeout_ms = 15000 },
+  { probe = "luaeval('VFC.snap(\"telescope-picker\")')", expect = "ok" },
+  { send = "<C-n>" },
+  { probe = "luaeval('VFC.snap(\"telescope-picker-after-c-n\")')", expect = "ok" },
+  { send = "<Esc>" },
+  { send = "<Esc>" },
+  { probe = "luaeval('VFC.snap(\"telescope-dismissed\")')", expect = "ok" },
+]
