@@ -540,6 +540,24 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // the same one-shot thread again, and one live at a time by
+            // construction: `update` returns this only while a motion is
+            // running and only once per frame, so the chain is at most the
+            // frames one dismissal is quantized into and stops on its own.
+            // The degrade when the channel is unwired is the state-first
+            // frame with no interpolation over it -- exactly what a terminal
+            // below the full tier gets, and never a stack left mid-slide,
+            // since the model is already in its final state.
+            Effect::ScheduleAnimTick { after } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("toast-motion", move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::AnimTick);
+                    });
+                }
+                Flow::Continue
+            }
             // the same one-shot thread, and the same degrade: an unwired
             // channel leaves the hold to be resolved by the probe's answer
             // or the first keypress, both of which arrive on paths that do

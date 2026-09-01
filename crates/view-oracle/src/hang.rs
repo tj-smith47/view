@@ -926,12 +926,17 @@ impl HangSession {
     }
 
     /// The sticky banner's text, if one is raised.
+    ///
+    /// The row budget is a terminal's worth rather than the banner's own
+    /// height: `visible_lines` charges each notice its frame as well as its
+    /// text, and a budget sized to the text alone would answer `None` for a
+    /// banner that is on screen.
     #[must_use]
     pub fn banner(&self) -> Option<String> {
         self.model
             .engine
             .messages
-            .visible_lines(4)
+            .visible_lines(40)
             .into_iter()
             .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
             .find(|line| !line.is_empty())

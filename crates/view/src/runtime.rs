@@ -1184,7 +1184,7 @@ mod tests {
         model
             .engine
             .messages
-            .visible_lines(4)
+            .visible_lines(40)
             .into_iter()
             .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
             .collect()

@@ -99,16 +99,32 @@ pub enum LayerKind {
     EngineGrid,
     /// The command line, present while nvim's command line is open.
     Cmdline(CmdlineState),
-    /// The visible toast box's physical lines, already selected by
-    /// `Messages::visible_lines` (persistent error/warn lines kept, the
-    /// most recent transient lines filling what room remains) and split on
-    /// each entry's own embedded line breaks: one row per span-vec, in
-    /// display order top to bottom. Present while any message is visible.
+    /// One notice's toast box: its physical lines, already selected by
+    /// `Messages::visible_toasts` (persistent error/warn boxes kept, the
+    /// most recent transient ones filling what room remains) and split on
+    /// the entry's own embedded line breaks -- one row per span-vec, in
+    /// display order top to bottom.
+    ///
+    /// One layer per visible notice rather than one for the stack, which is
+    /// what lets the top slot's box leave to the right while the ones below
+    /// it slide up: two rects moving in different directions cannot be one
+    /// rect. `slot` is this box's position in the painted stack counted from
+    /// the top, the departing box included for as long as it is still on
+    /// screen; `x_offset` is how many cells right of its home column it has
+    /// travelled, `0` for every box that is not leaving. `rect` already
+    /// carries both, so a painter never re-derives a position from them --
+    /// they are what a test reads to tell one frame of the motion from the
+    /// next.
+    ///
     /// Each row is a single [`view_core::native::views::StyleRole::Plain`]
     /// span (a toast has no per-segment structure to preserve), kept as a
     /// span-vec rather than a `String` so the layer honestly carries the
     /// same overlay-row shape every other overlay layer does.
-    Messages(Vec<Vec<Span>>),
+    Toast {
+        lines: Vec<Vec<Span>>,
+        slot: usize,
+        x_offset: u16,
+    },
     /// The open tabs, present once nvim has sent a `tabline_update`.
     Tabline(TablineState),
     /// The completion popup menu, present while it is open.
@@ -222,7 +238,7 @@ impl LayerKind {
             | Self::Ai(_) => true,
             Self::EngineGrid
             | Self::Cmdline(_)
-            | Self::Messages(_)
+            | Self::Toast { .. }
             | Self::Tabline(_)
             | Self::Popupmenu(_)
             | Self::Speculated(_)
@@ -479,65 +495,7 @@ pub fn render(model: &Model) -> Surface {
             ));
         }
     }
-    if !engine.messages.entries.is_empty() {
-        // `Messages::visible_lines` is the single selection of what
-        // actually shows: persistent (error/warn) lines always kept, the
-        // remaining row budget filled with the most recent transient
-        // lines, one physical line (an entry's content split on its own
-        // embedded `\n`s) per visual row rather than one row per
-        // `MessageEntry` -- sizing/painting per entry instead squashes
-        // every line of a multi-line `emsg` into a single row wide enough
-        // to hold all of them concatenated, and leaves the row it should
-        // have occupied showing whatever the grid layer painted
-        // underneath. Both the layer's geometry and its painted content
-        // come from this exact `Vec<String>`, so sizing and painting can
-        // never disagree about what is visible -- which requires handing
-        // `visible_lines` a budget already shrunk by the two rows
-        // `paint_messages` reserves for its own top/bottom border edge:
-        // selecting against the full `grid_h` and growing the frame
-        // around the result afterward let the row count `visible_lines`
-        // chose exceed what the framed interior can hold, so the interior
-        // clamp below silently dropped whatever the tail of the selected
-        // `Vec` happened to be -- the newest lines, including the
-        // always-kept persistent error/warn line -- while
-        // `visible_lines`'s own persistent-line-priority eviction never
-        // got the chance to make that call itself. `.max(1)` on the row
-        // budget matches this block's own width/height floor below: a
-        // pre-attach frame (`grid_h` still 0, e.g. a native toast pushed
-        // before the engine's first `GridResize`) still reserves its one
-        // row rather than vanishing until real grid content arrives, and
-        // a grid too short to fit even a bordered single line still
-        // selects one physical line -- `paint_message_border`'s own
-        // width/height-under-2 guard is what degrades that case to a
-        // blank (borderless) fill instead of a panic.
-        let visible = engine
-            .messages
-            .visible_lines(usize::from(grid_h.saturating_sub(2)).max(1));
-        let content_width = messages_width(&visible)
-            .min(grid_w.saturating_sub(2))
-            .max(1);
-        let content_height = u16::try_from(visible.len())
-            .unwrap_or(u16::MAX)
-            .min(grid_h.saturating_sub(2))
-            .max(1);
-        // the border frame (paint_messages) adds one cell on every edge
-        // around the content `visible_lines` already selected -- grown
-        // here, not in `visible_lines` itself, so the selection logic
-        // above stays free of layout math; `overlay_layer`'s own
-        // `clamp_to` still caps the grown rect to the live grid, which by
-        // construction never has to remove more than the frame it just
-        // added since the budget above already left room for it
-        let width = content_width.saturating_add(2);
-        let height = content_height.saturating_add(2);
-        let col = grid_w.saturating_sub(width);
-        layers.push(overlay_layer(
-            Rect::new(0, col, width, height),
-            (grid_w, grid_h),
-            offset,
-            LayerKind::Messages(visible),
-            model.caps,
-        ));
-    }
+    layers.extend(toast_layers(model, (grid_w, grid_h), offset));
     if let Some(pm) = &engine.popupmenu {
         // mirrors, term for term, the condition the cmdline block above
         // actually built a `completion` under: only when every one of
@@ -591,6 +549,140 @@ fn messages_width(lines: &[Vec<Span>]) -> u16 {
         .max()
         .and_then(|w| u16::try_from(w).ok())
         .unwrap_or(u16::MAX)
+}
+
+/// One framed toast box's outer size: the widest line it holds plus the
+/// frame, clipped to the grid.
+///
+/// The floors match `Messages::visible_toasts`' own: a pre-attach frame
+/// (`grid_w`/`grid_h` still 0, e.g. a native toast pushed before the
+/// engine's first `GridResize`) still reserves a box rather than vanishing
+/// until real grid content arrives, and `paint::toast`'s
+/// width/height-under-2 guard is what degrades a grid too small for the
+/// frame to a blank fill instead of a panic.
+fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
+    let width = messages_width(lines)
+        .min(grid_w.saturating_sub(2))
+        .max(1)
+        .saturating_add(2);
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .max(1)
+        .saturating_add(2);
+    (width, height)
+}
+
+/// The toast stack: one framed box per visible notice, oldest at the top,
+/// plus the box a dismissal is still carrying off to the right.
+///
+/// The stack is already in its final state here -- the departed notice is
+/// out of `Messages::entries` -- so the motion decides only where the boxes
+/// are drawn. The departing box keeps the row it held; the boxes at and
+/// below the slot it vacated sit `y_shift` rows lower than the home they
+/// are settling into, and the ones above it do not move at all. `y_shift`
+/// runs from the departing box's full height down to nothing over the
+/// motion, which is the slide up, and the same eased fraction drives that
+/// box's own `x_offset` -- one motion, on one clock, not two that share a
+/// duration.
+///
+/// The departing box is pushed last, so it composites over the stack
+/// arriving underneath it instead of being cleared by it.
+fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
+    let (grid_w, grid_h) = bounds;
+    let stack = model
+        .engine
+        .messages
+        .visible_toasts(usize::from(grid_h).max(3));
+    let leaving = model.toast_motion.as_ref().map(|motion| {
+        let (lines, slot) = motion.exiting();
+        let (width, height) = toast_box(lines, grid_w);
+        Leaving {
+            lines: lines.to_vec(),
+            slot: slot.min(stack.len()),
+            x_offset: motion.cells_of(width),
+            y_shift: height.saturating_sub(motion.cells_of(height)),
+        }
+    });
+    if stack.is_empty() && leaving.is_none() {
+        return Vec::new();
+    }
+    let vacated = leaving.as_ref().map_or(usize::MAX, |l| l.slot);
+    let y_shift = leaving.as_ref().map_or(0, |l| l.y_shift);
+    let mut layers = Vec::with_capacity(stack.len().saturating_add(1));
+    let mut row: u16 = 0;
+    let mut vacated_row: u16 = 0;
+    for (i, lines) in stack.into_iter().enumerate() {
+        let (_, height) = toast_box(&lines, grid_w);
+        if i == vacated {
+            vacated_row = row;
+        }
+        let slot = if i >= vacated { i.saturating_add(1) } else { i };
+        let at = if i >= vacated {
+            row.saturating_add(y_shift)
+        } else {
+            row
+        };
+        layers.push(toast_layer(lines, slot, 0, at, bounds, offset, model.caps));
+        row = row.saturating_add(height);
+    }
+    if let Some(leaving) = leaving {
+        let at = if leaving.slot < layers.len() {
+            vacated_row
+        } else {
+            row
+        };
+        let layer = toast_layer(
+            leaving.lines,
+            leaving.slot,
+            leaving.x_offset,
+            at,
+            bounds,
+            offset,
+            model.caps,
+        );
+        // a box that has travelled its own width is entirely past the right
+        // edge; it leaves the stack rather than sitting in it as an empty
+        // rect the paint shadow still has to pair against
+        if layer.rect.width > 0 {
+            layers.push(layer);
+        }
+    }
+    layers
+}
+
+/// The departing box's presentation state for one frame of the motion.
+struct Leaving {
+    lines: Vec<Vec<Span>>,
+    slot: usize,
+    x_offset: u16,
+    y_shift: u16,
+}
+
+/// One toast box as a [`Layer`]: right-anchored to the grid, shifted
+/// `x_offset` cells further right while it is on its way out.
+fn toast_layer(
+    lines: Vec<Vec<Span>>,
+    slot: usize,
+    x_offset: u16,
+    row: u16,
+    bounds: (u16, u16),
+    offset: u16,
+    caps: TermCaps,
+) -> Layer {
+    let (grid_w, _) = bounds;
+    let (width, height) = toast_box(&lines, grid_w);
+    let col = grid_w.saturating_sub(width).saturating_add(x_offset);
+    overlay_layer(
+        Rect::new(row, col, width, height),
+        bounds,
+        offset,
+        LayerKind::Toast {
+            lines,
+            slot,
+            x_offset,
+        },
+        caps,
+    )
 }
 
 /// The widest popup menu item's [`PmItem::display_text`], in terminal
@@ -1130,6 +1222,58 @@ mod tests {
         model
     }
 
+    /// Every toast layer in the frame, in paint order, as
+    /// `(slot, x_offset, row, texts)` -- the whole of what one frame of the
+    /// stack says about where its boxes are.
+    fn toasts(surface: &Surface) -> Vec<(usize, u16, u16, Vec<String>)> {
+        surface
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.kind {
+                LayerKind::Toast {
+                    lines,
+                    slot,
+                    x_offset,
+                } => Some((
+                    *slot,
+                    *x_offset,
+                    layer.rect.row,
+                    lines
+                        .iter()
+                        .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What each toast box in the frame reads, top to bottom.
+    fn toast_texts(surface: &Surface) -> Vec<Vec<String>> {
+        toasts(surface)
+            .into_iter()
+            .map(|(_, _, _, texts)| texts)
+            .collect()
+    }
+
+    /// A model on a terminal that interpolates, holding three notices: the
+    /// stack the motion tests dismiss the top of.
+    fn model_with_three_toasts(tier: view_core::model::Tier) -> Model {
+        let mut model = model_with_grid(20, 12);
+        model.caps.tier = tier;
+        for text in ["first", "second", "third"] {
+            apply(
+                &mut model,
+                UiEvent::MsgShow {
+                    kind: "echomsg".into(),
+                    content: vec![(0, text.into())],
+                    replace_last: false,
+                },
+            );
+        }
+        model
+    }
+
     /// Non-exhaustive `view-core` state structs (`CmdlineState`,
     /// `TablineState`, `PopupmenuState`) cannot be built with struct-literal
     /// syntax from outside their defining crate, so tests drive them through
@@ -1644,7 +1788,7 @@ mod tests {
         let messages = surface
             .layers
             .iter()
-            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .find(|l| matches!(l.kind, LayerKind::Toast { .. }))
             .expect("messages layer present");
         assert_eq!(messages.rect.row, 0);
         assert_eq!(
@@ -1659,12 +1803,11 @@ mod tests {
 
     #[test]
     fn messages_layer_keeps_a_persistent_error_line_when_transient_lines_overflow_the_box() {
-        // height 4, not 2: the framed interior is 2 rows shy of grid_h, so
-        // a 2-line selection budget needs a 4-row grid to actually reach
-        // `visible_lines` (a 2-row grid would floor the budget at 1 via
-        // the saturating shrink below, testing the floor instead of the
-        // eviction-priority behavior this test targets)
-        let mut model = model_with_grid(20, 4);
+        // 6 rows, not 3: each notice is its own framed box costing its
+        // line plus two frame rows, so a grid with room for two of the
+        // three boxes is what puts the eviction priority this test targets
+        // in play rather than the single-box floor
+        let mut model = model_with_grid(20, 6);
         apply(
             &mut model,
             UiEvent::MsgShow {
@@ -1692,24 +1835,132 @@ mod tests {
 
         let surface = render(&model);
 
-        let LayerKind::Messages(lines) = &surface
-            .layers
-            .iter()
-            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
-            .expect("messages layer present")
-            .kind
-        else {
-            unreachable!("just matched Messages above");
-        };
-        let texts: Vec<String> = lines
-            .iter()
-            .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
-            .collect();
         assert_eq!(
-            texts,
-            vec!["an error".to_string(), "new info".to_string()],
-            "the persistent error must survive the overflow; the oldest transient line is evicted instead"
+            toast_texts(&surface),
+            vec![vec!["an error".to_string()], vec!["new info".to_string()]],
+            "the persistent error must survive the overflow; the oldest \
+             transient box is evicted instead"
         );
+    }
+
+    /// The stack's whole motion, frame by frame: the notice that left is
+    /// still on screen and travelling right, the ones under it are still
+    /// below the rows they are settling into and rise into them, and
+    /// nothing above the vacated slot moves. One clock drives both halves,
+    /// which is what a frame-by-frame read is here to hold -- two motions
+    /// that merely shared a duration would be free to disagree on any one
+    /// frame.
+    #[test]
+    fn the_top_toast_exits_right_while_the_rest_slide_up_in_one_motion() {
+        let mut model = model_with_three_toasts(view_core::model::Tier::Full);
+        let first = model.engine.messages.entries[0].id();
+        let _ = update(&mut model, Msg::ToastExpired { id: first });
+        let mut frames = Vec::new();
+        loop {
+            frames.push(toasts(&render(&model)));
+            if model.toast_motion.is_none() {
+                break;
+            }
+            let _ = update(&mut model, Msg::AnimTick);
+        }
+
+        // the rows the survivors settle into, read off the frame the motion
+        // arrived at rather than the one it left: what they rise toward is
+        // where the stack now is, not where they stood behind the notice
+        let settled: Vec<u16> = frames
+            .last()
+            .expect("a settled frame")
+            .iter()
+            .map(|(_, _, row, _)| *row)
+            .collect();
+        let moving: Vec<_> = frames
+            .iter()
+            .take_while(|f| f.len() == 3)
+            .cloned()
+            .collect();
+        assert!(
+            !moving.is_empty() && moving.len() < frames.len(),
+            "the departing box travels for some frames and then leaves: \
+             {frames:?}"
+        );
+        for (i, frame) in moving.iter().enumerate() {
+            let (slot, _, _, texts) = frame[2].clone();
+            assert_eq!(
+                (slot, texts),
+                (0, vec!["first".to_string()]),
+                "the departing box holds the slot it is vacating, painted \
+                 last so it composites over the stack arriving beneath it"
+            );
+            for (n, (slot, x_offset, row, _)) in frame[..2].iter().enumerate() {
+                assert_eq!(
+                    (*slot, *x_offset),
+                    (n + 1, 0),
+                    "only the departing box travels sideways"
+                );
+                assert!(
+                    *row >= settled[n],
+                    "frame {i} box {n} must never rise past its home row \
+                     {}: {frame:?}",
+                    settled[n]
+                );
+            }
+        }
+        let rights: Vec<u16> = moving.iter().map(|f| f[2].1).collect();
+        let ups: Vec<u16> = moving.iter().map(|f| f[0].2).collect();
+        assert!(
+            rights.windows(2).all(|w| w[0] <= w[1]) && rights[0] < rights[rights.len() - 1],
+            "the exit accelerates rightward and never reverses: {rights:?}"
+        );
+        assert!(
+            ups.windows(2).all(|w| w[0] >= w[1]) && ups[0] > ups[ups.len() - 1],
+            "the stack rises over the same frames and never sinks: {ups:?}"
+        );
+        assert_eq!(
+            ups[0].saturating_sub(settled[0]),
+            3,
+            "the stack starts a full box below the home it settles into"
+        );
+
+        let last = frames.last().expect("a settled frame");
+        assert_eq!(
+            last.clone(),
+            vec![
+                (0, 0, settled[0], vec!["second".to_string()]),
+                (1, 0, settled[1], vec!["third".to_string()]),
+            ],
+            "the motion settles on exactly the frame the stack was already in"
+        );
+    }
+
+    /// Below the full tier the state-first frame is the only frame: the
+    /// stack paints its final state the instant the notice leaves, with no
+    /// departing box and nothing offset.
+    #[test]
+    fn below_full_tier_the_stack_jumps_to_its_final_state() {
+        let full = {
+            let mut model = model_with_three_toasts(view_core::model::Tier::Full);
+            let first = model.engine.messages.entries[0].id();
+            let _ = update(&mut model, Msg::ToastExpired { id: first });
+            while model.toast_motion.is_some() {
+                let _ = update(&mut model, Msg::AnimTick);
+            }
+            toasts(&render(&model))
+        };
+        for tier in [
+            view_core::model::Tier::Standard,
+            view_core::model::Tier::Basic,
+        ] {
+            let mut model = model_with_three_toasts(tier);
+            let first = model.engine.messages.entries[0].id();
+            let _ = update(&mut model, Msg::ToastExpired { id: first });
+            assert_eq!(model.toast_motion, None, "{tier:?} interpolates nothing");
+            assert_eq!(
+                toasts(&render(&model)),
+                full,
+                "{tier:?} paints on its first frame exactly what the full \
+                 tier arrives at on its last"
+            );
+        }
     }
 
     #[test]
@@ -1815,7 +2066,7 @@ mod tests {
         let messages_idx = surface
             .layers
             .iter()
-            .position(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .position(|l| matches!(l.kind, LayerKind::Toast { .. }))
             .expect("Messages layer present");
         assert!(
             shell_idx < messages_idx,
@@ -1881,8 +2132,8 @@ mod tests {
         let panel = position(|k| matches!(k, LayerKind::Ai(_))).expect("the panel overlay is open");
         let cmdline = position(|k| matches!(k, LayerKind::Cmdline(_)))
             .expect("a cmdline is open and the palette is off");
-        let messages =
-            position(|k| matches!(k, LayerKind::Messages(_))).expect("an error message is showing");
+        let messages = position(|k| matches!(k, LayerKind::Toast { .. }))
+            .expect("an error message is showing");
         let popupmenu = position(|k| matches!(k, LayerKind::Popupmenu(_)))
             .expect("a buffer-anchored completion menu is showing");
 

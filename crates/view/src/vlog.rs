@@ -105,9 +105,12 @@ fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
 /// pure and cannot log these itself -- see the module docs), the async
 /// `nvim_get_hl` default-colors probe's reply, an engine-down transition,
 /// a native feature invocation, the mappings the engine claimed, and every
-/// AI event. Every other `Msg` variant (`Key`, `Paste`, `Mouse`,
-/// `Resized`, loop plumbing) carries nothing this log's contract asks for
-/// and is a deliberate no-op here.
+/// AI event, plus the toast stack's own clock (an expiry and each frame of
+/// the motion it starts), which is what a read of this log answers "did
+/// anything wake the loop while the editor was idle" from. Every other
+/// `Msg` variant (`Key`, `Paste`, `Mouse`, `Resized`, loop plumbing)
+/// carries nothing this log's contract asks for and is a deliberate no-op
+/// here.
 pub fn log_msg(msg: &view_core::msg::Msg) {
     use view_core::msg::Msg;
     match msg {
@@ -189,6 +192,11 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
                 )
             });
         }
+        // the one `Msg` with a wall-clock cadence of its own, and so the
+        // one whose lines answer "was the loop woken while nothing was
+        // moving": a short burst per dismissal, silence between them
+        Msg::AnimTick => log("toast", "anim-tick"),
+        Msg::ToastExpired { .. } => log("toast", "expired"),
         Msg::MappingsClaimed { claimed } => {
             log_with("native", || {
                 let keys: Vec<String> = claimed

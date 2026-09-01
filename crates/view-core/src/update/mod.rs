@@ -1,6 +1,6 @@
 //! The pure state transition: `Msg` in, `Model` mutated, `Effect`s out.
 
-use crate::model::{Focus, Model, MouseCapture, OverlayKind};
+use crate::model::{Focus, Model, MouseCapture, OverlayKind, Tier};
 use crate::msg::{
     DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
 };
@@ -10,6 +10,8 @@ use crate::native::keys::{Action, Resolved};
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 use crate::native::toast::HoldOutcome;
+use crate::native::toast::ToastMotion;
+use crate::native::views::Span;
 
 /// How long a session parks foreign startup messages before giving up on
 /// hearing which plugin claimed a surface and letting them through.
@@ -58,7 +60,22 @@ fn path_to_wire(path: &std::path::Path) -> String {
 /// the boundary as a returned [`Effect`] instead of being performed here.
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
+    // any input during an animation completes it on that frame (the spec's
+    // interruptible rule): the model is already in the state the motion is
+    // interpolating toward, so jumping to the last frame paints that state
+    // and nothing waits on choreography the user has moved past. A key that
+    // itself dismisses a notice still starts that notice's own motion at the
+    // tail below -- that is the next motion, not this one continuing.
+    if matches!(msg, Msg::Key(_) | Msg::Mouse(_) | Msg::Paste(_)) {
+        if let Some(motion) = model.toast_motion.as_mut() {
+            model.dirty |= motion.complete();
+        }
+    }
+    // taken ahead of the message so `departed_toast` can tell a notice that
+    // left the stack from one nvim replaced in place
+    let entries_before = model.engine.messages.entries.len();
     let mut effects = dispatch(model, msg);
+    let departed = model.engine.messages.departed_toast(entries_before);
     // the toast stack's dismissal timer belongs to its top slot, and the
     // ways an entry leaves that slot are spread across a dozen arms below
     // -- an expiry, a keypress, a deliberate sticky dismissal, an
@@ -68,7 +85,38 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // somebody remembered; `arm_top_slot` answers `None` when the slot has
     // not changed hands, which is nearly every message.
     effects.extend(model.engine.messages.arm_top_slot());
+    effects.extend(start_toast_exit(model, departed));
     effects
+}
+
+/// Starts the stack's exit motion for a notice that just left, and asks for
+/// the first frame's wakeup.
+///
+/// The gate is the tier and nothing else: below `Tier::Full` there is no
+/// interpolation at all, so no motion is started, no tick is ever scheduled,
+/// and the stack paints the state it is already in. The slot timers and the
+/// pause key are untouched either way -- motion is presentation, timing is
+/// behavior.
+fn start_toast_exit(model: &mut Model, departed: Option<(Vec<Vec<Span>>, usize)>) -> Vec<Effect> {
+    let Some((lines, slot)) = departed else {
+        return Vec::new();
+    };
+    if model.caps.tier != Tier::Full {
+        return Vec::new();
+    }
+    // one wakeup chain at a time: a second dismissal landing while the
+    // first is still playing replaces the motion and is driven by the chain
+    // already running, because two chains ticking one clock advance it twice
+    // per interval and the stack arrives in half the time it was given
+    let already_ticking = model.toast_motion.is_some();
+    model.toast_motion = Some(ToastMotion::exit_right(lines, slot));
+    model.dirty = true;
+    if already_ticking {
+        return Vec::new();
+    }
+    vec![Effect::ScheduleAnimTick {
+        after: crate::native::toast::MOTION_STEP,
+    }]
 }
 
 fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
@@ -613,6 +661,25 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 model.dirty = true;
             }
             Vec::new()
+        }
+        // one frame of the stack's exit motion, and the only place a
+        // further tick is ever asked for: a tick arriving with no motion
+        // live -- the interrupt rule dropped it, or this is the wakeup that
+        // followed the last frame -- ends the chain instead of re-arming it,
+        // which is what stops an idle editor from holding a timer thread
+        Msg::AnimTick => {
+            let Some(motion) = model.toast_motion.as_mut() else {
+                return Vec::new();
+            };
+            model.dirty = true;
+            if motion.advance() {
+                vec![Effect::ScheduleAnimTick {
+                    after: crate::native::toast::MOTION_STEP,
+                }]
+            } else {
+                model.toast_motion = None;
+                Vec::new()
+            }
         }
         // nvim owns all buffer text (see the crate's hard rule): a `loaded:
         // true` reply is applied straight to the preview pane, but `loaded:

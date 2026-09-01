@@ -285,7 +285,7 @@ fn a_wedge_that_opens_while_the_session_is_idle_still_raises_the_notice() {
         model
             .engine
             .messages
-            .visible_lines(4)
+            .visible_lines(40)
             .into_iter()
             .map(|spans| spans.into_iter().map(|span| span.text).collect::<String>())
             .collect::<Vec<_>>(),

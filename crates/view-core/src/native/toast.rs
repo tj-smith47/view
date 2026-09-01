@@ -148,6 +148,117 @@ pub fn timeout_for(route: Route) -> Option<Duration> {
     }
 }
 
+/// The spec's `motion.slow` duration (spec 7.1, rule 4): the whole interval one
+/// toast dismissal is interpolated over. Anything longer is latency wearing
+/// a costume, so this is a ceiling on the motion, not a starting point.
+pub const MOTION_SLOW: Duration = Duration::from_millis(120);
+
+/// The interpolated frames [`MOTION_SLOW`] is divided into.
+///
+/// Position is quantized to whole cells, so the only question this answers
+/// is how many cell steps a dismissal is allowed to cost: six frames per
+/// dismissal, and none at all at rest. A stack that is not moving schedules
+/// no tick, which is what keeps an idle editor's loop asleep.
+pub const MOTION_STEPS: u16 = 6;
+
+/// The wait between two [`crate::msg::Msg::AnimTick`]s while a motion is
+/// live. Pinned against [`MOTION_SLOW`] and [`MOTION_STEPS`] by
+/// `the_motion_clock_spends_exactly_the_slow_duration`.
+pub const MOTION_STEP: Duration = Duration::from_millis(20);
+
+/// The presentation-only interpolation one dismissal is played through.
+///
+/// The model reaches its final state on the frame the notice leaves (spec 7.1,
+/// rule 1) -- `Messages::entries` no longer holds it -- so what slides out
+/// is the copy taken while it still stood, carried here and nowhere else.
+/// Nothing in the stack's timing depends on this: motion is presentation,
+/// timing is behavior, and below [`Tier::Full`](crate::model::Tier) no
+/// motion is started at all.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastMotion {
+    pub phase: MotionPhase,
+    /// Frames played so far, `0..MOTION_STEPS`. The frame painted at step
+    /// `e` sits `(e + 1) / MOTION_STEPS` of the way through the motion, so
+    /// the last painted frame is the settled one and the tick that would
+    /// make this `MOTION_STEPS` ends the motion instead of painting a
+    /// seventh frame.
+    pub elapsed_steps: u16,
+}
+
+/// What the toast stack is interpolating.
+///
+/// One variant, because the spec gives the stack one motion: the top slot's
+/// notice leaving is also the whole stack sliding up, over one interval,
+/// on one clock (amended 2026-08-21, C4).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MotionPhase {
+    /// The departing notice's lines, and the slot it is vacating: the boxes
+    /// at that slot and below are the ones that slide up, the ones above it
+    /// do not move.
+    ExitRight {
+        lines: Vec<Vec<crate::native::views::Span>>,
+        slot: usize,
+    },
+}
+
+impl ToastMotion {
+    /// The motion a notice leaving `slot` starts, on its first frame.
+    #[must_use]
+    pub(crate) fn exit_right(lines: Vec<Vec<crate::native::views::Span>>, slot: usize) -> Self {
+        Self {
+            phase: MotionPhase::ExitRight { lines, slot },
+            elapsed_steps: 0,
+        }
+    }
+
+    /// Plays one frame, reporting whether the motion is still live. A dead
+    /// motion is dropped by the caller rather than left holding a settled
+    /// state nothing would repaint.
+    pub(crate) fn advance(&mut self) -> bool {
+        self.elapsed_steps = self.elapsed_steps.saturating_add(1);
+        self.elapsed_steps < MOTION_STEPS
+    }
+
+    /// Jumps to the last frame, reporting whether that moved anything. The
+    /// motion is left standing rather than dropped so the wakeup chain
+    /// already in flight stays its only owner: a chain orphaned here would
+    /// land on the next motion and advance it twice per interval.
+    pub(crate) fn complete(&mut self) -> bool {
+        let moved = self.elapsed_steps < MOTION_STEPS;
+        self.elapsed_steps = MOTION_STEPS;
+        moved
+    }
+
+    /// The departing notice's lines and the slot it is vacating.
+    #[must_use]
+    pub fn exiting(&self) -> (&[Vec<crate::native::views::Span>], usize) {
+        match &self.phase {
+            MotionPhase::ExitRight { lines, slot } => (lines, *slot),
+        }
+    }
+
+    /// How many of `travel` cells this frame has covered, ease-in (spec 7.1,
+    /// rule 4: ease-in for exits), rounded to whole cells.
+    ///
+    /// The same eased fraction answers both halves of the motion, which is
+    /// what makes them one motion rather than two that happen to share a
+    /// duration.
+    #[must_use]
+    pub fn cells_of(&self, travel: u16) -> u16 {
+        let step = u32::from(self.elapsed_steps.saturating_add(1).min(MOTION_STEPS));
+        let steps = u32::from(MOTION_STEPS);
+        let full = steps.saturating_mul(steps);
+        let eased = u32::from(travel)
+            .saturating_mul(step)
+            .saturating_mul(step)
+            .saturating_add(full / 2)
+            / full;
+        u16::try_from(eased).unwrap_or(u16::MAX).min(travel)
+    }
+}
+
 /// The default [`ToastHistory`] ring size: enough scrollback for a
 /// `:messages`-style view reachable from the palette without holding an
 /// unbounded session history.
@@ -244,6 +355,31 @@ mod tests {
         assert_eq!(timeout_for(Route::Prompt), None);
         assert_eq!(timeout_for(Route::Sticky), None);
         assert_eq!(timeout_for(Route::Statusline), None);
+    }
+
+    /// The three motion constants restate one duration between them, so a
+    /// step count or an interval edited on its own would silently stretch or
+    /// shorten the interval the spec caps at `motion.slow`.
+    #[test]
+    fn the_motion_clock_spends_exactly_the_slow_duration() {
+        assert_eq!(MOTION_STEP * u32::from(MOTION_STEPS), MOTION_SLOW);
+    }
+
+    /// Ease-in for exits: the first frames barely move and the last covers
+    /// the most ground, and the settled frame is at full travel rather than
+    /// short of it -- a motion that ended short would pop the last cells.
+    #[test]
+    fn the_exit_eases_in_and_arrives_on_its_last_painted_frame() {
+        let mut motion = ToastMotion::exit_right(vec![], 0);
+        let mut covered = Vec::new();
+        loop {
+            covered.push(motion.cells_of(36));
+            if !motion.advance() {
+                break;
+            }
+        }
+        assert_eq!(covered.len(), usize::from(MOTION_STEPS));
+        assert_eq!(covered, vec![1, 4, 9, 16, 25, 36]);
     }
 
     #[test]

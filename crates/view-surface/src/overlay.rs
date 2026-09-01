@@ -702,7 +702,7 @@ fn body(kind: &LayerKind) -> Option<Body> {
         LayerKind::Ai(view) => Some(ai_body(view)),
         LayerKind::EngineGrid
         | LayerKind::Cmdline(_)
-        | LayerKind::Messages(_)
+        | LayerKind::Toast { .. }
         | LayerKind::Tabline(_)
         | LayerKind::Popupmenu(_)
         | LayerKind::Speculated(_)

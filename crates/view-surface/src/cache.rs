@@ -86,6 +86,11 @@ struct Inputs {
     cmdline: Option<view_core::model::CmdlineState>,
     popupmenu: Option<view_core::model::PopupmenuState>,
     messages: Vec<view_core::model::MessageEntry>,
+    // the frame's only free-running input, and the reason it cannot be
+    // inferred from `messages`: a motion frame moves the same entries to
+    // different rows, so a cache keyed on the stack's contents alone would
+    // hand back the frame before the one that just advanced
+    toast_motion: Option<view_core::native::toast::ToastMotion>,
     // the palette's second row source: a plugin's own completion float,
     // read back off its buffer. It turns over as the typed prefix narrows
     // without the cmdline state above it changing at all -- the wire's
@@ -109,6 +114,7 @@ impl Inputs {
             cmdline: engine.cmdline.clone(),
             popupmenu: engine.popupmenu.clone(),
             messages: engine.messages.entries.clone(),
+            toast_motion: model.toast_motion.clone(),
             absorbed: engine.absorbed_rows().cloned(),
         }
     }
@@ -131,6 +137,7 @@ impl Inputs {
             && self.cmdline == engine.cmdline
             && self.popupmenu == engine.popupmenu
             && self.messages == engine.messages.entries
+            && self.toast_motion == model.toast_motion
             && self.absorbed.as_ref() == engine.absorbed_rows()
     }
 }
@@ -300,7 +307,7 @@ fn kind_name(kind: &crate::LayerKind) -> &'static str {
     match kind {
         crate::LayerKind::EngineGrid => "EngineGrid",
         crate::LayerKind::Cmdline(_) => "Cmdline",
-        crate::LayerKind::Messages(_) => "Messages",
+        crate::LayerKind::Toast { .. } => "Toast",
         crate::LayerKind::Tabline(_) => "Tabline",
         crate::LayerKind::Popupmenu(_) => "Popupmenu",
         crate::LayerKind::Shell => "Shell",
@@ -517,7 +524,7 @@ mod tests {
         assert!(surface
             .layers
             .iter()
-            .any(|l| matches!(l.kind, LayerKind::Messages(_))));
+            .any(|l| matches!(l.kind, LayerKind::Toast { .. })));
         assert_eq!((cache.frames, cache.rebuilds), (2, 2));
     }
 

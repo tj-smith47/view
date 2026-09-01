@@ -207,7 +207,7 @@ fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid, offse
         ),
         LayerKind::Tabline(state) => paint_tabline(canvas, layer, state),
         LayerKind::Cmdline(state) => paint_cmdline(canvas, layer, state),
-        LayerKind::Messages(entries) => paint_messages(canvas, layer, entries),
+        LayerKind::Toast { lines, .. } => paint_toast(canvas, layer, lines),
         LayerKind::Popupmenu(state) => paint_popupmenu(canvas, layer, state),
         LayerKind::Picker(_)
         | LayerKind::Tree(_)
@@ -312,12 +312,13 @@ fn blank_row(canvas: &mut Canvas<'_>, row: u16, col: u16, width: u16) {
     }
 }
 
-/// `lines` is already the exact visible set `Messages::visible_lines`
-/// selected -- one physical line per row, in display order -- so this only
+/// `lines` is already the exact visible set `Messages::visible_toasts`
+/// selected for this one notice -- one physical line per row, in display
+/// order -- so this only
 /// has to blank each row (mirroring the real painter's own toast-box clear;
 /// without it a row's cells past a shorter line's text would keep showing
 /// whatever an earlier layer painted there) and write each line.
-fn paint_messages(
+fn paint_toast(
     canvas: &mut Canvas<'_>,
     layer: &Layer,
     lines: &[Vec<view_core::native::views::Span>],

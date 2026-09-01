@@ -537,6 +537,11 @@ pub enum Msg {
     ToastExpired {
         id: MessageId,
     },
+    /// One frame of the toast stack's dismissal motion elapsed. Advances
+    /// [`ToastMotion::elapsed_steps`](crate::native::toast::ToastMotion) and
+    /// nothing else: the model is already in its final state, so a tick that
+    /// arrives with no motion live changes nothing and schedules nothing.
+    AnimTick,
     /// The matcher worker's answer to one `Effect::PickerQuery`, streamed:
     /// the worker sends this as many times as its nucleo tick loop produces
     /// a new ranked prefix for a still-running Files scan, not once at the
@@ -1193,6 +1198,19 @@ pub enum Effect {
     /// expire.
     ScheduleToastExpiry {
         id: MessageId,
+        after: Duration,
+    },
+    /// Wakes the loop for the next frame of a live toast motion, on
+    /// [`Effect::ScheduleToastExpiry`]'s shape and served by the same
+    /// one-shot thread.
+    ///
+    /// Returned only while a motion is actually live, which is the whole
+    /// damage-driven property: an idle stack -- the overwhelmingly common
+    /// case -- returns this never, so nothing puts a free-running timer on
+    /// an editor sitting still. `an_idle_stack_schedules_no_tick` is what
+    /// holds that, since a scheduler that always re-arms looks identical
+    /// from every other angle.
+    ScheduleAnimTick {
         after: Duration,
     },
     /// Arms the startup hold's deadline: after `after` elapses the timer

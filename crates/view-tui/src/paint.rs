@@ -15,6 +15,8 @@ use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 
+mod toast;
+
 /// The terminal-space rows a frame's composite must repaint, so a redraw
 /// touches only the changed region instead of all ~4800 cells.
 ///
@@ -801,7 +803,9 @@ fn composite_layers(
                 );
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
-            LayerKind::Messages(msgs) => paint_messages(msgs, &theme, borders, area, damage, buf),
+            LayerKind::Toast { lines, .. } => {
+                toast::paint_toast(lines, &theme, borders, area, damage, buf);
+            }
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
             LayerKind::Shell => paint_shell(&theme, area, damage, buf),
@@ -1060,142 +1064,6 @@ fn paint_cmdline(
     paint_text_row(&text, style, area, 0, buf);
 }
 
-/// Renders the message log as a bordered toast box: `render()` already
-/// picked exactly the visible physical lines (`Messages::visible_lines` --
-/// persistent error/warn lines always kept, the most recent transient
-/// lines filling the rest) and grew/right-anchored `area` to them plus a
-/// one-cell frame on every edge, so painting only has to draw the border
-/// around `area` and write one line per interior row, in the order given
-/// (oldest of the visible set on top). A truly empty `lines` paints nothing
-/// at all -- no clear, no border -- matching `render()`'s own contract of
-/// never emitting a `Messages` layer for an empty log; a caller that hands
-/// this an empty slice with a stale nonzero `area` (only possible by
-/// bypassing `render()`, e.g. directly in tests) must still see no bleed
-/// from a frame that has no content to frame.
-///
-/// The whole rect -- border cells included -- is cleared to the toast's own
-/// `msg_area` style first, before any text or border glyph: without this, a
-/// row, a border cell, or the columns past a line's own text on a row keeps
-/// showing whatever the `EngineGrid` layer painted underneath (real nvim
-/// content, e.g. a floating window's cells composited into the base grid
-/// when the frontend has no `ext_multigrid` support), which is what a live
-/// repro showed as foreign glyphs bleeding through at a toast row's right
-/// edge.
-///
-/// Every write here is clipped to the rows `damage` names, border cells
-/// included: see [`composite_layers`] for why a row of this rect the frame
-/// is not repainting is not this painter's to touch.
-fn paint_messages(
-    lines: &[Vec<Span>],
-    theme: &Theme,
-    borders: BorderSet,
-    area: ratatui::layout::Rect,
-    damage: &Damage,
-    buf: &mut Buffer,
-) {
-    if lines.is_empty() {
-        return;
-    }
-
-    let msg = theme.float_chrome(ChromeGroup::MsgArea, theme.float_bg());
-    let style = ratatui_style(msg);
-    let blank = " ".repeat(usize::from(area.width));
-    for row in (0..area.height).filter(|&row| damage.covers_row_of(area, row)) {
-        paint_text_row(&blank, style, area, row, buf);
-    }
-
-    let border_style = ratatui_style(ResolvedStyle {
-        fg: Some(message_border_color(theme)),
-        bg: msg.bg,
-        ..ResolvedStyle::default()
-    });
-    paint_message_border(area, borders, border_style, damage, buf);
-
-    let inner = inset_by_one(area);
-    // every toast line is a single `StyleRole::Plain` span (see
-    // `LayerKind::Messages`'s doc comment), so this row's own `style` is
-    // the whole story -- `paint_text_row` over the flattened text is the
-    // honest rendering, not a placeholder for per-span resolution nobody
-    // asked for here
-    for (i, spans) in lines.iter().enumerate() {
-        let Ok(row) = u16::try_from(i) else {
-            break;
-        };
-        if !damage.covers_row_of(inner, row) {
-            continue;
-        }
-        paint_text_row(
-            &view_surface::overlay::line_text(spans),
-            style,
-            inner,
-            row,
-            buf,
-        );
-    }
-}
-
-/// `area` shrunk by one cell on every edge: the interior the border frame
-/// leaves for `Messages::visible_lines`' own content, matching exactly the
-/// unframed rect `view-surface` grew by two cols/two rows to make room for
-/// the border this module draws around it.
-fn inset_by_one(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
-    ratatui::layout::Rect {
-        x: area.x.saturating_add(1),
-        y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    }
-}
-
-/// Draws `borders` on all four edges of `area`, styled `style`.
-/// A degenerate area narrower or shorter than 2 cells has no distinct edge
-/// cells to draw (the frame `view-surface` builds is never this small in
-/// practice, since it always adds a full 2-cell frame around at least a
-/// 1x1 content rect, but a direct unit-test caller could still construct
-/// one) and paints nothing rather than writing corner glyphs on top of
-/// each other.
-///
-/// The charset arrives from the caller rather than being spelled here: a
-/// toast is the one float `view-surface` hands over unframed, and a second
-/// literal set would have kept drawing box-drawing glyphs at a terminal
-/// that cannot render them long after every other float stopped.
-fn paint_message_border(
-    area: ratatui::layout::Rect,
-    borders: BorderSet,
-    style: Style,
-    damage: &Damage,
-    buf: &mut Buffer,
-) {
-    if area.width < 2 || area.height < 2 {
-        return;
-    }
-    let last_col = area.width - 1;
-    let last_row = area.height - 1;
-    let top_row = damage.covers_row_of(area, 0);
-    let bottom_row = damage.covers_row_of(area, last_row);
-    for col in 0..area.width {
-        let (top, bottom) = match col {
-            0 => (borders.top_left, borders.bottom_left),
-            c if c == last_col => (borders.top_right, borders.bottom_right),
-            _ => (borders.horizontal, borders.horizontal),
-        };
-        if top_row {
-            set_border_cell(buf, area.x + col, area.y, top, style);
-        }
-        if bottom_row {
-            set_border_cell(buf, area.x + col, area.y + last_row, bottom, style);
-        }
-    }
-    let vert = borders.vertical;
-    for row in 1..last_row {
-        if !damage.covers_row_of(area, row) {
-            continue;
-        }
-        set_border_cell(buf, area.x, area.y + row, vert, style);
-        set_border_cell(buf, area.x + last_col, area.y + row, vert, style);
-    }
-}
-
 /// Writes one border glyph directly into `buf`, bypassing [`paint_text_row`]:
 /// its column-advance-by-display-width logic exists for laying out a whole
 /// string of arbitrary (possibly wide/control) characters across a row,
@@ -1213,29 +1081,9 @@ fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, 
     cell.set_style(style);
 }
 
-/// The message toast border's foreground. `Theme` resolves no builtin
-/// group carrying a genuinely muted/comment tone -- `from_hl` maps only
-/// `StatusLine`, the tabline and popup-menu families, and `MsgArea`, none
-/// of which plays the role real nvim's own `Comment`/`NonText`/
-/// `FloatBorder` groups would (an unobtrusive chrome color distinct from
-/// both emphasis and interior-text colors), and this module never probes
-/// nvim for a group it does not already resolve -- so the border derives a
-/// dimmed variant of the interior's own `msg_area` foreground when one is
-/// set, visibly distinct from the full-brightness interior text with no
-/// further highlight lookup or RPC round trip. Never falls back to a
-/// dimmed `MsgArea` background: the border sits ON that background, so
-/// dimming it paints a frame that is merely a darker shade of the surface it is
-/// supposed to stand out from -- on a black-bg/no-fg theme this dims pure
-/// black to itself, an invisible border around a box the user cannot tell
-/// apart from empty screen. The floor is the plain (undimmed) neutral grey
-/// constant instead, which stays visible against any background.
-fn message_border_color(theme: &Theme) -> u32 {
-    border_color(theme.chrome(ChromeGroup::MsgArea))
-}
-
 /// A frame's foreground given the style of the surface it encloses: a
 /// dimmed variant of that surface's own foreground, or the neutral grey
-/// floor when it has none. See [`message_border_color`] for why the floor
+/// floor when it has none. See [`toast::toast_border_color`] for why the floor
 /// is a fixed color rather than a dimmed background.
 fn border_color(interior: ResolvedStyle) -> u32 {
     interior.fg.map_or(0x0080_8080, dim)
@@ -1273,7 +1121,7 @@ fn selection_style(theme: &Theme, base: ResolvedStyle) -> ResolvedStyle {
 }
 
 /// Scales each RGB channel of `c` to 60% of its original value, the muted
-/// transform [`message_border_color`] applies when no themed group already
+/// transform [`toast::toast_border_color`] applies when no themed group already
 /// carries one.
 fn dim(c: u32) -> u32 {
     let channel = |shift: u32| -> u32 { ((c >> shift) & 0xFF) * 3 / 5 };
@@ -2684,7 +2532,7 @@ mod tests {
     fn message_box_rows(surface: &Surface) -> Vec<u16> {
         let mut rows = Vec::new();
         for layer in &surface.layers {
-            if !matches!(layer.kind, LayerKind::Messages(_)) {
+            if !matches!(layer.kind, LayerKind::Toast { .. }) {
                 continue;
             }
             let first = layer.rect.row;
@@ -3043,22 +2891,16 @@ mod tests {
         );
     }
 
-    /// Clamp-boundary regression: five physical lines exactly fill a
-    /// 5-row grid (no eviction `Messages::visible_lines` itself would ever
-    /// perform against a full `grid_h` budget), but the framed interior
-    /// only has 3 rows once the border's own top/bottom edge is
-    /// subtracted. Before `render()` shrank the selection budget by the
-    /// frame's 2 rows, `visible_lines` kept all 5 lines (nothing to evict
-    /// at max_rows == total lines) and the interior clamp then silently
-    /// dropped the tail of that `Vec` -- the two newest lines, including
-    /// the persistent `echoerr` -- without `visible_lines`'s own
-    /// persistent-line-priority eviction ever getting a say. Disconfirm:
-    /// reverting `render()`'s three `.saturating_sub(2)` budget clamps back
-    /// to the raw `grid_h`/`grid_w` reproduces exactly this -- `cargo test
-    /// -p view-tui messages_toast_paints_the_newest_persistent_line`
-    /// fails with the interior's last row reading `"info2"`, a transient
-    /// line three older than the dropped `echoerr`, instead of
-    /// "critical error".
+    /// Clamp-boundary regression: five notices against a 5-row grid, where
+    /// each one costs its line plus its own two frame rows, so only one box
+    /// fits. The one that survives must be the persistent `echoerr`, and it
+    /// must actually reach the screen rather than being selected and then
+    /// silently clipped away by a frame the selection never paid for.
+    /// Disconfirm: charging a box its lines alone in
+    /// `Messages::visible_toasts` keeps two boxes for a 5-row stack, and
+    /// the second one's rows fall outside the grid -- the interior row here
+    /// reads `"info3"`, a transient line the error should have outranked,
+    /// instead of "critical error".
     #[test]
     fn messages_toast_paints_the_newest_persistent_line_at_the_clamp_boundary_instead_of_silently_dropping_it(
     ) {
@@ -3093,13 +2935,21 @@ mod tests {
         let messages = surface
             .layers
             .iter()
-            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .find(|l| matches!(l.kind, LayerKind::Toast { .. }))
             .expect("messages layer present");
-        // the frame still closes: a full 5-row box (3-row interior + 2
-        // border rows), not clamped shorter than the grid it fits inside
         assert_eq!(
-            messages.rect.height, 5,
-            "frame must fit the grid exactly, not overflow and get clamped"
+            surface
+                .layers
+                .iter()
+                .filter(|l| matches!(l.kind, LayerKind::Toast { .. }))
+                .count(),
+            1,
+            "a 5-row stack holds exactly one framed box"
+        );
+        assert_eq!(
+            messages.rect.height, 3,
+            "one line inside its own frame, not clamped shorter than the \
+             grid it fits inside"
         );
         let (x, y, w) = (messages.rect.col, messages.rect.row, messages.rect.width);
         assert_eq!(
@@ -3113,15 +2963,15 @@ mod tests {
             "bottom-right corner still closes the frame"
         );
 
-        // the interior's last row (y + 1 + 2, the third and final interior
-        // row) must carry the persistent, newest line -- not blank border
-        // fill left over from a silently dropped selection
-        let last_row: String = (x + 1..x + w - 1)
-            .map(|c| buf[(c, y + 3)].symbol().to_string())
+        // the interior row must carry the persistent line -- not blank
+        // border fill left over from a selection the frame then clipped
+        let interior: String = (x + 1..x + w - 1)
+            .map(|c| buf[(c, y + 1)].symbol().to_string())
             .collect();
         assert_eq!(
-            last_row, "critical error",
-            "the persistent error, as the newest selected line, must be painted on the interior's last row"
+            interior, "critical error",
+            "the persistent error must outrank every transient notice for \
+             the one box the stack has room for"
         );
     }
 
@@ -3168,7 +3018,7 @@ mod tests {
         let messages = surface
             .layers
             .iter()
-            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .find(|l| matches!(l.kind, LayerKind::Toast { .. }))
             .expect("messages layer present");
         let (x, y, w) = (messages.rect.col, messages.rect.row, messages.rect.width);
         assert_eq!(
@@ -3237,15 +3087,15 @@ mod tests {
     /// A theme with no `MsgArea` foreground -- e.g. a colorscheme that
     /// only sets `guibg` on `MsgArea`, or a pre-attach/no-colorscheme
     /// `Theme::default()` -- must still get a visible border. Disconfirm:
-    /// reverting `message_border_color` to its pre-fix chain ending in the
+    /// reverting `toast::toast_border_color` to its pre-fix chain ending in the
     /// `MsgArea` background, with that background black, makes this assert
     /// `0` instead of the grey constant -- an invisible black-on-black
     /// frame around a black background.
     #[test]
-    fn message_border_color_falls_back_to_neutral_grey_never_a_dimmed_background() {
+    fn the_toast_border_color_falls_back_to_neutral_grey_never_a_dimmed_background() {
         let theme = Theme::default();
         assert_eq!(
-            message_border_color(&theme),
+            toast::toast_border_color(&theme),
             0x0080_8080,
             "no msg_area foreground at all must fall back to the plain (undimmed) grey constant"
         );
@@ -3259,7 +3109,7 @@ mod tests {
             },
         );
         assert_eq!(
-            message_border_color(&bg_only),
+            toast::toast_border_color(&bg_only),
             0x0080_8080,
             "a background-only theme must not derive the border from a dimmed bg -- \
              dimming black yields black, an invisible frame on its own background"
@@ -3267,7 +3117,7 @@ mod tests {
     }
 
     #[test]
-    fn message_border_color_dims_a_set_msg_area_foreground() {
+    fn the_toast_border_color_dims_a_set_msg_area_foreground() {
         let mut theme = Theme::default();
         theme.set_chrome(
             ChromeGroup::MsgArea,
@@ -3277,7 +3127,7 @@ mod tests {
             },
         );
         assert_eq!(
-            message_border_color(&theme),
+            toast::toast_border_color(&theme),
             0x0099_0000,
             "a set msg_area foreground must still dim to 60%, distinct from the full-brightness interior text"
         );
@@ -3300,7 +3150,8 @@ mod tests {
         let theme = Theme::from_hl(model.engine.hl());
         // an area shaped like a real toast rect would occupy, handed
         // straight to paint_messages with an empty slice: render()'s own
-        // contract never emits a Messages layer for an empty log, but this
+        // contract never emits a Toast layer for a notice with no lines,
+        // but this
         // exercises paint_messages' own guard directly rather than relying
         // solely on that upstream omission
         let area = ratatui::layout::Rect {
@@ -3323,7 +3174,7 @@ mod tests {
                     &Damage::full(),
                     buf,
                 );
-                paint_messages(&[], &theme, BorderSet::ASCII, area, &Damage::full(), buf);
+                toast::paint_toast(&[], &theme, BorderSet::ASCII, area, &Damage::full(), buf);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -5035,6 +4886,17 @@ mod tests {
         )
     }
 
+    /// One notice's toast layer kind, at the top of the stack and not
+    /// moving: the shape every toast test that is not about the motion
+    /// wants.
+    fn toast_kind(lines: Vec<Vec<Span>>) -> LayerKind {
+        LayerKind::Toast {
+            lines,
+            slot: 0,
+            x_offset: 0,
+        }
+    }
+
     /// Paints `layer` alone into a `width` x `height` terminal and returns
     /// the painted buffer.
     fn paint_layer_alone(
@@ -5505,12 +5367,7 @@ mod tests {
         let caps = model.caps;
         let rect = Rect::new(0, 8, 13, 3);
         let lines = vec![vec![Span::plain("saved".to_string())]];
-        let buf = paint_layer_alone(
-            &model,
-            Layer::new(rect, LayerKind::Messages(lines), caps),
-            40,
-            12,
-        );
+        let buf = paint_layer_alone(&model, Layer::new(rect, toast_kind(lines), caps), 40, 12);
         for row in rect.row..rect.row + rect.height {
             for col in rect.col..rect.col + rect.width {
                 assert_eq!(
@@ -5581,7 +5438,7 @@ mod tests {
         let lines = vec![vec![Span::plain("saved".to_string())]];
         let surface = Surface::from_layers(vec![
             Layer::new(Rect::new(0, 0, 40, 12), LayerKind::EngineGrid, caps),
-            Layer::new(rect, LayerKind::Messages(lines), caps),
+            Layer::new(rect, toast_kind(lines), caps),
         ]);
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();

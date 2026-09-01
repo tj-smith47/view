@@ -36,7 +36,7 @@ fn visible_texts(model: &Model) -> Vec<String> {
     model
         .engine
         .messages
-        .visible_lines(4)
+        .visible_lines(40)
         .into_iter()
         .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
         .collect()
@@ -1969,7 +1969,7 @@ fn a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does() {
 fn shown(m: &Model) -> Vec<String> {
     m.engine
         .messages
-        .visible_lines(4)
+        .visible_lines(40)
         .into_iter()
         .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
         .collect()
@@ -10553,4 +10553,234 @@ fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
         texts.iter().any(|line| line.contains("not fresh")),
         "the refusal is still reported: {texts:?}"
     );
+}
+
+/// A terminal that interpolates: the tier gate is the only thing that
+/// decides whether a dismissal is animated, so a test about the motion has
+/// to say so rather than inherit `TermCaps::default`'s floor.
+fn animating_model() -> Model {
+    let mut m = started_model();
+    m.caps.tier = crate::model::Tier::Full;
+    m
+}
+
+fn tick_waits(effects: &[Effect]) -> Vec<Duration> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::ScheduleAnimTick { after } => Some(*after),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The damage-driven contract, and the one property a free-running timer
+/// would be indistinguishable from at every other angle: a stack that is
+/// standing still asks for no wakeup, whatever else is happening to it.
+#[test]
+fn an_idle_stack_schedules_no_tick() {
+    let mut m = animating_model();
+    let effects = update(&mut m, Msg::Redraw(vec![echomsg("first")]));
+    assert_eq!(
+        tick_waits(&effects),
+        Vec::<Duration>::new(),
+        "a toast arriving is not a motion: {effects:?}"
+    );
+    assert_eq!(m.toast_motion, None);
+
+    let effects = update(&mut m, Msg::Redraw(vec![echomsg("second")]));
+    assert_eq!(
+        tick_waits(&effects),
+        Vec::<Duration>::new(),
+        "a second toast behind the first moves nothing: {effects:?}"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "j".into(),
+        }),
+    );
+    assert_eq!(
+        tick_waits(&effects),
+        Vec::<Duration>::new(),
+        "a keypress that dismissed nothing standing at the top schedules \
+         nothing: {effects:?}"
+    );
+}
+
+/// A replace is not a departure. nvim's progress convention overwrites the
+/// newest entry in place, which stamps a fresh id and changes the top slot
+/// whenever that entry was the only one standing -- a search count updating
+/// itself would otherwise animate an exit on every keystroke.
+#[test]
+fn a_toast_replaced_in_place_is_not_an_exit() {
+    let mut m = animating_model();
+    let _ = update(&mut m, Msg::Redraw(vec![echomsg("1 of 9")]));
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "echomsg".into(),
+            content: vec![(0, "2 of 9".into())],
+            replace_last: true,
+        }]),
+    );
+    assert_eq!(
+        tick_waits(&effects),
+        Vec::<Duration>::new(),
+        "a line replacing itself is not a dismissal: {effects:?}"
+    );
+    assert_eq!(m.toast_motion, None);
+}
+
+/// The expiry that promotes the next notice is exactly where the motion
+/// starts, and the chain of wakeups it opens is bounded: one per frame, and
+/// the tick after the last frame ends it rather than re-arming.
+#[test]
+fn a_tick_after_the_motion_ends_schedules_nothing() {
+    let mut m = animating_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second")]),
+    );
+    let first = m.engine.messages.entries[0].id();
+    let effects = update(&mut m, Msg::ToastExpired { id: first });
+    assert_eq!(
+        tick_waits(&effects),
+        vec![crate::native::toast::MOTION_STEP],
+        "the expiry that vacates the top slot starts the motion: {effects:?}"
+    );
+
+    let mut frames = 1;
+    loop {
+        let effects = update(&mut m, Msg::AnimTick);
+        if tick_waits(&effects).is_empty() {
+            break;
+        }
+        frames += 1;
+        assert!(frames <= 64, "the motion never ended");
+    }
+    assert_eq!(
+        frames,
+        usize::from(crate::native::toast::MOTION_STEPS),
+        "a dismissal costs exactly the frames the motion is quantized into"
+    );
+    assert_eq!(m.toast_motion, None, "the motion is dropped, not parked");
+
+    m.dirty = false;
+    let effects = update(&mut m, Msg::AnimTick);
+    assert_eq!(
+        tick_waits(&effects),
+        Vec::<Duration>::new(),
+        "a tick that outlived its motion ends the chain: {effects:?}"
+    );
+    assert!(!m.dirty, "a stray tick paints nothing new");
+}
+
+/// Two dismissals inside one motion window are one motion and one wakeup
+/// chain. Two chains ticking the single clock would advance it twice per
+/// interval, so the stack would arrive in half the time the spec gives it.
+#[test]
+fn a_second_dismissal_mid_motion_does_not_open_a_second_chain() {
+    let mut m = animating_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second"), echomsg("third")]),
+    );
+    let first = m.engine.messages.entries[0].id();
+    let second = m.engine.messages.entries[1].id();
+    let _ = update(&mut m, Msg::ToastExpired { id: first });
+    let effects = update(&mut m, Msg::ToastExpired { id: second });
+    assert_eq!(
+        tick_waits(&effects),
+        Vec::<Duration>::new(),
+        "the chain already running drives the new motion: {effects:?}"
+    );
+
+    let mut frames = 0;
+    loop {
+        let effects = update(&mut m, Msg::AnimTick);
+        frames += 1;
+        if tick_waits(&effects).is_empty() {
+            break;
+        }
+        assert!(frames <= 64, "the motion never ended");
+    }
+    assert_eq!(
+        frames,
+        usize::from(crate::native::toast::MOTION_STEPS),
+        "the restarted motion still gets its whole interval"
+    );
+}
+
+/// The spec's interruptible rule: input during an animation completes it on
+/// that frame. The state it was interpolating toward is already the model's,
+/// so the motion jumps to its last frame; the tick already in flight retires
+/// it, and nothing re-arms the chain.
+#[test]
+fn input_during_a_motion_completes_it_on_that_frame() {
+    let mut m = animating_model();
+    let _ = update(&mut m, Msg::Redraw(vec![echomsg("only")]));
+    let only = m.engine.messages.entries[0].id();
+    let _ = update(&mut m, Msg::ToastExpired { id: only });
+    let _ = update(&mut m, Msg::AnimTick);
+    assert!(
+        m.toast_motion.is_some(),
+        "a motion must be live to interrupt"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "j".into(),
+        }),
+    );
+    let settled = m.toast_motion.clone().map(|mut done| {
+        let _ = done.complete();
+        done
+    });
+    assert_eq!(m.toast_motion, settled, "the key jumped to the last frame");
+    assert!(m.dirty, "completing it on this frame means painting it");
+
+    let effects_after = update(&mut m, Msg::AnimTick);
+    assert_eq!(
+        m.toast_motion, None,
+        "the tick in flight retires the motion"
+    );
+    assert_eq!(
+        (tick_waits(&effects), tick_waits(&effects_after)),
+        (Vec::new(), Vec::new()),
+        "neither the interrupting key nor the tick still in flight re-arms \
+         the chain"
+    );
+}
+
+/// Motion is presentation, timing is behavior: the tier gate stops the
+/// interpolation and touches neither the slot timer nor which notice the
+/// stack is showing.
+#[test]
+fn below_full_tier_a_dismissal_still_arms_the_next_slot() {
+    for tier in [crate::model::Tier::Standard, crate::model::Tier::Basic] {
+        let mut m = started_model();
+        m.caps.tier = tier;
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![echomsg("first"), echomsg("second")]),
+        );
+        let first = m.engine.messages.entries[0].id();
+        let second = m.engine.messages.entries[1].id();
+        let effects = update(&mut m, Msg::ToastExpired { id: first });
+        assert_eq!(
+            tick_waits(&effects),
+            Vec::<Duration>::new(),
+            "{tier:?} interpolates nothing: {effects:?}"
+        );
+        assert_eq!(m.toast_motion, None, "{tier:?}");
+        assert_eq!(
+            armed_slots(&effects),
+            vec![second],
+            "{tier:?} still arms the promoted slot: {effects:?}"
+        );
+        assert_eq!(visible_texts(&m), vec!["second".to_string()], "{tier:?}");
+    }
 }
