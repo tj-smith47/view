@@ -6257,50 +6257,95 @@ fn a_sticky_entry_does_not_hold_the_slot_queue() {
     );
 }
 
+/// The pre-attach key-overflow counter's own family and wording, so these
+/// tests read the mechanism `startup.rs`'s `PreAttach::absorb` uses rather
+/// than a paraphrase of it.
+const OVERFLOW_FAMILY: &str = "view: startup key buffer full";
+
+fn overflow_count(m: &mut Model, dropped: u32) {
+    let _ = m.engine.record_native_notice_once(
+        OVERFLOW_FAMILY,
+        format!("{OVERFLOW_FAMILY}, dropped {dropped} keystrokes"),
+    );
+}
+
 #[test]
-fn a_native_running_count_replaces_its_own_previous_line() {
-    // a notice view raises with `replace_last` is a running count, and the
-    // line it means to overwrite is the one it wrote itself: sent looking
-    // for an nvim line instead it finds none, appends, and the pre-attach
-    // key-overflow counter becomes one stacked entry per dropped keystroke
-    // -- which under slot timers is one full timeout per keystroke before
-    // the last of them is even reached
+fn a_native_running_count_occupies_one_line() {
+    // one line whose text changes, not one entry per update: under slot
+    // timers a stacked counter is one full timeout per dropped keystroke
+    // before the last of them is even reached
     let mut m = started_model();
-    let _ = m
-        .engine
-        .record_native_notice("dropped 1 keystroke".to_string(), false);
-    let _ = m
-        .engine
-        .record_native_notice("dropped 2 keystrokes".to_string(), true);
-    let _ = m
-        .engine
-        .record_native_notice("dropped 3 keystrokes".to_string(), true);
+    overflow_count(&mut m, 1);
+    overflow_count(&mut m, 2);
+    overflow_count(&mut m, 3);
     assert_eq!(
         visible_texts(&m),
-        vec!["dropped 3 keystrokes".to_string()],
+        vec![format!("{OVERFLOW_FAMILY}, dropped 3 keystrokes")],
         "a native running count must occupy one line, not one per update"
     );
 }
 
 #[test]
-fn a_native_running_count_never_overwrites_a_sticky_notice() {
-    // a line that stands until it is dismissed is nobody's previous
-    // message, so the count lands beside it rather than on top of it
+fn a_native_running_count_steps_over_an_unrelated_notice_standing_behind_it() {
+    // the arrangement that tells a family withdrawal apart from "overwrite
+    // whatever native line happens to stand last": with an unrelated notice
+    // between the counter's two lines, the last-entry rule destroys the
+    // unrelated line AND stacks the counter anyway -- both defects at once,
+    // in the choke point every message in the editor routes through
+    let mut m = started_model();
+    overflow_count(&mut m, 1);
+    let _ = m
+        .engine
+        .record_native_notice("view: theme cache rebuilt".to_string(), false);
+    overflow_count(&mut m, 2);
+    assert_eq!(
+        visible_texts(&m),
+        vec![
+            "view: theme cache rebuilt".to_string(),
+            format!("{OVERFLOW_FAMILY}, dropped 2 keystrokes"),
+        ],
+        "an unrelated native notice must survive the count's next update, \
+         and the count must still occupy one line"
+    );
+}
+
+#[test]
+fn a_native_running_count_never_takes_down_a_sticky_notice() {
+    // a line that stands until it is dismissed belongs to no other notice's
+    // family, so the count lands beside it rather than on top of it
     let mut m = started_model();
     let _ = m.engine.record_native_notice_sticky_once(
         "view: conflict",
         "view: conflict on the toast row".into(),
     );
-    let _ = m
-        .engine
-        .record_native_notice("dropped 1 keystroke".to_string(), true);
+    overflow_count(&mut m, 1);
     assert_eq!(
         visible_texts(&m),
         vec![
             "view: conflict on the toast row".to_string(),
-            "dropped 1 keystroke".to_string()
+            format!("{OVERFLOW_FAMILY}, dropped 1 keystrokes"),
         ],
-        "a sticky notice must survive a native replace aimed past it"
+        "a sticky notice must survive an unrelated family's withdrawal"
+    );
+}
+
+#[test]
+fn a_native_notice_asking_for_a_replace_finds_no_nvim_line_to_take() {
+    // `replace_last` is nvim's own replace and names nvim's own last line,
+    // so a native notice that passes it appends rather than overwriting
+    // something view wrote. No production caller passes `true`; this pins
+    // the semantics the counter's family mechanism exists instead of
+    let mut m = started_model();
+    let _ = m
+        .engine
+        .record_native_notice("view: first".to_string(), false);
+    let _ = m
+        .engine
+        .record_native_notice("view: second".to_string(), true);
+    assert_eq!(
+        visible_texts(&m),
+        vec!["view: first".to_string(), "view: second".to_string()],
+        "a native replace must not overwrite a line view raised itself"
     );
 }
 
@@ -6328,6 +6373,39 @@ fn a_wire_replace_never_overwrites_a_line_view_raised_itself() {
         vec!["from nvim, again".to_string(), "from view".to_string()],
         "a wire replace must overwrite nvim's own last line and leave \
          view's notice standing"
+    );
+}
+
+#[test]
+fn a_sticky_entry_between_two_transients_is_stepped_over_on_promotion() {
+    // the arrangement that tells `find` apart from "skip a leading run":
+    // promotion has to step over an entry sitting between the two
+    // transients, not merely start past a prefix of excluded ones
+    let mut m = started_model();
+    let _ = update(&mut m, Msg::Redraw(vec![echomsg("first")]));
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "emsg".into(),
+            content: vec![(0, "boom".into())],
+            replace_last: false,
+        }]),
+    );
+    let _ = update(&mut m, Msg::Redraw(vec![echomsg("second")]));
+    let first = m.engine.messages.entries[0].id();
+    let second = m.engine.messages.entries[2].id();
+
+    let effects = update(&mut m, Msg::ToastExpired { id: first });
+    assert_eq!(
+        armed_slots(&effects),
+        vec![second],
+        "the slot must be promoted past the sticky entry between the two \
+         transients: {effects:?}"
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec!["boom".to_string(), "second".to_string()],
+        "only the expired transient leaves"
     );
 }
 

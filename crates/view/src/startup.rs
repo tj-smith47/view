@@ -39,6 +39,13 @@ use view_tui::terminal::Term;
 /// spec's "bounded ring of 64".
 const KEY_RING_CAPACITY: usize = 64;
 
+/// The opening the pre-attach key-overflow notice's wordings share, and so
+/// the family `EngineModel::record_native_notice_once` withdraws before
+/// writing the next count. Both halves of the line are built from it, so the
+/// prefix the withdrawal matches on cannot drift from the prefix the notice
+/// carries.
+const KEY_OVERFLOW_FAMILY: &str = "view: startup key buffer full";
+
 /// `main.rs`'s `msg_tx`/`msg_rx` channel capacity. Deliberately tied to
 /// [`KEY_RING_CAPACITY`] rather than stated as its own literal: a
 /// maximally-full pre-attach key ring replays exactly `KEY_RING_CAPACITY`
@@ -726,12 +733,18 @@ impl PreAttach {
                     self.dropped = self.dropped.saturating_add(1);
                     let dropped = self.dropped;
                     let plural = if dropped == 1 { "" } else { "s" };
-                    self.toast_effects.extend(model.engine.record_native_notice(
-                        format!(
-                            "view: startup key buffer full, dropped {dropped} keystroke{plural}"
-                        ),
-                        dropped > 1,
-                    ));
+                    // through the family mechanism rather than
+                    // `replace_last`: the line this count means to overwrite
+                    // is the one it wrote itself, and nvim's `replace_last`
+                    // names nvim's own previous message instead -- pointed at
+                    // a native line it either finds nothing and stacks one
+                    // entry per dropped keystroke, or finds whichever native
+                    // line happens to stand last and destroys it
+                    self.toast_effects
+                        .extend(model.engine.record_native_notice_once(
+                            KEY_OVERFLOW_FAMILY,
+                            format!("{KEY_OVERFLOW_FAMILY}, dropped {dropped} keystroke{plural}"),
+                        ));
                     repaint(model);
                 }
                 false
@@ -1356,6 +1369,65 @@ mod tests {
             model.engine.toast_history.entries().next().map(|e| e.id()),
             Some(entry.id()),
             "the overflow notice must land in scrollback history too, not just on screen"
+        );
+    }
+
+    #[test]
+    fn a_second_pre_attach_overflow_updates_the_count_in_place_rather_than_stacking() {
+        // the counter is one line whose number changes. Stacked instead, a
+        // flood of keys at a slow startup buries the screen in copies of
+        // itself, and each copy takes the toast stack's top slot for a full
+        // dismissal timeout before the next one is even reachable
+        let (tx, rx) = std::sync::mpsc::sync_channel(KEY_RING_CAPACITY + 3);
+        for i in 0..KEY_RING_CAPACITY + 2 {
+            tx.send(Msg::Key(key(&i.to_string()))).unwrap();
+        }
+        tx.send(Msg::EngineReady).unwrap();
+
+        let mut model = Model::with_term_size(80, 24);
+        let drained = drain_pre_attach_with(&rx, &mut model, |_| {});
+
+        let lines: Vec<String> = model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(view_core::model::MessageEntry::lines)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![format!("{KEY_OVERFLOW_FAMILY}, dropped 2 keystrokes")],
+            "two evictions must leave one line carrying the later count"
+        );
+        // each update supersedes the previous line's timer rather than
+        // adding one beside it: the earlier effects name ids nothing stands
+        // at any more, which the top-slot guard ignores on arrival, and the
+        // standing line is armed exactly once
+        let entry = model
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("the counter must be on the message surface");
+        assert!(
+            matches!(
+                drained.toast_effects.last(),
+                Some(Effect::ScheduleToastExpiry { id, .. }) if *id == entry.id()
+            ),
+            "the live timer must name the line that is actually standing: {:?}",
+            drained.toast_effects
+        );
+        assert_eq!(
+            drained
+                .toast_effects
+                .iter()
+                .filter(
+                    |e| matches!(e, Effect::ScheduleToastExpiry { id, .. } if *id == entry.id())
+                )
+                .count(),
+            1,
+            "the standing line owns one slot and so one timer: {:?}",
+            drained.toast_effects
         );
     }
 

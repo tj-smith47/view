@@ -1276,6 +1276,15 @@ impl EngineModel {
     /// classification this method's callers want -- a call site anywhere
     /// outside this module reaches a native notice through this method or
     /// not at all.
+    ///
+    /// `replace_last` is nvim's own replace and it targets nvim's own last
+    /// line, so a native notice that passes `true` finds no target and
+    /// appends: it is here for the wire contract this method shares with
+    /// [`Self::record_message`], not as a way for view to overwrite a line
+    /// view wrote. A running count -- one line whose text changes -- is
+    /// [`Self::record_native_notice_once`], whose family withdrawal names
+    /// the line it means to take down rather than trusting whatever happens
+    /// to stand last. No caller passes `true` here today.
     pub fn record_native_notice(
         &mut self,
         text: String,
@@ -1689,6 +1698,10 @@ impl Messages {
         replace_last: bool,
     ) -> MessageId {
         let id = MessageId(self.next_message_id);
+        // saturating rather than wrapping: an id that stops advancing at
+        // `u64::MAX` collides only with entries nothing is still waiting on,
+        // while a wrap would hand a live entry the id of one a timer thread
+        // is asleep holding
         self.next_message_id = self.next_message_id.saturating_add(1);
         let entry = MessageEntry {
             kind,
@@ -1698,26 +1711,12 @@ impl Messages {
             id,
         };
         if replace_last {
-            // a replace targets the last line from the same source. nvim's
-            // `replace_last` names the message nvim itself sent before this
-            // one, so it must not reach a line view raised; and a native running
-            // count means its own previous line, so it must not be sent
-            // looking for an nvim line that may not exist -- a native notice
-            // that finds no target appends instead, and a per-keystroke
-            // counter becomes one stacked entry per keystroke. Matching the
-            // kind exactly rather than the origin keeps a `"native_sticky"`
-            // notice out of it as well: a line that stands until it is
-            // dismissed is nobody's previous message
-            let native = MessageEntry::is_native_kind(&entry.kind);
-            let target = self.entries.iter_mut().rev().find(|e| {
-                !e.condition
-                    && if native {
-                        e.kind == entry.kind
-                    } else {
-                        !e.is_native()
-                    }
-            });
-            if let Some(last) = target {
+            if let Some(last) = self
+                .entries
+                .iter_mut()
+                .rev()
+                .find(|e| !e.condition && !e.is_native())
+            {
                 *last = entry;
                 return id;
             }
@@ -1761,10 +1760,17 @@ impl Messages {
     /// Idempotent, and meant to be called on every path that can add to or
     /// remove from the stack: an unchanged top slot answers `None`, so a
     /// second call after a message that touched no toast costs a comparison
-    /// and arms nothing. At most one timer is outstanding for the whole
-    /// stack at any moment, which is what makes the promoted entry's timeout
-    /// a full one rather than the remainder of a timer armed while it was
-    /// still queued.
+    /// and arms nothing. At most one slot is *armed* at a time, which is what
+    /// makes the promoted entry's timeout a full one rather than the
+    /// remainder of a timer armed while it was still queued.
+    ///
+    /// Not the same as one timer being in flight. `Effect::ScheduleToastExpiry`
+    /// has no cancellation, so when the armed entry leaves by any route other
+    /// than its own expiry -- a keypress, an `msg_clear`, a sticky dismissal,
+    /// a replace -- the successor is armed while the superseded thread is
+    /// still sleeping. That is the condition the top-slot test in
+    /// `Msg::ToastExpired` exists to survive: it is what makes the surviving
+    /// timer's arrival a no-op instead of an unread notice retired early.
     pub(crate) fn arm_top_slot(&mut self) -> Option<crate::msg::Effect> {
         let top = self.top_slot();
         if top == self.armed_slot {

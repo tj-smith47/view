@@ -1942,38 +1942,73 @@ fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
 // view::runtime::Executor exercises the timer threads at all.
 #[test]
 fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
+    use view_core::native::toast::TRANSIENT_TOAST_TIMEOUT;
+
     let mut session = spawn_view_pty_owning_messages();
 
-    session
-        .send(b"\x1b:for i in range(1,5) | echomsg 'slottoken' . i | endfor\r")
-        .unwrap();
-    assert!(
-        wait_for_toast(&mut session, "slottoken5", Duration::from_secs(5)),
-        "screen never showed the fifth of five echomsg lines; last screen:\n{}",
-        session.screen()
-    );
+    for round in 1..=3u32 {
+        let token = format!("slot{round}token");
+        let dispatched = Instant::now();
+        session
+            .send(format!("\x1b:for i in range(1,5) | echomsg '{token}' . i | endfor\r").as_bytes())
+            .unwrap();
+        assert!(
+            wait_for_toast(
+                &mut session,
+                &format!("{token}5"),
+                view_test_support::host_deadline(Duration::from_secs(5))
+            ),
+            "screen never showed the fifth of five echomsg lines; last screen:\n{}",
+            session.screen()
+        );
 
-    // no further input: every expiry from here is a timer's doing. Three
-    // timeouts is a full timeout short of the moment the fifth slot's own
-    // timer even starts (it reaches the top after four), and three past the
-    // moment a timer-per-toast design would have taken it down with the
-    // rest.
-    std::thread::sleep(view_core::native::toast::TRANSIENT_TOAST_TIMEOUT * 3);
-    let screen = session.screen();
-    assert!(
-        toast_shows(&screen, "slottoken5"),
-        "the last of five stacked toasts expired before it ever reached the \
-         top slot -- its timer ran while it was queued behind four others; \
-         last screen:\n{screen}"
-    );
-    assert!(
-        !screen.contains("slottoken1"),
-        "the top slot's own timer never ran, so this proves nothing about \
-         which timer is armed; last screen:\n{screen}"
-    );
+        // no further input: every expiry from here is a timer's doing. Three
+        // timeouts is a full timeout short of the moment the fifth slot's own
+        // timer even starts, and three past the moment a timer-per-toast
+        // design would have taken it down with the rest.
+        std::thread::sleep(TRANSIENT_TOAST_TIMEOUT * 3);
+        let screen = session.screen();
+        // the window this round had to land inside, timed from the dispatch
+        // and never from the start of the wait: the fifth slot reaches the
+        // top at four timeouts and expires at five, so a screen read past
+        // the fourth is a round this thread slept through and the fifth slot
+        // may legitimately own the top by now -- a token gone there says
+        // nothing about which timer was armed. Clear the stack with a
+        // keypress and dispatch again rather than conclude from it.
+        if dispatched.elapsed() >= TRANSIENT_TOAST_TIMEOUT * 4 {
+            session.send(b"\x1b").unwrap();
+            assert!(
+                session.wait_for_screen(
+                    view_test_support::host_deadline(TRANSIENT_TOAST_TIMEOUT),
+                    |s| { !s.contents().contains(&token) }
+                ),
+                "the stalled round's toasts never left the screen, so the next \
+                 round would start behind them; last screen:\n{}",
+                session.screen()
+            );
+            continue;
+        }
+        assert!(
+            toast_shows(&screen, &format!("{token}5")),
+            "the last of five stacked toasts expired before it ever reached the \
+             top slot -- its timer ran while it was queued behind four others; \
+             read {:?} after the dispatch; last screen:\n{screen}",
+            dispatched.elapsed()
+        );
+        assert!(
+            !screen.contains(&format!("{token}1")),
+            "the top slot's own timer never ran, so this proves nothing about \
+             which timer is armed; last screen:\n{screen}"
+        );
 
-    session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait();
+        session.send(b"\x1b:q!\r").unwrap();
+        let _ = session.wait();
+        return;
+    }
+    panic!(
+        "the host slept through the readable window on three consecutive \
+         rounds; this says nothing about the slot timers either way"
+    );
 }
 
 // The falsifiable counterpart to the transient-expiry test above: an emsg
