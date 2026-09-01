@@ -342,14 +342,19 @@ tasks:
         vars: { PATHS: "{{.PATHS}}", CLI_ARGS: "{{.CLI_ARGS}}" }
 
   commit:quick:
-    desc: "Commit NON-CODE paths (docs, plans, README, .claude notes) without the ci chain: task commit:quick PATHS=\"<path> <path>\" -- -m 'msg'. Anything under crates/, scripts/, .github/, or Taskfile.yml goes through `task commit`."
+    desc: "Commit NON-CODE paths (docs, plans, README, .claude notes) without the ci chain: task commit:quick PATHS=\"<path> <path>\" -- -m 'msg'. Anything under crates/, scripts/, compat/, corpus/, .github/, or Taskfile.yml goes through `task commit`."
     preconditions:
       - sh: test -n "{{.PATHS}}"
         msg: "Name the paths: task commit:quick PATHS=\"<path> <path>\" -- -m '<msg>'"
       - sh: test -n "$(git status --porcelain -- {{.PATHS}})"
         msg: "None of the named paths has a change to commit."
-      - sh: test -z "$(printf '%s\n' {{.PATHS}} | grep -E '^(crates/|scripts/|[.]github/|Taskfile[.]yml$|Cargo[.](toml|lock)$|[.]engine-pin$)')"
-        msg: "The named paths include code, scripts, CI, or build files; those go through `task commit` (the ci gate)."
+      # compat/ and corpus/ are here because check-style.sh walks them for the
+      # same em-dash/style rules it applies to code: a fixture committed
+      # around the ci gate leaves the breakage for whichever task runs ci
+      # next, which is how an em dash in a TOML comment failed a later task's
+      # gate before that task had written a line
+      - sh: test -z "$(printf '%s\n' {{.PATHS}} | grep -E '^(crates/|scripts/|compat/|corpus/|[.]github/|Taskfile[.]yml$|Cargo[.](toml|lock)$|[.]engine-pin$)')"
+        msg: "The named paths include code, scripts, fixtures, CI, or build files; those go through `task commit` (the ci gate)."
     cmds:
       - task: _commit:only
         vars: { PATHS: "{{.PATHS}}", CLI_ARGS: "{{.CLI_ARGS}}" }
