@@ -8,6 +8,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::*;
+use view_core::model::Tier;
 use view_core::native::views::{PickerView, StyleRole};
 
 fn picker() -> LayerKind {
@@ -53,35 +54,76 @@ fn every_row_of_a_framed_overlay_is_exactly_the_rect_wide_and_the_rect_is_filled
     }
 }
 
+/// Capabilities at `tier`'s own probe answers, with the box-glyph bit set
+/// to `unicode_boxes`.
+///
+/// The three booleans per tier are `TermCaps::from_probe`'s own derivation
+/// read backwards, which is what makes a fixture here a terminal that could
+/// actually exist: a tier is not a field a test may set beside the answers
+/// it derives from.
+fn caps(tier: Tier, unicode_boxes: bool) -> TermCaps {
+    let probed = match tier {
+        Tier::Full => TermCaps::from_probe(true, true, true),
+        Tier::Standard => TermCaps::from_probe(false, true, false),
+        _ => TermCaps::from_probe(false, false, false),
+    };
+    assert_eq!(probed.tier, tier, "fixture must land on the tier it names");
+    probed.with_unicode_boxes(unicode_boxes)
+}
+
+/// The decoupling, in the direction the tier-keyed charset got wrong: a
+/// 16-color terminal that answered no capability query but does draw box
+/// glyphs used to be handed ASCII on the strength of its color depth.
 #[test]
-fn standard_tier_draws_the_same_frame_as_full() {
-    let full = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Full));
-    let standard = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Standard));
+fn a_basic_tier_terminal_that_draws_box_glyphs_gets_rounded_corners() {
+    let basic = rows(
+        28,
+        8,
+        &picker(),
+        BorderSet::for_caps(caps(Tier::Basic, true)),
+    );
+    let full = rows(
+        28,
+        8,
+        &picker(),
+        BorderSet::for_caps(caps(Tier::Full, true)),
+    );
 
     assert_eq!(
-        line_text(&standard.lines[0]).chars().next(),
+        line_text(&basic.lines[0]).chars().next(),
         Some('╭'),
         "a corner glyph is font coverage, not a color depth"
     );
     assert_eq!(
-        BorderSet::for_tier(Tier::Standard),
-        BorderSet::for_tier(Tier::Full),
+        BorderSet::for_caps(caps(Tier::Basic, true)),
+        BorderSet::for_caps(caps(Tier::Full, true)),
         "the two charsets differ in nothing, corners included"
     );
-    assert_eq!(full, standard, "the whole frame is identical");
+    assert_eq!(full, basic, "the whole frame is identical");
 }
 
+/// The other direction: a terminal with every color and protocol answer
+/// there is, whose box-glyph probe came back saying it does not account for
+/// `╭` as one cell, gets the frame it can actually draw.
 #[test]
-fn basic_tier_draws_ascii() {
-    let basic = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Basic));
-
-    assert_eq!(BorderSet::for_tier(Tier::Basic), BorderSet::ASCII);
-    assert!(
-        line_text(&basic.lines[0]).starts_with('+'),
-        "{:?}",
-        basic.lines[0]
+fn a_full_tier_terminal_without_box_glyphs_gets_ascii() {
+    let full = rows(
+        28,
+        8,
+        &picker(),
+        BorderSet::for_caps(caps(Tier::Full, false)),
     );
-    for line in &basic.lines {
+
+    assert_eq!(
+        BorderSet::for_caps(caps(Tier::Full, false)),
+        BorderSet::ASCII
+    );
+    assert!(
+        line_text(&full.lines[0]).starts_with('+'),
+        "{:?}",
+        full.lines[0]
+    );
+    for line in &full.lines {
         let text = line_text(line);
         assert!(
             !text.chars().any(|c| "╭╮╰╯─│".contains(c)),
@@ -91,9 +133,9 @@ fn basic_tier_draws_ascii() {
 }
 
 #[test]
-fn a_tier_swaps_the_border_glyphs_without_moving_any_content() {
-    let full = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Full));
-    let basic = rows(28, 8, &picker(), BorderSet::for_tier(Tier::Basic));
+fn the_charset_swaps_the_border_glyphs_without_moving_any_content() {
+    let full = rows(28, 8, &picker(), BorderSet::ROUNDED);
+    let basic = rows(28, 8, &picker(), BorderSet::ASCII);
 
     assert!(
         line_text(&full.lines[0]).starts_with('╭'),
@@ -1175,34 +1217,53 @@ fn a_panel_with_no_cells_names_no_caret() {
     assert_eq!(ai_caret(&view, 40, 0), None);
 }
 
+/// Walks the whole tier population against both answers of the bit that
+/// actually decides, so a tier added to `Tier` cannot quietly acquire a
+/// charset of its own: the row a tier sits in is the box-glyph bit's, at
+/// every tier there is.
 #[test]
-fn a_tier_maps_to_exactly_one_border_charset() {
-    assert_eq!(BorderSet::for_tier(Tier::Full), BorderSet::ROUNDED);
-    assert_eq!(BorderSet::for_tier(Tier::Standard), BorderSet::ROUNDED);
-    assert_eq!(BorderSet::for_tier(Tier::Basic), BorderSet::ASCII);
+fn the_box_glyph_bit_alone_maps_to_a_border_charset() {
+    for tier in [Tier::Full, Tier::Standard, Tier::Basic] {
+        assert_eq!(
+            BorderSet::for_caps(caps(tier, true)),
+            BorderSet::ROUNDED,
+            "{tier:?} draws box glyphs"
+        );
+        assert_eq!(
+            BorderSet::for_caps(caps(tier, false)),
+            BorderSet::ASCII,
+            "{tier:?} does not draw box glyphs"
+        );
+    }
     assert_ne!(BorderSet::ASCII.horizontal, BorderSet::ROUNDED.horizontal);
 }
 
-/// The charset a layer carries follows from its kind and the tier, and
-/// nothing else: a native overlay always gets one (never the silent blank
-/// rect an unframed native kind painted), a non-overlay kind never does
-/// (never the framed nothing an engine grid handed a charset produced).
+/// The charset a layer carries follows from its kind and its terminal's
+/// box-glyph bit, and nothing else: a native overlay always gets one (never
+/// the silent blank rect an unframed native kind painted), a non-overlay
+/// kind never does (never the framed nothing an engine grid handed a
+/// charset produced).
 #[test]
-fn a_layers_charset_is_derived_from_its_kind_and_tier() {
+fn a_layers_charset_is_derived_from_its_kind_and_its_box_glyph_bit() {
     let rect = crate::Rect {
         row: 2,
         col: 4,
         width: 20,
         height: 6,
     };
-    let layer = crate::Layer::new(rect, picker(), Tier::Standard);
+    let layer = crate::Layer::new(rect, picker(), caps(Tier::Standard, true));
     assert_eq!(layer.rect, rect);
     assert_eq!(layer.borders, Some(BorderSet::ROUNDED));
     assert!(layer.kind.is_native_overlay());
+    assert_eq!(
+        crate::Layer::new(rect, picker(), caps(Tier::Standard, false)).borders,
+        Some(BorderSet::ASCII),
+        "the same kind at the same tier, without the glyphs"
+    );
 
     for kind in [LayerKind::EngineGrid, LayerKind::Shell] {
         assert!(!kind.is_native_overlay(), "{kind:?}");
-        let layer = crate::Layer::new(rect, kind, Tier::Full);
+        let layer = crate::Layer::new(rect, kind, caps(Tier::Full, true));
         assert_eq!(
             layer.borders, None,
             "a kind with no body to lay out must carry no frame"

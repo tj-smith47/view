@@ -1926,7 +1926,8 @@ pub enum MouseCapture {
 /// Detected terminal capabilities.
 ///
 /// `tier` is coarse UX vocabulary; the probed bits are what gates behavior
-/// (BSU/ESU gates on `caps.sync`, never on tier alone).
+/// (BSU/ESU gates on `caps.sync`, the border charset on
+/// `caps.unicode_boxes`, never on tier alone).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TermCaps {

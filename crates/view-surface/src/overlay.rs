@@ -18,7 +18,7 @@
 //! capability; this module only decides which text carries which role.
 
 use unicode_width::UnicodeWidthChar;
-use view_core::model::Tier;
+use view_core::model::TermCaps;
 use view_core::native::geometry::LIST_MARKER_COLS;
 use view_core::native::views::{
     AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView,
@@ -86,25 +86,27 @@ impl BorderSet {
         vertical: '|',
     };
 
-    /// The border charset for `tier`.
+    /// The border charset for `caps`: [`TermCaps::unicode_boxes`] and
+    /// nothing else.
     ///
     /// Corner glyphs are font coverage, not a terminal capability: a
     /// terminal that draws `┌` draws `╭`, so square corners are no
-    /// fallback for rounded ones and view ships no third set.
-    /// The honest predicate is whether the terminal draws box-drawing
-    /// glyphs at all, which is a capability of its own rather than
-    /// anything the color-depth and synchronization bits behind a tier can
-    /// answer; until that bit is probed, `basic` -- the tier that answered
-    /// no capability query at all -- is the closest stand-in for it.
+    /// fallback for rounded ones and view ships no third set. The honest
+    /// predicate is whether the terminal accounts for a box-drawing glyph
+    /// as one cell, which the box-glyph probe answers directly -- the
+    /// color-depth, synchronization and keyboard-protocol answers a tier is
+    /// made of never could. A terminal that draws box glyphs on a 16-color
+    /// connection gets rounded corners, and a truecolor one that cannot
+    /// gets ASCII; `--tier basic` still forces ASCII because
+    /// `caps_for_override` sets the bit false, which is the user's own
+    /// claim about their terminal rather than an inference from its color
+    /// depth.
     #[must_use]
-    pub fn for_tier(tier: Tier) -> Self {
-        match tier {
-            Tier::Full | Tier::Standard => Self::ROUNDED,
-            Tier::Basic => Self::ASCII,
-            // `Tier` is `#[non_exhaustive]`; a tier this build predates
-            // draws the frame every terminal can render rather than one it
-            // may not.
-            _ => Self::ASCII,
+    pub fn for_caps(caps: TermCaps) -> Self {
+        if caps.unicode_boxes {
+            Self::ROUNDED
+        } else {
+            Self::ASCII
         }
     }
 }

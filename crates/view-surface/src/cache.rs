@@ -74,7 +74,12 @@ struct Inputs {
     term: (u16, u16),
     content_painted: bool,
     palette_enabled: bool,
-    tier: view_core::model::Tier,
+    // the whole capability struct, not the tier alone: the border charset
+    // follows `unicode_boxes`, which a probe reply arriving after the first
+    // paint flips without moving the tier -- a frame keyed on the tier
+    // would then be reused with the charset the session no longer draws in,
+    // and every later probed bit joins this comparison for free
+    caps: view_core::model::TermCaps,
     statusline_rows: u16,
     had_overlays: bool,
     tabline: Option<view_core::model::TablineState>,
@@ -92,7 +97,7 @@ impl Inputs {
             term: (model.term_width, model.term_height),
             content_painted: model.content_painted,
             palette_enabled: model.palette_enabled,
-            tier: model.caps.tier,
+            caps: model.caps,
             statusline_rows: model.statusline_rows(),
             had_overlays: !model.overlays().is_empty(),
             tabline: engine.tabline.clone(),
@@ -114,7 +119,7 @@ impl Inputs {
             && self.term == (model.term_width, model.term_height)
             && self.content_painted == model.content_painted
             && self.palette_enabled == model.palette_enabled
-            && self.tier == model.caps.tier
+            && self.caps == model.caps
             && self.statusline_rows == model.statusline_rows()
             && self.tabline == engine.tabline
             && self.cmdline == engine.cmdline
@@ -396,6 +401,38 @@ mod tests {
             .iter()
             .any(|l| matches!(l.kind, LayerKind::Messages(_))));
         assert_eq!((cache.frames, cache.rebuilds), (2, 2));
+    }
+
+    /// A box-glyph reply that lands after the first paint moves no tier --
+    /// it flips one bool -- and every framed layer in the cached frame is
+    /// drawn in the charset that bool decides. Reusing that frame leaves
+    /// the session drawing ASCII corners at a terminal that has just said
+    /// it draws box glyphs, with nothing failing.
+    #[test]
+    fn a_late_box_glyph_answer_rebuilds_the_frame_it_reframes() {
+        let mut model = model_with_grid(20, 6);
+        model.statusline_enabled = true;
+        let mut cache = SurfaceCache::new();
+        let borders = |surface: &Surface| {
+            surface
+                .layers
+                .iter()
+                .find_map(|l| l.borders)
+                .expect("the statusline feature is on, so a framed layer exists")
+        };
+        assert_eq!(borders(cache.render(&model)), crate::BorderSet::ASCII);
+
+        let tier_before = model.caps.tier;
+        model.caps = model.caps.with_unicode_boxes(true);
+        let surface = cache.render(&model);
+
+        assert_eq!(model.caps.tier, tier_before, "the tier did not move");
+        assert_eq!(borders(surface), crate::BorderSet::ROUNDED);
+        assert_eq!(
+            (cache.frames, cache.rebuilds),
+            (2, 2),
+            "a charset change cannot be served from the cache"
+        );
     }
 
     #[test]

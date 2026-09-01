@@ -24,10 +24,11 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as TuiRect;
 use view_core::grid::Grid;
-use view_core::model::{Model, Tier};
+use view_core::model::{Model, TermCaps, Tier};
 use view_core::native::views::{PickerView, Span, StatuslineView, StyleRole};
 use view_surface::{Layer, LayerKind, Rect, Surface};
 use view_tui::paint::{composite_into, Damage};
+use view_tui::tiers::caps_for_override;
 
 /// Where the layer sits on the shared canvas both painters render into.
 /// Non-zero on both axes so a divergence at the layer's own offset (not
@@ -74,19 +75,12 @@ fn plain_picker() -> LayerKind {
 /// so a style disagreement is not something this parity check could ever
 /// observe on that side, and comparing text only is what both sides can
 /// legitimately agree or disagree about.
-fn painted_rows(
-    tier: Tier,
-    truecolor: bool,
-    width: u16,
-    height: u16,
-    kind: LayerKind,
-) -> Vec<String> {
-    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, tier);
+fn painted_rows(caps: TermCaps, width: u16, height: u16, kind: LayerKind) -> Vec<String> {
+    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, caps);
     let surface = Surface::from_layers(vec![layer]);
 
     let mut model = Model::new();
-    model.caps.tier = tier;
-    model.caps.truecolor = truecolor;
+    model.caps = caps;
 
     let mut buf = Buffer::empty(TuiRect::new(0, 0, AT_COL + width + 2, AT_ROW + height + 1));
     composite_into(&mut buf, &model, &surface, &Damage::full());
@@ -101,8 +95,8 @@ fn painted_rows(
 }
 
 /// Renders the same layer through `view-oracle`'s pure-text raster.
-fn rastered_rows(tier: Tier, width: u16, height: u16, kind: LayerKind) -> Vec<String> {
-    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, tier);
+fn rastered_rows(caps: TermCaps, width: u16, height: u16, kind: LayerKind) -> Vec<String> {
+    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, caps);
     let surface = Surface::from_layers(vec![layer]);
     view_oracle::raster::screen_rows(&surface, &Grid::new())
         .into_iter()
@@ -117,9 +111,23 @@ fn rastered_rows(tier: Tier, width: u16, height: u16, kind: LayerKind) -> Vec<St
         .collect()
 }
 
-fn assert_parity(tier: Tier, truecolor: bool, width: u16, height: u16, kind: LayerKind) {
-    let painted = painted_rows(tier, truecolor, width, height, kind.clone());
-    let rastered = rastered_rows(tier, width, height, kind);
+/// The terminals both painters are held to: the three a `--tier` override
+/// describes, plus the crossing no override produces -- a 16-color terminal
+/// whose box-glyph probe came back, whose frame is rounded while its colors
+/// are not. Built through `caps_for_override` rather than by hand, so a
+/// fixture here cannot claim a tier its own booleans do not derive.
+fn terminals() -> Vec<TermCaps> {
+    vec![
+        caps_for_override(Tier::Full),
+        caps_for_override(Tier::Standard),
+        caps_for_override(Tier::Basic),
+        caps_for_override(Tier::Basic).with_unicode_boxes(true),
+    ]
+}
+
+fn assert_parity(caps: TermCaps, width: u16, height: u16, kind: LayerKind) {
+    let painted = painted_rows(caps, width, height, kind.clone());
+    let rastered = rastered_rows(caps, width, height, kind);
 
     // A silent upstream regression (an empty Surface, a layer that never
     // reached the compositor) would make both painters agree on all-blank
@@ -128,33 +136,25 @@ fn assert_parity(tier: Tier, truecolor: bool, width: u16, height: u16, kind: Lay
     // content actually reached the painter before trusting parity on it.
     assert!(
         painted.iter().any(|row| !row.trim().is_empty()),
-        "painted_rows produced no non-blank content for tier {tier:?}; the parity check below would be vacuous"
+        "painted_rows produced no non-blank content for {caps:?}; the parity check below would be vacuous"
     );
 
     assert_eq!(
         painted, rastered,
-        "view-tui and view-oracle disagree on tier {tier:?} truecolor={truecolor}"
+        "view-tui and view-oracle disagree on {caps:?}"
     );
 }
 
 #[test]
 fn statusline_spans_paint_identically_in_both_painters() {
-    for (tier, truecolor) in [
-        (Tier::Full, true),
-        (Tier::Standard, true),
-        (Tier::Basic, false),
-    ] {
-        assert_parity(tier, truecolor, 46, 1, spanful_statusline());
+    for caps in terminals() {
+        assert_parity(caps, 46, 1, spanful_statusline());
     }
 }
 
 #[test]
 fn plain_span_overlays_paint_identically_in_both_painters() {
-    for (tier, truecolor) in [
-        (Tier::Full, true),
-        (Tier::Standard, true),
-        (Tier::Basic, false),
-    ] {
-        assert_parity(tier, truecolor, 24, 6, plain_picker());
+    for caps in terminals() {
+        assert_parity(caps, 24, 6, plain_picker());
     }
 }

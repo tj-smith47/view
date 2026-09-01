@@ -478,7 +478,7 @@ impl Term {
 
     /// Takes `caps` as this terminal's own: the keyboard-protocol push the
     /// alternate screen may have gone up without, and the full repaint a
-    /// tier change owes the frame already on screen.
+    /// capability change owes the frame already on screen.
     ///
     /// Both callers are upgrades of the same decision -- the probe's settle
     /// and, for an answer that arrived after it,
@@ -493,11 +493,13 @@ impl Term {
             self.caps.kitty_kbd,
             cfg!(unix) && caps.kitty_kbd,
         )?;
-        if caps.tier != self.caps.tier {
-            // the frame on screen was painted at the old tier, in the old
-            // border charset and palette; leaving the next frame free to
-            // clip its damage to the rows that changed would leave the rest
-            // of that frame styled for a tier this session is no longer at
+        if caps != self.caps {
+            // the frame on screen was painted under the old capabilities, in
+            // the old border charset and palette; leaving the next frame free
+            // to clip its damage to the rows that changed would leave the
+            // rest of that frame drawn for a terminal this session no longer
+            // believes it is talking to. Every field, not the tier alone:
+            // `unicode_boxes` decides the charset without moving the tier.
             self.last_offset = None;
         }
         self.caps = caps;

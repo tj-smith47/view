@@ -13,7 +13,7 @@ pub use cache::SurfaceCache;
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
 use view_core::model::{
-    CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState, Tier,
+    CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState, TermCaps,
 };
 use view_core::native::geometry::{OverlayBox, OverlayRect};
 use view_core::native::palette::PaletteState;
@@ -233,8 +233,8 @@ impl LayerKind {
 
 impl Layer {
     /// The one [`Layer`] constructor: `kind` decides whether the layer
-    /// carries a frame, and `tier` decides the charset it is drawn from
-    /// when it does.
+    /// carries a frame, and `caps` decides the charset it is drawn from
+    /// when it does (see [`BorderSet::for_caps`]).
     ///
     /// Deriving the frame rather than accepting it is what makes the two
     /// silent-blank mismatches unrepresentable. A native overlay handed no
@@ -245,8 +245,8 @@ impl Layer {
     /// loudly. `kind` is the only fact either outcome ever depended on, so
     /// it is the only fact the caller supplies.
     #[must_use]
-    pub fn new(rect: Rect, kind: LayerKind, tier: Tier) -> Self {
-        let borders = kind.is_native_overlay().then(|| BorderSet::for_tier(tier));
+    pub fn new(rect: Rect, kind: LayerKind, caps: TermCaps) -> Self {
+        let borders = kind.is_native_overlay().then(|| BorderSet::for_caps(caps));
         Self {
             rect,
             kind,
@@ -359,7 +359,7 @@ pub fn render(model: &Model) -> Surface {
     let mut layers = vec![Layer::new(
         Rect::new(offset, 0, grid_w, grid_h),
         LayerKind::EngineGrid,
-        model.caps.tier,
+        model.caps,
     )];
 
     // directly above the grid it predicts and below everything else: a
@@ -379,7 +379,7 @@ pub fn render(model: &Model) -> Surface {
         layers.push(Layer::new(
             Rect::new(0, 0, model.term_width, model.term_height),
             LayerKind::Shell,
-            model.caps.tier,
+            model.caps,
         ));
     }
 
@@ -395,7 +395,7 @@ pub fn render(model: &Model) -> Surface {
             layers.push(Layer::new(
                 Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
                 LayerKind::Tabline(tabline.clone()),
-                model.caps.tier,
+                model.caps,
             ));
         }
     }
@@ -413,7 +413,7 @@ pub fn render(model: &Model) -> Surface {
                 model.statusline_rows(),
             ),
             LayerKind::Statusline(engine.statusline.view(grid_w)),
-            model.caps.tier,
+            model.caps,
         ));
     }
     // native overlays sit above the grid and the persistent chrome, and
@@ -457,7 +457,7 @@ pub fn render(model: &Model) -> Surface {
             layers.push(Layer::new(
                 Rect::new(rect.row, rect.col, rect.width, rect.height),
                 LayerKind::Palette(state.view()),
-                model.caps.tier,
+                model.caps,
             ));
         } else {
             layers.push(overlay_layer(
@@ -465,7 +465,7 @@ pub fn render(model: &Model) -> Surface {
                 (grid_w, grid_h),
                 offset,
                 LayerKind::Cmdline(cmdline.clone()),
-                model.caps.tier,
+                model.caps,
             ));
         }
     }
@@ -525,7 +525,7 @@ pub fn render(model: &Model) -> Surface {
             (grid_w, grid_h),
             offset,
             LayerKind::Messages(visible),
-            model.caps.tier,
+            model.caps,
         ));
     }
     if let Some(pm) = &engine.popupmenu {
@@ -557,7 +557,7 @@ pub fn render(model: &Model) -> Surface {
                     (grid_w, grid_h),
                     offset,
                     LayerKind::Popupmenu(pm.clone()),
-                    model.caps.tier,
+                    model.caps,
                 ));
             }
         }
@@ -672,7 +672,7 @@ fn cmdline_popupmenu_layer(
     Some(Layer::new(
         rect,
         LayerKind::Popupmenu(pm.clone()),
-        model.caps.tier,
+        model.caps,
     ))
 }
 
@@ -689,7 +689,7 @@ fn overlay_layer(
     bounds: (u16, u16),
     offset: u16,
     kind: LayerKind,
-    tier: Tier,
+    caps: TermCaps,
 ) -> Layer {
     let clamped = rect.clamp_to(bounds.0, bounds.1);
     Layer::new(
@@ -698,7 +698,7 @@ fn overlay_layer(
             ..clamped
         },
         kind,
-        tier,
+        caps,
     )
 }
 
@@ -745,7 +745,7 @@ fn speculated_layer(model: &Model, grid: (u16, u16), offset: u16) -> Option<Laye
             bottom.saturating_sub(top).saturating_add(1),
         ),
         LayerKind::Speculated(cells),
-        model.caps.tier,
+        model.caps,
     ))
 }
 
@@ -755,14 +755,15 @@ fn speculated_layer(model: &Model, grid: (u16, u16), offset: u16) -> Option<Laye
 /// The rect comes from [`Model::overlay_rect`], the same resolution
 /// `update()`'s mouse hit-test routes a click through, so paint and routing
 /// cannot disagree about where an overlay is. The border charset comes from
-/// the terminal's own tier, resolved once here rather than per painter.
+/// the terminal's own probed capabilities, resolved once here rather than
+/// per painter.
 fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
     let cells = model.overlay_rect(open);
     let kind = layer_kind(model, &open.kind, cells.height, cells.width)?;
     Some(Layer::new(
         Rect::new(cells.row, cells.col, cells.width, cells.height),
         kind,
-        model.caps.tier,
+        model.caps,
     ))
 }
 
@@ -3176,7 +3177,7 @@ mod tests {
         let surface = Surface::from_layers(vec![Layer::new(
             Rect::new(0, 0, 1, 1),
             LayerKind::Speculated(Vec::new()),
-            Tier::Standard,
+            TermCaps::default(),
         )]);
 
         assert!(!surface.carries_speculation());

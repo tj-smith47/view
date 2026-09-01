@@ -768,7 +768,7 @@ fn composite_layers(
     // lookup over already-decoded fields, not an RPC round trip, so
     // re-deriving on every paint costs nothing beyond this struct copy
     let theme = Theme::from_hl(model.engine.hl());
-    let borders = BorderSet::for_tier(model.caps.tier);
+    let borders = BorderSet::for_caps(model.caps);
     for (index, layer) in surface.layers.iter().enumerate() {
         let area = clip_to_frame(layer.rect, frame_area);
         if area.width == 0 || area.height == 0 {
@@ -5003,10 +5003,18 @@ mod tests {
         );
     }
 
+    /// A fixture terminal whose box-glyph probe came back saying it
+    /// accounts for `╭` as one cell, and one whose did not. The bit decides
+    /// the border charset on its own, so every fixture below states which
+    /// terminal it is rather than inheriting a default.
+    const DRAWS_BOX_GLYPHS: bool = true;
+    const NO_BOX_GLYPHS: bool = false;
+
     /// A model whose only chrome is the terminal capabilities under test.
-    fn caps_model(sync: bool, truecolor: bool, kitty: bool) -> Model {
+    fn caps_model(sync: bool, truecolor: bool, kitty: bool, unicode_boxes: bool) -> Model {
         let mut model = Model::new();
-        model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty);
+        model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty)
+            .with_unicode_boxes(unicode_boxes);
         model
     }
 
@@ -5046,15 +5054,19 @@ mod tests {
     /// describing what a terminal actually receives.
     #[test]
     fn a_native_overlay_paints_exactly_the_rows_the_layout_pass_produced() {
-        for (sync, truecolor, kitty) in [
-            (true, true, true),
-            (false, true, false),
-            (false, false, false),
+        for (sync, truecolor, kitty, boxes) in [
+            (true, true, true, DRAWS_BOX_GLYPHS),
+            (false, true, false, DRAWS_BOX_GLYPHS),
+            (false, false, false, NO_BOX_GLYPHS),
+            // the crossings no `--tier` override produces: the charset
+            // follows the probe, so the painter is held to both of them
+            (false, false, false, DRAWS_BOX_GLYPHS),
+            (true, true, true, NO_BOX_GLYPHS),
         ] {
-            let model = caps_model(sync, truecolor, kitty);
-            let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+            let model = caps_model(sync, truecolor, kitty, boxes);
+            let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
             let rect = Rect::new(1, 2, 24, 7);
-            let layer = Layer::new(rect, native_picker(), model.caps.tier);
+            let layer = Layer::new(rect, native_picker(), model.caps);
             let buf = paint_layer_alone(&model, layer, 30, 10);
             let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
             for (i, line) in laid.lines.iter().enumerate() {
@@ -5078,8 +5090,11 @@ mod tests {
     /// and no cell resets to the terminal default.
     #[test]
     fn an_overlay_takes_the_theme_whatever_the_color_probe_found() {
-        for (sync, truecolor, kitty) in [(true, true, true), (false, false, false)] {
-            let mut model = caps_model(sync, truecolor, kitty);
+        for (sync, truecolor, kitty, boxes) in [
+            (true, true, true, DRAWS_BOX_GLYPHS),
+            (false, false, false, NO_BOX_GLYPHS),
+        ] {
+            let mut model = caps_model(sync, truecolor, kitty, boxes);
             model.engine.apply_grid(GridOp::Resize {
                 width: 30,
                 height: 10,
@@ -5092,10 +5107,10 @@ mod tests {
                     sp: None,
                 },
             );
-            let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+            let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
             let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
             let selected = laid.selected.expect("the picker has a selection");
-            let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+            let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
             let buf = paint_layer_alone(&model, layer, 30, 10);
             for row in 1..8_u16 {
                 for col in 2..26_u16 {
@@ -5131,7 +5146,7 @@ mod tests {
     /// no colorscheme chose ended up across the Confirm prompt.
     #[test]
     fn the_selected_row_takes_a_themed_background_rather_than_reverse_video() {
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         apply(
             &mut model,
             view_core::events::UiEvent::DefaultColorsSet {
@@ -5161,8 +5176,8 @@ mod tests {
                 hl_id: 7,
             },
         );
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
-        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
         let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
         let selected = laid.selected.expect("the picker has a selection");
         let buf = paint_layer_alone(&model, layer, 30, 10);
@@ -5194,7 +5209,7 @@ mod tests {
     fn a_styled_span_in_a_float_keeps_the_floats_background_not_the_buffers() {
         let buffer_bg = 0x0028_2A36;
         let float_bg = 0x0021_222C;
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         apply(
             &mut model,
             view_core::events::UiEvent::DefaultColorsSet {
@@ -5243,7 +5258,7 @@ mod tests {
             Some(ChromeGroup::Question),
             "this test colors the group the role reads; a re-pointed role would leave it painting nothing"
         );
-        let layer = Layer::new(Rect::new(0, 0, 24, 7), panel, model.caps.tier);
+        let layer = Layer::new(Rect::new(0, 0, 24, 7), panel, model.caps);
         let buf = paint_layer_alone(&model, layer, 24, 7);
         let mut found = false;
         for row in 0..7_u16 {
@@ -5269,7 +5284,7 @@ mod tests {
     /// concrete background no layer beneath can show through.
     #[test]
     fn an_unthemed_selection_swaps_the_themes_colors_instead_of_inverting() {
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         apply(
             &mut model,
             view_core::events::UiEvent::DefaultColorsSet {
@@ -5278,8 +5293,8 @@ mod tests {
                 sp: None,
             },
         );
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
-        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
         let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
         let selected = laid.selected.expect("the picker has a selection");
         let buf = paint_layer_alone(&model, layer, 30, 10);
@@ -5295,9 +5310,9 @@ mod tests {
     /// background yet.
     #[test]
     fn the_selected_row_reverses_even_with_no_color_available() {
-        let model = caps_model(false, false, false);
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
-        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+        let model = caps_model(false, false, false, NO_BOX_GLYPHS);
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
         let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
         let selected = laid.selected.expect("the picker has a selection");
         let buf = paint_layer_alone(&model, layer, 30, 10);
@@ -5325,7 +5340,7 @@ mod tests {
     fn model_over_a_highlighted_buffer(width: u16, height: u16) -> Model {
         // the ssh case: no COLORTERM, so nothing about this frame may depend
         // on the color probe having found one
-        let mut model = caps_model(false, false, false);
+        let mut model = caps_model(false, false, false, NO_BOX_GLYPHS);
         model.engine.apply_grid(GridOp::Resize { width, height });
         apply(
             &mut model,
@@ -5371,11 +5386,11 @@ mod tests {
     #[test]
     fn no_background_from_the_layer_beneath_survives_into_an_overlay_row() {
         let model = model_over_a_highlighted_buffer(40, 12);
-        let tier = model.caps.tier;
+        let caps = model.caps;
         let rect = Rect::new(2, 3, 24, 7);
         let surface = Surface::from_layers(vec![
-            Layer::new(Rect::new(0, 0, 40, 12), LayerKind::EngineGrid, tier),
-            Layer::new(rect, native_picker(), tier),
+            Layer::new(Rect::new(0, 0, 40, 12), LayerKind::EngineGrid, caps),
+            Layer::new(rect, native_picker(), caps),
         ]);
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -5391,7 +5406,7 @@ mod tests {
             buf[(0, 0)].modifier.contains(Modifier::ITALIC),
             "the fixture's own premise: the layer beneath carries a modifier"
         );
-        let borders = view_surface::overlay::BorderSet::for_tier(tier);
+        let borders = view_surface::overlay::BorderSet::for_caps(caps);
         let laid = view_surface::overlay::rows(rect.width, rect.height, &native_picker(), borders);
         let selected = laid.selected.expect("the picker has a selection");
         let last_col = rect.col + rect.width - 1;
@@ -5429,7 +5444,7 @@ mod tests {
     /// own shape, and every scheme that themes floats without theming
     /// nvim's message area or completion menu.
     fn model_with_a_float_body_only(width: u16, height: u16) -> Model {
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         model.engine.apply_grid(GridOp::Resize { width, height });
         apply(
             &mut model,
@@ -5479,12 +5494,12 @@ mod tests {
     #[test]
     fn a_toast_on_a_scheme_that_states_no_msg_area_paints_on_the_float_body() {
         let model = model_with_a_float_body_only(40, 12);
-        let tier = model.caps.tier;
+        let caps = model.caps;
         let rect = Rect::new(0, 8, 13, 3);
         let lines = vec![vec![Span::plain("saved".to_string())]];
         let buf = paint_layer_alone(
             &model,
-            Layer::new(rect, LayerKind::Messages(lines), tier),
+            Layer::new(rect, LayerKind::Messages(lines), caps),
             40,
             12,
         );
@@ -5553,12 +5568,12 @@ mod tests {
     #[test]
     fn a_toast_owns_every_cell_of_its_box_including_the_border() {
         let model = model_over_a_highlighted_buffer(40, 12);
-        let tier = model.caps.tier;
+        let caps = model.caps;
         let rect = Rect::new(0, 27, 13, 3);
         let lines = vec![vec![Span::plain("saved".to_string())]];
         let surface = Surface::from_layers(vec![
-            Layer::new(Rect::new(0, 0, 40, 12), LayerKind::EngineGrid, tier),
-            Layer::new(rect, LayerKind::Messages(lines), tier),
+            Layer::new(Rect::new(0, 0, 40, 12), LayerKind::EngineGrid, caps),
+            Layer::new(rect, LayerKind::Messages(lines), caps),
         ]);
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -5587,7 +5602,7 @@ mod tests {
     /// rather than sharing it.
     #[test]
     fn a_native_overlay_is_framed_in_a_dimmed_shade_of_its_interior_color() {
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         apply(
             &mut model,
             view_core::events::UiEvent::DefaultColorsSet {
@@ -5596,7 +5611,7 @@ mod tests {
                 sp: None,
             },
         );
-        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
         let buf = paint_layer_alone(&model, layer, 30, 10);
         let theme = Theme::from_hl(model.engine.hl());
         assert_eq!(
@@ -5628,7 +5643,7 @@ mod tests {
         // `a_native_overlay_is_framed_in_a_dimmed_shade_of_its_interior_color`
         // uses, gives the interior a non-`Reset` color the walk can
         // actually be caught failing to reach.
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         apply(
             &mut model,
             view_core::events::UiEvent::DefaultColorsSet {
@@ -5637,7 +5652,7 @@ mod tests {
                 sp: None,
             },
         );
-        let layer = Layer::new(Rect::new(1, 2, 400, 400), native_picker(), model.caps.tier);
+        let layer = Layer::new(Rect::new(1, 2, 400, 400), native_picker(), model.caps);
         let buf = paint_layer_alone(&model, layer, 12, 5);
         assert_eq!(
             &buf[(2, 1)].symbol(),
@@ -5665,12 +5680,8 @@ mod tests {
     /// painter's own guard refuses the rect rather than blanking it.
     #[test]
     fn a_layer_with_no_border_charset_paints_nothing() {
-        let model = caps_model(true, true, true);
-        let layer = Layer::new(
-            Rect::new(1, 2, 24, 7),
-            LayerKind::EngineGrid,
-            model.caps.tier,
-        );
+        let model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), LayerKind::EngineGrid, model.caps);
         assert!(
             layer.borders.is_none(),
             "a non-overlay kind carries no frame"
@@ -5724,7 +5735,7 @@ mod tests {
     /// defined by this fixture and by nothing else, so the test would pass
     /// over a mapping no real session can reach.
     fn model_with_distinctly_colored_chrome() -> Model {
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         for (id, group, color) in [
             (1_u64, ChromeGroup::ModeMsg, 0x00FF_0000),
             (2, ChromeGroup::StatusLine, 0x00CC_CCCC),
@@ -5772,10 +5783,10 @@ mod tests {
     fn statusline_roles_resolve_to_their_own_distinct_chrome_colors() {
         let model = model_with_distinctly_colored_chrome();
         let theme = Theme::from_hl(model.engine.hl());
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
         let width = 46_u16;
         let rect = Rect::new(1, 2, width, 1);
-        let layer = Layer::new(rect, spanful_statusline(), model.caps.tier);
+        let layer = Layer::new(rect, spanful_statusline(), model.caps);
         let laid = view_surface::overlay::rows(width, 1, &spanful_statusline(), borders);
         let buf = paint_layer_alone(&model, layer, width + 4, 4);
 
@@ -5854,7 +5865,7 @@ mod tests {
     fn a_tree_git_chip_takes_a_reverse_video_diff_groups_color_but_not_its_reverse() {
         use view_core::native::views::{GitMark, TreeRow, TreeView};
 
-        let mut model = caps_model(true, true, true);
+        let mut model = caps_model(true, true, true, DRAWS_BOX_GLYPHS);
         apply(
             &mut model,
             view_core::events::UiEvent::HlAttrDefine {
@@ -5881,11 +5892,11 @@ mod tests {
                 ])
                 .with_selected(1),
         );
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let borders = view_surface::overlay::BorderSet::for_caps(model.caps);
         let width = 30_u16;
         let rect = Rect::new(1, 1, width, 5);
         let laid = view_surface::overlay::rows(width, 5, &kind, borders);
-        let layer = Layer::new(rect, kind, model.caps.tier);
+        let layer = Layer::new(rect, kind, model.caps);
         let buf = paint_layer_alone(&model, layer, width + 4, 8);
 
         let mut chip = None;
@@ -5927,12 +5938,13 @@ mod tests {
     /// arrives.
     #[test]
     fn an_overlay_title_paints_brighter_and_bolder_than_the_frame_around_it() {
-        for (sync, truecolor, kitty) in [
-            (true, true, true),
-            (false, true, false),
-            (false, false, false),
+        for (sync, truecolor, kitty, boxes) in [
+            (true, true, true, DRAWS_BOX_GLYPHS),
+            (false, true, false, DRAWS_BOX_GLYPHS),
+            (false, false, false, NO_BOX_GLYPHS),
+            (false, false, false, DRAWS_BOX_GLYPHS),
         ] {
-            let mut model = caps_model(sync, truecolor, kitty);
+            let mut model = caps_model(sync, truecolor, kitty, boxes);
             // italic and underline are set on the group deliberately: the
             // title must carry its group's whole resolved style the way a
             // content row's roles do, not just the foreground
@@ -5957,7 +5969,7 @@ mod tests {
             );
             let theme = Theme::from_hl(model.engine.hl());
             let rect = Rect::new(1, 2, 24, 7);
-            let layer = Layer::new(rect, native_picker(), model.caps.tier);
+            let layer = Layer::new(rect, native_picker(), model.caps);
             let buf = paint_layer_alone(&model, layer, 30, 10);
 
             // the top edge is `<corner><rule> Files <rule...><corner>` on

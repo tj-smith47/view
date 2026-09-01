@@ -3,12 +3,17 @@
 //! A native overlay's frame is the part of `view` a user sees before they
 //! see anything else, and it degrades in exactly one step: rounded
 //! box-drawing wherever the terminal draws box-drawing glyphs, ASCII where
-//! it does not. The `full` and `standard` dumps here are therefore
-//! byte-identical by design -- a diff that parts them is the regression
-//! this file exists to catch. Unit assertions on individual rows cannot
-//! say whether the whole picture is right; a committed dump can, and
-//! reviewing a diff of one is how a change to framing gets noticed instead
-//! of silently shipping.
+//! it does not. Each dump names both facts about the terminal it depicts --
+//! its tier and whether its box-glyph probe came back -- because only the
+//! second decides the frame; the tier legs are here so a charset that
+//! started tracking color depth again parts two dumps that must not part.
+//! The `full` and `standard` dumps are byte-identical by design -- a diff
+//! that parts them is the regression this file exists to catch -- and
+//! `a_terminals_tier_never_reaches_its_frame` holds the two crossings to
+//! the same committed pictures without a fourth set of files. Unit
+//! assertions on individual rows cannot say whether the whole picture is
+//! right; a committed dump can, and reviewing a diff of one is how a change
+//! to framing gets noticed instead of silently shipping.
 //!
 //! Rendered through `view_oracle::raster::screen_text`, the same pure
 //! `Surface` -> text path the differential oracle compares against a
@@ -23,7 +28,7 @@
 use std::path::PathBuf;
 
 use view_core::grid::Grid;
-use view_core::model::Tier;
+use view_core::model::{TermCaps, Tier};
 use view_core::native::views::{
     AiPanelView, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeRow,
     TreeView,
@@ -39,6 +44,13 @@ const UPDATE: &str = "VIEW_UPDATE_GOLDENS";
 const AT_ROW: u16 = 1;
 const AT_COL: u16 = 2;
 
+/// A fixture terminal whose box-glyph probe came back saying it accounts
+/// for `╭` as one cell, and one whose did not. Named rather than spelled
+/// `true`/`false` at a call site, because the bit is what every dump in
+/// this file actually varies over.
+const DRAWS_BOX_GLYPHS: bool = true;
+const NO_BOX_GLYPHS: bool = false;
+
 /// Renders one framed overlay to a screen dump.
 ///
 /// The surface is the overlay alone, with no engine grid under it: the
@@ -47,8 +59,18 @@ const AT_COL: u16 = 2;
 /// around it. Buffer text under an overlay is nvim's, covered by the
 /// oracle's own differential legs, and putting it here would make every
 /// golden churn on fixture changes that say nothing about framing.
-fn dump(tier: Tier, width: u16, height: u16, kind: LayerKind) -> String {
-    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, tier);
+fn dump(tier: Tier, unicode_boxes: bool, width: u16, height: u16, kind: LayerKind) -> String {
+    let probed = match tier {
+        Tier::Full => TermCaps::from_probe(true, true, true),
+        Tier::Standard => TermCaps::from_probe(false, true, false),
+        _ => TermCaps::from_probe(false, false, false),
+    };
+    assert_eq!(probed.tier, tier, "fixture must land on the tier it names");
+    let layer = Layer::new(
+        Rect::new(AT_ROW, AT_COL, width, height),
+        kind,
+        probed.with_unicode_boxes(unicode_boxes),
+    );
     view_oracle::raster::screen_text(&Surface::from_layers(vec![layer]), &Grid::new())
 }
 
@@ -167,50 +189,74 @@ fn crashed_ai_panel() -> LayerKind {
 /// scroll window and title inset a dump has room to show.
 #[test]
 fn full_picker() {
-    assert_golden("full-picker", &dump(Tier::Full, 34, 8, picker()));
+    assert_golden(
+        "full-picker",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 34, 8, picker()),
+    );
 }
 
 #[test]
 fn standard_picker() {
-    assert_golden("standard-picker", &dump(Tier::Standard, 34, 8, picker()));
+    assert_golden(
+        "standard-picker",
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 34, 8, picker()),
+    );
 }
 
 #[test]
 fn basic_picker() {
-    assert_golden("basic-picker", &dump(Tier::Basic, 34, 8, picker()));
+    assert_golden(
+        "basic-picker",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 34, 8, picker()),
+    );
 }
 
 #[test]
 fn full_tree() {
-    assert_golden("full-tree", &dump(Tier::Full, 30, 7, tree()));
+    assert_golden(
+        "full-tree",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 30, 7, tree()),
+    );
 }
 
 #[test]
 fn standard_tree() {
-    assert_golden("standard-tree", &dump(Tier::Standard, 30, 7, tree()));
+    assert_golden(
+        "standard-tree",
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 30, 7, tree()),
+    );
 }
 
 #[test]
 fn basic_tree() {
-    assert_golden("basic-tree", &dump(Tier::Basic, 30, 7, tree()));
+    assert_golden(
+        "basic-tree",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 30, 7, tree()),
+    );
 }
 
 #[test]
 fn full_statusline() {
-    assert_golden("full-statusline", &dump(Tier::Full, 46, 3, statusline()));
+    assert_golden(
+        "full-statusline",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 46, 3, statusline()),
+    );
 }
 
 #[test]
 fn standard_statusline() {
     assert_golden(
         "standard-statusline",
-        &dump(Tier::Standard, 46, 3, statusline()),
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 46, 3, statusline()),
     );
 }
 
 #[test]
 fn basic_statusline() {
-    assert_golden("basic-statusline", &dump(Tier::Basic, 46, 3, statusline()));
+    assert_golden(
+        "basic-statusline",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 46, 3, statusline()),
+    );
 }
 
 /// The height the statusline actually ships at: `render()` sizes its layer
@@ -230,7 +276,7 @@ fn basic_statusline() {
 fn full_statusline_bar() {
     assert_golden(
         "full-statusline-bar",
-        &dump(Tier::Full, 46, 1, statusline()),
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 46, 1, statusline()),
     );
 }
 
@@ -238,7 +284,7 @@ fn full_statusline_bar() {
 fn standard_statusline_bar() {
     assert_golden(
         "standard-statusline-bar",
-        &dump(Tier::Standard, 46, 1, statusline()),
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 46, 1, statusline()),
     );
 }
 
@@ -246,63 +292,87 @@ fn standard_statusline_bar() {
 fn basic_statusline_bar() {
     assert_golden(
         "basic-statusline-bar",
-        &dump(Tier::Basic, 46, 1, statusline()),
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 46, 1, statusline()),
     );
 }
 
 #[test]
 fn full_prompt() {
-    assert_golden("full-prompt", &dump(Tier::Full, 32, 7, prompt()));
+    assert_golden(
+        "full-prompt",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 32, 7, prompt()),
+    );
 }
 
 #[test]
 fn standard_prompt() {
-    assert_golden("standard-prompt", &dump(Tier::Standard, 32, 7, prompt()));
+    assert_golden(
+        "standard-prompt",
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 32, 7, prompt()),
+    );
 }
 
 #[test]
 fn basic_prompt() {
-    assert_golden("basic-prompt", &dump(Tier::Basic, 32, 7, prompt()));
+    assert_golden(
+        "basic-prompt",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 32, 7, prompt()),
+    );
 }
 
 #[test]
 fn full_palette() {
-    assert_golden("full-palette", &dump(Tier::Full, 38, 8, palette()));
+    assert_golden(
+        "full-palette",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 38, 8, palette()),
+    );
 }
 
 #[test]
 fn standard_palette() {
-    assert_golden("standard-palette", &dump(Tier::Standard, 38, 8, palette()));
+    assert_golden(
+        "standard-palette",
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 38, 8, palette()),
+    );
 }
 
 #[test]
 fn basic_palette() {
-    assert_golden("basic-palette", &dump(Tier::Basic, 38, 8, palette()));
+    assert_golden(
+        "basic-palette",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 38, 8, palette()),
+    );
 }
 
 #[test]
 fn full_ai_panel() {
-    assert_golden("full-ai-panel", &dump(Tier::Full, 30, 7, ai_panel()));
+    assert_golden(
+        "full-ai-panel",
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 30, 7, ai_panel()),
+    );
 }
 
 #[test]
 fn standard_ai_panel() {
     assert_golden(
         "standard-ai-panel",
-        &dump(Tier::Standard, 30, 7, ai_panel()),
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 30, 7, ai_panel()),
     );
 }
 
 #[test]
 fn basic_ai_panel() {
-    assert_golden("basic-ai-panel", &dump(Tier::Basic, 30, 7, ai_panel()));
+    assert_golden(
+        "basic-ai-panel",
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 30, 7, ai_panel()),
+    );
 }
 
 #[test]
 fn full_crashed_ai_panel() {
     assert_golden(
         "full-crashed-ai-panel",
-        &dump(Tier::Full, 30, 7, crashed_ai_panel()),
+        &dump(Tier::Full, DRAWS_BOX_GLYPHS, 30, 7, crashed_ai_panel()),
     );
 }
 
@@ -310,7 +380,7 @@ fn full_crashed_ai_panel() {
 fn standard_crashed_ai_panel() {
     assert_golden(
         "standard-crashed-ai-panel",
-        &dump(Tier::Standard, 30, 7, crashed_ai_panel()),
+        &dump(Tier::Standard, DRAWS_BOX_GLYPHS, 30, 7, crashed_ai_panel()),
     );
 }
 
@@ -318,8 +388,40 @@ fn standard_crashed_ai_panel() {
 fn basic_crashed_ai_panel() {
     assert_golden(
         "basic-crashed-ai-panel",
-        &dump(Tier::Basic, 30, 7, crashed_ai_panel()),
+        &dump(Tier::Basic, NO_BOX_GLYPHS, 30, 7, crashed_ai_panel()),
     );
+}
+
+/// The two crossings the committed dumps do not have files for: a `basic`
+/// terminal whose box-glyph probe came back, and a `full` one whose did
+/// not. Each is asserted against the same-fixture dump of the tier that
+/// does have a file, so both pictures are the committed ones without a
+/// fourth and fifth set of goldens to review. Re-point the charset at the
+/// tier and every row of this table fails.
+#[test]
+fn a_terminals_tier_never_reaches_its_frame() {
+    let fixtures: Vec<(&str, u16, u16, LayerKind)> = vec![
+        ("picker", 34, 8, picker()),
+        ("tree", 30, 7, tree()),
+        ("statusline", 46, 3, statusline()),
+        ("statusline-bar", 46, 1, statusline()),
+        ("prompt", 32, 7, prompt()),
+        ("palette", 38, 8, palette()),
+        ("ai-panel", 30, 7, ai_panel()),
+        ("crashed-ai-panel", 30, 7, crashed_ai_panel()),
+    ];
+    for (name, width, height, kind) in fixtures {
+        assert_eq!(
+            dump(Tier::Basic, DRAWS_BOX_GLYPHS, width, height, kind.clone()),
+            dump(Tier::Full, DRAWS_BOX_GLYPHS, width, height, kind.clone()),
+            "{name}: a 16-color terminal that draws box glyphs is framed like any other"
+        );
+        assert_eq!(
+            dump(Tier::Full, NO_BOX_GLYPHS, width, height, kind.clone()),
+            dump(Tier::Basic, NO_BOX_GLYPHS, width, height, kind),
+            "{name}: a terminal that cannot draw box glyphs is framed in ASCII, whatever its colors"
+        );
+    }
 }
 
 /// Walks the committed dumps rather than naming them: a `standard-` golden
