@@ -106,17 +106,17 @@ steps = [
   { send = "e" },
   # What a defaults user must see, in one needle rather than two: the
   # window named by the one identity it carries, the surface it took, and
-  # the key that gives it back. A native notice is a transient toast, so
-  # this waits on the screen directly after the last keystroke rather than
-  # behind a probe -- an intervening round trip can outlast the toast's own
-  # four seconds and leave a screen that showed the line looking like one
-  # that never did. The tail (" to give it back.") is not asserted: the
+  # the key that gives it back. The line is sticky, so the keystrokes above
+  # cannot wipe it and this can wait on the screen for as long as the
+  # detection takes. The tail (" to give it back.") is not asserted: the
   # line is longer than the message layer's clip at the grid's width less
   # two, and only what fits is on the screen to match.
   { wait_for = "view: cmp_menu is drawing over the command line, which view owns. Set [native] palette = false", timeout_ms = 15000 },
-  # Not the anonymous wording: this float carries a filetype, so the
-  # notice names it rather than falling back to "a plugin".
-  { assert_absent = "a plugin is drawing over" },
+  # Not the anonymous wording: this float carries a widget filetype, so the
+  # notice names it rather than falling back to "a plugin". The surface is
+  # named too -- this fixture's noice raises a true anonymous line about the
+  # message area, which a bare needle would collide with.
+  { assert_absent = "a plugin is drawing over the command line" },
   # And the menu really was cmp's, standing at the cmdline, not a float
   # this scenario merely believes was there.
   { probe = "luaeval('require(\"cmp\").visible()')", expect = "true" },

@@ -143,6 +143,24 @@ impl Session {
         }
     }
 
+    /// Every float filetype the bridge reports within `budget`, in arrival
+    /// order. Not folded through `update`: what this observes is the wire
+    /// the watcher writes, and the model would only add a second thing that
+    /// could be wrong.
+    fn float_filetypes(&self, budget: Duration) -> Vec<String> {
+        let deadline = Instant::now() + budget;
+        let mut seen = Vec::new();
+        while let Ok(msg) = self
+            .rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            if let Msg::FloatObserved(float) = msg {
+                seen.push(float.filetype);
+            }
+        }
+        seen
+    }
+
     /// The name carried by the next colorscheme announcement, with the
     /// traffic around it applied to `model`.
     fn switch_name(&self, model: &mut Model) -> Option<String> {
@@ -172,15 +190,22 @@ fn chrome(model: &Model) -> Vec<(ChromeGroup, view_core::theme::ResolvedStyle)> 
 /// Every event the `view_bridge` group registers, as the chunk asks nvim
 /// for them. Registration is a notify, so nvim reports nothing back about
 /// whether the chunk ran to completion.
-const TRIGGERS: [&str; 5] = [
+const TRIGGERS: [&str; 12] = [
     "ColorScheme",
     "DiagnosticChanged",
     "BufEnter",
     "DirChanged",
     "FocusGained",
+    "CmdlineEnter",
+    "CmdlineChanged",
+    "ModeChanged",
+    "CursorHold",
+    "CursorHoldI",
+    "WinEnter",
+    "WinClosed",
 ];
 
-/// Registration is a notify over a chunk that creates three autocmds in
+/// Registration is a notify over a chunk that creates its autocmds in
 /// sequence, so a chunk aborting partway -- a later `nvim_create_autocmd`
 /// rejected, a typo in an event name -- leaves the earlier registrations
 /// working and the later ones simply absent, with no error anywhere and no
@@ -243,6 +268,76 @@ fn a_colorscheme_set_by_the_users_own_config_is_still_observed() {
         Some(SCHEME),
         "a scheme set during config sourcing must still reach view"
     );
+}
+
+/// A float opener and a `CursorHold` that only ever fires when this test
+/// asks for one: an `updatetime` this large means no idle timer can arm a
+/// scan the test did not schedule, which is what keeps the round below
+/// measuring the chunk's own state machine.
+const FLOAT_INIT: &str = "vim.o.updatetime = 100000\n\
+function _G.view_test_float(ft)\n\
+  local buf = vim.api.nvim_create_buf(false, true)\n\
+  vim.bo[buf].filetype = ft\n\
+  vim.api.nvim_open_win(buf, false, { relative = 'editor', row = 1,\n\
+    col = 1, width = 8, height = 2, style = 'minimal' })\n\
+end\n";
+
+/// The trailing edge of the throttle, live. The leading edge alone loses the
+/// last keystroke of a burst: the arming events inside the running window
+/// are absorbed, and the float the absorbed one summons appears 61 ms later
+/// -- after the scheduled scan has already walked the windows and found
+/// nothing. Nothing re-arms, so a user who types `:e pre` and stops to read
+/// the menu is never told the menu is covering the command line.
+///
+/// The compat harness cannot catch this: `Step::Send` waits out 200 ms of
+/// screen silence, so every key it types is spaced wider than the throttle
+/// window -- the case that always worked.
+///
+/// The round is only evidence if the leading scan really did run before the
+/// second float existed, which the `view_test_a` sighting ahead of the first
+/// `view_test_b` one is what proves. A host stalled long enough to run that
+/// scan late produces a round where they arrive together; that round is
+/// discarded and the dispatch repeated with a wider gap, rather than read as
+/// a pass.
+#[test]
+fn a_float_opened_after_the_leading_scan_is_still_reported() {
+    let session = Session::start("trailing-scan", FLOAT_INIT);
+    session.eval("execute('lua _G.view_test_float(\"view_test_a\")')");
+
+    let mut rounds = Vec::new();
+    for gap in [250_u64, 500, 1000] {
+        let _ = session.float_filetypes(Duration::from_millis(300));
+        // the leading edge, then an event inside its window with nothing for
+        // that scan to find, then the float it stands for -- opened from
+        // inside nvim so the gap is measured against the same loop the
+        // throttle's own timer runs on
+        session.eval("execute('doautocmd CursorHold')");
+        session.eval("execute('doautocmd CursorHold')");
+        session.eval(&format!(
+            "execute('lua vim.defer_fn(function() \
+             _G.view_test_float(\"view_test_b\") end, {gap})')"
+        ));
+
+        let seen = session.float_filetypes(Duration::from_millis(gap + 800));
+        let first_b = seen.iter().position(|ft| ft == "view_test_b");
+        let first_a = seen.iter().position(|ft| ft == "view_test_a");
+        let leading_scan_ran_first = match (first_a, first_b) {
+            (Some(a), Some(b)) => a < b,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if leading_scan_ran_first {
+            assert!(
+                first_b.is_some(),
+                "the float opened {gap} ms after the arming burst was never \
+                 reported: the absorbed event owes a trailing scan, and the \
+                 walk this round did produce was {seen:?}"
+            );
+            return;
+        }
+        rounds.push(seen);
+    }
+    panic!("no round observed the leading scan ahead of the second float; the host stalled the deferred scan past every gap tried: {rounds:?}");
 }
 
 /// The switch has to reach the colors a painter reads, not just the message

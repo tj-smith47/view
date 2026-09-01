@@ -33,15 +33,19 @@ fn family(identity: Option<&str>) -> String {
 /// Answers one float sighting: nothing at all for a float drawing where
 /// view does not, and otherwise the one notice its claimant owes the user.
 ///
-/// Repeats are cheap rather than suppressed here: the watcher re-reports a
-/// float that moved -- every keystroke of a cmdline session, for nvim-cmp --
-/// and each repeat re-offers the same line to
-/// `record_native_notice_once`, which leaves a standing line (and its own
-/// expiry) exactly as it was. Suppressing the repeat one level earlier
-/// instead is what made the notice unreadable: the keystroke that summons
-/// the float is also the one that dismisses the toast it raises, so the
-/// only line the session would ever have raised was already gone by the
-/// time anything painted it.
+/// The watcher re-reports a float that moved -- every keystroke of a
+/// cmdline session, for nvim-cmp -- and a repeat that adds no surface stops
+/// at `SurfaceConflicts::record`, which answers news only. So a standing
+/// claim costs a lookup per sighting and nothing else: no notice churn, and
+/// no repaint asked of a screen that did not change.
+///
+/// The line is sticky for the same reason the repeat is answered: the
+/// keystroke that summons the float is the keystroke that dismisses a
+/// transient toast. Suppressing the repeat leaves a line raised once,
+/// wiped, and never said again; answering the repeat over a transient line
+/// leaves it blinking on and off at the scan rate for as long as the user
+/// types. The conflict is true until the config changes, so the line stands
+/// until it is replaced or deliberately dismissed.
 pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Effect> {
     let Some(surface) = surfaces::claims(float, model) else {
         return Vec::new();
@@ -59,8 +63,32 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
     };
     let family = family(identity.as_deref());
     let text = notice(&family, &claimed, model.config_was_read());
+    // reaching here at all means the claim is news -- `record` answers a
+    // sighting that adds nothing with `None` above -- so the wording is about
+    // to change and the frame does owe a repaint. The re-sighting that
+    // changes no pixel never gets this far, which is what keeps a 6.7 Hz scan
+    // off the paint loop for as long as a menu stands open.
     model.dirty = true;
-    model.engine.record_native_notice_once(&family, text)
+    model.engine.record_native_notice_sticky_once(&family, text)
+}
+
+/// Answers the end of one float scan: every claimant the scan did not sight
+/// has stopped drawing, so the line about it comes down.
+///
+/// The other half of the sticky notice. A line that stands until it is
+/// dismissed would otherwise outlive the thing it describes -- and this one
+/// is a box across the top rows, so an obsolete copy occludes the buffer for
+/// the rest of the session. Withdrawal by family, on the same terms the
+/// wording replacement uses, so a claimant's line comes down whichever of
+/// its wordings is up.
+pub(super) fn sweep_floats(model: &mut Model) -> Vec<Effect> {
+    for identity in model.surface_conflicts.sweep() {
+        let withdrew = model
+            .engine
+            .withdraw_native_notice(&family(identity.as_deref()));
+        model.dirty |= withdrew;
+    }
+    Vec::new()
 }
 
 /// The whole notice line for `claimed`, opening with its own `family` --
@@ -261,33 +289,50 @@ mod tests {
         );
     }
 
-    /// The live failure this shape was built from: a native notice is a
-    /// transient toast, and the keystroke that summons a cmdline completion
-    /// menu is also the one that dismisses the toast the previous keystroke
-    /// raised. A detector that spoke only the first time a pair was seen
-    /// therefore said it once, into a frame the next key wiped, and stayed
-    /// silent for the rest of the session while the plugin kept drawing.
+    /// The live failure this shape was built from, and the one the first fix
+    /// for it produced. A cmdline session types a key every ~200 ms; each key
+    /// dismisses whatever transient toast has had its frame, and arms the
+    /// scan that sights the menu again ~150 ms later. So a transient line
+    /// here is not "raised once" -- it is raised, wiped, raised, wiped, for
+    /// as long as the user types, on the one path this feature exists to
+    /// serve. This drives that whole cycle: every keystroke a user makes
+    /// while the menu stands, with the sighting the keystroke arms, and the
+    /// line has to be readable throughout.
     #[test]
-    fn a_notice_a_keypress_dismissed_is_raised_again_by_the_next_sighting() {
+    fn the_notice_stands_through_the_keystrokes_that_keep_summoning_the_float() {
         let mut model = captured_session();
         open_cmdline(&mut model);
+        let expected = vec![
+            "view: cmp_menu is drawing over the command line, which view owns. \
+             Set [native] palette = false to give it back."
+                .to_string(),
+        ];
         let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        assert_eq!(notices(&model).len(), 1);
-        // what the user's next keystroke does to a toast that has already
-        // had its frame
-        model.engine.messages.note_flush();
-        assert!(model.engine.messages.dismiss_transient_on_keypress(true));
-        assert!(notices(&model).is_empty(), "the toast is gone");
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
-        assert_eq!(
-            notices(&model),
-            vec![
-                "view: cmp_menu is drawing over the command line, which view owns. \
-                 Set [native] palette = false to give it back."
-                    .to_string()
-            ],
-            "the conflict is still true, so the line is on screen again"
-        );
+        assert_eq!(notices(&model), expected);
+
+        for key in 1..=8 {
+            // the keystroke: a frame has been painted since the line landed,
+            // which is the whole condition a transient dismissal needs
+            model.engine.messages.note_flush();
+            let _ = model.engine.messages.dismiss_transient_on_keypress(true);
+            assert_eq!(
+                notices(&model),
+                expected,
+                "keystroke {key} took the notice off the screen"
+            );
+            // and the scan that keystroke armed, 150 ms later
+            model.dirty = false;
+            let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+            assert_eq!(notices(&model), expected, "sighting {key} stacked a copy");
+            assert!(
+                !model.dirty,
+                "sighting {key} asked for a repaint of a screen it did not change"
+            );
+        }
+
+        // the way out is the deliberate one every sticky entry has
+        assert!(model.engine.messages.dismiss_sticky());
+        assert!(notices(&model).is_empty());
     }
 
     #[test]
@@ -371,6 +416,35 @@ mod tests {
         let effects = observe_float(&mut model, &picker);
         assert!(effects.is_empty());
         assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+    }
+
+    /// What keeps a standing line from outliving what it says. The notice is
+    /// sticky, and a sticky line about a menu that closed ten minutes ago is
+    /// a box across the top of the buffer saying something untrue -- so a
+    /// scan that no longer finds the float takes the line down with it, and
+    /// the plugin drawing again raises it again.
+    #[test]
+    fn a_notice_comes_down_with_the_float_that_stopped_being_sighted() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        assert_eq!(notices(&model).len(), 1);
+
+        // a scan that still finds it: the line stays
+        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        let _ = update(&mut model, Msg::FloatSweep);
+        assert_eq!(notices(&model).len(), 1, "the menu is still drawing");
+
+        // the scan after the menu closed reports no float at all, and its
+        // end marker is the only thing that says so
+        model.dirty = false;
+        let _ = update(&mut model, Msg::FloatSweep);
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+        assert!(model.dirty, "the box left the screen: that is a repaint");
+
+        // and the same plugin drawing again is owed the line again
+        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        assert_eq!(notices(&model).len(), 1);
     }
 
     /// The dispatch seam itself: the message a decoded bridge notification

@@ -80,11 +80,21 @@ steps = [
   { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open" },
   # None of the picker's four windows is a claimant: not the two that
   # carry a telescope filetype, and not the two border windows, whose
-  # empty filetype and empty buffer name would reach the anonymous
-  # wording if they claimed anything at all.
+  # empty filetype would reach the anonymous wording if they claimed
+  # anything at all. The anonymous needle names the surface, because this
+  # fixture's noice raises a true anonymous line about the message area
+  # (below) and a bare "a plugin is drawing over" could not tell them apart.
   { assert_absent = "TelescopePrompt is drawing over" },
   { assert_absent = "TelescopeResults is drawing over" },
-  { assert_absent = "a plugin is drawing over" },
+  { assert_absent = "a plugin is drawing over the command line" },
+  # noice's health float draws in the message area and is a true claim --
+  # but `markdown` is the filetype its own on_open sets so the message
+  # renders, not a name for the plugin, so it reaches the user as an
+  # unnamed plugin rather than as a document type wearing a plugin's place.
+  # Clipped at the message layer's own width (the grid less two), which
+  # this line is longer than: only what fits is on the screen to match.
+  { wait_for = "view: a plugin is drawing over the message area, which view owns. Set [native] notific", timeout_ms = 15000 },
+  { assert_absent = "markdown is drawing over" },
   # A second <Esc> from the picker's normal mode dismisses it.
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },

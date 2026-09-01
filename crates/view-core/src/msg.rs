@@ -316,6 +316,16 @@ pub enum Msg {
     /// crossed onto a surface view owns. `update::surface_conflict` is what
     /// makes the repeat free.
     FloatObserved(crate::native::surfaces::FloatSighting),
+    /// The end of one float scan: every [`Msg::FloatObserved`] since the
+    /// last one of these is the complete set of floats nvim had open.
+    ///
+    /// The only way a closed float is observable. A window that goes away
+    /// notifies nothing, and a scan that finds no floats sends nothing, so
+    /// without a marker the wire cannot distinguish "the menu closed" from
+    /// "no scan has run since". With one, a claimant missing from a
+    /// completed walk is a claimant whose float is gone, which is what
+    /// retires the notice about it (`update::surface_conflict`).
+    FloatSweep,
     /// One `nvim_buf_lines_event` notification forwarded from a buffer
     /// attached via `RpcCall::BufAttach`. Carries nvim's own change shape
     /// verbatim -- distinct from [`Msg::BufferChanged`] (the statusline's

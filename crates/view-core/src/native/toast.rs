@@ -18,8 +18,10 @@ pub enum Route {
     /// A confirm-class prompt; rendered as the modal `OverlayKind::Prompt`
     /// overlay elsewhere, not a toast at all.
     Prompt,
-    /// One of nvim's error/warning kinds (`MessageEntry::is_persistent_kind`)
-    /// or a locally-raised condition. Never expires on its own: it stays
+    /// One of the kinds that stand until they are taken down
+    /// (`MessageEntry::is_persistent_kind`: nvim's error/warning kinds and
+    /// view's own `"native_sticky"`), or a locally-raised condition. Never
+    /// expires on its own: it stays
     /// until replaced, cleared by nvim, or deliberately dismissed
     /// ([`crate::model::Messages::dismiss_sticky`]).
     Sticky,

@@ -1284,6 +1284,40 @@ impl EngineModel {
         family: &str,
         text: String,
     ) -> Vec<crate::msg::Effect> {
+        self.record_native_notice_once_as("native", family, text)
+    }
+
+    /// [`Self::record_native_notice_once`] for a notice that has to still be
+    /// on screen after the next keystroke: the `"native_sticky"` kind, which
+    /// routes [`crate::native::toast::Route::Sticky`] and so survives both
+    /// the idle expiry and `Messages::dismiss_transient_on_keypress`.
+    ///
+    /// For a notice whose subject the user's own typing keeps producing. A
+    /// plugin drawing over an owned surface is the case: the keystroke that
+    /// summons the float is the keystroke that would dismiss the transient
+    /// line about it, and the detection that follows re-raises it ~150 ms
+    /// later, so a transient line cycles on and off for as long as the user
+    /// types instead of standing to be read. It leaves the way every sticky
+    /// entry does -- replaced by its own family, cleared by nvim, or
+    /// dismissed deliberately ([`Messages::dismiss_sticky`]).
+    pub fn record_native_notice_sticky_once(
+        &mut self,
+        family: &str,
+        text: String,
+    ) -> Vec<crate::msg::Effect> {
+        self.record_native_notice_once_as("native_sticky", family, text)
+    }
+
+    /// The shared body of [`Self::record_native_notice_once`] and
+    /// [`Self::record_native_notice_sticky_once`]: same de-duplication, same
+    /// family withdrawal, differing only in the `kind` the entry carries and
+    /// therefore in the lifetime `toast::route` gives it.
+    fn record_native_notice_once_as(
+        &mut self,
+        kind: &str,
+        family: &str,
+        text: String,
+    ) -> Vec<crate::msg::Effect> {
         let content = vec![(0, text)];
         // every entry, not just the tail: anything at all landing between
         // two detections -- one ordinary nvim message is enough -- takes
@@ -1303,7 +1337,7 @@ impl EngineModel {
         self.messages
             .entries
             .retain(|e| !is_standing_native_notice(e, family));
-        self.record_message("native".to_string(), content, false)
+        self.record_message(kind.to_string(), content, false)
     }
 
     /// Retracts every standing one-shot native notice whose line starts
@@ -1494,15 +1528,20 @@ impl MessageEntry {
     }
 
     /// The kind-only half of [`is_persistent`]: whether `kind` alone (no
-    /// locally-raised condition flag, since none exists yet) names one of
-    /// nvim's error/warning kinds. `toast::route` matches on this directly
-    /// -- it classifies the wire `kind` string before any `MessageEntry`
-    /// exists to ask.
+    /// locally-raised condition flag, since none exists yet) names a kind
+    /// that stands until it is replaced or dismissed. `toast::route` matches
+    /// on this directly -- it classifies the `kind` string before any
+    /// `MessageEntry` exists to ask.
+    ///
+    /// nvim's error/warning kinds, plus the one view raises itself:
+    /// `"native_sticky"` is not a wire kind and can arrive only through
+    /// [`EngineModel::record_native_notice_sticky_once`], whose doc carries
+    /// the argument for why that notice cannot be transient.
     #[must_use]
     pub fn is_persistent_kind(kind: &str) -> bool {
         matches!(
             kind,
-            "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err"
+            "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err" | "native_sticky"
         )
     }
 
@@ -1528,12 +1567,15 @@ impl MessageEntry {
     /// Whether view raised this entry itself rather than decoding it from
     /// nvim's `msg_show`.
     ///
-    /// The `"native"` kind is the marker, and it is reachable from outside
-    /// `model.rs` only through [`EngineModel::record_native_notice`] and
-    /// [`Messages::set_native_condition`], so no wire message can wear it.
+    /// The `"native"` kinds are the marker -- `"native_sticky"` differing
+    /// only in lifetime ([`EngineModel::record_native_notice_sticky_once`]),
+    /// so every family withdrawal and every de-duplication ranges over both.
+    /// Both are reachable from outside `model.rs` only through
+    /// [`EngineModel::record_native_notice`] and its siblings and
+    /// [`Messages::set_native_condition`], so no wire message can wear one.
     #[must_use]
     pub fn is_native(&self) -> bool {
-        self.kind == "native"
+        matches!(self.kind.as_str(), "native" | "native_sticky")
     }
 
     /// Whether this entry keeps its rows when the toast box overflows.
@@ -2194,10 +2236,18 @@ mod tests {
             "lua_error",
             "rpc_error",
             "shell_err",
+            // the one kind view raises itself: a line the keystroke that
+            // re-detects its subject would otherwise wipe
+            "native_sticky",
         ] {
             assert!(
                 entry(kind, vec![]).is_persistent(),
                 "{kind} must be persistent"
+            );
+            assert_eq!(
+                crate::native::toast::route(kind),
+                crate::native::toast::Route::Sticky,
+                "{kind} must route sticky, or it expires on a timer anyway"
             );
         }
         for kind in [

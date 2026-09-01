@@ -1702,6 +1702,13 @@ mod tests {
             shown.contains("every native feature stays on this session"),
             "and told what that cost them: {shown}"
         );
+        assert!(
+            !model.config_was_read(),
+            "the session has to know these surfaces are the fail-open default \
+             rather than this user's answer: a notice that later names a \
+             `[native]` remedy would be telling them to write a line they may \
+             have written into the very file view could not read"
+        );
     }
 
     #[test]

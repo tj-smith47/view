@@ -3396,6 +3396,21 @@ mod tests {
         );
     }
 
+    /// The scan's end marker, which carries no argument at all -- the one
+    /// bridge event that does, and the reason the decoder answers it ahead
+    /// of the split every other event's payload needs.
+    #[test]
+    fn a_bridge_float_sweep_decodes_without_an_argument() {
+        assert!(matches!(
+            decode_bridge_event(&[Value::from("float_sweep")]),
+            Some(Msg::FloatSweep)
+        ));
+        assert!(
+            decode_bridge_event(&[Value::from("colorscheme")]).is_none(),
+            "no other event is legible without its payload"
+        );
+    }
+
     /// nvim-cmp's cmdline menu exactly as `docs/surface-float-wire-capture.md`
     /// records it, through the chunk's own argument order. The anchor is
     /// carried because dropping it moves an `NE`-anchored float half a

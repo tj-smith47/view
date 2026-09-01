@@ -212,20 +212,45 @@ pub struct FloatSighting {
     pub name: String,
 }
 
+/// Filetypes that say what a buffer holds, never who opened the window.
+///
+/// The capture's discriminator table parts the two kinds cleanly. Every
+/// float that names its plugin does it with a filetype the plugin invented
+/// for its own widget -- `cmp_menu`, `notify`, `TelescopeResults`,
+/// `TelescopePrompt` -- while noice's health float carries `markdown`,
+/// which its `on_open` sets so the message *renders*, not to sign it
+/// (`docs/surface-float-wire-capture.md`, the noice section). Taking that
+/// as a name produces "view: markdown is drawing over the message area",
+/// which names a document type as if it were a plugin, and mints a notice
+/// family per content type on top.
+///
+/// A deny-list rather than an allow-list of widget filetypes because the
+/// widget names are open-ended (every plugin invents its own) while the
+/// document types a plugin sets to get rendering are a short, stable set.
+/// A content type not listed here reads as a name until it is added; the
+/// cost is one wrong word in one notice, against an allow-list's cost of
+/// staying silent about every plugin nobody enumerated.
+const CONTENT_FILETYPES: [&str; 5] = ["markdown", "help", "text", "man", "log"];
+
 impl FloatSighting {
-    /// The best name this float carries for whatever opened it, or `None`
-    /// when it carries none.
+    /// The name this float carries for whatever opened it, or `None` when it
+    /// carries none.
     ///
     /// Best-effort and bounded by design: a floating window records no
-    /// authorship, so this reads what the window itself sets -- the
-    /// filetype first (the mark every observed plugin sets on its own
-    /// menu), then the buffer name -- and never infers a plugin from
-    /// geometry.
+    /// authorship, so this reads the one mark a plugin sets on its own
+    /// widget -- the buffer's filetype -- and never infers a plugin from
+    /// geometry. A filetype naming what the buffer *holds* is not that mark
+    /// ([`CONTENT_FILETYPES`]), and neither is the buffer's name: every float
+    /// in `docs/surface-float-wire-capture.md` carries `name = ""`, and a
+    /// plugin that floats a real file would put a path where a plugin's name
+    /// belongs -- the same category error, plus a fresh claimant per file.
     #[must_use]
     pub fn identity(&self) -> Option<&str> {
-        [self.filetype.as_str(), self.name.as_str()]
-            .into_iter()
-            .find(|mark| !mark.is_empty())
+        let filetype = self.filetype.as_str();
+        if filetype.is_empty() || CONTENT_FILETYPES.contains(&filetype) {
+            return None;
+        }
+        Some(filetype)
     }
 
     /// The inclusive `(top, left, bottom, right)` cell span this float
@@ -321,6 +346,11 @@ fn owned(surface: Surface, model: &Model) -> Option<Surface> {
 /// Which identities have been seen claiming which surfaces, so a second
 /// sighting adds to one notice rather than raising a second one.
 ///
+/// One entry per distinct claiming identity, which
+/// [`FloatSighting::identity`] bounds to widget filetypes: a session holds
+/// as many as it has plugins drawing over an owned surface, and a plugin
+/// floating one buffer after another adds none.
+///
 /// Keyed on the identity a float carries -- `None` being its own key,
 /// shared by every float carrying none -- which is the key the notice's own
 /// family is built from too: two notices sharing a family retract each
@@ -338,30 +368,32 @@ pub struct SurfaceConflicts {
 struct Claimant {
     identity: Option<String>,
     surfaces: Vec<Surface>,
+    /// Whether a float of this identity was sighted during the scan now
+    /// running; cleared by [`SurfaceConflicts::sweep`] at the end of each
+    /// one, so a claimant that survives a sweep without being set was not
+    /// on screen for that whole walk.
+    seen: bool,
 }
 
 impl SurfaceConflicts {
-    /// Records that `identity` was seen claiming `surface`, and answers
-    /// every surface it now claims -- on the repeat sighting as much as on
-    /// the first.
+    /// Records that `identity` was seen claiming `surface`, and answers the
+    /// full set it claims when that set is *news* -- a claimant not standing
+    /// before, or a surface it had not taken. `None` for the repeat sighting
+    /// of a claim already recorded.
     ///
     /// The set is kept in [`SURFACES`] order rather than in the order the
     /// floats happened to arrive, so one identity claiming two surfaces
     /// reads the same way whichever it claimed first.
     ///
-    /// Deliberately not "news only". A native notice is a transient toast
-    /// that the user's *next keystroke* dismisses
-    /// ([`Messages::dismiss_transient_on_keypress`](crate::model::Messages::dismiss_transient_on_keypress)),
-    /// and the float this detects is most often one a keystroke summoned --
-    /// nvim-cmp's cmdline menu re-lays itself out on every key. A set
-    /// reported only the first time therefore raised one line that the very
-    /// next key wiped, and nothing could ever say it again for the rest of
-    /// the session (proven live: the notice stood for 214 ms and was gone
-    /// before the scenario could read the screen). Answering every time
-    /// leaves "say it once" where it belongs -- in
-    /// [`record_native_notice_once`](crate::model::EngineModel::record_native_notice_once),
-    /// which no-ops on a line already standing and speaks again only when
-    /// nothing of that claimant's is on screen.
+    /// News-only is safe here only because the line raised from it stands:
+    /// it is sticky
+    /// ([`record_native_notice_sticky_once`](crate::model::EngineModel::record_native_notice_sticky_once)),
+    /// so no keystroke wipes it, and it is withdrawn by [`Self::sweep`] when
+    /// the float stops being sighted -- which also drops the claimant, so a
+    /// plugin that draws again is news again. The first shape of this
+    /// answered every repeat instead, over a transient line, which raised
+    /// the notice and re-raised it at the scan rate for as long as the user
+    /// typed.
     pub fn record(&mut self, identity: Option<&str>, surface: Surface) -> Option<&[Surface]> {
         let index = match self
             .claimants
@@ -373,18 +405,41 @@ impl SurfaceConflicts {
                 self.claimants.push(Claimant {
                     identity: identity.map(str::to_owned),
                     surfaces: Vec::new(),
+                    seen: false,
                 });
                 self.claimants.len() - 1
             }
         };
         let claimant = self.claimants.get_mut(index)?;
-        if !claimant.surfaces.contains(&surface) {
-            claimant.surfaces.push(surface);
-            claimant
-                .surfaces
-                .sort_by_key(|surface| SURFACES.iter().position(|row| row.surface == *surface));
+        claimant.seen = true;
+        if claimant.surfaces.contains(&surface) {
+            return None;
         }
+        claimant.surfaces.push(surface);
+        claimant
+            .surfaces
+            .sort_by_key(|surface| SURFACES.iter().position(|row| row.surface == *surface));
         Some(&claimant.surfaces)
+    }
+
+    /// Closes one scan: drops every claimant not sighted during it and
+    /// answers their identities, so the caller can withdraw what it told the
+    /// user about each. Called on [`crate::msg::Msg::FloatSweep`].
+    ///
+    /// A dropped claimant is forgotten entirely rather than remembered as
+    /// "already told": the plugin drew, view said so, and the drawing
+    /// stopped -- if it starts again the user is owed the line again, on a
+    /// screen that no longer carries it.
+    pub fn sweep(&mut self) -> Vec<Option<String>> {
+        let mut gone = Vec::new();
+        self.claimants.retain_mut(|claimant| {
+            if std::mem::take(&mut claimant.seen) {
+                return true;
+            }
+            gone.push(claimant.identity.clone());
+            false
+        });
+        gone
     }
 }
 
@@ -392,7 +447,10 @@ impl SurfaceConflicts {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{claims, row, FloatAnchor, FloatSighting, Surface, SurfaceConflicts, SURFACES};
+    use super::{
+        claims, row, FloatAnchor, FloatSighting, Surface, SurfaceConflicts, CONTENT_FILETYPES,
+        SURFACES,
+    };
     use crate::events::UiEvent;
     use crate::model::Model;
     use crate::native::ext::Ext;
@@ -598,14 +656,29 @@ mod tests {
         }
     }
 
+    /// Every identity the capture records, on both sides of the line: the
+    /// four widget filetypes plugins invented for their own windows are
+    /// names, and noice's `markdown` -- set so the message renders -- is not.
+    /// The buffer name is never one either: the capture's own floats all
+    /// carry `name = ""`, and the one shape that would produce a non-empty
+    /// one is a plugin floating a real file, where the "identity" is a path.
     #[test]
-    fn an_identity_is_the_filetype_then_the_buffer_name_then_nothing() {
-        assert_eq!(cmp_cmdline_menu().identity(), Some("cmp_menu"));
+    fn an_identity_is_a_widget_filetype_and_never_content_or_a_path() {
+        for widget in ["cmp_menu", "notify", "TelescopeResults", "TelescopePrompt"] {
+            assert_eq!(float(widget, 0, 0, 4, 4).identity(), Some(widget));
+        }
+        for content in CONTENT_FILETYPES {
+            assert_eq!(
+                float(content, 0, 0, 4, 4).identity(),
+                None,
+                "{content} says what the buffer holds, not who opened the window"
+            );
+        }
         let named = FloatSighting {
             name: "/tmp/scratch".to_string(),
             ..float("", 0, 0, 4, 4)
         };
-        assert_eq!(named.identity(), Some("/tmp/scratch"));
+        assert_eq!(named.identity(), None);
         assert_eq!(float("", 0, 0, 4, 4).identity(), None);
     }
 
@@ -618,9 +691,9 @@ mod tests {
         );
         assert_eq!(
             conflicts.record(Some("noice"), Surface::Messages),
-            Some([Surface::Messages].as_slice()),
-            "a repeat answers the same set rather than falling silent: the line it \
-             raises may have been dismissed since"
+            None,
+            "the repeat sighting is not news: the line it would raise is \
+             sticky and still standing"
         );
         assert_eq!(
             conflicts.record(Some("noice"), Surface::Cmdline),
@@ -636,6 +709,37 @@ mod tests {
             conflicts.record(None, Surface::Cmdline),
             Some([Surface::Cmdline].as_slice()),
             "a float with no identity is its own claimant, the one the notice calls a plugin"
+        );
+    }
+
+    /// What makes the standing line honest: a claimant sighted during a scan
+    /// survives it, one that was not is gone and is answered so its notice
+    /// can come down -- and it is forgotten, so the same plugin drawing
+    /// again is news again rather than a claim nothing will ever say.
+    #[test]
+    fn a_sweep_drops_the_claimants_that_scan_did_not_sight() {
+        let mut conflicts = SurfaceConflicts::default();
+        let _ = conflicts.record(Some("cmp_menu"), Surface::Cmdline);
+        let _ = conflicts.record(None, Surface::Messages);
+
+        assert_eq!(
+            conflicts.sweep(),
+            Vec::<Option<String>>::new(),
+            "both were sighted in the scan this closes"
+        );
+
+        // the next scan sees only one of them
+        let _ = conflicts.record(Some("cmp_menu"), Surface::Cmdline);
+        assert_eq!(
+            conflicts.sweep(),
+            vec![None],
+            "the unnamed float has closed"
+        );
+
+        assert_eq!(
+            conflicts.record(None, Surface::Messages),
+            Some([Surface::Messages].as_slice()),
+            "and it draws again: news, because the line about it came down"
         );
     }
 }

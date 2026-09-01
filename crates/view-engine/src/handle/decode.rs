@@ -95,6 +95,11 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
 /// re-registering autocommands on a running engine. An event with no
 /// consumer costs one dropped notification here.
 pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
+    // ahead of the split below, which requires an argument: the sweep marker
+    // carries none, because what it says is "that was the whole walk"
+    if params.first()?.as_str()? == "float_sweep" {
+        return Some(Msg::FloatSweep);
+    }
     let [event, first, rest @ ..] = params else {
         return None;
     };
