@@ -8,12 +8,17 @@
 # message in noice's own history and displays it through the nvim-notify
 # backend.
 #
-# `notifications` carries no takeover row (view-native's supersede module
-# has exactly one row and it is statusline's). What the switches do carry
-# is the attach itself: `palette = false` detaches ext_cmdline and
-# ext_popupmenu, `notifications = false` detaches ext_messages, so the
-# `deferred` state below hands noice back every surface it asks for and
-# the `nvim_list_uis()` probes there are the direct evidence. `cmdheight`
+# `notifications` takes two things: the attach, and `vim.notify` itself.
+# The attach -- `palette = false` detaches ext_cmdline and ext_popupmenu,
+# `notifications = false` detaches ext_messages, so the `deferred` state
+# below hands noice back every surface it asks for and the
+# `nvim_list_uis()` probes there are the direct evidence. And the
+# function: enabled, view holds `vim.notify` at the engine default
+# (view-native's supersede table, the `TakeoverKind::Notify` row), so
+# noice's message router stops receiving the calls it exists to intercept
+# and the message is drawn as view's own toast instead. That is the one
+# thing that differs between `superseded` and `deferred` here beyond the
+# attach, and both states assert it from noice's own manager history. `cmdheight`
 # reads 0 there, and not from view: view zeroes it only for a session that
 # took both the cmdline and the messages, which the same two switches deny
 # (`dressing`/`fidget` deferred run those switches with noice's components
@@ -23,10 +28,9 @@
 # (v0.12.4, reproduced headless). noice writes the option itself nowhere:
 # its one mention, lua/noice/message/router.lua:245, is commented out.
 #
-# In the two states that keep view's defaults, noice's routing is
-# identical; the one fact `<leader>fm` discriminates is whether it opens
-# view's own message-history overlay (titled "Messages") or, unclaimed,
-# does nothing.
+# `<leader>fm` discriminates a second thing: whether view's own
+# message-history overlay (titled "Messages") is claimed at all, or,
+# unclaimed, does nothing.
 schema = 1
 plugin = "noice"
 class = "ui-owning"
@@ -79,13 +83,18 @@ steps = [
   # lands in the install window instead of the buffer.
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   { send = ":lua vim.notify('noice-compat-marker')<CR>" },
-  # The routed message rendered through the nvim-notify backend as a
-  # floating window whose body text lands in the grid.
+  # The message reaches the grid either way -- as view's own toast here,
+  # as noice's nvim-notify float in the deferred state below -- so grid
+  # presence says nothing about who drew it on its own.
   { wait_for = "noice-compat-marker", timeout_ms = 15000 },
-  # nvim-notify alone would also float this text, so grid presence does
-  # not by itself prove noice routed it; the message sitting in noice's
-  # own manager history is the noice-specific fact.
-  { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },
+  # Who drew it, read from noice: view holds vim.notify at the engine
+  # default, so noice's router never receives this call and its own
+  # manager history never records it. The deferred state below runs the
+  # identical probe against `notifications = false` and reads "routed",
+  # which is what makes this pair an assertion about the takeover rather
+  # than about a noice that failed to start (is_running() above already
+  # proves it did).
+  { probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent\" end)()')", expect = "absent" },
   { send = "\\fm" },
   { wait_for = "Messages", timeout_ms = 5000 },
   { send = "<Esc>" },

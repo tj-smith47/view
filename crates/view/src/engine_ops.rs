@@ -43,6 +43,10 @@ pub trait EngineOps {
     /// Sets one nvim option and keeps it there for the session, the durable
     /// takeover a superseded plugin cannot undo (see `RpcCall::HoldOption`).
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
+    /// Re-points `vim.notify` at the engine default and keeps it there for
+    /// the session, so a plugin's messages cross as `ext_messages` traffic
+    /// (see `RpcCall::HoldNotify`).
+    fn hold_notify(&self) -> Result<(), EngineError>;
     /// Answers a request nvim is blocked on.
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError>;
     /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe tagged
@@ -255,6 +259,9 @@ impl EngineOps for EngineHandle {
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.hold_option(name, value)
     }
+    fn hold_notify(&self) -> Result<(), EngineError> {
+        self.hold_notify()
+    }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.reply(token, value)
     }
@@ -412,6 +419,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
+    }
+    fn hold_notify(&self) -> Result<(), EngineError> {
+        (**self).hold_notify()
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
@@ -573,6 +583,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).hold_option(name, value)
+    }
+    fn hold_notify(&self) -> Result<(), EngineError> {
+        (**self).hold_notify()
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
@@ -759,6 +772,9 @@ impl EngineOps for FakeOps {
     }
     fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.record(format!("hold_option({name},{value:?})"))
+    }
+    fn hold_notify(&self) -> Result<(), EngineError> {
+        self.record("hold_notify()".to_string())
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.record(format!("reply({},{value:?})", token.msgid))
@@ -979,6 +995,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn hold_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn hold_notify(&self) -> Result<(), EngineError> {
         Ok(())
     }
     fn reply(&self, _token: ReplyToken, _value: ReplyValue) -> Result<(), EngineError> {

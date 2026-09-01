@@ -491,15 +491,28 @@ mod tests {
         // of this blob from the code under test and a spelling change
         // regenerates the "old" file and passes, while the records already
         // on disk -- the only ones this pin exists for -- go stale unseen.
-        // `handovers()` is a supersession of `statusline` plus a claimed
-        // `<leader>ff`, so these are exactly the two keys a v1 build wrote
+        // a v1 build superseded `statusline` and claimed `<leader>ff`, so
+        // these are exactly the two keys such a file holds
         const V1_RECORD: &str = "schema_version = 1\n\n\
              [announced]\n\
              \"/cfg/view.toml\" = [\"picker:key:<leader>ff\", \"statusline\"]\n";
+        const V1_SURFACES: [&str; 2] = ["picker:key:<leader>ff", "statusline"];
 
         let dir = scratch("v1-compat");
         let record = dir.join("native-first-run.toml");
-        let report = handovers();
+        // the report is narrowed to what a v1 build could have announced,
+        // rather than being today's whole report: this pin is about a v1
+        // file still decoding, and a surface added to the plan afterwards is
+        // genuinely un-announced -- news the record has no entry to silence
+        let report: Vec<Handover> = handovers()
+            .into_iter()
+            .filter(|h| V1_SURFACES.contains(&h.record_key().as_str()))
+            .collect();
+        assert_eq!(
+            report.len(),
+            V1_SURFACES.len(),
+            "both surfaces a v1 record names must still exist in this build: {report:?}"
+        );
         std::fs::write(&record, V1_RECORD).expect("the record must be writable");
 
         let notices = first_run(&report, Some(Path::new("/cfg/view.toml")), &record)
@@ -513,6 +526,21 @@ mod tests {
             std::fs::read_to_string(&record).expect("the record must be readable"),
             V1_RECORD,
             "a run with nothing to announce must not rewrite the record"
+        );
+
+        // the other half of the same file: a surface this build takes over
+        // that no v1 record could name is still news, and announcing it must
+        // not re-announce the two the record already covers
+        let later = first_run(&handovers(), Some(Path::new("/cfg/view.toml")), &record)
+            .expect("a v1 record must be readable by this build");
+        let expected: Vec<String> = handovers()
+            .iter()
+            .filter(|h| !V1_SURFACES.contains(&h.record_key().as_str()))
+            .map(Handover::notice)
+            .collect();
+        assert_eq!(
+            later, expected,
+            "only the surfaces a v1 record never named may introduce themselves"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

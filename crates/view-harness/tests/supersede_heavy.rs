@@ -244,7 +244,8 @@ fn apply(handle: &EngineHandle, plan: &[Supersession]) {
     for entry in plan {
         match &entry.rpc {
             RpcCall::HoldOption { name, value } => handle.hold_option(name, value).unwrap(),
-            other => panic!("a plan entry must ride a durable option call, got {other:?}"),
+            RpcCall::HoldNotify => handle.hold_notify().unwrap(),
+            other => panic!("a plan entry must ride a durable takeover call, got {other:?}"),
         }
     }
 }
@@ -353,4 +354,203 @@ fn a_disabled_statusline_leaves_a_live_lualine_holding_the_surface() {
         "a disabled feature may not touch the session's config tree either"
     );
     assert_eq!(before_committed, snapshot(&committed));
+}
+
+/// Blocks until a plugin in this fixture actually owns `vim.notify`, so what
+/// follows is measured against a live patcher rather than against the engine
+/// default nobody contested.
+///
+/// The discriminator is the function's own `source`, which the pin answers
+/// `vim/_core/editor` for its default (`docs/vim-notify-takeover-wire-capture.md`);
+/// anything else is somebody's replacement. noice installs its router from a
+/// deferred load and nvim-notify's setup patches the global directly, so this
+/// is a wait rather than an assertion.
+fn wait_for_a_plugin_owning_notify(handle: &EngineHandle) {
+    wait_for(
+        handle,
+        "luaeval('package.loaded.notify ~= nil')",
+        "true",
+        load_timeout(),
+    );
+    wait_for(
+        handle,
+        "luaeval('tostring(debug.getinfo(vim.notify).source ~= [[vim/_core/editor]])')",
+        "true",
+        load_timeout(),
+    );
+}
+
+/// Whether `marker` reached nvim-notify's own history: the plugin's record of
+/// a message it rendered, which outlives the float it drew for it.
+///
+/// Read from the plugin rather than from the screen because that is the fact
+/// a takeover changes -- a message the plugin never saw cannot be in it --
+/// and because the float times out on its own while the history does not.
+fn in_notify_history(handle: &EngineHandle, marker: &str) -> String {
+    handle
+        .eval_str(&format!(
+            "luaeval('(function() \
+             for _, n in ipairs(require([[notify]]).history()) do \
+             if table.concat(n.message, [[\\n]]):find([[{marker}]]) then \
+             return [[in-history]] end end return [[absent]] end)()')"
+        ))
+        .unwrap()
+}
+
+/// Runs `chunk` as a statement inside nvim and answers `"1"`.
+///
+/// `eval_str` is a request, so the answer is the receipt that the chunk ran
+/// before the next assertion reads what it did. Written with `[[...]]` Lua
+/// strings so the whole thing survives as one single-quoted vimscript
+/// literal, the same way the redraw witness above does.
+fn run_lua(handle: &EngineHandle, chunk: &str) {
+    let answer = handle
+        .eval_str(&format!("luaeval('(function() {chunk} return 1 end)()')"))
+        .unwrap();
+    assert_eq!(answer, "1", "the chunk did not run: {chunk}");
+}
+
+/// The takeover's own version of the lualine evidence above: `vim.notify` is
+/// a Lua global, and assigning one fires no autocommand at all, so
+/// `SafeState` is the whole guard rather than the backstop half of one. The
+/// plugin that patches it here is the fixture's own, and the message sent
+/// afterwards proves where the call actually went -- not merely which
+/// function the global holds.
+#[test]
+#[ignore = "heavy fixture: run via `task compat-supersede`, which has the compat plugin cache"]
+fn the_takeover_reasserts_after_a_plugin_repatches_it() {
+    let config = config_home("notify");
+    let scratch = config.parent().unwrap().to_path_buf();
+    let committed = fixtures_root().join("heavy");
+    let before_committed = snapshot(&committed);
+    let before_config = snapshot(&config);
+
+    let engine = session(&config, &scratch);
+    wait_for_a_plugin_owning_notify(&engine.handle);
+
+    // the control, before view touches anything: a vim.notify call in this
+    // fixture reaches nvim-notify and is recorded by it. Without this the
+    // assertion after the takeover would pass against a fixture whose
+    // plugins never handled a notification in the first place
+    run_lua(&engine.handle, "vim.notify([[pre-takeover-marker]])");
+    wait_for(
+        &engine.handle,
+        "luaeval('(function() for _, n in ipairs(require([[notify]]).history()) do \
+         if table.concat(n.message, [[\\n]]):find([[pre%-takeover%-marker]]) then \
+         return [[in-history]] end end return [[absent]] end)()')",
+        "in-history",
+        hold_timeout(),
+    );
+    run_lua(&engine.handle, "_G.__plugin_notify = vim.notify");
+
+    let plan = plan(&NativeConfig::all_enabled(), registry::features());
+    apply(&engine.handle, &plan);
+    assert_eq!(
+        engine
+            .handle
+            .eval_str("luaeval('tostring(vim.notify ~= _G.__plugin_notify)')")
+            .unwrap(),
+        "true",
+        "an enabled notifications must take vim.notify from the live plugin"
+    );
+    run_lua(&engine.handle, "_G.__view_notify = vim.notify");
+
+    // the re-patch nothing reports. noice installs its router from a
+    // deferred load that runs after VimEnter -- after the plan -- and
+    // nvim-notify's documented setup is this same assignment from init.lua;
+    // a takeover that does not survive it silently lapses on an ordinary
+    // config rather than an exotic one
+    run_lua(
+        &engine.handle,
+        "_G.__seen = nil \
+         _G.__repatched = function(msg) _G.__seen = msg end \
+         vim.notify = _G.__repatched",
+    );
+    // read behind a bound rather than instantly: the guard runs when nvim
+    // next returns to its main loop, which is not ordered against this probe
+    wait_for(
+        &engine.handle,
+        "luaeval('tostring(vim.notify == _G.__view_notify)')",
+        "true",
+        hold_timeout(),
+    );
+
+    // and the message that follows goes to view, not to either claimant
+    run_lua(&engine.handle, "vim.notify([[post-takeover-marker]])");
+    assert_eq!(
+        engine
+            .handle
+            .eval_str("luaeval('tostring(_G.__seen)')")
+            .unwrap(),
+        "nil",
+        "the function that re-patched vim.notify must not receive the next message"
+    );
+    assert_eq!(
+        in_notify_history(&engine.handle, "post%-takeover%-marker"),
+        "absent",
+        "a message view owns must not reach nvim-notify, which would draw its own float over view's chrome"
+    );
+    assert_eq!(
+        in_notify_history(&engine.handle, "pre%-takeover%-marker"),
+        "in-history",
+        "the control message must still be in the plugin's history: supersession is runtime only, and it takes nothing away retroactively"
+    );
+
+    assert_eq!(
+        before_config,
+        snapshot(&config),
+        "supersession is runtime only: the session's own config tree may not change"
+    );
+    assert_eq!(
+        before_committed,
+        snapshot(&committed),
+        "supersession is runtime only: the committed fixture may not change"
+    );
+}
+
+/// The other half of the pair: with `notifications` off, `vim.notify` is
+/// left exactly where the fixture's plugins put it, so a call still reaches
+/// nvim-notify and still draws its own float.
+#[test]
+#[ignore = "heavy fixture: run via `task compat-supersede`, which has the compat plugin cache"]
+fn a_disabled_notifications_leaves_vim_notify_with_the_plugin() {
+    let config = config_home("notify-disabled");
+    let scratch = config.parent().unwrap().to_path_buf();
+    let before_config = snapshot(&config);
+
+    let engine = session(&config, &scratch);
+    wait_for_a_plugin_owning_notify(&engine.handle);
+    run_lua(&engine.handle, "_G.__plugin_notify = vim.notify");
+
+    let cfg = NativeConfig::from_toml_str("[native]\nnotifications = false\n").unwrap();
+    let plan = plan(&cfg, registry::features());
+    assert!(
+        !plan.iter().any(|s| s.rpc == RpcCall::HoldNotify),
+        "a disabled notifications must contribute no takeover"
+    );
+    apply(&engine.handle, &plan);
+
+    assert_eq!(
+        engine
+            .handle
+            .eval_str("luaeval('tostring(vim.notify == _G.__plugin_notify)')")
+            .unwrap(),
+        "true",
+        "a disabled feature must leave vim.notify exactly where the plugin put it"
+    );
+    run_lua(&engine.handle, "vim.notify([[disabled-marker]])");
+    wait_for(
+        &engine.handle,
+        "luaeval('(function() for _, n in ipairs(require([[notify]]).history()) do \
+         if table.concat(n.message, [[\\n]]):find([[disabled%-marker]]) then \
+         return [[in-history]] end end return [[absent]] end)()')",
+        "in-history",
+        hold_timeout(),
+    );
+
+    assert_eq!(
+        before_config,
+        snapshot(&config),
+        "a disabled feature may not touch the session's config tree either"
+    );
 }

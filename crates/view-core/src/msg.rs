@@ -1499,6 +1499,30 @@ pub enum RpcCall {
         name: String,
         value: OptionValue,
     },
+    /// Re-points `vim.notify` at the engine's own default and keeps it there
+    /// for the rest of the session, so every message a plugin raises through
+    /// it crosses as `ext_messages` traffic and is drawn as one of view's
+    /// toasts rather than as a float composited over view's chrome.
+    ///
+    /// The takeover has to hold for the same reason [`HoldOption`](Self::HoldOption)
+    /// does, and rather more urgently: nvim-notify's own documented setup is
+    /// `vim.notify = require('notify')`, and noice patches the function from
+    /// its deferred load, which runs after `VimEnter` -- after the point a
+    /// plan is applied. A one-shot assignment is therefore overwritten by
+    /// the plugin in the ordinary case, not the exotic one.
+    ///
+    /// Carries no payload: what the function is re-pointed *at* is the
+    /// engine's own default behaviour, which `view-engine` reproduces from a
+    /// live capture of it (`docs/vim-notify-takeover-wire-capture.md`)
+    /// rather than from a value a caller could get wrong. Re-pointing at the
+    /// function that was installed when the plan ran would take a plugin's
+    /// own notify whenever the user's `init.lua` set it directly.
+    ///
+    /// Reversible on exactly the same terms as every other call here: the
+    /// hold is session state, never a config edit, so it is gone the moment
+    /// the session ends and it is never issued at all for a user who has
+    /// turned `notifications` off.
+    HoldNotify,
     /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe, tagged
     /// with `generation` (`HlTable::probe_generation` at the moment
     /// `update()` emitted this, from its `DefaultColorsSet` arm). Resolves

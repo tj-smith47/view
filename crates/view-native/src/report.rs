@@ -22,9 +22,13 @@ use crate::supersede::Supersession;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Surface {
-    /// An nvim option view holds for the session, from the supersession
-    /// plan.
-    SessionOption,
+    /// A session-lifetime hold from the supersession plan: an nvim option
+    /// view keeps at its own value, or `vim.notify` re-pointed at the engine
+    /// default. One variant for both, because they are the same news to a
+    /// user -- a surface their plugin was drawing is view's for this session,
+    /// and one config line gives it back -- and the notice below reads the
+    /// same for either.
+    SessionHold,
     /// A default key view registered over a mapping the user's config had
     /// already made.
     Key {
@@ -61,7 +65,7 @@ impl Handover {
     #[must_use]
     pub fn notice(&self) -> String {
         let took = match &self.surface {
-            Surface::SessionOption => format!("view is drawing the {}", self.feature),
+            Surface::SessionHold => format!("view is drawing the {}", self.feature),
             Surface::Key { lhs } => format!("view took {lhs} for the {}", self.feature),
         };
         match self.supersedes {
@@ -77,19 +81,19 @@ impl Handover {
     ///
     /// A feature that takes both an option and a key has two things to say
     /// and says each once, so the key is per surface rather than per
-    /// feature. The option form is the bare feature id, which is what
+    /// feature. The held-surface form is the bare feature id, which is what
     /// earlier records already hold.
     #[must_use]
     pub fn record_key(&self) -> String {
         match &self.surface {
-            Surface::SessionOption => self.feature.to_string(),
+            Surface::SessionHold => self.feature.to_string(),
             Surface::Key { lhs } => format!("{}:key:{lhs}", self.feature),
         }
     }
 }
 
-/// Everything this session took over: the supersession plan's options first,
-/// then the default keys that landed on a user's own mapping, in
+/// Everything this session took over: the supersession plan's held surfaces
+/// first, then the default keys that landed on a user's own mapping, in
 /// registration order.
 ///
 /// `claimed` is the engine's own answer to the mapping registration (see
@@ -106,7 +110,7 @@ pub fn report(
         .iter()
         .map(|entry| Handover {
             feature: entry.feature,
-            surface: Surface::SessionOption,
+            surface: Surface::SessionHold,
             reverses_with: entry.reverses_with,
             supersedes: entry.supersedes,
         })
@@ -187,6 +191,29 @@ mod tests {
             handover.notice(),
             "view is drawing the statusline (lualine still loads). \
              Turn it off with native.statusline = false"
+        );
+    }
+
+    /// The notify takeover is listed on exactly the same terms as the held
+    /// option, through the same `Surface::SessionHold`: a user who lost
+    /// their notification floats is told what took them and what gives them
+    /// back, and does not have to notice that one of these two surfaces is
+    /// an option and the other a Lua function.
+    #[test]
+    fn the_notify_takeover_is_reported_with_the_switch_that_returns_it() {
+        let handover = report(
+            &plan(&NativeConfig::all_enabled(), registry::features()),
+            &[],
+            registry::features(),
+        )
+        .into_iter()
+        .find(|h| h.feature == "notifications")
+        .expect("an all-enabled plan must supersede notifications");
+        assert_eq!(handover.surface, Surface::SessionHold);
+        assert_eq!(
+            handover.notice(),
+            "view is drawing the notifications (nvim-notify / noice messages \
+             still loads). Turn it off with native.notifications = false"
         );
     }
 

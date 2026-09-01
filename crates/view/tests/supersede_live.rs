@@ -85,7 +85,8 @@ fn apply(handle: &EngineHandle, plan: &[Supersession]) {
     for entry in plan {
         match &entry.rpc {
             RpcCall::HoldOption { name, value } => handle.hold_option(name, value).unwrap(),
-            other => panic!("a plan entry must ride a durable option call, got {other:?}"),
+            RpcCall::HoldNotify => handle.hold_notify().unwrap(),
+            other => panic!("a plan entry must ride a durable takeover call, got {other:?}"),
         }
     }
 }
@@ -150,13 +151,15 @@ fn every_held_option_is_global_scoped() {
     let plan = plan(&NativeConfig::all_enabled(), registry::features());
     assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
 
+    // an entry holding something other than an option has no scope to ask
+    // about, so it is skipped rather than failed -- and counted, so a table
+    // that stopped holding any option at all cannot leave this walk vacuous
+    let mut asked = 0;
     for entry in &plan {
         let RpcCall::HoldOption { name, .. } = &entry.rpc else {
-            panic!(
-                "a plan entry must ride a durable option call, got {:?}",
-                entry.rpc
-            )
+            continue;
         };
+        asked += 1;
         // the name is interpolated into a single-quoted vimscript literal
         // below, where a `'` would close the string and the rest would be
         // evaluated as script. nvim's own option names are lowercase ASCII,
@@ -179,6 +182,10 @@ fn every_held_option_is_global_scoped() {
             entry.feature
         );
     }
+    assert!(
+        asked > 0,
+        "no plan entry holds an option any more, so this scope walk proved nothing"
+    );
 }
 
 #[test]

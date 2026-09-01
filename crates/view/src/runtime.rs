@@ -388,6 +388,7 @@ impl<E: EngineOps> Executor<E> {
                     } => self.ops.input_mouse(&button, &action, &modifier, row, col),
                     RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
+                    RpcCall::HoldNotify => self.ops.hold_notify(),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
                     RpcCall::ProbeSwapRecovery { generation } => {
                         self.ops.probe_swap_recovery(generation)
@@ -2317,6 +2318,15 @@ mod tests {
         }));
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "hold_option(laststatus,Int(0))");
+    }
+
+    #[test]
+    fn hold_notify_effect_maps_to_engine_ops_hold_notify() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::HoldNotify));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "hold_notify()");
     }
 
     #[test]

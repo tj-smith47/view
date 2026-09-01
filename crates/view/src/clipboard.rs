@@ -820,6 +820,9 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn hold_notify(&self) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn reply(
             &self,
             token: ReplyToken,

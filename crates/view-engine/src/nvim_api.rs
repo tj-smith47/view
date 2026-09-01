@@ -133,6 +133,63 @@ vim.api.nvim_create_autocmd('SafeState', {
   callback = hold,
 })";
 
+/// The lua chunk [`EngineHandle::hold_notify`] runs inside nvim, taking no
+/// arguments at all. Constant by construction for the same reason as
+/// [`FEED_KEYS_CHUNK`], and with nothing to interpolate in the first place.
+///
+/// The three branches are the engine's own `vim.notify`, reproduced from a
+/// live capture of it rather than recalled
+/// (`docs/vim-notify-takeover-wire-capture.md`): `ERROR` echoes with
+/// `err = true`, which the engine renders as a `msg_show` of kind
+/// `echoerr`; `WARN` echoes under `WarningMsg`; everything else, including
+/// a call that passes no level at all, echoes unhighlighted. The capture
+/// pins all five `vim.log.levels` values against the default's own wire
+/// output, byte for byte, so "the engine default" here is a measured shape
+/// and not a paraphrase of one. `msg` is passed through to `nvim_echo`
+/// unconverted, as the default does: a non-string argument is refused by
+/// the API with the same error the default raises, rather than silently
+/// stringified into something the caller never wrote.
+///
+/// Reproduced rather than captured at runtime, which would be the shorter
+/// chunk: the plan is applied at `VimEnter`, and `vim.notify =
+/// require('notify')` in an `init.lua` is nvim-notify's own documented
+/// setup, so the function standing at that moment is very often the
+/// plugin's. Saving it would hold the plugin's notify -- the exact inverse
+/// of the takeover.
+///
+/// One guard, on `SafeState` alone. There is no `OptionSet` equivalent for
+/// a Lua assignment: nothing fires when a plugin writes `vim.notify`, so
+/// the idle backstop is the whole mechanism rather than the second half of
+/// one. That is enough for the write this exists to undo, because it fires
+/// before nvim redraws -- noice patches `vim.notify` from its deferred
+/// load, well after `VimEnter`, and nvim-notify's setup does it from
+/// `init.lua`; both are undone at the next return to the main loop. The
+/// guard compares before it writes, so an idle transition that changed
+/// nothing costs one table lookup, which matters because `SafeState` fires
+/// every time nvim waits for input.
+const HOLD_NOTIFY_CHUNK: &str = "\
+local function notify(msg, level, _)
+  if level == vim.log.levels.ERROR then
+    vim.api.nvim_echo({ { msg } }, true, { err = true })
+  elseif level == vim.log.levels.WARN then
+    vim.api.nvim_echo({ { msg, 'WarningMsg' } }, true, {})
+  else
+    vim.api.nvim_echo({ { msg } }, true, {})
+  end
+end
+local function hold()
+  if vim.notify ~= notify then
+    vim.notify = notify
+  end
+end
+hold()
+local group = vim.api.nvim_create_augroup(
+  'view-hold-notify', { clear = true })
+vim.api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = hold,
+})";
+
 /// The lua chunk [`EngineHandle::register_mappings`] runs inside nvim,
 /// taking view's channel id, the specs to register, every feature/verb pair
 /// the command can complete, and the command's own name as its four
@@ -2455,6 +2512,36 @@ impl EngineHandle {
         )
     }
 
+    /// Re-points `vim.notify` at the engine's own default and installs a
+    /// session-lifetime guard that puts it back whenever a plugin patches
+    /// it: the durable takeover [`crate::RpcCall::HoldNotify`] describes.
+    ///
+    /// One `nvim_exec_lua` chunk rather than an assignment followed by an
+    /// autocmd call, for the same reason [`hold_option`](Self::hold_option)
+    /// is one: a takeover that re-pointed the function but failed to
+    /// install its guard is the silent lapse this call exists to prevent,
+    /// and here it is the ordinary outcome rather than a rare one, since
+    /// every plugin that owns this surface patches the function after the
+    /// plan has run. What the function is re-pointed at, and why the guard
+    /// has only the idle arm its option sibling's has two of, is in
+    /// [`HOLD_NOTIFY_CHUNK`].
+    ///
+    /// No arguments: the chunk takes none and interpolates none.
+    ///
+    /// A notification, not a request, like every other call the paint loop
+    /// may emit: nothing waits on the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn hold_notify(&self) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![Value::from(HOLD_NOTIFY_CHUNK), Value::Array(Vec::new())],
+        )
+    }
+
     /// Evaluates `expr` via `nvim_eval` and renders the result as a string,
     /// the state-parity probe engine-attached oracles use to compare their
     /// decoded screen state against nvim's own ground truth (buffer text,
@@ -3430,6 +3517,7 @@ mod tests {
         const PUBLISHED: &[(&str, &str)] = &[
             ("BUFFER_LIST_CHUNK", BUFFER_LIST_CHUNK),
             ("CHECKTIME_CHUNK", CHECKTIME_CHUNK),
+            ("HOLD_NOTIFY_CHUNK", HOLD_NOTIFY_CHUNK),
             ("OPEN_FILE_CHUNK", OPEN_FILE_CHUNK),
             ("PREVIEW_CHUNK", PREVIEW_CHUNK),
             ("RENAME_CHUNK", RENAME_CHUNK),
@@ -4053,6 +4141,42 @@ mod tests {
             HOLD_OPTION_CHUNK.contains("{ clear = true }"),
             "a re-applied plan must replace its guard rather than stack a second one"
         );
+    }
+
+    #[test]
+    fn hold_notify_sends_the_constant_chunk_with_no_arguments() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.hold_notify().unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(
+            params,
+            vec![Value::from(HOLD_NOTIFY_CHUNK), Value::Array(Vec::new())]
+        );
+    }
+
+    #[test]
+    fn the_notify_chunk_both_re_points_the_function_and_guards_it() {
+        // the halves are what make a takeover durable; a chunk that lost
+        // any one of them would still pass the wire-shape test above
+        assert!(HOLD_NOTIFY_CHUNK.contains("vim.notify = notify"));
+        assert!(
+            HOLD_NOTIFY_CHUNK.contains("'SafeState'"),
+            "without the idle backstop the assignment is a one-shot, and \
+             every plugin that owns this surface patches vim.notify after \
+             the plan has run"
+        );
+        assert!(
+            HOLD_NOTIFY_CHUNK.contains("{ clear = true }"),
+            "a re-applied plan must replace its guard rather than stack a second one"
+        );
+        // the three arms of the engine default the capture pinned: a chunk
+        // that dropped the error one would route an error message to the
+        // ordinary echo and lose the kind view routes on
+        assert!(HOLD_NOTIFY_CHUNK.contains("{ err = true }"));
+        assert!(HOLD_NOTIFY_CHUNK.contains("'WarningMsg'"));
     }
 
     #[test]

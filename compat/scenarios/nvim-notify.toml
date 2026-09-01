@@ -1,18 +1,23 @@
 # nvim-notify is ui-owning: it replaces vim.notify's echo-area output with
-# floating notification windows it draws itself. `notifications` carries no
-# takeover row (see view-native's supersede module: the takeover table has
-# exactly one row and it is statusline's). What it does carry is the
-# attach: `notifications = false` detaches `ext_messages` and nothing else,
-# so the `deferred` state below is where a message goes back to nvim while
-# the command line stays view's -- the probes there are what hold the two
-# switches to their own surfaces. vim.notify routing is otherwise
-# identical in every state below; the one fact `<leader>fm`
-# discriminates is whether it opens view's own message-history overlay
-# (titled "Messages") or, unclaimed, does nothing at all. The marker call
-# goes through require('notify') directly rather than vim.notify because
-# noice (also in this fixture) wraps vim.notify with its own router -- the
-# direct call pins nvim-notify's own rendering and history, present or not,
-# independent of noice's routing table.
+# floating notification windows it draws itself. `notifications` takes two
+# things back. The attach: it detaches `ext_messages` and nothing else, so
+# the `deferred` state below is where a message goes back to nvim while the
+# command line stays view's -- the probes there are what hold the two
+# switches to their own surfaces. And the function: enabled, view holds
+# `vim.notify` at the engine default (view-native's supersede table, the
+# `TakeoverKind::Notify` row), so a call through it crosses as ext_messages
+# traffic and is drawn as view's own toast; nvim-notify never sees the
+# message and its history never records it. That is the fact the
+# `vim-notify-*` markers below discriminate on, in every state.
+#
+# `<leader>fm` discriminates a second thing: whether view's own
+# message-history overlay (titled "Messages") is claimed at all, or,
+# unclaimed, does nothing.
+#
+# The `notify-compat-marker` calls go through require('notify') directly
+# rather than vim.notify precisely because vim.notify is contested here --
+# the direct call pins nvim-notify's own rendering and history, present or
+# not, independent of both noice's routing table and view's takeover.
 schema = 1
 plugin = "nvim-notify"
 class = "ui-owning"
@@ -40,6 +45,15 @@ steps = [
   # The float times out and disappears; the message persisting in
   # nvim-notify's own history API is the durable plugin-specific fact.
   { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
+  # The takeover, read from the plugin that would otherwise have drawn it:
+  # a vim.notify call reaches view through ext_messages and is painted as
+  # view's own toast, so it never enters nvim-notify's history and no
+  # float is composited over view's chrome. The direct require('notify')
+  # marker above is still in that history, which is what makes this an
+  # assertion about routing rather than about a plugin that failed to load.
+  { send = ":lua vim.notify('vim-notify-marker')<CR>" },
+  { wait_for = "vim-notify-marker", timeout_ms = 15000 },
+  { probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "absent" },
   { send = "\\fm" },
   { wait_for = "Messages", timeout_ms = 5000 },
   { send = "<Esc>" },
@@ -64,6 +78,15 @@ steps = [
   # The float times out and disappears; the message persisting in
   # nvim-notify's own history API is the durable plugin-specific fact.
   { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
+  # The takeover, read from the plugin that would otherwise have drawn it:
+  # a vim.notify call reaches view through ext_messages and is painted as
+  # view's own toast, so it never enters nvim-notify's history and no
+  # float is composited over view's chrome. The direct require('notify')
+  # marker above is still in that history, which is what makes this an
+  # assertion about routing rather than about a plugin that failed to load.
+  { send = ":lua vim.notify('vim-notify-marker')<CR>" },
+  { wait_for = "vim-notify-marker", timeout_ms = 15000 },
+  { probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "absent" },
   { send = "\\fm" },
   { wait_for = "Messages", timeout_ms = 5000 },
   { send = "<Esc>" },
@@ -83,6 +106,13 @@ steps = [
   { send = ":lua require('notify')('notify-compat-marker')<CR>" },
   { wait_for = "notify-compat-marker", timeout_ms = 15000 },
   { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
+  # The other half of the takeover pair: with the feature off, vim.notify
+  # is left wherever this fixture's plugins put it, so the same call the
+  # superseded state proves view absorbs reaches nvim-notify and is
+  # recorded by it.
+  { send = ":lua vim.notify('vim-notify-marker')<CR>" },
+  { wait_for = "vim-notify-marker", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
   # native.notifications = false hands `<leader>fm` back unclaimed; the
   # fixture never binds it either, so the send below is a genuine no-op --
   # the assert below is the negative half of the pair the superseded

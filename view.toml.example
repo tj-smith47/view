@@ -18,7 +18,9 @@ tree = true
 statusline = true
 notifications = true       # false hands the message area back: ext_messages
                            # is not attached, so nvim draws its own messages
-                           # and hit-enter prompts on the last row again
+                           # and hit-enter prompts on the last row again, and
+                           # vim.notify is left wherever your plugins put it
+                           # instead of being held at the engine default
 palette = true             # false hands back the command line and its
                            # completion popup: ext_cmdline/ext_popupmenu are
                            # not attached, so `:` is nvim's own last row

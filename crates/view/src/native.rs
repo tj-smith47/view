@@ -393,22 +393,33 @@ mod tests {
     }
 
     #[test]
-    fn the_takeover_holds_every_planned_option_and_registers_the_keys_once() {
+    fn the_takeover_holds_every_planned_surface_and_registers_the_keys_once() {
         let mut session = NativeSession::all_enabled(7, None);
         let mut m = model();
         let effects = session.follow_up(&mut m, Stage::VimEnter);
-        let holds = effects
+        // the plan's own calls, compared as a list rather than counted: a
+        // count matches whenever a hold of the wrong surface replaces the
+        // right one, and the plan carries two kinds of hold now
+        let planned: Vec<RpcCall> = plan(&NativeConfig::all_enabled(), registry::features())
             .iter()
-            .filter(|e| matches!(e, Effect::Rpc(RpcCall::HoldOption { .. })))
-            .count();
+            .map(|entry| entry.rpc.clone())
+            .collect();
+        let holds: Vec<RpcCall> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(call @ (RpcCall::HoldOption { .. } | RpcCall::HoldNotify)) => {
+                    Some(call.clone())
+                }
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            holds,
-            plan(&NativeConfig::all_enabled(), registry::features()).len(),
-            "every planned option must be held: {effects:?}"
+            holds, planned,
+            "every planned surface must be held: {effects:?}"
         );
         assert!(
-            holds > 0,
-            "the shipped plan holds at least one option; a takeover of none means the plan never reached the seam"
+            !holds.is_empty(),
+            "the shipped plan holds at least one surface; a takeover of none means the plan never reached the seam"
         );
         let registrations: Vec<&Effect> = effects
             .iter()
