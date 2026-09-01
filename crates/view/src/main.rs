@@ -828,10 +828,12 @@ fn main() -> Result<()> {
     // on the first grid Flush
     model.content_painted = false;
 
-    // ahead of the trust, config and theme reads below rather than after
-    // them, for the same reason the spawn is ahead of `Term::init`: until
-    // the attach thread has the size, the child it started is still sitting
-    // in front of its own `init.lua`.
+    // ahead of the trust and theme reads below rather than after them, for
+    // the same reason the spawn is ahead of `Term::init`: until the attach
+    // thread has the size, the child it started is still sitting in front
+    // of its own `init.lua`. The `[native]` read between them is the one
+    // that cannot wait behind the attach: it decides the surfaces the
+    // attach asks for.
     let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
     let term_size = view_tui::terminal::TermSizeCell::default();
     #[cfg(unix)]
@@ -1683,7 +1685,7 @@ mod tests {
 
         assert_eq!(
             view_native::config::ext_surfaces(&resolved.native),
-            view_engine::UI_EXT_OPTIONS.to_vec(),
+            view_core::native::ext::ALL.to_vec(),
             "a config that could not be read keeps every surface"
         );
         assert!(

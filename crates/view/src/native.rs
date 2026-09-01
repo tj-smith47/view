@@ -14,7 +14,8 @@ use std::path::PathBuf;
 
 use view_core::model::Model;
 use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall};
-use view_core::native::{ext, registry};
+use view_core::native::ext::Ext;
+use view_core::native::registry;
 use view_native::config::{NativeConfig, ViewConfig};
 use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
@@ -237,7 +238,7 @@ impl NativeSession {
         effects.push(Effect::Rpc(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         }));
-        if model.owns(ext::CMDLINE) && model.owns(ext::MESSAGES) {
+        if model.owns(Ext::Cmdline) && model.owns(Ext::Messages) {
             effects.push(Effect::Rpc(RpcCall::SetOption {
                 name: "cmdheight".to_string(),
                 value: OptionValue::Int(0),
@@ -446,13 +447,13 @@ mod tests {
     #[test]
     fn cmdheight_is_zeroed_only_for_a_session_that_took_both_surfaces() {
         for (surfaces, zeroed) in [
-            (view_engine::UI_EXT_OPTIONS.to_vec(), true),
-            (vec![ext::LINEGRID, ext::MESSAGES, ext::TABLINE], false),
+            (view_core::native::ext::ALL.to_vec(), true),
+            (vec![Ext::LineGrid, Ext::Messages, Ext::Tabline], false),
             (
-                vec![ext::LINEGRID, ext::CMDLINE, ext::POPUPMENU, ext::TABLINE],
+                vec![Ext::LineGrid, Ext::Cmdline, Ext::Popupmenu, Ext::Tabline],
                 false,
             ),
-            (vec![ext::LINEGRID, ext::TABLINE], false),
+            (vec![Ext::LineGrid, Ext::Tabline], false),
         ] {
             let mut session = NativeSession::all_enabled(7, None);
             let mut m = model();

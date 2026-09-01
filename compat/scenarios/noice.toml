@@ -14,8 +14,14 @@
 # ext_popupmenu, `notifications = false` detaches ext_messages, so the
 # `deferred` state below hands noice back every surface it asks for and
 # the `nvim_list_uis()` probes there are the direct evidence. `cmdheight`
-# is not view's to assert in that state: noice sets it itself once it owns
-# the cmdline.
+# reads 0 there, and not from view: view zeroes it only for a session that
+# took both the cmdline and the messages, which the same two switches deny
+# (`dressing`/`fidget` deferred run those switches with noice's components
+# off and read 1). It is noice taking the surface that zeroes it -- its
+# message component calls `vim.ui_attach` with `ext_messages`, and the
+# pinned engine sets `cmdheight = 0` for a Lua UI that asks for messages
+# (v0.12.4, reproduced headless). noice writes the option itself nowhere:
+# its one mention, lua/noice/message/router.lua:245, is commented out.
 #
 # In the two states that keep view's defaults, noice's routing is
 # identical; the one fact `<leader>fm` discriminates is whether it opens
@@ -105,6 +111,12 @@ steps = [
   # native feature owns.
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_linegrid == true)')", expect = "true" },
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_tabline == true)')", expect = "true" },
+  # The handoff completing, read from the option itself: view withheld
+  # `cmdheight = 0` (it zeroes it only when it took both the cmdline and
+  # the messages), and it is 0 anyway because noice's own `vim.ui_attach`
+  # for `ext_messages` made the engine zero it. Nothing but noice owning
+  # the message surface produces this value here.
+  { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "0" },
   # The remedy's whole point: neither complaint survives it.
   { assert_absent = "Noice can't work when the GUI has" },
   { assert_absent = "noice.nvim is using the command line" },

@@ -2078,7 +2078,7 @@ end"
 /// attach *actually* sends now follows the `[native]` switches
 /// (`view_native::config::ext_surfaces`), and `view-native` may not depend
 /// on this crate, so one of the two would be holding a copy.
-pub const UI_EXT_OPTIONS: &[&str] = view_core::native::ext::ALL;
+pub const UI_EXT_OPTIONS: &[&str] = view_core::native::ext::ALL_NAMES;
 
 /// The non-`ext_` option [`EngineHandle::claim_stdout_tty`] sets, declaring
 /// that this UI's stdout is a real terminal.

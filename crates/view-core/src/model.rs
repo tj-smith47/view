@@ -101,7 +101,7 @@ pub struct Model {
     /// copy of the `[native]` table is how the answers come to disagree.
     /// Defaults to the full set, matching the config-absent session that
     /// attaches everything.
-    ext_surfaces: Vec<&'static str>,
+    ext_surfaces: Vec<crate::native::ext::Ext>,
     /// The working directory a relative [`crate::native::picker::Source`]
     /// resolves against, learned once at startup
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
@@ -284,18 +284,17 @@ impl Model {
     /// before `nvim_ui_attach` is issued, with exactly the list handed to
     /// the attach: a session that recorded a different set from the one it
     /// sent would answer [`Self::owns`] about a surface nvim never gave it.
-    pub fn attach_surfaces(&mut self, surfaces: Vec<&'static str>) {
+    pub fn attach_surfaces(&mut self, surfaces: Vec<crate::native::ext::Ext>) {
         self.ext_surfaces = surfaces;
     }
 
-    /// Whether this session externalized `surface` -- one of
-    /// [`crate::native::ext`]'s names -- so view renders it and the user's
-    /// plugins see it taken.
+    /// Whether this session externalized `surface`, so view renders it and
+    /// the user's plugins see it taken.
     ///
     /// `false` means nvim still draws that surface into the grid itself,
     /// which is what turning the owning native feature off asks for.
     #[must_use]
-    pub fn owns(&self, surface: &str) -> bool {
+    pub fn owns(&self, surface: crate::native::ext::Ext) -> bool {
         self.ext_surfaces.contains(&surface)
     }
 
@@ -303,7 +302,7 @@ impl Model {
     /// a replacement engine attaches with the surfaces the session it
     /// replaces was given, never with the default set.
     #[must_use]
-    pub fn attached_surfaces(&self) -> &[&'static str] {
+    pub fn attached_surfaces(&self) -> &[crate::native::ext::Ext] {
         &self.ext_surfaces
     }
 
@@ -2072,22 +2071,29 @@ mod tests {
     #[test]
     fn an_unattached_model_owns_every_surface() {
         let model = Model::new();
-        for surface in crate::native::ext::ALL {
-            assert!(model.owns(surface), "{surface} must default to owned");
+        for &surface in crate::native::ext::ALL {
+            assert!(model.owns(surface), "{surface:?} must default to owned");
         }
-        assert!(!model.owns("ext_multigrid"), "and nothing else");
+        assert_eq!(
+            model.attached_surfaces().len(),
+            crate::native::ext::ALL.len(),
+            "and nothing else"
+        );
     }
 
     #[test]
     fn owns_answers_from_the_set_the_attach_recorded() {
         let mut model = Model::new();
-        model.attach_surfaces(vec![crate::native::ext::LINEGRID]);
-        assert!(model.owns(crate::native::ext::LINEGRID));
+        model.attach_surfaces(vec![crate::native::ext::Ext::LineGrid]);
+        assert!(model.owns(crate::native::ext::Ext::LineGrid));
         assert!(
-            !model.owns(crate::native::ext::MESSAGES),
+            !model.owns(crate::native::ext::Ext::Messages),
             "a surface left out of the attach is nvim's to draw"
         );
-        assert_eq!(model.attached_surfaces(), [crate::native::ext::LINEGRID]);
+        assert_eq!(
+            model.attached_surfaces(),
+            [crate::native::ext::Ext::LineGrid]
+        );
     }
 
     /// `shown_at_flush` is private bookkeeping the tests below don't

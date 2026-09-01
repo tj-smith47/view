@@ -16,8 +16,12 @@
 picker = true
 tree = true
 statusline = true
-notifications = true
-palette = true
+notifications = true       # false hands the message area back: ext_messages
+                           # is not attached, so nvim draws its own messages
+                           # and hit-enter prompts on the last row again
+palette = true             # false hands back the command line and its
+                           # completion popup: ext_cmdline/ext_popupmenu are
+                           # not attached, so `:` is nvim's own last row
 tree_width = 30            # default: 30 -- percent of the terminal width,
                            # clamped to 15..70: any whole number outside that
                            # range opens at the nearest end, and anything that

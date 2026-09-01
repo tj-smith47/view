@@ -14,7 +14,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use view_core::native::ext;
+use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
 use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::registry;
@@ -533,13 +533,13 @@ impl NativeConfig {
 /// direction `[native]` resolution itself walks, where an absent answer is
 /// the full experience.
 #[must_use]
-pub fn ext_surfaces(cfg: &NativeConfig) -> Vec<&'static str> {
+pub fn ext_surfaces(cfg: &NativeConfig) -> Vec<Ext> {
     ext::ALL
         .iter()
         .copied()
-        .filter(|surface| match *surface {
-            ext::CMDLINE | ext::POPUPMENU => cfg.enabled("palette"),
-            ext::MESSAGES => cfg.enabled("notifications"),
+        .filter(|surface| match surface {
+            Ext::Cmdline | Ext::Popupmenu => cfg.enabled("palette"),
+            Ext::Messages => cfg.enabled("notifications"),
             _ => true,
         })
         .collect()
@@ -620,11 +620,11 @@ mod tests {
         let cfg = NativeConfig::from_toml_str("[native]\npalette = false\n").unwrap();
         let surfaces = ext_surfaces(&cfg);
         assert!(
-            !surfaces.contains(&ext::CMDLINE) && !surfaces.contains(&ext::POPUPMENU),
+            !surfaces.contains(&Ext::Cmdline) && !surfaces.contains(&Ext::Popupmenu),
             "the cmdline and its completion popup go back to nvim together: {surfaces:?}"
         );
         assert!(
-            surfaces.contains(&ext::MESSAGES),
+            surfaces.contains(&Ext::Messages),
             "one switch must not take a surface the other owns: {surfaces:?}"
         );
     }
@@ -634,11 +634,11 @@ mod tests {
         let cfg = NativeConfig::from_toml_str("[native]\nnotifications = false\n").unwrap();
         let surfaces = ext_surfaces(&cfg);
         assert!(
-            !surfaces.contains(&ext::MESSAGES),
+            !surfaces.contains(&Ext::Messages),
             "messages go back to nvim: {surfaces:?}"
         );
         assert!(
-            surfaces.contains(&ext::CMDLINE) && surfaces.contains(&ext::POPUPMENU),
+            surfaces.contains(&Ext::Cmdline) && surfaces.contains(&Ext::Popupmenu),
             "one switch must not take a surface the other owns: {surfaces:?}"
         );
     }
@@ -654,7 +654,7 @@ mod tests {
                 .unwrap();
             let surfaces = ext_surfaces(&cfg);
             assert!(
-                surfaces.contains(&ext::LINEGRID) && surfaces.contains(&ext::TABLINE),
+                surfaces.contains(&Ext::LineGrid) && surfaces.contains(&Ext::Tabline),
                 "{} = false detached a surface no feature owns: {surfaces:?}",
                 feature.id
             );
@@ -832,11 +832,18 @@ mod tests {
         // key nests under depends on whichever `[table]` header the file
         // happened to open last, and that is not `[native]`'s own concern
         // to pin.
-        let appended = EXAMPLE_TOML.replacen(
-            "palette = true\n",
-            "palette = true\nnative.picker = false\n",
-            1,
-        );
+        // The anchor is found rather than written out: the switches carry
+        // trailing comments, and a literal spliced against one of them
+        // matches nothing the day the comment is reworded -- leaving the
+        // example unedited and the refusal below asserted against a file
+        // that never held the dotted key.
+        let anchor = EXAMPLE_TOML
+            .lines()
+            .find(|line| line.starts_with("palette = true"))
+            .expect("the example must still ship the palette switch");
+        let appended =
+            EXAMPLE_TOML.replacen(anchor, &format!("{anchor}\nnative.picker = false"), 1);
+        assert_ne!(appended, EXAMPLE_TOML, "the dotted key must be spliced in");
         let err = NativeConfig::from_toml_str(&appended)
             .expect_err("a nested [native] table is not a feature switch");
         assert!(

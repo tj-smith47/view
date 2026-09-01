@@ -863,12 +863,16 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
 /// the row's cell there says what has to become true for it to go green, in
 /// terms of the product, since the plan marker beside it means nothing
 /// outside this repo's own planning notes.
-const EXPECTED_RED: [(&str, &str, &str, &str); 1] = [(
+const EXPECTED_RED: [RedRow; 1] = [(
     "noice",
     "unaccommodated",
     "T19",
     "view raises its own conflict notice on a default first launch",
 )];
+
+/// One [`EXPECTED_RED`] row: scenario stem, state, the task that clears it,
+/// and what a reader of the evidence page is told has to become true.
+type RedRow = (&'static str, &'static str, &'static str, &'static str);
 
 /// The scenario file's own stem -- not `plugin`, since two scenario files
 /// can name the same plugin (`lualine.toml` and `cold-bootstrap.toml` both
@@ -885,9 +889,9 @@ fn scenario_stem(result: &ScenarioResult) -> &str {
 /// [`EXPECTED_RED`] names it -- the row's own words, not the plan marker
 /// beside them, since these strings are stamped into an evidence page read
 /// outside this repo's planning notes.
-fn expected_red_clears_when(result: &ScenarioResult) -> Option<&'static str> {
+fn expected_red_clears_when(result: &ScenarioResult, manifest: &[RedRow]) -> Option<&'static str> {
     let stem = scenario_stem(result);
-    EXPECTED_RED
+    manifest
         .iter()
         .find(|(scenario, state, _, _)| *scenario == stem && *state == result.state)
         .map(|(_, _, _, clears_when)| *clears_when)
@@ -899,7 +903,16 @@ fn expected_red_clears_when(result: &ScenarioResult) -> Option<&'static str> {
 /// manifest as the thing to fix. Everything else is left exactly as the run
 /// reported it.
 fn apply_red_expectation(result: &mut ScenarioResult) {
-    let Some(clears_when) = expected_red_clears_when(result) else {
+    apply_red_expectation_over(result, &EXPECTED_RED);
+}
+
+/// [`apply_red_expectation`] against an arbitrary manifest, so the
+/// reconciliation tests own a row of their own instead of borrowing
+/// whichever one [`EXPECTED_RED`] happens to hold: a task that clears the
+/// last row would otherwise leave every positive leg passing vacuously,
+/// having reconciled nothing.
+fn apply_red_expectation_over(result: &mut ScenarioResult, manifest: &[RedRow]) {
+    let Some(clears_when) = expected_red_clears_when(result, manifest) else {
         return;
     };
     match result.status {
@@ -1174,26 +1187,25 @@ mod tests {
         }
     }
 
-    /// The manifest's own first row, read rather than named, so a task that
-    /// clears a row cannot leave the three reconciliation tests below
-    /// asserting about a row nothing lists any more -- which is how they
-    /// came to fail on the commit that turned `noice`/`deferred` green.
-    /// `None` once the manifest is empty: with nothing listed there is
-    /// nothing to reconcile, and the three tests have no subject rather
-    /// than a stale one.
-    fn listed_row() -> Option<(&'static str, &'static str, &'static str)> {
-        EXPECTED_RED
-            .first()
-            .map(|(scenario, state, _, clears_when)| (*scenario, *state, *clears_when))
-    }
+    /// The manifest the three reconciliation tests below reconcile against:
+    /// their own, never the shipped [`EXPECTED_RED`]. Borrowing the shipped
+    /// one couples them to whichever rows happen to be listed -- they fail
+    /// when a task clears the row they named (which is how they failed on
+    /// the commit that turned `noice`/`deferred` green), and once the last
+    /// row clears they would have no subject at all and pass having
+    /// asserted nothing.
+    const SYNTHETIC: [RedRow; 1] = [(
+        "smoke-minimal",
+        "present",
+        "T0",
+        "the fixture this row invents is fixed",
+    )];
 
     #[test]
     fn a_listed_red_row_reports_as_expected_and_names_its_clearing_task() {
-        let Some((scenario, state, clears_when)) = listed_row() else {
-            return;
-        };
+        let (scenario, state, _, clears_when) = SYNTHETIC[0];
         let mut result = red_row(scenario, state, ScenarioStatus::Failed);
-        apply_red_expectation(&mut result);
+        apply_red_expectation_over(&mut result, &SYNTHETIC);
         assert_eq!(result.status, ScenarioStatus::ExpectedFailure);
         let detail = result.detail.expect("an expected-red row keeps its detail");
         assert!(
@@ -1206,11 +1218,9 @@ mod tests {
     fn a_listed_row_that_passes_fails_the_run_as_a_stale_manifest() {
         // The half that keeps the manifest from becoming a permanent
         // waiver: a row nobody has to remove is a failure nobody has to fix.
-        let Some((scenario, state, _)) = listed_row() else {
-            return;
-        };
+        let (scenario, state, _, _) = SYNTHETIC[0];
         let mut result = red_row(scenario, state, ScenarioStatus::Ok);
-        apply_red_expectation(&mut result);
+        apply_red_expectation_over(&mut result, &SYNTHETIC);
         assert_eq!(result.status, ScenarioStatus::Failed);
         assert!(result
             .detail
@@ -1223,12 +1233,10 @@ mod tests {
         // The row asserts something about a run; a state that did not run
         // asserts nothing, and honoring the skip would let the manifest
         // outlive the scenario it names.
-        let Some((scenario, state, _)) = listed_row() else {
-            return;
-        };
+        let (scenario, state, _, _) = SYNTHETIC[0];
         let mut result = red_row(scenario, state, ScenarioStatus::Skipped);
         result.detail = Some("VIEW_DAILY_CONFIG is unset".to_string());
-        apply_red_expectation(&mut result);
+        apply_red_expectation_over(&mut result, &SYNTHETIC);
         assert_eq!(result.status, ScenarioStatus::Failed);
         let detail = result
             .detail

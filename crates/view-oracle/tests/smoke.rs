@@ -168,6 +168,26 @@ fn spawn_view_pty_raw() -> ViewPtySession {
 /// feature's rendering.
 const MESSAGES_ON: &[&str] = &["notifications"];
 
+/// Whether `token` is on `screen` inside view's own toast frame.
+///
+/// The frame is what tells the two renderings apart. With `ext_messages`
+/// detached nvim paints the same text into the grid's last row, which
+/// satisfies a bare substring check and leaves a test whose subject is
+/// view's rendering passing on nvim's -- so a test that means "view showed
+/// this as a toast" says so by reading the box around it. Both charsets
+/// count: `BorderSet::for_caps` draws the vertical edge as `|` at a
+/// terminal that answered no box-glyph probe and as `│` at one that did.
+fn toast_shows(screen: &str, token: &str) -> bool {
+    screen
+        .lines()
+        .any(|row| row.contains(token) && (row.contains('│') || row.contains('|')))
+}
+
+/// [`toast_shows`], waited for.
+fn wait_for_toast(session: &mut ViewPtySession, token: &str, timeout: Duration) -> bool {
+    session.wait_for_screen(timeout, |screen| toast_shows(&screen.contents(), token))
+}
+
 /// [`spawn_view_pty`] with the message surface left to view, for a test
 /// whose subject is what view does with a message rather than what nvim
 /// draws without one.
@@ -1861,12 +1881,12 @@ fn a_restart_of_a_still_running_engine_leaves_exactly_one_replacement() {
 
 #[test]
 fn view_shows_an_echoed_message() {
-    let mut session = spawn_view_pty();
+    let mut session = spawn_view_pty_owning_messages();
 
     session.send(b"\x1b:echo \"hi\"\r").unwrap();
     assert!(
-        session.wait_for("hi", Duration::from_secs(5)),
-        "screen never showed the echoed message text; last screen:\n{}",
+        wait_for_toast(&mut session, "hi", Duration::from_secs(5)),
+        "screen never showed the echoed message text in view's own toast; last screen:\n{}",
         session.screen()
     );
 
@@ -1890,8 +1910,8 @@ fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
 
     session.send(b"\x1b:echo 'sometoken'\r").unwrap();
     assert!(
-        session.wait_for("sometoken", Duration::from_secs(5)),
-        "screen never showed the echoed transient message; last screen:\n{}",
+        wait_for_toast(&mut session, "sometoken", Duration::from_secs(5)),
+        "screen never showed the echoed transient message as a toast; last screen:\n{}",
         session.screen()
     );
 
@@ -1916,19 +1936,19 @@ fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
 // must never touch it.
 #[test]
 fn a_persistent_emsg_survives_the_same_idle_wait_a_transient_toast_does_not() {
-    let mut session = spawn_view_pty();
+    let mut session = spawn_view_pty_owning_messages();
 
     session.send(b"\x1b:echoerr 'errtoken'\r").unwrap();
     assert!(
-        session.wait_for("errtoken", Duration::from_secs(5)),
-        "screen never showed the echoerr message; last screen:\n{}",
+        wait_for_toast(&mut session, "errtoken", Duration::from_secs(5)),
+        "screen never showed the echoerr message as a toast; last screen:\n{}",
         session.screen()
     );
 
     std::thread::sleep(view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4));
     let screen = session.screen();
     assert!(
-        screen.contains("errtoken"),
+        toast_shows(&screen, "errtoken"),
         "persistent emsg vanished after an idle wait that should only reap transient toasts; \
          last screen:\n{screen}"
     );

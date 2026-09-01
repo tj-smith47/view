@@ -29,6 +29,7 @@ use std::time::Instant;
 use view_core::events::UiEvent;
 use view_core::model::Model;
 use view_core::msg::{Effect, Key, Msg};
+use view_core::native::ext::Ext;
 use view_engine::handle::EngineError;
 use view_engine::process::{Engine, EngineConfig};
 use view_tui::terminal::Term;
@@ -173,7 +174,7 @@ pub enum AttachFailure {
 fn spawn_and_attach(
     cfg: EngineConfig,
     spawned: &AtomicU32,
-    start: impl FnOnce() -> Option<(u16, u16, Vec<&'static str>)>,
+    start: impl FnOnce() -> Option<(u16, u16, Vec<Ext>)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     // read before `Engine::spawn` consumes `cfg` by value: there is no
@@ -225,7 +226,7 @@ pub(crate) fn restart_and_attach(
     cfg: EngineConfig,
     width: u16,
     height: u16,
-    surfaces: Vec<&'static str>,
+    surfaces: Vec<Ext>,
 ) -> Result<Engine, AttachFailure> {
     let stdin_relay = cfg.stdin_relay_requested();
     // on every attempt, not only the first: a child already reaped reports
@@ -262,7 +263,7 @@ pub(crate) fn restart_and_attach(
 fn register_and_attach(
     engine: Engine,
     stdin_relay: bool,
-    start: impl FnOnce() -> Option<(u16, u16, Vec<&'static str>)>,
+    start: impl FnOnce() -> Option<(u16, u16, Vec<Ext>)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     engine
@@ -283,20 +284,21 @@ fn register_and_attach(
         drop(engine);
         return Err(AttachFailure::Attach(EngineError::Closed));
     };
+    let names: Vec<&str> = surfaces.iter().copied().map(Ext::as_str).collect();
     if stdin_relay {
         engine
             .handle
-            .ui_attach_with_stdin_relay(width, height, &surfaces)
+            .ui_attach_with_stdin_relay(width, height, &names)
             .map_err(AttachFailure::Attach)?;
         crate::vlog::log("engine", "ui_attach_with_stdin_relay returned ok");
     } else {
         engine
             .handle
-            .ui_attach(width, height, &surfaces)
+            .ui_attach(width, height, &names)
             .map_err(AttachFailure::Attach)?;
         crate::vlog::log("engine", "ui_attach returned ok");
     }
-    crate::vlog::log_with("engine", || format!("attached surfaces={surfaces:?}"));
+    crate::vlog::log_with("engine", || format!("attached surfaces={names:?}"));
     // resolved here rather than at the call site, and here rather than
     // anywhere earlier in this function: on the startup path this waits on
     // a channel the capability probe fills, and every line above is work
@@ -319,7 +321,7 @@ fn register_and_attach(
 /// it externalizes. None of the three exists until `Term::init` has
 /// returned and `view.toml` has been read, and the child's own startup
 /// depends on none of them, which is why the thread starts without them.
-type AttachStart = (crate::wake::LoopSender, u16, u16, Vec<&'static str>);
+type AttachStart = (crate::wake::LoopSender, u16, u16, Vec<Ext>);
 
 /// Runs [`spawn_and_attach`] on a background thread so a slow-starting
 /// nvim can never delay [`paint_shell_frame`], and returns the
@@ -441,7 +443,7 @@ impl AttachGuard {
         msg_tx: crate::wake::LoopSender,
         width: u16,
         height: u16,
-        surfaces: Vec<&'static str>,
+        surfaces: Vec<Ext>,
     ) {
         // a receiver already gone means the attach thread ended early, and
         // the failure it ended with is already in `engine_rx` for
@@ -974,7 +976,7 @@ mod tests {
         let mut engine = spawn_and_attach(
             cfg,
             &AtomicU32::new(0),
-            || Some((80, 24, view_engine::UI_EXT_OPTIONS.to_vec())),
+            || Some((80, 24, view_core::native::ext::ALL.to_vec())),
             Vec::new,
         )
         .unwrap();
@@ -1027,7 +1029,7 @@ mod tests {
             crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
 
         let guard = attach_in_background(EngineConfig::isolated());
-        guard.attach_at(msg_tx, 80, 24, view_engine::UI_EXT_OPTIONS.to_vec());
+        guard.attach_at(msg_tx, 80, 24, view_core::native::ext::ALL.to_vec());
         let pid = wait_for_spawn(&guard);
 
         drop(guard);
@@ -1046,7 +1048,7 @@ mod tests {
             crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
 
         let guard = attach_in_background(EngineConfig::isolated());
-        guard.attach_at(msg_tx, 80, 24, view_engine::UI_EXT_OPTIONS.to_vec());
+        guard.attach_at(msg_tx, 80, 24, view_core::native::ext::ALL.to_vec());
         guard.send_residue(Vec::new());
         assert!(
             matches!(msg_rx.recv().unwrap(), Msg::EngineReady),
@@ -1125,7 +1127,7 @@ mod tests {
         let mut engine = spawn_and_attach(
             EngineConfig::isolated(),
             &AtomicU32::new(0),
-            || Some((80, 24, view_engine::UI_EXT_OPTIONS.to_vec())),
+            || Some((80, 24, view_core::native::ext::ALL.to_vec())),
             move || {
                 let elapsed = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 recorder.store(elapsed, Ordering::SeqCst);
