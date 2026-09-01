@@ -8,6 +8,15 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes `supersede::takeover_augroups`, the shipped takeover table's own
+# augroup names, so a test in a crate that can also see view-engine pins
+# them against the Lua chunks that create them. No production caller: the
+# names are only ever built inside nvim. Off in every ordinary build, and
+# the dependency direction is untouched -- nothing here gains an edge, only
+# a test/harness crate that already depends on both turns this on.
+test-support = []
+
 [dependencies]
 # The picker's fuzzy matcher engine (spec §18): confined to this crate by
 # scripts/audit-deps.sh, the same confinement `arboard` has in the `view`

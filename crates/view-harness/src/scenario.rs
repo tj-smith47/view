@@ -311,16 +311,15 @@ pub enum ScenarioError {
     /// `expect` was set on a step whose action is not `probe`.
     #[error("step {index} sets expect but is not a probe step")]
     ExpectWithoutProbe { index: usize },
-    /// A `wait_for_probe` step expects the negative sentinel
-    /// [`NEGATIVE_SENTINEL`], which its own polling makes vacuous.
+    /// A `wait_for_probe` step expects one of [`NEGATIVE_SENTINELS`], which
+    /// its own polling makes vacuous.
     #[error(
         "step {index} polls wait_for_probe for expect = \"{sentinel}\", which passes on its \
          first poll before anything could have happened: assert a negative with send -> \
          wait_for the visible effect -> probe (single shot), or wait toward a positive \
-         sentinel naming the state reached",
-        sentinel = NEGATIVE_SENTINEL
+         sentinel naming the state reached"
     )]
-    VacuousNegativeWait { index: usize },
+    VacuousNegativeWait { index: usize, sentinel: String },
     /// `timeout_ms` was set on a step whose action is none of `wait_for`,
     /// `wait_for_cell`, or `wait_for_probe` (the only three steps that poll
     /// toward a deadline).
@@ -396,14 +395,19 @@ fn starts_with_silent_command(keys: &str) -> bool {
     })
 }
 
-/// The answer a probe returns to say the thing it looked for did not happen.
+/// Every answer a probe returns to say the thing it looked for did not
+/// happen: the corpus's own spelling first, then the four a scenario might
+/// reach for instead.
 ///
-/// One spelling across the whole corpus, which is what lets
-/// [`validate_step`] recognize a negative expectation at load time without
-/// reading Lua. A scenario asserting a negative under a different word gets
-/// no help from that check, so the word is the convention rather than a mere
-/// habit: `absent`, never `no`/`none`/`false`/`missing`.
-const NEGATIVE_SENTINEL: &str = "absent";
+/// The set is what lets [`validate_step`] recognize a negative expectation at
+/// load time without reading Lua. It is closed rather than open because
+/// `expect` is otherwise free text matched against whatever a probe returns
+/// (`"local t = ()"`, `"n"`, `"closed"`), so there is nothing general to
+/// pattern-match on -- and it carries the alternates, not just `absent`,
+/// because a rule keyed on one word is a rule a scenario escapes by writing
+/// a synonym. Whichever of these a step names, the shape it needs is the
+/// same, and the refusal says so.
+const NEGATIVE_SENTINELS: [&str; 5] = ["absent", "no", "none", "false", "missing"];
 
 /// Validates and converts one [`RawStep`] into a [`Step`], applying
 /// [`DEFAULT_STEP_TIMEOUT_MS`] to a `wait_for`/`wait_for_cell`/`wait_for_probe`
@@ -489,8 +493,11 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
         let Some(expect) = raw.expect else {
             return Err(ScenarioError::ProbeMissingExpect { index });
         };
-        if expect == NEGATIVE_SENTINEL {
-            return Err(ScenarioError::VacuousNegativeWait { index });
+        if NEGATIVE_SENTINELS.contains(&expect.as_str()) {
+            return Err(ScenarioError::VacuousNegativeWait {
+                index,
+                sentinel: expect,
+            });
         }
         return Ok(Step::WaitForProbe {
             expr,
@@ -1275,16 +1282,25 @@ states = []
     /// directory walks, so a scenario written this way fails `task ci`
     /// without anyone re-running the class audit by hand.
     #[test]
-    fn a_wait_for_probe_expecting_the_negative_sentinel_is_rejected() {
-        let toml = VALID.replace(
-            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
-            "{ wait_for_probe = \"luaeval('lualine ~= nil')\", expect = \"absent\" },",
-        );
-        let err = parse(&toml).expect_err("a vacuous negative wait must be a hard error");
-        assert!(
-            matches!(err, ScenarioError::VacuousNegativeWait { .. }),
-            "expected VacuousNegativeWait, got {err:?}"
-        );
+    fn a_wait_for_probe_expecting_a_negative_sentinel_is_rejected() {
+        // every word the set names, not only the corpus's own: a refusal
+        // keyed on `absent` alone is one a scenario escapes by writing a
+        // synonym, and the synonym polls just as vacuously
+        for sentinel in NEGATIVE_SENTINELS {
+            let toml = VALID.replace(
+                "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+                &format!(
+                    "{{ wait_for_probe = \"luaeval('lualine ~= nil')\", expect = \"{sentinel}\" }},"
+                ),
+            );
+            let err = parse(&toml)
+                .expect_err("a vacuous negative wait must be a hard error whichever word it uses");
+            assert!(
+                matches!(&err, ScenarioError::VacuousNegativeWait { sentinel: got, .. }
+                    if got == sentinel),
+                "expected VacuousNegativeWait({sentinel}), got {err:?}"
+            );
+        }
     }
 
     #[test]

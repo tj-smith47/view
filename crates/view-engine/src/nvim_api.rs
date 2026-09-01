@@ -198,6 +198,18 @@ vim.api.nvim_create_autocmd('SafeState', {
   callback = hold,
 })";
 
+/// [`HOLD_OPTION_CHUNK`] itself, for the cross-crate pin that reads the
+/// augroup name this chunk builds. Gated behind `test-support` for the
+/// reason [`HIDDEN_LOAD_CHUNK`] is.
+#[cfg(any(test, feature = "test-support"))]
+pub const OPTION_HOLD_CHUNK: &str = HOLD_OPTION_CHUNK;
+
+/// [`HOLD_NOTIFY_CHUNK`] itself, for the cross-crate pin that reads the
+/// augroup name this chunk builds. Gated behind `test-support` for the
+/// reason [`HIDDEN_LOAD_CHUNK`] is.
+#[cfg(any(test, feature = "test-support"))]
+pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
+
 /// The lua chunk [`EngineHandle::register_mappings`] runs inside nvim,
 /// taking view's channel id, the specs to register, every feature/verb pair
 /// the command can complete, and the command's own name as its four

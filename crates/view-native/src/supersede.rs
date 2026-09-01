@@ -119,11 +119,18 @@ enum TakeoverKind {
     Notify,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TakeoverKind {
     /// The augroup name the hold this row issues creates inside nvim:
     /// `view-hold-<option>` for an option, `view-hold-notify` for the
     /// function.
+    ///
+    /// This spelling is a copy of one that lives in `view-engine`'s two hold
+    /// chunks, which this crate cannot read: `view-native` has no dependency
+    /// edge to `view-engine` and must not grow one.
+    /// [`takeover_augroups`] exists so a crate that can see both pins the two
+    /// against each other instead
+    /// (`view-harness`'s `every_takeover_augroup_is_the_one_its_chunk_builds`).
     ///
     /// The engine's own key, spelled the way `HOLD_OPTION_CHUNK` and
     /// `HOLD_NOTIFY_CHUNK` build it, rather than a name invented here for
@@ -141,6 +148,18 @@ impl TakeoverKind {
             Self::Notify => "view-hold-notify".to_string(),
         }
     }
+}
+
+/// Every augroup the shipped takeover table's holds create inside nvim, one
+/// per row, in table order.
+///
+/// The whole population rather than a sample: a row added later joins by
+/// existing, so the pin that reads this cannot go stale against a table it
+/// no longer covers.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn takeover_augroups() -> Vec<String> {
+    TAKEOVERS.iter().map(|row| row.kind.claims()).collect()
 }
 
 /// One row of the takeover table: the feature that owns it, and what its

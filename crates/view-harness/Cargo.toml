@@ -42,8 +42,11 @@ view-surface = { version = "0.0.1", path = "../view-surface" }
 # feature crates they measure.
 [dev-dependencies]
 view-core = { version = "0.0.1", path = "../view-core" }
-view-engine = { version = "0.0.1", path = "../view-engine" }
-view-native = { version = "0.0.1", path = "../view-native" }
+# test-support on both: it exposes the two hold chunks and the takeover
+# table's augroup names, which `tests/supersede_augroups.rs` pins against
+# each other. Dev-only, so no shipped build of either crate carries them.
+view-engine = { version = "0.0.1", path = "../view-engine", features = ["test-support"] }
+view-native = { version = "0.0.1", path = "../view-native", features = ["test-support"] }
 # The shared temp-dir fixture guard (see its own crate doc): the
 # remote_memory row's own test needs a real scratch directory and its
 # `Drop`-driven cleanup, matching how view-bench's tests for the same
