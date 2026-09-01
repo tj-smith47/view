@@ -3396,6 +3396,59 @@ mod tests {
         );
     }
 
+    /// nvim-cmp's cmdline menu exactly as `docs/surface-float-wire-capture.md`
+    /// records it, through the chunk's own argument order. The anchor is
+    /// carried because dropping it moves an `NE`-anchored float half a
+    /// screen, and `row`/`col` are read from both wire numeric types
+    /// because nvim types them `Float`.
+    #[test]
+    fn a_bridge_float_event_decodes_the_window_geometry_and_its_identity() {
+        let decoded = decode_bridge_event(&[
+            Value::from("float"),
+            Value::from(1003),
+            Value::from(2),
+            Value::from(26.0),
+            Value::from(0),
+            Value::from(20),
+            Value::from(2),
+            Value::from(1001),
+            Value::from("cmp_menu"),
+            Value::from(""),
+            Value::from("NW"),
+        ]);
+        assert!(
+            matches!(&decoded, Some(Msg::FloatObserved(_))),
+            "got {decoded:?}"
+        );
+        let Some(Msg::FloatObserved(float)) = decoded else {
+            return;
+        };
+        assert_eq!((float.win, float.buf), (1003, 2));
+        assert_eq!((float.row, float.col), (26, 0));
+        assert_eq!((float.width, float.height), (20, 2));
+        assert_eq!(float.zindex, 1001);
+        assert_eq!(float.identity(), Some("cmp_menu"));
+        assert_eq!(
+            float.anchor,
+            view_core::native::surfaces::FloatAnchor::NorthWest
+        );
+    }
+
+    #[test]
+    fn a_bridge_float_event_missing_a_field_is_malformed_rather_than_guessed() {
+        assert!(
+            decode_bridge_event(&[
+                Value::from("float"),
+                Value::from(1003),
+                Value::from(2),
+                Value::from(26),
+                Value::from(0),
+            ])
+            .is_none(),
+            "a partial sighting names a rect nobody observed"
+        );
+    }
+
     /// nvim reports no name at all for a scheme cleared with `:colorscheme
     /// default` in some paths. The switch still happened, so the message
     /// must still arrive -- a consumer keys off the event, not the name.

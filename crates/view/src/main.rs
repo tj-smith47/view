@@ -670,6 +670,11 @@ fn load_view_config(
         Err(err) => {
             vlog::log_with("native", || format!("config unreadable: {err}"));
             model.dirty = true;
+            // the surfaces attached below are the fail-open default, not an
+            // answer to what this user wrote, so nothing may later tell them
+            // to write a `[native]` line they may already have written --
+            // see `Model::config_was_read`
+            model.note_config_unread();
             notices.extend(model.engine.record_native_notice(
                 format!("view: {err}; every native feature stays on this session"),
                 false,

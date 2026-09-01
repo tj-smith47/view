@@ -151,6 +151,25 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::Ai(event) => {
             log_with("ai", || ai_payload(event));
         }
+        // the sighting, not the verdict: a conflict notice that failed to
+        // appear is either a float the watcher never reported or a rect the
+        // table declined, and only a line carrying the geometry as it
+        // arrived can tell those apart
+        Msg::FloatObserved(float) => {
+            log_with("native", || {
+                format!(
+                    "float win={} row={} col={} {}x{} anchor={:?} zindex={} identity={:?}",
+                    float.win,
+                    float.row,
+                    float.col,
+                    float.width,
+                    float.height,
+                    float.anchor,
+                    float.zindex,
+                    float.identity(),
+                )
+            });
+        }
         Msg::MappingsClaimed { claimed } => {
             log_with("native", || {
                 let keys: Vec<String> = claimed

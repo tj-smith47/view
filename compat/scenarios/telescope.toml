@@ -39,3 +39,54 @@ steps = [
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
 ]
+
+# The negative control for surface-ownership conflicts, and the reason
+# this state exists at all: under `native = {}` view owns the command
+# line, the popupmenu and the message area, and telescope's picker covers
+# the middle of the grid -- including every row view would have drawn its
+# palette on. A detector that answered "does this float overlap a surface
+# view owns" by rect intersection alone would name the picker here, on
+# every heavy session, for a plugin that has taken nothing.
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.telescope ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":Telescope help_tags<CR>" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
+  { send = "nvim_buf_atta" },
+  # All four picker windows are rendering by the time a candidate this
+  # long reaches the results list.
+  { wait_for = "nvim_buf_attach()", timeout_ms = 15000 },
+  # telescope's default <Esc> drops from the prompt's insert mode to its
+  # normal mode with every picker window still open -- a mode transition,
+  # which is one of the events view's float watcher arms on. An absence is
+  # only evidence if the look happened, so the picker is left standing
+  # through that scan rather than dismissed before it.
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # Past the watcher's own throttle, timed inside the session so a loaded
+  # host cannot shorten it, and with the picker confirmed still open: the
+  # window list the scan walked is the one holding these four floats.
+  { probe = "luaeval('(function() vim.g.view_compat_armed_at = vim.uv.hrtime() return \"armed\" end)()')", expect = "armed" },
+  { wait_for_probe = "luaeval('((vim.uv.hrtime() - vim.g.view_compat_armed_at) > 400000000) and \"settled\" or \"waiting\"')", expect = "settled", timeout_ms = 10000 },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open" },
+  # None of the picker's four windows is a claimant: not the two that
+  # carry a telescope filetype, and not the two border windows, whose
+  # empty filetype and empty buffer name would reach the anonymous
+  # wording if they claimed anything at all.
+  { assert_absent = "TelescopePrompt is drawing over" },
+  { assert_absent = "TelescopeResults is drawing over" },
+  { assert_absent = "a plugin is drawing over" },
+  # A second <Esc> from the picker's normal mode dismisses it.
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+]

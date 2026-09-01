@@ -15,6 +15,7 @@ mod ai_fs;
 mod paste;
 pub(super) mod review;
 mod supervision;
+mod surface_conflict;
 mod surfaces;
 mod ui_event;
 mod watch;
@@ -433,6 +434,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             tree_git_refresh_effect(model)
         }
+        Msg::FloatObserved(float) => surface_conflict::observe_float(model, &float),
         // The key-dispatch-path arm: one event per keystroke in an attached
         // buffer, folded into the open review's hunks and nothing else. The
         // work is O(open hunks) and allocation-free for an edit outside

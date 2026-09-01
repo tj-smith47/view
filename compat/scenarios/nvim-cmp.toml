@@ -47,3 +47,79 @@ steps = [
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { probe = "luaeval('require(\"cmp\").visible()')", expect = "false" },
 ]
+
+# The same plugin under view's own defaults, where the completion menu
+# stops being only a semantic question: with `native = {}` view owns the
+# command line, and the pinned cmp draws its cmdline menu on the grid's
+# last rows -- over the palette view painted there. That is a plugin
+# drawing on a surface view took over, and a migrating user is owed the
+# sentence that says which plugin, which surface and which `view.toml`
+# line hands it back.
+[[states]]
+name = "unaccommodated"
+accommodations = false
+native = {}
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.cmp ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # The fixture pins nvim-cmp with cmp-buffer as its only source and
+  # configures insert mode alone, so no cmdline float exists until one is
+  # asked for. This is the pinned plugin's own cmdline setup, the same
+  # call docs/surface-float-wire-capture.md records making, with the
+  # buffer source standing in for cmp-cmdline: same view layer, same
+  # window machinery, only the candidates differ.
+  { probe = "luaeval('(function() local cmp = require(\"cmp\") cmp.setup.cmdline(\":\", { mapping = cmp.mapping.preset.cmdline(), sources = { { name = \"buffer\" } } }) return \"armed\" end)()')", expect = "armed" },
+  # Two words sharing a prefix, so the buffer source has something to
+  # offer both in the buffer and at the cmdline.
+  { send = "iprefabricated preflight<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # First the negative control from the same plugin: cmp's insert-mode
+  # menu opens beside the cursor, claims nothing, and must stay unnamed.
+  # A detector that fired on "a float from a plugin" rather than on the
+  # rect it occupies would already have named this window below. The
+  # needle is cmp's own identity, not the notice family: this fixture's
+  # noice raises its health float over the message area in this state
+  # too, and that notice is a true one about a different plugin.
+  { send = "o" },
+  { send = "p" },
+  { probe = "mode()", expect = "i" },
+  { send = "r" },
+  { probe = "mode()", expect = "i" },
+  { send = "e" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 15000 },
+  { assert_absent = "cmp_menu is drawing over" },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # Now the claim. Keys go one per send for the same reason the present
+  # state paces them: cmp reads a multi-column jump between CmdlineChanged
+  # events as paste-like input and never opens the menu for it.
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { send = "r" },
+  { send = "e" },
+  # What a defaults user must see, in one needle rather than two: the
+  # window named by the one identity it carries, the surface it took, and
+  # the key that gives it back. A native notice is a transient toast, so
+  # this waits on the screen directly after the last keystroke rather than
+  # behind a probe -- an intervening round trip can outlast the toast's own
+  # four seconds and leave a screen that showed the line looking like one
+  # that never did. The tail (" to give it back.") is not asserted: the
+  # line is longer than the message layer's clip at the grid's width less
+  # two, and only what fits is on the screen to match.
+  { wait_for = "view: cmp_menu is drawing over the command line, which view owns. Set [native] palette = false", timeout_ms = 15000 },
+  # Not the anonymous wording: this float carries a filetype, so the
+  # notice names it rather than falling back to "a plugin".
+  { assert_absent = "a plugin is drawing over" },
+  # And the menu really was cmp's, standing at the cmdline, not a float
+  # this scenario merely believes was there.
+  { probe = "luaeval('require(\"cmp\").visible()')", expect = "true" },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+]

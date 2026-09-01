@@ -102,6 +102,26 @@ pub struct Model {
     /// Defaults to the full set, matching the config-absent session that
     /// attaches everything.
     ext_surfaces: Vec<crate::native::ext::Ext>,
+    /// Whether the `[native]` table [`Model::attach_surfaces`] recorded was
+    /// read from a `view.toml` at all.
+    ///
+    /// Beside `ext_surfaces` rather than derived from it, because it is the
+    /// one thing that set cannot answer: a config that could not be parsed
+    /// fails *open*, attaching every surface, so a user who wrote
+    /// `palette = false` into a file with a typo above it gets exactly the
+    /// set of someone who wrote nothing. Telling them to set a line they
+    /// already set would be false, so a notice about an owned surface reads
+    /// this before naming a remedy (`update::surface_conflict`).
+    ///
+    /// Defaults to `true`: an absent config is read successfully -- it says
+    /// nothing, which is the full experience -- and only the fail-open leg
+    /// in `crates/view/src/main.rs` clears it.
+    config_was_read: bool,
+    /// Which float identities have been seen drawing over a surface view
+    /// owns, so the second sighting adds to one notice instead of raising a
+    /// second one. Session-lifetime, like the conflict it records: the
+    /// remedy is a config line that takes effect at the next start.
+    pub(crate) surface_conflicts: crate::native::surfaces::SurfaceConflicts,
     /// The working directory a relative [`crate::native::picker::Source`]
     /// resolves against, learned once at startup
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
@@ -261,6 +281,8 @@ impl Model {
             statusline_enabled: false,
             palette_enabled: false,
             ext_surfaces: crate::native::ext::ALL.to_vec(),
+            config_was_read: true,
+            surface_conflicts: crate::native::surfaces::SurfaceConflicts::default(),
             cwd: PathBuf::new(),
             ai_trusted: false,
             ai_enabled: true,
@@ -296,6 +318,29 @@ impl Model {
     #[must_use]
     pub fn owns(&self, surface: crate::native::ext::Ext) -> bool {
         self.ext_surfaces.contains(&surface)
+    }
+
+    /// Records that this session never read a `view.toml`'s `[native]`
+    /// table -- the file exists and could not be parsed, so the surfaces
+    /// [`Self::attach_surfaces`] recorded are the fail-open default rather
+    /// than an answer to what the user wrote.
+    ///
+    /// Called from the same fail-open arm that raises the notice about the
+    /// unreadable file, so the two can never disagree about which happened.
+    pub fn note_config_unread(&mut self) {
+        self.config_was_read = false;
+    }
+
+    /// Whether the `[native]` switches this session attached with were
+    /// actually read from the user's config, on the terms
+    /// [`Self::note_config_unread`] sets.
+    ///
+    /// The one caller is the notice that would otherwise name a `[native]`
+    /// line as a remedy: see [`Self::note_config_unread`] for why that
+    /// line is a lie on the fail-open leg.
+    #[must_use]
+    pub fn config_was_read(&self) -> bool {
+        self.config_was_read
     }
 
     /// The whole attached set, for the one caller that has to re-send it:

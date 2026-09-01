@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use view_core::msg::{DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken};
 use view_core::native::mappings::MappingClaim;
+use view_core::native::surfaces::{FloatAnchor, FloatSighting};
 
 use super::{saturate_u32, AttachedBuf};
 
@@ -85,8 +86,9 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
 /// has no consumer for the event. Each event names its own payload shape
 /// (see [`crate::nvim_api::REGISTER_BRIDGE_CHUNK`]'s doc): `colorscheme`
 /// carries the scheme's name alone, `diagnostics` an `(errors, warnings)`
-/// count pair, `git` the branch name alone, and `buffer` a `(name,
-/// modified)` pair.
+/// count pair, `git` the branch name alone, `buffer` a `(name, modified)`
+/// pair, and `float` the eleven positional fields
+/// [`decode_float_observed`] names.
 ///
 /// The bridge deliberately carries more triggers than there are consumers
 /// today: the group is registered once, and adding a consumer must not mean
@@ -113,8 +115,65 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             let modified = rest.first()?.as_bool()?;
             Some(Msg::BufferChanged { name, modified })
         }
+        "float" => decode_float_observed(params),
         _ => None,
     }
+}
+
+/// Decodes the float watcher's `('float', win, buf, row, col, width,
+/// height, zindex, filetype, name, anchor)` params into
+/// [`Msg::FloatObserved`], or `None` for a shape the chunk does not
+/// produce.
+///
+/// Read off `params` whole rather than off the `(first, rest)` split its
+/// caller already made: eleven positional fields destructured in one
+/// pattern is the shape a reviewer can check against the `rpcnotify` call
+/// in [`crate::nvim_api::REGISTER_BRIDGE_CHUNK`] argument for argument.
+///
+/// `row`/`col` arrive through [`wire_i64`] because they are `Float` in
+/// nvim's own window-config API and may be negative (a float placed partly
+/// off-grid); `width`/`height` are counts and saturate. `zindex` saturates
+/// into `u16`, which is wider than the 1001 the highest observed float
+/// carries. A missing `anchor` is impossible from this chunk (it defaults
+/// the field in Lua) and still degrades to nvim's own `NW` default rather
+/// than dropping the sighting.
+fn decode_float_observed(params: &[Value]) -> Option<Msg> {
+    let [_, win, buf, row, col, width, height, zindex, filetype, name, anchor] = params else {
+        return None;
+    };
+    Some(Msg::FloatObserved(FloatSighting {
+        win: win.as_u64()?,
+        buf: buf.as_u64()?,
+        row: wire_i64(row)?,
+        col: wire_i64(col)?,
+        width: saturate_u16(wire_i64(width)?),
+        height: saturate_u16(wire_i64(height)?),
+        anchor: FloatAnchor::from_wire(anchor.as_str().unwrap_or_default()),
+        zindex: saturate_u16(wire_i64(zindex)?),
+        filetype: filetype.as_str().unwrap_or_default().to_owned(),
+        name: name.as_str().unwrap_or_default().to_owned(),
+    }))
+}
+
+/// A wire number as `i64`, whether it arrived as an integer or a float.
+///
+/// nvim's msgpack encoder emits an integral Lua number as an Integer, so
+/// the second arm answers only a value that really did carry a fraction --
+/// which `nvim_win_get_config`'s `Float`-typed `row`/`col` legitimately
+/// can. Truncating toward zero there rather than refusing: half a cell of
+/// offset is not a reason to drop a sighting, and the `as` conversion
+/// saturates at the bounds rather than wrapping.
+fn wire_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|number| number as i64))
+}
+
+/// Saturates a wire `i64` into the `u16` a cell count or a `zindex` is,
+/// clamping at both ends rather than wrapping: a negative width is not a
+/// huge one.
+fn saturate_u16(value: i64) -> u16 {
+    u16::try_from(value).unwrap_or(if value < 0 { 0 } else { u16::MAX })
 }
 
 /// Decodes one `nvim_buf_lines_event` notification's `(buf, changedtick,

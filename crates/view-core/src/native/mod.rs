@@ -20,6 +20,7 @@ pub mod registry;
 pub mod speculate;
 pub mod statusline;
 pub mod supervision;
+pub mod surfaces;
 pub mod toast;
 pub mod tree;
 pub mod views;

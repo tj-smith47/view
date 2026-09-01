@@ -353,6 +353,50 @@ return claimed";
 /// the current window, and `BufModifiedSet` alone covers every actual
 /// modified-flag transition without the per-keystroke flood
 /// `TextChanged`/`TextChangedI` would add.
+///
+/// The float trigger is the one group that scans rather than forwards, and
+/// `docs/surface-float-wire-capture.md` is why: there is no event to
+/// forward. Every plugin measured there opens its floating window with
+/// `noautocmd = true`, so `WinNew` fired zero times across the whole
+/// capture, and nvim-cmp closes its menu from inside its own non-nested
+/// autocmd, so `WinClosed` never fires for that one either -- a watcher
+/// built on either event observes nothing at all. So the callback arms a
+/// throttled scan of `nvim_list_wins()` instead, and reports every float
+/// it can see each time it runs.
+///
+/// Three properties of that arrangement are load-bearing:
+///
+/// - **The events that arm it are transitions, never a poll.** A cmdline
+///   float appears about 61 ms after the keystroke that summons it (cmp's
+///   own `performance.debounce`), and `CmdlineEnter`/`CmdlineChanged` are
+///   what precede it; `ModeChanged`, `CursorHold`, `CursorHoldI` and
+///   `WinEnter` cover the floats no cmdline brackets. None of them
+///   re-fires because the scan ran, so an idle editor arms nothing and
+///   costs nothing.
+/// - **The throttle bounds the traffic, not the latency.** The first
+///   arming event schedules one scan 150 ms out and every event inside
+///   that window is absorbed by it (`float_armed`), so a float storm
+///   costs at most one window walk per 150 ms rather than one per event,
+///   and the delay is longer than cmp's own debounce so the scan that
+///   follows a keystroke sees the window that keystroke opened.
+/// - **A hidden float is not a sighting.** `cfg.hide` is skipped, so a
+///   window view has already taken over (hidden through
+///   `nvim_win_set_config`) stops being reported rather than being
+///   reported forever.
+/// - **A scan reports what it sees, not what changed.** Suppressing the
+///   repeat sighting of an unmoved float looks like the cheaper wire until
+///   the receiver is remembered: what a claim raises is a transient toast,
+///   and the keystroke that arms the next scan is the same keystroke that
+///   dismisses the toast standing from the last one. A menu whose geometry
+///   the next character does not move would then be reported once, cleared
+///   off the screen, and never mentioned again while it goes on covering
+///   the surface. Repeats are answered instead, and cost nothing: the
+///   notice de-duplicates on the line's own text
+///   ([`view_core::model::EngineModel::record_native_notice_once`]).
+///
+/// `pcall` around `nvim_win_get_config` because a window can close between
+/// the list and the read; ids are per-session and never persisted (see
+/// [`view_core::native::surfaces::FloatSighting`]).
 const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -393,6 +437,31 @@ vim.api.nvim_create_autocmd(
   callback = function()
     vim.rpcnotify(channel, 'view_bridge', 'buffer', vim.fn.expand('%:t'),
       vim.bo.modified)
+  end,
+})
+local float_armed = false
+local function scan_floats()
+  float_armed = false
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    local ok, cfg = pcall(vim.api.nvim_win_get_config, win)
+    if ok and cfg.relative ~= '' and not cfg.hide then
+      local buf = vim.api.nvim_win_get_buf(win)
+      vim.rpcnotify(channel, 'view_bridge', 'float', win, buf,
+        math.floor(cfg.row or 0), math.floor(cfg.col or 0),
+        cfg.width, cfg.height, cfg.zindex or 0, vim.bo[buf].filetype,
+        vim.api.nvim_buf_get_name(buf), cfg.anchor or 'NW')
+    end
+  end
+end
+vim.api.nvim_create_autocmd({ 'CmdlineEnter', 'CmdlineChanged',
+  'ModeChanged', 'CursorHold', 'CursorHoldI', 'WinEnter' }, {
+  group = group,
+  callback = function()
+    if float_armed then
+      return
+    end
+    float_armed = true
+    vim.defer_fn(scan_floats, 150)
   end,
 })
 vim.api.nvim_create_autocmd('VimLeavePre', {
@@ -3910,6 +3979,12 @@ mod tests {
             "'BufFilePost'",
             "'BufWritePost'",
             "'BufModifiedSet'",
+            "'CmdlineEnter'",
+            "'CmdlineChanged'",
+            "'ModeChanged'",
+            "'CursorHold'",
+            "'CursorHoldI'",
+            "'WinEnter'",
         ] {
             assert!(
                 REGISTER_BRIDGE_CHUNK.contains(event),
@@ -3926,9 +4001,54 @@ mod tests {
             REGISTER_BRIDGE_CHUNK
                 .matches("vim.rpcnotify(channel, 'view_bridge'")
                 .count(),
-            4,
-            "colorscheme through the shared relay, plus diagnostics/git/buffer \
-             each sending their own richer payload instead of a bare match"
+            5,
+            "colorscheme through the shared relay, plus diagnostics, git, \
+             buffer and float each sending their own richer payload instead \
+             of a bare match"
+        );
+    }
+
+    /// The float watcher's load-bearing properties, each of which is a
+    /// silent defect if it drifts: a scan that is never armed twice at once
+    /// reports a storm once per window rather than once per event, a scan
+    /// that reads `hide` keeps reporting a float view has already taken
+    /// over, a scan whose delay drops under nvim-cmp's own 60 ms debounce
+    /// runs before the window it exists to see, an anchor left off the wire
+    /// puts an NE float's right edge where its left edge should be, and a
+    /// scan that reported only what changed would name a covering float
+    /// once and then never again.
+    #[test]
+    fn the_float_watcher_scans_windows_throttled_and_skips_a_hidden_one() {
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("nvim_list_wins()"),
+            "a float watcher cannot be built on WinNew: every observed \
+             plugin opens its window with noautocmd \
+             (docs/surface-float-wire-capture.md)"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("not cfg.hide"),
+            "a hidden float draws nothing and must stop being reported"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("if float_armed then"),
+            "the throttle is what bounds a float storm to one walk per window"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("vim.defer_fn(scan_floats, 150)"),
+            "the delay must outlast nvim-cmp's own 60 ms debounce, or the scan \
+             runs before the menu it exists to see"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("cfg.anchor or 'NW'"),
+            "an NE-anchored float's col is its right edge; dropping the anchor \
+             places nvim-notify's toast off the grid entirely"
+        );
+        assert!(
+            !REGISTER_BRIDGE_CHUNK.contains("float_seen"),
+            "a scan reports what it sees: the keystroke that arms the next \
+             scan is the one that dismissed the toast the last scan raised, \
+             so a float whose geometry the next character does not move \
+             would be named once and then covered silently"
         );
     }
 

@@ -297,6 +297,25 @@ pub enum Msg {
         name: String,
         modified: bool,
     },
+    /// The bridge's float watcher saw a floating window, or saw one it had
+    /// already reported move: geometry, anchor and whatever identity the
+    /// window carries, in the grid's own cells.
+    ///
+    /// Not an event -- there is no event to have. Every plugin observed in
+    /// `docs/surface-float-wire-capture.md` opens its float with
+    /// `noautocmd = true`, so `WinNew` fires for none of them, and nvim-cmp
+    /// closes its menu from inside a non-nested autocmd, so `WinClosed`
+    /// does not fire for it either. What the bridge does instead is scan
+    /// the window list, throttled, on the ordinary activity that brackets a
+    /// float appearing (see `REGISTER_BRIDGE_CHUNK`); the throttle is what
+    /// bounds this message's rate under a float storm.
+    ///
+    /// Repeats are ordinary and expected: nvim-cmp reuses one window id and
+    /// re-sets its config as the candidate list narrows, which the watcher
+    /// reports as a fresh sighting because it cannot know whether the move
+    /// crossed onto a surface view owns. `update::surface_conflict` is what
+    /// makes the repeat free.
+    FloatObserved(crate::native::surfaces::FloatSighting),
     /// One `nvim_buf_lines_event` notification forwarded from a buffer
     /// attached via `RpcCall::BufAttach`. Carries nvim's own change shape
     /// verbatim -- distinct from [`Msg::BufferChanged`] (the statusline's
