@@ -46,6 +46,21 @@ fn model() -> Model {
     Model::new()
 }
 
+/// A model past its startup window, which is where all but the tests about
+/// that window itself belong: a session parks foreign messages until the
+/// claimant probe answers or the first key arrives (see
+/// `crate::native::toast::StartupHold`), and a test that pushes a
+/// `msg_show` without either would be reading the parked set, not the
+/// stack.
+fn started_model() -> Model {
+    let mut model = Model::new();
+    let _ = model
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    model
+}
+
 /// A model on an 80x24 terminal, so an overlay's share of it resolves to
 /// a rect with cells both inside and outside to click on.
 fn full_screen_model() -> Model {
@@ -390,7 +405,7 @@ fn key_in_engine_focus_becomes_rpc_input_effect() {
 
 #[test]
 fn a_keypress_dismisses_an_already_flushed_transient_toast_and_marks_dirty() {
-    let mut m = model();
+    let mut m = started_model();
     let _ = update(
         &mut m,
         Msg::Redraw(vec![
@@ -2256,7 +2271,7 @@ fn cmdline_pos_without_prior_show_is_a_noop() {
 
 #[test]
 fn msg_show_appends_and_replace_last_overwrites() {
-    let mut m = model();
+    let mut m = started_model();
     let _ = update(
         &mut m,
         Msg::Redraw(vec![UiEvent::MsgShow {
@@ -2340,17 +2355,31 @@ fn a_sticky_error_outlives_every_incidental_key() {
             visible_texts(&m)
         );
     }
-    // <Esc> outside normal mode is leaving that mode, not asking for the
-    // toast to go: dismissing there would make the contract above depend on
-    // where the cursor happened to be
-    for mode in ["insert", "visual", "cmdline_normal", "operator"] {
+}
+
+/// The way out cannot depend on the mode reading, because that reading can
+/// be wrong for a whole session: `mode_change` carries nvim's cursor-shape
+/// mode, and a plugin that borrows `guicursor` can leave it standing at a
+/// value `mode()` disagrees with (observed: `replace` at rest, for every
+/// launch with noice's cmdline component on). A dismissal gated on it is
+/// absent exactly there, so `<Esc>` dismisses whatever the mode says --
+/// and still reaches nvim, so leaving the mode is not spent either.
+#[test]
+fn an_escape_dismisses_a_sticky_error_whatever_mode_nvim_last_reported() {
+    for mode in ["normal", "insert", "visual", "cmdline_normal", "operator"] {
         let mut m = model_showing_a_sticky_error(mode);
-        let _ = press(&mut m, "<Esc>");
-        assert_eq!(
-            visible_texts(&m).len(),
-            1,
-            "<Esc> in {mode} mode must leave the standing error alone: {:?}",
+        let effects = press(&mut m, "<Esc>");
+        assert!(
+            visible_texts(&m).is_empty(),
+            "<Esc> reported as {mode} mode must still take the standing error: {:?}",
             visible_texts(&m)
+        );
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"
+            ),
+            "and must still reach nvim, so the mode is still left: {effects:?}"
         );
     }
 }
@@ -8429,6 +8458,59 @@ fn arm_swap_probe(m: &mut Model) -> u64 {
     swap_probe_generation(&effects)
 }
 
+/// The third resolve trigger, and the one that has to come first inside the
+/// key arm: the release re-stamps what it drains, and the dismissal that
+/// runs immediately after keeps only what carries the current stamp.
+#[test]
+fn the_first_keypress_releases_the_startup_hold_before_it_dismisses_anything() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "a plugin said something".into())],
+                replace_last: false,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+    assert!(m.engine.messages.entries.is_empty(), "parked, not stacked");
+
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "l".into(),
+        }),
+    );
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
+        "the key that ended the window has to leave what it released on screen: {:?}",
+        m.engine.messages.entries
+    );
+}
+
+/// The deadline trigger, which is the only one a launch that never reaches
+/// `VimEnter` gets at all.
+#[test]
+fn the_hold_deadline_releases_what_the_probe_never_answered_for() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "echomsg".into(),
+            content: vec![(0, "a plugin said something".into())],
+            replace_last: false,
+        }]),
+    );
+    assert!(m.engine.messages.entries.is_empty());
+    let effects = update(&mut m, Msg::StartupHoldExpired);
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(m.engine.messages.entries.len(), 1);
+    assert!(m.dirty, "a line arriving on screen is a repaint");
+}
+
 #[test]
 fn a_connection_is_asked_what_it_recovered_the_moment_it_attaches() {
     let mut m = model();
@@ -8436,10 +8518,14 @@ fn a_connection_is_asked_what_it_recovered_the_moment_it_attaches() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::Rpc(RpcCall::ProbeSwapRecovery { .. })]
+            [
+                Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }),
+                Effect::ScheduleStartupHold { .. }
+            ]
         ),
         "a connection nobody asks until VimEnter is a connection that never \
-         answers when a startup error parks it first: {effects:?}"
+         answers when a startup error parks it first, and one whose startup \
+         hold has no deadline is one a silent launch never ends: {effects:?}"
     );
 }
 

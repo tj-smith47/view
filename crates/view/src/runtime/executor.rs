@@ -538,6 +538,20 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // the same one-shot thread, and the same degrade: an unwired
+            // channel leaves the hold to be resolved by the probe's answer
+            // or the first keypress, both of which arrive on paths that do
+            // not need a clock
+            Effect::ScheduleStartupHold { after } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("startup-hold", move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::StartupHoldExpired);
+                    });
+                }
+                Flow::Continue
+            }
             // the same one-shot thread `ScheduleToastExpiry` uses, and the
             // same reason for it: `update()` has no clock, and a reply that
             // said a path could not be read has to be re-asked later rather

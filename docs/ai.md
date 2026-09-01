@@ -408,16 +408,16 @@ your next `:w`.
 With unsaved edits in the buffer, those edits are now the only copy:
 
 ```
-/home/you/project/src/lib.rs is no longer a readable file on disk -- nothing
-was reloaded, and your buffer still holds your edits
+view: file /home/you/project/src/lib.rs is no longer a readable file on disk
+-- nothing was reloaded, and your buffer still holds your edits
 ```
 
 Without them, the buffer is holding whatever it last read, and view says
 that instead rather than crediting you with edits you never made:
 
 ```
-/home/you/project/src/lib.rs is no longer a readable file on disk -- nothing
-was reloaded, and the buffer still holds the content it last read
+view: file /home/you/project/src/lib.rs is no longer a readable file on disk
+-- nothing was reloaded, and the buffer still holds the content it last read
 ```
 
 This case never opens the prompt: a path that cannot be read has no reload

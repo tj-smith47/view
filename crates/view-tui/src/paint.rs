@@ -2154,6 +2154,14 @@ mod tests {
     /// `LayerKind` are `#[non_exhaustive]` and cannot be built with
     /// struct-literal syntax from outside `view-core`.
     fn apply(model: &mut Model, ev: view_core::events::UiEvent) {
+        // past the startup window first: a foreign message is parked rather
+        // than stacked until it closes
+        // (`view_core::native::toast::StartupHold`), and every test here is
+        // about where a toast paints rather than about when one is shown
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
         let _ = view_core::update::update(model, view_core::msg::Msg::Redraw(vec![ev]));
     }
 

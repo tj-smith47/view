@@ -1206,7 +1206,7 @@ impl EngineModel {
         content: Vec<(u64, String)>,
         replace_last: bool,
     ) -> Vec<crate::msg::Effect> {
-        let route = crate::native::toast::route(&kind);
+        let route = crate::native::toast::route_under_hold(&kind, self.messages.startup_hold());
         if route == crate::native::toast::Route::Statusline {
             // only `search_count` reaches here as a `kind`
             // (`msg_showmode`/`msg_showcmd`/`msg_ruler` arrive as their own
@@ -1227,6 +1227,13 @@ impl EngineModel {
         // notice, which then occupies the last slot instead
         if let Some(entry) = self.messages.entries.iter().find(|e| e.id() == id) {
             self.toast_history.push(entry);
+        }
+        // strictly after the scrollback record above, which is what makes
+        // "nothing is ever dropped" true on every path through the hold: the
+        // message is in the ring before it leaves the stack
+        if route == crate::native::toast::Route::HistoryOnly {
+            self.messages.hold(id);
+            return Vec::new();
         }
         // only `Route::Transient` ever schedules a timeout (see
         // `toast::timeout_for`); a prompt/sticky/statusline entry expires
@@ -1575,7 +1582,16 @@ impl MessageEntry {
     /// [`Messages::set_native_condition`], so no wire message can wear one.
     #[must_use]
     pub fn is_native(&self) -> bool {
-        matches!(self.kind.as_str(), "native" | "native_sticky")
+        Self::is_native_kind(&self.kind)
+    }
+
+    /// The kind-only half of [`is_native`](Self::is_native), for the same
+    /// reason [`is_persistent_kind`](Self::is_persistent_kind) exists:
+    /// `toast::route_under_hold` classifies a `kind` string before any
+    /// `MessageEntry` has been built to ask.
+    #[must_use]
+    pub fn is_native_kind(kind: &str) -> bool {
+        matches!(kind, "native" | "native_sticky")
     }
 
     /// Whether this entry keeps its rows when the toast box overflows.
@@ -1595,6 +1611,16 @@ impl MessageEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Messages {
     pub entries: Vec<MessageEntry>,
+    /// Foreign transient messages parked by the startup hold: recorded to
+    /// scrollback like any other, but taking no toast slot and painting
+    /// nothing until `resolve_startup_hold` decides their fate. See
+    /// [`crate::native::toast::StartupHold`].
+    held: Vec<MessageEntry>,
+    /// Whether a message arriving now is parked. `Pending` from
+    /// `Default::default`, which is what makes this mechanism win a race it
+    /// would otherwise start after: the first redraw batch after attach can
+    /// already carry a plugin's setup-time complaint.
+    startup_hold: crate::native::toast::StartupHold,
     /// Bumped by `note_flush` on every `Flush` UI event; stamped onto each
     /// new entry as `MessageEntry::shown_at_flush`. See
     /// `dismiss_transient_on_keypress`.
@@ -1657,6 +1683,100 @@ impl Messages {
         }
         self.entries.push(entry);
         id
+    }
+
+    /// Whether the startup hold is still parking foreign transient
+    /// messages. Read by [`EngineModel::record_message`] on every message,
+    /// which is why it is a `Copy` enum read and nothing more.
+    #[must_use]
+    pub fn startup_hold(&self) -> crate::native::toast::StartupHold {
+        self.startup_hold
+    }
+
+    /// The messages the startup hold is holding, oldest first. Never
+    /// authoritative for anything painted -- `entries` is -- and here for
+    /// the assertions that have to see the parking rather than infer it
+    /// from an empty stack.
+    #[must_use]
+    pub fn held(&self) -> &[MessageEntry] {
+        &self.held
+    }
+
+    /// Moves the entry `id` names out of the visible stack and into the
+    /// held set: the second half of a `Route::HistoryOnly` record, run
+    /// after [`EngineModel::record_message`] has already written it to
+    /// scrollback, so no path through the hold can lose a message.
+    ///
+    /// Once the hold has collapsed nothing will ever release what it parks,
+    /// so a message arriving then is dropped from the stack without being
+    /// parked at all -- the scrollback record is the whole of what it gets,
+    /// which is what the standing notice tells the user.
+    pub(crate) fn hold(&mut self, id: MessageId) {
+        let Some(index) = self.entries.iter().position(|e| e.id == id) else {
+            return;
+        };
+        let entry = self.entries.remove(index);
+        if self.startup_hold == crate::native::toast::StartupHold::Pending {
+            self.held.push(entry);
+        }
+    }
+
+    /// Resolves the startup hold, once, and reports whether anything the
+    /// user can see changed.
+    ///
+    /// [`HoldOutcome::Release`](crate::native::toast::HoldOutcome::Release)
+    /// drains the held set onto the stack in arrival order and **re-stamps
+    /// every drained entry to the current flush generation**. Without the
+    /// re-stamp a drained entry carries the generation it was pushed at,
+    /// many flushes ago, and `dismiss_transient_on_keypress` -- which keeps
+    /// a transient only while `shown_at_flush == current` -- drops it on the
+    /// very keypress that released it, painting zero frames. The stamp is
+    /// the same convention `UiEvent::Flush` maintains for a freshly pushed
+    /// toast.
+    ///
+    /// [`HoldOutcome::Collapse`](crate::native::toast::HoldOutcome::Collapse)
+    /// leaves the held set where it is -- in the history ring alone -- and
+    /// keeps parking, so a late complaint from the same startup joins it
+    /// rather than landing on top of the notice that explains it. The
+    /// `Release` that later ends a collapsed hold discards the held set
+    /// instead of draining it: the decision that it stays in the history was
+    /// already taken, and re-raising it on the first keypress would restore
+    /// the wall the notice replaced.
+    ///
+    /// A hold already `Off` answers `false` and changes nothing: the three
+    /// triggers race each other by design and only the first is the
+    /// decision.
+    #[must_use]
+    pub fn resolve_startup_hold(&mut self, outcome: crate::native::toast::HoldOutcome) -> bool {
+        use crate::native::toast::{HoldOutcome, StartupHold};
+        if self.startup_hold == StartupHold::Off {
+            return false;
+        }
+        if outcome == HoldOutcome::Collapse {
+            if self.startup_hold == StartupHold::Collapsed {
+                return false;
+            }
+            self.startup_hold = StartupHold::Collapsed;
+            return false;
+        }
+        let collapsed = self.startup_hold == StartupHold::Collapsed;
+        self.startup_hold = StartupHold::Off;
+        if collapsed {
+            // a claimant was named and the notice on screen already says
+            // where these went; releasing them onto the stack now would put
+            // the wall of startup errors back up, one keypress late
+            self.held.clear();
+            return false;
+        }
+        if self.held.is_empty() {
+            return false;
+        }
+        let current = self.flush_generation;
+        for mut entry in self.held.drain(..) {
+            entry.shown_at_flush = current;
+            self.entries.push(entry);
+        }
+        true
     }
 
     /// Drops every message nvim showed, per `msg_clear`, and keeps every
@@ -2151,6 +2271,144 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::events::{TabEntry, TabHandle};
+
+    fn showed(model: &mut Model, kind: &str, text: &str) {
+        let _ = model
+            .engine
+            .record_message(kind.to_string(), vec![(0, text.to_string())], false);
+    }
+
+    fn stack(model: &Model) -> Vec<String> {
+        model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .map(|entry| entry.lines().join(""))
+            .collect()
+    }
+
+    fn history(model: &Model) -> Vec<String> {
+        model
+            .engine
+            .toast_history
+            .entries()
+            .map(|entry| entry.lines().join(""))
+            .collect()
+    }
+
+    /// The whole point of the window: a plugin's setup-time complaints are
+    /// recorded exactly as they would have been and take no toast slot, so
+    /// the notice that explains them is what the user reads.
+    #[test]
+    fn a_foreign_startup_message_is_parked_but_still_recorded() {
+        let mut model = Model::new();
+        showed(
+            &mut model,
+            "echomsg",
+            "noice.nvim: Noice needs ext_messages",
+        );
+        assert!(stack(&model).is_empty(), "{:?}", stack(&model));
+        assert_eq!(model.engine.messages.held().len(), 1);
+        assert_eq!(
+            history(&model),
+            vec!["noice.nvim: Noice needs ext_messages".to_string()],
+            "parked is not dropped: the history overlay is where the notice sends the user"
+        );
+    }
+
+    /// The exclusions that keep the window honest. A line view raises about
+    /// itself is never a claimant's, and an error is not something a notice
+    /// about surfaces can stand in for.
+    #[test]
+    fn view_s_own_lines_and_every_error_paint_through_the_hold() {
+        for (kind, text) in [
+            ("native", "view: view.toml line 3: unknown key"),
+            (
+                "native_sticky",
+                "view: a plugin is drawing over the command line",
+            ),
+            ("emsg", "E492: Not an editor command"),
+            ("echoerr", "noice.nvim: Noice can't work"),
+        ] {
+            let mut model = Model::new();
+            showed(&mut model, kind, text);
+            assert_eq!(
+                stack(&model),
+                vec![text.to_string()],
+                "kind {kind} was parked"
+            );
+            assert!(
+                model.engine.messages.held().is_empty(),
+                "kind {kind} was parked"
+            );
+        }
+    }
+
+    /// Releasing drains in arrival order and re-stamps, because the very
+    /// next thing the keypress that released does is dismiss transients
+    /// that have not had a frame -- which, unstamped, is all of them.
+    #[test]
+    fn releasing_drains_in_order_and_restamps_so_the_releasing_key_cannot_wipe_it() {
+        let mut model = Model::new();
+        showed(&mut model, "echomsg", "one");
+        showed(&mut model, "echomsg", "two");
+        for _ in 0..4 {
+            model.engine.messages.note_flush();
+        }
+        assert!(model
+            .engine
+            .messages
+            .resolve_startup_hold(crate::native::toast::HoldOutcome::Release));
+        assert_eq!(stack(&model), vec!["one".to_string(), "two".to_string()]);
+        let _ = model.engine.messages.dismiss_transient_on_keypress(false);
+        assert_eq!(
+            stack(&model),
+            vec!["one".to_string(), "two".to_string()],
+            "the key that released them took them straight back off"
+        );
+    }
+
+    /// A collapsed hold has a notice standing that says where the parked
+    /// messages went, so the key that ends the window discards them rather
+    /// than putting the wall back up one keystroke late.
+    #[test]
+    fn a_collapsed_hold_keeps_parking_and_never_drains_what_it_parked() {
+        use crate::native::toast::HoldOutcome;
+        let mut model = Model::new();
+        showed(&mut model, "echomsg", "one");
+        assert!(!model
+            .engine
+            .messages
+            .resolve_startup_hold(HoldOutcome::Collapse));
+        showed(&mut model, "echomsg", "late");
+        assert!(stack(&model).is_empty(), "{:?}", stack(&model));
+        assert!(!model
+            .engine
+            .messages
+            .resolve_startup_hold(HoldOutcome::Release));
+        assert!(stack(&model).is_empty(), "{:?}", stack(&model));
+        assert_eq!(history(&model).len(), 2, "both are still readable");
+    }
+
+    /// Three triggers race by design; only the first is the decision.
+    #[test]
+    fn a_resolved_hold_never_resolves_again() {
+        use crate::native::toast::HoldOutcome;
+        let mut model = Model::new();
+        assert!(!model
+            .engine
+            .messages
+            .resolve_startup_hold(HoldOutcome::Release));
+        showed(&mut model, "echomsg", "after");
+        assert_eq!(stack(&model), vec!["after".to_string()]);
+        assert!(!model
+            .engine
+            .messages
+            .resolve_startup_hold(HoldOutcome::Collapse));
+        showed(&mut model, "echomsg", "still after");
+        assert_eq!(stack(&model).len(), 2);
+    }
 
     /// A model nothing has told about an attach answers for the session
     /// that attaches everything, which is what a `Model` built by a test,

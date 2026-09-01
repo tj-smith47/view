@@ -138,6 +138,57 @@ pub fn row(surface: Surface) -> Option<&'static OwnedSurface> {
     SURFACES.iter().find(|row| row.surface == surface)
 }
 
+/// One plugin class whose whole purpose is to render a surface view also
+/// renders, identified by the Lua module a session can be asked about.
+///
+/// A float sighting names a *widget*; this names a *plugin*, which is the
+/// difference between "something is drawing over the command line" and
+/// "noice.nvim is using the command line". The presence question is asked of
+/// `package.loaded`, the public module registry, so nothing here reaches
+/// into a plugin's private state or depends on a version of its config.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfaceClaimant {
+    /// How a notice names the plugin, in the spelling its own README uses.
+    pub class: &'static str,
+    /// The module `package.loaded` is asked about.
+    pub module: &'static str,
+    /// Every surface this class exists to render. Filtered at notice time
+    /// against [`Policy::Own`] and [`Model::owns`], so a surface this
+    /// session handed back -- or one view absorbs rather than fights over --
+    /// is not something the user is told about.
+    pub surfaces: &'static [Surface],
+}
+
+/// The shipped claimant table.
+///
+/// One row, deliberately. A claimant row is a *named* claim, and the price
+/// of naming a plugin that turns out not to be drawing anything is a notice
+/// that says something false; the generic, evidence-first path for every
+/// plugin nobody enumerated is the float detector ([`claims`]), which needs
+/// no table at all. noice.nvim earns a row because it is the class of
+/// record: it exists to take the command line, the popup menu and the
+/// messages, it says so in its own health check, and on view's defaults that
+/// check fires three errors at a user who has been told nothing about how to
+/// resolve them.
+pub const SURFACE_CLAIMANTS: &[SurfaceClaimant] = &[SurfaceClaimant {
+    class: "noice.nvim",
+    module: "noice",
+    surfaces: &[Surface::Cmdline, Surface::Popupmenu, Surface::Messages],
+}];
+
+/// The claimants `probed` names, in table order -- the order a notice per
+/// claimant is raised in, so two claimants read the same way whichever
+/// module the probe listed first.
+///
+/// Unknown module names are ignored rather than trusted: the reply crosses
+/// the wire, and a name no row carries names no claimant.
+pub fn probed_claimants(probed: &[String]) -> impl Iterator<Item = &'static SurfaceClaimant> + '_ {
+    SURFACE_CLAIMANTS
+        .iter()
+        .filter(|claimant| probed.iter().any(|name| name == claimant.module))
+}
+
 /// Which corner of a float its `row`/`col` name.
 ///
 /// Load-bearing rather than decoration: an `NE`-anchored window at
@@ -244,10 +295,23 @@ impl FloatSighting {
     /// in `docs/surface-float-wire-capture.md` carries `name = ""`, and a
     /// plugin that floats a real file would put a path where a plugin's name
     /// belongs -- the same category error, plus a fresh claimant per file.
+    /// A filetype that is not spelled the way filetypes are is refused as a
+    /// name as well, and that is a trust boundary rather than tidiness: this
+    /// string arrives off the wire and is interpolated into a notice family,
+    /// which native notices are withdrawn by prefix match. A filetype
+    /// carrying a space could spell another family exactly -- `a plugin`
+    /// spells the anonymous one -- and a notice that retracts a different
+    /// notice's line is a fact the user was told and then silently un-told.
     #[must_use]
     pub fn identity(&self) -> Option<&str> {
         let filetype = self.filetype.as_str();
         if filetype.is_empty() || CONTENT_FILETYPES.contains(&filetype) {
+            return None;
+        }
+        if !filetype
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
             return None;
         }
         Some(filetype)
@@ -343,6 +407,18 @@ fn owned(surface: Surface, model: &Model) -> Option<Surface> {
     }
 }
 
+/// Whether this session actually draws `surface` and would fight a second
+/// renderer for it: the table says [`Policy::Own`], and the `[native]`
+/// switch behind its `ext_*` left it attached.
+///
+/// The one predicate a notice is gated on, wherever the notice comes from.
+/// A surface view absorbs rather than owns is not a conflict, and one this
+/// session handed back is not view's to complain about.
+#[must_use]
+pub fn view_draws(surface: Surface, model: &Model) -> bool {
+    row(surface).is_some_and(|row| row.policy == Policy::Own && owned(surface, model).is_some())
+}
+
 /// Which identities have been seen claiming which surfaces, so a second
 /// sighting adds to one notice rather than raising a second one.
 ///
@@ -361,6 +437,11 @@ fn owned(surface: Surface, model: &Model) -> Option<Surface> {
 #[derive(Debug, Default)]
 pub struct SurfaceConflicts {
     claimants: Vec<Claimant>,
+    /// Surfaces a named claimant's notice already accounts for. An unnamed
+    /// float drawing on one of these adds nothing a user can act on -- same
+    /// surface, same `[native]` line -- and a second box saying so is the
+    /// two-notices-for-one-plugin case the spec forbids.
+    named: Vec<Surface>,
 }
 
 /// One identity's standing claim.
@@ -420,6 +501,52 @@ impl SurfaceConflicts {
             .surfaces
             .sort_by_key(|surface| SURFACES.iter().position(|row| row.surface == *surface));
         Some(&claimant.surfaces)
+    }
+
+    /// Whether a named claimant's notice already accounts for `surface`, so
+    /// an unnamed float sighted drawing there is a conflict the user has
+    /// already been told about, with the same remedy.
+    #[must_use]
+    pub fn covered(&self, surface: Surface) -> bool {
+        self.named.contains(&surface)
+    }
+
+    /// Records that a named claimant's notice now accounts for `surfaces`,
+    /// and answers what that leaves of the anonymous claimant's standing
+    /// claim: `None` when there is no anonymous claim or none of it was
+    /// covered, `Some(&[])` when all of it was (its notice comes down), and
+    /// `Some(rest)` when part of it survives (its notice is re-worded to
+    /// the rest).
+    ///
+    /// The anonymous claimant is the one this can act on, and the only one.
+    /// A float carrying a name is a different plugin making a different
+    /// claim, and one notice per plugin is the rule rather than one notice
+    /// per surface -- silencing the named one would lose a fact about a
+    /// second plugin that the first plugin's notice never mentions. A float
+    /// carrying no name, over a surface a named claimant has already been
+    /// reported for, is the same fact told worse.
+    pub fn cover(&mut self, surfaces: &[Surface]) -> Option<&[Surface]> {
+        for surface in surfaces {
+            if !self.named.contains(surface) {
+                self.named.push(*surface);
+            }
+        }
+        let index = self
+            .claimants
+            .iter()
+            .position(|claimant| claimant.identity.is_none())?;
+        let named = self.named.clone();
+        let claimant = self.claimants.get_mut(index)?;
+        let before = claimant.surfaces.len();
+        claimant.surfaces.retain(|surface| !named.contains(surface));
+        if claimant.surfaces.len() == before {
+            return None;
+        }
+        if claimant.surfaces.is_empty() {
+            self.claimants.remove(index);
+            return Some(&[]);
+        }
+        Some(&self.claimants.get(index)?.surfaces)
     }
 
     /// Closes one scan: drops every claimant not sighted during it and

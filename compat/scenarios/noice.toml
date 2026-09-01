@@ -51,16 +51,29 @@ steps = [
   { wait_for_probe = "luaeval('package.loaded.noice ~= nil')", expect = "true", timeout_ms = 180000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   # What a defaults user must see: view's own single notice, carrying the
-  # exact key that hands the surface back.
-  { wait_for = "noice.nvim is using the command line", timeout_ms = 30000 },
-  { wait_for = "[native] palette = false", timeout_ms = 5000 },
-  # And what they must not see: noice's own three complaints stacked on top
-  # of it, one per externalized ext.
-  { assert_absent = "Noice can't work when the GUI has" },
-  # Not discarded, though -- the message history still holds them verbatim,
-  # one key away, for a user who goes looking.
+  # exact key that hands the surface back. Two needles because the notice
+  # is two rows -- the message layer clips at the grid's width less two
+  # rather than wrapping, so the remedy is put on its own line.
+  { wait_for = "noice.nvim is using the command line and the message area", timeout_ms = 30000 },
+  { wait_for = "Set [native] palette = false and [native] notifications = false", timeout_ms = 5000 },
+  # And the one thing view controls about noice's own three complaints:
+  # that its notice is not joined by a second one about the same plugin.
+  # noice's health errors do not reach view at all on this path, and the
+  # capture is the reason this scenario no longer claims otherwise:
+  # `noice/util/init.lua`'s `M.notify` calls `require("notify").notify`
+  # directly whenever nvim-notify is present -- which it is in this
+  # fixture -- so it never goes through `vim.notify`, view's takeover
+  # never sees it, and a whole unaccommodated launch produces zero
+  # `msg_show` events (docs/toast-routing-wire-capture.md). The three
+  # errors are drawn by nvim-notify's own float, which view's float
+  # detector sights over the message area carrying no usable name. What is
+  # asserted is therefore the composition: that unnamed sighting is
+  # absorbed by the claimant notice above rather than standing beside it.
+  { assert_absent = "a plugin is drawing over" },
+  # And view's own message history is still one key away, which is where
+  # the notice sends a user whose startup traffic view did park.
   { send = "\\fm" },
-  { wait_for = "Noice can't work when the GUI has", timeout_ms = 5000 },
+  { wait_for = "Messages", timeout_ms = 5000 },
   { send = "<Esc>" },
 ]
 

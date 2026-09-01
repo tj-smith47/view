@@ -505,6 +505,72 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
   end,
 })";
 
+/// The lua chunk [`EngineHandle::probe_claimants`] runs inside nvim, taking
+/// view's channel id and the module names to look for as its two varargs.
+/// Constant by construction for the same reason as
+/// [`REGISTER_BRIDGE_CHUNK`]: no caller data is interpolated into the Lua
+/// source -- the names travel as an argument and are only ever used as table
+/// keys.
+///
+/// `package.loaded` rather than a plugin-manager API, because there is no
+/// plugin-manager API: lazy.nvim, packer, vim-plug and a hand-rolled
+/// `runtimepath` all end in the same place, a module in that table. It
+/// answers what is *loaded*, which is the question -- a plugin present on
+/// disk but never required has taken no surface.
+///
+/// On `SafeState`, not inline: being reached at all means `VimEnter` has
+/// fired, so every eager plugin has run, and the wait to the first idle
+/// transition also catches the manager that finishes its own deferred
+/// loading on a timer after `VimEnter` (lazy.nvim's `VeryLazy` is exactly
+/// that).
+///
+/// Not `once`, and the reason is the launch this feature is *for*: a cold
+/// first launch installs the plugin stack over the network, and nvim
+/// returns to its main loop -- firing `SafeState` -- many times while
+/// lazy.nvim is still cloning. A single reading taken there answers "no
+/// claimants" about a session that is about to load one, and the notice is
+/// then never raised at all on the one launch that most needs it (observed:
+/// `neo-tree`/`unaccommodated` on a cold compat cache).
+///
+/// What keeps a repeat from becoming a per-idle scan is the pair of stops
+/// rather than `once`: the notify goes out only when the answer is the
+/// first one or has something new in it, so a steady state sends nothing at
+/// all, and the group deletes itself once every module is found or the
+/// session is a minute old. A module loaded an hour later by a keypress is
+/// a surface the user took deliberately.
+///
+/// The notify is wrapped in a `pcall` for the reason the float sweep's is:
+/// it is timer-driven, so it is one of the few that can land after a channel
+/// teardown.
+const PROBE_CLAIMANTS_CHUNK: &str = "\
+local channel, modules = ...
+local group = vim.api.nvim_create_augroup(
+  'view_bridge_claimants', { clear = true })
+local reported, first = {}, true
+local deadline = vim.uv.now() + 60000
+vim.api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = function()
+    local loaded, fresh = {}, false
+    for _, name in ipairs(modules) do
+      if package.loaded[name] ~= nil then
+        loaded[#loaded + 1] = name
+        if not reported[name] then
+          reported[name] = true
+          fresh = true
+        end
+      end
+    end
+    if first or fresh then
+      first = false
+      pcall(vim.rpcnotify, channel, 'view_bridge', 'claimants', loaded)
+    end
+    if #loaded == #modules or vim.uv.now() > deadline then
+      pcall(vim.api.nvim_del_augroup_by_id, group)
+    end
+  end,
+})";
+
 /// `VimLeavePre` gets its own method rather than another `view_bridge`
 /// event: every other hook in the group is editor state a later frame
 /// recomputes, delivered best-effort into the runtime channel, while this
@@ -2300,6 +2366,37 @@ impl EngineHandle {
         )
     }
 
+    /// Arms the one-shot probe that answers which of view's known surface
+    /// claimants this session actually loaded (see
+    /// [`PROBE_CLAIMANTS_CHUNK`]). The answer arrives asynchronously as a
+    /// `view_bridge` `claimants` notification carrying the loaded subset.
+    ///
+    /// The module names come from
+    /// [`SURFACE_CLAIMANTS`](view_core::native::surfaces::SURFACE_CLAIMANTS),
+    /// the same table the notice's wording is built from, so the question
+    /// asked and the answer's use cannot drift apart.
+    ///
+    /// A `notify`, like [`register_bridge`](Self::register_bridge): nothing
+    /// waits on the arming, and the probe's own reply is the notification.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn probe_claimants(&self, channel_id: u64) -> Result<(), EngineError> {
+        let modules: Vec<Value> = view_core::native::surfaces::SURFACE_CLAIMANTS
+            .iter()
+            .map(|claimant| Value::from(claimant.module))
+            .collect();
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(PROBE_CLAIMANTS_CHUNK),
+                Value::Array(vec![Value::from(channel_id), Value::Array(modules)]),
+            ],
+        )
+    }
+
     /// Injects view's `g:clipboard` provider (see
     /// [`REGISTER_CLIPBOARD_CHUNK`]). A `notify`, like `register_bridge`:
     /// this only needs to be *ordered*, never *live before `ui_attach`
@@ -3643,6 +3740,7 @@ mod tests {
             ("HOLD_NOTIFY_CHUNK", HOLD_NOTIFY_CHUNK),
             ("OPEN_FILE_CHUNK", OPEN_FILE_CHUNK),
             ("PREVIEW_CHUNK", PREVIEW_CHUNK),
+            ("PROBE_CLAIMANTS_CHUNK", PROBE_CLAIMANTS_CHUNK),
             ("RENAME_CHUNK", RENAME_CHUNK),
             ("REVIEW_CLEAR_CHUNK", REVIEW_CLEAR_CHUNK),
             ("REVIEW_SHOW_CHUNK", REVIEW_SHOW_CHUNK),
@@ -3996,6 +4094,79 @@ mod tests {
             params,
             vec![Value::from("termresponse"), Value::from(ANSWER)]
         );
+    }
+
+    /// The claimant probe's load-bearing properties, each a silent defect
+    /// if it drifts: a probe that reads anything but `package.loaded` asks a
+    /// question no plugin manager answers the same way, one that fires on
+    /// `VimEnter` misses a manager's deferred load, one whose group does not
+    /// clear itself stacks a second copy after an engine restart, and a
+    /// notify outside a `pcall` is a timer-driven call that can raise on a
+    /// channel already torn down.
+    ///
+    /// The three that keep a repeating autocmd from becoming a per-idle
+    /// scan: it answers only on a first or changed reading, and it deletes
+    /// its own group once every module is found or the session is a minute
+    /// old.
+    #[test]
+    fn the_claimant_probe_asks_package_loaded_at_every_idle_until_it_knows() {
+        assert!(PROBE_CLAIMANTS_CHUNK.contains("package.loaded[name]"));
+        assert!(PROBE_CLAIMANTS_CHUNK.contains("'SafeState'"));
+        assert!(PROBE_CLAIMANTS_CHUNK.contains("'view_bridge_claimants', { clear = true }"));
+        assert_eq!(
+            PROBE_CLAIMANTS_CHUNK
+                .matches("channel, 'view_bridge'")
+                .count(),
+            1,
+            "one answer, and it rides the bridge every other reading already does"
+        );
+        assert!(PROBE_CLAIMANTS_CHUNK.contains("pcall(vim.rpcnotify"));
+        assert!(
+            !PROBE_CLAIMANTS_CHUNK.contains("VimEnter"),
+            "a reading taken at VimEnter misses every manager that defers its own loading"
+        );
+        assert!(
+            !PROBE_CLAIMANTS_CHUNK.contains("once = true"),
+            "a cold first launch idles many times before the stack it is cloning exists"
+        );
+        assert!(
+            PROBE_CLAIMANTS_CHUNK.contains("if first or fresh then"),
+            "a steady state must send nothing at all"
+        );
+        assert!(
+            PROBE_CLAIMANTS_CHUNK.contains("#loaded == #modules or vim.uv.now() > deadline"),
+            "the group must stop itself once it knows, and again on a deadline"
+        );
+        assert!(PROBE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_augroup_by_id"));
+    }
+
+    /// The question asked and the answer's use come from one table, so a
+    /// row added to it cannot arrive with nothing probing for its module.
+    #[test]
+    fn the_probe_asks_for_exactly_the_shipped_claimant_modules() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.probe_claimants(7).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(params[0], Value::from(PROBE_CLAIMANTS_CHUNK));
+        let args = params[1].as_array().expect("channel and the module list");
+        let [channel, modules] = args.as_slice() else {
+            unreachable!("the chunk takes exactly two arguments: {args:?}")
+        };
+        assert_eq!(channel.as_u64(), Some(7));
+        let asked: Vec<&str> = modules
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let shipped: Vec<&str> = view_core::native::surfaces::SURFACE_CLAIMANTS
+            .iter()
+            .map(|claimant| claimant.module)
+            .collect();
+        assert_eq!(asked, shipped);
     }
 
     /// Every trigger the bridge exists to carry lives in the one group, and

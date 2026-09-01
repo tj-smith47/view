@@ -326,6 +326,24 @@ pub enum Msg {
     /// completed walk is a claimant whose float is gone, which is what
     /// retires the notice about it (`update::surface_conflict`).
     FloatSweep,
+    /// The claimant probe's answer: the Lua module names from
+    /// [`SURFACE_CLAIMANTS`](crate::native::surfaces::SURFACE_CLAIMANTS)
+    /// that `package.loaded` reported present, on the first `SafeState`
+    /// after `VimEnter`.
+    ///
+    /// The first of the three triggers that resolve the startup hold, and
+    /// the only one that can collapse it. Asked once, off the paint path,
+    /// about no plugin private: `package.loaded` is the public module
+    /// registry. A claimant that loads *after* this answer is not
+    /// collapsed -- its messages release with the rest and toast normally,
+    /// which is the honest bound of a probe taken once.
+    ClaimantsProbed(Vec<String>),
+    /// The startup hold's deadline elapsed
+    /// ([`Effect::ScheduleStartupHold`]) with no probe answer. Releases the
+    /// hold, which is what makes an engine that never answers degrade to
+    /// the behaviour view had before the hold existed rather than to
+    /// silence.
+    StartupHoldExpired,
     /// One `nvim_buf_lines_event` notification forwarded from a buffer
     /// attached via `RpcCall::BufAttach`. Carries nvim's own change shape
     /// verbatim -- distinct from [`Msg::BufferChanged`] (the statusline's
@@ -1144,6 +1162,20 @@ pub enum Effect {
     /// expire.
     ScheduleToastExpiry {
         id: MessageId,
+        after: Duration,
+    },
+    /// Arms the startup hold's deadline: after `after` elapses the timer
+    /// worker sends [`Msg::StartupHoldExpired`] into the loop. Exactly
+    /// [`Effect::ScheduleToastExpiry`]'s shape and served by the same
+    /// one-shot thread, because it is the same thing -- a wakeup on a loop
+    /// with no free-running clock.
+    ///
+    /// The degrade when a runtime or harness drops this effect is stated
+    /// rather than hidden: the first keypress becomes the hold's only
+    /// remaining release, so an engine that dies before the probe answers,
+    /// in a session where nobody types, keeps its startup messages in the
+    /// history and paints none of them.
+    ScheduleStartupHold {
         after: Duration,
     },
     /// Re-nominates `path` after a grace period, so an answer of

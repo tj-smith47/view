@@ -752,6 +752,15 @@ fn run_scenario(
         if let Err(err) = session.drive_step(step) {
             failing_step = Some(index);
             detail = Some(err.to_string());
+            // The report line names the step and the needle; what it cannot
+            // carry is the 100x30 grid the needle was missing from, which is
+            // usually the whole diagnosis (an overlay standing over the cells
+            // the assertion reads, rather than the state never arriving).
+            // Behind an opt-in name so an ordinary gate run keeps its
+            // one-line-per-row shape.
+            if std::env::var_os("VIEW_COMPAT_DUMP").is_some() {
+                eprintln!("--- screen at failure ---\n{}\n---", session.pty().screen());
+            }
             break;
         }
     }
@@ -845,11 +854,13 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
 
 /// The `(scenario stem, state, clearing task, what clearing it means)` rows
 /// this suite expects to be red, each with the task whose landing turns it
-/// green:
+/// green.
 ///
-/// - `noice`/`unaccommodated` asserts the single conflict notice `view`
-///   raises when a plugin claims a surface it has externalized, and the
-///   remedy that notice carries. Neither exists yet; **T19** builds them.
+/// Empty, and that is a state this list is meant to reach rather than a
+/// disabled mechanism: every scenario the suite carries now passes on its
+/// own. The reconciliation below is still exercised, against a manifest the
+/// tests own rather than this one, so an empty list here cannot make those
+/// legs pass by reconciling nothing (`apply_red_expectation_over`).
 ///
 /// A row here is not a waiver. Red-and-listed reports distinctly and does
 /// not fail the run; green-and-listed is a hard failure, so the task that
@@ -863,12 +874,7 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
 /// the row's cell there says what has to become true for it to go green, in
 /// terms of the product, since the plan marker beside it means nothing
 /// outside this repo's own planning notes.
-const EXPECTED_RED: [RedRow; 1] = [(
-    "noice",
-    "unaccommodated",
-    "T19",
-    "view raises its own conflict notice on a default first launch",
-)];
+const EXPECTED_RED: [RedRow; 0] = [];
 
 /// One [`EXPECTED_RED`] row: scenario stem, state, the task that clears it,
 /// and what a reader of the evidence page is told has to become true.

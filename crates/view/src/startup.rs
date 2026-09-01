@@ -276,6 +276,16 @@ fn register_and_attach(
         .register_bridge(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
     crate::vlog::log("engine", "registered view_bridge autocmd group");
+    // armed here rather than from the `VimEnter` arm the way the other
+    // startup probes are: the chunk waits for the first idle transition
+    // itself, and arming it before sourcing begins is what makes it
+    // unmissable -- a config that errors out mid-source still reaches an
+    // idle main loop, and still owes the user the answer
+    engine
+        .handle
+        .probe_claimants(engine.api_info.channel_id)
+        .map_err(AttachFailure::Attach)?;
+    crate::vlog::log("engine", "armed the surface-claimant probe");
     let Some((width, height, surfaces)) = start() else {
         crate::vlog::log("engine", "no terminal size ever came; killing the child");
         // `Engine`'s own `Drop` is the kill and the reap (see its impl):

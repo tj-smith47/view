@@ -532,6 +532,13 @@ mod tests {
     #[test]
     fn messages_overlay_paints_entry_text() {
         let mut model = model_with_grid(20, 5);
+        // past the startup window, where a foreign message is parked rather
+        // than stacked (`view_core::native::toast::StartupHold`): this is a
+        // test about where a toast paints, not about when one is shown
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
         apply(
             &mut model,
             UiEvent::MsgShow {

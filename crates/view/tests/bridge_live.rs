@@ -340,6 +340,41 @@ fn a_float_opened_after_the_leading_scan_is_still_reported() {
     panic!("no round observed the leading scan ahead of the second float; the host stalled the deferred scan past every gap tried: {rounds:?}");
 }
 
+/// The whole probe against a real engine: what `package.loaded` answers,
+/// when it answers it, and that the answer decodes back into the message
+/// `update` acts on. A fixture that requires nothing and one that stands a
+/// module in the registry, so a pass cannot come from the probe answering
+/// the same thing either way.
+#[test]
+fn the_claimant_probe_answers_what_the_session_actually_loaded() {
+    for (name, init, expected) in [
+        ("claimants-bare", "", Vec::new()),
+        (
+            "claimants-loaded",
+            "package.loaded['noice'] = { probed = true }\n",
+            vec!["noice".to_string()],
+        ),
+    ] {
+        let session = Session::start(name, init);
+        session
+            .engine
+            .handle
+            .probe_claimants(session.engine.api_info.channel_id)
+            .unwrap();
+        // the probe fires on the first idle transition, which an eval
+        // barrier is not: this forces nvim through its main loop
+        session.eval("execute('sleep 100m')");
+        let mut model = model();
+        let probed = session
+            .wait_for(&mut model, ARRIVAL, |msg| match msg {
+                Msg::ClaimantsProbed(loaded) => Some(loaded.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: the probe never answered"));
+        assert_eq!(probed, expected, "{name}");
+    }
+}
+
 /// The switch has to reach the colors a painter reads, not just the message
 /// log. `view-tui` derives its chrome from the live highlight table every
 /// frame, so this asserts against the same `Theme::chrome` accessor the

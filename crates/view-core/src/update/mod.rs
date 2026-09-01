@@ -9,6 +9,17 @@ use crate::native::diff::BufTextChangedEvent;
 use crate::native::keys::{Action, Resolved};
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
+use crate::native::toast::HoldOutcome;
+
+/// How long a session parks foreign startup messages before giving up on
+/// hearing which plugin claimed a surface and letting them through.
+///
+/// The deadline, not the schedule: the claimant probe answers in the first
+/// hundred milliseconds of an ordinary launch and resolves the hold there.
+/// This bounds the launch where it never answers at all -- a config that
+/// errors out before `VimEnter`, a plugin manager that blocks on a network
+/// install -- so the hold cannot silently swallow a message.
+const STARTUP_HOLD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
 mod ai;
 mod ai_fs;
@@ -131,9 +142,18 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // `VimEnter`, so a chain that waited for that event would never hear
         // about the recovery that failed. The reading is gated engine-side
         // and answers "nothing yet" until `VimEnter` has fired
-        Msg::EngineAttached => vec![Effect::Rpc(RpcCall::ProbeSwapRecovery {
-            generation: model.supervision.begin_swap_probe(),
-        })],
+        Msg::EngineAttached => vec![
+            Effect::Rpc(RpcCall::ProbeSwapRecovery {
+                generation: model.supervision.begin_swap_probe(),
+            }),
+            // the deadline on the startup hold, armed from the first moment
+            // there is a connection at all. Nothing else guarantees the hold
+            // ends: the probe that normally resolves it rides on `VimEnter`,
+            // and a config that parks nvim on an error never reaches one
+            Effect::ScheduleStartupHold {
+                after: STARTUP_HOLD_DEADLINE,
+            },
+        ],
         Msg::EngineDown(exit) => {
             model.running = false;
             vec![Effect::Quit {
@@ -436,6 +456,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::FloatObserved(float) => surface_conflict::observe_float(model, &float),
         Msg::FloatSweep => surface_conflict::sweep_floats(model),
+        Msg::ClaimantsProbed(probed) => surface_conflict::on_claimants_probed(model, &probed),
+        Msg::StartupHoldExpired => {
+            model.dirty |= model
+                .engine
+                .messages
+                .resolve_startup_hold(HoldOutcome::Release);
+            Vec::new()
+        }
         // The key-dispatch-path arm: one event per keystroke in an attached
         // buffer, folded into the open review's hunks and nothing else. The
         // work is O(open hunks) and allocation-free for an edit outside
@@ -964,13 +992,6 @@ fn take_binding(model: &mut Model, notation: &str) -> Option<Resolved> {
     resolved
 }
 
-/// nvim's own name for normal mode in the `mode_change` event.
-///
-/// Matched exactly rather than by prefix: `cmdline_normal` is a command line
-/// being typed, where `<Esc>` abandons the line the user is writing, and
-/// that is not the idle reading state a toast dismissal belongs to.
-const NORMAL_MODE: &str = "normal";
-
 /// Which way `notation` moves the AI panel's transcript window, or `None`
 /// for a key that does not scroll it.
 ///
@@ -1039,6 +1060,15 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
     // never delivers to `update`; runs regardless of focus, since
     // the semantic is user activity, not specifically engine input
     let cmdline_open = model.engine.cmdline.is_some();
+    // ahead of the dismissal, never after it: the first keypress is the end
+    // of the startup window, and a message drained onto the stack by a key
+    // the same call is about to dismiss on would be shown and retired in one
+    // frame. Draining re-stamps `shown_at_flush`, which is what the
+    // at-least-one-visible-frame guard inside the dismissal reads
+    model.dirty |= model
+        .engine
+        .messages
+        .resolve_startup_hold(HoldOutcome::Release);
     if model
         .engine
         .messages
@@ -1101,28 +1131,35 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // A sticky error outlives every incidental keypress by design
             // (`MessageEntry::is_persistent`), which without a way out is a
             // box that occludes the buffer until some later error happens to
-            // replace it. Normal-mode `<Esc>` is the way out: it is the key a
-            // reader already reaches for to cancel, it edits nothing in
-            // normal mode, and the same reflex clears highlights and the
-            // message line in the configs nvim users arrive from. Insert,
-            // visual and operator-pending are excluded because `<Esc>` is
-            // load-bearing there -- leaving the mode is the gesture, not
-            // dismissing a toast -- which keeps the dismissal deliberate.
+            // replace it. `<Esc>` is the way out: it is the key a reader
+            // already reaches for to cancel, and the same reflex clears
+            // highlights and the message line in the configs nvim users
+            // arrive from.
             //
             // The key still reaches nvim either way, so nothing an `<Esc>`
             // does in the engine is shadowed and a session with no toast up
             // pays one string compare for this.
             //
-            // The mode reading is advisory, not exact: `mode.current` is
-            // only ever written from nvim's own `mode_change`, so between
-            // view forwarding an `i` and that event arriving it still says
-            // `normal` while nvim is already inserting. An `<Esc>` inside
-            // that window dismisses, which is the one way the exclusions
-            // above leak. Closing it would mean predicting the mode locally
-            // -- state nvim owns -- so the window is named rather than
-            // guarded, and nothing is lost when it is hit: the key is
-            // forwarded, so insert is still left, and the text is still in
-            // the history.
+            // Deliberately not narrowed to normal mode, which is what it
+            // used to be. The only mode signal a UI gets is `mode_change`,
+            // and that is nvim's *cursor shape* mode, which a plugin can
+            // leave standing at a value `mode()` disagrees with: on a
+            // default heavy launch with noice's cmdline and message
+            // components on -- the launch this notice exists for -- nvim
+            // reports `replace` at rest and never corrects it, while
+            // `mode()` answers `n` throughout (compat, `neo-tree (heavy,
+            // unaccommodated)`; noice takes `guicursor` over and hands it
+            // back around its own cmdline). A mode-gated dismissal is
+            // therefore not merely approximate there, it is absent: the one
+            // way out of a box across the top of the buffer never fires,
+            // for the whole session.
+            //
+            // What that costs is real and smaller: an `<Esc>` leaving
+            // insert or visual takes a standing toast with it, so a
+            // sticky message can go before it has been read. It stays
+            // readable -- every dismissed entry is in the message history
+            // (`<leader>fm`) -- and a way out that always works is worth
+            // more than a dismissal that is always deliberate.
             //
             // The busy modal is excluded outright. It offers `<Esc>` as its
             // own dismissal (`SupervisionChoice::Dismiss`), and the error
@@ -1131,11 +1168,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // spends an answer the user made on a dismissal they did not
             // (the same reasoning `note_supervision_choice` already applies
             // to a focused overlay under the modal).
-            if notation == "<Esc>"
-                && model.engine.mode.current == NORMAL_MODE
-                && !modal_was_open
-                && model.engine.messages.dismiss_sticky()
-            {
+            if notation == "<Esc>" && !modal_was_open && model.engine.messages.dismiss_sticky() {
                 model.dirty = true;
             }
             vec![Effect::Rpc(RpcCall::Input { notation })]

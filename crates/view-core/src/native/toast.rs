@@ -32,6 +32,82 @@ pub enum Route {
     /// Everything else: an ordinary toast that expires on its own after
     /// [`TRANSIENT_TOAST_TIMEOUT`] with no other input.
     Transient,
+    /// A [`Route::Transient`] message that arrived while the startup hold
+    /// was still open ([`StartupHold`]): recorded to scrollback exactly as
+    /// it would have been, and parked instead of taking a toast slot. Only
+    /// [`route_under_hold`] answers this, and only for foreign traffic --
+    /// view's own notices, prompts, statusline kinds and the persistent
+    /// kinds are never held (see that function).
+    HistoryOnly,
+}
+
+/// Whether a session is still in the window where a foreign startup message
+/// is parked rather than toasted, and what the resolution of that window
+/// decided.
+///
+/// Opens at [`Messages::default`](crate::model::Messages) -- before the
+/// engine is spawned, before attach, before nvim sources a line of config --
+/// because the traffic it exists to catch (a plugin's setup-time complaint)
+/// arrives in the first redraw batch after attach, ahead of `VimEnter` and
+/// of any RPC round trip view could take to decide with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StartupHold {
+    /// Still open: a foreign transient message is parked, and may still be
+    /// released onto the stack.
+    #[default]
+    Pending,
+    /// A claimant was found and named, so the parked messages stay in the
+    /// history and the ones still arriving from the same startup join them.
+    /// The notice standing on screen is what explains where they went.
+    Collapsed,
+    /// Over: every message routes exactly as it did before this mechanism
+    /// existed.
+    Off,
+}
+
+impl StartupHold {
+    /// Whether a foreign transient message arriving now is parked rather
+    /// than stacked.
+    #[must_use]
+    pub fn holds(self) -> bool {
+        matches!(self, Self::Pending | Self::Collapsed)
+    }
+}
+
+/// What resolving the startup hold does with what it parked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldOutcome {
+    /// A claimant is named on screen: the parked messages stay in the
+    /// history ring, reachable from the message-history overlay, and the
+    /// hold keeps parking until the first keypress so a late complaint from
+    /// the same startup lands beside them rather than on top of the notice.
+    Collapse,
+    /// Nothing to explain: the parked messages drain onto the stack in
+    /// arrival order and the session behaves exactly as it did before this
+    /// mechanism existed.
+    Release,
+}
+
+/// [`route`] under a startup hold: the same table, except that a foreign
+/// transient message is parked ([`Route::HistoryOnly`]) while `hold` still
+/// holds.
+///
+/// Four classes are never parked, and the last is what keeps the collapse
+/// honest. Persistent kinds, prompts and statusline kinds are excluded by
+/// construction -- [`route`] never calls them `Transient` -- and view's own
+/// notices are excluded here: view is not a claimant and never speaks in
+/// one's name, so a broken-config line, a startup key-buffer warning or any
+/// other line view raises about itself paints immediately, conflict or no
+/// conflict. Without that a config typo the user needs to see would be
+/// demoted behind a notice that never mentions it.
+#[must_use]
+pub fn route_under_hold(kind: &str, hold: StartupHold) -> Route {
+    match route(kind) {
+        Route::Transient if hold.holds() && !MessageEntry::is_native_kind(kind) => {
+            Route::HistoryOnly
+        }
+        other => other,
+    }
 }
 
 /// The routing table, one match -- the table IS the implementation.
@@ -68,7 +144,7 @@ pub const TRANSIENT_TOAST_TIMEOUT: Duration = Duration::from_secs(4);
 pub fn timeout_for(route: Route) -> Option<Duration> {
     match route {
         Route::Transient => Some(TRANSIENT_TOAST_TIMEOUT),
-        Route::Prompt | Route::Sticky | Route::Statusline => None,
+        Route::Prompt | Route::Sticky | Route::Statusline | Route::HistoryOnly => None,
     }
 }
 

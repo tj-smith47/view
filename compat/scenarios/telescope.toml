@@ -59,6 +59,11 @@ steps = [
   # the fixture's LazyDone autocmd closes it; a keystroke sent before that
   # lands in the install window instead of the buffer.
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # Read before any key is sent, because <Esc> is the dismissal of a
+  # sticky notice whatever mode nvim last reported and this scenario
+  # spends several of them: this is the default launch's own reading.
+  { wait_for = "view: noice.nvim is using the command line and the message area", timeout_ms = 15000 },
+  { wait_for = "Set [native] palette = false and [native] notifications = false", timeout_ms = 5000 },
   { send = ":Telescope help_tags<CR>" },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
   { send = "nvim_buf_atta" },
@@ -82,18 +87,23 @@ steps = [
   # carry a telescope filetype, and not the two border windows, whose
   # empty filetype would reach the anonymous wording if they claimed
   # anything at all. The anonymous needle names the surface, because this
-  # fixture's noice raises a true anonymous line about the message area
-  # (below) and a bare "a plugin is drawing over" could not tell them apart.
+  # fixture's noice would raise a true anonymous line about the message
+  # area, and a bare "a plugin is drawing over" could not tell them apart.
   { assert_absent = "TelescopePrompt is drawing over" },
   { assert_absent = "TelescopeResults is drawing over" },
   { assert_absent = "a plugin is drawing over the command line" },
-  # noice's health float draws in the message area and is a true claim --
-  # but `markdown` is the filetype its own on_open sets so the message
-  # renders, not a name for the plugin, so it reaches the user as an
-  # unnamed plugin rather than as a document type wearing a plugin's place.
-  # Clipped at the message layer's own width (the grid less two), which
-  # this line is longer than: only what fits is on the screen to match.
-  { wait_for = "view: a plugin is drawing over the message area, which view owns. Set [native] notific", timeout_ms = 15000 },
+  # noice's health float draws in the message area and is a true claim,
+  # and it carries no name view can use -- `markdown` is the filetype its
+  # own on_open sets so the message renders, not a name for the plugin --
+  # so on its own it would reach the user as an unnamed plugin. It does
+  # not reach the user that way here, and that is the assertion: this
+  # fixture loads noice, view's claimant probe named noice for the message
+  # area above before any float was sighted, and an unnamed float over a
+  # surface a named claimant already covers is the same conflict counted
+  # twice. One notice per plugin, whichever of the two mechanisms saw it.
+  # The suppression is the claimant's coverage rather than its notice line,
+  # so it survives the <Esc> that took the line down.
+  { assert_absent = "a plugin is drawing over the message area" },
   { assert_absent = "markdown is drawing over" },
   # A second <Esc> from the picker's normal mode dismisses it.
   { send = "<Esc>" },

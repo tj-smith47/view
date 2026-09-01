@@ -121,6 +121,16 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             Some(Msg::BufferChanged { name, modified })
         }
         "float" => decode_float_observed(params),
+        // the whole answer is the one array argument, and an empty one is a
+        // real answer -- "none of them loaded" is what releases the startup
+        // hold, so a session that loaded nothing must reach `update` too
+        "claimants" => Some(Msg::ClaimantsProbed(
+            first
+                .as_array()?
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect(),
+        )),
         _ => None,
     }
 }

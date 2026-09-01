@@ -105,7 +105,7 @@ pub(super) fn on_checktime_reply(
             model.forget_file_gone_confirmation(&path);
             if model
                 .engine
-                .withdraw_native_notice(&file_gone_prefix(&path))
+                .withdraw_native_notice(&file_notice_family(&path))
             {
                 model.dirty = true;
             }
@@ -162,7 +162,7 @@ pub(super) fn on_checktime_reply(
                 // once per window would otherwise buy a fresh probe, and a
                 // fresh sleeping thread, for every window it stays gone
                 let confirmed = model.take_file_gone_confirmation(request_id, &path)
-                    || model.engine.has_native_notice(&file_gone_prefix(&path));
+                    || model.engine.has_native_notice(&file_notice_family(&path));
                 if !confirmed {
                     effects.push(Effect::ReprobeExternalWrite { path });
                     continue;
@@ -194,10 +194,13 @@ pub(super) fn on_checktime_reply(
                 } else {
                     "and the buffer still holds the content it last read"
                 };
-                let prefix = file_gone_prefix(&path);
+                let family = file_notice_family(&path);
                 let raised = model.engine.record_native_notice_once(
-                    &prefix,
-                    format!("{prefix} -- nothing was reloaded, {fate}"),
+                    &family,
+                    format!(
+                        "{family}no longer a readable file on disk -- nothing was \
+                         reloaded, {fate}"
+                    ),
                 );
                 // a native notice always routes transient, so recording one
                 // always owes an expiry effect: an empty answer here is the
@@ -219,13 +222,21 @@ pub(super) fn on_checktime_reply(
     effects
 }
 
-/// The opening of the notice an unreadable path raises, without the clause
-/// naming which of the two true things the buffer is holding: the spelling
-/// both the notice and its later withdrawal are keyed on, so a notice raised
-/// for a modified buffer is still retracted by an answer that finds the path
+/// The family of every native notice about one path, which is what both the
+/// notice and its later withdrawal are keyed on: a notice raised for a
+/// modified buffer is still retracted by an answer that finds the path
 /// readable again after the edits were saved elsewhere.
-fn file_gone_prefix(path: &std::path::Path) -> String {
-    format!("{} is no longer a readable file on disk", path.display())
+///
+/// `view: `, the noun before the path and the word after it are not
+/// decoration. Every native notice family shares the opening so that no two
+/// of them can prefix each other -- withdrawal is `starts_with`, so a family
+/// that is a prefix of another retracts the other's line -- and a bare path
+/// opening the line would place a family under the user's control. The
+/// trailing `is ` is what separates two paths one of which starts with the
+/// other: without it the family for `/a` is a prefix of the family for
+/// `/a b`, and taking the first notice down takes the second with it.
+pub(super) fn file_notice_family(path: &std::path::Path) -> String {
+    format!("view: file {} is ", path.display())
 }
 
 /// Folds one `Msg::ExternalWatchDegraded` into a notice the user actually
@@ -547,8 +558,8 @@ mod tests {
             assert_eq!(
                 text,
                 format!(
-                    "/proj/src/lib.rs is no longer a readable file on disk -- \
-                     nothing was reloaded, {tail}"
+                    "view: file /proj/src/lib.rs is no longer a readable file \
+                     on disk -- nothing was reloaded, {tail}"
                 ),
                 "the notice docs/ai.md quotes for modified={modified} must say exactly this"
             );
@@ -625,6 +636,10 @@ mod tests {
             )
         };
         let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", false);
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
         let _ = update(
             &mut model,
             Msg::Redraw(vec![crate::events::UiEvent::MsgShow {

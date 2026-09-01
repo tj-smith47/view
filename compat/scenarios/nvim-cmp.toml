@@ -76,7 +76,12 @@ steps = [
   { probe = "luaeval('(function() local cmp = require(\"cmp\") cmp.setup.cmdline(\":\", { mapping = cmp.mapping.preset.cmdline(), sources = { { name = \"buffer\" } } }) return \"armed\" end)()')", expect = "armed" },
   # Two words sharing a prefix, so the buffer source has something to
   # offer both in the buffer and at the cmdline.
-  { send = "iprefabricated preflight<Esc>" },
+  # `<C-c>` rather than `<Esc>` for the mode exits in this state, here and
+  # below: `<Esc>` is also the dismissal of a standing sticky notice, and
+  # the noice line asserted further down has to still be up when cmp's own
+  # line joins it. Both leave insert mode, which is all these two steps are
+  # for.
+  { send = "iprefabricated preflight<C-c>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   # First the negative control from the same plugin: cmp's insert-mode
   # menu opens beside the cursor, claims nothing, and must stay unnamed.
@@ -93,7 +98,7 @@ steps = [
   { send = "e" },
   { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 15000 },
   { assert_absent = "cmp_menu is drawing over" },
-  { send = "<Esc>" },
+  { send = "<C-c>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   # Now the claim. Keys go one per send for the same reason the present
   # state paces them: cmp reads a multi-column jump between CmdlineChanged
@@ -104,14 +109,19 @@ steps = [
   { send = "p" },
   { send = "r" },
   { send = "e" },
-  # What a defaults user must see, in one needle rather than two: the
-  # window named by the one identity it carries, the surface it took, and
-  # the key that gives it back. The line is sticky, so the keystrokes above
-  # cannot wipe it and this can wait on the screen for as long as the
-  # detection takes. The tail (" to give it back.") is not asserted: the
-  # line is longer than the message layer's clip at the grid's width less
-  # two, and only what fits is on the screen to match.
-  { wait_for = "view: cmp_menu is drawing over the command line, which view owns. Set [native] palette = false", timeout_ms = 15000 },
+  # What a defaults user must see: the window named by the one identity it
+  # carries, the surface it took, and the key that gives it back. The line
+  # is sticky, so the keystrokes above cannot wipe it and this can wait on
+  # the screen for as long as the detection takes. Two needles because the
+  # notice is two rows: the message layer clips at the grid's width less
+  # two rather than wrapping, so the remedy is put on its own line where a
+  # user can read it.
+  { wait_for = "view: cmp_menu is drawing over the command line, which view owns.", timeout_ms = 15000 },
+  { wait_for = "Set [native] palette = false to give it back.", timeout_ms = 5000 },
+  # cmp is a second plugin, and it keeps its own line: this fixture also
+  # loads noice, whose claimant notice covers the same command line, and
+  # one notice per plugin is the rule rather than one per surface.
+  { wait_for = "view: noice.nvim is using the command line", timeout_ms = 5000 },
   # Not the anonymous wording: this float carries a widget filetype, so the
   # notice names it rather than falling back to "a plugin". The surface is
   # named too -- this fixture's noice raises a true anonymous line about the

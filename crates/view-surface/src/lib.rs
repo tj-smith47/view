@@ -1109,6 +1109,14 @@ mod tests {
     fn model_with_grid(width: u16, height: u16) -> Model {
         let mut model = Model::new();
         model.engine.apply_grid(GridOp::Resize { width, height });
+        // past the startup window: a foreign message is parked rather than
+        // stacked until it closes (`view_core::native::toast::StartupHold`),
+        // and every test here is about where a toast paints rather than
+        // about when one is shown
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
         model
     }
 

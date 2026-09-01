@@ -383,8 +383,8 @@ fn a_removed_watched_file_is_announced_once_the_grace_confirms_it() {
     assert_eq!(
         text,
         format!(
-            "{} is no longer a readable file on disk -- nothing was reloaded, \
-             and the buffer still holds the content it last read",
+            "view: file {} is no longer a readable file on disk -- nothing \
+             was reloaded, and the buffer still holds the content it last read",
             case.path.display()
         )
     );
