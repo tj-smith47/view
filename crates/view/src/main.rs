@@ -706,14 +706,14 @@ fn seed_ai_enabled(
 /// would have said).
 fn caps_notice(cli: &Cli, caps: TermCaps, source: CapsSource) -> Option<String> {
     (cli.print_caps || cli.tier.is_some()).then(|| {
+        // rendered from the capability register, so the line a user reads
+        // and the table the build enforces are one thing: a capability that
+        // gains a row is printed here with no edit, and one printed here
+        // without a row cannot exist
         format!(
-            "view: terminal capabilities: tier={:?} sync={} truecolor={} \
-             kitty_kbd={} unicode_boxes={} ({})",
+            "view: terminal capabilities: tier={:?} {} ({})",
             caps.tier,
-            caps.sync,
-            caps.truecolor,
-            caps.kitty_kbd,
-            caps.unicode_boxes,
+            view_tui::tiers::resolved(&caps),
             source.label()
         )
     })
@@ -919,14 +919,11 @@ fn main() -> Result<()> {
     // `VIEW_LOG` takes the first verdict for the session's.
     vlog::log_with("startup", || {
         format!(
-            "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} \
-             unicode_boxes={} fence_seen={} source={} term={width}x{height}",
+            "version={} caps tier={:?} {} fence_seen={} source={} \
+             term={width}x{height}",
             VERSION,
             model.caps.tier,
-            model.caps.sync,
-            model.caps.truecolor,
-            model.caps.kitty_kbd,
-            model.caps.unicode_boxes,
+            view_tui::tiers::resolved(&model.caps),
             probe.fence_seen,
             term.caps_source().label()
         )

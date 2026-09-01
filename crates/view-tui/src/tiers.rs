@@ -118,6 +118,149 @@ const QUERY_DA1_FENCE: &[u8] = b"\x1b[c";
 /// order.
 const TRUECOLOR_SGR_PARAMS: [&str; 5] = ["48", "2", "1", "2", "3"];
 
+/// What decides a capability whose probe went unanswered.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub enum Fallback {
+    /// Nothing outside the terminal carries this fact, so an unanswered
+    /// question leaves the capability off. The floor, not a guess: a
+    /// terminal that did not say it can do this is driven as though it
+    /// cannot.
+    Unanswered,
+    /// The named environment variable decides.
+    EnvHint {
+        /// The variable read, spelled as the environment spells it, for a
+        /// listing that has to tell a user which one to look at.
+        var: &'static str,
+        /// How its value is read -- the same function the resolution path
+        /// calls, so a row cannot advertise a reading the build does not
+        /// perform.
+        read: fn(&EnvHints) -> bool,
+    },
+}
+
+impl Fallback {
+    /// What this fallback resolves to under `hints`.
+    #[must_use]
+    pub fn resolve(&self, hints: &EnvHints) -> bool {
+        match self {
+            Self::EnvHint { read, .. } => read(hints),
+            Self::Unanswered => false,
+        }
+    }
+}
+
+/// One capability view consumes: the probe that carries the fact, and what
+/// decides the bit when that probe stays silent.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub struct CapabilityRow {
+    /// The [`TermCaps`] field this row governs, spelled exactly as the
+    /// field is: the drift check matches the two by name.
+    pub capability: &'static str,
+    /// The bytes that ask the terminal, which is the whole of what
+    /// "authoritative probe" means here -- the same constant
+    /// [`Probe::start`] writes, so a row cannot cite a question this build
+    /// does not put on the wire.
+    pub query: &'static [u8],
+    /// Reads this capability out of resolved capabilities, so a listing
+    /// walks the register instead of restating the field list beside it.
+    pub read: fn(&TermCaps) -> bool,
+    /// What decides the bit when [`Self::query`] goes unanswered.
+    pub fallback: Fallback,
+}
+
+/// Synchronized output, from the DECRQM answer to [`QUERY_SYNC`]: a
+/// terminal reporting mode 2026 as set or reset (`Pm` 1 or 2) has it, one
+/// reporting it unrecognized does not. Captured in
+/// `docs/terminal-probe-wire-capture.md`, "A. kitty 0.45.0, dev-linux" and
+/// "What a terminal that does not support this answers".
+const SYNC: CapabilityRow = CapabilityRow {
+    capability: "sync",
+    query: QUERY_SYNC,
+    read: |caps| caps.sync,
+    fallback: Fallback::Unanswered,
+};
+
+/// 24-bit color, from the DECRQSS readback of [`QUERY_TRUECOLOR`]: the
+/// terminal echoes the SGR state it kept, so a quantized request answers
+/// negatively in its own words. Captured in
+/// `docs/terminal-probe-wire-capture.md`, sections A, F, G and H -- F and G
+/// being the pair that disqualifies `COLORTERM` as the oracle, a truecolor
+/// terminal reached over ssh with the variable unset and a tmux answering
+/// negatively with it set.
+const TRUECOLOR: CapabilityRow = CapabilityRow {
+    capability: "truecolor",
+    query: QUERY_TRUECOLOR,
+    read: |caps| caps.truecolor,
+    fallback: Fallback::EnvHint {
+        var: "COLORTERM",
+        read: |hints| truecolor_hint(hints.colorterm.as_deref()),
+    },
+};
+
+/// The kitty keyboard protocol, from the progressive-enhancement answer to
+/// [`QUERY_KITTY`]. Captured in `docs/terminal-probe-wire-capture.md`,
+/// "A. kitty 0.45.0, dev-linux".
+const KITTY_KBD: CapabilityRow = CapabilityRow {
+    capability: "kitty_kbd",
+    query: QUERY_KITTY,
+    read: |caps| caps.kitty_kbd,
+    fallback: Fallback::Unanswered,
+};
+
+/// Box-drawing cell accounting, from the cursor column reported after
+/// [`QUERY_BOX_GLYPH`] writes one `╭`: one column advanced means one cell.
+/// Captured in `docs/terminal-probe-wire-capture.md`, sections D and E,
+/// whose limits "What D and E prove, and what they do not" states -- this
+/// is the terminal's accounting, never the font's coverage.
+const UNICODE_BOXES: CapabilityRow = CapabilityRow {
+    capability: "unicode_boxes",
+    query: QUERY_BOX_GLYPH,
+    read: |caps| caps.unicode_boxes,
+    fallback: Fallback::EnvHint {
+        var: "LC_ALL/LC_CTYPE/LANG",
+        read: |hints| unicode_boxes_hint(hints.locale.as_deref()),
+    },
+};
+
+/// Every capability view consumes, as data rather than as a `match`, so the
+/// set is enumerable: the drift check that every probed [`TermCaps`] field
+/// still has a row has something to walk, and the resolution path and the
+/// user-facing listing read the same four rows rather than each keeping a
+/// list of their own.
+///
+/// A capability with no row here does not exist, which is what makes one
+/// more capability inferred from the environment somewhere off to the side
+/// unrepresentable rather than merely absent. `TermCaps::tier` has no row
+/// and is not a capability: it is derived from these by
+/// [`TermCaps::from_probe`] and is never probed.
+///
+/// Ordered as the spec's register table lists them, which is also the order
+/// every listing of these bits has printed since before this table existed.
+static REGISTER: [CapabilityRow; 4] = [SYNC, TRUECOLOR, KITTY_KBD, UNICODE_BOXES];
+
+/// Every capability row -- see [`REGISTER`].
+#[must_use]
+pub fn register() -> &'static [CapabilityRow] {
+    &REGISTER
+}
+
+/// The register resolved against `caps`, as one `name=value` run in
+/// register order.
+///
+/// The one rendering of these bits, shared by every listing a user or a log
+/// reader sees, so a capability gained or renamed cannot leave one listing
+/// saying something another does not.
+#[must_use]
+pub fn resolved(caps: &TermCaps) -> String {
+    REGISTER
+        .iter()
+        .map(|row| format!("{}={}", row.capability, (row.read)(caps)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// What the environment claims about capabilities the terminal can be
 /// asked about directly.
 ///
@@ -325,10 +468,10 @@ impl<'a> Probe<'a> {
     fn caps_from(&self, replies: &Replies) -> TermCaps {
         let truecolor = replies
             .truecolor
-            .unwrap_or_else(|| truecolor_hint(self.hints.colorterm.as_deref()));
+            .unwrap_or_else(|| TRUECOLOR.fallback.resolve(&self.hints));
         let unicode_boxes = replies
             .unicode_boxes
-            .unwrap_or_else(|| unicode_boxes_hint(self.hints.locale.as_deref()));
+            .unwrap_or_else(|| UNICODE_BOXES.fallback.resolve(&self.hints));
         TermCaps::from_probe(replies.sync, truecolor, replies.kitty)
             .with_unicode_boxes(unicode_boxes)
     }
@@ -1024,8 +1167,8 @@ fn probe_real_terminal() -> io::Result<(TermCaps, Option<Probe<'static>>)> {
 /// `/dev/null`) and the `cfg(not(unix))` arm (no termios equivalent to
 /// bound a raw read with at all).
 fn no_probe_caps(hints: &EnvHints) -> TermCaps {
-    TermCaps::from_probe(false, truecolor_hint(hints.colorterm.as_deref()), false)
-        .with_unicode_boxes(unicode_boxes_hint(hints.locale.as_deref()))
+    TermCaps::from_probe(false, TRUECOLOR.fallback.resolve(hints), false)
+        .with_unicode_boxes(UNICODE_BOXES.fallback.resolve(hints))
 }
 
 #[cfg(test)]
@@ -2112,5 +2255,131 @@ mod tests {
         );
         assert_eq!(CapsSource::Probed.label(), "probed");
         assert_eq!(CapsSource::Assumed.label(), "assumed");
+    }
+
+    /// The field names a `TermCaps` value renders under `{:?}`.
+    ///
+    /// The debug shape is the honest enumeration available in-crate:
+    /// `TermCaps` is `#[non_exhaustive]`, so no exhaustive struct pattern
+    /// can be written here, and a field added over there lands in this
+    /// rendering with no edit anywhere.
+    fn termcaps_debug_fields() -> Vec<String> {
+        let rendered = format!("{:?}", TermCaps::default());
+        let body = rendered
+            .split_once('{')
+            .and_then(|(_, rest)| rest.rsplit_once('}'))
+            .map(|(body, _)| body)
+            .expect("TermCaps derives Debug as a braced struct");
+        body.split(',')
+            .filter_map(|field| field.split(':').next())
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn every_termcaps_field_has_a_register_row() {
+        let fields = termcaps_debug_fields();
+        assert!(
+            fields.contains(&"tier".to_string()),
+            "the exclusion below names a field that must exist, got {fields:?}"
+        );
+        // `tier` is excluded by construction, not by oversight: it is
+        // derived by `TermCaps::from_probe` from the rows below and is
+        // never probed, so a row for it would name a question no terminal
+        // is ever asked.
+        let probed: Vec<&str> = fields
+            .iter()
+            .map(String::as_str)
+            .filter(|name| *name != "tier")
+            .collect();
+
+        for field in &probed {
+            assert!(
+                register().iter().any(|row| row.capability == *field),
+                "TermCaps::{field} is a probed capability with no capability \
+                 register row: add one naming the probe that carries the fact \
+                 and what decides it when that probe is silent"
+            );
+        }
+        for row in register() {
+            assert!(
+                probed.contains(&row.capability),
+                "capability register row `{}` names no TermCaps field; the \
+                 probed fields are {probed:?}",
+                row.capability
+            );
+        }
+    }
+
+    #[test]
+    fn no_row_lists_an_env_var_as_its_probe() {
+        const NEVER_A_PROBE: [&str; 5] = ["COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TERM"];
+        for row in register() {
+            let query = String::from_utf8_lossy(row.query);
+            for var in NEVER_A_PROBE {
+                assert!(
+                    !query.contains(var),
+                    "`{}` names {var} as its probe; an environment variable is \
+                     a hint that shortens a probe, never the question itself",
+                    row.capability
+                );
+            }
+            assert!(
+                query.starts_with('\x1b') || query.starts_with('\r'),
+                "`{}` has a probe that puts nothing on the wire: {query:?}",
+                row.capability
+            );
+        }
+    }
+
+    #[test]
+    fn every_rows_probe_is_a_query_the_batch_actually_writes() {
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[?62c".as_slice())]);
+        let mut sink = Vec::new();
+        detect(&mut source, &mut sink, PROBE_DEADLINE, &EnvHints::default()).unwrap();
+        for row in register() {
+            assert!(
+                sink.windows(row.query.len()).any(|w| w == row.query),
+                "`{}` cites a query the startup batch never sends",
+                row.capability
+            );
+        }
+    }
+
+    #[test]
+    fn a_silent_probe_resolves_every_row_to_its_registered_fallback() {
+        let hints = EnvHints {
+            colorterm: Some("truecolor".to_string()),
+            locale: Some("en_US.UTF-8".to_string()),
+            ..EnvHints::default()
+        };
+        // the fence and nothing else: every capability question goes
+        // unanswered, which is exactly the case each row's fallback claims
+        // to describe
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[?62c".as_slice())]);
+        let mut sink = Vec::new();
+        let (caps, _) = detect(&mut source, &mut sink, PROBE_DEADLINE, &hints).unwrap();
+        for row in register() {
+            assert_eq!(
+                (row.read)(&caps),
+                row.fallback.resolve(&hints),
+                "`{}` resolves to something its registered fallback ({:?}) \
+                 does not describe",
+                row.capability,
+                row.fallback
+            );
+        }
+        // the hint each row declares, named: the resolution above passes
+        // whichever variable a row happens to point at, and these two are
+        // the ones spec and captures oblige
+        assert!(matches!(
+            TRUECOLOR.fallback,
+            Fallback::EnvHint {
+                var: "COLORTERM",
+                ..
+            }
+        ));
+        assert!(matches!(SYNC.fallback, Fallback::Unanswered));
     }
 }

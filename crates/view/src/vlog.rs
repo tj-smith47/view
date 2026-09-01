@@ -135,9 +135,9 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::CapsUpgraded(caps) => {
             log_with("startup", || {
                 format!(
-                    "caps tier={:?} sync={} truecolor={} kitty_kbd={} \
-                     unicode_boxes={} answered late",
-                    caps.tier, caps.sync, caps.truecolor, caps.kitty_kbd, caps.unicode_boxes
+                    "caps tier={:?} {} answered late",
+                    caps.tier,
+                    view_tui::tiers::resolved(caps)
                 )
             });
         }
