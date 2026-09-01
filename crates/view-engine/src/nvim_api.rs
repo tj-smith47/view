@@ -137,18 +137,27 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// arguments at all. Constant by construction for the same reason as
 /// [`FEED_KEYS_CHUNK`], and with nothing to interpolate in the first place.
 ///
-/// The three branches are the engine's own `vim.notify`, reproduced from a
-/// live capture of it rather than recalled
-/// (`docs/vim-notify-takeover-wire-capture.md`): `ERROR` echoes with
-/// `err = true`, which the engine renders as a `msg_show` of kind
-/// `echoerr`; `WARN` echoes under `WarningMsg`; everything else, including
-/// a call that passes no level at all, echoes unhighlighted. The capture
-/// pins all five `vim.log.levels` values against the default's own wire
-/// output, byte for byte, so "the engine default" here is a measured shape
-/// and not a paraphrase of one. `msg` is passed through to `nvim_echo`
-/// unconverted, as the default does: a non-string argument is refused by
-/// the API with the same error the default raises, rather than silently
-/// stringified into something the caller never wrote.
+/// The body is the engine's own `vim.notify` reproduced term for term from
+/// the pinned `runtime/lua/vim/_core/editor.lua`, and verified against a
+/// live capture of both rather than recalled
+/// (`docs/vim-notify-takeover-wire-capture.md`): one `nvim_echo` whose
+/// chunk carries `WarningMsg` only at `WARN`, whose `err` is the `ERROR`
+/// test itself -- which the engine renders as a `msg_show` of kind
+/// `echoerr` -- and whose `_truncate` is forwarded from `opts` when the
+/// caller passed one. The capture walks all five `vim.log.levels` values
+/// and four `opts` shapes against the default's own wire output, so "the
+/// engine default" here is a measured shape and not a paraphrase of one.
+///
+/// Every term of the default is reproduced, `_truncate` included, rather
+/// than only the ones that are observable on the pin: `_truncate` changes
+/// nothing an `ext_messages` consumer can see today, but a reproduction
+/// that keeps only the visible terms is a claim that stops being true the
+/// moment the engine pin moves, and nothing would fail.
+///
+/// `msg` is passed through to `nvim_echo` unconverted, as the default does:
+/// a non-string argument is refused by the API with the same error the
+/// default raises, rather than silently stringified into something the
+/// caller never wrote.
 ///
 /// Reproduced rather than captured at runtime, which would be the shorter
 /// chunk: the plan is applied at `VimEnter`, and `vim.notify =
@@ -168,14 +177,13 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// nothing costs one table lookup, which matters because `SafeState` fires
 /// every time nvim waits for input.
 const HOLD_NOTIFY_CHUNK: &str = "\
-local function notify(msg, level, _)
-  if level == vim.log.levels.ERROR then
-    vim.api.nvim_echo({ { msg } }, true, { err = true })
-  elseif level == vim.log.levels.WARN then
-    vim.api.nvim_echo({ { msg, 'WarningMsg' } }, true, {})
-  else
-    vim.api.nvim_echo({ { msg } }, true, {})
-  end
+local function notify(msg, level, opts)
+  local chunks =
+    { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
+  vim.api.nvim_echo(chunks, true, {
+    err = level == vim.log.levels.ERROR,
+    _truncate = opts and opts._truncate,
+  })
 end
 local function hold()
   if vim.notify ~= notify then
@@ -4172,11 +4180,15 @@ mod tests {
             HOLD_NOTIFY_CHUNK.contains("{ clear = true }"),
             "a re-applied plan must replace its guard rather than stack a second one"
         );
-        // the three arms of the engine default the capture pinned: a chunk
-        // that dropped the error one would route an error message to the
-        // ordinary echo and lose the kind view routes on
-        assert!(HOLD_NOTIFY_CHUNK.contains("{ err = true }"));
-        assert!(HOLD_NOTIFY_CHUNK.contains("'WarningMsg'"));
+        // every term of the pinned default's own nvim_echo call: dropping
+        // the err test routes an error message to the ordinary echo and
+        // loses the kind view routes on, dropping WarningMsg loses the one
+        // highlight the default carries, and dropping the _truncate
+        // forwarding makes this a partial reproduction that nothing else
+        // would fail
+        assert!(HOLD_NOTIFY_CHUNK.contains("err = level == vim.log.levels.ERROR"));
+        assert!(HOLD_NOTIFY_CHUNK.contains("level == vim.log.levels.WARN and 'WarningMsg'"));
+        assert!(HOLD_NOTIFY_CHUNK.contains("_truncate = opts and opts._truncate"));
     }
 
     #[test]

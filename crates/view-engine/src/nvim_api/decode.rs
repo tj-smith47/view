@@ -221,7 +221,9 @@ pub(super) fn decode_checktime_entry(entry: &Value) -> CheckTimeOutcome {
 /// `paths` are echoed back from the waiter rather than decoded from the
 /// reply (the chunk's own answer is positional -- each path was already
 /// resolved to a `bufnr` before nvim ever executed), the same reason
-/// `Waiter::Preview` and `Waiter::LoadHidden` carry `path` themselves.
+/// [`crate::handle`]'s `Waiter::Preview` and `Waiter::LoadHidden` carry
+/// `path` themselves -- named rather than linked because `Waiter` is private
+/// to that module and an intra-doc link to it resolves from inside it only.
 ///
 /// An entry the reply does not carry at all (a short array, or an `error`
 /// reply with no array) degrades to [`CheckTimeOutcome::NoBuffer`] for a

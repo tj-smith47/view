@@ -86,20 +86,6 @@ impl OptionValueSpec {
     }
 }
 
-/// The name `vim.notify` is claimed under in the takeover table, so that a
-/// function and an option compete for the same uniqueness check.
-///
-/// It cannot collide with a real option name: `every_held_option_is_global_scoped`
-/// in `supersede_live` asserts every option row is lowercase ASCII, and this
-/// carries a `.`.
-///
-/// Test-only, like the uniqueness check it feeds: nothing view sends over
-/// the wire carries this string. What the engine keys the guard on is the
-/// augroup name in `HOLD_NOTIFY_CHUNK`, and a second spelling of it here
-/// that production also read would be a second place for the two to drift.
-#[cfg(test)]
-const VIM_NOTIFY: &str = "vim.notify";
-
 /// What one takeover row changes hands on.
 ///
 /// Two kinds rather than one, because the two surfaces nvim lets a plugin
@@ -135,17 +121,24 @@ enum TakeoverKind {
 
 #[cfg(test)]
 impl TakeoverKind {
-    /// The one surface this row claims, named the way the hold's own guard
-    /// is keyed: an option by its name, the notify function by
-    /// [`VIM_NOTIFY`].
+    /// The augroup name the hold this row issues creates inside nvim:
+    /// `view-hold-<option>` for an option, `view-hold-notify` for the
+    /// function.
     ///
-    /// One vocabulary for both kinds so the uniqueness rule can be stated
-    /// once. Two rows claiming one surface is a contradiction whichever kind
-    /// they are (`no_two_takeover_rows_claim_one_surface`).
-    fn claims(self) -> &'static str {
+    /// The engine's own key, spelled the way `HOLD_OPTION_CHUNK` and
+    /// `HOLD_NOTIFY_CHUNK` build it, rather than a name invented here for
+    /// the check: both chunks create their group with `clear = true`, so two
+    /// rows whose groups collide leave only the later row's guard installed
+    /// -- and that is a property of the augroup string, not of the option
+    /// name or the kind. Comparing option names instead would let a row
+    /// holding an nvim option literally named `notify` derive
+    /// `view-hold-notify`, take the notify guard down inside nvim, and pass
+    /// (`no_two_takeover_rows_claim_one_surface`,
+    /// `an_option_named_notify_collides_with_the_notify_row`).
+    fn claims(self) -> String {
         match self {
-            Self::Option { option, .. } => option,
-            Self::Notify => VIM_NOTIFY,
+            Self::Option { option, .. } => format!("view-hold-{option}"),
+            Self::Notify => "view-hold-notify".to_string(),
         }
     }
 }
@@ -242,10 +235,10 @@ pub fn plan(cfg: &NativeConfig, features: &[FeatureDesc]) -> Vec<Supersession> {
 /// surface that needs two options to change hands is one feature with two
 /// rows, and taking only the first would leave view believing it owns a
 /// surface nvim is still half drawing -- silently, since the dropped row
-/// looks exactly like a row that was never written. Two rows setting the
-/// same option for one feature are the contradiction that cannot be
-/// resolved this way -- whichever features write them --, and
-/// `no_two_takeover_rows_claim_one_option` rejects the table outright
+/// looks exactly like a row that was never written. Two rows whose holds
+/// land on one augroup are the contradiction that cannot be resolved this
+/// way -- whichever features write them, and whichever kinds they are --,
+/// and `no_two_takeover_rows_claim_one_surface` rejects the table outright
 /// rather than letting later-wins ordering decide.
 fn plan_from(
     cfg: &NativeConfig,
@@ -359,22 +352,19 @@ mod tests {
         }
     }
 
-    /// The first surface two rows both claim, as `(surface, earlier
+    /// The first augroup two rows both create, as `(augroup, earlier
     /// feature, later feature)`, or `None` if every row in `takeovers`
     /// claims a distinct one.
     ///
     /// Blind to which features the two rows belong to, and to which kind of
-    /// surface they name, because the thing that collides is neither: the
-    /// guard a hold installs is keyed on the surface name alone -- the
-    /// augroup is `view-hold-<option>` for an option and `view-hold-notify`
-    /// for the function -- so the second hold replaces the first one's guard
-    /// and silently wins, while the plan still carries both entries, each
-    /// printing its own reversal line for a surface only one of them holds.
-    /// Two features claiming one surface is a contradiction in the table,
-    /// not something an ordering rule can settle.
-    fn colliding_claim(
-        takeovers: &[Takeover],
-    ) -> Option<(&'static str, &'static str, &'static str)> {
+    /// surface they name, because the thing that collides is neither: both
+    /// hold chunks create their group with `clear = true`, so the second
+    /// hold replaces the first one's guard and silently wins, while the plan
+    /// still carries both entries, each printing its own reversal line for a
+    /// surface only one of them holds. Two features whose holds land on one
+    /// augroup is a contradiction in the table, not something an ordering
+    /// rule can settle.
+    fn colliding_claim(takeovers: &[Takeover]) -> Option<(String, &'static str, &'static str)> {
         takeovers.iter().enumerate().find_map(|(i, t)| {
             takeovers
                 .iter()
@@ -418,7 +408,11 @@ mod tests {
         ];
         assert_eq!(
             colliding_claim(&table),
-            Some(("laststatus", "statusline", "notifications"))
+            Some((
+                "view-hold-laststatus".to_string(),
+                "statusline",
+                "notifications"
+            ))
         );
     }
 
@@ -440,7 +434,41 @@ mod tests {
         ];
         assert_eq!(
             colliding_claim(&table),
-            Some(("vim.notify", "notifications", "statusline"))
+            Some((
+                "view-hold-notify".to_string(),
+                "notifications",
+                "statusline"
+            ))
+        );
+    }
+
+    #[test]
+    fn an_option_named_notify_collides_with_the_notify_row() {
+        // the cross-KIND collision, which a check comparing option names
+        // against an invented "vim.notify" spelling waves through: nvim
+        // carries no option named `notify` today, so nothing but this walk
+        // stands between a future row and a takeover whose guard is silently
+        // taken down by the other row's `clear = true`
+        let table = [
+            Takeover {
+                feature: "notifications",
+                kind: TakeoverKind::Notify,
+            },
+            Takeover {
+                feature: "statusline",
+                kind: TakeoverKind::Option {
+                    option: "notify",
+                    value: OptionValueSpec::Bool(true),
+                },
+            },
+        ];
+        assert_eq!(
+            colliding_claim(&table),
+            Some((
+                "view-hold-notify".to_string(),
+                "notifications",
+                "statusline"
+            ))
         );
     }
 

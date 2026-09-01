@@ -2,7 +2,7 @@
 
 Captured live against the pinned engine per "capture, never recall." Source of
 truth for what "re-pointed at the engine default" (spec §5.5) means on the
-wire, and for `view_engine::nvim_api::HOLD_NOTIFY_CHUNK`'s three branches.
+wire, and for what `view_engine::nvim_api::HOLD_NOTIFY_CHUNK` reproduces.
 
 ## Engine identity
 
@@ -25,6 +25,12 @@ A standalone Python msgpack-rpc client, the same shape
 (`ext_linegrid`/`ext_cmdline`/`ext_popupmenu`/`ext_messages`/`ext_tabline`).
 Every `msg_*` event in each redraw batch is drained between calls, so each
 block below is the whole message traffic one `vim.notify` call produced.
+
+Two axes are walked on both sides of the takeover, because a reproduction is
+only proven over what was varied: **level**, all five `vim.log.levels` values,
+and **opts**, the four shapes the pinned default distinguishes
+(`{ _truncate = true }`, `{ _truncate = false }`, no opts at all, and an opts
+table carrying something the default ignores).
 
 ## Finding: the engine default is not recoverable once a plugin patches it
 
@@ -83,13 +89,11 @@ and the line under it is the entire `msg_*` traffic it produced:
 Three distinct shapes, not five: `TRACE`/`DEBUG`/`INFO` are one unhighlighted
 `echomsg`, `WARN` is an `echomsg` under `WarningMsg` (hl id 26), and `ERROR` is
 a `msg_show` of kind `echoerr` under hl id 6. A call passing no level at all
-takes the unhighlighted arm, and `opts` is ignored:
+takes the unhighlighted arm:
 
 ```
 vim.notify('no-level')                                   -> [True]
     ['msg_show', ['echomsg', [[0, 'no-level', 0]], False, True, False, 1, '']]
-vim.notify('with-opts', vim.log.levels.INFO, { title = 't' }) -> [True]
-    ['msg_show', ['echomsg', [[0, 'with-opts', 0]], False, True, False, 2, '']]
 vim.notify('multi\nline')                                -> [True]
     ['msg_show', ['echomsg', [[0, 'multi\nline', 0]], False, True, False, 3, '']]
 ```
@@ -106,19 +110,59 @@ vim.notify({ 1, 2 })
 takeover that stringified would hand nvim a message the caller never wrote,
 and would accept a call the engine rejects.
 
+## Finding: `opts` is not ignored -- `_truncate` reaches `nvim_echo`
+
+The reproduction target, read from the pinned tree rather than recalled:
+
+```
+$ sed -n '548,555p' \
+    "$VIMRUNTIME/lua/vim/_core/editor.lua"
+function vim.notify(msg, level, opts) -- luacheck: no unused args
+  local chunks = { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
+  vim.api.nvim_echo(
+    chunks,
+    true,
+    { err = level == vim.log.levels.ERROR, _truncate = opts and opts._truncate }
+  )
+end
+```
+
+`opts` carries one term the default forwards, `_truncate`, so a reproduction
+that took `(msg, level, _)` would be a partial one. The opts axis, walked
+against the default before the takeover is installed (200 `T`s, wider than the
+80-column capture UI, so a truncation would be visible in the echoed length):
+
+```
+=== default @ INFO opts={ _truncate = true } ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=208, head='default-TTTTTTTTTT']
+=== default @ INFO opts={ _truncate = false } ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=208, head='default-TTTTTTTTTT']
+=== default @ INFO opts=nil opts ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=208, head='default-TTTTTTTTTT']
+=== default @ INFO opts={ title = 't' } ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=14, head='default-titled']
+```
+
+`_truncate` is **inert on this pin over `ext_messages`**: the flag shortens
+what nvim itself draws in the message area, and an externalized consumer
+receives the whole text either way, so all three long-message rows are the
+same 208 characters. That is a measured result, not a reason to drop the term
+-- `HOLD_NOTIFY_CHUNK` forwards it anyway, so the reproduction stays true term
+for term if a later pin gives the flag an observable effect. Nothing else in
+this repo would catch that change.
+
 ## The chunk, and its output beside the default's
 
 verbatim `HOLD_NOTIFY_CHUNK`:
 
 ```lua
-local function notify(msg, level, _)
-  if level == vim.log.levels.ERROR then
-    vim.api.nvim_echo({ { msg } }, true, { err = true })
-  elseif level == vim.log.levels.WARN then
-    vim.api.nvim_echo({ { msg, 'WarningMsg' } }, true, {})
-  else
-    vim.api.nvim_echo({ { msg } }, true, {})
-  end
+local function notify(msg, level, opts)
+  local chunks =
+    { { msg, level == vim.log.levels.WARN and 'WarningMsg' or nil } }
+  vim.api.nvim_echo(chunks, true, {
+    err = level == vim.log.levels.ERROR,
+    _truncate = opts and opts._truncate,
+  })
 end
 local function hold()
   if vim.notify ~= notify then
@@ -139,21 +183,49 @@ Run in the same session, immediately after the block above, then one
 
 ```
 === held vim.notify @ TRACE ===
-  ['msg_show', ['echomsg', [[0, 'held-trace', 0]], False, True, False, 6, '']]
+  ['msg_show', ['echomsg', [[0, 'held-trace', 0]], False, True, False, 10, '']]
 === held vim.notify @ DEBUG ===
-  ['msg_show', ['echomsg', [[0, 'held-debug', 0]], False, True, False, 7, '']]
+  ['msg_show', ['echomsg', [[0, 'held-debug', 0]], False, True, False, 11, '']]
 === held vim.notify @ INFO ===
-  ['msg_show', ['echomsg', [[0, 'held-info', 0]], False, True, False, 8, '']]
+  ['msg_show', ['echomsg', [[0, 'held-info', 0]], False, True, False, 12, '']]
 === held vim.notify @ WARN ===
-  ['msg_show', ['echomsg', [[45, 'held-warn', 26]], False, True, False, 9, '']]
+  ['msg_show', ['echomsg', [[45, 'held-warn', 26]], False, True, False, 13, '']]
 === held vim.notify @ ERROR ===
-  ['msg_show', ['echoerr', [[25, 'held-error', 6]], False, True, False, 10, '']]
+  ['msg_show', ['echoerr', [[25, 'held-error', 6]], False, True, False, 14, '']]
 ```
 
-Kind, attr id and hl id match the default's row for row; only the message text
-and the monotonically increasing message id differ. That is the whole claim
-behind "re-pointed at the engine default": a consumer reading `msg_show`
-cannot tell the two apart.
+and the same opts axis, run against the held function in the same session:
+
+```
+=== held @ INFO opts={ _truncate = true } ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=205, head='held-TTTTTTTTTTTTT']
+=== held @ INFO opts={ _truncate = false } ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=205, head='held-TTTTTTTTTTTTT']
+=== held @ INFO opts=nil opts ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=205, head='held-TTTTTTTTTTTTT']
+=== held @ INFO opts={ title = 't' } ===
+  ['msg_show', kind='echomsg', attr=0, hl=0, len=11, head='held-titled']
+```
+
+Kind, attr id and hl id match the default's row for row on both axes; the
+lengths differ by exactly the three characters between the `default-` and
+`held-` tags. Only the message text and the monotonically increasing message
+id differ. That is the whole claim behind "re-pointed at the engine default":
+a consumer reading `msg_show` cannot tell the two apart.
+
+One divergence, in the error text and not in the message traffic: a non-string
+`msg` is refused by `nvim_echo` from inside the held function too, with the
+same message, but the location names the takeover's own chunk rather than the
+runtime file.
+
+```
+held      -> [0, 'Lua: [string "<nvim>"]:4: Invalid chunk: expected Array with 1 or 2 Strings ...']
+default   -> [False, '[string "vim/_core/editor"]:550: Invalid chunk: expected Array with 1 or 2 Strings']
+```
+
+Unavoidable for any reproduction -- a Lua function knows where it was
+compiled -- and it reaches only a caller that already passed an argument the
+API rejects.
 
 `vim.notify_once` routes through the held function too -- it calls `vim.notify`
 by name rather than holding its own reference:
@@ -172,7 +244,7 @@ given one turn on its main loop:
 _G.__plugin installed, vim.notify == _G.__plugin: true
 after SafeState, vim.notify is the plugin's: false
 === vim.notify after the re-assert ===
-  ['msg_show', ['echomsg', [[0, 'after-repatch', 0]], False, True, False, 11, '']]
+  ['msg_show', ['echomsg', [[0, 'after-repatch', 0]], False, True, False, 19, '']]
 the plugin function saw: nil
 ```
 

@@ -311,6 +311,16 @@ pub enum ScenarioError {
     /// `expect` was set on a step whose action is not `probe`.
     #[error("step {index} sets expect but is not a probe step")]
     ExpectWithoutProbe { index: usize },
+    /// A `wait_for_probe` step expects the negative sentinel
+    /// [`NEGATIVE_SENTINEL`], which its own polling makes vacuous.
+    #[error(
+        "step {index} polls wait_for_probe for expect = \"{sentinel}\", which passes on its \
+         first poll before anything could have happened: assert a negative with send -> \
+         wait_for the visible effect -> probe (single shot), or wait toward a positive \
+         sentinel naming the state reached",
+        sentinel = NEGATIVE_SENTINEL
+    )]
+    VacuousNegativeWait { index: usize },
     /// `timeout_ms` was set on a step whose action is none of `wait_for`,
     /// `wait_for_cell`, or `wait_for_probe` (the only three steps that poll
     /// toward a deadline).
@@ -385,6 +395,15 @@ fn starts_with_silent_command(keys: &str) -> bool {
         })
     })
 }
+
+/// The answer a probe returns to say the thing it looked for did not happen.
+///
+/// One spelling across the whole corpus, which is what lets
+/// [`validate_step`] recognize a negative expectation at load time without
+/// reading Lua. A scenario asserting a negative under a different word gets
+/// no help from that check, so the word is the convention rather than a mere
+/// habit: `absent`, never `no`/`none`/`false`/`missing`.
+const NEGATIVE_SENTINEL: &str = "absent";
 
 /// Validates and converts one [`RawStep`] into a [`Step`], applying
 /// [`DEFAULT_STEP_TIMEOUT_MS`] to a `wait_for`/`wait_for_cell`/`wait_for_probe`
@@ -470,6 +489,9 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
         let Some(expect) = raw.expect else {
             return Err(ScenarioError::ProbeMissingExpect { index });
         };
+        if expect == NEGATIVE_SENTINEL {
+            return Err(ScenarioError::VacuousNegativeWait { index });
+        }
         return Ok(Step::WaitForProbe {
             expr,
             expect,
@@ -1243,6 +1265,49 @@ states = []
             matches!(err, ScenarioError::ProbeMissingExpect { .. }),
             "expected ProbeMissingExpect, got {err:?}"
         );
+    }
+
+    /// A `wait_for_probe` polls until its expectation is met, so one asking
+    /// for the negative sentinel is satisfied by its own first poll -- before
+    /// the thing it claims never happened had any chance to. The refusal is
+    /// what keeps that shape out of the corpus: every file under
+    /// `compat/scenarios/` goes through `load_file` in this module's own
+    /// directory walks, so a scenario written this way fails `task ci`
+    /// without anyone re-running the class audit by hand.
+    #[test]
+    fn a_wait_for_probe_expecting_the_negative_sentinel_is_rejected() {
+        let toml = VALID.replace(
+            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+            "{ wait_for_probe = \"luaeval('lualine ~= nil')\", expect = \"absent\" },",
+        );
+        let err = parse(&toml).expect_err("a vacuous negative wait must be a hard error");
+        assert!(
+            matches!(err, ScenarioError::VacuousNegativeWait { .. }),
+            "expected VacuousNegativeWait, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_shot_probe_may_expect_the_negative_sentinel() {
+        // the shape the refusal above points at: the same expectation read
+        // once, after a wait_for proved the effect had already landed
+        let toml = VALID.replace(
+            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"absent\" },",
+        );
+        parse(&toml).expect("a single-shot negative probe is the supported shape");
+    }
+
+    #[test]
+    fn a_wait_for_probe_may_still_wait_toward_a_positive_sentinel() {
+        // the refusal is keyed on the sentinel, not on wait_for_probe: the
+        // 90-odd polls in the corpus that wait toward a state being reached
+        // must stay loadable
+        let toml = VALID.replace(
+            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+            "{ wait_for_probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+        );
+        parse(&toml).expect("a positive wait_for_probe must still load");
     }
 
     #[test]
