@@ -1237,6 +1237,33 @@ mod tests {
         assert!(model.engine.absorbed_rows().is_none());
     }
 
+    /// The same rule with the identity gate cleared, which is the only way
+    /// to ask it: a float presenting a name view *would* absorb, over a
+    /// surface a named claimant's notice already covers, is that plugin's
+    /// window and still not view's to take.
+    ///
+    /// The cover is recorded directly rather than probed through
+    /// `SURFACE_CLAIMANTS`, because no shipped row can produce this input --
+    /// `no_claimant_names_an_absorbable_identity` keeps the two tables
+    /// disjoint on purpose. The branch it guards is real all the same, and
+    /// the sibling test above cannot fail on it: the float that one drives
+    /// is refused by the identity gate before the cover is ever consulted.
+    #[test]
+    fn an_absorbable_menu_a_claimants_notice_covers_is_left_alone() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        model
+            .surface_conflicts
+            .note_covered(&[Surface::Cmdline], &["cmp_menu"]);
+        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        assert!(
+            effects.is_empty(),
+            "a window whose plugin already has a notice standing is not one to \
+             hide out from under it: {effects:?}"
+        );
+        assert!(model.engine.absorbed_rows().is_none());
+    }
+
     /// A hidden float draws nothing, so it is nobody's conflict -- the scan
     /// reports it only so an absorption can keep reading behind it.
     #[test]

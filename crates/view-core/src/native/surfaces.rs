@@ -1248,6 +1248,60 @@ mod tests {
     /// answers per sighting; this is the guard that walks the population, so
     /// a row added to either table trips over it in a unit test rather than
     /// on somebody's screen.
+    /// Every row of [`COMPLETION_MENUS`] read back out of the document that
+    /// measured it, rather than trusted because somebody typed it here.
+    ///
+    /// Absorption is view taking a window away from the plugin that opened
+    /// it, and the fact that makes that safe is one measurement:
+    /// `docs/surface-float-wire-capture.md`'s discriminator table has a
+    /// `survives view's hide` row, and it reads `yes` for exactly one
+    /// column. A second completion plugin is welcome in the table -- after
+    /// its own column is in the document with that cell answered, which is
+    /// what this walk is here to insist on. A row added without the
+    /// measurement fails here by name.
+    #[test]
+    fn every_absorbable_menu_is_one_the_capture_measured_a_hide_surviving() {
+        const DOC: &str = include_str!("../../../../docs/surface-float-wire-capture.md");
+        let row = |label: &str| -> Vec<String> {
+            DOC.lines()
+                .find(|line| line.starts_with(label))
+                .map(|line| {
+                    line.trim_matches('|')
+                        .split('|')
+                        .map(|cell| cell.trim().to_string())
+                        .collect()
+                })
+                .expect("the capture doc must carry the discriminator table")
+        };
+        let filetypes = row("| buffer `filetype` |");
+        let survives = row("| survives view's `hide` |");
+        assert_eq!(
+            filetypes.len(),
+            survives.len(),
+            "the two rows describe the same columns or neither says anything \
+             about the other"
+        );
+        for menu in super::COMPLETION_MENUS {
+            let column = filetypes
+                .iter()
+                .position(|cell| cell.contains(&format!("`{menu}`")))
+                .unwrap_or_else(|| {
+                    unreachable!(
+                        "{menu} is absorbed but names no column of the capture's \
+                         discriminator table"
+                    )
+                });
+            assert!(
+                survives
+                    .get(column)
+                    .is_some_and(|cell| cell.contains("yes")),
+                "{menu} is absorbed on a column the capture never measured a \
+                 hide surviving: {:?}",
+                survives.get(column)
+            );
+        }
+    }
+
     #[test]
     fn no_claimant_names_an_absorbable_identity() {
         for claimant in super::SURFACE_CLAIMANTS {
