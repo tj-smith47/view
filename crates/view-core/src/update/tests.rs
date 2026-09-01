@@ -6114,6 +6114,247 @@ fn a_native_invoke_notice_is_wired_through_the_same_choke_point_as_a_wire_toast(
     );
 }
 
+/// The `MessageId`s the effects in `effects` arm a dismissal timer for, in
+/// order. The slot model's whole claim is about *how many* timers are armed
+/// and *which* entry each names, so every slot test reads both out of the
+/// same place.
+fn armed_slots(effects: &[Effect]) -> Vec<crate::model::MessageId> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::ScheduleToastExpiry { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn echomsg(text: &str) -> UiEvent {
+    UiEvent::MsgShow {
+        kind: "echomsg".into(),
+        content: vec![(0, text.into())],
+        replace_last: false,
+    }
+}
+
+#[test]
+fn a_toast_behind_another_starts_its_timer_when_it_reaches_the_top() {
+    // the charter's sentence, as a test: a notice that arrived behind
+    // another has not been read yet, so its timer must not have been
+    // running while it was queued -- it starts on the expiry that promotes
+    // it, at the full timeout, not at whatever was left of one armed when
+    // it arrived
+    let mut m = started_model();
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second")]),
+    );
+    let first = m.engine.messages.entries[0].id();
+    let second = m.engine.messages.entries[1].id();
+    assert_eq!(
+        armed_slots(&effects),
+        vec![first],
+        "two toasts in one flush must arm one timer, for the one at the top \
+         of the stack: {effects:?}"
+    );
+
+    let effects = update(&mut m, Msg::ToastExpired { id: first });
+    assert_eq!(
+        visible_texts(&m),
+        vec!["second".to_string()],
+        "the top slot's expiry must retire that entry alone"
+    );
+    assert_eq!(
+        armed_slots(&effects),
+        vec![second],
+        "the entry promoted into the top slot must have its timer armed \
+         there and then: {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScheduleToastExpiry { after, .. }
+                if *after == crate::native::toast::TRANSIENT_TOAST_TIMEOUT)),
+        "the promoted entry gets a full timeout, not the remainder of \
+         anything: {effects:?}"
+    );
+}
+
+#[test]
+fn only_the_top_slot_arms_a_timer() {
+    // one timer thread for the whole stack, however deep it gets: a timer
+    // per entry is what expires a notice the user has not reached yet
+    let mut m = started_model();
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            echomsg("one"),
+            echomsg("two"),
+            echomsg("three"),
+            echomsg("four"),
+        ]),
+    );
+    let top = m.engine.messages.entries[0].id();
+    assert_eq!(
+        armed_slots(&effects),
+        vec![top],
+        "four toasts must arm exactly one timer, for the top slot: {effects:?}"
+    );
+
+    let effects = update(&mut m, Msg::Redraw(vec![echomsg("five")]));
+    assert_eq!(
+        armed_slots(&effects),
+        Vec::new(),
+        "a toast arriving at the bottom of a stack whose top slot is \
+         already armed must arm nothing at all: {effects:?}"
+    );
+}
+
+#[test]
+fn a_sticky_entry_does_not_hold_the_slot_queue() {
+    // a sticky notice is dismissed deliberately, never by a timer, so it
+    // takes no slot -- parked at the top of the stack it would otherwise
+    // freeze every transient behind it forever
+    let mut m = started_model();
+    let effects = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::MsgShow {
+                kind: "emsg".into(),
+                content: vec![(0, "boom".into())],
+                replace_last: false,
+            },
+            echomsg("after"),
+            echomsg("later"),
+        ]),
+    );
+    let after = m.engine.messages.entries[1].id();
+    let later = m.engine.messages.entries[2].id();
+    assert_eq!(
+        armed_slots(&effects),
+        vec![after],
+        "the oldest transient behind a sticky entry owns the top slot, and \
+         it is the only slot armed: {effects:?}"
+    );
+
+    let effects = update(&mut m, Msg::ToastExpired { id: after });
+    assert_eq!(
+        armed_slots(&effects),
+        vec![later],
+        "the sticky entry sits ahead of both transients and must not have \
+         held the queue: {effects:?}"
+    );
+
+    let effects = update(&mut m, Msg::ToastExpired { id: later });
+    assert_eq!(
+        armed_slots(&effects),
+        Vec::new(),
+        "nothing is armed once only the sticky entry is left: {effects:?}"
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec!["boom".to_string()],
+        "the sticky entry stands through both transients' whole lifetimes"
+    );
+}
+
+#[test]
+fn a_native_running_count_replaces_its_own_previous_line() {
+    // a notice view raises with `replace_last` is a running count, and the
+    // line it means to overwrite is the one it wrote itself: sent looking
+    // for an nvim line instead it finds none, appends, and the pre-attach
+    // key-overflow counter becomes one stacked entry per dropped keystroke
+    // -- which under slot timers is one full timeout per keystroke before
+    // the last of them is even reached
+    let mut m = started_model();
+    let _ = m
+        .engine
+        .record_native_notice("dropped 1 keystroke".to_string(), false);
+    let _ = m
+        .engine
+        .record_native_notice("dropped 2 keystrokes".to_string(), true);
+    let _ = m
+        .engine
+        .record_native_notice("dropped 3 keystrokes".to_string(), true);
+    assert_eq!(
+        visible_texts(&m),
+        vec!["dropped 3 keystrokes".to_string()],
+        "a native running count must occupy one line, not one per update"
+    );
+}
+
+#[test]
+fn a_native_running_count_never_overwrites_a_sticky_notice() {
+    // a line that stands until it is dismissed is nobody's previous
+    // message, so the count lands beside it rather than on top of it
+    let mut m = started_model();
+    let _ = m.engine.record_native_notice_sticky_once(
+        "view: conflict",
+        "view: conflict on the toast row".into(),
+    );
+    let _ = m
+        .engine
+        .record_native_notice("dropped 1 keystroke".to_string(), true);
+    assert_eq!(
+        visible_texts(&m),
+        vec![
+            "view: conflict on the toast row".to_string(),
+            "dropped 1 keystroke".to_string()
+        ],
+        "a sticky notice must survive a native replace aimed past it"
+    );
+}
+
+#[test]
+fn a_wire_replace_never_overwrites_a_line_view_raised_itself() {
+    // the other half of the same rule: nvim's `replace_last` names the
+    // message nvim sent before this one, so a view notice standing at the
+    // tail is skipped over rather than dropped for a line nvim never put
+    // there
+    let mut m = started_model();
+    let _ = update(&mut m, Msg::Redraw(vec![echomsg("from nvim")]));
+    let _ = m
+        .engine
+        .record_native_notice("from view".to_string(), false);
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "echomsg".into(),
+            content: vec![(0, "from nvim, again".into())],
+            replace_last: true,
+        }]),
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec!["from nvim, again".to_string(), "from view".to_string()],
+        "a wire replace must overwrite nvim's own last line and leave \
+         view's notice standing"
+    );
+}
+
+#[test]
+fn a_stale_expiry_for_a_lower_slot_is_ignored() {
+    // only the top slot is ever armed, so an expiry naming anything else
+    // came from a timer whose entry has since been overtaken; obeying it
+    // would retire a notice that has not had its own turn on screen
+    let mut m = started_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second")]),
+    );
+    let second = m.engine.messages.entries[1].id();
+
+    let effects = update(&mut m, Msg::ToastExpired { id: second });
+    assert!(
+        effects.is_empty(),
+        "a stale expiry must change nothing at all: {effects:?}"
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec!["first".to_string(), "second".to_string()],
+        "an expiry for an entry that is not the top slot must be ignored"
+    );
+}
+
 #[test]
 fn a_verb_this_build_does_not_answer_is_told_the_ones_it_does() {
     let mut m = model();
@@ -8506,8 +8747,13 @@ fn the_hold_deadline_releases_what_the_probe_never_answered_for() {
     );
     assert!(m.engine.messages.entries.is_empty());
     let effects = update(&mut m, Msg::StartupHoldExpired);
-    assert!(effects.is_empty(), "{effects:?}");
     assert_eq!(m.engine.messages.entries.len(), 1);
+    assert_eq!(
+        armed_slots(&effects),
+        vec![m.engine.messages.entries[0].id()],
+        "a parked message's dismissal timer starts when the release puts it \
+         at the top of the stack, never while it was still parked: {effects:?}"
+    );
     assert!(m.dirty, "a line arriving on screen is a repaint");
 }
 
@@ -8583,7 +8829,7 @@ fn a_replacement_connection_may_report_the_same_failure_its_predecessor_did() {
         },
     );
     let second = attach_swap_probe(&mut m);
-    let effects = update(
+    let _ = update(
         &mut m,
         Msg::SwapRecovered {
             generation: second,
@@ -8593,10 +8839,20 @@ fn a_replacement_connection_may_report_the_same_failure_its_predecessor_did() {
             empty: true,
         },
     );
-    assert!(
-        !effects.is_empty(),
+    // read off the stack rather than off the effects: the second notice
+    // lands behind the first, and a toast that arrives behind one already
+    // standing arms no timer of its own (`Messages::top_slot`), so an empty
+    // effect list no longer says anything about whether it was raised
+    let said = visible_texts(&m)
+        .into_iter()
+        .filter(|line| line.contains(E305))
+        .count();
+    assert_eq!(
+        said,
+        2,
         "a fresh connection's failure went unsaid because the one it \
-         replaced had already failed the same way: {effects:?}"
+         replaced had already failed the same way: {:?}",
+        visible_texts(&m)
     );
 }
 

@@ -1212,7 +1212,9 @@ impl EngineModel {
 
     /// The one place a [`MessageEntry`] is created that also classifies it
     /// (`native::toast::route`), records it to scrollback
-    /// (`toast_history`), and schedules its transient-toast expiry.
+    /// (`toast_history`), and arms the toast stack's one dismissal timer
+    /// ([`Messages::arm_top_slot`]) if this message changed which entry holds
+    /// the top slot.
     /// `Messages::push` alone only stamps an id; a caller that reaches past
     /// this method straight to `messages.push` produces an entry with no
     /// history record and no expiry -- invisible to a future `:messages`
@@ -1256,15 +1258,12 @@ impl EngineModel {
         // message is in the ring before it leaves the stack
         if route == crate::native::toast::Route::HistoryOnly {
             self.messages.hold(id, replace_last);
-            return Vec::new();
         }
-        // only `Route::Transient` ever schedules a timeout (see
-        // `toast::timeout_for`); a prompt/sticky/statusline entry expires
-        // some other way or not at all
-        match crate::native::toast::timeout_for(route) {
-            Some(after) => vec![crate::msg::Effect::ScheduleToastExpiry { id, after }],
-            None => Vec::new(),
-        }
+        // the timer belongs to the top slot, not to the entry that just
+        // arrived (`Messages::arm_top_slot`): a message landing behind one
+        // already standing arms nothing, and a parked one that took its
+        // predecessor's place before being held hands the slot back here
+        self.messages.arm_top_slot().into_iter().collect()
     }
 
     /// A locally-synthesized notice -- never from nvim's own `msg_show` --
@@ -1652,6 +1651,11 @@ pub struct Messages {
     /// included, so every pushed entry -- even one that overwrites another
     /// in place -- gets an identity distinct from what stood there before.
     next_message_id: u64,
+    /// The entry [`Self::arm_top_slot`] last handed a dismissal timer, so it
+    /// can tell a top slot that has changed hands from one that has merely
+    /// been asked about again. `None` both before the first toast and
+    /// whenever the queue is empty.
+    armed_slot: Option<MessageId>,
 }
 
 impl Messages {
@@ -1694,18 +1698,84 @@ impl Messages {
             id,
         };
         if replace_last {
-            if let Some(last) = self
-                .entries
-                .iter_mut()
-                .rev()
-                .find(|e| !e.condition && !e.is_native())
-            {
+            // a replace targets the last line from the same source. nvim's
+            // `replace_last` names the message nvim itself sent before this
+            // one, so it must not reach a line view raised; and a native running
+            // count means its own previous line, so it must not be sent
+            // looking for an nvim line that may not exist -- a native notice
+            // that finds no target appends instead, and a per-keystroke
+            // counter becomes one stacked entry per keystroke. Matching the
+            // kind exactly rather than the origin keeps a `"native_sticky"`
+            // notice out of it as well: a line that stands until it is
+            // dismissed is nobody's previous message
+            let native = MessageEntry::is_native_kind(&entry.kind);
+            let target = self.entries.iter_mut().rev().find(|e| {
+                !e.condition
+                    && if native {
+                        e.kind == entry.kind
+                    } else {
+                        !e.is_native()
+                    }
+            });
+            if let Some(last) = target {
                 *last = entry;
                 return id;
             }
         }
         self.entries.push(entry);
         id
+    }
+
+    /// The entry occupying the top slot of the toast stack -- the oldest
+    /// entry still standing that takes a slot at all -- or `None` when
+    /// nothing does.
+    ///
+    /// The dismissal timer belongs to this slot rather than to any particular
+    /// notice, per the spec's motion rules and its `ext_messages` routing
+    /// table: a notice that arrived behind others has not been read yet, and
+    /// a timer started on arrival retires it before it was ever at the front.
+    /// New toasts enter at the bottom, so the queue is arrival order and the
+    /// head of it is what expires next.
+    ///
+    /// Three classes of entry are deliberately outside the queue. A
+    /// persistent one (nvim's error/warning kinds, view's own
+    /// `"native_sticky"`, a raised condition) is dismissed deliberately and
+    /// never by a timer, so a sticky notice standing ahead of the stack
+    /// would otherwise freeze every transient behind it for the rest of the
+    /// session. An unanswered prompt's question is ended by its own answer.
+    /// And a message the startup hold parked
+    /// ([`crate::native::toast::Route::HistoryOnly`]) is not in `entries` at
+    /// all, so it takes no slot by construction and takes one the moment the
+    /// hold releases it onto the stack.
+    #[must_use]
+    pub fn top_slot(&self) -> Option<MessageId> {
+        self.entries
+            .iter()
+            .find(|e| !e.outranks_transient())
+            .map(MessageEntry::id)
+    }
+
+    /// Arms a dismissal timer for the top slot if it has changed hands since
+    /// the last call, and reports the effect that does so.
+    ///
+    /// Idempotent, and meant to be called on every path that can add to or
+    /// remove from the stack: an unchanged top slot answers `None`, so a
+    /// second call after a message that touched no toast costs a comparison
+    /// and arms nothing. At most one timer is outstanding for the whole
+    /// stack at any moment, which is what makes the promoted entry's timeout
+    /// a full one rather than the remainder of a timer armed while it was
+    /// still queued.
+    pub(crate) fn arm_top_slot(&mut self) -> Option<crate::msg::Effect> {
+        let top = self.top_slot();
+        if top == self.armed_slot {
+            return None;
+        }
+        self.armed_slot = top;
+        let id = top?;
+        // the queue holds only entries `route` calls `Route::Transient`,
+        // which is the one route that owns an idle timeout at all
+        let after = crate::native::toast::timeout_for(crate::native::toast::Route::Transient)?;
+        Some(crate::msg::Effect::ScheduleToastExpiry { id, after })
     }
 
     /// Whether the startup hold is still parking foreign transient

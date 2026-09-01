@@ -1929,6 +1929,53 @@ fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
     let _ = session.wait();
 }
 
+// The live-process proof that the dismissal timer belongs to the top slot
+// rather than to the notice. Five messages land in one flush, so under a
+// timer-per-toast design all five are armed at the same instant and the
+// whole stack is gone one TRANSIENT_TOAST_TIMEOUT later -- the last one
+// having been on screen for exactly as long as the first, with four
+// notices' worth of reading time to do it in. Under slot timers only the
+// top slot's timer runs, so the fifth is still standing well past the
+// point the flat design had retired it. Asserted from a real pty for the
+// same reason the two tests above are: EngineSession drops
+// Effect::ScheduleToastExpiry, so only the compiled binary running
+// view::runtime::Executor exercises the timer threads at all.
+#[test]
+fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
+    let mut session = spawn_view_pty_owning_messages();
+
+    session
+        .send(b"\x1b:for i in range(1,5) | echomsg 'slottoken' . i | endfor\r")
+        .unwrap();
+    assert!(
+        wait_for_toast(&mut session, "slottoken5", Duration::from_secs(5)),
+        "screen never showed the fifth of five echomsg lines; last screen:\n{}",
+        session.screen()
+    );
+
+    // no further input: every expiry from here is a timer's doing. Three
+    // timeouts is a full timeout short of the moment the fifth slot's own
+    // timer even starts (it reaches the top after four), and three past the
+    // moment a timer-per-toast design would have taken it down with the
+    // rest.
+    std::thread::sleep(view_core::native::toast::TRANSIENT_TOAST_TIMEOUT * 3);
+    let screen = session.screen();
+    assert!(
+        toast_shows(&screen, "slottoken5"),
+        "the last of five stacked toasts expired before it ever reached the \
+         top slot -- its timer ran while it was queued behind four others; \
+         last screen:\n{screen}"
+    );
+    assert!(
+        !screen.contains("slottoken1"),
+        "the top slot's own timer never ran, so this proves nothing about \
+         which timer is armed; last screen:\n{screen}"
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
 // The falsifiable counterpart to the transient-expiry test above: an emsg
 // carries no ScheduleToastExpiry effect at all (route() sends persistent
 // kinds to Route::Sticky, and timeout_for only returns Some for

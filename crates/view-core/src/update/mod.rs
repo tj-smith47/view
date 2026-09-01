@@ -58,6 +58,20 @@ fn path_to_wire(path: &std::path::Path) -> String {
 /// the boundary as a returned [`Effect`] instead of being performed here.
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
+    let mut effects = dispatch(model, msg);
+    // the toast stack's dismissal timer belongs to its top slot, and the
+    // ways an entry leaves that slot are spread across a dozen arms below
+    // -- an expiry, a keypress, a deliberate sticky dismissal, an
+    // `msg_clear`, a startup hold releasing what it parked. Arming here
+    // instead of at each of them is what makes "the promoted entry's timer
+    // starts now" true on every one of those paths rather than on the ones
+    // somebody remembered; `arm_top_slot` answers `None` when the slot has
+    // not changed hands, which is nearly every message.
+    effects.extend(model.engine.messages.arm_top_slot());
+    effects
+}
+
+fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
     // A chord prefix belongs to the sidebar it was armed in, and focus can
     // leave one with no key involved at all -- a review landing hands the
     // keyboard back to the buffer it is drawn in. Anything that reaches a
@@ -587,14 +601,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }]
         }
         Msg::ToastExpired { id } => {
-            // races the same entry being cleared, replaced (which stamps a
-            // fresh id, so this id simply no longer matches anything), or
-            // dismissed by a keypress in the meantime -- losing that race is
-            // "already handled", not an error, so this filters by id rather
-            // than asserting the entry is still present
-            let before = model.engine.messages.entries.len();
-            model.engine.messages.entries.retain(|e| e.id() != id);
-            if model.engine.messages.entries.len() != before {
+            // only the top slot is ever armed, so an expiry naming anything
+            // else is a stale one: the entry it was armed for has since been
+            // cleared, replaced (which stamps a fresh id), or dismissed by a
+            // keypress, and the timer thread was already in flight when that
+            // happened. Losing that race is "already handled", not an error
+            // -- but obeying it would retire whatever now sits at that id,
+            // an entry that has not had its own turn at the front yet
+            if model.engine.messages.top_slot() == Some(id) {
+                model.engine.messages.entries.retain(|e| e.id() != id);
                 model.dirty = true;
             }
             Vec::new()

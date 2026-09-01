@@ -121,7 +121,7 @@ steps = [
   #
   # Placed rather than typed, unlike the `present` state's own seeding: a
   # `<C-c>` queued behind a single 24-byte burst discards whatever of that
-  # burst nvim has not yet consumed (Ctrl-C flushes typeahead — on a loaded
+  # burst nvim has not yet consumed (Ctrl-C flushes typeahead -- on a loaded
   # host that left `prefabricated pr` in the buffer, a contiguous tail
   # gone), and the candidate list this state
   # asserts against is then a different one every run. What this state is
