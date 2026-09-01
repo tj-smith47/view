@@ -136,12 +136,12 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
 }
 
 /// Decodes the float watcher's `('float', win, buf, row, col, width,
-/// height, zindex, filetype, name, anchor)` params into
+/// height, zindex, filetype, name, anchor, hidden)` params into
 /// [`Msg::FloatObserved`], or `None` for a shape the chunk does not
 /// produce.
 ///
 /// Read off `params` whole rather than off the `(first, rest)` split its
-/// caller already made: eleven positional fields destructured in one
+/// caller already made: twelve positional fields destructured in one
 /// pattern is the shape a reviewer can check against the `rpcnotify` call
 /// in [`crate::nvim_api::REGISTER_BRIDGE_CHUNK`] argument for argument.
 ///
@@ -151,9 +151,11 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
 /// into `u16`, which is wider than the 1001 the highest observed float
 /// carries. A missing `anchor` is impossible from this chunk (it defaults
 /// the field in Lua) and still degrades to nvim's own `NW` default rather
-/// than dropping the sighting.
+/// than dropping the sighting; `hidden` degrades the same way, to the
+/// `false` a window carrying no `hide` flag has.
 fn decode_float_observed(params: &[Value]) -> Option<Msg> {
-    let [_, win, buf, row, col, width, height, zindex, filetype, name, anchor] = params else {
+    let [_, win, buf, row, col, width, height, zindex, filetype, name, anchor, hidden] = params
+    else {
         return None;
     };
     Some(Msg::FloatObserved(FloatSighting {
@@ -167,6 +169,7 @@ fn decode_float_observed(params: &[Value]) -> Option<Msg> {
         zindex: saturate_u16(wire_i64(zindex)?),
         filetype: filetype.as_str().unwrap_or_default().to_owned(),
         name: name.as_str().unwrap_or_default().to_owned(),
+        hidden: hidden.as_bool().unwrap_or(false),
     }))
 }
 
@@ -382,6 +385,41 @@ pub(super) fn decode_preview_reply(result: &Value) -> (bool, Vec<String>) {
         })
         .unwrap_or_default();
     (true, lines)
+}
+
+/// Decodes an absorbed float's `hidden`/`lines`/`selected` keys, in the
+/// shape `crate::nvim_api::READ_FLOAT_ROWS_CHUNK` returns them.
+///
+/// `selected` is the chunk's own zero-based row or `-1` for "the menu is
+/// open and nothing in it is selected", which is what the captured menu
+/// expresses by leaving `cursorline` off
+/// (`docs/surface-float-wire-capture.md`); a negative or absent value is
+/// therefore `None` rather than row zero.
+///
+/// A non-map or malformed `result` degrades to `(false, [], None)` -- the
+/// same "absent or malformed is exactly as informative as an explicit
+/// false" precedent `decode_preview_reply` follows, and the safe direction
+/// here: `hidden = false` is what makes the caller stop absorbing rather
+/// than paint rows it cannot vouch for.
+pub(super) fn decode_float_rows_reply(result: &Value) -> (bool, Vec<String>, Option<usize>) {
+    let Some(pairs) = result.as_map() else {
+        return (false, Vec::new(), None);
+    };
+    let hidden = crate::wire::map_find(pairs, "hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let lines = crate::wire::map_find(pairs, "lines")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let selected = crate::wire::map_find(pairs, "selected")
+        .and_then(Value::as_i64)
+        .and_then(|row| usize::try_from(row).ok());
+    (hidden, lines, selected)
 }
 
 /// Decodes a rename reply's `ok` key, live-verified against a real `nvim

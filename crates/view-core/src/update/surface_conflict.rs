@@ -166,11 +166,27 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
     let Some(surface) = surfaces::claims(float, model) else {
         return Vec::new();
     };
+    let identity = float.identity().map(str::to_owned);
+    let covered = model.surface_conflicts.covers(surface, identity.as_deref());
+    if surfaces::absorbs(surface, model) && !covered {
+        // ahead of the notice and ahead of the hidden-float filter below:
+        // the window this hides is the one view then has to keep reading,
+        // and a claimant already named (`covered`) is a plugin whose own
+        // notice stands -- hiding one of its windows would leave a user
+        // reading "noice.nvim is using the command line" beside a command
+        // line whose menu view had quietly taken over
+        return absorb(model, float, surface);
+    }
+    if float.hidden {
+        // a window with its `hide` flag set draws nothing, so it covers
+        // nothing; the scan reports it only so an absorption can keep
+        // reading the rows behind it (`FloatSighting::hidden`)
+        return Vec::new();
+    }
     if !surfaces::view_draws(surface, model) {
         return Vec::new();
     }
-    let identity = float.identity().map(str::to_owned);
-    if model.surface_conflicts.covers(surface, identity.as_deref()) {
+    if covered {
         // a named claimant's notice already says this surface is taken, says
         // who by, and carries the same `[native]` line as the remedy; a
         // second box -- one that cannot even say who, or one spelling a
@@ -178,20 +194,87 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
         // conflict counted twice
         return Vec::new();
     }
+    raise_notice(model, identity.as_deref(), surface)
+}
+
+/// Answers one sighting of a float view absorbs rather than reports: the
+/// hide that stops two menus stacking, and the read that fills the palette
+/// with what the hidden one was showing.
+///
+/// The read is an effect whose reply is a `Msg`, never a read taken here:
+/// this runs on the same `update()` the keystrokes run on, and a paint that
+/// waited on an RPC would make every cmdline keystroke cost a round trip.
+///
+/// No `dirty` on this path. A standing menu is re-sighted at the scan's own
+/// rate for as long as a user reads it, and the frame owes a repaint only
+/// when the rows actually move -- which is decided where they arrive
+/// ([`on_float_rows`]), not here.
+fn absorb(model: &mut Model, float: &FloatSighting, surface: Surface) -> Vec<Effect> {
+    let step = model
+        .engine
+        .float_absorption
+        .observe(float.win, float.hidden, float.identity());
+    match step {
+        surfaces::AbsorbStep::HideThenRead => vec![
+            Effect::Rpc(crate::msg::RpcCall::HideWindow { win: float.win }),
+            Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win: float.win }),
+        ],
+        surfaces::AbsorbStep::Read => {
+            vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows {
+                win: float.win,
+            })]
+        }
+        // the disclosed failure mode: view could not hold the surface, so
+        // the user is told which plugin took it and which line hands it
+        // back, rather than left reading two menus
+        surfaces::AbsorbStep::Yield => raise_notice(model, float.identity(), surface),
+    }
+}
+
+/// Answers one [`Msg::FloatRows`](crate::msg::Msg::FloatRows): the rows a
+/// hidden float was drawing become the palette's, or the absorption gives
+/// up and the notice takes its place.
+pub(super) fn on_float_rows(
+    model: &mut Model,
+    win: u64,
+    hidden: bool,
+    lines: Vec<String>,
+    selected: Option<usize>,
+) -> Vec<Effect> {
+    let rows = crate::native::palette::AbsorbedRows { lines, selected };
+    match model.engine.float_absorption.rows_read(win, hidden, rows) {
+        surfaces::RowsOutcome::Absorbed { changed } => {
+            model.dirty |= changed;
+            Vec::new()
+        }
+        surfaces::RowsOutcome::Yield(identity) => {
+            raise_notice(model, identity.as_deref(), Surface::Cmdline)
+        }
+        surfaces::RowsOutcome::Stale => Vec::new(),
+    }
+}
+
+/// The one notice a float claimant owes the user, raised once per identity
+/// and re-worded rather than repeated as that identity takes more surfaces.
+///
+/// Empty for a sighting that adds nothing: `SurfaceConflicts::record`
+/// answers news only, which is what keeps a 6.7 Hz scan off the paint loop
+/// for as long as a menu stands open.
+fn raise_notice(model: &mut Model, identity: Option<&str>, surface: Surface) -> Vec<Effect> {
+    if !surfaces::view_draws(surface, model) {
+        return Vec::new();
+    }
     let Some(claimed) = model
         .surface_conflicts
-        .record(identity.as_deref(), surface)
+        .record(identity, surface)
         .map(<[Surface]>::to_vec)
     else {
         return Vec::new();
     };
-    let family = family(identity.as_deref());
+    let family = family(identity);
     let text = notice(&family, &claimed, model.config_was_read(), false);
-    // reaching here at all means the claim is news -- `record` answers a
-    // sighting that adds nothing with `None` above -- so the wording is about
-    // to change and the frame does owe a repaint. The re-sighting that
-    // changes no pixel never gets this far, which is what keeps a 6.7 Hz scan
-    // off the paint loop for as long as a menu stands open.
+    // reaching here at all means the claim is news, so the wording is about
+    // to change and the frame does owe a repaint
     model.dirty = true;
     model.engine.record_native_notice_sticky_once(&family, text)
 }
@@ -212,7 +295,24 @@ pub(super) fn sweep_floats(model: &mut Model) -> Vec<Effect> {
             .withdraw_native_notice(&family(identity.as_deref()));
         model.dirty |= withdrew;
     }
+    // the same rule for the floats view took over instead of reporting: a
+    // prefix that narrows to no candidates closes the menu while the command
+    // line stays open, and the palette must stop offering what it was
+    // showing rather than hold the last set that had any
+    model.dirty |= model.engine.float_absorption.sweep();
     Vec::new()
+}
+
+/// Ends every absorption, because the command line the absorbed menus were
+/// completing has closed.
+///
+/// The teardown the sweep cannot do on its own: nvim-cmp closes its menu
+/// from inside a non-nested `CmdlineLeave` callback, so no `WinClosed`
+/// announces it, and the scan that would eventually miss the window is
+/// armed by events a closed command line no longer produces. Without this
+/// the next command line would open onto the previous one's candidates.
+pub(super) fn cmdline_closed(model: &mut Model) {
+    model.dirty |= model.engine.float_absorption.forget();
 }
 
 /// The whole notice for `claimed`, opening with its own `family` -- which
@@ -300,10 +400,10 @@ fn join(parts: &[&str]) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{absorb_float_notices, observe_float};
+    use super::{absorb_float_notices, observe_float, surfaces};
     use crate::events::UiEvent;
     use crate::model::Model;
-    use crate::msg::{Effect, Msg};
+    use crate::msg::{Effect, Msg, RpcCall};
     use crate::native::ext::Ext;
     use crate::native::surfaces::{FloatAnchor, FloatSighting, Surface};
     use crate::update::update;
@@ -350,6 +450,7 @@ mod tests {
             zindex: 1001,
             filetype: filetype.to_string(),
             name: String::new(),
+            hidden: false,
         }
     }
 
@@ -367,7 +468,52 @@ mod tests {
             zindex: 50,
             filetype: filetype.to_string(),
             name: String::new(),
+            hidden: false,
         }
+    }
+
+    /// The same menu as the scan sees it once view's hide has landed.
+    fn hidden_menu(filetype: &str) -> FloatSighting {
+        FloatSighting {
+            hidden: true,
+            ..cmp_cmdline_menu(filetype)
+        }
+    }
+
+    /// One sighting of a cmdline float view cannot take over: the sighting
+    /// itself, then the engine answering that the window is still not
+    /// hidden.
+    ///
+    /// The path back onto the notice for every test below that is about the
+    /// wording rather than about the absorption. A float over the command
+    /// line is absorbed first now, and the notice is what a *failed*
+    /// absorption leaves -- so a test that wants the line has to drive the
+    /// failure rather than assume it.
+    fn unhidable(model: &mut Model, float: &FloatSighting) -> Vec<Effect> {
+        let mut effects = observe_float(model, float);
+        effects.extend(update(
+            model,
+            Msg::FloatRows {
+                win: float.win,
+                hidden: false,
+                lines: Vec::new(),
+                selected: None,
+            },
+        ));
+        effects
+    }
+
+    /// The rows one read of an absorbed float answers with.
+    fn rows_arrive(model: &mut Model, win: u64, lines: &[&str], selected: Option<usize>) {
+        let _ = update(
+            model,
+            Msg::FloatRows {
+                win,
+                hidden: true,
+                lines: lines.iter().map(|line| (*line).to_string()).collect(),
+                selected,
+            },
+        );
     }
 
     /// Every native line standing on `model`, in the order they were
@@ -387,7 +533,7 @@ mod tests {
     fn a_float_over_the_cmdline_is_named_once_with_the_line_that_resolves_it() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
         assert_eq!(
             notices(&model),
             vec![
@@ -402,7 +548,7 @@ mod tests {
     fn a_float_with_no_identity_is_named_a_plugin() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu(""));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu(""));
         assert_eq!(
             notices(&model),
             vec![
@@ -417,7 +563,7 @@ mod tests {
     fn one_identity_claiming_two_surfaces_raises_one_notice_naming_both() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("noice"));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("noice"));
         let _ = observe_float(&mut model, &toast("noice"));
         assert_eq!(
             notices(&model),
@@ -435,7 +581,8 @@ mod tests {
     fn a_repeated_detection_replaces_its_wording_instead_of_stacking() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        for _ in 0..5 {
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        for _ in 0..4 {
             let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
         }
         assert_eq!(notices(&model).len(), 1, "a repeat is not a second notice");
@@ -466,7 +613,7 @@ mod tests {
              Set [native] palette = false in view.toml to give it back."
                 .to_string(),
         ];
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
         assert_eq!(notices(&model), expected);
 
         for key in 1..=8 {
@@ -498,7 +645,7 @@ mod tests {
     fn each_float_notice_starts_with_its_own_family() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
         let _ = observe_float(&mut model, &toast("notify"));
         let standing = notices(&model);
         assert_eq!(
@@ -538,7 +685,7 @@ mod tests {
         let mut model = captured_session();
         open_cmdline(&mut model);
         model.note_config_unread();
-        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
         let standing = notices(&model);
         assert_eq!(standing.len(), 1);
         assert!(
@@ -571,6 +718,7 @@ mod tests {
             zindex: 50,
             filetype: "TelescopeResults".to_string(),
             name: String::new(),
+            hidden: false,
         };
         let effects = observe_float(&mut model, &picker);
         assert!(effects.is_empty());
@@ -586,7 +734,7 @@ mod tests {
     fn a_notice_comes_down_with_the_float_that_stopped_being_sighted() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
         assert_eq!(notices(&model).len(), 1);
 
         // a scan that still finds it: the line stays
@@ -602,18 +750,309 @@ mod tests {
         assert!(model.dirty, "the box left the screen: that is a repaint");
 
         // and the same plugin drawing again is owed the line again
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
         assert_eq!(notices(&model).len(), 1);
     }
 
     /// The dispatch seam itself: the message a decoded bridge notification
-    /// arrives as reaches the same answer `observe_float` gives.
+    /// arrives as reaches the same answer `observe_float` gives, and the
+    /// message its reply arrives as reaches `on_float_rows`.
     #[test]
     fn the_float_message_routes_through_update() {
         let mut model = captured_session();
         open_cmdline(&mut model);
+        let effects = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [
+                    Effect::Rpc(RpcCall::HideWindow { win: 1003 }),
+                    Effect::Rpc(RpcCall::ReadFloatRows { win: 1003 })
+                ]
+            ),
+            "{effects:?}"
+        );
+        rows_arrive(&mut model, 1003, &[" preflight  Text "], Some(0));
+        assert_eq!(
+            model
+                .engine
+                .absorbed_rows()
+                .map(|rows| rows.lines.clone())
+                .unwrap_or_default(),
+            vec![" preflight  Text ".to_string()]
+        );
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+    }
+
+    /// The ordering that is the whole point: a frame carrying view's palette
+    /// rows *and* the plugin's own menu is the bug this feature exists to
+    /// prevent, so the hide is issued before the read and the rows do not
+    /// exist to paint until the read comes back -- which it cannot do before
+    /// the hide it followed down the same connection has run.
+    #[test]
+    fn the_float_is_hidden_before_its_rows_are_painted() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let calls: Vec<&RpcCall> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Rpc(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(
+                calls.as_slice(),
+                [
+                    RpcCall::HideWindow { win: 1003 },
+                    RpcCall::ReadFloatRows { win: 1003 }
+                ]
+            ),
+            "the hide goes first, and both name the sighted window: {calls:?}"
+        );
+        assert!(
+            model.engine.absorbed_rows().is_none(),
+            "nothing is painted from a float until its own read answers"
+        );
+        rows_arrive(&mut model, 1003, &["preflight"], None);
+        assert!(model.engine.absorbed_rows().is_some());
+    }
+
+    /// The cadence bound, which is what keeps this off the key path: the
+    /// window is hidden once and remembered, so a menu re-sighted at the
+    /// scan's own rate for a whole cmdline session costs one hide and not
+    /// one per keystroke.
+    #[test]
+    fn the_same_float_is_hidden_once_however_often_it_is_observed() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        let mut hides = 0;
+        let mut reads = 0;
+        let mut others = 0;
+        for key in 0..8 {
+            // the first sighting is of a window nobody has hidden yet; every
+            // one after it is the same window with view's own hide standing
+            let float = if key == 0 {
+                cmp_cmdline_menu("cmp_menu")
+            } else {
+                hidden_menu("cmp_menu")
+            };
+            for effect in update(&mut model, Msg::FloatObserved(float)) {
+                match effect {
+                    Effect::Rpc(RpcCall::HideWindow { .. }) => hides += 1,
+                    Effect::Rpc(RpcCall::ReadFloatRows { .. }) => reads += 1,
+                    _ => others += 1,
+                }
+            }
+            rows_arrive(&mut model, 1003, &["preflight"], None);
+        }
+        assert_eq!(others, 0, "an absorbed float owes nothing else");
+        assert_eq!(hides, 1, "one hide per window, never one per keystroke");
+        assert_eq!(reads, 8, "the rows are re-read, because they change");
+    }
+
+    /// The flash bound, as a counter rather than as a test of the frame: view
+    /// cannot hold a window against its owner, so a plugin that puts its menu
+    /// back gets re-hidden -- twice, and then view stops absorbing it and
+    /// says so instead.
+    #[test]
+    fn a_float_that_reshows_three_times_falls_back_to_the_notice() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        rows_arrive(&mut model, 1003, &["preflight"], None);
+
+        for reshow in 1..=2 {
+            let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Rpc(RpcCall::HideWindow { .. }))),
+                "re-show {reshow} must be re-hidden"
+            );
+            assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+            rows_arrive(&mut model, 1003, &["preflight"], None);
+        }
+
+        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Rpc(RpcCall::HideWindow { .. }))),
+            "the third re-show stops the absorption rather than fighting on: {effects:?}"
+        );
+        assert_eq!(
+            notices(&model),
+            vec![
+                "view: cmp_menu is drawing over the command line, which view owns.\n\
+                 Set [native] palette = false in view.toml to give it back."
+                    .to_string()
+            ]
+        );
+        assert!(
+            model.engine.absorbed_rows().is_none(),
+            "and the palette stops showing rows off a menu that is on screen"
+        );
+    }
+
+    /// The other failure mode the same disclosure covers: an engine that does
+    /// not take the flag at all. The read that follows the hide reports the
+    /// window still visible, and view stops rather than painting its rows
+    /// under a menu that never went away.
+    #[test]
+    fn a_hide_failure_degrades_to_the_notice_and_never_paints_both() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        let _ = update(
+            &mut model,
+            Msg::FloatRows {
+                win: 1003,
+                hidden: false,
+                lines: vec![" preflight  Text ".to_string()],
+                selected: Some(0),
+            },
+        );
+        assert!(
+            model.engine.absorbed_rows().is_none(),
+            "rows read off a window still on screen are the double chrome"
+        );
+        assert_eq!(
+            notices(&model),
+            vec![
+                "view: cmp_menu is drawing over the command line, which view owns.\n\
+                 Set [native] palette = false in view.toml to give it back."
+                    .to_string()
+            ],
+            "the failure mode is telling the user, never drawing over them"
+        );
+        // and it stays yielded: a window view could not hide is not one to
+        // keep trying to hide on every scan
+        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Rpc(RpcCall::HideWindow { .. }))),
+            "{effects:?}"
+        );
+    }
+
+    /// The teardown. nvim-cmp closes its menu from inside a non-nested
+    /// `CmdlineLeave` callback, so no `WinClosed` announces it and no scan is
+    /// armed to miss it -- without this the next command line would open onto
+    /// the previous one's candidates.
+    #[test]
+    fn absorption_stops_when_the_cmdline_closes() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        rows_arrive(&mut model, 1003, &["preflight", "prefabricated"], Some(0));
+        assert!(model.engine.absorbed_rows().is_some());
+
+        model.dirty = false;
+        let _ = update(&mut model, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+        assert!(
+            model.engine.absorbed_rows().is_none(),
+            "the palette must not reopen holding the last command line's candidates"
+        );
+        assert!(model.dirty, "rows left the screen: that is a repaint");
+    }
+
+    /// The teardown the command line cannot do, because it is still open: a
+    /// prefix that narrows to no candidates closes the menu on its own (the
+    /// capture's `:zqx` opens no window at all), and the scan's end marker is
+    /// the only thing that says so.
+    #[test]
+    fn absorption_stops_when_the_menu_closes_under_an_open_cmdline() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
         let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
-        assert_eq!(notices(&model).len(), 1, "{:?}", notices(&model));
+        rows_arrive(&mut model, 1003, &["preflight"], None);
+        let _ = update(&mut model, Msg::FloatSweep);
+        assert!(
+            model.engine.absorbed_rows().is_some(),
+            "a scan that still finds the menu changes nothing"
+        );
+
+        model.dirty = false;
+        let _ = update(&mut model, Msg::FloatSweep);
+        assert!(model.engine.absorbed_rows().is_none(), "the menu closed");
+        assert!(model.dirty, "rows left the screen: that is a repaint");
+    }
+
+    /// The same gate on the surface whose rows are the ones being taken.
+    /// `[native] palette = false` detaches `ext_cmdline` and
+    /// `ext_popupmenu` together, so no config reaches this state -- but
+    /// `absorbs()` answers about a surface handed to it rather than about a
+    /// rect it resolved itself, and an answer of "yes, take those rows" for
+    /// a completion surface this session does not draw would be one its
+    /// caller's invariants, not its own, were holding up.
+    #[test]
+    fn a_session_that_does_not_draw_completions_absorbs_nothing() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        model.attach_surfaces(vec![
+            Ext::LineGrid,
+            Ext::Cmdline,
+            Ext::Messages,
+            Ext::Tabline,
+        ]);
+        assert!(!surfaces::absorbs(Surface::Cmdline, &model));
+    }
+
+    /// Absorption follows ownership, exactly as the notice does: with
+    /// `[native] palette = false` the command line was never taken from the
+    /// user's plugins, so view neither hides their window nor reads their
+    /// buffer -- the detector and the absorber both follow the config rather
+    /// than a constant.
+    #[test]
+    fn a_yielded_cmdline_absorbs_nothing_and_hides_nobody() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        model.attach_surfaces(vec![Ext::LineGrid, Ext::Messages, Ext::Tabline]);
+        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(model.engine.absorbed_rows().is_none());
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+    }
+
+    /// A float already accounted for by a named claimant's notice is that
+    /// plugin's, and its windows are not view's to take over: a user reading
+    /// "noice.nvim is using the command line" must not also find that command
+    /// line's menu quietly absorbed.
+    #[test]
+    fn a_claimants_own_float_is_never_absorbed() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        probe(&mut model, &["noice"]);
+        let effects = observe_float(&mut model, &cmp_cmdline_menu("noice"));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(model.engine.absorbed_rows().is_none());
+    }
+
+    /// A hidden float draws nothing, so it is nobody's conflict -- the scan
+    /// reports it only so an absorption can keep reading behind it.
+    #[test]
+    fn a_hidden_float_is_never_reported_as_drawing_over_anything() {
+        let mut model = captured_session();
+        open_cmdline(&mut model);
+        probe(&mut model, &["noice"]);
+        let effects = observe_float(
+            &mut model,
+            &FloatSighting {
+                hidden: true,
+                ..toast("notify")
+            },
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(
+            !notices(&model)
+                .iter()
+                .any(|line| line.starts_with("view: notify is drawing over ")),
+            "{:?}",
+            notices(&model)
+        );
     }
 
     fn probe(model: &mut Model, loaded: &[&str]) {
@@ -767,7 +1206,7 @@ mod tests {
         );
 
         // and a second plugin, which says who it is
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("cmp_menu")));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu("cmp_menu"));
         let standing = notices(&model);
         assert_eq!(standing.len(), 2, "{standing:?}");
         assert!(
@@ -858,7 +1297,7 @@ mod tests {
     fn a_claimant_notice_absorbs_the_float_notice_already_standing() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("")));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu(""));
         assert_eq!(notices(&model).len(), 1);
         probe(&mut model, &["noice"]);
         let standing = notices(&model);
@@ -875,7 +1314,7 @@ mod tests {
     fn a_float_claim_the_notice_does_not_cover_survives_it() {
         let mut model = captured_session();
         open_cmdline(&mut model);
-        let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("")));
+        let _ = unhidable(&mut model, &cmp_cmdline_menu(""));
         let _ = update(&mut model, Msg::FloatObserved(toast("")));
         assert_eq!(notices(&model).len(), 1);
         // a claimant that takes only the command line back

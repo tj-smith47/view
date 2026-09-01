@@ -452,7 +452,17 @@ pub fn render(model: &Model) -> Surface {
                 .as_ref()
                 .filter(|pm| pm.is_cmdline_sourced())
                 .cloned();
-            let state = PaletteState::new(cmdline.clone(), completion);
+            // a plugin that draws its own cmdline menu never drives nvim's
+            // popup menu, so `popupmenu_show` never fires and the palette
+            // would stand empty beside it; the rows view read off that float
+            // are the second source, and the engine's own still wins
+            // whenever it has one (`PaletteState::with_absorbed`)
+            let state = match (completion, engine.absorbed_rows()) {
+                (None, Some(absorbed)) => {
+                    PaletteState::with_absorbed(cmdline.clone(), absorbed.clone())
+                }
+                (completion, _) => PaletteState::new(cmdline.clone(), completion),
+            };
             let rect = palette_rect(model, offset);
             layers.push(Layer::new(
                 Rect::new(rect.row, rect.col, rect.width, rect.height),

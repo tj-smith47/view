@@ -392,10 +392,18 @@ return claimed";
 ///   reported -- a user who types `:e pre` and stops to read the menu gets
 ///   nothing at all. One trailing scan per window keeps the same
 ///   one-walk-per-150 ms bound.
-/// - **A hidden float is not a sighting.** `cfg.hide` is skipped, so a
-///   window view has already taken over (hidden through
-///   `nvim_win_set_config`) stops being reported rather than being
-///   reported forever.
+/// - **A hidden float is still a sighting, and says so.** `cfg.hide` rides
+///   along as the last field rather than filtering the window out of the
+///   walk. The window view itself hides ([`HIDE_FLOAT_CHUNK`], for the
+///   completion menu it absorbs into the palette) is precisely the one
+///   whose buffer view then has to keep reading as the candidate list
+///   narrows, and a scan that dropped it the moment the hide landed would
+///   leave the palette holding the rows that stood at the keystroke the
+///   hide went out on. What a hidden float is *not* is a conflict to report
+///   -- it draws nothing -- and that judgment is made in
+///   `view_core::update::surface_conflict`, where the surface and the
+///   `[native]` ownership are known, rather than in a chunk that knows
+///   neither.
 /// - **Every scan closes with `float_sweep`.** A float that closes emits
 ///   nothing (nvim-cmp's `WinClosed` never fires at all), so the only
 ///   evidence a window is gone is a walk that did not find it -- and a walk
@@ -464,14 +472,15 @@ vim.api.nvim_create_autocmd(
 local float_armed, float_pending = false, false
 local function report_float(win)
   local cfg = vim.api.nvim_win_get_config(win)
-  if cfg.relative == '' or cfg.hide then
+  if cfg.relative == '' then
     return
   end
   local buf = vim.api.nvim_win_get_buf(win)
   vim.rpcnotify(channel, 'view_bridge', 'float', win, buf,
     math.floor(cfg.row or 0), math.floor(cfg.col or 0),
     cfg.width, cfg.height, cfg.zindex or 0, vim.bo[buf].filetype,
-    vim.api.nvim_buf_get_name(buf), cfg.anchor or 'NW')
+    vim.api.nvim_buf_get_name(buf), cfg.anchor or 'NW',
+    cfg.hide == true)
 end
 local function scan_floats()
   float_armed = false
@@ -669,6 +678,57 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   end
 end
 return out";
+
+/// Sets one floating window's own `hide` flag, for the completion float
+/// view absorbs into the palette (`RpcCall::HideWindow`).
+///
+/// One field of a window config, and the only one written: the window keeps
+/// its buffer, its lines and its cursor, which is what makes the absorption
+/// reversible and what lets [`READ_FLOAT_ROWS_CHUNK`] keep reading rows off
+/// a window that is no longer drawing them. `docs/surface-float-wire-capture.md`
+/// measured the pinned nvim-cmp reconfiguring this very window while the
+/// flag stood and preserving it, 277 samples with no re-show.
+///
+/// `pcall`, because the window can close between the scan that sighted it
+/// and this call landing: this rides a notification, and nvim reports a
+/// notification's error to the user as a message about a window they never
+/// knew existed. Constant, like every other chunk here -- the window handle
+/// travels as `nvim_exec_lua`'s positional vararg.
+const HIDE_FLOAT_CHUNK: &str = "\
+local win = ...
+pcall(vim.api.nvim_win_set_config, win, { hide = true })";
+
+/// Reads what a float view is absorbing was drawing: its `hide` flag, its
+/// buffer's lines, and its selection.
+///
+/// Every field is the one `docs/surface-float-wire-capture.md` recorded for
+/// the captured menu, and the selection is the reason this is a read rather
+/// than an inference: the menu buffer carries no extmarks in any namespace
+/// in any state, so the selection is the window's own cursor row gated on
+/// its `cursorline` option -- `false` means "menu open, nothing selected",
+/// `true` means "row N is it". The `hide` flag comes back with them because
+/// it is read after the hide has run, which is how view learns from the
+/// engine that a hide did not land instead of from a user seeing two menus.
+///
+/// A window that closed between the sighting and this call answers
+/// `hidden = false` with no lines, which is the same degrade an error reply
+/// takes: view stops absorbing that window rather than painting rows off a
+/// buffer nobody is showing. Constant, like every other chunk here.
+const READ_FLOAT_ROWS_CHUNK: &str = "\
+local win = ...
+if not vim.api.nvim_win_is_valid(win) then
+  return { hidden = false, lines = {}, selected = -1 }
+end
+local buf = vim.api.nvim_win_get_buf(win)
+local selected = -1
+if vim.wo[win].cursorline then
+  selected = vim.api.nvim_win_get_cursor(win)[1] - 1
+end
+return {
+  hidden = vim.api.nvim_win_get_config(win).hide == true,
+  lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false),
+  selected = selected,
+}";
 
 /// Resolves the picker preview pane's text for a candidate path, verified
 /// live against the pinned engine -- see
@@ -3294,6 +3354,47 @@ impl EngineHandle {
         )
     }
 
+    /// Hides `win` via [`HIDE_FLOAT_CHUNK`], for a completion float view is
+    /// taking into its own palette. Fire-and-forget, and issued once per
+    /// window rather than once per keystroke (the cadence bound lives in
+    /// `view_core::native::surfaces::FloatAbsorption`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn hide_window(&self, win: u64) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(HIDE_FLOAT_CHUNK),
+                Value::Array(vec![Value::from(win)]),
+            ],
+        )
+    }
+
+    /// Issues [`READ_FLOAT_ROWS_CHUNK`] as an async request correlated on
+    /// `win`, reading the rows and selection of a float view is absorbing.
+    /// Async by construction, like [`preview_buffer`](Self::preview_buffer):
+    /// this returns immediately and the answer crosses back as
+    /// `Msg::FloatRows` through the connection's pump, which is what keeps
+    /// the palette's second row source off the paint path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
+        self.request_float_rows(
+            "nvim_exec_lua",
+            vec![
+                Value::from(READ_FLOAT_ROWS_CHUNK),
+                Value::Array(vec![Value::from(win)]),
+            ],
+            win,
+        )
+    }
+
     /// Issues [`RENAME_CHUNK`] as an async request tagged with `generation`,
     /// renaming `old_path` to `new_path` and retargeting any open buffer
     /// along with it. Async by construction, like
@@ -4230,8 +4331,10 @@ mod tests {
     /// The float watcher's load-bearing properties, each of which is a
     /// silent defect if it drifts: a scan that is never armed twice at once
     /// reports a storm once per window rather than once per event, a scan
-    /// that reads `hide` keeps reporting a float view has already taken
-    /// over, a scan whose delay drops under nvim-cmp's own 60 ms debounce
+    /// that dropped hidden windows would stop reporting the float view has
+    /// taken over and freeze its rows at whatever the menu held when the
+    /// hide landed, a scan whose delay drops under nvim-cmp's own 60 ms
+    /// debounce
     /// runs before the window it exists to see, an anchor left off the wire
     /// puts an NE float's right edge where its left edge should be, a scan
     /// that reported only what changed would name a covering float once and
@@ -4242,7 +4345,7 @@ mod tests {
     /// `crates/view/tests/bridge_live.rs`, which opens a float after the
     /// leading scan has run; this is the cheap pin that fails first.
     #[test]
-    fn the_float_watcher_scans_windows_throttled_and_skips_a_hidden_one() {
+    fn the_float_watcher_scans_windows_throttled_and_reports_a_hidden_one() {
         assert!(
             REGISTER_BRIDGE_CHUNK.contains("nvim_list_wins()"),
             "a float watcher cannot be built on WinNew: every observed \
@@ -4250,8 +4353,15 @@ mod tests {
              (docs/surface-float-wire-capture.md)"
         );
         assert!(
-            REGISTER_BRIDGE_CHUNK.contains("cfg.relative == '' or cfg.hide"),
-            "a hidden float draws nothing and must stop being reported"
+            REGISTER_BRIDGE_CHUNK.contains("cfg.hide == true)"),
+            "the hide flag rides on the sighting: a scan that dropped the \
+             window view hid would leave the palette holding the candidates \
+             the menu had at the keystroke the hide went out on"
+        );
+        assert!(
+            !REGISTER_BRIDGE_CHUNK.contains("or cfg.hide"),
+            "a hidden float is still walked, because that walk is how an \
+             absorbed menu's rows keep being re-read as the prefix narrows"
         );
         assert!(
             REGISTER_BRIDGE_CHUNK.contains("if float_armed then"),

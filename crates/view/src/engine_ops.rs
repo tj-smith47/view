@@ -89,6 +89,14 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
+    /// Sets one floating window's own `hide` flag, for the completion float
+    /// view absorbs into the palette; fire-and-forget, no reply (see
+    /// `RpcCall::HideWindow`).
+    fn hide_window(&self, win: u64) -> Result<(), EngineError>;
+    /// Reads an absorbed float's rows and selection; never blocks, and
+    /// never itself returns the answer (see `RpcCall::ReadFloatRows`,
+    /// `Msg::FloatRows`).
+    fn read_float_rows(&self, win: u64) -> Result<(), EngineError>;
     /// Opens `path` as `:edit` would, reusing an already-loaded buffer
     /// rather than duplicating it; fire-and-forget, no reply (see
     /// `RpcCall::OpenFile`).
@@ -295,6 +303,12 @@ impl EngineOps for EngineHandle {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
     }
+    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
+        self.hide_window(win)
+    }
+    fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
+        self.read_float_rows(win)
+    }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.open_file(path)
     }
@@ -455,6 +469,12 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
+    }
+    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
+        (**self).hide_window(win)
+    }
+    fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
+        (**self).read_float_rows(win)
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -619,6 +639,12 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
+    }
+    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
+        (**self).hide_window(win)
+    }
+    fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
+        (**self).read_float_rows(win)
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -812,6 +838,12 @@ impl EngineOps for FakeOps {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
+    }
+    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
+        self.record(format!("hide_window({win})"))
+    }
+    fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
+        self.record(format!("read_float_rows({win})"))
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.record(format!("open_file({path})"))
@@ -1035,6 +1067,12 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn hide_window(&self, _win: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn read_float_rows(&self, _win: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn open_file(&self, _path: &str) -> Result<(), EngineError> {

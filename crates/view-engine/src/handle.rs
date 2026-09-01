@@ -15,8 +15,8 @@ mod decode;
 use decode::{
     decode_bridge_event, decode_buf_lines_event, decode_buffer_list_reply, decode_clipboard_get,
     decode_clipboard_set, decode_delete_confirm_reply, decode_feature_invoke,
-    decode_hl_probe_reply, decode_mapping_claims, decode_preview_reply, decode_prompt_reply,
-    decode_rename_reply, decode_swap_recovery_reply, SwapRecoveryReading,
+    decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_claims, decode_preview_reply,
+    decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, SwapRecoveryReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -138,6 +138,18 @@ enum Waiter {
     /// (echoed back since the reply itself carries no path -- the picker's
     /// selection may have moved on by the time this lands).
     Preview { generation: u64, path: String },
+    /// An async read of a float view is absorbing (see
+    /// [`EngineHandle::read_float_rows`]): nothing is blocked on this
+    /// `msgid`, so its `Response` is decoded and routed to `pump` as
+    /// `Msg::FloatRows`.
+    ///
+    /// Correlated on `win` rather than tagged with a generation, and echoed
+    /// back because the reply carries no window of its own. The handle is
+    /// the correlation the absorption is already keyed on and it is stable
+    /// for exactly as long as one lasts, so a reply that outlives its
+    /// absorption names a window `FloatAbsorption` no longer holds and is
+    /// dropped there rather than here.
+    FloatRows { win: u64 },
     /// An async file-tree rename (see [`EngineHandle::rename_file`]):
     /// nothing is blocked on this `msgid`, so its `Response` is decoded and
     /// routed to `pump` as `Msg::TreeRenameReply`, tagged with `generation`
@@ -729,6 +741,30 @@ impl EngineHandle {
                                         path,
                                         loaded,
                                         lines,
+                                    });
+                                }
+                            }
+                            Some(Waiter::FloatRows { win }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "not
+                                    // hidden, no rows", the same "safe
+                                    // default" precedent every async reply
+                                    // here follows -- and the safe direction
+                                    // for this one specifically: view stops
+                                    // absorbing a float it could not read
+                                    // and says so, rather than painting
+                                    // rows it does not have under a menu it
+                                    // cannot prove it hid
+                                    let (hidden, lines, selected) = if error == Value::Nil {
+                                        decode_float_rows_reply(&result)
+                                    } else {
+                                        (false, Vec::new(), None)
+                                    };
+                                    pump.route_float_rows(Msg::FloatRows {
+                                        win,
+                                        hidden,
+                                        lines,
+                                        selected,
                                     });
                                 }
                             }
@@ -1536,6 +1572,27 @@ impl EngineHandle {
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into one absorbed float's rows and routed to the connection's pump
+    /// as `Msg::FloatRows` (see [`Waiter::FloatRows`]). Async on the same
+    /// terms as [`request_probe`](Self::request_probe); `win` is echoed
+    /// back for the reason [`request_preview`](Self::request_preview) echoes
+    /// its path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_float_rows(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        win: u64,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::FloatRows { win })
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
     /// into an agent's file read or write answer and routed to the
     /// connection's pump as `Msg::AiFsReadReply`/`Msg::AiFsWriteReply` (see
     /// [`Waiter::AiFs`]). Async on the same terms as
@@ -2325,6 +2382,67 @@ mod tests {
         assert_eq!(
             decode_load_hidden_reply(&Value::Nil),
             (None, Created::No, 0)
+        );
+    }
+
+    #[test]
+    fn decode_float_rows_reply_carries_the_hide_flag_lines_and_selection() {
+        // the capture's own menu, one `<C-n>` in:
+        // docs/surface-float-wire-capture.md records the buffer lines as
+        // rendered rows (abbreviation and kind column included) and the
+        // selection as the window cursor's row, which the chunk sends
+        // zero-based
+        let result = Value::Map(vec![
+            (Value::from("hidden"), Value::from(true)),
+            (
+                Value::from("lines"),
+                Value::Array(vec![
+                    Value::from(" preflight      Text   "),
+                    Value::from(" prefabricated  Text   "),
+                ]),
+            ),
+            (Value::from("selected"), Value::from(1)),
+        ]);
+        assert_eq!(
+            decode_float_rows_reply(&result),
+            (
+                true,
+                vec![
+                    " preflight      Text   ".to_string(),
+                    " prefabricated  Text   ".to_string()
+                ],
+                Some(1)
+            )
+        );
+    }
+
+    #[test]
+    fn decode_float_rows_reply_reads_the_menus_no_selection_sentinel() {
+        // `cursorline = false` is the captured menu's "open, nothing
+        // selected" state, which the chunk sends as -1 rather than as an
+        // absent key
+        let result = Value::Map(vec![
+            (Value::from("hidden"), Value::from(true)),
+            (
+                Value::from("lines"),
+                Value::Array(vec![Value::from(" pre ")]),
+            ),
+            (Value::from("selected"), Value::from(-1)),
+        ]);
+        assert_eq!(
+            decode_float_rows_reply(&result),
+            (true, vec![" pre ".to_string()], None)
+        );
+    }
+
+    #[test]
+    fn decode_float_rows_reply_degrades_a_reply_it_cannot_read_to_not_hidden() {
+        // "not hidden" is the degrade that yields the surface back and
+        // raises the notice, so a reply this decoder cannot read can never
+        // be read as permission to paint somebody else's rows
+        assert_eq!(
+            decode_float_rows_reply(&Value::Nil),
+            (false, Vec::new(), None)
         );
     }
 
@@ -3414,8 +3532,10 @@ mod tests {
     /// nvim-cmp's cmdline menu exactly as `docs/surface-float-wire-capture.md`
     /// records it, through the chunk's own argument order. The anchor is
     /// carried because dropping it moves an `NE`-anchored float half a
-    /// screen, and `row`/`col` are read from both wire numeric types
-    /// because nvim types them `Float`.
+    /// screen, `row`/`col` are read from both wire numeric types because
+    /// nvim types them `Float`, and the `hide` flag rides along because a
+    /// float view has taken over is still walked by every later scan --
+    /// that walk is what re-reads its rows as the prefix narrows.
     #[test]
     fn a_bridge_float_event_decodes_the_window_geometry_and_its_identity() {
         let decoded = decode_bridge_event(&[
@@ -3430,6 +3550,7 @@ mod tests {
             Value::from("cmp_menu"),
             Value::from(""),
             Value::from("NW"),
+            Value::from(false),
         ]);
         assert!(
             matches!(&decoded, Some(Msg::FloatObserved(_))),
@@ -3447,6 +3568,35 @@ mod tests {
             float.anchor,
             view_core::native::surfaces::FloatAnchor::NorthWest
         );
+        assert!(!float.hidden, "the capture's menu was on screen");
+    }
+
+    /// The same window once view's own hide has landed: still walked, still
+    /// reported, and saying so.
+    #[test]
+    fn a_bridge_float_event_reports_a_window_view_has_already_hidden() {
+        let decoded = decode_bridge_event(&[
+            Value::from("float"),
+            Value::from(1003),
+            Value::from(2),
+            Value::from(26.0),
+            Value::from(0),
+            Value::from(20),
+            Value::from(2),
+            Value::from(1001),
+            Value::from("cmp_menu"),
+            Value::from(""),
+            Value::from("NW"),
+            Value::from(true),
+        ]);
+        assert!(
+            matches!(&decoded, Some(Msg::FloatObserved(_))),
+            "a hidden float is still a sighting, got {decoded:?}"
+        );
+        let Some(Msg::FloatObserved(float)) = decoded else {
+            return;
+        };
+        assert!(float.hidden);
     }
 
     #[test]

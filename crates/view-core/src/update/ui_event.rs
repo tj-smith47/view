@@ -175,6 +175,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         }
         UiEvent::CmdlineHide => {
             model.engine.cmdline = None;
+            super::surface_conflict::cmdline_closed(model);
             // the answer landing, so the box goes with it: nvim sends no
             // msg_clear when a confirm-class prompt resolves, and the only
             // other `cmdline_hide` a prompt overlay can see is the re-arm

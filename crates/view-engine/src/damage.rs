@@ -358,6 +358,13 @@ struct Route {
     /// picker is waiting on, and an older held reply is superseded rather
     /// than kept.
     deferred_preview: Option<Msg>,
+    /// The newest `Msg::FloatRows` an attached-but-full sink refused, held
+    /// for the next routing attempt to retry.
+    ///
+    /// One slot, on the same terms as [`Route::deferred_preview`]: the rows
+    /// an absorbed float is showing right now are the only ones worth
+    /// painting, and an older held read is superseded rather than kept.
+    deferred_float_rows: Option<Msg>,
     /// The `Msg::TreeRenameReply` an attached-but-full sink refused, held
     /// for the next routing attempt to retry.
     ///
@@ -426,6 +433,7 @@ enum Held {
     BufferList,
     HiddenBufferLoaded,
     Preview,
+    FloatRows,
     Rename,
     CreatePrompt,
     RenamePrompt,
@@ -442,6 +450,7 @@ impl Route {
             Held::BufferList => &mut self.deferred_buffer_list,
             Held::HiddenBufferLoaded => &mut self.deferred_hidden_buffer_loaded,
             Held::Preview => &mut self.deferred_preview,
+            Held::FloatRows => &mut self.deferred_float_rows,
             Held::Rename => &mut self.deferred_rename,
             Held::CreatePrompt => &mut self.deferred_create_prompt,
             Held::RenamePrompt => &mut self.deferred_rename_prompt,
@@ -461,6 +470,7 @@ impl Route {
             Held::BufferList,
             Held::HiddenBufferLoaded,
             Held::Preview,
+            Held::FloatRows,
             Held::Rename,
             Held::CreatePrompt,
             Held::RenamePrompt,
@@ -751,6 +761,19 @@ impl PumpShared {
     /// "genuinely empty" apart from "lost".
     pub(crate) fn route_preview(&self, msg: Msg) {
         self.route_held(msg, Held::Preview);
+    }
+
+    /// Routes a `Msg::FloatRows` without ever dropping it on a full sink,
+    /// and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped rows reply is the one the palette cannot tell apart from a
+    /// menu with nothing in it: the absorption already hid the plugin's own
+    /// window, so the user would be reading an empty palette while the
+    /// candidates stood in a buffer nobody is painting, until the next scan
+    /// happened to ask again.
+    pub(crate) fn route_float_rows(&self, msg: Msg) {
+        self.route_held(msg, Held::FloatRows);
     }
 
     /// Routes a `Msg::TreeRenameReply` without ever dropping it on a full

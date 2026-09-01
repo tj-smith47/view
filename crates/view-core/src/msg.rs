@@ -326,6 +326,31 @@ pub enum Msg {
     /// completed walk is a claimant whose float is gone, which is what
     /// retires the notice about it (`update::surface_conflict`).
     FloatSweep,
+    /// The decoded answer to one [`RpcCall::ReadFloatRows`]: what a float
+    /// view is absorbing was drawing, and whether it is still hidden.
+    ///
+    /// Correlated on `win` rather than tagged with a generation. The window
+    /// handle is the correlation the absorption is already keyed on, and it
+    /// is stable for exactly as long as the absorption is (the capture
+    /// measures one id reused across a cmdline session and never across
+    /// two); a reply that outlives its own absorption names a window
+    /// `FloatAbsorption` no longer holds and is dropped there.
+    ///
+    /// `hidden` is read *after* the hide this reply follows, so a `false`
+    /// here is the engine saying the hide did not land -- an older engine
+    /// that does not take the flag, or a plugin that put the window back --
+    /// and view stops absorbing that float rather than painting its rows
+    /// underneath a menu that is still on screen.
+    FloatRows {
+        /// The window the rows came off.
+        win: u64,
+        /// Whether that window's `hide` flag was set when they were read.
+        hidden: bool,
+        /// Its buffer's lines, top to bottom, as the plugin rendered them.
+        lines: Vec<String>,
+        /// Which row it was showing as selected, or `None` for none.
+        selected: Option<usize>,
+    },
     /// The claimant probe's answer: the Lua module names from
     /// [`SURFACE_CLAIMANTS`](crate::native::surfaces::SURFACE_CLAIMANTS)
     /// that `package.loaded` reported present.
@@ -1725,6 +1750,43 @@ pub enum RpcCall {
     PreviewBuffer {
         path: String,
         generation: u64,
+    },
+    /// Sets `win`'s own `hide` flag through `nvim_win_set_config`, so a
+    /// plugin's floating window stops drawing while view renders what it was
+    /// drawing (`update::surface_conflict`'s absorption).
+    ///
+    /// Reversible and text-free by construction: `hide` is one field of a
+    /// window's config, the window keeps its buffer, its lines and its
+    /// cursor, and nothing here writes to a buffer or to the user's config.
+    /// The plugin's own next `nvim_win_set_config` preserves the flag on the
+    /// pinned versions (`docs/surface-float-wire-capture.md` measured 277
+    /// samples with no re-show) and is free to clear it on any other, which
+    /// is what [`ReadFloatRows`](Self::ReadFloatRows)'s reply reports back.
+    ///
+    /// Fire-and-forget, and issued at most once per window view takes over
+    /// -- not once per keystroke -- so a menu standing through a whole
+    /// cmdline session costs one call. The chunk wraps the set in a `pcall`:
+    /// the window can close between the scan that sighted it and this call,
+    /// and a bare notification's error would reach the user as a message
+    /// about a window they never knew existed.
+    HideWindow {
+        win: u64,
+    },
+    /// Reads `win`'s buffer lines and its selection, for a float view is
+    /// absorbing into the palette. Async like `PreviewBuffer`: the reply
+    /// decodes on the reader thread and routes back as `Msg::FloatRows`.
+    ///
+    /// The selection is `nvim_win_get_cursor(win)[1]` gated on
+    /// `vim.wo[win].cursorline`, which
+    /// `docs/surface-float-wire-capture.md` measured as the whole carrier
+    /// for the captured menu -- its buffer holds no extmarks in any
+    /// namespace, so there is nothing else to read. The reply also carries
+    /// the window's own `hide` flag, read after
+    /// [`HideWindow`](Self::HideWindow) has run, which is how view learns a
+    /// hide did not land from the engine rather than from a user noticing
+    /// two menus.
+    ReadFloatRows {
+        win: u64,
     },
     /// Opens `path` as nvim would for `:edit`: an existing buffer for it is
     /// reused rather than duplicated, and a path with no buffer yet gets

@@ -274,6 +274,19 @@ pub struct FloatSighting {
     /// The buffer's name, empty for the unfiled scratch buffer nearly every
     /// float uses.
     pub name: String,
+    /// Whether the window's own `hide` flag is set, so it occupies its cells
+    /// without drawing anything in them.
+    ///
+    /// Reported rather than filtered out at the scan, and the absorption is
+    /// why: the one window view itself hides ([`Policy::Absorb`]) is the one
+    /// whose rows view then has to keep reading as the candidate list
+    /// narrows, and a scan that stopped reporting it the moment the hide
+    /// landed would leave the palette holding the rows that stood at the
+    /// keystroke the hide went out on. A hidden float draws nothing, so it
+    /// is never a conflict to tell a user about -- that filter lives in
+    /// `update::surface_conflict`, where the surface and the ownership are
+    /// already known, rather than in a Lua chunk that knows neither.
+    pub hidden: bool,
 }
 
 /// Filetypes that say what a buffer holds, never who opened the window.
@@ -418,6 +431,31 @@ fn owned(surface: Surface, model: &Model) -> Option<Surface> {
         Some(ext) if model.owns(ext) => Some(surface),
         _ => None,
     }
+}
+
+/// Whether a claim on `surface` is one view answers by taking the
+/// claimant's rows into the palette rather than by telling the user about
+/// it.
+///
+/// A float over the command line, while a command line is open, is a
+/// completion menu: that is the only thing a plugin draws there, and the
+/// rows it draws belong to the *completion* surface rather than to the
+/// command line the rect lands on -- [`claims`] names the cells, this names
+/// what was drawn in them. So the policy read here is
+/// [`Surface::Popupmenu`]'s ([`Policy::Absorb`], the same answer view
+/// already gives a cmdline-sourced popupmenu that arrives on the wire), and
+/// the ownership gate is that surface's own: `[native] palette = false`
+/// detaches `ext_cmdline` and `ext_popupmenu` together, so a session that
+/// handed the command line back absorbs nothing and hides nobody's window.
+///
+/// Reading the table rather than matching on a variant is what keeps this
+/// following the config: a surface whose row stops saying `Absorb` stops
+/// being absorbed here, with no second place saying otherwise.
+#[must_use]
+pub fn absorbs(surface: Surface, model: &Model) -> bool {
+    surface == Surface::Cmdline
+        && row(Surface::Popupmenu).is_some_and(|row| row.policy == Policy::Absorb)
+        && owned(Surface::Popupmenu, model).is_some()
 }
 
 /// Whether this session actually draws `surface` and would fight a second
@@ -624,6 +662,219 @@ impl SurfaceConflicts {
     }
 }
 
+/// How many times one window may be put back on screen after view has
+/// hidden it before view stops absorbing it and says so instead.
+///
+/// The flash this bounds is real and cannot be designed away: between a
+/// plugin's re-show and view's next observation of it there is a frame
+/// carrying both chromes, and view cannot hold a window against its owner
+/// -- nvim offers no lock. What it can do is stop after a bounded number of
+/// them. Three, because two is a plugin that reconfigured its window twice
+/// and a third is a plugin that is going to keep doing it; the wire capture
+/// measured zero over 277 samples on the pinned versions, so this counter
+/// is for the plugin and the engine nobody has run yet.
+const MAX_RESHOWS: u8 = 3;
+
+/// What one sighting of an absorbable float asks view to do.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AbsorbStep {
+    /// Hide the window, then read its rows: the first sighting of a float
+    /// view has not taken yet, and the re-hide after a tolerated re-show.
+    HideThenRead,
+    /// Read its rows and nothing else -- the window is already hidden, and
+    /// what changes from here is the candidate list inside it.
+    Read,
+    /// Stop absorbing this one and tell the user about it instead: view
+    /// hid it and it came back, or the hide never landed at all.
+    Yield,
+}
+
+/// What a reply carrying one float's rows leaves the palette holding.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowsOutcome {
+    /// The rows are view's to paint now. `changed` is whether they differ
+    /// from what the palette already had, which is the only thing that owes
+    /// a repaint: the scan re-reads a standing menu at its own cadence, and
+    /// a frame per read of rows nobody moved is a paint loop keeping time
+    /// with a plugin.
+    Absorbed { changed: bool },
+    /// The window was not hidden when its own rows were read, so the hide
+    /// did not land -- an engine that does not take the flag, or a plugin
+    /// that put the window straight back. Nothing is absorbed, nothing is
+    /// painted twice, and the identity is handed back so the caller can
+    /// raise the notice that says so.
+    Yield(Option<String>),
+    /// The reply names a window this session is not absorbing (a teardown
+    /// overtook it, or it has already yielded), so there is nothing to do.
+    Stale,
+}
+
+/// The floats view has taken over, and the rows it took off them.
+///
+/// Keyed on the window handle, which is the one identifier that is stable
+/// for exactly as long as this state is: the capture measures one window id
+/// reused across a whole cmdline session and never across two, which is
+/// also the lifetime of an absorption ([`Self::forget`] runs at
+/// `cmdline_hide`). Nothing here outlives the connection -- window handles
+/// are per-session allocations, so a replacement engine's are somebody
+/// else's numbers.
+#[derive(Debug, Default)]
+pub struct FloatAbsorption {
+    windows: Vec<AbsorbedWindow>,
+    /// The rows last read, and the window they came off, so a window that
+    /// goes away takes its own rows with it and not another's.
+    rows: Option<(u64, crate::native::palette::AbsorbedRows)>,
+}
+
+/// One float view has taken over.
+#[derive(Debug)]
+struct AbsorbedWindow {
+    win: u64,
+    /// What the float called itself when it was first sighted, kept so the
+    /// notice a degrade raises names the same thing the notice would have
+    /// named had view never absorbed it at all.
+    identity: Option<String>,
+    /// Whether a read has come back saying the hide actually landed. Until
+    /// one has, a sighting that still shows the window is not yet evidence
+    /// of anything: the reply is what nvim itself says about the flag, read
+    /// after the hide ran, while a sighting is a scan that may have walked
+    /// the window list before the hide was even written.
+    confirmed: bool,
+    reshows: u8,
+    degraded: bool,
+    /// Whether this window was sighted during the scan now running, on the
+    /// same terms as [`Claimant::seen`].
+    seen: bool,
+}
+
+impl FloatAbsorption {
+    /// Answers one sighting of a float view may absorb.
+    ///
+    /// The cadence bound lives here: a hide goes out on the first sighting
+    /// of a window and on nothing else until the plugin puts that window
+    /// back, so a menu observed at the scan rate for a whole cmdline session
+    /// costs one hide, not one per keystroke.
+    pub fn observe(&mut self, win: u64, hidden: bool, identity: Option<&str>) -> AbsorbStep {
+        let index = match self.windows.iter().position(|w| w.win == win) {
+            Some(index) => index,
+            None => {
+                self.windows.push(AbsorbedWindow {
+                    win,
+                    identity: identity.map(str::to_owned),
+                    confirmed: false,
+                    reshows: 0,
+                    degraded: false,
+                    seen: true,
+                });
+                return AbsorbStep::HideThenRead;
+            }
+        };
+        let Some(window) = self.windows.get_mut(index) else {
+            return AbsorbStep::Yield;
+        };
+        window.seen = true;
+        if window.degraded {
+            return AbsorbStep::Yield;
+        }
+        if hidden || !window.confirmed {
+            return AbsorbStep::Read;
+        }
+        window.reshows = window.reshows.saturating_add(1);
+        if window.reshows >= MAX_RESHOWS {
+            window.degraded = true;
+            self.drop_rows(win);
+            return AbsorbStep::Yield;
+        }
+        AbsorbStep::HideThenRead
+    }
+
+    /// Folds one read of a float's rows.
+    pub fn rows_read(
+        &mut self,
+        win: u64,
+        hidden: bool,
+        rows: crate::native::palette::AbsorbedRows,
+    ) -> RowsOutcome {
+        let Some(window) = self.windows.iter_mut().find(|w| w.win == win) else {
+            return RowsOutcome::Stale;
+        };
+        if window.degraded {
+            return RowsOutcome::Stale;
+        }
+        if !hidden {
+            window.degraded = true;
+            let identity = window.identity.clone();
+            self.drop_rows(win);
+            return RowsOutcome::Yield(identity);
+        }
+        window.confirmed = true;
+        let changed = !matches!(&self.rows, Some((owner, held)) if *owner == win && held == &rows);
+        self.rows = Some((win, rows));
+        RowsOutcome::Absorbed { changed }
+    }
+
+    /// The rows the palette paints, or `None` while view is absorbing
+    /// nothing.
+    #[must_use]
+    pub fn rows(&self) -> Option<&crate::native::palette::AbsorbedRows> {
+        self.rows.as_ref().map(|(_, rows)| rows)
+    }
+
+    /// Closes one float scan: drops every absorbed window the scan did not
+    /// sight, and answers whether the palette's rows went with one of them.
+    ///
+    /// The teardown for the case the command line does not cover: a prefix
+    /// with no candidates produces no window at all (the capture's `:zqx`),
+    /// so the menu is gone while the command line the user is still typing
+    /// stays open. Without this the palette would keep offering the
+    /// candidates of a prefix that no longer has any.
+    pub fn sweep(&mut self) -> bool {
+        let mut dropped = Vec::new();
+        self.windows.retain_mut(|window| {
+            if std::mem::take(&mut window.seen) {
+                return true;
+            }
+            dropped.push(window.win);
+            false
+        });
+        let mut cleared = false;
+        for win in dropped {
+            // every dropped window, not the first one that owned the rows:
+            // `any` would stop walking at it and leave the rest holding
+            cleared |= self.drop_rows(win);
+        }
+        cleared
+    }
+
+    /// Forgets every absorption, and answers whether there was one.
+    ///
+    /// Called when the command line closes and when a connection is
+    /// replaced: both end the session those window handles were allocated
+    /// in, and the plugin's own window is closed by then (nvim-cmp closes
+    /// its menu from a `CmdlineLeave` callback, which is also why no
+    /// `WinClosed` announces it). Nothing is un-hidden: there is no window
+    /// left to un-hide, and a hide view cannot see any more is a hide view
+    /// must not keep claiming to hold.
+    pub fn forget(&mut self) -> bool {
+        let held = !self.windows.is_empty() || self.rows.is_some();
+        self.windows.clear();
+        self.rows = None;
+        held
+    }
+
+    /// Drops the palette's rows if they came off `win`, and answers whether
+    /// they did.
+    fn drop_rows(&mut self, win: u64) -> bool {
+        if self.rows.as_ref().is_some_and(|(owner, _)| *owner == win) {
+            self.rows = None;
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -689,6 +940,7 @@ mod tests {
             zindex: 50,
             filetype: filetype.to_string(),
             name: String::new(),
+            hidden: false,
         }
     }
 

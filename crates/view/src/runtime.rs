@@ -1736,6 +1736,31 @@ mod tests {
         assert_eq!(ops.calls.borrow()[0], "preview_buffer(src/main.rs,7)");
     }
 
+    /// The two calls an absorbed completion float costs, in the order the
+    /// outbox carries them: nvim runs them in that order, which is what
+    /// makes the reply that brings the rows back one the hide has already
+    /// happened before.
+    #[test]
+    fn absorbing_a_float_maps_to_hide_window_then_read_float_rows() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        assert!(matches!(
+            executor.run(Effect::Rpc(RpcCall::HideWindow { win: 1003 })),
+            Flow::Continue
+        ));
+        assert!(matches!(
+            executor.run(Effect::Rpc(RpcCall::ReadFloatRows { win: 1003 })),
+            Flow::Continue
+        ));
+        assert_eq!(
+            *ops.calls.borrow(),
+            vec![
+                "hide_window(1003)".to_string(),
+                "read_float_rows(1003)".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn preview_buffer_write_failure_returns_engine_lost() {
         let ops = FakeOps::default();

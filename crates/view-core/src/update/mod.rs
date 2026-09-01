@@ -456,6 +456,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::FloatObserved(float) => surface_conflict::observe_float(model, &float),
         Msg::FloatSweep => surface_conflict::sweep_floats(model),
+        Msg::FloatRows {
+            win,
+            hidden,
+            lines,
+            selected,
+        } => surface_conflict::on_float_rows(model, win, hidden, lines, selected),
         Msg::ClaimantsProbed(probed) => surface_conflict::on_claimants_probed(model, &probed),
         Msg::StartupHoldExpired => {
             model.dirty |= model

@@ -264,6 +264,7 @@ impl Model {
                 toast_history: crate::native::toast::ToastHistory::new(),
                 tabline: None,
                 popupmenu: None,
+                float_absorption: crate::native::surfaces::FloatAbsorption::default(),
                 mouse_on: false,
                 statusline: crate::native::statusline::StatuslineState::default(),
             },
@@ -1063,6 +1064,15 @@ pub struct EngineModel {
     pub toast_history: crate::native::toast::ToastHistory,
     pub tabline: Option<TablineState>,
     pub popupmenu: Option<PopupmenuState>,
+    /// The floating windows view has taken over and the rows it took off
+    /// them, for a plugin drawing its own completion menu on the command
+    /// line view renders (`update::surface_conflict`'s absorption).
+    ///
+    /// On the engine's own model rather than beside
+    /// [`Model::surface_conflicts`], because what it holds is window
+    /// handles: those are per-connection allocations, and a replacement
+    /// engine's are somebody else's numbers.
+    pub(crate) float_absorption: crate::native::surfaces::FloatAbsorption,
     /// Whether nvim currently wants terminal mouse reporting on, from the
     /// last `mouse_on`/`mouse_off` redraw event. The terminal only enables
     /// mouse capture while this is `true`: capturing unconditionally would
@@ -1147,6 +1157,17 @@ impl EngineModel {
         self.hl.mark_dirty();
     }
 
+    /// The rows view took off a plugin's own cmdline completion float, or
+    /// `None` while it is absorbing none.
+    ///
+    /// The palette's second row source, read by `view-surface::render` and
+    /// written only by the reply to an `RpcCall::ReadFloatRows`: no paint
+    /// asks the engine anything to get them.
+    #[must_use]
+    pub fn absorbed_rows(&self) -> Option<&crate::native::palette::AbsorbedRows> {
+        self.float_absorption.rows()
+    }
+
     /// Drops every piece of this model the engine both raises and retracts,
     /// for a connection being replaced.
     ///
@@ -1162,6 +1183,7 @@ impl EngineModel {
     /// |---|---|---|
     /// | `cmdline` | `cmdline_hide` | yes |
     /// | `popupmenu` | `popupmenu_hide` | yes |
+    /// | `float_absorption` | the plugin's window dies with the connection | yes |
     /// | `tabline` | the next `tabline_update` | yes |
     /// | `mouse_on` | `mouse_off` | yes |
     /// | `statusline`'s `msg_*` segments | the same event, empty | yes, via [`crate::native::statusline::StatuslineState::forget_engine_segments`] |
@@ -1182,6 +1204,7 @@ impl EngineModel {
     pub fn forget_overlays(&mut self) {
         self.cmdline = None;
         self.popupmenu = None;
+        let _ = self.float_absorption.forget();
         self.tabline = None;
         self.mouse_on = false;
         self.statusline.forget_engine_segments();

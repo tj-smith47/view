@@ -329,6 +329,8 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::PreviewBuffer { path, generation } => {
                         self.ops.preview_buffer(&path, generation)
                     }
+                    RpcCall::HideWindow { win } => self.ops.hide_window(win),
+                    RpcCall::ReadFloatRows { win } => self.ops.read_float_rows(win),
                     RpcCall::OpenFile { path } => self.ops.open_file(&path),
                     RpcCall::RenameFile {
                         old_path,

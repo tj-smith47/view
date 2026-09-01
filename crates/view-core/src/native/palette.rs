@@ -16,6 +16,33 @@ use crate::model::{CmdlineState, MessageEntry, PopupmenuState};
 use crate::native::toast::ToastHistory;
 use crate::native::views::{PaletteRow, PaletteView};
 
+/// The rows a plugin's own cmdline completion float was drawing, read back
+/// off its buffer so view can render them as palette rows instead of
+/// letting two menus stack (`update::surface_conflict`'s absorption).
+///
+/// A second source for the same palette rows, not a second kind of
+/// completion: nvim's externalized popup menu never fires for a plugin that
+/// draws its own float (`popupmenu_show` needs the engine's own completion),
+/// so a session using one has an empty palette and a plugin's menu over it
+/// until these rows arrive.
+///
+/// `lines` are the float buffer's own lines with their padding trimmed at
+/// both ends: the capture records them as rendered rows, abbreviation and
+/// kind column included (`" preflight      Text   "`), and an absorbing
+/// consumer takes the text and re-renders rather than replaying a layout
+/// sized for a window it just hid.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct AbsorbedRows {
+    /// The rows, top to bottom.
+    pub lines: Vec<String>,
+    /// Which row the plugin was showing as selected, or `None` when it was
+    /// showing none. Read from the float's own window cursor gated on its
+    /// `cursorline` option, which is the whole selection carrier for the
+    /// captured menu -- its buffer holds no extmarks in any namespace.
+    pub selected: Option<usize>,
+}
+
 /// The command palette's state while nvim's command line is open: the
 /// typed line, plus its completion candidates when the open popup menu is
 /// cmdline-sourced. A buffer-anchored completion (insert-mode keyword
@@ -27,6 +54,7 @@ use crate::native::views::{PaletteRow, PaletteView};
 pub struct PaletteState {
     cmdline: CmdlineState,
     completion: Option<PopupmenuState>,
+    absorbed: Option<AbsorbedRows>,
 }
 
 impl PaletteState {
@@ -40,6 +68,24 @@ impl PaletteState {
         Self {
             cmdline,
             completion,
+            absorbed: None,
+        }
+    }
+
+    /// The same palette over rows view took off a plugin's own completion
+    /// float rather than off the wire.
+    ///
+    /// Never both sources at once, and the engine's own is the one that
+    /// wins: `popupmenu_show` is the engine saying what it is completing,
+    /// while absorbed rows are a rendering read back out of somebody else's
+    /// buffer. The caller (`view-surface::render`) picks, and this
+    /// constructor is the absorbed half of that choice.
+    #[must_use]
+    pub fn with_absorbed(cmdline: CmdlineState, absorbed: AbsorbedRows) -> Self {
+        Self {
+            cmdline,
+            completion: None,
+            absorbed: Some(absorbed),
         }
     }
 
@@ -59,20 +105,31 @@ impl PaletteState {
 
     #[must_use]
     pub fn view(&self) -> PaletteView {
-        let rows = self.completion.as_ref().map_or_else(Vec::new, |pm| {
-            pm.items
+        let rows = match (&self.completion, &self.absorbed) {
+            (Some(pm), _) => pm
+                .items
                 .iter()
                 .map(|item| PaletteRow::new(item.display_text()))
-                .collect()
-        });
+                .collect(),
+            (None, Some(absorbed)) => absorbed
+                .lines
+                .iter()
+                .map(|line| PaletteRow::new(line.trim()))
+                .collect(),
+            (None, None) => Vec::new(),
+        };
         let view = PaletteView::new(title_for(&self.cmdline.firstc))
             .with_query(self.query())
             .with_rows(rows);
-        match self
-            .completion
-            .as_ref()
-            .and_then(|pm| usize::try_from(pm.selected).ok())
-        {
+        // the engine's `selected` is a signed sentinel (-1 for "nothing
+        // selected"), the absorbed one an `Option` already decided where the
+        // window cursor was read; both land on the same `with_selected`
+        let selected = match (&self.completion, &self.absorbed) {
+            (Some(pm), _) => usize::try_from(pm.selected).ok(),
+            (None, Some(absorbed)) => absorbed.selected,
+            (None, None) => None,
+        };
+        match selected {
             Some(index) => view.with_selected(index),
             None => view,
         }
@@ -278,6 +335,73 @@ mod tests {
         );
         let state = PaletteState::new(cmdline(":", "set nu"), Some(completion));
         assert_eq!(state.view().selected, None);
+    }
+
+    /// The rows the wire capture read off nvim-cmp's own cmdline menu
+    /// buffer, verbatim padding included, with the selection it expressed as
+    /// a window cursor on row 2.
+    #[test]
+    fn absorbed_rows_render_in_the_palette_with_the_selection_marked() {
+        let state = PaletteState::with_absorbed(
+            cmdline(":", "pref"),
+            AbsorbedRows {
+                lines: vec![
+                    " preflight      Text   ".to_string(),
+                    " prefabricated  Text   ".to_string(),
+                ],
+                selected: Some(1),
+            },
+        );
+        let view = state.view();
+        assert_eq!(
+            view.rows
+                .iter()
+                .map(|r| r.label.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "preflight      Text".to_string(),
+                "prefabricated  Text".to_string()
+            ],
+            "the rows are re-rendered from the text, not replayed with the \
+             padding of a window view just hid"
+        );
+        assert_eq!(view.selected, Some(1));
+        assert_eq!(view.query, ":pref", "and the typed line is still view's");
+    }
+
+    /// The engine's own menu is the authority whenever it fires: a session
+    /// that has both is a session whose plugin drew a float over a
+    /// completion nvim was already externalizing, and re-rendering the
+    /// float's buffer would show the same candidates through the worse
+    /// source.
+    #[test]
+    fn a_wire_sourced_completion_outranks_absorbed_rows() {
+        let completion = popupmenu(
+            vec![PmItem {
+                word: "number".to_string(),
+                kind: String::new(),
+                menu: String::new(),
+                info: String::new(),
+            }],
+            0,
+            0,
+            4,
+            -1,
+        );
+        let mut state = PaletteState::new(cmdline(":", "set nu"), Some(completion));
+        state.absorbed = Some(AbsorbedRows {
+            lines: vec!["absorbed".to_string()],
+            selected: None,
+        });
+        let view = state.view();
+        assert_eq!(
+            view.rows
+                .iter()
+                .map(|r| r.label.clone())
+                .collect::<Vec<_>>(),
+            vec!["number".to_string()]
+        );
+        assert_eq!(view.selected, Some(0));
     }
 
     #[test]

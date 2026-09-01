@@ -158,7 +158,8 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::FloatObserved(float) => {
             log_with("native", || {
                 format!(
-                    "float win={} row={} col={} {}x{} anchor={:?} zindex={} identity={:?}",
+                    "float win={} row={} col={} {}x{} anchor={:?} zindex={} \
+                     identity={:?} hidden={}",
                     float.win,
                     float.row,
                     float.col,
@@ -167,6 +168,24 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
                     float.anchor,
                     float.zindex,
                     float.identity(),
+                    float.hidden,
+                )
+            });
+        }
+        // the other half of an absorption, on the same terms: a palette
+        // standing empty beside a plugin's menu is either a read whose
+        // reply never came back or one that answered with the window still
+        // visible, and only the reply's own fields tell those apart
+        Msg::FloatRows {
+            win,
+            hidden,
+            lines,
+            selected,
+        } => {
+            log_with("native", || {
+                format!(
+                    "float-rows win={win} hidden={hidden} rows={} selected={selected:?}",
+                    lines.len()
                 )
             });
         }
