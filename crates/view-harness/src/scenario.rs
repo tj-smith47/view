@@ -320,6 +320,20 @@ pub enum ScenarioError {
          sentinel naming the state reached"
     )]
     VacuousNegativeWait { index: usize, sentinel: String },
+    /// A `wait_for_probe` step polls toward `"closed"` about the scenario's
+    /// own plugin, with nothing earlier in the same state having observed
+    /// that expression report anything else.
+    #[error(
+        "state \"{state}\" step {index} polls wait_for_probe toward \"closed\" for {plugin}'s \
+         own window with nothing earlier proving it open: a window that never opened answers \
+         \"closed\" on the first poll, so either wait toward \"open\" first or read the state \
+         once with probe"
+    )]
+    VacuousOwnWindowWait {
+        state: String,
+        plugin: String,
+        index: usize,
+    },
     /// `timeout_ms` was set on a step whose action is none of `wait_for`,
     /// `wait_for_cell`, or `wait_for_probe` (the only three steps that poll
     /// toward a deadline).
@@ -407,6 +421,16 @@ fn starts_with_silent_command(keys: &str) -> bool {
 /// because a rule keyed on one word is a rule a scenario escapes by writing
 /// a synonym. Whichever of these a step names, the shape it needs is the
 /// same, and the refusal says so.
+///
+/// `"closed"` is deliberately not among them, and the corpus is the reason:
+/// of its `wait_for_probe … expect = "closed"` steps, most gate on
+/// lazy.nvim's installer window rather than on the plugin under test, and
+/// the rest are the second half of a transition whose first half waited
+/// toward `"open"` on the same expression. Both are honest -- a window can
+/// be observed closed as a real state, unlike `absent` or `missing`, which
+/// name only the absence of an observation. The genuinely vacuous shape is
+/// narrower than the word and is refused by
+/// [`check_own_window_closed_polls`] instead.
 const NEGATIVE_SENTINELS: [&str; 5] = ["absent", "no", "none", "false", "missing"];
 
 /// Validates and converts one [`RawStep`] into a [`Step`], applying
@@ -633,6 +657,65 @@ fn check_accommodation_declines(
     Ok(())
 }
 
+/// Letters and digits of `text`, lowercased: `"nvim-tree"` and
+/// `"NvimTree"` both reduce to `nvim_tree`'s spelling, which is what lets
+/// [`check_own_window_closed_polls`] recognize a probe that names the
+/// plugin whatever punctuation each side wrote it with.
+fn normalized(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Fails a state that polls toward `"closed"` about the scenario's own
+/// plugin without first observing that same expression report anything
+/// else.
+///
+/// `"closed"` is not in [`NEGATIVE_SENTINELS`] and should not be: a window
+/// really can be observed closed as a state, and most of the corpus's
+/// `"closed"` waits are either scheduling gates gating on someone else's
+/// window (lazy.nvim's installer) or the second half of a transition whose
+/// first half proved the window open. What is vacuous is the narrower
+/// shape this checks: a claim that the plugin's *own* window is not there,
+/// polled rather than read, which passes on its first sample whether the
+/// window ever existed or not.
+fn check_own_window_closed_polls(
+    plugin: &str,
+    states: &[ScenarioStateEntry],
+) -> Result<(), ScenarioError> {
+    let needle = normalized(plugin);
+    if needle.is_empty() {
+        return Ok(());
+    }
+    for state in states {
+        let mut proven: BTreeSet<&str> = BTreeSet::new();
+        for (index, step) in state.steps.iter().enumerate() {
+            match step {
+                Step::Probe { expr, expect } if expect != "closed" => {
+                    proven.insert(expr.as_str());
+                }
+                Step::WaitForProbe { expr, expect, .. } if expect != "closed" => {
+                    proven.insert(expr.as_str());
+                }
+                Step::WaitForProbe { expr, expect, .. }
+                    if expect == "closed"
+                        && normalized(expr).contains(&needle)
+                        && !proven.contains(expr.as_str()) =>
+                {
+                    return Err(ScenarioError::VacuousOwnWindowWait {
+                        state: state_name(state.name).to_string(),
+                        plugin: plugin.to_string(),
+                        index,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parses and validates one scenario from its raw TOML text, `source_stem`
 /// being the filename stem [`check_cold_bootstrap_authorization`] checks a
 /// `cold_bootstrap = true` flag against.
@@ -649,6 +732,7 @@ fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile,
         .collect::<Result<Vec<_>, _>>()?;
     check_cold_bootstrap_authorization(raw.cold_bootstrap, source_stem)?;
     check_accommodation_declines(raw.fixture.as_deref(), source_stem, &states)?;
+    check_own_window_closed_polls(&raw.plugin, &states)?;
     validate_state_completeness(class, raw.cold_bootstrap, &states)?;
 
     Ok(ScenarioFile {
@@ -674,8 +758,10 @@ fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile,
 /// [`SUPPORTED_SCHEMA`], [`ScenarioError::UnknownClass`]/[`ScenarioError::UnsupportedState`]
 /// if `class`/a state's `name` do not name a recognized value,
 /// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]/[`ScenarioError::UnauthorizedColdBootstrap`]/[`ScenarioError::UnauthorizedAccommodationDecline`]/[`ScenarioError::AccommodationDeclineWithoutFixture`]
-/// if the `states` list itself is invalid, or any of the per-step errors
-/// [`validate_step`] can raise.
+/// if the `states` list itself is invalid,
+/// [`ScenarioError::VacuousOwnWindowWait`] if a state polls toward its own
+/// plugin's window being closed without first proving it open, or any of
+/// the per-step errors [`validate_step`] can raise.
 pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
     parse_from(raw_toml, None)
 }
@@ -1301,6 +1387,71 @@ states = []
                 "expected VacuousNegativeWait({sentinel}), got {err:?}"
             );
         }
+    }
+
+    /// The vacuity `"closed"` can carry without being a negative sentinel:
+    /// a poll toward the plugin's own window not being there passes on its
+    /// first sample whether the window ever opened or not.
+    #[test]
+    fn a_wait_for_probe_polling_toward_the_plugins_own_window_closed_is_rejected() {
+        let toml = VALID.replace(
+            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+            "{ wait_for_probe = \"luaeval('lualine_win_state()')\", expect = \"closed\" },",
+        );
+        let err =
+            parse(&toml).expect_err("a poll toward the plugin's own window closing is vacuous");
+        assert!(
+            matches!(&err, ScenarioError::VacuousOwnWindowWait { plugin, .. } if plugin == "lualine"),
+            "expected VacuousOwnWindowWait(lualine), got {err:?}"
+        );
+    }
+
+    /// The two shapes that are not vacuous, and which the corpus is full
+    /// of: a wait toward someone else's window (lazy.nvim's installer),
+    /// and the second half of a transition whose first half proved the
+    /// window open.
+    #[test]
+    fn a_closed_wait_stands_when_it_names_another_window_or_follows_an_open_one() {
+        let other = VALID.replace(
+            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+            "{ wait_for_probe = \"luaeval('lazy_win_state()')\", expect = \"closed\" },",
+        );
+        parse(&other).expect("a wait on another plugin's window is a scheduling gate");
+
+        let transition = VALID.replace(
+            "{ probe = \"luaeval('lualine ~= nil')\", expect = \"true\" },",
+            "{ wait_for_probe = \"luaeval('lualine_win_state()')\", expect = \"open\" },\n  \
+             { send = \"<Esc>\" },\n  \
+             { wait_for_probe = \"luaeval('lualine_win_state()')\", expect = \"closed\" },",
+        );
+        parse(&transition).expect("a closed wait after a proven open is a real transition");
+    }
+
+    /// Every scenario outside `compat/scenarios/` that the sweep never
+    /// loads, held to the same loader: a capture harness kept out of the
+    /// sweep still fails `task ci` when an edit breaks its schema, instead
+    /// of failing the next time a human runs it by path.
+    #[test]
+    fn every_acceptance_scenario_loads() {
+        let dir = crate::fixture::workspace_root()
+            .join("scripts")
+            .join("acceptance");
+        let mut checked = 0_usize;
+        for entry in std::fs::read_dir(&dir).expect("scripts/acceptance must be readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            load_file(&path).unwrap_or_else(|err| {
+                panic!("{} must load: {err}", path.display());
+            });
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no scenario was reached in {} -- the walk found nothing to enforce",
+            dir.display()
+        );
     }
 
     #[test]

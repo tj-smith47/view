@@ -32,7 +32,12 @@ steps = [
   # launches view from (see oracle.rs's `cmd.cwd`), so this pins the
   # native sidebar actually rendering that directory's listing.
   { wait_for = "lazy-lock.json", timeout_ms = 15000 },
-  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"NvimTree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+  # Read once, not polled: the claim is that the plugin's own window
+  # never opened, and a poll toward that answers "closed" on its first
+  # sample whether it opened or not. The wait above is what makes the
+  # read meaningful -- view's own sidebar is already drawn by then, so
+  # the plugin has had its chance.
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"NvimTree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed" },
 ]
 
 
@@ -52,7 +57,12 @@ steps = [
   # launches view from (see oracle.rs's `cmd.cwd`), so this pins the
   # native sidebar actually rendering that directory's listing.
   { wait_for = "lazy-lock.json", timeout_ms = 15000 },
-  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"NvimTree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+  # Read once, not polled: the claim is that the plugin's own window
+  # never opened, and a poll toward that answers "closed" on its first
+  # sample whether it opened or not. The wait above is what makes the
+  # read meaningful -- view's own sidebar is already drawn by then, so
+  # the plugin has had its chance.
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"NvimTree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed" },
 ]
 
 [[states]]
