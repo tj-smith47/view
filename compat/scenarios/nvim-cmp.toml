@@ -120,9 +120,10 @@ steps = [
   # offer both in the buffer and at the cmdline.
   #
   # Placed rather than typed, unlike the `present` state's own seeding: a
-  # single 24-byte burst through the pty reaches this state's nvim short on
-  # a loaded host (observed leaving `prefabricated pr` in the buffer while
-  # the `<C-c>` behind it still arrived), and the candidate list this state
+  # `<C-c>` queued behind a single 24-byte burst discards whatever of that
+  # burst nvim has not yet consumed (Ctrl-C flushes typeahead — on a loaded
+  # host that left `prefabricated pr` in the buffer, a contiguous tail
+  # gone), and the candidate list this state
   # asserts against is then a different one every run. What this state is
   # about is where a completion menu draws, not how its buffer came to hold
   # two words, and every keystroke it does assert is typed one send at a
@@ -154,7 +155,10 @@ steps = [
   # `<C-c>` rather than `<Esc>` for this mode exit: `<Esc>` is also the
   # dismissal of a standing sticky notice, and the noice line asserted
   # further down has to still be up when cmp's own line would have joined
-  # it. Both leave insert mode, which is all this step is for.
+  # it. Both leave insert mode, which is all this step is for. Safe only
+  # because the wait above already drained the typed keys: Ctrl-C discards
+  # nvim's unconsumed typeahead, so it must never be queued behind sends
+  # nothing has waited on.
   { send = "<C-c>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   # Now the claim. Keys go one per send for the same reason the present
