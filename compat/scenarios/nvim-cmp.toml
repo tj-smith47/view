@@ -46,6 +46,44 @@ steps = [
   # the assertions above keep passing
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { probe = "luaeval('require(\"cmp\").visible()')", expect = "false" },
+  # The other place this plugin completes, under the configuration this
+  # fixture actually commits: `[native] palette = false` leaves ext_cmdline
+  # and ext_popupmenu with nvim, so the command line is nvim's own row and
+  # cmp's cmdline menu is a plain float over the grid view paints. A
+  # completion plugin asserted in insert mode alone leaves that path
+  # untested in both directions -- that the menu renders at all, and that
+  # view takes nothing from a surface it was handed back.
+  #
+  # The fixture configures cmp for insert mode only, so the cmdline sources
+  # are armed here the way docs/surface-float-wire-capture.md records the
+  # capture arming them: the pinned plugin's own `cmp.setup.cmdline`, with
+  # the buffer source standing in for cmp-cmdline.
+  { probe = "luaeval('(function() local cmp = require(\"cmp\") cmp.setup.cmdline(\":\", { mapping = cmp.mapping.preset.cmdline(), sources = { { name = \"buffer\" } } }) return \"armed\" end)()')", expect = "armed" },
+  # One key per send, the pacing this file documents above: cmp reads a
+  # cursor jump of more than a column between CmdlineChanged events as
+  # paste-like input and opens no menu for it.
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "p" },
+  { send = "r" },
+  { send = "e" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 15000 },
+  # The word this state seeded on its first line, offered for the prefix
+  # typed at the command line and drawn by cmp's own menu: label, two-space
+  # gutter, kind column, as the capture records the rows. The buffer line
+  # behind the menu reads `prefabricated` too, so the kind column is what
+  # parts the candidate from the text it completes.
+  { wait_for = "prefabricated  Text", timeout_ms = 15000 },
+  # And view left the window standing: with the command line handed back
+  # there is no surface to absorb, so the walk that reads "hidden" once view
+  # owns the command line has to read "showing" here.
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"cmp_menu\" then if vim.api.nvim_win_get_config(w).hide == true then return \"hidden\" end return \"showing\" end end return \"none\" end)()')", expect = "showing" },
+  # Nor is there a palette: view draws no command line in this state, so the
+  # query line it would head one with cannot be on screen.
+  { assert_absent = "> :e pre" },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
 ]
 
 # The same plugin under view's own defaults, where the completion menu
@@ -139,15 +177,21 @@ steps = [
   # docs/surface-float-wire-capture.md), which is the plugin's own
   # rendering rather than anything view writes on its own, and the window
   # that used to draw it is hidden by the step above. The candidate labels
-  # themselves are deliberately not asserted: cmp-buffer re-indexes the
-  # buffer as this scenario types into it, so which words it offers for
-  # `pre` -- and how far through one it has got -- differs between runs.
+  # this scenario types into are deliberately not named: cmp-buffer
+  # re-indexes the buffer as the keys land, so how far through one of them a
+  # run has got differs between runs. The word placed by the seeding step is
+  # not one of those -- it is in the buffer before any of this state's keys
+  # are typed, so it is a candidate for `pre` in every run -- and naming it
+  # is the difference between a palette holding cmp's candidates and one
+  # holding rows.
   # Two needles rather than one: the palette's own header line proves the
-  # box on screen is view's command line and not some other overlay, and
-  # `Text` -- four characters that appear nowhere else this fixture draws
-  # -- proves the rows inside it came off cmp's own rendering.
+  # box on screen is view's command line and not some other overlay, and the
+  # candidate carries the two-space gutter and kind column cmp itself
+  # rendered (`" prefabricated  Text   "` in the capture), which is also what
+  # parts it from the buffer line reading `prefabricated preflight` on the
+  # same screen.
   { wait_for = "> :e pre", timeout_ms = 15000 },
-  { wait_for = "Text", timeout_ms = 15000 },
+  { wait_for = "prefabricated  Text", timeout_ms = 15000 },
   # A completion menu a user cannot move is a screenshot. `<C-n>` is the
   # plugin's own cmdline mapping, so the selection is cmp's to make and
   # view's to show: the marker view puts on a selected palette row appears
