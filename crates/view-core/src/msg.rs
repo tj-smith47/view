@@ -1751,9 +1751,10 @@ pub enum RpcCall {
         path: String,
         generation: u64,
     },
-    /// Sets `win`'s own `hide` flag through `nvim_win_set_config`, so a
+    /// Writes `win`'s own `hide` flag through `nvim_win_set_config`, so a
     /// plugin's floating window stops drawing while view renders what it was
-    /// drawing (`update::surface_conflict`'s absorption).
+    /// drawing (`update::surface_conflict`'s absorption) -- and starts again
+    /// when view is done with it.
     ///
     /// Reversible and text-free by construction: `hide` is one field of a
     /// window's config, the window keeps its buffer, its lines and its
@@ -1762,15 +1763,20 @@ pub enum RpcCall {
     /// pinned versions (`docs/surface-float-wire-capture.md` measured 277
     /// samples with no re-show) and is free to clear it on any other, which
     /// is what [`ReadFloatRows`](Self::ReadFloatRows)'s reply reports back.
+    /// Preserved is why `hide = false` exists here at all: a window view
+    /// hid and then stopped absorbing has nothing else in the session that
+    /// would ever show it again.
     ///
-    /// Fire-and-forget, and issued at most once per window view takes over
-    /// -- not once per keystroke -- so a menu standing through a whole
-    /// cmdline session costs one call. The chunk wraps the set in a `pcall`:
-    /// the window can close between the scan that sighted it and this call,
-    /// and a bare notification's error would reach the user as a message
-    /// about a window they never knew existed.
-    HideWindow {
+    /// Fire-and-forget, and issued at most twice per window view takes over
+    /// -- once to take it, once to give it back, never once per keystroke --
+    /// so a menu standing through a whole cmdline session costs two calls.
+    /// The chunk checks the window is still valid and wraps the set in a
+    /// `pcall`: the window can close between the scan that sighted it and
+    /// this call, and a bare notification's error would reach the user as a
+    /// message about a window they never knew existed.
+    SetFloatHidden {
         win: u64,
+        hide: bool,
     },
     /// Reads `win`'s buffer lines and its selection, for a float view is
     /// absorbing into the palette. Async like `PreviewBuffer`: the reply
@@ -1782,7 +1788,7 @@ pub enum RpcCall {
     /// for the captured menu -- its buffer holds no extmarks in any
     /// namespace, so there is nothing else to read. The reply also carries
     /// the window's own `hide` flag, read after
-    /// [`HideWindow`](Self::HideWindow) has run, which is how view learns a
+    /// [`SetFloatHidden`](Self::SetFloatHidden) has run, which is how view learns a
     /// hide did not land from the engine rather than from a user noticing
     /// two menus.
     ReadFloatRows {

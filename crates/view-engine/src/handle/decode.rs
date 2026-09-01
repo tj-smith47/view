@@ -87,7 +87,7 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
 /// (see [`crate::nvim_api::REGISTER_BRIDGE_CHUNK`]'s doc): `colorscheme`
 /// carries the scheme's name alone, `diagnostics` an `(errors, warnings)`
 /// count pair, `git` the branch name alone, `buffer` a `(name, modified)`
-/// pair, and `float` the eleven positional fields
+/// pair, and `float` the twelve positional fields
 /// [`decode_float_observed`] names.
 ///
 /// The bridge deliberately carries more triggers than there are consumers

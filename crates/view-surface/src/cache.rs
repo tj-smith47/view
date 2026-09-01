@@ -278,7 +278,8 @@ fn divergence_detail(got: &Surface, want: &Surface) -> String {
             // exists to catch, a render input `Inputs` does not compare
             let same_place = kind_name(&g.kind) == kind_name(&w.kind) && g.rect == w.rect;
             let payload = if same_place {
-                " (same kind and rect: the layer's own content differs,                  which is an input `Inputs` does not compare)"
+                " (same kind and rect: the layer's own content differs, \
+                 which is an input `Inputs` does not compare)"
             } else {
                 ""
             };

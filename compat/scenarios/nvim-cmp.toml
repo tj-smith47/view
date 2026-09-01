@@ -113,6 +113,10 @@ steps = [
   { send = "f" },
   { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 15000 },
   { assert_absent = "cmp_menu is drawing over" },
+  # `<C-c>` rather than `<Esc>` for this mode exit: `<Esc>` is also the
+  # dismissal of a standing sticky notice, and the noice line asserted
+  # further down has to still be up when cmp's own line would have joined
+  # it. Both leave insert mode, which is all this step is for.
   { send = "<C-c>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   # Now the claim. Keys go one per send for the same reason the present
@@ -138,6 +142,11 @@ steps = [
   # themselves are deliberately not asserted: cmp-buffer re-indexes the
   # buffer as this scenario types into it, so which words it offers for
   # `pre` -- and how far through one it has got -- differs between runs.
+  # Two needles rather than one: the palette's own header line proves the
+  # box on screen is view's command line and not some other overlay, and
+  # `Text` -- four characters that appear nowhere else this fixture draws
+  # -- proves the rows inside it came off cmp's own rendering.
+  { wait_for = "> :e pre", timeout_ms = 15000 },
   { wait_for = "Text", timeout_ms = 15000 },
   # A completion menu a user cannot move is a screenshot. `<C-n>` is the
   # plugin's own cmdline mapping, so the selection is cmp's to make and
@@ -158,10 +167,23 @@ steps = [
   { assert_absent = "a plugin is drawing over the command line" },
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
-  # The teardown: cmp closes its cmdline menu from inside its own
-  # `CmdlineLeave` handler, with no `WinClosed` to see it, so the palette
-  # that reopens must not be holding the last command line's candidates --
-  # the selected row asserted above is gone with the command line it
-  # completed.
   { assert_absent = "> pre" },
+  # The teardown, asked the only way that can answer it: cmp closes its
+  # cmdline menu from inside its own `CmdlineLeave` handler, with no
+  # `WinClosed` to see it, so what proves the absorption ended is a second
+  # command line opening onto none of the first one's state. A palette that
+  # merely closed would pass the line above and fail here.
+  #
+  # `zqx` is the capture's own no-candidate prefix: cmp opens no window for
+  # it at all, so this palette has nothing of its own to draw and every row
+  # it could show would be the last session's.
+  { send = ":" },
+  { send = "e" },
+  { send = " " },
+  { send = "z" },
+  { send = "q" },
+  { send = "x" },
+  { wait_for = "> :e zqx", timeout_ms = 15000 },
+  { assert_absent = "Text" },
+  { send = "<Esc>" },
 ]

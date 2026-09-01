@@ -89,10 +89,10 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
-    /// Sets one floating window's own `hide` flag, for the completion float
-    /// view absorbs into the palette; fire-and-forget, no reply (see
-    /// `RpcCall::HideWindow`).
-    fn hide_window(&self, win: u64) -> Result<(), EngineError>;
+    /// Writes one floating window's own `hide` flag, for the completion
+    /// float view absorbs into the palette and hands back;
+    /// fire-and-forget, no reply (see `RpcCall::SetFloatHidden`).
+    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError>;
     /// Reads an absorbed float's rows and selection; never blocks, and
     /// never itself returns the answer (see `RpcCall::ReadFloatRows`,
     /// `Msg::FloatRows`).
@@ -303,8 +303,8 @@ impl EngineOps for EngineHandle {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
     }
-    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
-        self.hide_window(win)
+    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
+        self.set_float_hidden(win, hide)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.read_float_rows(win)
@@ -470,8 +470,8 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
     }
-    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
-        (**self).hide_window(win)
+    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
+        (**self).set_float_hidden(win, hide)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
@@ -640,8 +640,8 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
     }
-    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
-        (**self).hide_window(win)
+    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
+        (**self).set_float_hidden(win, hide)
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
@@ -839,8 +839,8 @@ impl EngineOps for FakeOps {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
     }
-    fn hide_window(&self, win: u64) -> Result<(), EngineError> {
-        self.record(format!("hide_window({win})"))
+    fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
+        self.record(format!("set_float_hidden({win},{hide})"))
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.record(format!("read_float_rows({win})"))
@@ -1069,7 +1069,7 @@ impl EngineOps for SlowOps {
     fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
         Ok(())
     }
-    fn hide_window(&self, _win: u64) -> Result<(), EngineError> {
+    fn set_float_hidden(&self, _win: u64, _hide: bool) -> Result<(), EngineError> {
         Ok(())
     }
     fn read_float_rows(&self, _win: u64) -> Result<(), EngineError> {

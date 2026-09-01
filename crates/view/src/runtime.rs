@@ -1736,27 +1736,35 @@ mod tests {
         assert_eq!(ops.calls.borrow()[0], "preview_buffer(src/main.rs,7)");
     }
 
-    /// The two calls an absorbed completion float costs, in the order the
+    /// The calls an absorbed completion float costs, in the order the
     /// outbox carries them: nvim runs them in that order, which is what
     /// makes the reply that brings the rows back one the hide has already
-    /// happened before.
+    /// happened before -- and the show that ends the absorption carries the
+    /// same window with the flag written the other way, so the whole
+    /// round trip is two writes of one field.
     #[test]
-    fn absorbing_a_float_maps_to_hide_window_then_read_float_rows() {
+    fn absorbing_a_float_maps_to_hide_then_read_then_show() {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
-        assert!(matches!(
-            executor.run(Effect::Rpc(RpcCall::HideWindow { win: 1003 })),
-            Flow::Continue
-        ));
-        assert!(matches!(
-            executor.run(Effect::Rpc(RpcCall::ReadFloatRows { win: 1003 })),
-            Flow::Continue
-        ));
+        for effect in [
+            Effect::Rpc(RpcCall::SetFloatHidden {
+                win: 1003,
+                hide: true,
+            }),
+            Effect::Rpc(RpcCall::ReadFloatRows { win: 1003 }),
+            Effect::Rpc(RpcCall::SetFloatHidden {
+                win: 1003,
+                hide: false,
+            }),
+        ] {
+            assert!(matches!(executor.run(effect), Flow::Continue));
+        }
         assert_eq!(
             *ops.calls.borrow(),
             vec![
-                "hide_window(1003)".to_string(),
-                "read_float_rows(1003)".to_string()
+                "set_float_hidden(1003,true)".to_string(),
+                "read_float_rows(1003)".to_string(),
+                "set_float_hidden(1003,false)".to_string()
             ]
         );
     }

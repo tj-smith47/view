@@ -679,24 +679,29 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return out";
 
-/// Sets one floating window's own `hide` flag, for the completion float
-/// view absorbs into the palette (`RpcCall::HideWindow`).
+/// Writes one floating window's own `hide` flag, for the completion float
+/// view absorbs into the palette (`RpcCall::SetFloatHidden`).
 ///
 /// One field of a window config, and the only one written: the window keeps
 /// its buffer, its lines and its cursor, which is what makes the absorption
 /// reversible and what lets [`READ_FLOAT_ROWS_CHUNK`] keep reading rows off
 /// a window that is no longer drawing them. `docs/surface-float-wire-capture.md`
 /// measured the pinned nvim-cmp reconfiguring this very window while the
-/// flag stood and preserving it, 277 samples with no re-show.
+/// flag stood and preserving it, 277 samples with no re-show -- which is
+/// also why the flag has to be written back: nothing else in the session
+/// clears it, so an absorption that ends is an absorption that shows the
+/// window again.
 ///
 /// `pcall`, because the window can close between the scan that sighted it
 /// and this call landing: this rides a notification, and nvim reports a
 /// notification's error to the user as a message about a window they never
-/// knew existed. Constant, like every other chunk here -- the window handle
-/// travels as `nvim_exec_lua`'s positional vararg.
+/// knew existed. That is the ordinary case for the un-hide rather than the
+/// unlucky one -- nvim-cmp closes its menu on the `CmdlineLeave` that ends
+/// the absorption. Constant, like every other chunk here -- the window
+/// handle and the flag travel as `nvim_exec_lua`'s positional varargs.
 const HIDE_FLOAT_CHUNK: &str = "\
-local win = ...
-pcall(vim.api.nvim_win_set_config, win, { hide = true })";
+local win, hide = ...
+pcall(vim.api.nvim_win_set_config, win, { hide = hide })";
 
 /// Reads what a float view is absorbing was drawing: its `hide` flag, its
 /// buffer's lines, and its selection.
@@ -714,6 +719,13 @@ pcall(vim.api.nvim_win_set_config, win, { hide = true })";
 /// `hidden = false` with no lines, which is the same degrade an error reply
 /// takes: view stops absorbing that window rather than painting rows off a
 /// buffer nobody is showing. Constant, like every other chunk here.
+///
+/// The read is capped at 200 lines rather than taking the buffer whole,
+/// and the cap is a wire bound rather than a rendering one: the palette
+/// paints half a terminal's rows, so 200 is past what any terminal could
+/// show, while an uncapped `-1` puts however many lines somebody else's
+/// buffer holds on the wire once per scan, into the model, and into the
+/// frame cache's comparison on every frame after that.
 const READ_FLOAT_ROWS_CHUNK: &str = "\
 local win = ...
 if not vim.api.nvim_win_is_valid(win) then
@@ -726,7 +738,7 @@ if vim.wo[win].cursorline then
 end
 return {
   hidden = vim.api.nvim_win_get_config(win).hide == true,
-  lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false),
+  lines = vim.api.nvim_buf_get_lines(buf, 0, 200, false),
   selected = selected,
 }";
 
@@ -3354,21 +3366,22 @@ impl EngineHandle {
         )
     }
 
-    /// Hides `win` via [`HIDE_FLOAT_CHUNK`], for a completion float view is
-    /// taking into its own palette. Fire-and-forget, and issued once per
-    /// window rather than once per keystroke (the cadence bound lives in
-    /// `view_core::native::surfaces::FloatAbsorption`).
+    /// Writes `win`'s `hide` flag via [`HIDE_FLOAT_CHUNK`], for a completion
+    /// float view is taking into its own palette (`hide = true`) or handing
+    /// back (`hide = false`). Fire-and-forget, and issued once per window
+    /// per direction rather than once per keystroke (the cadence bound lives
+    /// in `view_core::native::surfaces::FloatAbsorption`).
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited.
-    pub fn hide_window(&self, win: u64) -> Result<(), EngineError> {
+    pub fn set_float_hidden(&self, win: u64, hide: bool) -> Result<(), EngineError> {
         self.notify(
             "nvim_exec_lua",
             vec![
                 Value::from(HIDE_FLOAT_CHUNK),
-                Value::Array(vec![Value::from(win)]),
+                Value::Array(vec![Value::from(win), Value::from(hide)]),
             ],
         )
     }
@@ -4334,8 +4347,8 @@ mod tests {
     /// that dropped hidden windows would stop reporting the float view has
     /// taken over and freeze its rows at whatever the menu held when the
     /// hide landed, a scan whose delay drops under nvim-cmp's own 60 ms
-    /// debounce
-    /// runs before the window it exists to see, an anchor left off the wire
+    /// debounce runs before the window it exists to see, an anchor left off
+    /// the wire
     /// puts an NE float's right edge where its left edge should be, a scan
     /// that reported only what changed would name a covering float once and
     /// then never again, and a window absorbed by the running throttle with
@@ -4395,6 +4408,31 @@ mod tests {
              scan is the one that dismissed the toast the last scan raised, \
              so a float whose geometry the next character does not move \
              would be named once and then covered silently"
+        );
+    }
+
+    /// The two chunks an absorption runs, held to the shape that makes it
+    /// reversible and bounded.
+    ///
+    /// The flag is written from a vararg rather than spelled `true`: view
+    /// hides a window and view shows it again, and on the pinned engine
+    /// nothing else in the session would ever clear a flag view left set
+    /// (the capture measured the plugin's own reconfigure preserving it
+    /// across 277 samples). The read is capped because it is re-issued once
+    /// per scan for as long as a menu stands, and `-1` puts however many
+    /// lines somebody else's buffer holds on the wire every time.
+    #[test]
+    fn the_absorption_chunks_write_a_reversible_flag_and_read_a_bounded_buffer() {
+        assert!(
+            HIDE_FLOAT_CHUNK.contains("local win, hide = ...")
+                && HIDE_FLOAT_CHUNK.contains("{ hide = hide }"),
+            "a chunk that can only set the flag is an absorption a window \
+             never comes back from: {HIDE_FLOAT_CHUNK}"
+        );
+        assert!(
+            READ_FLOAT_ROWS_CHUNK.contains("nvim_buf_get_lines(buf, 0, 200, false)"),
+            "the row read is bounded by what a palette could paint, never by \
+             what a buffer happens to hold: {READ_FLOAT_ROWS_CHUNK}"
         );
     }
 

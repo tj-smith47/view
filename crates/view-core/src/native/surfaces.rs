@@ -437,23 +437,60 @@ fn owned(surface: Surface, model: &Model) -> Option<Surface> {
 /// claimant's rows into the palette rather than by telling the user about
 /// it.
 ///
-/// A float over the command line, while a command line is open, is a
-/// completion menu: that is the only thing a plugin draws there, and the
-/// rows it draws belong to the *completion* surface rather than to the
-/// command line the rect lands on -- [`claims`] names the cells, this names
-/// what was drawn in them. So the policy read here is
-/// [`Surface::Popupmenu`]'s ([`Policy::Absorb`], the same answer view
-/// already gives a cmdline-sourced popupmenu that arrives on the wire), and
-/// the ownership gate is that surface's own: `[native] palette = false`
-/// detaches `ext_cmdline` and `ext_popupmenu` together, so a session that
-/// handed the command line back absorbs nothing and hides nobody's window.
+/// The filetypes a cmdline completion menu presents, and the whole of what
+/// view will take a window over for.
+///
+/// An allow-list, which is the opposite discipline from
+/// [`CONTENT_FILETYPES`]'s deny-list, because the two answers cost
+/// different things. Getting a *name* wrong costs one wrong word in a
+/// notice the user can read and act on. Getting a *taking* wrong costs the
+/// user a window that stops drawing and, on the pinned engine, stays that
+/// way through the plugin's own next reconfigure -- so absorption is gated
+/// on what was measured rather than on what a rect suggests. The capture's
+/// discriminator table has one column that reads "survives view's `hide`:
+/// yes" and it is this one; every other float in it reads "not measured".
+///
+/// One row, on the same terms as [`SURFACE_CLAIMANTS`]: a menu no row names
+/// takes the notice path instead, which is a line naming the plugin and the
+/// `view.toml` switch that hands the command line back -- exactly what a
+/// user got before any float was absorbed at all.
+const COMPLETION_MENUS: [&str; 1] = ["cmp_menu"];
+
+/// Whether a claim on `surface` by this float is one view answers by taking
+/// the claimant's rows into the palette rather than by telling the user
+/// about it.
+///
+/// Three conditions, and the float's own identity is the first of them.
+/// The rect is not evidence: [`claims`] answers `Cmdline` for anything
+/// whose bottom edge lands in the rows the command line keeps, and an LSP
+/// progress spinner parked above the status line is in that band whenever a
+/// user types `:w` (`compat/scenarios/fidget.toml` runs one at grid row
+/// 28). Absorbing on the rect alone hides a window that is not a menu and
+/// paints a diagnostic line into the palette as a completion candidate, so
+/// the float has to present a completion menu's own identity
+/// ([`COMPLETION_MENUS`]) before anything is taken. A float that claims the
+/// command line without one is still a conflict and still gets its notice;
+/// it is only never hidden.
+///
+/// Then the policy read, which is [`Surface::Popupmenu`]'s
+/// ([`Policy::Absorb`], the same answer view already gives a
+/// cmdline-sourced popupmenu that arrives on the wire): the rows a menu
+/// draws belong to the *completion* surface rather than to the command line
+/// the rect lands on -- [`claims`] names the cells, this names what was
+/// drawn in them. And the ownership gate is that surface's own: `[native]
+/// palette = false` detaches `ext_cmdline` and `ext_popupmenu` together, so
+/// a session that handed the command line back absorbs nothing and hides
+/// nobody's window.
 ///
 /// Reading the table rather than matching on a variant is what keeps this
 /// following the config: a surface whose row stops saying `Absorb` stops
 /// being absorbed here, with no second place saying otherwise.
 #[must_use]
-pub fn absorbs(surface: Surface, model: &Model) -> bool {
+pub fn absorbs(float: &FloatSighting, surface: Surface, model: &Model) -> bool {
     surface == Surface::Cmdline
+        && float
+            .identity()
+            .is_some_and(|identity| COMPLETION_MENUS.contains(&identity))
         && row(Surface::Popupmenu).is_some_and(|row| row.policy == Policy::Absorb)
         && owned(Surface::Popupmenu, model).is_some()
 }
@@ -688,6 +725,10 @@ pub enum AbsorbStep {
     /// Stop absorbing this one and tell the user about it instead: view
     /// hid it and it came back, or the hide never landed at all.
     Yield,
+    /// Nothing at all: the first sighting of this window already carries
+    /// somebody else's `hide`, so it is drawing nothing for view to take
+    /// and nothing for view to report.
+    Ignore,
 }
 
 /// What a reply carrying one float's rows leaves the palette holding.
@@ -756,9 +797,17 @@ impl FloatAbsorption {
     /// of a window and on nothing else until the plugin puts that window
     /// back, so a menu observed at the scan rate for a whole cmdline session
     /// costs one hide, not one per keystroke.
+    ///
+    /// `hidden` is read on the first sighting as well as on the ones after
+    /// it, and it parts two different windows: one view hid (`confirmed`,
+    /// and its rows are what the palette is painting) from one that was
+    /// already hidden when view first saw it. The second is somebody else's
+    /// -- a user's own config, another plugin -- and it is drawing nothing,
+    /// so there is nothing to take and nothing to give back.
     pub fn observe(&mut self, win: u64, hidden: bool, identity: Option<&str>) -> AbsorbStep {
         let index = match self.windows.iter().position(|w| w.win == win) {
             Some(index) => index,
+            None if hidden => return AbsorbStep::Ignore,
             None => {
                 self.windows.push(AbsorbedWindow {
                     win,
@@ -848,20 +897,35 @@ impl FloatAbsorption {
         cleared
     }
 
-    /// Forgets every absorption, and answers whether there was one.
+    /// Forgets every absorption, and answers which windows view still owes
+    /// an un-hide.
+    ///
+    /// The hide is view's to reverse, and the reversal is the last thing an
+    /// absorption does. That nvim-cmp's own menu window is already gone by
+    /// then -- it closes from a `CmdlineLeave` callback, which is also why
+    /// no `WinClosed` announces it -- is a fact about one plugin, and view
+    /// cannot see from here which one it is holding: a window this returns
+    /// may be closed, and asking nvim to show a closed window is what the
+    /// caller's chunk answers safely (it checks validity, and rides a
+    /// `pcall`). What view must never do is stop tracking a window it hid
+    /// while that window still exists, because the flag survives the
+    /// plugin's own next reconfigure (the capture measured 277 samples with
+    /// no re-show) and nothing else in the session will ever clear it.
+    ///
+    /// A window the scan stopped sighting is not in here to begin with:
+    /// [`Self::sweep`] dropped it, which is the plugin having closed it and
+    /// the one case where there is genuinely nothing to give back.
     ///
     /// Called when the command line closes and when a connection is
-    /// replaced: both end the session those window handles were allocated
-    /// in, and the plugin's own window is closed by then (nvim-cmp closes
-    /// its menu from a `CmdlineLeave` callback, which is also why no
-    /// `WinClosed` announces it). Nothing is un-hidden: there is no window
-    /// left to un-hide, and a hide view cannot see any more is a hide view
-    /// must not keep claiming to hold.
-    pub fn forget(&mut self) -> bool {
-        let held = !self.windows.is_empty() || self.rows.is_some();
-        self.windows.clear();
+    /// replaced. The replacement discards the list rather than sending it:
+    /// those handles were allocated in a session that no longer exists.
+    #[must_use]
+    pub fn forget(&mut self) -> Vec<u64> {
         self.rows = None;
-        held
+        self.windows
+            .drain(..)
+            .map(|window| window.win)
+            .collect::<Vec<_>>()
     }
 
     /// Drops the palette's rows if they came off `win`, and answers whether
@@ -1174,5 +1238,27 @@ mod tests {
             Some([Surface::Messages].as_slice()),
             "and it draws again: news, because the line about it came down"
         );
+    }
+
+    /// The two tables that decide what happens to one float must not name
+    /// the same plugin: a claimant's own windows are covered by a notice
+    /// that says which surfaces it took, and a window view also hides is a
+    /// user reading that line beside a menu view quietly took over. The
+    /// notice-side guard for it lives in `update::surface_conflict`, which
+    /// answers per sighting; this is the guard that walks the population, so
+    /// a row added to either table trips over it in a unit test rather than
+    /// on somebody's screen.
+    #[test]
+    fn no_claimant_names_an_absorbable_identity() {
+        for claimant in super::SURFACE_CLAIMANTS {
+            for identity in claimant.identities {
+                assert!(
+                    !super::COMPLETION_MENUS.contains(identity),
+                    "{} presents {identity}, which is also in COMPLETION_MENUS: \
+                     a claimant's float is reported, never taken",
+                    claimant.class
+                );
+            }
+        }
     }
 }
