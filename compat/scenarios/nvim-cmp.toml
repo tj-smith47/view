@@ -117,15 +117,16 @@ steps = [
   # two rather than wrapping, so the remedy is put on its own line where a
   # user can read it.
   { wait_for = "view: cmp_menu is drawing over the command line, which view owns.", timeout_ms = 15000 },
-  { wait_for = "Set [native] palette = false to give it back.", timeout_ms = 5000 },
+  { wait_for = "Set [native] palette = false in view.toml to give it back.", timeout_ms = 5000 },
   # cmp is a second plugin, and it keeps its own line: this fixture also
   # loads noice, whose claimant notice covers the same command line, and
   # one notice per plugin is the rule rather than one per surface.
   { wait_for = "view: noice.nvim is using the command line", timeout_ms = 5000 },
   # Not the anonymous wording: this float carries a widget filetype, so the
   # notice names it rather than falling back to "a plugin". The surface is
-  # named too -- this fixture's noice raises a true anonymous line about the
-  # message area, which a bare needle would collide with.
+  # named too, because the anonymous family is a real wording this screen
+  # could carry for another surface and a bare needle would not tell them
+  # apart.
   { assert_absent = "a plugin is drawing over the command line" },
   # And the menu really was cmp's, standing at the cmdline, not a float
   # this scenario merely believes was there.

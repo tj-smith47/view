@@ -1232,7 +1232,7 @@ impl EngineModel {
         // "nothing is ever dropped" true on every path through the hold: the
         // message is in the ring before it leaves the stack
         if route == crate::native::toast::Route::HistoryOnly {
-            self.messages.hold(id);
+            self.messages.hold(id, replace_last);
             return Vec::new();
         }
         // only `Route::Transient` ever schedules a timeout (see
@@ -1711,14 +1711,34 @@ impl Messages {
     /// so a message arriving then is dropped from the stack without being
     /// parked at all -- the scrollback record is the whole of what it gets,
     /// which is what the standing notice tells the user.
-    pub(crate) fn hold(&mut self, id: MessageId) {
+    ///
+    /// `replace_last` is applied a second time, here, on the same terms
+    /// [`Self::push`] applies it to the visible stack. It has to be: parking
+    /// takes the entry off that stack, so the next line of a coalescing
+    /// sequence finds nothing there to overwrite and appends instead, and a
+    /// startup progress line that nvim coalesced into one toast would drain
+    /// as one toast per step. The hold decides *when* a message is shown,
+    /// never how many of it there are.
+    pub(crate) fn hold(&mut self, id: MessageId, replace_last: bool) {
         let Some(index) = self.entries.iter().position(|e| e.id == id) else {
             return;
         };
         let entry = self.entries.remove(index);
-        if self.startup_hold == crate::native::toast::StartupHold::Pending {
-            self.held.push(entry);
+        if self.startup_hold != crate::native::toast::StartupHold::Pending {
+            return;
         }
+        if replace_last {
+            if let Some(last) = self
+                .held
+                .iter_mut()
+                .rev()
+                .find(|e| !e.condition && !e.is_native())
+            {
+                *last = entry;
+                return;
+            }
+        }
+        self.held.push(entry);
     }
 
     /// Resolves the startup hold, once, and reports whether anything the
@@ -2317,31 +2337,84 @@ mod tests {
         );
     }
 
+    /// A message that overwrites the one before it keeps doing so while it
+    /// is parked, so the hold changes when a startup progress line is shown
+    /// and never how many of it there are.
+    ///
+    /// `replace_last` is nvim's own coalescing -- a plugin redrawing
+    /// "Installing 3/9" over "Installing 2/9" sends it -- and the visible
+    /// stack applies it by overwriting the tail. Parking removes the entry
+    /// from that stack, so without the same rule inside the held set the
+    /// next line finds nothing to overwrite and the release drains one toast
+    /// per step of a progress bar that was only ever one line.
+    #[test]
+    fn a_coalescing_sequence_held_then_released_drains_as_one_entry() {
+        let mut model = Model::new();
+        for step in 1..=9 {
+            let _ = model.engine.record_message(
+                "echomsg".to_string(),
+                vec![(0, format!("Installing {step}/9"))],
+                step > 1,
+            );
+        }
+        assert_eq!(
+            model.engine.messages.held().len(),
+            1,
+            "{:?}",
+            model.engine.messages.held()
+        );
+        assert!(model
+            .engine
+            .messages
+            .resolve_startup_hold(crate::native::toast::HoldOutcome::Release));
+        assert_eq!(stack(&model), vec!["Installing 9/9".to_string()]);
+        // the history is the one place every step survives, exactly as it
+        // does for a coalescing sequence the hold never touched
+        assert_eq!(history(&model).len(), 9);
+    }
+
     /// The exclusions that keep the window honest. A line view raises about
     /// itself is never a claimant's, and an error is not something a notice
     /// about surfaces can stand in for.
+    ///
+    /// Ranged over both states that park, because they are different
+    /// windows and only one of them ever gives what it parked back: a
+    /// collapsed hold keeps parking for the rest of the launch and discards
+    /// the set at release, so an error that got past the pending window and
+    /// into the collapsed one would be a message no user ever sees on the
+    /// stack.
     #[test]
     fn view_s_own_lines_and_every_error_paint_through_the_hold() {
-        for (kind, text) in [
-            ("native", "view: view.toml line 3: unknown key"),
-            (
-                "native_sticky",
-                "view: a plugin is drawing over the command line",
-            ),
-            ("emsg", "E492: Not an editor command"),
-            ("echoerr", "noice.nvim: Noice can't work"),
-        ] {
-            let mut model = Model::new();
-            showed(&mut model, kind, text);
-            assert_eq!(
-                stack(&model),
-                vec![text.to_string()],
-                "kind {kind} was parked"
-            );
-            assert!(
-                model.engine.messages.held().is_empty(),
-                "kind {kind} was parked"
-            );
+        use crate::native::toast::{HoldOutcome, StartupHold};
+        for hold in [StartupHold::Pending, StartupHold::Collapsed] {
+            for (kind, text) in [
+                ("native", "view: view.toml line 3: unknown key"),
+                (
+                    "native_sticky",
+                    "view: a plugin is drawing over the command line",
+                ),
+                ("emsg", "E492: Not an editor command"),
+                ("echoerr", "noice.nvim: Noice can't work"),
+            ] {
+                let mut model = Model::new();
+                if hold == StartupHold::Collapsed {
+                    assert!(!model
+                        .engine
+                        .messages
+                        .resolve_startup_hold(HoldOutcome::Collapse));
+                }
+                assert_eq!(model.engine.messages.startup_hold(), hold);
+                showed(&mut model, kind, text);
+                assert_eq!(
+                    stack(&model),
+                    vec![text.to_string()],
+                    "kind {kind} was parked under {hold:?}"
+                );
+                assert!(
+                    model.engine.messages.held().is_empty(),
+                    "kind {kind} was parked under {hold:?}"
+                );
+            }
         }
     }
 

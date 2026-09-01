@@ -2366,10 +2366,17 @@ impl EngineHandle {
         )
     }
 
-    /// Arms the one-shot probe that answers which of view's known surface
-    /// claimants this session actually loaded (see
-    /// [`PROBE_CLAIMANTS_CHUNK`]). The answer arrives asynchronously as a
-    /// `view_bridge` `claimants` notification carrying the loaded subset.
+    /// Arms the probe that answers which of view's known surface claimants
+    /// this session actually loaded (see [`PROBE_CLAIMANTS_CHUNK`]). Answers
+    /// arrive asynchronously as `view_bridge` `claimants` notifications
+    /// carrying the loaded subset.
+    ///
+    /// Repeating rather than one-shot: it reads at every idle transition and
+    /// notifies whenever the reading is news, so a claimant that loads
+    /// lazily -- noice's own documented spec is `event = "VeryLazy"` -- is
+    /// still answered for. It retires itself once every module is accounted
+    /// for, or after a minute, so a session that never loads one stops
+    /// paying for the question.
     ///
     /// The module names come from
     /// [`SURFACE_CLAIMANTS`](view_core::native::surfaces::SURFACE_CLAIMANTS),
@@ -3780,9 +3787,14 @@ mod tests {
                 .unwrap_or_default();
             let mut rest = doc.as_str();
             while let Some((above, fenced)) = rest.split_once("```lua\n") {
+                // `\n```" rather than "```": a closing fence CommonMark
+                // accepts is alone on its line, and splitting on the bare
+                // marker reads a fence closed as `})``` -- which renders
+                // every following section inside the code block -- as a
+                // fence that closed correctly
                 let (body, tail) = fenced
-                    .split_once("```")
-                    .expect("a lua fence must be closed");
+                    .split_once("\n```")
+                    .expect("a lua fence must be closed on a line of its own");
                 rest = tail;
                 let Some(marked) = above
                     .lines()

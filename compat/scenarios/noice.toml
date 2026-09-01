@@ -56,22 +56,42 @@ steps = [
   # rather than wrapping, so the remedy is put on its own line.
   { wait_for = "noice.nvim is using the command line and the message area", timeout_ms = 30000 },
   { wait_for = "Set [native] palette = false and [native] notifications = false", timeout_ms = 5000 },
-  # And the one thing view controls about noice's own three complaints:
-  # that its notice is not joined by a second one about the same plugin.
-  # noice's health errors do not reach view at all on this path, and the
-  # capture is the reason this scenario no longer claims otherwise:
+  { wait_for = "in view.toml to give them back", timeout_ms = 5000 },
+  { wait_for = "Startup messages from this launch are in the history", timeout_ms = 5000 },
+  # The three health errors themselves. Positive half: every one of them
+  # reached the user, drawn by nvim-notify's own float --
   # `noice/util/init.lua`'s `M.notify` calls `require("notify").notify`
-  # directly whenever nvim-notify is present -- which it is in this
-  # fixture -- so it never goes through `vim.notify`, view's takeover
-  # never sees it, and a whole unaccommodated launch produces zero
-  # `msg_show` events (docs/toast-routing-wire-capture.md). The three
-  # errors are drawn by nvim-notify's own float, which view's float
-  # detector sights over the message area carrying no usable name. What is
-  # asserted is therefore the composition: that unnamed sighting is
-  # absorbed by the claimant notice above rather than standing beside it.
+  # directly whenever nvim-notify is present, so they never cross view's
+  # `vim.notify` takeover at all. Asked of nvim-notify's own history rather
+  # than of the screen, because that float retires itself on a timer and a
+  # screen needle would be racing it.
+  { wait_for_probe = "luaeval('(function() local ok, n = pcall(require, \"notify\") if not ok then return \"no-mod\" end for _, rec in ipairs(n.history()) do for _, line in ipairs(rec.message or {}) do if line:find(\"work when the GUI has\", 1, true) then return \"raised\" end end end return \"absent\" end)()')", expect = "raised", timeout_ms = 60000 },
+  # Negative half: not one of them is on view's own stack, read off the
+  # difference in how the two things leave. nvim-notify's floats retire
+  # themselves on a timer; an error routed through view is a persistent kind
+  # (`MessageEntry::is_persistent_kind`) and would still be standing here for
+  # the rest of the launch. So: wait until nvim holds no floating window at
+  # all -- the lazy install window is already closed above, and every float
+  # left on this launch is nvim-notify's -- and then the errors are gone from
+  # the screen while the box the user is left reading is view's notice alone.
+  { wait_for_probe = "luaeval('(function() local n = 0 for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.api.nvim_win_get_config(w).relative ~= \"\" then n = n + 1 end end return tostring(n) end)()')", expect = "0", timeout_ms = 30000 },
+  { assert_absent = "Noice can't work when the GUI has" },
+  { wait_for = "noice.nvim is using the command line and the message area", timeout_ms = 5000 },
+  # The composition, on the other thing that whole launch produces: the
+  # error float itself. view's float detector sights it over the message
+  # area carrying no usable name, and that unnamed sighting is absorbed by
+  # the claimant notice above rather than standing beside it -- one notice
+  # per plugin, however many ways view noticed the same one. (A whole
+  # unaccommodated launch produces zero `msg_show` events, which is why the
+  # detector is the only thing view has to compose here; see
+  # docs/toast-routing-wire-capture.md.)
   { assert_absent = "a plugin is drawing over" },
-  # And view's own message history is still one key away, which is where
-  # the notice sends a user whose startup traffic view did park.
+  # And the same rule for a float that does carry a name, when the name is
+  # noice's own: every window noice opens presents `filetype = "noice"`
+  # (`lua/noice/view/nui.lua:41`), which is one plugin, not two.
+  { assert_absent = "view: noice is drawing over" },
+  # And the history the notice's own third line points at is one key away,
+  # holding what view recorded of this launch.
   { send = "\\fm" },
   { wait_for = "Messages", timeout_ms = 5000 },
   { send = "<Esc>" },

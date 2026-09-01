@@ -56,12 +56,19 @@ fn claimant_family(class: &str) -> String {
 /// Raised once and never re-recorded. There is no running count in the
 /// wording, because a count that updates is a notice that re-records, and a
 /// notice that re-records re-enters the toast stack and re-animates.
+///
+/// Called for every reading the probe takes, not just the first, and the
+/// notice is raised from whichever reading first names a claimant. The hold
+/// is the part that is one-shot: a reading that names nobody resolves it
+/// `Release`, and a claimant that loads after that -- noice's own documented
+/// spec is `event = "VeryLazy"`, so this is the ordinary case rather than the
+/// unlucky one -- finds the collapse window already closed. The bound,
+/// stated: everything that plugin raised before view could detect it has
+/// already been shown, and view has no way to un-show it. What the late
+/// reading still buys is the notice itself -- which surfaces went, and the
+/// `view.toml` line that hands them back -- which is the obligation here.
+/// The hold was only ever the anti-flash mechanism for the eager case.
 pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<Effect> {
-    // read before the resolution below, which is what decides whether the
-    // held messages stay in the history: the closing clause tells the user
-    // where they went, and on a launch that parked nothing it would be
-    // pointing at an empty overlay
-    let parked = !model.engine.messages.held().is_empty();
     let mut effects = Vec::new();
     let mut named = false;
     for claimant in surfaces::probed_claimants(probed) {
@@ -76,9 +83,9 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
         }
         named = true;
         let family = claimant_family(claimant.class);
-        let text = notice(&family, &claimed, model.config_was_read(), parked);
+        let text = notice(&family, &claimed, model.config_was_read(), true);
         effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
-        effects.extend(absorb_float_notices(model, &claimed));
+        effects.extend(absorb_float_notices(model, claimant, &claimed));
         model.dirty = true;
     }
     let outcome = if named {
@@ -98,8 +105,12 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
 /// is what "anonymous" means -- but it does not have to: a claim on a
 /// surface a named claimant has already been reported for is the same
 /// conflict with the same remedy, told by the notice that could not say who.
-/// A float that does name itself keeps its line: that is a second plugin,
-/// and one notice per plugin is the rule.
+/// The claimant's own windows are the same case with a name on them:
+/// [`SurfaceClaimant::identities`](surfaces::SurfaceClaimant::identities)
+/// says which filetypes this plugin's floats present, so a sighting of one
+/// is this plugin drawing on the surface its notice already names, not a
+/// second plugin. Any other name keeps its line -- one notice per plugin is
+/// the rule.
 ///
 /// Ordinarily a no-op: the probe answers at the session's first idle
 /// transition, well before a float scan can have been armed and waited out
@@ -107,22 +118,32 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
 /// the other order -- a claimant that loaded late, or a float sighted during
 /// a slow startup -- and it exists because the guard in [`observe_float`]
 /// only covers sightings that arrive after the notice.
-fn absorb_float_notices(model: &mut Model, claimed: &[Surface]) -> Vec<Effect> {
-    let Some(rest) = model
-        .surface_conflicts
-        .cover(claimed)
-        .map(<[Surface]>::to_vec)
-    else {
-        return Vec::new();
-    };
-    if rest.is_empty() {
-        model.dirty |= model.engine.withdraw_native_notice(ANONYMOUS_FAMILY);
-        return Vec::new();
-    }
-    let text = notice(ANONYMOUS_FAMILY, &rest, model.config_was_read(), false);
+fn absorb_float_notices(
+    model: &mut Model,
+    claimant: &surfaces::SurfaceClaimant,
+    claimed: &[Surface],
+) -> Vec<Effect> {
     model
-        .engine
-        .record_native_notice_sticky_once(ANONYMOUS_FAMILY, text)
+        .surface_conflicts
+        .note_covered(claimed, claimant.identities);
+    let mut effects = Vec::new();
+    for identity in std::iter::once(None).chain(claimant.identities.iter().copied().map(Some)) {
+        let Some(rest) = model
+            .surface_conflicts
+            .narrow(identity)
+            .map(<[Surface]>::to_vec)
+        else {
+            continue;
+        };
+        let family = family(identity);
+        if rest.is_empty() {
+            model.dirty |= model.engine.withdraw_native_notice(&family);
+            continue;
+        }
+        let text = notice(&family, &rest, model.config_was_read(), false);
+        effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
+    }
+    effects
 }
 
 /// Answers one float sighting: nothing at all for a float drawing where
@@ -149,11 +170,12 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
         return Vec::new();
     }
     let identity = float.identity().map(str::to_owned);
-    if identity.is_none() && model.surface_conflicts.covered(surface) {
+    if model.surface_conflicts.covers(surface, identity.as_deref()) {
         // a named claimant's notice already says this surface is taken, says
         // who by, and carries the same `[native]` line as the remedy; a
-        // second box that cannot even say who is the same conflict counted
-        // twice
+        // second box -- one that cannot even say who, or one spelling a
+        // filetype that claimant's own windows present -- is the same
+        // conflict counted twice
         return Vec::new();
     }
     let Some(claimed) = model
@@ -201,10 +223,23 @@ pub(super) fn sweep_floats(model: &mut Model) -> Vec<Effect> {
 /// message box takes: `MessageEntry::lines` splits on it, and the layer that
 /// sizes the box clips at the grid width rather than wrapping, so a remedy
 /// pushed onto the end of the first sentence is a remedy the user cannot
-/// read. `parked` adds the third line, and only the claimant notice ever
-/// passes it true -- it is the sentence that says where the startup traffic
-/// this notice displaced actually went.
-fn notice(family: &str, claimed: &[Surface], config_was_read: bool, parked: bool) -> String {
+/// read.
+///
+/// `startup_account` adds the third line, and only the claimant notice
+/// passes it true: that notice is the account of a launch, and the history
+/// is where everything else from that launch is. It is not conditional on
+/// anything having actually been parked -- view's own startup lines are in
+/// the ring on every launch, so the sentence is true whether or not the
+/// hold caught a foreign one, and a user reading a box about their first
+/// launch is owed the key that shows the rest of it. A float notice raised
+/// mid-session is about a window that just opened, not about a launch, and
+/// says nothing about the history.
+fn notice(
+    family: &str,
+    claimed: &[Surface],
+    config_was_read: bool,
+    startup_account: bool,
+) -> String {
     let rows: Vec<_> = claimed
         .iter()
         .filter_map(|surface| surfaces::row(*surface))
@@ -231,10 +266,16 @@ fn notice(family: &str, claimed: &[Surface], config_was_read: bool, parked: bool
         String::new()
     } else {
         let them = if labels.len() > 1 { "them" } else { "it" };
-        format!("\nSet {} to give {them} back.", join(&remedies))
+        format!(
+            "\nSet {} in view.toml to give {them} back.",
+            join(&remedies)
+        )
     };
-    let history = if parked {
-        "\nStartup messages from other plugins are in the message history."
+    // `--` rather than the decided box's em dash: notice text is written to
+    // the grid verbatim, and the charset a terminal can draw is a capability
+    // reading the message layer does not take
+    let history = if startup_account {
+        "\nStartup messages from this launch are in the history -- <leader>fm."
     } else {
         ""
     };
@@ -262,7 +303,7 @@ mod tests {
     use super::{absorb_float_notices, observe_float};
     use crate::events::UiEvent;
     use crate::model::Model;
-    use crate::msg::Msg;
+    use crate::msg::{Effect, Msg};
     use crate::native::ext::Ext;
     use crate::native::surfaces::{FloatAnchor, FloatSighting, Surface};
     use crate::update::update;
@@ -351,7 +392,7 @@ mod tests {
             notices(&model),
             vec![
                 "view: cmp_menu is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false to give it back."
+                 Set [native] palette = false in view.toml to give it back."
                     .to_string()
             ]
         );
@@ -366,7 +407,7 @@ mod tests {
             notices(&model),
             vec![
                 "view: a plugin is drawing over the command line, which view owns.\n\
-                 Set [native] palette = false to give it back."
+                 Set [native] palette = false in view.toml to give it back."
                     .to_string()
             ]
         );
@@ -383,7 +424,7 @@ mod tests {
             vec![
                 "view: noice is drawing over the command line and the message area, \
                  which view owns.\nSet [native] palette = false and \
-                 [native] notifications = false to give them back."
+                 [native] notifications = false in view.toml to give them back."
                     .to_string()
             ],
             "one line, both surfaces, both remedies -- never two notices retracting each other"
@@ -422,7 +463,7 @@ mod tests {
         open_cmdline(&mut model);
         let expected = vec![
             "view: cmp_menu is drawing over the command line, which view owns.\n\
-             Set [native] palette = false to give it back."
+             Set [native] palette = false in view.toml to give it back."
                 .to_string(),
         ];
         let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
@@ -595,45 +636,104 @@ mod tests {
                 "view: noice.nvim is using the command line and the message area, \
                  which view owns.\n\
                  Set [native] palette = false and [native] notifications = false \
-                 to give them back."
+                 in view.toml to give them back.\n\
+                 Startup messages from this launch are in the history -- <leader>fm."
                     .to_string()
             ]
         );
     }
 
-    /// The three-line shape the message box can actually draw: one break per
-    /// sentence, because the layer that sizes the box clips at the grid
-    /// width instead of wrapping.
+    /// The lifetime the claimant notice is recorded with, pinned at the one
+    /// call site that chooses it.
+    ///
+    /// Every compat `wait_for` finds this line well inside the four-second
+    /// transient window, so recording it as an ordinary `"native"` notice
+    /// keeps the whole battery green while turning the flagship line into
+    /// something that leaves on a timer -- or on the next key the user
+    /// presses, which is a key they press while reading it. Both exits are
+    /// driven here.
     #[test]
-    fn the_notice_breaks_at_every_sentence_so_the_remedy_is_on_screen() {
+    fn the_conflict_notice_outlives_the_transient_timeout() {
         let mut model = captured_session();
-        // a parked startup message, which is what earns the third line
-        let _ = update(
-            &mut model,
-            Msg::Redraw(vec![UiEvent::MsgShow {
-                kind: "echomsg".to_string(),
-                content: vec![(0, "noice.nvim: setup".to_string())],
-                replace_last: false,
-            }]),
-        );
-        probe(&mut model, &["noice"]);
+        let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
-        let lines: Vec<&str> = standing[0].split('\n').collect();
-        assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(
-            lines[1].starts_with("Set [native] palette = false"),
-            "{lines:?}"
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::ScheduleToastExpiry { .. })),
+            "a notice on an idle-expiry timer is one that leaves without being \
+             answered: {effects:?}"
         );
-        assert_eq!(
-            lines[2],
-            "Startup messages from other plugins are in the message history."
+
+        // the same fact read off the entry rather than off the effect list:
+        // `Msg::ToastExpired` retains by id alone, so what keeps the timer
+        // from ever being armed for this line is the kind it carries
+        assert!(
+            model
+                .engine
+                .messages
+                .entries
+                .iter()
+                .all(crate::model::MessageEntry::is_persistent),
+            "{:?}",
+            notices(&model)
         );
-        for line in &lines {
-            assert!(
-                line.chars().count() <= 98,
-                "a line the toast layer clips is a line the user cannot read: {line:?}"
+
+        // and the keystroke that wipes a transient line
+        model.engine.messages.note_flush();
+        let _ = model.engine.messages.dismiss_transient_on_keypress(true);
+        assert_eq!(notices(&model), standing, "a keystroke took it down");
+    }
+
+    /// The decided wording, line for line: the three-line shape the message
+    /// box can actually draw -- one break per sentence, because the layer
+    /// that sizes the box clips at the grid width instead of wrapping -- with
+    /// the file the remedy goes in and the key that shows the rest of the
+    /// launch.
+    ///
+    /// Ranged over whether the hold actually parked a foreign message,
+    /// because neither clause is conditional on that: the remedy is a line in
+    /// a file either way, and view's own startup lines are in the history on
+    /// every launch, so a user reading this box is one key from the rest of
+    /// it whatever the hold caught. The flagship launch is in fact the
+    /// `false` leg -- noice raises its errors through nvim-notify directly,
+    /// so nothing foreign is ever parked there.
+    #[test]
+    fn the_notice_breaks_at_every_sentence_so_the_remedy_is_on_screen() {
+        for parked in [false, true] {
+            let mut model = captured_session();
+            if parked {
+                let _ = update(
+                    &mut model,
+                    Msg::Redraw(vec![UiEvent::MsgShow {
+                        kind: "echomsg".to_string(),
+                        content: vec![(0, "noice.nvim: setup".to_string())],
+                        replace_last: false,
+                    }]),
+                );
+            }
+            probe(&mut model, &["noice"]);
+            let standing = notices(&model);
+            assert_eq!(standing.len(), 1, "parked={parked}: {standing:?}");
+            let lines: Vec<&str> = standing[0].split('\n').collect();
+            assert_eq!(
+                lines,
+                vec![
+                    "view: noice.nvim is using the command line and the message area, \
+                     which view owns.",
+                    "Set [native] palette = false and [native] notifications = false \
+                     in view.toml to give them back.",
+                    "Startup messages from this launch are in the history -- <leader>fm.",
+                ],
+                "parked={parked}"
             );
+            for line in &lines {
+                assert!(
+                    line.chars().count() <= 98,
+                    "a line the toast layer clips is a line the user cannot read: {line:?}"
+                );
+            }
         }
     }
 
@@ -678,6 +778,80 @@ mod tests {
         );
     }
 
+    /// The ordering a lazy claimant actually launches in: noice's own
+    /// documented spec is `event = "VeryLazy"`, so the session's first
+    /// `SafeState` finds `package.loaded.noice` empty, and the hold resolves
+    /// `Release` -- everything parked goes onto the stack, and anything the
+    /// plugin raises after that toasts normally.
+    ///
+    /// The notice is the obligation; the hold is only the anti-flash
+    /// mechanism for the eager case. So the bound this pins is the honest
+    /// one: the messages raised before the late detection have already been
+    /// seen, and the notice that says which surfaces went and how to get
+    /// them back still arrives.
+    #[test]
+    fn a_claimant_that_loads_after_the_hold_resolved_still_gets_its_notice() {
+        let mut model = captured_session();
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, "some other plugin: loaded".to_string())],
+                replace_last: false,
+            }]),
+        );
+        assert!(!model.engine.messages.held().is_empty());
+
+        // the first idle transition, with nothing loaded yet
+        probe(&mut model, &[]);
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+        assert!(
+            model.engine.messages.held().is_empty(),
+            "an empty reading releases the hold rather than stranding what it caught"
+        );
+
+        // and the reading the re-firing probe takes once the plugin loads
+        probe(&mut model, &["noice"]);
+        let standing = notices(&model);
+        assert_eq!(standing.len(), 1, "{standing:?}");
+        assert!(
+            standing[0].starts_with("view: noice.nvim is using "),
+            "{standing:?}"
+        );
+    }
+
+    /// The same rule for a float that does name itself, when the name it
+    /// carries is the claimant's own.
+    ///
+    /// noice sets `filetype = "noice"` on every window it opens
+    /// (`lua/noice/view/nui.lua:41`), so its floats reach the *named* family
+    /// rather than the anonymous one the guard above covers, and a default
+    /// launch that both loads noice and sights one of its windows would say
+    /// "noice.nvim is using the command line" and "noice is drawing over the
+    /// command line" -- one plugin, two boxes, differing only in how view
+    /// happened to notice it. Driven in both orders, because the claimant
+    /// probe and the float scan race each other on a real launch.
+    #[test]
+    fn a_claimants_own_windows_are_that_claimant_rather_than_a_second_plugin() {
+        for float_first in [false, true] {
+            let mut model = captured_session();
+            open_cmdline(&mut model);
+            if float_first {
+                let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("noice")));
+            }
+            probe(&mut model, &["noice"]);
+            if !float_first {
+                let _ = update(&mut model, Msg::FloatObserved(cmp_cmdline_menu("noice")));
+            }
+            let standing = notices(&model);
+            assert_eq!(standing.len(), 1, "float_first={float_first}: {standing:?}");
+            assert!(
+                standing[0].starts_with("view: noice.nvim is using "),
+                "float_first={float_first}: {standing:?}"
+            );
+        }
+    }
+
     /// The other order, which the sighting-time guard cannot cover: the
     /// unnamed float was already reported when the claimant answered.
     #[test]
@@ -705,7 +879,13 @@ mod tests {
         let _ = update(&mut model, Msg::FloatObserved(toast("")));
         assert_eq!(notices(&model).len(), 1);
         // a claimant that takes only the command line back
-        let _ = absorb_float_notices(&mut model, &[Surface::Cmdline]);
+        let claimant = crate::native::surfaces::SurfaceClaimant {
+            surfaces: &[Surface::Cmdline],
+            ..*crate::native::surfaces::SURFACE_CLAIMANTS
+                .first()
+                .expect("the shipped table has a row")
+        };
+        let _ = absorb_float_notices(&mut model, &claimant, &[Surface::Cmdline]);
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
         assert!(
@@ -811,6 +991,108 @@ mod tests {
         families.sort();
         families.dedup();
         families
+    }
+
+    /// The population `every_family` has to walk, bound to the crate rather
+    /// than to whoever last remembered to extend the list.
+    ///
+    /// A notice family is produced by exactly one shape of function -- named
+    /// `family` or ending `_family` -- and a family the walk never
+    /// instantiates is a family no collision test ever sees. This fails the
+    /// moment a new producer is written, which is the point at which joining
+    /// the walk is one line rather than an archaeology exercise.
+    ///
+    /// Mechanism honesty: the naming convention is what makes a producer
+    /// reachable here. A family built inline, under no function of its own,
+    /// is invisible to this -- and is also a family with no single place to
+    /// change its wording, which review catches on other grounds.
+    #[test]
+    fn every_family_walks_every_family_producer_in_the_crate() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut producers: Vec<String> = Vec::new();
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the crate's own source tree") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("a readable source file");
+                // production only: a test helper named `..._family` is a
+                // fixture, not a family a notice is ever recorded under
+                let text = text.split("\n#[cfg(test)]").next().unwrap_or_default();
+                for line in text.lines() {
+                    // a family producer is a free function returning the
+                    // opening string itself; `pub(super) fn` and friends are
+                    // why this looks for `fn ` rather than a line prefix
+                    if !line.ends_with("-> String {") {
+                        continue;
+                    }
+                    let Some(rest) = line.split_once("fn ").map(|(_, rest)| rest) else {
+                        continue;
+                    };
+                    let Some(name) = rest.split('(').next() else {
+                        continue;
+                    };
+                    if name == "family" || name.ends_with("_family") {
+                        producers.push(name.to_string());
+                    }
+                }
+            }
+        }
+        producers.sort();
+        producers.dedup();
+        assert!(
+            producers.len() >= 3,
+            "the walk found nothing, so it proves nothing: {producers:?}"
+        );
+
+        let this = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/update/surface_conflict.rs"),
+        )
+        .expect("this file");
+        let body = this
+            .split_once("fn every_family() -> Vec<String> {")
+            .expect("the walk this test is about")
+            .1;
+        let body = body.split_once("\n    #[test]").expect("the walk's end").0;
+        for producer in &producers {
+            assert!(
+                body.contains(producer.as_str()),
+                "{producer} builds a notice family that `every_family` never instantiates, \
+                 so no collision test ever sees it"
+            );
+        }
+    }
+
+    /// The one collision the terminator does not close, pinned rather than
+    /// claimed in a comment.
+    ///
+    /// A path is the one part of a family that stays under the user's
+    /// control past the charset guard, and nothing in a filesystem forbids a
+    /// file whose name embeds another notice's whole opening, terminator
+    /// included. Withdrawing the shorter one then retracts the longer one's
+    /// line too.
+    ///
+    /// Left standing: closing it means either rejecting filenames view can
+    /// otherwise watch perfectly well, or wording the notice around a case
+    /// no user has. What is owed is that the bound is a fact this suite
+    /// states, so a change that widens or closes it moves this test rather
+    /// than passing unnoticed.
+    #[test]
+    fn a_path_that_spells_another_notices_opening_still_prefixes_it() {
+        let inner = crate::update::watch::file_notice_family(std::path::Path::new("/proj/a"));
+        let outer =
+            crate::update::watch::file_notice_family(std::path::Path::new("/proj/a is /proj/b"));
+        assert!(
+            outer.starts_with(&inner),
+            "the residual this states is gone -- {outer:?} no longer opens with {inner:?}, \
+             so the collision is closed and this bound is stale"
+        );
     }
 
     #[test]

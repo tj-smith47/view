@@ -158,6 +158,16 @@ pub struct SurfaceClaimant {
     /// session handed back -- or one view absorbs rather than fights over --
     /// is not something the user is told about.
     pub surfaces: &'static [Surface],
+    /// The `filetype`s this class's own floating windows present, which is
+    /// what [`FloatSighting::identity`] reads a name out of. A sighting
+    /// carrying one of these is this plugin drawing on a surface its own
+    /// notice already names -- not a second plugin -- so the composition
+    /// guard treats it exactly as it treats an anonymous float.
+    ///
+    /// Empty is the honest answer for a class whose windows carry no
+    /// distinguishing filetype; those sightings reach the anonymous family
+    /// and are absorbed there.
+    pub identities: &'static [&'static str],
 }
 
 /// The shipped claimant table.
@@ -175,6 +185,9 @@ pub const SURFACE_CLAIMANTS: &[SurfaceClaimant] = &[SurfaceClaimant {
     class: "noice.nvim",
     module: "noice",
     surfaces: &[Surface::Cmdline, Surface::Popupmenu, Surface::Messages],
+    // every window noice opens goes through its own nui view, which sets
+    // `filetype = "noice"` on the buffer (lua/noice/view/nui.lua:41)
+    identities: &["noice"],
 }];
 
 /// The claimants `probed` names, in table order -- the order a notice per
@@ -437,11 +450,25 @@ pub fn view_draws(surface: Surface, model: &Model) -> bool {
 #[derive(Debug, Default)]
 pub struct SurfaceConflicts {
     claimants: Vec<Claimant>,
-    /// Surfaces a named claimant's notice already accounts for. An unnamed
-    /// float drawing on one of these adds nothing a user can act on -- same
-    /// surface, same `[native]` line -- and a second box saying so is the
+    /// What the named claimant notices already account for. A float drawing
+    /// on one of these surfaces, carrying no name or one of that claimant's
+    /// own, adds nothing a user can act on -- same plugin, same surface,
+    /// same `[native]` line -- and a second box saying so is the
     /// two-notices-for-one-plugin case the spec forbids.
-    named: Vec<Surface>,
+    covers: Vec<Cover>,
+}
+
+/// One named claimant's accounted-for surfaces, with the identities its own
+/// floats present.
+///
+/// Kept per claimant rather than as one flat surface set, because the
+/// identity half is what makes the absorption *this* plugin's: a second
+/// claimant covering the message area cannot make noice's own windows
+/// anonymous, and a flat set could not tell the two apart.
+#[derive(Debug)]
+struct Cover {
+    surfaces: Vec<Surface>,
+    identities: &'static [&'static str],
 }
 
 /// One identity's standing claim.
@@ -503,45 +530,72 @@ impl SurfaceConflicts {
         Some(&claimant.surfaces)
     }
 
-    /// Whether a named claimant's notice already accounts for `surface`, so
-    /// an unnamed float sighted drawing there is a conflict the user has
-    /// already been told about, with the same remedy.
+    /// Whether a named claimant's notice already accounts for a float of
+    /// `identity` drawing on `surface`, so the sighting is a conflict the
+    /// user has already been told about, with the same remedy.
+    ///
+    /// `None` -- a float that names nobody -- is covered by any claimant
+    /// holding the surface: the sighting cannot say who, and the standing
+    /// notice can. A float that does name itself is covered only by the
+    /// claimant whose own windows present that name
+    /// ([`SurfaceClaimant::identities`]); any other name is a second plugin,
+    /// whose line says something the first plugin's never does.
     #[must_use]
-    pub fn covered(&self, surface: Surface) -> bool {
-        self.named.contains(&surface)
+    pub fn covers(&self, surface: Surface, identity: Option<&str>) -> bool {
+        self.covers.iter().any(|cover| {
+            cover.surfaces.contains(&surface)
+                && identity.is_none_or(|name| cover.identities.contains(&name))
+        })
     }
 
     /// Records that a named claimant's notice now accounts for `surfaces`,
-    /// and answers what that leaves of the anonymous claimant's standing
-    /// claim: `None` when there is no anonymous claim or none of it was
-    /// covered, `Some(&[])` when all of it was (its notice comes down), and
-    /// `Some(rest)` when part of it survives (its notice is re-worded to
-    /// the rest).
+    /// drawn by floats presenting `identities`.
     ///
-    /// The anonymous claimant is the one this can act on, and the only one.
-    /// A float carrying a name is a different plugin making a different
-    /// claim, and one notice per plugin is the rule rather than one notice
-    /// per surface -- silencing the named one would lose a fact about a
-    /// second plugin that the first plugin's notice never mentions. A float
-    /// carrying no name, over a surface a named claimant has already been
-    /// reported for, is the same fact told worse.
-    pub fn cover(&mut self, surfaces: &[Surface]) -> Option<&[Surface]> {
-        for surface in surfaces {
-            if !self.named.contains(surface) {
-                self.named.push(*surface);
+    /// Paired with [`Self::narrow`], which is what takes the notices already
+    /// standing down to what this cover leaves of them.
+    pub fn note_covered(&mut self, surfaces: &[Surface], identities: &'static [&'static str]) {
+        if let Some(cover) = self
+            .covers
+            .iter_mut()
+            .find(|cover| cover.identities == identities)
+        {
+            for surface in surfaces {
+                if !cover.surfaces.contains(surface) {
+                    cover.surfaces.push(*surface);
+                }
             }
+            return;
         }
+        self.covers.push(Cover {
+            surfaces: surfaces.to_vec(),
+            identities,
+        });
+    }
+
+    /// Answers what the recorded covers leave of `identity`'s standing
+    /// claim: `None` when it has none or none of it was covered, `Some(&[])`
+    /// when all of it was (its notice comes down), and `Some(rest)` when part
+    /// of it survives (its notice is re-worded to the rest).
+    pub fn narrow(&mut self, identity: Option<&str>) -> Option<&[Surface]> {
         let index = self
             .claimants
             .iter()
-            .position(|claimant| claimant.identity.is_none())?;
-        let named = self.named.clone();
-        let claimant = self.claimants.get_mut(index)?;
-        let before = claimant.surfaces.len();
-        claimant.surfaces.retain(|surface| !named.contains(surface));
-        if claimant.surfaces.len() == before {
+            .position(|claimant| claimant.identity.as_deref() == identity)?;
+        let covered: Vec<Surface> = self
+            .claimants
+            .get(index)?
+            .surfaces
+            .iter()
+            .copied()
+            .filter(|surface| self.covers(*surface, identity))
+            .collect();
+        if covered.is_empty() {
             return None;
         }
+        let claimant = self.claimants.get_mut(index)?;
+        claimant
+            .surfaces
+            .retain(|surface| !covered.contains(surface));
         if claimant.surfaces.is_empty() {
             self.claimants.remove(index);
             return Some(&[]);

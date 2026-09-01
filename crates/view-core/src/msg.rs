@@ -328,15 +328,21 @@ pub enum Msg {
     FloatSweep,
     /// The claimant probe's answer: the Lua module names from
     /// [`SURFACE_CLAIMANTS`](crate::native::surfaces::SURFACE_CLAIMANTS)
-    /// that `package.loaded` reported present, on the first `SafeState`
-    /// after `VimEnter`.
+    /// that `package.loaded` reported present.
+    ///
+    /// Arrives at every idle transition whose reading is news -- the first
+    /// one, and any later one that found a module the earlier readings had
+    /// not -- so a lazily-loaded claimant is answered for whenever it
+    /// actually loads. Off the paint path, and about no plugin private:
+    /// `package.loaded` is the public module registry.
     ///
     /// The first of the three triggers that resolve the startup hold, and
-    /// the only one that can collapse it. Asked once, off the paint path,
-    /// about no plugin private: `package.loaded` is the public module
-    /// registry. A claimant that loads *after* this answer is not
-    /// collapsed -- its messages release with the rest and toast normally,
-    /// which is the honest bound of a probe taken once.
+    /// the only one that can collapse it. The *hold* is what a late answer
+    /// cannot recover: a first reading naming nobody releases it, so a
+    /// claimant loading after that finds the collapse window closed and its
+    /// messages have already toasted. The notice still arrives, which is the
+    /// obligation; the hold was only ever the anti-flash mechanism for the
+    /// claimant that loaded eagerly.
     ClaimantsProbed(Vec<String>),
     /// The startup hold's deadline elapsed
     /// ([`Effect::ScheduleStartupHold`]) with no probe answer. Releases the

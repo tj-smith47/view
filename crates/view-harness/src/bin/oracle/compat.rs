@@ -661,6 +661,25 @@ fn run_scenario(
     cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
     cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
     cmd.env("VIEW_COMPAT_SOCK", &sock_path);
+    // the one host variable a launch's own wire trace needs, allow-listed
+    // here because `make_hermetic` sweeps `VIEW_LOG` along with everything
+    // else: the routing evidence in docs/toast-routing-wire-capture.md was
+    // read out of a file this produced, and a trace nobody can re-obtain is
+    // evidence that expires. One file per (plugin, state), so the states of
+    // one run do not interleave into something unreadable
+    if let Some(dir) = std::env::var_os("VIEW_COMPAT_LOG") {
+        let dir = std::path::PathBuf::from(dir);
+        if std::fs::create_dir_all(&dir).is_ok() {
+            cmd.env(
+                "VIEW_LOG",
+                dir.join(format!(
+                    "{}-{}.log",
+                    scenario.plugin,
+                    state_name(state.name)
+                )),
+            );
+        }
+    }
     if let Some(value) = accommodations_env(state) {
         cmd.env(ACCOMMODATIONS_VAR, value);
     }

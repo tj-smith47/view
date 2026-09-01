@@ -105,14 +105,24 @@ pipeline today, unlike the three top-level events above.
 ## Finding: noice's health errors never reach `msg_show` at all
 
 Captured over a full `compat/fixtures/heavy` launch with `VIEW_LOG` pointed
-at a file (`VIEW_COMPAT_LOG` in the harness, since `make_hermetic` sweeps
-every host variable that is not an allow-listed passthrough, `VIEW_LOG`
-included). The plan this task was written against assumed noice's three
+at a file. `make_hermetic` sweeps every host variable that is not an
+allow-listed passthrough, `VIEW_LOG` included, so the harness takes
+`VIEW_COMPAT_LOG` as a directory and hands the spawned `view` a
+`VIEW_LOG` of its own inside it, one file per (plugin, state):
+
+```
+$ VIEW_COMPAT_LOG=~/.cache/view-compat-logs cargo run -p view-harness \
+    --bin oracle -- compat --scenario compat/scenarios/noice.toml
+$ ls ~/.cache/view-compat-logs
+noice-unaccommodated.log  noice-superseded.log  ...
+```
+
+The plan this task was written against assumed noice's three
 health errors arrive as three view toasts once `HOLD_NOTIFY_CHUNK` has taken
 `vim.notify` over. They do not.
 
 ```
-$ grep -c msg_show ~/.cache/view-compat-noice.log
+$ grep -c msg_show ~/.cache/view-compat-logs/noice-unaccommodated.log
 0
 $ # the same launch, asked what nvim-notify is holding
 nvim-notify-history=3
@@ -184,7 +194,8 @@ vim.api.nvim_create_autocmd('SafeState', {
       pcall(vim.api.nvim_del_augroup_by_id, group)
     end
   end,
-})```
+})
+```
 
 `SafeState` rather than an inline read at `VimEnter`: a manager that
 finishes its own deferred loading on a timer after `VimEnter` (lazy.nvim's
