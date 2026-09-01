@@ -850,10 +850,6 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
 /// - `noice`/`unaccommodated` asserts the single conflict notice `view`
 ///   raises when a plugin claims a surface it has externalized, and the
 ///   remedy that notice carries. Neither exists yet; **T19** builds them.
-/// - `noice`/`deferred` asserts that the remedy actually works on an
-///   unadjusted config. It cannot today: the externalized UI extensions
-///   stay attached regardless of `[native]`, which is the defect **T8**
-///   fixes.
 ///
 /// A row here is not a waiver. Red-and-listed reports distinctly and does
 /// not fail the run; green-and-listed is a hard failure, so the task that
@@ -867,21 +863,12 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
 /// the row's cell there says what has to become true for it to go green, in
 /// terms of the product, since the plan marker beside it means nothing
 /// outside this repo's own planning notes.
-const EXPECTED_RED: [(&str, &str, &str, &str); 2] = [
-    (
-        "noice",
-        "unaccommodated",
-        "T19",
-        "view raises its own conflict notice on a default first launch",
-    ),
-    (
-        "noice",
-        "deferred",
-        "T8",
-        "the engine's externalized UI extensions follow [native], so an \
-         opted-out surface attaches nothing",
-    ),
-];
+const EXPECTED_RED: [(&str, &str, &str, &str); 1] = [(
+    "noice",
+    "unaccommodated",
+    "T19",
+    "view raises its own conflict notice on a default first launch",
+)];
 
 /// The scenario file's own stem -- not `plugin`, since two scenario files
 /// can name the same plugin (`lualine.toml` and `cold-bootstrap.toml` both
@@ -1187,13 +1174,28 @@ mod tests {
         }
     }
 
+    /// The manifest's own first row, read rather than named, so a task that
+    /// clears a row cannot leave the three reconciliation tests below
+    /// asserting about a row nothing lists any more -- which is how they
+    /// came to fail on the commit that turned `noice`/`deferred` green.
+    /// `None` once the manifest is empty: with nothing listed there is
+    /// nothing to reconcile, and the three tests have no subject rather
+    /// than a stale one.
+    fn listed_row() -> Option<(&'static str, &'static str, &'static str)> {
+        EXPECTED_RED
+            .first()
+            .map(|(scenario, state, _, clears_when)| (*scenario, *state, *clears_when))
+    }
+
     #[test]
     fn a_listed_red_row_reports_as_expected_and_names_its_clearing_task() {
-        let mut result = red_row("noice", "unaccommodated", ScenarioStatus::Failed);
+        let Some((scenario, state, clears_when)) = listed_row() else {
+            return;
+        };
+        let mut result = red_row(scenario, state, ScenarioStatus::Failed);
         apply_red_expectation(&mut result);
         assert_eq!(result.status, ScenarioStatus::ExpectedFailure);
         let detail = result.detail.expect("an expected-red row keeps its detail");
-        let (_, _, _, clears_when) = EXPECTED_RED[0];
         assert!(
             detail.contains(clears_when) && detail.contains("some failure"),
             "the row must say what clears it and keep the original failure: {detail}"
@@ -1204,7 +1206,10 @@ mod tests {
     fn a_listed_row_that_passes_fails_the_run_as_a_stale_manifest() {
         // The half that keeps the manifest from becoming a permanent
         // waiver: a row nobody has to remove is a failure nobody has to fix.
-        let mut result = red_row("noice", "deferred", ScenarioStatus::Ok);
+        let Some((scenario, state, _)) = listed_row() else {
+            return;
+        };
+        let mut result = red_row(scenario, state, ScenarioStatus::Ok);
         apply_red_expectation(&mut result);
         assert_eq!(result.status, ScenarioStatus::Failed);
         assert!(result
@@ -1218,7 +1223,10 @@ mod tests {
         // The row asserts something about a run; a state that did not run
         // asserts nothing, and honoring the skip would let the manifest
         // outlive the scenario it names.
-        let mut result = red_row("noice", "deferred", ScenarioStatus::Skipped);
+        let Some((scenario, state, _)) = listed_row() else {
+            return;
+        };
+        let mut result = red_row(scenario, state, ScenarioStatus::Skipped);
         result.detail = Some("VIEW_DAILY_CONFIG is unset".to_string());
         apply_red_expectation(&mut result);
         assert_eq!(result.status, ScenarioStatus::Failed);

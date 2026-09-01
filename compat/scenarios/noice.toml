@@ -1,17 +1,24 @@
 # noice is ui-owning in spirit (it exists to take over cmdline, messages,
-# and the completion popup) but view already externalizes all three of
+# and the completion popup) but view's defaults externalize all three of
 # those surfaces, and noice refuses to claim a surface the attached GUI
 # has externalized. The fixture therefore runs noice in its own supported
 # GUI configuration -- cmdline/messages/popupmenu components off -- and
-# this scenario asserts on the part of noice that still owns UI there: its
-# message router, which intercepts vim.notify and both records the message
-# in noice's own history and displays it through the nvim-notify backend.
+# the default states assert on the part of noice that still owns UI there:
+# its message router, which intercepts vim.notify and both records the
+# message in noice's own history and displays it through the nvim-notify
+# backend.
 #
 # `notifications` carries no takeover row (view-native's supersede module
-# has exactly one row and it is statusline's), and `cmdheight` stays 0 in
-# every state regardless -- `ext_messages` attaches at the session level,
-# not per feature. noice's own routing is therefore identical in every
-# state below; the one fact `<leader>fm` discriminates is whether it opens
+# has exactly one row and it is statusline's). What the switches do carry
+# is the attach itself: `palette = false` detaches ext_cmdline and
+# ext_popupmenu, `notifications = false` detaches ext_messages, so the
+# `deferred` state below hands noice back every surface it asks for and
+# the `nvim_list_uis()` probes there are the direct evidence. `cmdheight`
+# is not view's to assert in that state: noice sets it itself once it owns
+# the cmdline.
+#
+# In the two states that keep view's defaults, noice's routing is
+# identical; the one fact `<leader>fm` discriminates is whether it opens
 # view's own message-history overlay (titled "Messages") or, unclaimed,
 # does nothing.
 schema = 1
@@ -50,6 +57,11 @@ steps = [
 [[states]]
 name = "superseded"
 steps = [
+  # The positive control for the `deferred` state's attach probes: view's
+  # own defaults externalize the cmdline, so this is the session noice's
+  # health check complains about.
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_cmdline == true)')", expect = "true" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_messages == true)')", expect = "true" },
   # noice defers its real setup until after VimEnter, so package.loaded
   # alone is not proof the router is running; is_running() only reports
   # true once the deferred load actually completed. Generous timeout: the
@@ -83,6 +95,16 @@ native = { palette = false, notifications = false }
 steps = [
   { wait_for_probe = "luaeval('package.loaded.noice ~= nil and require(\"noice.config\").is_running()')", expect = "true", timeout_ms = 180000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # What the two switches did to the attach, asked of nvim rather than
+  # inferred from noice staying quiet: these three are the surfaces the
+  # remedy hands back, and they are why the complaints below never come.
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_cmdline == true)')", expect = "false" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_popupmenu == true)')", expect = "false" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_messages == true)')", expect = "false" },
+  # And the two that follow no switch: the grid protocol, and a tabline no
+  # native feature owns.
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_linegrid == true)')", expect = "true" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_tabline == true)')", expect = "true" },
   # The remedy's whole point: neither complaint survives it.
   { assert_absent = "Noice can't work when the GUI has" },
   { assert_absent = "noice.nvim is using the command line" },

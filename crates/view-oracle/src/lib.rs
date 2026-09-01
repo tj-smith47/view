@@ -514,7 +514,9 @@ impl EngineSession {
     /// As [`spawn`](Self::spawn).
     pub fn spawn_configured(cfg: EngineConfig, cols: u16, rows: u16) -> Result<Self, OracleError> {
         let mut engine = Engine::spawn(cfg)?;
-        engine.handle.ui_attach(cols, rows)?;
+        engine
+            .handle
+            .ui_attach(cols, rows, view_engine::UI_EXT_OPTIONS)?;
         // no consumer ever drains this channel: EngineSession polls
         // DamagePump::take_damage directly instead (leg (c) is
         // harness-owned polling, not a blocking recv on a sink), and

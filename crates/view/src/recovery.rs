@@ -353,7 +353,13 @@ pub(crate) fn restart_engine(
     // command line of its own to correct one left behind
     // ([`EngineModel::forget_overlays`])
     model.engine.forget_overlays();
-    let mut engine = crate::startup::restart_and_attach(engine, respawn(), width, height)?;
+    let mut engine = crate::startup::restart_and_attach(
+        engine,
+        respawn(),
+        width,
+        height,
+        model.attached_surfaces().to_vec(),
+    )?;
     let (pump, cutover) = engine.start_pump(channels.msg.clone());
     let pending_redraw = if cutover.redraw_pending {
         pump.take_damage()
@@ -763,7 +769,10 @@ mod tests {
         };
         let respawn = || view_engine::process::EngineConfig::isolated();
         let mut engine = Engine::spawn(respawn()).unwrap();
-        engine.handle.ui_attach(80, 24).unwrap();
+        engine
+            .handle
+            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+            .unwrap();
         let (_pump, _cutover) = engine.start_pump(channels.msg.clone());
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
         let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());

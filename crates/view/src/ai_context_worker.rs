@@ -311,7 +311,10 @@ mod tests {
         let engine =
             view_engine::process::Engine::spawn(view_engine::process::EngineConfig::isolated())
                 .expect("spawn engine");
-        engine.handle.ui_attach(80, 24).expect("attach ui");
+        engine
+            .handle
+            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+            .expect("attach ui");
         engine
             .handle
             .command("call setline(1, ['hello world', 'second line'])")

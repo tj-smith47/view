@@ -155,6 +155,34 @@ fn spawn_view_pty_raw() -> ViewPtySession {
     spawn_view_pty_raw_with_args(&[])
 }
 
+/// The one `[native]` switch a test whose subject is view's own message
+/// surface has to leave on.
+///
+/// `notifications = false` detaches `ext_messages`, which hands the message
+/// area back to nvim: its own reports, and its own hit-enter prompts, are
+/// then painted into the grid exactly as in bare nvim, and no `msg_show`
+/// ever reaches view to render as a toast or to answer. That is what the
+/// switch is for, and it is the opposite of what a test asserting on view's
+/// toasts, message history, or recovery notices is measuring. Everything
+/// else stays off, so such a test is still uncoupled from every other
+/// feature's rendering.
+const MESSAGES_ON: &[&str] = &["notifications"];
+
+/// [`spawn_view_pty`] with the message surface left to view, for a test
+/// whose subject is what view does with a message rather than what nvim
+/// draws without one.
+fn spawn_view_pty_owning_messages() -> ViewPtySession {
+    let mut session = build_view_pty_with_content(
+        &[],
+        None,
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
+    );
+    let _ = session.wait_for("~", Duration::from_secs(5));
+    session
+}
+
 /// Like [`spawn_view_pty_raw`], but with `extra_args` inserted before the
 /// scratch-file positional argument (e.g. `--nvim-bin <wrapper>`, for tests
 /// that need to control how slowly the embedded engine starts).
@@ -176,7 +204,7 @@ fn build_view_pty(
     isolation: Option<RwLockReadGuard<'static, ()>>,
     policy: QueryPolicy,
 ) -> ViewPtySession {
-    build_view_pty_with_content(extra_args, None, isolation, policy)
+    build_view_pty_with_content(extra_args, None, isolation, policy, &[])
 }
 
 /// Like [`build_view_pty`], but seeds the scratch file with `content` before
@@ -187,12 +215,13 @@ fn build_view_pty_with_content(
     content: Option<&str>,
     isolation: Option<RwLockReadGuard<'static, ()>>,
     policy: QueryPolicy,
+    native_on: &[&str],
 ) -> ViewPtySession {
     let paths = common::ScratchPaths::new("smoke");
     if let Some(content) = content {
         std::fs::write(&paths.scratch, content).expect("scratch fixture must be writable");
     }
-    spawn_view_pty_at(paths, extra_args, isolation, policy)
+    spawn_view_pty_at(paths, extra_args, isolation, policy, native_on)
 }
 
 /// Like [`build_view_pty_with_content`], but against scratch paths the caller
@@ -206,13 +235,14 @@ fn spawn_view_pty_at(
     extra_args: &[&std::ffi::OsStr],
     isolation: Option<RwLockReadGuard<'static, ()>>,
     policy: QueryPolicy,
+    native_on: &[&str],
 ) -> ViewPtySession {
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     for arg in extra_args {
         cmd.arg(arg);
     }
     cmd.arg(&paths.scratch);
-    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
+    common::isolate_xdg_native_off_except(&mut cmd, &paths.isolated_home, native_on);
 
     let session = PtySession::spawn_configured_with(cmd, 80, 24, policy).unwrap();
 
@@ -727,6 +757,7 @@ fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
         Some("on disk\n"),
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
     );
     assert!(
         session.wait_for("on disk", Duration::from_secs(15)),
@@ -818,6 +849,7 @@ fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empt
         Some("on disk\n"),
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
     );
     assert!(
         session.wait_for("on disk", Duration::from_secs(15)),
@@ -894,7 +926,13 @@ fn an_ordinary_launch_whose_config_errors_is_never_told_a_recovery_failed() {
     )
     .expect("the isolated config must be writable");
 
-    let mut session = spawn_view_pty_at(paths, &[], shared_isolation(), QueryPolicy::AnswerDa1);
+    let mut session = spawn_view_pty_at(
+        paths,
+        &[],
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
+    );
 
     // an absence is only worth reading against something that happened, and
     // both halves here are events rather than clocks. The screen is watched
@@ -962,6 +1000,7 @@ fn a_swap_that_cannot_be_read_is_reported_as_a_failure_and_never_as_work_returne
         &[std::ffi::OsStr::new("--cmd"), &directory],
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
     );
 
     let named = said_part(&view_core::native::supervision::swap_recovery_failure_notice("", false));
@@ -1018,6 +1057,7 @@ fn a_restart_that_cannot_read_the_swap_says_so_instead_of_going_silent() {
         ],
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
     );
     assert!(
         session.wait_for("on disk", Duration::from_secs(15)),
@@ -1094,6 +1134,7 @@ fn a_recovery_that_came_back_with_holes_is_not_worded_as_one_that_failed() {
         &[std::ffi::OsStr::new("--cmd"), &directory],
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
     );
 
     let named = said_part(&view_core::native::supervision::swap_recovery_damage_notice(""));
@@ -1157,6 +1198,7 @@ fn a_restart_whose_file_moved_under_the_swap_recovers_the_work_and_keeps_the_war
         ],
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
     );
     assert!(
         session.wait_for("on disk", Duration::from_secs(15)),
@@ -1262,6 +1304,7 @@ fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
         ],
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        MESSAGES_ON,
     );
     // declared after the session so it drops before it: whatever the wrapper
     // does to that directory is undone even if an assertion below unwinds
@@ -1843,7 +1886,7 @@ fn view_shows_an_echoed_message() {
 // view::runtime::Executor actually runs the effect, can exercise this.
 #[test]
 fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
-    let mut session = spawn_view_pty();
+    let mut session = spawn_view_pty_owning_messages();
 
     session.send(b"\x1b:echo 'sometoken'\r").unwrap();
     assert!(
@@ -2018,6 +2061,7 @@ fn a_leading_plus_line_number_places_the_cursor_on_that_line() {
         Some(&content),
         shared_isolation(),
         QueryPolicy::AnswerDa1,
+        &[],
     );
     // `~` (nvim's empty-buffer-line marker) never appears here: the seeded
     // 60-line fixture fills every row of the 24-row viewport, unlike the

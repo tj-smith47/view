@@ -14,6 +14,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use view_core::native::ext;
 use view_core::native::geometry;
 use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::registry;
@@ -518,6 +519,32 @@ impl NativeConfig {
     }
 }
 
+/// The `ext_*` surfaces a session running `cfg` externalizes at
+/// `nvim_ui_attach`, in attach order.
+///
+/// This is what makes "turning a native feature off returns that surface to
+/// your plugins" literally true rather than merely true of view's own
+/// rendering: a plugin that inspects the attached UI's `ext_*` flags and
+/// stands down (or refuses to run) sees a UI it supports.
+///
+/// Written as a filter over [`ext::ALL`] rather than as a list built up
+/// switch by switch, so a surface this build learns to externalize is
+/// attached unconditionally until someone gives it a row here -- the same
+/// direction `[native]` resolution itself walks, where an absent answer is
+/// the full experience.
+#[must_use]
+pub fn ext_surfaces(cfg: &NativeConfig) -> Vec<&'static str> {
+    ext::ALL
+        .iter()
+        .copied()
+        .filter(|surface| match *surface {
+            ext::CMDLINE | ext::POPUPMENU => cfg.enabled("palette"),
+            ext::MESSAGES => cfg.enabled("notifications"),
+            _ => true,
+        })
+        .collect()
+}
+
 /// Every registry id, comma separated, for an error message that shows a
 /// user what they could have written instead.
 fn known_ids() -> String {
@@ -578,6 +605,61 @@ mod tests {
 
     use super::*;
     use view_core::native::keys::Resolved;
+
+    #[test]
+    fn an_absent_config_attaches_every_ext() {
+        assert_eq!(
+            ext_surfaces(&NativeConfig::all_enabled()),
+            ext::ALL.to_vec(),
+            "the full experience externalizes every surface this build knows"
+        );
+    }
+
+    #[test]
+    fn palette_off_attaches_no_cmdline_ext() {
+        let cfg = NativeConfig::from_toml_str("[native]\npalette = false\n").unwrap();
+        let surfaces = ext_surfaces(&cfg);
+        assert!(
+            !surfaces.contains(&ext::CMDLINE) && !surfaces.contains(&ext::POPUPMENU),
+            "the cmdline and its completion popup go back to nvim together: {surfaces:?}"
+        );
+        assert!(
+            surfaces.contains(&ext::MESSAGES),
+            "one switch must not take a surface the other owns: {surfaces:?}"
+        );
+    }
+
+    #[test]
+    fn notifications_off_attaches_no_messages_ext() {
+        let cfg = NativeConfig::from_toml_str("[native]\nnotifications = false\n").unwrap();
+        let surfaces = ext_surfaces(&cfg);
+        assert!(
+            !surfaces.contains(&ext::MESSAGES),
+            "messages go back to nvim: {surfaces:?}"
+        );
+        assert!(
+            surfaces.contains(&ext::CMDLINE) && surfaces.contains(&ext::POPUPMENU),
+            "one switch must not take a surface the other owns: {surfaces:?}"
+        );
+    }
+
+    /// `ext_linegrid` is the grid protocol and `ext_tabline` has no native
+    /// feature to follow, so no `[native]` answer may drop either. Walks
+    /// every switch rather than the two that own a surface today: a feature
+    /// wired to a surface it does not own would otherwise ship silently.
+    #[test]
+    fn no_native_switch_detaches_the_grid_protocol_or_the_tabline() {
+        for feature in registry::features() {
+            let cfg = NativeConfig::from_toml_str(&format!("[native]\n{} = false\n", feature.id))
+                .unwrap();
+            let surfaces = ext_surfaces(&cfg);
+            assert!(
+                surfaces.contains(&ext::LINEGRID) && surfaces.contains(&ext::TABLINE),
+                "{} = false detached a surface no feature owns: {surfaces:?}",
+                feature.id
+            );
+        }
+    }
 
     /// The shipped example config, embedded at compile time rather than read
     /// through a `../..` walk from `CARGO_MANIFEST_DIR`: a moved or renamed

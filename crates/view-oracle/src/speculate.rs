@@ -374,7 +374,9 @@ impl SpecSession {
         let mut engine = Engine::spawn(EngineConfig::isolated())?;
         let (sink, _unused_rx) = sync_channel(64);
         let (pump, _cutover) = engine.start_pump(sink);
-        engine.handle.ui_attach(COLS, ROWS)?;
+        engine
+            .handle
+            .ui_attach(COLS, ROWS, view_engine::UI_EXT_OPTIONS)?;
         settle::install_hooks(&engine.handle)?;
         Ok(Self {
             engine,

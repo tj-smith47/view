@@ -47,7 +47,10 @@ use view_test_support::{settle_mtime, ScratchDir};
 /// guard.
 fn spawn() -> Engine {
     let engine = Engine::spawn(EngineConfig::isolated()).expect("spawn engine");
-    engine.handle.ui_attach(80, 24).expect("attach ui");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .expect("attach ui");
     engine
 }
 
@@ -1058,7 +1061,10 @@ fn spawn_unprivileged(root: &Scratch) -> Engine {
         config = config.with_nvim_bin(&wrapper);
     }
     let engine = Engine::spawn(config).expect("spawn engine");
-    engine.handle.ui_attach(80, 24).expect("attach ui");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .expect("attach ui");
     engine
 }
 

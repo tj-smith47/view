@@ -34,6 +34,7 @@ pub use heartbeat::{
 // handle.rs) since production always goes through the pumped, bounded path.
 #[cfg(any(test, feature = "test-support"))]
 pub use handle::EngineNotification;
+pub use nvim_api::UI_EXT_OPTIONS;
 pub use process::{
     remote_reconnect_backoff, ApiInfo, Engine, EngineConfig, RemoteSpec, ShutdownOutcome,
     ShutdownPath, REMOTE_RECONNECT_BACKOFF_BASE, REMOTE_RECONNECT_MAX_ATTEMPTS,

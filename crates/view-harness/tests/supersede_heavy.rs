@@ -148,7 +148,10 @@ fn session(config: &Path, scratch: &Path) -> Engine {
     // drained for the engine's lifetime rather than dropped, per
     // `Engine::start_pump`'s contract
     std::thread::spawn(move || while rx.recv().is_ok() {});
-    engine.handle.ui_attach(100, 30).unwrap();
+    engine
+        .handle
+        .ui_attach(100, 30, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     engine
 }
 

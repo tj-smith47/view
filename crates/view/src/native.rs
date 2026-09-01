@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use view_core::model::Model;
 use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall};
-use view_core::native::registry;
+use view_core::native::{ext, registry};
 use view_native::config::{NativeConfig, ViewConfig};
 use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
@@ -86,45 +86,33 @@ pub(crate) struct NativeSession {
 }
 
 impl NativeSession {
-    /// Resolves `config_path` into this session's answers, falling back to
-    /// the full experience when the file cannot be read or understood.
+    /// Folds `resolved` -- the one read of `config_path` this session
+    /// performs, made in `main.rs` before the attach -- into `model` and
+    /// into the plan this session applies.
     ///
-    /// A broken config is reported to the user through `model`'s own message
-    /// surface rather than to stderr: this runs behind the terminal's raw-mode
-    /// alternate screen, where a stderr write is invisible at best.
-    /// Falling back rather than refusing to start matches the loader's own
-    /// contract that an absent file is the full experience -- an editor does
-    /// not decline to open a file over a typo in an optional table -- but the
-    /// user is told, because a silently ignored `picker = false` is a feature
-    /// they turned off still taking their keys.
+    /// The value arrives already resolved rather than being read here
+    /// because the `ext_*` set `nvim_ui_attach` requests follows the same
+    /// `[native]` answers, and that decision is made before there is a
+    /// channel for anything to notify back over. Reading the file a second
+    /// time here would let one session hold two answers: a file edited or
+    /// made unreadable in the window between the two reads would leave the
+    /// attach and the takeover disagreeing about which surfaces view owns.
     ///
-    /// Returns whatever effect the broken-config notice owes the engine
-    /// alongside the built session, rather than pushing it and discarding
-    /// the return the way a bare `push_native` call would: a broken config
-    /// is discovered before `runtime::run`'s loop exists to run an effect
-    /// through, so the caller (`main.rs`) is the one that knows whether
-    /// that is "immediately, through the pre-cutover executor" or, for an
-    /// even earlier failure, "once an executor exists at all" -- this
-    /// method has no opinion on which and must not silently drop the
-    /// effect deciding it does not apply yet.
+    /// Returns whatever effects the notices it raises owe the engine,
+    /// rather than pushing them and discarding the return the way a bare
+    /// `push_native` call would: they are discovered before `runtime::run`'s
+    /// loop exists to run an effect through, so the caller (`main.rs`) is
+    /// the one that knows whether that is "immediately, through the
+    /// pre-cutover executor" or, for an even earlier failure, "once an
+    /// executor exists at all" -- this method has no opinion on which and
+    /// must not silently drop the effect deciding it does not apply yet.
     pub(crate) fn load(
+        resolved: ViewConfig,
         config_path: Option<PathBuf>,
         channel_id: u64,
         model: &mut Model,
     ) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
-        let resolved = match ViewConfig::load(config_path.as_deref()) {
-            Ok(resolved) => resolved,
-            Err(err) => {
-                crate::vlog::log_with("native", || format!("config unreadable: {err}"));
-                model.dirty = true;
-                effects = model.engine.record_native_notice(
-                    format!("view: {err}; every native feature stays on this session"),
-                    false,
-                );
-                ViewConfig::defaults()
-            }
-        };
         let cfg = resolved.native;
         model.statusline_enabled = cfg.enabled("statusline");
         model.palette_enabled = cfg.enabled("palette");
@@ -197,7 +185,7 @@ impl NativeSession {
     pub(crate) fn follow_up(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
         match stage {
             Stage::None => Vec::new(),
-            Stage::VimEnter => self.take_over(),
+            Stage::VimEnter => self.take_over(model),
             Stage::Claims => self.announce(model),
         }
     }
@@ -215,14 +203,15 @@ impl NativeSession {
     /// statusline, so this push does not read `self.cfg` or `self.plan` at
     /// all.
     ///
-    /// `cmdheight=0` registers unconditionally for the same reason, on a
-    /// different fact: `ext_messages` sits in the fixed ext-option set this
-    /// session attached with, not in `self.plan`, so `native.notifications
-    /// = false` cannot un-attach it and messages route to view either way.
-    /// Leaving the user's `cmdheight` alone while every message still
-    /// arrives as a `msg_show` view must render would be the incoherent
-    /// state -- the option follows the attach, not the feature toggle.
-    fn take_over(&mut self) -> Vec<Effect> {
+    /// `cmdheight=0` follows the attach rather than `self.plan`, and it is
+    /// the attach that now follows the switches: the last screen line is
+    /// nvim's own cmdline and message area, so taking it away is correct
+    /// only for a session that externalized *both* of those surfaces. A
+    /// session that left either one with nvim -- `native.palette = false`
+    /// keeps the cmdline there, `native.notifications = false` keeps the
+    /// messages -- needs the row it draws them on, and zeroing it would
+    /// leave the user typing `:` into a line that is not on screen.
+    fn take_over(&mut self, model: &Model) -> Vec<Effect> {
         if self.handed_over {
             return Vec::new();
         }
@@ -248,10 +237,12 @@ impl NativeSession {
         effects.push(Effect::Rpc(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         }));
-        effects.push(Effect::Rpc(RpcCall::SetOption {
-            name: "cmdheight".to_string(),
-            value: OptionValue::Int(0),
-        }));
+        if model.owns(ext::CMDLINE) && model.owns(ext::MESSAGES) {
+            effects.push(Effect::Rpc(RpcCall::SetOption {
+                name: "cmdheight".to_string(),
+                value: OptionValue::Int(0),
+            }));
+        }
         crate::vlog::log_with("native", || {
             let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
             format!("takeover options={taken:?} channel={}", self.channel_id)
@@ -352,6 +343,18 @@ mod tests {
         Model::with_term_size(80, 24)
     }
 
+    /// `load` over a config file read the way `main.rs` reads it, so these
+    /// tests keep asserting from a path on disk rather than from a value
+    /// they built by hand -- the parse is half of what they cover.
+    fn load_from(
+        config_path: Option<PathBuf>,
+        channel_id: u64,
+        model: &mut Model,
+    ) -> (NativeSession, Vec<Effect>) {
+        let resolved = ViewConfig::load(config_path.as_deref()).unwrap();
+        NativeSession::load(resolved, config_path, channel_id, model)
+    }
+
     /// A scratch record path for one test, named for it so two tests never
     /// read each other's record. The returned guard must outlive every use
     /// of the path: dropping it removes the directory the path points
@@ -435,6 +438,42 @@ mod tests {
         );
     }
 
+    /// Whether the takeover may zero `cmdheight` at all: the last screen
+    /// row is nvim's own cmdline and message area, and a session that gave
+    /// either surface back needs it. Walks all four crossings rather than
+    /// the two that differ, so a rule rewritten as "either" instead of
+    /// "both" fails by name.
+    #[test]
+    fn cmdheight_is_zeroed_only_for_a_session_that_took_both_surfaces() {
+        for (surfaces, zeroed) in [
+            (view_engine::UI_EXT_OPTIONS.to_vec(), true),
+            (vec![ext::LINEGRID, ext::MESSAGES, ext::TABLINE], false),
+            (
+                vec![ext::LINEGRID, ext::CMDLINE, ext::POPUPMENU, ext::TABLINE],
+                false,
+            ),
+            (vec![ext::LINEGRID, ext::TABLINE], false),
+        ] {
+            let mut session = NativeSession::all_enabled(7, None);
+            let mut m = model();
+            m.attach_surfaces(surfaces.clone());
+            let effects = session.follow_up(&mut m, Stage::VimEnter);
+            let sets_cmdheight = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Rpc(RpcCall::SetOption { name, value })
+                        if name == "cmdheight" && *value == OptionValue::Int(0)
+                )
+            });
+            assert_eq!(
+                sets_cmdheight,
+                zeroed,
+                "attached {surfaces:?} but cmdheight=0 was {}",
+                if sets_cmdheight { "sent" } else { "withheld" }
+            );
+        }
+    }
+
     #[test]
     fn a_disabled_ai_feature_registers_no_ai_key() {
         let mut session = NativeSession {
@@ -487,7 +526,7 @@ mod tests {
     fn load_snapshots_ai_enabled_from_the_model_rather_than_a_hardcoded_default() {
         let mut m = model();
         m.ai_enabled = false;
-        let (mut session, _effects) = NativeSession::load(None, 21, &mut m);
+        let (mut session, _effects) = load_from(None, 21, &mut m);
         let effects = session.follow_up(&mut m, Stage::VimEnter);
         let specs = effects
             .iter()
@@ -641,7 +680,7 @@ mod tests {
     #[test]
     fn load_reserves_the_statusline_row_with_a_resize_when_nothing_disables_it() {
         let mut m = model();
-        let (_session, effects) = NativeSession::load(None, 7, &mut m);
+        let (_session, effects) = load_from(None, 7, &mut m);
         assert!(m.statusline_enabled, "an absent config is every feature on");
         assert!(
             effects.iter().any(|e| matches!(
@@ -668,7 +707,7 @@ mod tests {
             .expect("a temp config must be writable");
 
         let mut m = model();
-        let (_session, effects) = NativeSession::load(Some(path), 7, &mut m);
+        let (_session, effects) = load_from(Some(path), 7, &mut m);
 
         assert!(
             !m.statusline_enabled,
@@ -690,7 +729,7 @@ mod tests {
     #[test]
     fn load_turns_the_palette_on_by_default_and_off_when_configured() {
         let mut on = model();
-        let _ = NativeSession::load(None, 7, &mut on);
+        let _ = load_from(None, 7, &mut on);
         assert!(on.palette_enabled, "an absent config is every feature on");
 
         let dir = view_test_support::ScratchDir::new("native-palette-toggle").unwrap();
@@ -704,7 +743,7 @@ palette = false
         .expect("a temp config must be writable");
 
         let mut off = model();
-        let _ = NativeSession::load(Some(path), 7, &mut off);
+        let _ = load_from(Some(path), 7, &mut off);
 
         assert!(
             !off.palette_enabled,
@@ -716,7 +755,7 @@ palette = false
     #[test]
     fn load_recovers_automatically_by_default_and_stops_when_configured() {
         let mut on = model();
-        let _ = NativeSession::load(None, 7, &mut on);
+        let _ = load_from(None, 7, &mut on);
         assert!(
             on.supervision.auto_restart,
             "an absent config must keep automatic recovery on"
@@ -733,7 +772,7 @@ auto_restart = false
         .expect("a temp config must be writable");
 
         let mut off = model();
-        let _ = NativeSession::load(Some(path), 7, &mut off);
+        let _ = load_from(Some(path), 7, &mut off);
 
         assert!(
             !off.supervision.auto_restart,
@@ -753,7 +792,7 @@ auto_restart = false
         use view_core::native::keys::{Action, Direction, Resolved};
 
         let mut default = model();
-        let _ = NativeSession::load(None, 7, &mut default);
+        let _ = load_from(None, 7, &mut default);
         assert_eq!(
             default.key_bindings.resolve(Some("<C-w>"), ">"),
             Some(Resolved::Act(Action::Resize(Direction::Wider))),
@@ -778,7 +817,7 @@ composer_newline = \"<A-x>\"
         .expect("a temp config must be writable");
 
         let mut configured = model();
-        let (_session, effects) = NativeSession::load(Some(path), 7, &mut configured);
+        let (_session, effects) = load_from(Some(path), 7, &mut configured);
 
         assert_eq!(
             configured.key_bindings.resolve(None, "<M-.>"),

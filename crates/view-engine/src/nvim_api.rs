@@ -2069,17 +2069,16 @@ if restore ~= nil then
 end"
 );
 
-/// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
-/// so a corpus/oracle runner attaching its own reference connection can
-/// request the identical set nvim sees from the real paint loop, rather
-/// than restating the list and risking the two drifting apart.
-pub const UI_EXT_OPTIONS: &[&str] = &[
-    "ext_linegrid",
-    "ext_cmdline",
-    "ext_popupmenu",
-    "ext_messages",
-    "ext_tabline",
-];
+/// Every `ext_*` UI capability this build can request: what a session with
+/// no `[native]` table to narrow it attaches, and what a corpus/oracle
+/// runner attaching its own reference connection asks for so nvim sees the
+/// identical set the real paint loop does.
+///
+/// Re-exported from `view-core` rather than spelled again here: the set an
+/// attach *actually* sends now follows the `[native]` switches
+/// (`view_native::config::ext_surfaces`), and `view-native` may not depend
+/// on this crate, so one of the two would be holding a copy.
+pub const UI_EXT_OPTIONS: &[&str] = view_core::native::ext::ALL;
 
 /// The non-`ext_` option [`EngineHandle::claim_stdout_tty`] sets, declaring
 /// that this UI's stdout is a real terminal.
@@ -2110,10 +2109,15 @@ const STDOUT_TTY_OPTION: &str = "stdout_tty";
 /// [`EngineHandle::ui_term_event`]).
 const TERM_RESPONSE_EVENT: &str = "termresponse";
 
-/// The `nvim_ui_attach` option map both attach methods send, so neither can
-/// drift from the other's capability set.
-fn attach_options() -> Vec<(Value, Value)> {
-    UI_EXT_OPTIONS
+/// The `nvim_ui_attach` option map both attach methods send for
+/// `surfaces`, so neither can drift from the other's encoding.
+///
+/// Only the requested surfaces appear, each `true`. An unrequested one is
+/// omitted rather than sent as `false`: nvim fills every `ext_*` option it
+/// was not given with its own default of `false` anyway, and the map view
+/// sends is then exactly the set it asked for.
+fn attach_options(surfaces: &[&str]) -> Vec<(Value, Value)> {
+    surfaces
         .iter()
         .map(|&name| (Value::from(name), Value::from(true)))
         .collect()
@@ -2131,15 +2135,19 @@ fn attach_options() -> Vec<(Value, Value)> {
 pub(crate) const STDIN_RELAY_CHILD_FD: i32 = 3;
 
 impl EngineHandle {
-    /// Attaches this connection as nvim's UI at `width` x `height` cells
-    /// with the full set of native-rendering extensions enabled:
-    /// `ext_linegrid`, `ext_cmdline`, `ext_popupmenu`, `ext_messages`, and
-    /// `ext_tabline`. Without these, nvim falls back to painting cmdline,
-    /// messages, popupmenu, and tabline content directly into the grid,
-    /// which this frontend has no way to distinguish from ordinary buffer
-    /// text; attaching all five up front is what makes
-    /// [`crate::ui_events::decode_redraw`]'s mode/cmdline/messages/tabline/
-    /// popupmenu variants reachable at all.
+    /// Attaches this connection as nvim's UI at `width` x `height` cells,
+    /// externalizing exactly the `ext_*` capabilities `surfaces` names --
+    /// [`UI_EXT_OPTIONS`] for a caller that wants every one of them.
+    ///
+    /// A surface left out is a surface nvim keeps painting into the grid
+    /// itself, where this frontend cannot distinguish it from ordinary
+    /// buffer text: requesting one is what makes
+    /// [`crate::ui_events::decode_redraw`]'s corresponding
+    /// mode/cmdline/messages/tabline/popupmenu variants reachable at all,
+    /// and leaving one out is what hands that surface back to the user's
+    /// own plugins. `ext_linegrid` is not a
+    /// surface and must always be present -- without it nvim speaks a
+    /// redraw vocabulary this crate does not decode.
     ///
     /// A `request`, not a `notify`: the caller needs to know attach succeeded
     /// before entering the paint loop. This is the only request the paint
@@ -2154,8 +2162,8 @@ impl EngineHandle {
     /// Returns the `EngineError` from the underlying request if it fails,
     /// nvim rejects the attach, or the reply does not arrive within
     /// `UI_ATTACH_TIMEOUT`.
-    pub fn ui_attach(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        self.attach(width, height, false)
+    pub fn ui_attach(&self, width: u16, height: u16, surfaces: &[&str]) -> Result<(), EngineError> {
+        self.attach(width, height, surfaces, false)
     }
 
     /// Identical to [`ui_attach`](Self::ui_attach), plus the `stdin_fd`
@@ -2172,12 +2180,23 @@ impl EngineHandle {
     /// # Errors
     ///
     /// Same as [`ui_attach`](Self::ui_attach).
-    pub fn ui_attach_with_stdin_relay(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        self.attach(width, height, true)
+    pub fn ui_attach_with_stdin_relay(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[&str],
+    ) -> Result<(), EngineError> {
+        self.attach(width, height, surfaces, true)
     }
 
-    fn attach(&self, width: u16, height: u16, stdin_relay: bool) -> Result<(), EngineError> {
-        let mut opts = attach_options();
+    fn attach(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[&str],
+        stdin_relay: bool,
+    ) -> Result<(), EngineError> {
+        let mut opts = attach_options(surfaces);
         if stdin_relay {
             opts.push((
                 Value::from("stdin_fd"),
@@ -4324,7 +4343,7 @@ mod tests {
     #[test]
     fn ui_attach_sends_the_full_ext_set() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
-        h.ui_attach(80, 24).unwrap();
+        h.ui_attach(80, 24, UI_EXT_OPTIONS).unwrap();
         let (method, params) = cap_rx
             .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
             .unwrap();
@@ -4349,10 +4368,40 @@ mod tests {
         }
     }
 
+    /// The whole point of the surfaces parameter: a caller that asks for
+    /// fewer must send fewer, so a plugin inspecting the attached UI sees
+    /// the surface it wants unclaimed. An options map that carried the
+    /// omitted ones as `false` would read to nvim the same way but would
+    /// mean this encoder had ignored its argument, which is the bug the
+    /// exactness half catches.
+    #[test]
+    fn ui_attach_sends_exactly_the_requested_exts() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.ui_attach(80, 24, &["ext_linegrid", "ext_tabline"])
+            .unwrap();
+        let (_, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        let Value::Map(opts) = &params[2] else {
+            unreachable!("expected an options map, got {:?}", params[2]);
+        };
+        let sent: Vec<&str> = opts.iter().filter_map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            sent,
+            vec!["ext_linegrid", "ext_tabline"],
+            "the attach must send the requested set and nothing else"
+        );
+        assert!(
+            opts.iter().all(|(_, v)| v.as_bool() == Some(true)),
+            "every requested surface is asked for, not declined: {opts:?}"
+        );
+    }
+
     #[test]
     fn ui_attach_with_stdin_relay_adds_stdin_fd_over_the_same_ext_set() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
-        h.ui_attach_with_stdin_relay(80, 24).unwrap();
+        h.ui_attach_with_stdin_relay(80, 24, UI_EXT_OPTIONS)
+            .unwrap();
         let (method, params) = cap_rx
             .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
             .unwrap();

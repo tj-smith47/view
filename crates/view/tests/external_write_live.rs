@@ -88,7 +88,10 @@ fn watched(label: &str) -> Watched {
     std::fs::write(&path, "original\n").expect("write fixture");
 
     let (engine, _pump, engine_rx) = common::spawn_with_pump(EngineConfig::isolated(), 64);
-    engine.handle.ui_attach(80, 24).expect("attach ui");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .expect("attach ui");
     let name = path.to_string_lossy().into_owned();
     engine.handle.load_hidden(&name, 1).expect("issue the load");
     common::drain_until(&engine_rx, ARRIVAL, |msg| match msg {

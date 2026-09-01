@@ -44,7 +44,10 @@ fn start() -> Session {
     let mut engine = Engine::spawn(EngineConfig::isolated()).expect("spawn engine");
     let (tx, rx): (SyncSender<Msg>, Receiver<Msg>) = std::sync::mpsc::sync_channel(256);
     let (_pump, _cutover) = engine.start_pump(tx);
-    engine.handle.ui_attach(80, 24).expect("attach ui");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .expect("attach ui");
     Session { engine, rx }
 }
 

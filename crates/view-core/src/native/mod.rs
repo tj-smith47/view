@@ -9,6 +9,7 @@ pub mod ai_fs;
 pub mod ai_panel;
 pub mod ai_registry;
 pub mod diff;
+pub mod ext;
 pub mod geometry;
 pub mod keys;
 pub mod mappings;

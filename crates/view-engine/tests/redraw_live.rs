@@ -52,7 +52,10 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     let deadline = Instant::now() + common::rpc_deadline();
     let [saw_grid_line, saw_flush] = drain_until(
@@ -84,7 +87,10 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     // entering cmdline mode is what proves the full ext set actually took:
     // without ext_cmdline, nvim paints ":" straight into the grid instead
     // of emitting mode_change + cmdline_show.
@@ -137,7 +143,10 @@ fn a_redraw_retracts_the_messages_nvim_had_shown() {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     // a request, so the message is on screen before the redraw is asked for:
     // a notified echo could still be queued behind the redraw and would make
@@ -203,7 +212,10 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     // under the build tree, never the system temp dir, which is
     // world-writable and would let an unrelated process pre-create this

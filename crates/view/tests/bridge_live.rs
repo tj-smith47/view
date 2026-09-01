@@ -66,7 +66,10 @@ impl Session {
             .handle
             .register_bridge(engine.api_info.channel_id)
             .unwrap();
-        engine.handle.ui_attach(80, 24).unwrap();
+        engine
+            .handle
+            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+            .unwrap();
         Self {
             engine,
             pump,

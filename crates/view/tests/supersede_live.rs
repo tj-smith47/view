@@ -68,7 +68,10 @@ fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
 /// is nothing to supersede.
 fn session(dir: &Path) -> Engine {
     let engine = common::spawn_with_drained_pump(common::isolated_reading(&dir.join("init.lua")));
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     engine
 }
 

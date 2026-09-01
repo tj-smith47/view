@@ -57,7 +57,10 @@ fn unclean_cfg(config_home: &std::path::Path) -> EngineConfig {
 fn without_clean_the_fixture_config_is_sourced() {
     let dir = config_home("sanity");
     let engine = Engine::spawn(unclean_cfg(&dir)).unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     assert_eq!(
         engine
             .handle
@@ -72,7 +75,10 @@ fn without_clean_the_fixture_config_is_sourced() {
 fn clean_suppresses_the_users_own_config() {
     let dir = config_home("clean");
     let engine = Engine::spawn(clean_cfg(&dir)).unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     assert_eq!(
         engine
             .handle
@@ -96,7 +102,10 @@ fn clean_suppresses_the_users_own_config() {
 #[test]
 fn cq_propagates_as_the_childs_own_exit_code() {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     // `command`, not `input`/`feed_keys`: those two queue typeahead and
     // return before nvim has actually run it, which raced `wait_exit`'s own
     // `qa!` below into exiting the process first with code 0 on an earlier
@@ -143,7 +152,10 @@ fn piped_stdin_lands_in_the_first_buffer_via_the_relay_fd() {
         .with_arg("-")
         .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap());
     let mut engine = Engine::spawn(cfg).unwrap();
-    engine.handle.ui_attach_with_stdin_relay(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach_with_stdin_relay(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     assert_eq!(
         engine.handle.eval_str("getline(1)").unwrap(),

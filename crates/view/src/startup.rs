@@ -173,7 +173,7 @@ pub enum AttachFailure {
 fn spawn_and_attach(
     cfg: EngineConfig,
     spawned: &AtomicU32,
-    size: impl FnOnce() -> Option<(u16, u16)>,
+    start: impl FnOnce() -> Option<(u16, u16, Vec<&'static str>)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     // read before `Engine::spawn` consumes `cfg` by value: there is no
@@ -189,7 +189,7 @@ fn spawn_and_attach(
     crate::vlog::log_with("engine", || {
         format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
     });
-    register_and_attach(engine, stdin_relay, size, residue)
+    register_and_attach(engine, stdin_relay, start, residue)
 }
 
 /// Replaces a failed engine with a fresh one and brings it through the same
@@ -203,6 +203,12 @@ fn spawn_and_attach(
 /// fresh one has never heard of, so attaching at the terminal's full height
 /// would put the statusline one row below the screen -- the same failure
 /// `NativeSession::load`'s own resize exists to prevent at startup.
+///
+/// `surfaces` is likewise the session's own attached set rather than the
+/// full one: the `[native]` table was read once at startup and is not read
+/// again here, so a replacement that attached everything would hand a
+/// user's plugins back a surface they were given for the whole session so
+/// far -- and view would start rendering a palette the config turned off.
 ///
 /// No `residue`: the capability probe's leftover bytes belong to the
 /// terminal handshake this process performed once, long before any restart.
@@ -219,6 +225,7 @@ pub(crate) fn restart_and_attach(
     cfg: EngineConfig,
     width: u16,
     height: u16,
+    surfaces: Vec<&'static str>,
 ) -> Result<Engine, AttachFailure> {
     let stdin_relay = cfg.stdin_relay_requested();
     // on every attempt, not only the first: a child already reaped reports
@@ -234,7 +241,12 @@ pub(crate) fn restart_and_attach(
             engine.pid()
         )
     });
-    register_and_attach(engine, stdin_relay, || Some((width, height)), Vec::new)
+    register_and_attach(
+        engine,
+        stdin_relay,
+        || Some((width, height, surfaces)),
+        Vec::new,
+    )
 }
 
 /// The half of [`spawn_and_attach`] that runs against a child that is
@@ -250,7 +262,7 @@ pub(crate) fn restart_and_attach(
 fn register_and_attach(
     engine: Engine,
     stdin_relay: bool,
-    size: impl FnOnce() -> Option<(u16, u16)>,
+    start: impl FnOnce() -> Option<(u16, u16, Vec<&'static str>)>,
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     engine
@@ -263,7 +275,7 @@ fn register_and_attach(
         .register_bridge(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
     crate::vlog::log("engine", "registered view_bridge autocmd group");
-    let Some((width, height)) = size() else {
+    let Some((width, height, surfaces)) = start() else {
         crate::vlog::log("engine", "no terminal size ever came; killing the child");
         // `Engine`'s own `Drop` is the kill and the reap (see its impl):
         // dropping it here is what performs them, and returning without it
@@ -274,16 +286,17 @@ fn register_and_attach(
     if stdin_relay {
         engine
             .handle
-            .ui_attach_with_stdin_relay(width, height)
+            .ui_attach_with_stdin_relay(width, height, &surfaces)
             .map_err(AttachFailure::Attach)?;
         crate::vlog::log("engine", "ui_attach_with_stdin_relay returned ok");
     } else {
         engine
             .handle
-            .ui_attach(width, height)
+            .ui_attach(width, height, &surfaces)
             .map_err(AttachFailure::Attach)?;
         crate::vlog::log("engine", "ui_attach returned ok");
     }
+    crate::vlog::log_with("engine", || format!("attached surfaces={surfaces:?}"));
     // resolved here rather than at the call site, and here rather than
     // anywhere earlier in this function: on the startup path this waits on
     // a channel the capability probe fills, and every line above is work
@@ -302,10 +315,11 @@ fn register_and_attach(
 
 /// What [`attach_in_background`]'s thread waits for before it attaches:
 /// the runtime loop's sender (its one use of it is the `EngineReady`
-/// marker) and the terminal size `ui_attach` needs. Neither exists until
-/// `Term::init` has returned, and the child's own startup depends on
-/// neither, which is why the thread starts without them.
-type AttachStart = (crate::wake::LoopSender, u16, u16);
+/// marker), the terminal size `ui_attach` needs, and the `ext_*` surfaces
+/// it externalizes. None of the three exists until `Term::init` has
+/// returned and `view.toml` has been read, and the child's own startup
+/// depends on none of them, which is why the thread starts without them.
+type AttachStart = (crate::wake::LoopSender, u16, u16, Vec<&'static str>);
 
 /// Runs [`spawn_and_attach`] on a background thread so a slow-starting
 /// nvim can never delay [`paint_shell_frame`], and returns the
@@ -351,9 +365,9 @@ pub fn attach_in_background(cfg: EngineConfig) -> AttachGuard {
             cfg,
             &spawned,
             || {
-                let (msg_tx, width, height) = start_rx.recv().ok()?;
+                let (msg_tx, width, height, surfaces) = start_rx.recv().ok()?;
                 started = Some(msg_tx);
-                Some((width, height))
+                Some((width, height, surfaces))
             },
             // a sender dropped without ever sending (a caller that failed
             // between here and its own probe) reads as "nothing was typed",
@@ -422,14 +436,20 @@ impl AttachGuard {
     /// Hands the attach the terminal size it has been waiting on, and the
     /// loop sender it announces itself over, releasing it to run
     /// `ui_attach`.
-    pub fn attach_at(&self, msg_tx: crate::wake::LoopSender, width: u16, height: u16) {
+    pub fn attach_at(
+        &self,
+        msg_tx: crate::wake::LoopSender,
+        width: u16,
+        height: u16,
+        surfaces: Vec<&'static str>,
+    ) {
         // a receiver already gone means the attach thread ended early, and
         // the failure it ended with is already in `engine_rx` for
         // `engine_result` to report
         let _ = self
             .start_tx
             .as_ref()
-            .map(|start_tx| start_tx.send((msg_tx, width, height)));
+            .map(|start_tx| start_tx.send((msg_tx, width, height, surfaces)));
     }
 
     /// Hands the attach the capability probe's leftover bytes, the last
@@ -951,8 +971,13 @@ mod tests {
         let cfg = EngineConfig::isolated()
             .with_arg("-")
             .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap());
-        let mut engine =
-            spawn_and_attach(cfg, &AtomicU32::new(0), || Some((80, 24)), Vec::new).unwrap();
+        let mut engine = spawn_and_attach(
+            cfg,
+            &AtomicU32::new(0),
+            || Some((80, 24, view_engine::UI_EXT_OPTIONS.to_vec())),
+            Vec::new,
+        )
+        .unwrap();
 
         assert_eq!(
             engine.handle.eval_str("getline(1)").unwrap(),
@@ -1002,7 +1027,7 @@ mod tests {
             crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
 
         let guard = attach_in_background(EngineConfig::isolated());
-        guard.attach_at(msg_tx, 80, 24);
+        guard.attach_at(msg_tx, 80, 24, view_engine::UI_EXT_OPTIONS.to_vec());
         let pid = wait_for_spawn(&guard);
 
         drop(guard);
@@ -1021,7 +1046,7 @@ mod tests {
             crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
 
         let guard = attach_in_background(EngineConfig::isolated());
-        guard.attach_at(msg_tx, 80, 24);
+        guard.attach_at(msg_tx, 80, 24, view_engine::UI_EXT_OPTIONS.to_vec());
         guard.send_residue(Vec::new());
         assert!(
             matches!(msg_rx.recv().unwrap(), Msg::EngineReady),
@@ -1100,7 +1125,7 @@ mod tests {
         let mut engine = spawn_and_attach(
             EngineConfig::isolated(),
             &AtomicU32::new(0),
-            || Some((80, 24)),
+            || Some((80, 24, view_engine::UI_EXT_OPTIONS.to_vec())),
             move || {
                 let elapsed = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 recorder.store(elapsed, Ordering::SeqCst);

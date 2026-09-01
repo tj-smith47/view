@@ -313,7 +313,10 @@ fn a_live_child_reports_no_stop_and_is_not_asked_to_quit() {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let pid = engine.pid();
     let mut orphan_guard = KillOnDrop(Some(pid));
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     assert!(
         engine.stop_report_if_exited().is_none(),
@@ -352,7 +355,10 @@ fn a_child_whose_connection_closed_is_reported_as_a_stop_not_a_broken_write() {
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let pid = engine.pid();
     let mut orphan_guard = KillOnDrop(Some(pid));
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     // nvim's own exit, not a teardown of view's: `command` never answers
     // because the process leaves mid-request, so its Err is the barrier that
@@ -380,7 +386,10 @@ fn a_restart_teardown_kills_the_child_rather_than_asking_it_to_quit() {
 
     let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let mut orphan_guard = KillOnDrop(Some(engine.pid()));
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     let status = engine.kill_exit().unwrap();
     orphan_guard.disarm();

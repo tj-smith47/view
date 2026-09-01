@@ -89,6 +89,19 @@ pub struct Model {
     /// with `native.palette = false` expects, rather than leaving them with
     /// no cmdline at all.
     pub palette_enabled: bool,
+    /// The `ext_*` surfaces this session actually attached with, written
+    /// once by the binary at attach ([`Model::attach_surfaces`]) from the
+    /// same `[native]` answers `statusline_enabled` and `palette_enabled`
+    /// come from.
+    ///
+    /// Private, read through [`Model::owns`] and
+    /// [`Model::attached_surfaces`]: "did this session externalize that
+    /// surface?" is a question a conflict notice, a restart's re-attach and
+    /// the `cmdheight` takeover all ask, and each answering it from its own
+    /// copy of the `[native]` table is how the answers come to disagree.
+    /// Defaults to the full set, matching the config-absent session that
+    /// attaches everything.
+    ext_surfaces: Vec<&'static str>,
     /// The working directory a relative [`crate::native::picker::Source`]
     /// resolves against, learned once at startup
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
@@ -247,6 +260,7 @@ impl Model {
             claimed_keys: Vec::new(),
             statusline_enabled: false,
             palette_enabled: false,
+            ext_surfaces: crate::native::ext::ALL.to_vec(),
             cwd: PathBuf::new(),
             ai_trusted: false,
             ai_enabled: true,
@@ -262,6 +276,35 @@ impl Model {
             checktime_generation: 0,
             pending_file_gone_probes: Vec::new(),
         }
+    }
+
+    /// Records the `ext_*` set this session attached with.
+    ///
+    /// Called by the binary once the `[native]` table has been read and
+    /// before `nvim_ui_attach` is issued, with exactly the list handed to
+    /// the attach: a session that recorded a different set from the one it
+    /// sent would answer [`Self::owns`] about a surface nvim never gave it.
+    pub fn attach_surfaces(&mut self, surfaces: Vec<&'static str>) {
+        self.ext_surfaces = surfaces;
+    }
+
+    /// Whether this session externalized `surface` -- one of
+    /// [`crate::native::ext`]'s names -- so view renders it and the user's
+    /// plugins see it taken.
+    ///
+    /// `false` means nvim still draws that surface into the grid itself,
+    /// which is what turning the owning native feature off asks for.
+    #[must_use]
+    pub fn owns(&self, surface: &str) -> bool {
+        self.ext_surfaces.contains(&surface)
+    }
+
+    /// The whole attached set, for the one caller that has to re-send it:
+    /// a replacement engine attaches with the surfaces the session it
+    /// replaces was given, never with the default set.
+    #[must_use]
+    pub fn attached_surfaces(&self) -> &[&'static str] {
+        &self.ext_surfaces
     }
 
     /// The next `request_id` for a `RpcCall::Checktime` this crate issues,
@@ -2022,6 +2065,30 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::events::{TabEntry, TabHandle};
+
+    /// A model nothing has told about an attach answers for the session
+    /// that attaches everything, which is what a `Model` built by a test,
+    /// a bench or an oracle run is standing in for.
+    #[test]
+    fn an_unattached_model_owns_every_surface() {
+        let model = Model::new();
+        for surface in crate::native::ext::ALL {
+            assert!(model.owns(surface), "{surface} must default to owned");
+        }
+        assert!(!model.owns("ext_multigrid"), "and nothing else");
+    }
+
+    #[test]
+    fn owns_answers_from_the_set_the_attach_recorded() {
+        let mut model = Model::new();
+        model.attach_surfaces(vec![crate::native::ext::LINEGRID]);
+        assert!(model.owns(crate::native::ext::LINEGRID));
+        assert!(
+            !model.owns(crate::native::ext::MESSAGES),
+            "a surface left out of the attach is nvim's to draw"
+        );
+        assert_eq!(model.attached_surfaces(), [crate::native::ext::LINEGRID]);
+    }
 
     /// `shown_at_flush` is private bookkeeping the tests below don't
     /// exercise; every construction goes through `Messages::push` so it

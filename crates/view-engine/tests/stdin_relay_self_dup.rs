@@ -72,7 +72,10 @@ fn relay_survives_when_the_source_fd_already_is_the_child_target_fd() {
         .with_arg("-")
         .with_stdin_relay(relay_fd);
     let mut engine = Engine::spawn(cfg).unwrap();
-    engine.handle.ui_attach_with_stdin_relay(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach_with_stdin_relay(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     assert_eq!(
         engine.handle.eval_str("getline(1)").unwrap(),

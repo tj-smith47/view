@@ -5457,7 +5457,10 @@ mod tests {
             .unwrap();
         // `--embed` holds nvim's startup until a UI attaches, so an engine
         // nobody attached to would never read the quit typed below
-        engine.handle.ui_attach(80, 24).unwrap();
+        engine
+            .handle
+            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+            .unwrap();
         engine.handle.input(":qa!<CR>").unwrap();
 
         // the announcement is a blocking round trip inside nvim's

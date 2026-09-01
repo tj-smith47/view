@@ -84,7 +84,13 @@ steps = [
   # config-level cross-check, not a fidget behavior: native.statusline is
   # off here, so lualine's own setup() keeps laststatus and paints its
   # separator glyph into column 85 (see lualine.toml).
-  { wait_for_cell = { row = 29, col = 85, expected = "" }, timeout_ms = 5000 },
+  #
+  # Row 28, not the last row 29 lualine.toml asserts: this state also turns
+  # palette and notifications off, which detaches ext_cmdline and
+  # ext_messages, so view leaves `cmdheight` alone and nvim keeps the last
+  # row for its own command line. The statusline sits above it.
+  { probe = "luaeval('tostring(vim.o.cmdheight)')", expect = "1" },
+  { wait_for_cell = { row = 28, col = 85, expected = "" }, timeout_ms = 5000 },
 ]
 
 [[states]]

@@ -109,8 +109,23 @@ pub fn scratch_root() -> PathBuf {
 /// one included, so that no caller has to remember a list to stay
 /// hermetic.
 pub fn isolate_xdg_native_off(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
+    isolate_xdg_native_off_except(cmd, home, &[]);
+}
+
+/// [`isolate_xdg_native_off`] with the features `keep` names left on.
+///
+/// The `[native]` switches now decide the `ext_*` set the session attaches,
+/// so the all-off baseline hands nvim back the message area and the command
+/// line -- which is what a test asserting nvim-drawn screen content wants,
+/// and the opposite of what a test asserting view's *own* message surface
+/// needs. `keep = ["notifications"]` is the second case.
+pub fn isolate_xdg_native_off_except(
+    cmd: &mut portable_pty::CommandBuilder,
+    home: &Path,
+    keep: &[&str],
+) {
     isolate_xdg_first_launch(cmd, home);
-    disable_native_features(home);
+    disable_native_features_except(home, keep);
 }
 
 /// [`isolate_xdg_native_off`] without the config file, for the one test
@@ -152,12 +167,23 @@ pub fn xdg_home(home: &Path, var: &str) -> PathBuf {
 /// registry rather than written out here, so a feature added later is
 /// switched off by the same call instead of quietly defaulting on.
 pub fn disable_native_features(home: &Path) {
+    disable_native_features_except(home, &[]);
+}
+
+/// [`disable_native_features`] with the features `keep` names written `true`
+/// instead. Still generated from the registry, so a feature added later is
+/// switched off by the same call unless a caller names it.
+pub fn disable_native_features_except(home: &Path, keep: &[&str]) {
     let dir = xdg_home(home, "XDG_CONFIG_HOME").join("view");
     std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
     let mut text = String::from("[native]\n");
     for feature in view_core::native::registry::features() {
         text.push_str(feature.id);
-        text.push_str(" = false\n");
+        text.push_str(if keep.contains(&feature.id) {
+            " = true\n"
+        } else {
+            " = false\n"
+        });
     }
     std::fs::write(dir.join("view.toml"), text).expect("the isolated view.toml must be writable");
 }

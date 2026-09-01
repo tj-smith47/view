@@ -18,7 +18,10 @@ use view_engine::process::{Engine, EngineConfig};
 /// attach `buf_set_text_live.rs`'s own `spawn` documents.
 fn spawn() -> Engine {
     let engine = Engine::spawn(EngineConfig::isolated()).expect("spawn engine");
-    engine.handle.ui_attach(80, 24).expect("attach ui");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .expect("attach ui");
     engine
 }
 

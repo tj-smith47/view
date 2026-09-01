@@ -68,7 +68,10 @@ impl Driver {
         let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
         let (_pump, _cutover) = engine.start_pump(tx);
-        engine.handle.ui_attach(80, 24).unwrap();
+        engine
+            .handle
+            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+            .unwrap();
         Self {
             engine,
             rx,

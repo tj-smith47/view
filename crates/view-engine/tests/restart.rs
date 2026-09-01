@@ -240,7 +240,10 @@ fn crash_with_unsaved_edit(dir: &Path, file: &Path, text: &str) {
     let engine = Engine::spawn(editing(dir, file)).unwrap();
     // --embed holds startup until a UI attaches, so the file is not even
     // loaded (and has no swap file) before this
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     write_unsaved_edit(&engine, text);
     crash(engine);
 }
@@ -357,14 +360,20 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
     let engine = Engine::spawn(editing(&dir, &file)).unwrap();
     // --embed holds startup until a UI attaches, so the file is not even
     // loaded (and has no swap file) before this
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     write_unsaved_edit(&engine, "never written to disk");
     kill_out_of_band(engine.pid());
 
     let engine = engine
         .restart(editing(&dir, &file))
         .expect("a crashed engine must restart");
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     assert_eq!(
         first_line(&engine),
@@ -402,7 +411,10 @@ fn a_session_started_over_a_crashed_ones_swap_recovers_without_asking() {
         "this is a plain spawn, not a restart: {:?}",
         engine.command_line()
     );
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     // read first, and through an ordinary request, because that is the
     // barrier the two assertions below need: `nvim_get_mode` is answered on
@@ -441,7 +453,10 @@ fn a_session_started_over_a_live_engines_swap_leaves_the_owner_its_work() {
     let owner = Engine::spawn(editing(&dir, &file)).unwrap();
     // --embed holds startup until a UI attaches, so the file is not even
     // loaded (and has no swap file) before this
-    owner.handle.ui_attach(80, 24).unwrap();
+    owner
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     write_unsaved_edit(&owner, "the owner is still editing this");
     assert!(
         !swap_files(&dir).is_empty(),
@@ -450,7 +465,10 @@ fn a_session_started_over_a_live_engines_swap_leaves_the_owner_its_work() {
     );
 
     let second = Engine::spawn(editing(&dir, &file)).unwrap();
-    second.handle.ui_attach(80, 24).unwrap();
+    second
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     assert_eq!(
         first_line(&second),
@@ -502,7 +520,10 @@ fn a_vimrc_clearing_every_autocommand_leaves_the_swap_guard_standing() {
             .with_arg(&file),
     )
     .unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     let sourced = engine
         .handle
@@ -552,7 +573,10 @@ fn a_file_opened_mid_session_over_a_swap_recovers_without_parking_the_editor() {
 
     // no file argument at all, so this session meets nothing at startup
     let engine = Engine::spawn(session(&dir)).unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     engine
         .handle
         .request_timeout(
@@ -680,7 +704,10 @@ fn failure_read_from_a_config_park(scratch_name: &str, planted: ErrorNaming) -> 
         config = config.with_arg(operand);
     }
     let engine = Engine::spawn(config).unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     // sourcing runs after the attach, so the park is something to wait for
     // rather than something to read once
@@ -785,7 +812,10 @@ fn a_crash_with_nothing_unsaved_raises_no_swap_event_at_all() {
     std::fs::write(&file, "what is on disk\n").unwrap();
 
     let engine = Engine::spawn(editing(&dir, &file)).unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     // proves the buffer really loaded, so the swap file asserted below is
     // this session's rather than the trace of a startup that never got there
     assert_eq!(first_line(&engine), "what is on disk");
@@ -797,7 +827,10 @@ fn a_crash_with_nothing_unsaved_raises_no_swap_event_at_all() {
     );
 
     let engine = Engine::spawn(editing(&dir, &file)).unwrap();
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     assert!(
         swap_guard_live(&engine),
@@ -841,7 +874,10 @@ fn a_restart_with_no_file_to_recover_carries_no_flag_and_stays_usable() {
     );
     assert_os_agrees(&engine);
 
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     assert!(
         !blocking(&engine),
         "the restarted engine is parked at a prompt nobody can answer"

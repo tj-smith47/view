@@ -96,7 +96,10 @@ fn engine_session_ignores_an_intrusive_user_config() {
     // `--embed` holds startup until a UI attaches, so a child probed before
     // this call has sourced no configuration at all and reports the same
     // empty buffer list a fully isolated one would
-    leaky.handle.ui_attach(40, 6).unwrap();
+    leaky
+        .handle
+        .ui_attach(40, 6, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     // the attach only releases startup; sourcing happens on the child's own
     // schedule from there, and a single probe would race it
     let deadline = Instant::now() + view_test_support::host_deadline(Duration::from_secs(10));

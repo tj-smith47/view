@@ -85,7 +85,10 @@ fn busy_session(
 /// Attaches a UI, types `busy`, and returns once the engine has stopped
 /// answering -- the readiness condition both spawns above share.
 fn put_to_work(label: &str, engine: &view_engine::process::Engine, busy: &str) {
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
     // typed rather than requested: `nvim_command` is a blocking request, and
     // a caller waiting on the reply to work that never returns could not go
     // on to interrupt it
@@ -305,7 +308,10 @@ fn a_wedge_that_opens_while_the_session_is_idle_still_raises_the_notice() {
 fn every_key_typed_at_the_modal_still_lands_in_the_buffer() {
     let dir = common::fixture("supervision-live-passthrough", "");
     let engine = common::spawn_with_drained_pump(common::isolated_reading(&dir.join("init.lua")));
-    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
 
     let mut model = Model::with_term_size(80, 24);
     let _ = update(

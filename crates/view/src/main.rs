@@ -645,6 +645,40 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     cli.config.clone().or_else(view_native::paths::config_path)
 }
 
+/// Reads every table `view-native` owns out of `config_path`, once, ahead
+/// of the attach that the `[native]` answers decide the `ext_*` set for.
+///
+/// A config that cannot be read or parsed falls back to every default and
+/// says so through `model`'s own message surface rather than stderr: this
+/// runs behind the terminal's raw-mode alternate screen, where a stderr
+/// write is invisible at best. Falling back rather than refusing to start
+/// matches the loader's own contract that an absent file is the full
+/// experience -- an editor does not decline to open a file over a typo in
+/// an optional table -- but the user is told, because a silently ignored
+/// `picker = false` is a feature they turned off still taking their keys.
+///
+/// The fallback is deliberately the *full* set of surfaces, not the safest
+/// one: a mistyped table must not also cost the user the palette and the
+/// message overlay, which is what a fail-closed answer here would do.
+fn load_view_config(
+    config_path: Option<&std::path::Path>,
+    model: &mut Model,
+    notices: &mut Vec<Effect>,
+) -> view_native::config::ViewConfig {
+    match view_native::config::ViewConfig::load(config_path) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            vlog::log_with("native", || format!("config unreadable: {err}"));
+            model.dirty = true;
+            notices.extend(model.engine.record_native_notice(
+                format!("view: {err}; every native feature stays on this session"),
+                false,
+            ));
+            view_native::config::ViewConfig::defaults()
+        }
+    }
+}
+
 /// Resolves `[ai]` from `view.toml` into `model.ai_enabled` and the width
 /// the panel opens at (`model.ai_panel_width_pct`), returning
 /// whatever notice a broken config owes the user alongside which agent
@@ -810,7 +844,33 @@ fn main() -> Result<()> {
         view_tui::terminal::spawn_input_thread(raw_tx.clone(), term_size.clone());
         wake::LoopSender::new(raw_tx)
     };
-    // released here, at the first point both halves exist, rather than
+    // Any notice the reads below owe the user is buffered as an effect
+    // rather than printed: the terminal is already raw-mode/alternate-screen
+    // owned by `Term::init` above, where a bare stderr write is invisible at
+    // best (see `TerminalGuard`'s doc comment) and no effect executor exists
+    // yet to run a native notice through. `run_cutover`'s own toast timer
+    // picks these up the same way it already does for
+    // `drained.toast_effects` -- see that binding's construction below.
+    let mut pre_executor_effects: Vec<Effect> = Vec::new();
+
+    let config_path = resolve_config_path(&cli);
+
+    // ahead of the attach below, and the one read in the whole startup that
+    // has to be: the `ext_*` set `nvim_ui_attach` requests follows the
+    // `[native]` switches, so a surface a user turned off is never taken
+    // from their plugins in the first place. Read once here and handed to
+    // `NativeSession` afterwards rather than read again there -- two reads
+    // of one file can answer differently, and the attach would then have
+    // externalized a surface the rest of the session believes it declined.
+    let view_config = load_view_config(
+        config_path.as_deref(),
+        &mut model,
+        &mut pre_executor_effects,
+    );
+    let surfaces = view_native::config::ext_surfaces(&view_config.native);
+    model.attach_surfaces(surfaces.clone());
+
+    // released here, at the first point every half exists, rather than
     // anywhere below: everything between this line and the shell frame is
     // work the child's own startup now runs underneath.
     //
@@ -819,22 +879,7 @@ fn main() -> Result<()> {
     // moment that frame is up (see `settle_probe` below), so editable
     // content lands at the attach's own cost on every terminal -- including
     // one that never answers the fence at all.
-    attach.attach_at(msg_tx.clone(), width, height);
-
-    // resolved before the engine exists because the theme cache is keyed on
-    // it, so cold start can already paint last session's colors before nvim
-    // answers `ui_attach` with its own `default_colors_set`. The `[native]`
-    // table behind the same path is read later, once there is a channel for
-    // the features it enables to notify back over (see `NativeSession`).
-    //
-    // Any notice this block owes the user is buffered as an effect rather
-    // than printed: the terminal is already raw-mode/alternate-screen owned
-    // by `Term::init` above, where a bare stderr write is invisible at best
-    // (see `TerminalGuard`'s doc comment) and no effect executor exists yet
-    // to run a native notice through. `run_cutover`'s own toast timer picks
-    // these up the same way it already does for `drained.toast_effects` --
-    // see that binding's construction below.
-    let mut pre_executor_effects: Vec<Effect> = Vec::new();
+    attach.attach_at(msg_tx.clone(), width, height, surfaces);
 
     // seeded here, once, before the engine exists: `update()` has no
     // filesystem access, so whether this project is trusted for AI agent
@@ -856,8 +901,9 @@ fn main() -> Result<()> {
         }
     }
 
-    let config_path = resolve_config_path(&cli);
-
+    // the theme cache is keyed on the same path, so cold start can already
+    // paint last session's colors before nvim answers `ui_attach` with its
+    // own `default_colors_set`
     let (ai_seed_effects, ai_agent) = seed_ai_enabled(config_path.as_deref(), &mut model);
     pre_executor_effects.extend(ai_seed_effects);
 
@@ -1030,8 +1076,12 @@ fn main() -> Result<()> {
     // built before the cutover, not after: a config that sources quickly has
     // already fired `VimEnter` into the presink by now, and that message is
     // what triggers this session's takeover and key registration
-    let (mut native, load_effects) =
-        native::NativeSession::load(config_path.clone(), engine.api_info.channel_id, &mut model);
+    let (mut native, load_effects) = native::NativeSession::load(
+        view_config,
+        config_path.clone(),
+        engine.api_info.channel_id,
+        &mut model,
+    );
     for eff in load_effects {
         let _ = executor.run(eff);
     }
@@ -1613,6 +1663,37 @@ mod tests {
             cfg.env_plan().is_empty(),
             "--clean must not carry isolated()'s hermetic environment plan, got {:?}",
             cfg.env_plan()
+        );
+    }
+
+    /// The fail-open leg the attach now depends on. A `view.toml` that
+    /// cannot be parsed must cost the user a notice, never a surface: the
+    /// set handed to `nvim_ui_attach` moments later is derived from what
+    /// this returns, so a fail-closed answer here would answer a typo by
+    /// taking away the palette and the message overlay for the session.
+    #[test]
+    fn an_unreadable_config_attaches_every_ext() {
+        let dir = view_test_support::ScratchDir::new("main-config-fail-open").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[native]\nthis is not toml\n").unwrap();
+
+        let mut model = Model::with_term_size(80, 24);
+        let mut notices = Vec::new();
+        let resolved = load_view_config(Some(&path), &mut model, &mut notices);
+
+        assert_eq!(
+            view_native::config::ext_surfaces(&resolved.native),
+            view_engine::UI_EXT_OPTIONS.to_vec(),
+            "a config that could not be read keeps every surface"
+        );
+        assert!(
+            !notices.is_empty(),
+            "the user must be told the file was ignored"
+        );
+        let shown = format!("{:?}", model.engine.messages.entries);
+        assert!(
+            shown.contains("every native feature stays on this session"),
+            "and told what that cost them: {shown}"
         );
     }
 

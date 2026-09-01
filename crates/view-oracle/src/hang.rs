@@ -625,7 +625,9 @@ impl HangSession {
         let mut engine = Engine::spawn(cfg)?;
         let (sink, rx) = sync_channel::<Msg>(256);
         let (pump, _cutover) = engine.start_pump(sink.clone());
-        engine.handle.ui_attach(COLS, ROWS)?;
+        engine
+            .handle
+            .ui_attach(COLS, ROWS, view_engine::UI_EXT_OPTIONS)?;
         Ok(Self {
             engine,
             pump,
@@ -864,7 +866,9 @@ impl HangSession {
         let mut engine = engine.restart(cfg)?;
         let (pump, _cutover) = engine.start_pump(sink.clone());
         let (width, height) = model.grid_target();
-        engine.handle.ui_attach(width, height)?;
+        engine
+            .handle
+            .ui_attach(width, height, view_engine::UI_EXT_OPTIONS)?;
         engine.handle.get_mode()?;
         let answered = asked.elapsed();
         // the replacement is a live connection again, so nothing about the

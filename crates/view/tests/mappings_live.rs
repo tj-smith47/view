@@ -70,7 +70,10 @@ impl Session {
         );
         let cfg = common::isolated_reading(&dir.join("init.lua"));
         let (engine, _pump, rx) = common::spawn_with_pump(cfg, 256);
-        engine.handle.ui_attach(80, 24).unwrap();
+        engine
+            .handle
+            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+            .unwrap();
         Self { engine, rx, dir }
     }
 

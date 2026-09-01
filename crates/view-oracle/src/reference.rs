@@ -334,7 +334,9 @@ impl ReferenceSession {
     /// Same as [`spawn`](Self::spawn).
     pub fn spawn_configured(cfg: EngineConfig, cols: u16, rows: u16) -> Result<Self, OracleError> {
         let mut engine = Engine::spawn(cfg)?;
-        engine.handle.ui_attach(cols, rows)?;
+        engine
+            .handle
+            .ui_attach(cols, rows, view_engine::UI_EXT_OPTIONS)?;
         let (sink, _unused_rx) = std::sync::mpsc::sync_channel(64);
         let (pump, _cutover) = engine.start_pump(sink);
         let session = Self {
