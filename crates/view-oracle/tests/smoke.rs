@@ -1954,7 +1954,11 @@ fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
     // No further input from here on: proves expiry is driven by the
     // ToastExpired timer, not by some other event's repaint incidentally
     // dropping the entry.
-    let margin = view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4);
+    // host-scaled: the slack covers view's timer firing, its repaint and
+    // the pty delivering it, all of which stretch together on a loaded box
+    let margin = view_test_support::host_deadline(
+        view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4),
+    );
     assert!(
         session.wait_for_screen(margin, |screen| !screen.contents().contains("sometoken")),
         "transient toast never expired while the editor sat idle; last screen:\n{}",
@@ -2111,7 +2115,11 @@ fn a_native_notice_expires_on_its_own_after_the_idle_timeout_same_as_a_wire_toas
     // No further input from here on: proves expiry is driven by the
     // ToastExpired timer, not by some other event's repaint incidentally
     // dropping the entry.
-    let margin = view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4);
+    // host-scaled for the same reason as the wire-sourced twin above: the
+    // timer, the repaint and the pty read all stretch together under load
+    let margin = view_test_support::host_deadline(
+        view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4),
+    );
     assert!(
         session.wait_for_screen(margin, |screen| {
             !screen.contents().contains("needs a feature and a verb")
