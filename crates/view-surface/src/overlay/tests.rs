@@ -453,6 +453,47 @@ fn a_palette_binding_is_pushed_against_the_right_edge_of_its_row() {
     );
 }
 
+/// How many of a framed palette's rows are never a list item: the two
+/// border edges, the query line and the rule under it.
+///
+/// `view_core::update::surfaces`'s `HISTORY_CHROME_ROWS` is that same four,
+/// because a page key there has to move the selection by what this painter
+/// actually shows. Mechanism honesty: nothing ties the two numbers together
+/// mechanically -- view-core cannot depend on view-surface -- so this test
+/// and that constant's own doc are the link, and a chrome row added or
+/// dropped here fails this by name.
+#[test]
+fn a_framed_palette_spends_four_rows_on_chrome() {
+    let labels = ["one", "two", "three", "four", "five", "six"];
+    let kind = LayerKind::Palette(
+        view_core::native::views::PaletteView::new("Messages")
+            .with_rows(
+                labels
+                    .iter()
+                    .map(|l| view_core::native::views::PaletteRow::new(*l))
+                    .collect(),
+            )
+            .with_selected(0),
+    );
+    for height in 5_u16..10 {
+        let framed = rows(30, height, &kind, BorderSet::ASCII);
+        let items = framed
+            .lines
+            .iter()
+            .filter(|line| {
+                let text = interior(&line_text(line));
+                labels.iter().any(|l| text.contains(l))
+            })
+            .count();
+        assert_eq!(
+            items,
+            usize::from(height) - 4,
+            "a {height}-row palette must draw {} item rows",
+            height - 4
+        );
+    }
+}
+
 #[test]
 fn a_tree_row_shows_its_depth_and_whether_it_can_be_opened() {
     use view_core::native::views::{TreeRow, TreeView};

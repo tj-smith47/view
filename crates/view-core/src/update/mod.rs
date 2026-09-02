@@ -37,8 +37,9 @@ use ai::{on_ai_event, open_ai_trust_prompt};
 use paste::paste_into_focused_surface;
 use supervision::{note_engine_liveness, note_supervision_choice};
 use surfaces::{
-    notice_ai_disabled, open_ai_panel, open_message_history, open_picker, picker_preview_request,
-    picker_source_for_verb, toggle_ai_panel, toggle_tree_sidebar, tree_git_refresh_effect,
+    message_history_key, notice_ai_disabled, notice_clipboard_unavailable, open_ai_panel,
+    open_message_history, open_picker, picker_preview_request, picker_source_for_verb,
+    toggle_ai_panel, toggle_tree_sidebar, tree_git_refresh_effect,
 };
 use ui_event::apply_ui_event;
 use watch::{
@@ -271,7 +272,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             regtype,
         }) => vec![
             Effect::ClipboardWrite {
-                token,
+                token: Some(token),
                 register,
                 lines: lines.clone(),
                 regtype,
@@ -596,6 +597,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::ExternalWritesDetected { paths } => on_external_writes_detected(model, paths),
         Msg::ConfirmExternalRemoval { path } => on_confirm_external_removal(model, path),
         Msg::ExternalWatchDegraded { reason } => on_external_watch_degraded(model, reason),
+        Msg::ClipboardUnavailable => notice_clipboard_unavailable(model),
         // Through the same notice channel `on_external_watch_degraded`
         // uses, and for the same reason it does rather than the panel's own
         // banner: the panel may not even be open when a session starts, and
@@ -1508,6 +1510,13 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
                 // whatever the key turns out to mean.
                 let binding = take_binding(model, &notation);
                 ai::ai_panel_key(model, &notation, binding)
+            }
+            // Guarded on the notation rather than handling <Esc> itself:
+            // closing is the same pop for every overlay, and the fallback
+            // below is where that lives, so the history's own arm answers
+            // only the keys that are its own.
+            Some(OverlayKind::MessageHistory(_)) if notation != "<Esc>" => {
+                message_history_key(model, &notation)
             }
             // the key belongs to the overlay on top of the stack,
             // and no other overlay kind carries a key handler yet,

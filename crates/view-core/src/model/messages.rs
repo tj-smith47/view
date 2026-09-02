@@ -31,6 +31,19 @@ pub struct MessageEntry {
     /// This entry's identity; see [`MessageId`]. Never set directly --
     /// stamped by `Messages::push` from its own counter.
     id: MessageId,
+    /// The notice family this entry was recorded under, for the native
+    /// notices that have one (`EngineModel::record_native_notice_once` and
+    /// its sticky sibling); `None` for every wire message and for a native
+    /// notice raised without one.
+    ///
+    /// Carried on the entry rather than re-derived from its text because
+    /// the two are not recoverable from each other: one family words itself
+    /// differently as its subject changes, so the line a user is looking at
+    /// in the message history names its family only if the family rode
+    /// along with it. That is what lets `d` in the history overlay retract
+    /// the standing line of a family whose current wording is not the one
+    /// the user selected.
+    family: Option<String>,
 }
 
 impl MessageEntry {
@@ -41,6 +54,23 @@ impl MessageEntry {
     #[must_use]
     pub fn id(&self) -> MessageId {
         self.id
+    }
+
+    /// The notice family this entry was recorded under, or `None` when it
+    /// was recorded without one -- see the field's own doc.
+    #[must_use]
+    pub fn family(&self) -> Option<&str> {
+        self.family.as_deref()
+    }
+
+    /// Stamps the family this entry was recorded under.
+    ///
+    /// Set here rather than through [`Messages::push`] so that the dozens
+    /// of wire-message call sites that have no family keep their signature,
+    /// and called before the entry reaches `ToastHistory` so the history's
+    /// own copy carries it too.
+    pub(crate) fn set_family(&mut self, family: Option<&str>) {
+        self.family = family.map(str::to_owned);
     }
 
     /// This entry's content chunks joined into one string, then split into
@@ -287,6 +317,7 @@ impl Messages {
             content,
             condition: false,
             id,
+            family: None,
         };
         if replace_last {
             if let Some(last) = self

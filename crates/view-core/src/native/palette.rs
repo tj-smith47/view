@@ -165,6 +165,12 @@ fn title_for(firstc: &str) -> &'static str {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageHistoryState {
     entries: Vec<MessageEntry>,
+    /// Which entry the overlay's own keys act on. An index rather than a
+    /// scroll offset because the one thing that scrolls this overlay is
+    /// `overlay::lay_out`, which windows a body's items around its
+    /// `selected` row already -- a second offset here would be a second
+    /// opinion about which rows are on screen.
+    selected: usize,
 }
 
 impl MessageHistoryState {
@@ -172,17 +178,69 @@ impl MessageHistoryState {
     pub fn snapshot(history: &ToastHistory) -> Self {
         Self {
             entries: history.entries().cloned().collect(),
+            selected: 0,
         }
     }
 
     #[must_use]
     pub fn view(&self) -> PaletteView {
-        let rows = self
+        let rows: Vec<PaletteRow> = self
             .entries
             .iter()
             .map(|entry| PaletteRow::new(entry_text(entry)))
             .collect();
-        PaletteView::new("Messages").with_rows(rows)
+        let view = PaletteView::new("Messages").with_rows(rows);
+        if self.entries.is_empty() {
+            return view;
+        }
+        view.with_selected(self.selected)
+    }
+
+    /// Moves the selection to `index`, clamped to the last entry, and
+    /// reports whether it actually moved (the caller's cue to repaint).
+    /// An empty snapshot has nothing to select and never moves.
+    pub fn select(&mut self, index: usize) -> bool {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            return false;
+        };
+        let next = index.min(last);
+        let moved = next != self.selected;
+        self.selected = next;
+        moved
+    }
+
+    /// [`Self::select`] relative to where the selection already is, saturating
+    /// at both ends rather than wrapping: a `j` at the bottom of the history
+    /// stays at the bottom, the same as it does in a buffer.
+    pub fn move_selection(&mut self, delta: isize) -> bool {
+        let step = delta.unsigned_abs();
+        let target = if delta < 0 {
+            self.selected.saturating_sub(step)
+        } else {
+            self.selected.saturating_add(step)
+        };
+        self.select(target)
+    }
+
+    /// The selected entry's text exactly as the overlay draws it, or `None`
+    /// for an empty snapshot.
+    ///
+    /// Verbatim on purpose, and the reason this overlay has a copy key at
+    /// all: the notices worth copying name paths, and a path with a space
+    /// in it survives no trimming, quoting or "copied 1 line" rewording.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<String> {
+        self.entries.get(self.selected).map(entry_text)
+    }
+
+    /// The notice family the selected entry was recorded under, or `None`
+    /// when it carries none -- every wire message, and every native notice
+    /// raised without a family (see [`MessageEntry::family`]).
+    #[must_use]
+    pub fn selected_family(&self) -> Option<&str> {
+        self.entries
+            .get(self.selected)
+            .and_then(MessageEntry::family)
     }
 }
 

@@ -1597,7 +1597,13 @@ mod tests {
     /// retracts the other's line -- a plugin's notice silently cancelling
     /// the one about a file that vanished under an unsaved buffer.
     fn every_family() -> Vec<String> {
-        let mut families = vec![super::ANONYMOUS_FAMILY.to_string()];
+        let mut families = vec![
+            super::ANONYMOUS_FAMILY.to_string(),
+            // a fixed opening like the anonymous one, and here for the same
+            // reason: nothing else instantiates it, so a wording that came
+            // to prefix another family would go unnoticed
+            crate::update::surfaces::CLIPBOARD_NOTICE_FAMILY.to_string(),
+        ];
         // what a plugin can call a float, through the wire boundary rather
         // than around it: what a family may be built from is exactly what
         // `identity` accepts, and these are the spellings that would spell

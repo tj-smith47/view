@@ -1252,6 +1252,20 @@ impl EngineModel {
         content: Vec<(u64, String)>,
         replace_last: bool,
     ) -> Vec<crate::msg::Effect> {
+        self.record_message_in_family(kind, content, replace_last, None)
+    }
+
+    /// [`Self::record_message`], stamping `family` onto the entry before it
+    /// reaches scrollback so the history's own copy carries it (see
+    /// [`MessageEntry::family`]). Private because a family is only ever
+    /// decided by [`Self::record_native_notice_once_as`], the one caller.
+    fn record_message_in_family(
+        &mut self,
+        kind: String,
+        content: Vec<(u64, String)>,
+        replace_last: bool,
+        family: Option<&str>,
+    ) -> Vec<crate::msg::Effect> {
         let route = crate::native::toast::route_under_hold(&kind, self.messages.startup_hold());
         if route == crate::native::toast::Route::Statusline {
             // only `search_count` reaches here as a `kind`
@@ -1271,7 +1285,8 @@ impl EngineModel {
         // recorded by id, not `.entries.last()`: `push`'s replace path can
         // overwrite an entry that sits before a still-open condition
         // notice, which then occupies the last slot instead
-        if let Some(entry) = self.messages.entries.iter().find(|e| e.id() == id) {
+        if let Some(entry) = self.messages.entries.iter_mut().find(|e| e.id() == id) {
+            entry.set_family(family);
             self.toast_history.push(entry);
         }
         // strictly after the scrollback record above, which is what makes
@@ -1395,7 +1410,7 @@ impl EngineModel {
         self.messages
             .entries
             .retain(|e| !is_standing_native_notice(e, family));
-        self.record_message(kind.to_string(), content, false)
+        self.record_message_in_family(kind.to_string(), content, false, Some(family))
     }
 
     /// Retracts every standing one-shot native notice whose line starts
@@ -1618,11 +1633,13 @@ pub enum OverlayKind {
     /// selection has. See [`crate::native::tree::TreeState`].
     Tree(crate::native::tree::TreeState),
     /// A `:messages`-style browse of `ToastHistory`'s ring, snapshotted at
-    /// open time. Centered like a picker; carries no navigation state of
-    /// its own beyond the snapshot itself -- no key arm in `Msg::Key`'s
-    /// `Focus::Native` match names this variant, so it falls to that
-    /// match's generic fallback, which closes it on `<Esc>` the same way
-    /// an overlay with no more specific key handling always has. See
+    /// open time. Centered like a picker; navigable over that snapshot
+    /// (`j`/`k`/`<C-d>`/`<C-u>`/`gg`/`G`), with `y` copying the selected
+    /// line verbatim and `d` retracting the standing notice of its family
+    /// (`crate::update::surfaces::message_history_key`). `<Esc>` is
+    /// deliberately not among them: it falls to the `Focus::Native`
+    /// match's generic fallback, which closes exactly this one overlay the
+    /// same way it closes any other. See
     /// [`crate::native::palette::MessageHistoryState`].
     MessageHistory(crate::native::palette::MessageHistoryState),
     /// The interrupt/restart modal a wedged or lost engine escalates into,

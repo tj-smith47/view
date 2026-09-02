@@ -1,12 +1,14 @@
 //! Opening, toggling and refreshing the surfaces that sit beside the
 //! buffer -- the picker, the file tree sidebar, the agent panel and the
 //! message-history overlay -- plus the effects each one's first frame
-//! needs. One family, split out of `update` so the router keeps to
-//! routing.
+//! needs, the keys the history overlay answers, and the notices a verb
+//! raises instead of opening anything. One family, split out of `update`
+//! so the router keeps to routing.
 
 use crate::model::{Model, OverlayKind};
-use crate::msg::{Effect, RpcCall};
+use crate::msg::{Effect, RegisterType, RpcCall};
 use crate::native::geometry::{Anchor, OverlayBox};
+use crate::native::palette::MessageHistoryState;
 
 /// Issues an `Effect::Rpc(RpcCall::PreviewBuffer)` for `state`'s current
 /// selection, or no effect at all when there is nothing to preview (an
@@ -233,7 +235,7 @@ pub(super) fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
 /// the same "closing is `<Esc>`'s job, not the invoking key's" split every
 /// other centered overlay here already follows.
 pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
-    let state = crate::native::palette::MessageHistoryState::snapshot(&model.engine.toast_history);
+    let state = MessageHistoryState::snapshot(&model.engine.toast_history);
     let prompt_is_topmost = matches!(
         model.overlays().last().map(|overlay| &overlay.kind),
         Some(OverlayKind::Prompt(_))
@@ -248,4 +250,155 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
     }
     model.dirty = true;
     Vec::new()
+}
+
+/// The rows the framed history overlay spends on everything that is not a
+/// history entry: its two borders, its (empty) query line and the rule
+/// under it, which `view_surface::overlay`'s `rows` and `palette_body`
+/// between them always draw.
+///
+/// Named here so a page key moves the selection by exactly what the frame
+/// last showed. Mechanism honesty: this crate cannot depend on the one that
+/// paints it, so nothing ties the two numbers together mechanically --
+/// `view_surface::overlay`'s `a_framed_palette_spends_four_rows_on_chrome`
+/// pins the painter's half against this same four, and its doc names this
+/// constant.
+const HISTORY_CHROME_ROWS: u16 = 4;
+
+/// One keypress aimed at the open message-history overlay.
+///
+/// `<Esc>` never reaches here (see the caller's guard): closing an overlay
+/// is the router's shared fallback, not a key of this overlay's own.
+pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    // the two keys that reach past the overlay answer first, so neither is
+    // holding a borrow of it while it touches the message log beside it
+    match notation {
+        "y" => return copy_selection(history(model).and_then(MessageHistoryState::selected_text)),
+        // A dismissal retracts a standing notice; it never edits the
+        // history, which is the record of what was said and stays true
+        // whether or not the line is still up. An entry with no family --
+        // every wire message -- therefore takes nothing down.
+        "d" => {
+            let family = history(model)
+                .and_then(MessageHistoryState::selected_family)
+                .map(str::to_owned);
+            if let Some(family) = family {
+                model.dirty |= model.engine.withdraw_native_notice(&family);
+            }
+            return Vec::new();
+        }
+        _ => {}
+    }
+    let page = history_page(model);
+    let Some(state) = history_mut(model) else {
+        return Vec::new();
+    };
+    let moved = match notation {
+        "j" => state.move_selection(1),
+        "k" => state.move_selection(-1),
+        "<C-d>" => state.move_selection(page),
+        "<C-u>" => state.move_selection(-page),
+        "gg" => state.select(0),
+        "G" => state.select(usize::MAX),
+        _ => false,
+    };
+    model.dirty |= moved;
+    Vec::new()
+}
+
+/// The half-page `<C-d>`/`<C-u>` move, derived from the open overlay's own
+/// painted height rather than a fixed number, so a page is half of what the
+/// user can actually see. Floored at one: a frame with no room for entries
+/// at all still moves the selection rather than swallowing the key.
+fn history_page(model: &Model) -> isize {
+    let rows = model.focused_overlay().map_or(0, |overlay| {
+        model
+            .overlay_rect(overlay)
+            .height
+            .saturating_sub(HISTORY_CHROME_ROWS)
+    });
+    isize::try_from(rows.div_ceil(2))
+        .unwrap_or(isize::MAX)
+        .max(1)
+}
+
+/// The open history overlay's state, or `None` when the focused overlay is
+/// something else -- which the caller's own match has already ruled out,
+/// and which this answers without panicking anyway.
+fn history(model: &Model) -> Option<&MessageHistoryState> {
+    match model.focused_overlay().map(|overlay| &overlay.kind) {
+        Some(OverlayKind::MessageHistory(state)) => Some(state),
+        _ => None,
+    }
+}
+
+/// [`history`], for the keys that move the selection.
+fn history_mut(model: &mut Model) -> Option<&mut MessageHistoryState> {
+    match model.focused_overlay_mut().map(|overlay| &mut overlay.kind) {
+        Some(OverlayKind::MessageHistory(state)) => Some(state),
+        _ => None,
+    }
+}
+
+/// Copies the selected entry's line, through the identical pair of effects
+/// an engine-initiated `"+y` produces (`EngineRequest::ClipboardSet`'s own
+/// arm): the local system-clipboard write and the OSC 52 escape, never one
+/// or the other. That pairing is the whole reason this key is worth having
+/// over an SSH session -- the escape reaches the terminal the user is
+/// actually sitting at, and the local write serves the session that has a
+/// display of its own.
+///
+/// `token: None` because nvim asked for nothing here (see
+/// [`Effect::ClipboardWrite`]), and `Charwise` because a copied line is a
+/// line, not a linewise register: `lines_to_text` appends no newline to it,
+/// which is what keeps a pasted path a path.
+fn copy_selection(text: Option<String>) -> Vec<Effect> {
+    let Some(text) = text else {
+        return Vec::new();
+    };
+    let lines = vec![text];
+    vec![
+        Effect::ClipboardWrite {
+            token: None,
+            register: COPY_REGISTER,
+            lines: lines.clone(),
+            regtype: RegisterType::Charwise,
+        },
+        Effect::Osc52Copy {
+            register: COPY_REGISTER,
+            lines,
+            regtype: RegisterType::Charwise,
+        },
+    ]
+}
+
+/// The register the history's own copy lands in: `'+'`, the system
+/// clipboard, which is where a user pasting into another program looks.
+const COPY_REGISTER: char = '+';
+
+/// The family every notice about an unreachable system clipboard is
+/// recorded under. Pinned as a constant because
+/// `surface_conflict`'s own collision walk ranges over it beside every
+/// other family in the crate.
+pub(super) const CLIPBOARD_NOTICE_FAMILY: &str = "view: no system clipboard ";
+
+/// What the user is told, once, when a copy could not reach a system
+/// clipboard. Opens with its own family, as `is_standing_native_notice`'s
+/// `starts_with` withdrawal requires, and says where the copy did go rather
+/// than only where it did not.
+const CLIPBOARD_UNAVAILABLE: &str = "view: no system clipboard is reachable; copies went to \
+                                     view's own registers and to OSC 52.";
+
+/// Answers [`crate::msg::Msg::ClipboardUnavailable`]: the once-per-family
+/// notice, and nothing else -- the copy itself already succeeded into the
+/// worker's shadow register and onto the terminal.
+pub(super) fn notice_clipboard_unavailable(model: &mut Model) -> Vec<Effect> {
+    let effects = model
+        .engine
+        .record_native_notice_once(CLIPBOARD_NOTICE_FAMILY, CLIPBOARD_UNAVAILABLE.to_string());
+    // an empty answer is the dedupe declining to say the same thing twice,
+    // and a repaint for a screen nothing changed on is what a second copy
+    // would otherwise cost
+    model.dirty |= !effects.is_empty();
+    effects
 }

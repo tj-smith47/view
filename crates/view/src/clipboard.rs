@@ -29,7 +29,8 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use view_core::msg::{RegisterType, ReplyToken, ReplyValue};
+use view_core::msg::{Msg, RegisterType, ReplyToken, ReplyValue};
+use view_core::sink::MsgSink;
 use view_engine::handle::EngineError;
 use view_native::clipboard::{lines_to_text, text_to_lines};
 
@@ -79,8 +80,14 @@ pub enum ClipboardJobKind {
     /// system clipboard has no field of its own for it, so it must ride
     /// here to reach [`lines_to_text`]'s trailing-newline convention (see
     /// `view_native::clipboard`'s module doc).
+    ///
+    /// Its `token` is optional where `Read`'s is not, for the reason
+    /// `Effect::ClipboardWrite`'s own doc gives: a copy view initiated
+    /// itself (the message history's `y`) performs the same write with no
+    /// nvim request behind it, and a reply written for one would answer
+    /// whatever request currently holds that msgid.
     Write {
-        token: ReplyToken,
+        token: Option<ReplyToken>,
         register: char,
         lines: Vec<String>,
         regtype: RegisterType,
@@ -269,8 +276,9 @@ impl<E: EngineOps> ReplyRoute<E> {
 /// - [`Read`](ClipboardJobKind::Read) replies charwise-empty, what an
 ///   unreachable clipboard reads as, because the token must be answered
 ///   exactly once whatever happens to the worker;
-/// - [`Write`](ClipboardJobKind::Write) replies `Nil`, for the same
-///   exactly-once reason;
+/// - [`Write`](ClipboardJobKind::Write) replies `Nil` when it carries a
+///   token, for the same exactly-once reason, and answers nobody when it
+///   carries none;
 /// - [`Query`](ClipboardJobKind::Query) sends the empty OSC 52 payload,
 ///   because nvim is sitting in `vim.wait` for it and silence there costs a
 ///   one-second stall and then a hit-enter prompt that wedges a narrow
@@ -304,7 +312,9 @@ pub(crate) fn dispatch<E: EngineOps>(
             );
         }
         ClipboardJobKind::Write { token, .. } => {
-            let _ = ops.reply(token, ReplyValue::Nil);
+            if let Some(token) = token {
+                let _ = ops.reply(token, ReplyValue::Nil);
+            }
         }
         ClipboardJobKind::Query { register } => {
             let _ = ops.ui_term_event(&view_core::osc52::clipboard_escape(register, ""));
@@ -325,17 +335,23 @@ pub(crate) fn dispatch<E: EngineOps>(
 /// the reply-exactly-once contract this function owns against a recording
 /// fake instead of a live nvim connection.
 ///
+/// `msgs` is how the worker tells the loop something the user has to be
+/// told -- today only [`Msg::ClipboardUnavailable`], for a copy that
+/// reached no system clipboard. The worker cannot raise a notice itself:
+/// the message log lives in the model, on the loop thread.
+///
 /// # Errors
 ///
 /// Returns the underlying `std::io::Error` if the OS cannot start the
 /// thread.
-pub fn spawn<E: EngineOps + Send + 'static>(
+pub fn spawn<E: EngineOps + Send + 'static, S: MsgSink + Send + 'static>(
     route: ReplyRoute<E>,
     jobs: mpsc::Receiver<ClipboardJob>,
+    msgs: S,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("view-clipboard".to_owned())
-        .spawn(move || run(&route, &jobs, || arboard::Clipboard::new().ok()))
+        .spawn(move || run(&route, &jobs, &msgs, || arboard::Clipboard::new().ok()))
 }
 
 /// The worker's body: one register-keyed shadow map, one lazily-created
@@ -351,9 +367,10 @@ pub fn spawn<E: EngineOps + Send + 'static>(
 /// only caller that needs the real backend, and a test supplying a fake
 /// instead is the only way to prove `read_lines`'s unreachable-vs-failed
 /// branches without a host display.
-fn run<E: EngineOps, C: ClipboardBackend + Send + 'static>(
+fn run<E: EngineOps, S: MsgSink, C: ClipboardBackend + Send + 'static>(
     route: &ReplyRoute<E>,
     jobs: &mpsc::Receiver<ClipboardJob>,
+    msgs: &S,
     connect: impl Fn() -> Option<C>,
 ) {
     let mut shadow: HashMap<char, String> = HashMap::new();
@@ -381,17 +398,32 @@ fn run<E: EngineOps, C: ClipboardBackend + Send + 'static>(
                 lines,
                 regtype,
             } => {
-                store(
+                let reached = store(
                     &mut clip,
                     &connect,
                     &mut shadow,
                     register,
                     lines_to_text(&lines, regtype),
                 );
-                let _ = route.reply(job.epoch, token, ReplyValue::Nil);
+                // after the shadow write above, so the notice can promise
+                // what it promises: the copy is already recoverable by this
+                // session's own `"+p` before the user is told the system
+                // clipboard was not part of it. `send` rather than
+                // `try_send` because this thread has nothing else to do
+                // while the loop drains, and a dropped notice would leave
+                // the user with a copy they believe went nowhere
+                if !reached {
+                    let _ = msgs.send(Msg::ClipboardUnavailable);
+                }
+                if let Some(token) = token {
+                    let _ = route.reply(job.epoch, token, ReplyValue::Nil);
+                }
             }
+            // no notice on this one: nvim's own OSC 52 provider already
+            // performed this copy and already put it where the user asked,
+            // so an unreachable local backend costs nothing to report
             ClipboardJobKind::Store { register, text } => {
-                store(&mut clip, &connect, &mut shadow, register, text);
+                let _ = store(&mut clip, &connect, &mut shadow, register, text);
             }
             ClipboardJobKind::Query { register } => {
                 // answered on every path and inside `READ_BUDGET` on every
@@ -412,15 +444,20 @@ fn run<E: EngineOps, C: ClipboardBackend + Send + 'static>(
 /// `register`, the pair every copy leaves behind whichever provider
 /// performed it -- so a paste answers the same text back whether the host
 /// has a reachable display or only this worker's own memory of the session.
+///
+/// Reports whether the system clipboard half actually happened, which is
+/// the one thing about a copy the user cannot see for themselves.
+#[must_use]
 fn store<C: ClipboardBackend>(
     clip: &mut Option<C>,
     connect: &impl Fn() -> Option<C>,
     shadow: &mut HashMap<char, String>,
     register: char,
     text: String,
-) {
-    write_system(clip, connect, &text);
+) -> bool {
+    let reached = write_system(clip, connect, &text);
     shadow.insert(register, text);
+    reached
 }
 
 /// How long a system-clipboard read may take before this worker stops
@@ -558,21 +595,28 @@ fn read_text<C: ClipboardBackend + Send + 'static>(
     }
 }
 
-/// Writes `text` to the system clipboard. Failure (no reachable backend,
-/// e.g. no display) is silent: the shadow register the caller updates
-/// regardless is what keeps `"+p` working in exactly that case, and there
-/// is nowhere to report a clipboard failure that both this background
-/// thread and a headless remote session could reach anyway.
+/// Writes `text` to the system clipboard, reporting whether a backend was
+/// reachable at all. The copy is never lost either way: the shadow register
+/// the caller updates regardless is what keeps `"+p` working, and the OSC 52
+/// escape its companion effect wrote has already left for the terminal.
+///
+/// Reachability alone, not success. A backend that exists and then refuses
+/// the write (a wedged selection owner, a clipboard holding something it
+/// will not replace) is a different fault from a host with no display, and
+/// only the second one is what `Msg::ClipboardUnavailable`'s notice
+/// describes; the first stays a `VIEW_LOG` line, as it was.
 fn write_system<C: ClipboardBackend>(
     clip: &mut Option<C>,
     connect: &impl Fn() -> Option<C>,
     text: &str,
-) {
-    if let Some(clip) = ensure_clip(clip, connect) {
-        if let Err(err) = clip.set_text(text.to_owned()) {
-            crate::vlog::log_with("clipboard", || format!("write failed: {err}"));
-        }
+) -> bool {
+    let Some(clip) = ensure_clip(clip, connect) else {
+        return false;
+    };
+    if let Err(err) = clip.set_text(text.to_owned()) {
+        crate::vlog::log_with("clipboard", || format!("write failed: {err}"));
     }
+    true
 }
 
 #[cfg(test)]
@@ -1047,6 +1091,7 @@ mod tests {
         let worker = spawn(
             ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
             job_rx,
+            mpsc::sync_channel::<Msg>(1).0,
         )
         .unwrap();
         job_tx
@@ -1085,13 +1130,14 @@ mod tests {
         let worker = spawn(
             ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
             job_rx,
+            mpsc::sync_channel::<Msg>(1).0,
         )
         .unwrap();
         job_tx
             .send(ClipboardJob {
                 epoch: 0,
                 kind: ClipboardJobKind::Write {
-                    token: ReplyToken { msgid: 7 },
+                    token: Some(ReplyToken { msgid: 7 }),
                     register: '+',
                     lines: vec!["hello".to_owned()],
                     regtype: RegisterType::Charwise,
@@ -1131,7 +1177,23 @@ mod tests {
         jobs: mpsc::Receiver<ClipboardJob>,
         connect: impl Fn() -> Option<FakeClipboard> + Send + 'static,
     ) -> JoinHandle<()> {
-        thread::spawn(move || run(&route, &jobs, connect))
+        spawn_fake_watching(route, jobs, connect).0
+    }
+
+    /// [`spawn_fake`], handing back the receiving half of the worker's
+    /// message sink so a test can read what the worker told the loop. The
+    /// plain `spawn_fake` above drops it, which is the same degrade a
+    /// closed loop already gives every notice this worker sends.
+    fn spawn_fake_watching<E: EngineOps + Send + 'static>(
+        route: ReplyRoute<E>,
+        jobs: mpsc::Receiver<ClipboardJob>,
+        connect: impl Fn() -> Option<FakeClipboard> + Send + 'static,
+    ) -> (JoinHandle<()>, mpsc::Receiver<Msg>) {
+        let (msgs, notices) = mpsc::sync_channel::<Msg>(8);
+        (
+            thread::spawn(move || run(&route, &jobs, &msgs, connect)),
+            notices,
+        )
     }
 
     #[test]
@@ -1188,7 +1250,7 @@ mod tests {
             .send(ClipboardJob {
                 epoch: 0,
                 kind: ClipboardJobKind::Write {
-                    token: ReplyToken { msgid: 1 },
+                    token: Some(ReplyToken { msgid: 1 }),
                     register: '+',
                     lines: vec!["shadowed".to_owned()],
                     regtype: RegisterType::Charwise,
@@ -1221,6 +1283,148 @@ mod tests {
                 lines: vec!["shadowed".to_owned()],
                 regtype: RegisterType::Charwise,
             }
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// A copy view initiated itself (the message history's `y`) carries no
+    /// token, and the worker must answer nobody for it: a `Nil` written
+    /// against a msgid nvim never issued answers whatever request currently
+    /// holds that number -- a blocked `g:clipboard` call, or a `VimEnter`.
+    ///
+    /// The copy still has to happen, which is the second half here: the read
+    /// that follows it comes back with the tokenless write's own text, so a
+    /// worker that "skipped the reply" by skipping the job would fail this
+    /// too.
+    #[test]
+    fn a_copy_with_no_reply_token_is_not_replied_to() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let worker = spawn_fake(
+            ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
+            job_rx,
+            || Some(FakeClipboard::reachable(None)),
+        );
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Write {
+                    token: None,
+                    register: '+',
+                    lines: vec!["/home/tj/my notes/plan v2.md".to_owned()],
+                    regtype: RegisterType::Charwise,
+                },
+            })
+            .unwrap();
+        // ordered behind a job that *does* owe an answer, so the absence
+        // proved below is the tokenless write's own and not a race with a
+        // worker that had not reached it yet
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Read {
+                    token: ReplyToken { msgid: 3 },
+                    register: '+',
+                },
+            })
+            .unwrap();
+
+        let (msgid, value) = reply_rx
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
+            .expect("the read behind the tokenless write must answer within 2s");
+        assert_eq!(
+            msgid, 3,
+            "the first reply off this worker must be the read's, never one \
+             invented for the tokenless write"
+        );
+        assert_eq!(
+            value,
+            ReplyValue::ClipboardLines {
+                lines: vec!["/home/tj/my notes/plan v2.md".to_owned()],
+                regtype: RegisterType::Charwise,
+            },
+            "the tokenless write must still have performed the copy"
+        );
+        assert!(
+            reply_rx.try_recv().is_err(),
+            "a tokenless write must produce no reply at all"
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// The worker is the only thing that knows a copy reached no system
+    /// clipboard, and the model is the only thing that can say so; this is
+    /// the edge between them. Per copy, not per session -- the once-ness is
+    /// the model's family dedupe (`update::surfaces`), proved there.
+    #[test]
+    fn an_unreachable_write_tells_the_loop_the_clipboard_was_not_reached() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        let (worker, notices) = spawn_fake_watching(
+            ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
+            job_rx,
+            || None,
+        );
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Write {
+                    token: None,
+                    register: '+',
+                    lines: vec!["copied with no display".to_owned()],
+                    regtype: RegisterType::Charwise,
+                },
+            })
+            .unwrap();
+
+        let notice = notices
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
+            .expect("an unreachable write must report itself within 2s");
+        assert!(matches!(notice, Msg::ClipboardUnavailable), "{notice:?}");
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// The other side of the same edge: a copy that did reach the system
+    /// clipboard says nothing, so the notice cannot appear on a host that
+    /// has a display.
+    #[test]
+    fn a_reachable_write_reports_no_clipboard_trouble() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let (worker, notices) = spawn_fake_watching(
+            ReplyRoute::new(ReplyRecorder::replies_only(reply_tx)),
+            job_rx,
+            || Some(FakeClipboard::reachable(None)),
+        );
+        job_tx
+            .send(ClipboardJob {
+                epoch: 0,
+                kind: ClipboardJobKind::Write {
+                    token: Some(ReplyToken { msgid: 4 }),
+                    register: '+',
+                    lines: vec!["copied with a display".to_owned()],
+                    regtype: RegisterType::Charwise,
+                },
+            })
+            .unwrap();
+        reply_rx
+            .recv_timeout(view_test_support::host_deadline(
+                std::time::Duration::from_secs(2),
+            ))
+            .expect("the write must reply within 2s");
+        assert!(
+            notices.try_recv().is_err(),
+            "a reachable write must raise no notice"
         );
 
         drop(job_tx);
@@ -1409,7 +1613,7 @@ mod tests {
             .send(ClipboardJob {
                 epoch: 0,
                 kind: ClipboardJobKind::Write {
-                    token: ReplyToken { msgid: 1 },
+                    token: Some(ReplyToken { msgid: 1 }),
                     register: '+',
                     lines: vec!["copied before the crash".to_owned()],
                     regtype: RegisterType::Charwise,

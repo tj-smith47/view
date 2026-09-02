@@ -825,7 +825,8 @@ pub fn run(
     // `clipboard_tx` clone (held by `channels` and by `executor`) drops at
     // the end of this function, same lifetime as the engine's own
     // reader/writer threads
-    let _clipboard_worker = crate::clipboard::spawn(clipboard_route.clone(), clipboard_rx)?;
+    let _clipboard_worker =
+        crate::clipboard::spawn(clipboard_route.clone(), clipboard_rx, msg_tx.clone())?;
     let (picker_tx, picker_rx) = mpsc::channel();
     // kept alive for the process's duration, the same shape as
     // `_clipboard_worker` above: the matcher worker exits once `picker_tx`
@@ -3215,7 +3216,7 @@ mod tests {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
         let flow = executor.run(Effect::ClipboardWrite {
-            token: ReplyToken { msgid: 6 },
+            token: Some(ReplyToken { msgid: 6 }),
             register: '+',
             lines: vec!["a".to_owned()],
             regtype: RegisterType::Linewise,
@@ -3230,7 +3231,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let executor = Executor::new(&ops).with_clipboard(tx);
         let flow = executor.run(Effect::ClipboardWrite {
-            token: ReplyToken { msgid: 7 },
+            token: Some(ReplyToken { msgid: 7 }),
             register: '*',
             lines: vec!["x".to_owned(), "y".to_owned()],
             regtype: RegisterType::Linewise,
@@ -3250,7 +3251,12 @@ mod tests {
         else {
             unreachable!("expected a Write job kind");
         };
-        assert_eq!(token.msgid, 7);
+        assert_eq!(
+            token
+                .expect("an engine-initiated write carries its token")
+                .msgid,
+            7
+        );
         assert_eq!(register, '*');
         assert_eq!(lines, vec!["x", "y"]);
         assert_eq!(regtype, RegisterType::Linewise);
@@ -3263,7 +3269,7 @@ mod tests {
         drop(rx);
         let executor = Executor::new(&ops).with_clipboard(tx);
         let flow = executor.run(Effect::ClipboardWrite {
-            token: ReplyToken { msgid: 8 },
+            token: Some(ReplyToken { msgid: 8 }),
             register: '+',
             lines: vec!["a".to_owned()],
             regtype: RegisterType::Charwise,

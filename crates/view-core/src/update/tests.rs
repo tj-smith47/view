@@ -1461,7 +1461,7 @@ fn clipboard_set_produces_a_write_and_an_osc52_copy_effect_from_one_arm() {
         &effects[..],
         [
             Effect::ClipboardWrite {
-                token: ReplyToken { msgid: 12 },
+                token: Some(ReplyToken { msgid: 12 }),
                 register: '*',
                 lines: ref w_lines,
                 regtype: RegisterType::Linewise,
@@ -7761,6 +7761,285 @@ fn esc_through_the_generic_native_fallback_closes_message_history_and_marks_dirt
         "closing the overlay must mark the model dirty for a repaint"
     );
 }
+
+/// A started 80x24 session holding `texts` in its message history, with
+/// the history overlay open over the snapshot of them.
+fn model_with_history(texts: &[&str]) -> Model {
+    let mut m = Model::with_term_size(80, 24);
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    for text in texts {
+        let _ =
+            m.engine
+                .record_message("echomsg".to_string(), vec![(0, (*text).to_string())], false);
+    }
+    open_history(&mut m);
+    m
+}
+
+fn open_history(model: &mut Model) {
+    let _ = update(
+        model,
+        Msg::FeatureInvoke {
+            feature: "notifications".to_string(),
+            verb: "history".to_string(),
+        },
+    );
+}
+
+/// The open history overlay's own rendered view.
+fn history_view(model: &Model) -> crate::native::views::PaletteView {
+    match model.overlays().last().map(|o| &o.kind) {
+        Some(OverlayKind::MessageHistory(state)) => state.view(),
+        other => panic!("the history overlay must be open: {other:?}"),
+    }
+}
+
+/// The item rows the open overlay's frame can actually show, by the same
+/// arithmetic `view_surface::overlay` paints it with.
+fn history_item_rows(model: &Model) -> usize {
+    let overlay = model.overlays().last().expect("an open overlay");
+    usize::from(model.overlay_rect(overlay).height.saturating_sub(4))
+}
+
+/// `j`/`k`/`<C-d>`/`<C-u>`/`gg`/`G` over a snapshot taller than the box
+/// drawn for it: the point of the whole gesture is reaching an entry the
+/// first frame never showed, so the selection has to leave the visible
+/// window rather than stop at its edge (`overlay::lay_out` scrolls the
+/// window to follow it).
+#[test]
+fn the_history_overlay_scrolls_past_its_visible_rows() {
+    let texts: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let mut m = model_with_history(&refs);
+    let rows = history_item_rows(&m);
+    assert!(
+        rows > 0 && rows < 40,
+        "the fixture must be taller than the frame for this to prove anything: {rows} rows"
+    );
+    assert_eq!(history_view(&m).selected, Some(0));
+
+    let _ = press(&mut m, "j");
+    assert_eq!(history_view(&m).selected, Some(1));
+    let _ = press(&mut m, "k");
+    assert_eq!(history_view(&m).selected, Some(0));
+    let _ = press(&mut m, "k");
+    assert_eq!(
+        history_view(&m).selected,
+        Some(0),
+        "`k` saturates at the top"
+    );
+
+    let _ = press(&mut m, "<C-d>");
+    let after_page = history_view(&m).selected.expect("a selection");
+    assert_eq!(
+        after_page,
+        rows.div_ceil(2),
+        "`<C-d>` moves half of what the frame shows"
+    );
+    let _ = press(&mut m, "<C-u>");
+    assert_eq!(history_view(&m).selected, Some(0));
+
+    let _ = press(&mut m, "G");
+    assert_eq!(history_view(&m).selected, Some(39));
+    assert!(
+        39 >= rows,
+        "`G` must reach an entry outside the {rows} rows the frame first drew"
+    );
+    let _ = press(&mut m, "gg");
+    assert_eq!(history_view(&m).selected, Some(0));
+}
+
+/// Both effects, from the one arm, exactly as the engine-initiated
+/// `EngineRequest::ClipboardSet` arm emits them: the local system-clipboard
+/// write for a session with a display, and the OSC 52 escape for the
+/// terminal a remote session is actually being read on. Emitting only the
+/// escape would leave a local session copying nothing, and only the write
+/// would leave every SSH session copying nothing.
+#[test]
+fn the_copy_key_emits_both_the_local_write_and_the_osc52_escape() {
+    // newest-first, as `ToastHistory::entries` hands them over, so row 1 is
+    // the older of the two
+    let mut m = model_with_history(&["older", "newer"]);
+    let _ = press(&mut m, "j");
+    let effects = press(&mut m, "y");
+    assert!(
+        matches!(
+            &effects[..],
+            [
+                Effect::ClipboardWrite {
+                    token: None,
+                    register: '+',
+                    lines: ref written,
+                    regtype: RegisterType::Charwise,
+                },
+                Effect::Osc52Copy {
+                    register: '+',
+                    lines: ref escaped,
+                    regtype: RegisterType::Charwise,
+                }
+            ] if written == &vec!["older".to_string()] && escaped == written
+        ),
+        "the copy key must emit the local write and the escape, both carrying \
+         the selected line: {effects:?}"
+    );
+}
+
+/// Paths are what this key exists for, and a path is not a token: no trim,
+/// no quote, no "copied 1 line" rewrite. The fixture is the shape that
+/// breaks every one of those -- a path with spaces in it, inside a notice
+/// with its own leading and trailing padding.
+#[test]
+fn the_copied_text_is_the_entry_verbatim() {
+    let entry = "  view: file /home/tj/my notes/plan v2.md is no longer readable  ";
+    let mut m = model_with_history(&[entry]);
+    let effects = press(&mut m, "y");
+    let Some(Effect::ClipboardWrite { lines, .. }) = effects.first() else {
+        panic!("the copy key must emit a local write first: {effects:?}");
+    };
+    assert_eq!(
+        lines,
+        &vec![entry.to_string()],
+        "the copy must be the entry's own text, byte for byte"
+    );
+}
+
+/// The worker sends one `Msg::ClipboardUnavailable` per unreachable copy;
+/// the family dedupe is what turns a session's worth of them into one line
+/// the user reads once.
+#[test]
+fn an_unreachable_system_clipboard_notices_once() {
+    let mut m = started_model();
+    let first = update(&mut m, Msg::ClipboardUnavailable);
+    assert!(
+        !first.is_empty(),
+        "the first unreachable copy must raise the notice"
+    );
+    assert!(m.dirty, "raising a notice must ask for a repaint");
+
+    m.dirty = false;
+    let second = update(&mut m, Msg::ClipboardUnavailable);
+    assert!(
+        second.is_empty(),
+        "a second unreachable copy must not re-record the standing line: {second:?}"
+    );
+    assert!(
+        !m.dirty,
+        "and must not spend a repaint on a screen nothing changed on"
+    );
+
+    let standing: Vec<String> = visible_texts(&m)
+        .into_iter()
+        .filter(|line| line.starts_with("view: no system clipboard "))
+        .collect();
+    assert_eq!(
+        standing.len(),
+        1,
+        "exactly one clipboard notice may stand: {:?}",
+        visible_texts(&m)
+    );
+    assert_eq!(
+        standing[0],
+        "view: no system clipboard is reachable; copies went to view's own \
+         registers and to OSC 52."
+    );
+}
+
+/// A surface-conflict notice stands for the session because the conflict
+/// does, and `d` in the history is the gesture that retires exactly that
+/// one line. Keyed on the family rather than the selected wording, which is
+/// the case this fixture is built around: the user selects the *older*
+/// wording of a family whose standing line has since been re-worded, and
+/// still takes the standing line down.
+#[test]
+fn the_dismiss_key_takes_down_a_standing_sticky_notice() {
+    let family = "view: noice.nvim is using ";
+    let mut m = Model::with_term_size(80, 24);
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    let _ = m
+        .engine
+        .record_native_notice_sticky_once(family, format!("{family}the cmdline, which view owns."));
+    let _ = m.engine.record_native_notice_sticky_once(
+        family,
+        format!("{family}the cmdline and messages, which view owns."),
+    );
+    assert!(m.engine.has_native_notice(family));
+    open_history(&mut m);
+    assert_eq!(
+        history_view(&m).rows.len(),
+        2,
+        "both wordings are in the history, which is the record of what was said"
+    );
+    // the history is newest-first, so the oldest row is the wording that is
+    // no longer the one standing -- the case this test is about
+    let _ = press(&mut m, "G");
+
+    m.dirty = false;
+    let effects = press(&mut m, "d");
+    assert!(
+        effects.is_empty(),
+        "a dismissal issues nothing: {effects:?}"
+    );
+    assert!(
+        !m.engine.has_native_notice(family),
+        "`d` on the family's older wording must still retract the standing line"
+    );
+    assert!(
+        m.dirty,
+        "taking a line off the screen must ask for a repaint"
+    );
+    assert_eq!(
+        history_view(&m).rows.len(),
+        2,
+        "and must not edit the history it was pressed in"
+    );
+}
+
+/// Dismissal retracts a standing notice; it is not a delete key. An
+/// ordinary message carries no family, so there is nothing for `d` to name
+/// -- and in particular it must not take down whatever notice happens to be
+/// standing beside it.
+#[test]
+fn the_dismiss_key_on_an_ordinary_history_entry_takes_down_nothing() {
+    let family = "view: noice.nvim is using ";
+    let mut m = Model::with_term_size(80, 24);
+    let _ = m
+        .engine
+        .messages
+        .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+    let _ = m
+        .engine
+        .record_native_notice_sticky_once(family, format!("{family}the cmdline, which view owns."));
+    // recorded last so the newest-first history puts it under the cursor
+    let _ = m.engine.record_message(
+        "echomsg".to_string(),
+        vec![(0, "an ordinary message".to_string())],
+        false,
+    );
+    open_history(&mut m);
+    assert_eq!(
+        history_view(&m).rows.first().map(|r| r.label.as_str()),
+        Some("an ordinary message"),
+        "the selected row must be the one with no family of its own"
+    );
+    assert_eq!(history_view(&m).selected, Some(0));
+
+    m.dirty = false;
+    let effects = press(&mut m, "d");
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        m.engine.has_native_notice(family),
+        "`d` on an entry with no family of its own must retract nothing"
+    );
+    assert!(!m.dirty, "and must not spend a repaint");
+    assert_eq!(history_view(&m).rows.len(), 2, "history is unedited");
+}
+
 /// The escalation ladder for a wedge that may still resolve itself: the
 /// sticky banner on the observation that first sees it, the modal only
 /// once the wedge has outlasted `ENGINE_BUSY_MODAL_THRESHOLD`.

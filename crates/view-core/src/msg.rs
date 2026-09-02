@@ -768,6 +768,22 @@ pub enum Msg {
     ExternalWatchDegraded {
         reason: String,
     },
+    /// The clipboard worker could not reach a system clipboard at all for a
+    /// copy it was handed -- no display on this host, which is what an SSH
+    /// session without forwarding looks like.
+    ///
+    /// Raised for the copy, not for the session: the worker cannot know at
+    /// startup whether a clipboard will ever be wanted, and a host that
+    /// gains one mid-session (a display claimed after the editor started)
+    /// would be slandered by a notice raised on a probe. Deduplication is
+    /// the model's, through `record_native_notice_once`'s family, so the
+    /// worker sends this for every unreachable write and the user is told
+    /// once while the line still stands.
+    ///
+    /// The copy is not lost when this arrives: the shadow register and the
+    /// OSC 52 escape both still carry it, which is what the notice's own
+    /// wording tells the user.
+    ClipboardUnavailable,
     /// The AI agent this session needs is not on the machine yet, and the
     /// download and install that fetch it are starting. Raised only for the
     /// first-run case that actually waits -- a session starting from a
@@ -1085,8 +1101,15 @@ pub enum Effect {
     /// present, so `"+yy` behaves identically over SSH. `regtype` is
     /// forwarded from `EngineRequest::ClipboardSet` unchanged; see
     /// [`RegisterType`] for why the local write needs it.
+    ///
+    /// `token` is `None` for a copy view itself initiated -- the message
+    /// history's own `y`, which copies the selected line -- because no nvim
+    /// request is blocked on it: the worker performs the write and replies
+    /// to nobody, rather than answering a msgid that names some unrelated
+    /// live request. A `Some` token keeps the one-reply-per-token contract
+    /// exactly as before.
     ClipboardWrite {
-        token: ReplyToken,
+        token: Option<ReplyToken>,
         register: char,
         lines: Vec<String>,
         regtype: RegisterType,
