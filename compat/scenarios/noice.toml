@@ -110,6 +110,9 @@ steps = [
   # health check complains about.
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_cmdline == true)')", expect = "true" },
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_messages == true)')", expect = "true" },
+  # ext_popupmenu rides the same default attach; nothing else in the suite
+  # asserts it ON, so a dropped attach flag would fail nothing without this.
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_popupmenu == true)')", expect = "true" },
   # noice defers its real setup until after VimEnter, so package.loaded
   # alone is not proof the router is running; is_running() only reports
   # true once the deferred load actually completed. Generous timeout: the

@@ -1477,6 +1477,12 @@ pub struct ModeState {
     /// (block) cursor regardless of what `modes`/`current_idx` describe.
     pub cursor_style_enabled: bool,
     pub modes: Vec<ModeInfo>,
+    /// nvim's *cursor-shape* mode, not `mode()`: a plugin that takes
+    /// `guicursor` over can leave it standing at a value `mode()` disagrees
+    /// with for the rest of the session (noice holds `replace` at rest on a
+    /// default heavy launch). Safe to key cursor styling on -- that is this
+    /// channel's contract -- and unsafe to gate behavior on; a consumer that
+    /// needs the real mode has no accurate channel here today.
     pub current: String,
     pub current_idx: u64,
 }

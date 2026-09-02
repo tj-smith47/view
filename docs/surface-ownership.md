@@ -41,7 +41,7 @@ the tables view actually runs disagree.
 | surface | `ext_*` option | policy | `[native]` switch that hands it back | claiming plugin classes | proving scenario / state |
 | --- | --- | --- | --- | --- | --- |
 | the command line | `ext_cmdline` | `Own` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
-| the completion menu | `ext_popupmenu` | `Absorb` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`deferred` |
+| the completion menu | `ext_popupmenu` | `Absorb` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred` |
 | the message area | `ext_messages` | `Own` | `[native] notifications = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the tab line | `ext_tabline` | `Own` | -- none -- | -- none -- | `noice`/`deferred` |
 | the buffer grid | -- none -- | `Yield` | -- none -- | -- none -- | -- none -- |
