@@ -1,5 +1,6 @@
 //! Pure application state: Model, Msg, and update(). No I/O, no rendering.
 
+pub mod config;
 pub mod events;
 pub mod grid;
 pub mod hl;

@@ -29,7 +29,9 @@ use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::Effect;
 use view_core::theme::Theme;
 use view_engine::process::{stdin_operands, BundledEngine, EngineConfig, RemoteSpec};
-use view_native::config::{Overrides, ResolvedConfig, ResolvedEngine, TierChoice, ViewConfig};
+use view_native::config::{
+    Overrides, Resolved, ResolvedConfig, ResolvedEngine, Source, TierChoice, ViewConfig,
+};
 use view_tui::terminal::Term;
 use view_tui::tiers::CapsSource;
 
@@ -804,7 +806,12 @@ fn seed_ai_enabled(
             let effects = [cfg.panel_width_notice(), cfg.review_open_target_notice()]
                 .into_iter()
                 .flatten()
-                .flat_map(|notice| model.engine.record_native_notice(notice.to_string(), false))
+                .map(str::to_string)
+                // and whatever the environment layer had to discard, on the
+                // same terms: this table's notices reach a user through one
+                // path, whichever layer produced them
+                .chain(cfg.notices().iter().cloned())
+                .flat_map(|notice| model.engine.record_native_notice(notice, false))
                 .collect();
             (effects, agent)
         }
@@ -830,14 +837,16 @@ fn seed_ai_enabled(
 /// by overriding them, whose whole point is to change what this would have
 /// said. The override is the *resolved* `[ui] tier` rather than the flag,
 /// so a session that named its tier in the environment is shown what it
-/// got exactly like one that named it on the command line.
+/// got exactly like one that named it on the command line -- and is told
+/// which of the three layers named it, which is the half a user needs to
+/// go and change it.
 fn caps_notice(
     cli: &Cli,
-    tier: Option<TierChoice>,
+    tier: &Resolved<Option<TierChoice>>,
     caps: TermCaps,
     source: CapsSource,
 ) -> Option<String> {
-    (cli.print_caps || tier.is_some()).then(|| {
+    (cli.print_caps || tier.value.is_some()).then(|| {
         // rendered from the capability register, so the line a user reads
         // and the table the build enforces are one thing: a capability that
         // gains a row is printed here with no edit, and one printed here
@@ -846,9 +855,37 @@ fn caps_notice(
             "view: terminal capabilities: tier={:?} {} ({})",
             caps.tier,
             view_tui::tiers::resolved(&caps),
-            source.label()
+            caps_source_label(source, tier.source)
         )
     })
+}
+
+/// Where the capabilities came from, with an override named down to the
+/// layer that set it.
+///
+/// [`CapsSource`] knows a resolved tier decided them and structurally
+/// cannot know which layer resolved that tier -- `view-tui` is handed the
+/// answer, not the chain. "tier override" alone leaves a user to guess
+/// between a flag they typed, a variable they exported and a file they
+/// wrote, which is the question provenance exists to answer.
+fn caps_source_label(caps: CapsSource, tier: Source) -> String {
+    if caps != CapsSource::Override {
+        return caps.label().to_string();
+    }
+    match tier {
+        Source::Flag => "--tier flag".to_string(),
+        // the name the key registry generates, never a second copy of it
+        Source::Env => view_native::config::keys()
+            .iter()
+            .find(|key| key.table == "ui" && key.key == "tier")
+            .map_or_else(|| caps.label().to_string(), view_native::config::env_name),
+        Source::File => "[ui] tier in your config file".to_string(),
+        // an override with nothing above the derived layer to explain it is
+        // a state the chain cannot produce, and so is a layer this build
+        // has never heard of; naming the override as the override it is
+        // beats inventing a layer that did not answer
+        _ => caps.label().to_string(),
+    }
 }
 
 /// Points fd 2 away from the terminal for the rest of the session and
@@ -1007,6 +1044,12 @@ fn main() -> Result<()> {
     if let Some(err) = &config_error {
         note_unread_config(err, &mut model, &mut pre_executor_effects);
     }
+    // same point, same reason, one layer up: a `VIEW_*` view could not read
+    // was resolved past before the terminal existed, and this is the first
+    // place there is a model to say so on
+    for notice in resolved.notices() {
+        pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
+    }
 
     // the `ext_*` set `nvim_ui_attach` requests follows the `[native]`
     // switches, so a surface a user turned off is never taken from their
@@ -1119,15 +1162,14 @@ fn main() -> Result<()> {
             model.caps.tier,
             view_tui::tiers::resolved(&model.caps),
             probe.fence_seen,
-            term.caps_source().label()
+            caps_source_label(term.caps_source(), resolved.ui.tier.source)
         )
     });
     // a message, not a write: this runs with the alternate screen up, where
     // a bare stderr line is invisible until teardown scrolls it back --
     // which is where the unconditional capability line used to surface,
     // long after the session it described
-    if let Some(notice) = caps_notice(&cli, resolved.ui.tier.value, model.caps, term.caps_source())
-    {
+    if let Some(notice) = caps_notice(&cli, &resolved.ui.tier, model.caps, term.caps_source()) {
         pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
     }
 
@@ -1361,7 +1403,6 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use std::ffi::OsString;
-    use view_native::config::Source;
 
     /// Every key a command line resolves, against an empty environment and
     /// no config file: what the assertions below are about is the flag
@@ -1404,6 +1445,34 @@ mod tests {
                 "the registry claims {flag}, which this binary does not accept: {accepted:?}"
             );
         }
+    }
+
+    /// The `after_help` sample is a hand-written list, and this is what
+    /// keeps it from becoming a stale one: a flag the registry carries has
+    /// to appear in the sentence that tells a user where view's flags may
+    /// go, or the ordering rule reads as not applying to it. The trailing
+    /// `...` stays, because the sentence also covers flags that name no
+    /// config key at all (`--clean`, `--config`, `--remote`).
+    #[test]
+    fn the_ordering_note_names_every_flag_the_registry_carries() {
+        let command = Cli::command();
+        let after = command
+            .get_after_help()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        for flag in view_native::config::keys()
+            .iter()
+            .filter_map(|key| key.flag)
+        {
+            assert!(
+                after.contains(flag),
+                "{flag} is missing from the flag-ordering note: {after}"
+            );
+        }
+        assert!(
+            after.contains("..."),
+            "the note lists a sample and must say so: {after}"
+        );
     }
 
     /// The other direction of the same claim: a flag typed on the command
@@ -1574,23 +1643,38 @@ mod tests {
     ///
     /// Two boundaries rather than a list of reads: `Term::init` opens the
     /// terminal half of startup and `pre_executor_effects` opens the half
-    /// where this process reads its own state (trust store, config, theme
-    /// cache, and whatever is added next to them), so a read added to
-    /// either half is behind the spawn by construction instead of by a
-    /// reviewer noticing. Nothing but a source-order check can hold this:
-    /// every one of those reads still has to happen before the shell frame
-    /// is rendered, so hoisting one above the spawn breaks no other test.
+    /// where this process reads its own state (trust store, theme cache,
+    /// and whatever is added next to them), so a read added to either half
+    /// is behind the spawn by construction instead of by a reviewer
+    /// noticing. Nothing but a source-order check can hold this: every one
+    /// of those reads still has to happen before the shell frame is
+    /// rendered, so hoisting one above the spawn breaks no other test.
+    ///
+    /// The config prologue is the one read that deliberately sits *ahead*
+    /// of the spawn, because the editor the child runs is one of the keys
+    /// the chain answers -- there is no spawn to order until it has run.
+    /// That exception has its own pin
+    /// ([`only_the_config_prologue_runs_before_the_engine_spawn`]) holding
+    /// it to the three calls it is, so it cannot quietly become the place
+    /// new startup reads accumulate.
     ///
     /// Measured on dev-linux, two alternating pairs of 200 cold spawns,
     /// uninstrumented builds from one source path and one target dir:
     /// `first_paint.minimal` marker p50 16.03/16.86ms with the spawn after
-    /// the handshake, 15.11/14.77ms with it before, for a shell frame that
-    /// did not move (3.24/3.33ms against 3.34/3.25ms). A terminal that
-    /// never answers the probe at all gains nothing and loses nothing
-    /// (404.25ms against 404.19ms): its content was held by the probe's own
-    /// second window, not by anything nvim is doing -- a wait `settle_probe`
-    /// has since removed, which is what leaves this ordering measurable at
-    /// all on such a terminal.
+    /// the terminal handshake, 15.11/14.77ms with it before, for a shell
+    /// frame that did not move (3.24/3.33ms against 3.34/3.25ms). A
+    /// terminal that never answers the probe at all gains nothing and loses
+    /// nothing (404.25ms against 404.19ms): its content was held by the
+    /// probe's own second window, not by anything nvim is doing -- a wait
+    /// `settle_probe` has since removed, which is what leaves this ordering
+    /// measurable at all on such a terminal.
+    ///
+    /// Those numbers measure the boundary this test pins -- the spawn
+    /// against the terminal handshake -- and were taken before the config
+    /// prologue moved ahead of the spawn. The prologue's own cost (one file
+    /// read of a few hundred bytes and one environment sweep) is unmeasured
+    /// since that move, so nothing here states a current end-to-end
+    /// `first_paint` figure.
     #[test]
     fn the_engine_spawn_precedes_both_halves_of_the_startup_only_this_process_needs() {
         let spawn = offset_of("startup::attach_in_background(");
@@ -1607,6 +1691,80 @@ mod tests {
                  startup waits on {cost}"
             );
         }
+    }
+
+    /// Every call `fn main` performs before the engine spawn, in source
+    /// order, paths and method calls alike.
+    ///
+    /// Deliberately unfiltered past the two things that are not calls at
+    /// all -- a `#[cfg(...)]` attribute and the keywords that take a
+    /// parenthesis -- because any filter is a hole: a read hoisted above
+    /// the spawn is exactly the thing that would have been "obviously not
+    /// worth listing".
+    fn calls_before_the_spawn() -> Vec<String> {
+        let body = startup_body();
+        let spawn = body
+            .find("startup::attach_in_background(")
+            .expect("fn main no longer spawns the engine itself");
+        let code = code_only(&body[..spawn]);
+        let bytes = code.as_bytes();
+        code.match_indices('(')
+            .filter_map(|(at, _)| {
+                let start = bytes[..at]
+                    .iter()
+                    .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b == b':'))
+                    .map_or(0, |before| before + 1);
+                let name = &code[start..at];
+                let attribute = start >= 2 && &code[start - 2..start] == "#[";
+                let keyword = matches!(name, "let" | "if" | "while" | "for" | "match" | "return");
+                (!name.is_empty() && !attribute && !keyword).then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    /// The one startup read that runs ahead of the engine spawn is the
+    /// config chain, and it is the three calls that chain takes.
+    ///
+    /// The exception is load-bearing -- `--nvim-bin` and `[engine]
+    /// nvim_bin` decide *which* editor the spawn spawns, so there is no
+    /// spawn to defer until the chain has answered -- and an exception with
+    /// no bound on it is where every later startup read ends up. Everything
+    /// else here is argument handling that reads nothing and the launch
+    /// shapes that never reach a spawn at all (`--print-clipboard`, a
+    /// refused remote, a relayed stdin), so a new entry in this list is
+    /// either one of those or a read that owes the engine's startup its
+    /// latency and must move below the spawn instead.
+    #[test]
+    fn only_the_config_prologue_runs_before_the_engine_spawn() {
+        assert_eq!(
+            calls_before_the_spawn(),
+            vec![
+                "Instant::now",
+                "vlog::init",
+                "Cli::parse",
+                "Some",
+                "print_clipboard",
+                "deny_incoherent_remote",
+                "deny_unsupported_stdin_relay",
+                "resolve_config_path",
+                "load_view_config",
+                "as_deref",
+                "resolve_session_config",
+                "clone",
+                "engine_config",
+                "remote",
+                "cloned",
+                "Some",
+                "remote_guard::deny_absent_ssh",
+                "maybe_relay_stdin",
+                "view_tui::input::adopt_terminal_stdin",
+                "vlog::log",
+                "route_stderr_off_the_terminal",
+            ],
+            "a call added before the engine spawn prepends its own latency \
+             to nvim's whole startup: move it below the spawn, or state \
+             here why it cannot run there"
+        );
     }
 
     /// The window the spawn opened: between it and `engine_result` this
@@ -1872,9 +2030,10 @@ mod tests {
     #[test]
     fn print_caps_flag_emits_exactly_one_notice() {
         let mut model = Model::new();
+        let cli = Cli::parse_from(["view", "--print-caps"]);
         let notice = caps_notice(
-            &Cli::parse_from(["view", "--print-caps"]),
-            None,
+            &cli,
+            &resolved_for(&cli).ui.tier,
             model.caps,
             CapsSource::Probed,
         )
@@ -1900,23 +2059,64 @@ mod tests {
         let cli = Cli::parse_from(["view", "--tier", "basic"]);
         let overridden = caps_notice(
             &cli,
-            resolved_for(&cli).ui.tier.value,
+            &resolved_for(&cli).ui.tier,
             model.caps,
             CapsSource::Override,
         )
         .expect("--tier implies the capability line");
         assert!(
-            overridden.contains("(tier override)"),
-            "an overridden session must not be told its capabilities were probed, got {overridden:?}"
+            overridden.contains("(--tier flag)"),
+            "an overridden session is told which layer overrode it, got {overridden:?}"
+        );
+    }
+
+    /// A tier override names the layer that set it, not the fact that one
+    /// was set: `--tier`, `VIEW_UI_TIER` and a config file are three
+    /// different things to go and change, and "tier override" is the same
+    /// word for all three.
+    #[test]
+    fn an_overridden_tier_names_the_layer_that_set_it() {
+        let model = Model::new();
+        let cli = Cli::parse_from(["view", "notes.md"]);
+        let from_env = view_native::config::resolve_with(
+            &ViewConfig::defaults(),
+            &Overrides::from(&cli),
+            &|name| (name == "VIEW_UI_TIER").then(|| "basic".to_string()),
+        );
+        let notice = caps_notice(
+            &cli,
+            &from_env.ui.tier,
+            model.caps,
+            view_tui::tiers::CapsSource::Override,
+        )
+        .expect("a resolved tier implies the capability line");
+        assert!(
+            notice.contains("(VIEW_UI_TIER)"),
+            "an environment override must name the variable, got {notice:?}"
+        );
+
+        // and a probed session says what it always said: the layer only
+        // stands in for the word `override`, never for `probed`
+        let probed = caps_notice(
+            &Cli::parse_from(["view", "--print-caps"]),
+            &from_env.ui.tier,
+            model.caps,
+            view_tui::tiers::CapsSource::Probed,
+        )
+        .expect("--print-caps asks for the capability line");
+        assert!(
+            probed.contains("(probed)"),
+            "capabilities that were probed are still probed, got {probed:?}"
         );
     }
 
     #[test]
     fn print_caps_is_silent_without_the_flag() {
         let model = Model::new();
+        let cli = Cli::parse_from(["view", "notes.md"]);
         let notice = caps_notice(
-            &Cli::parse_from(["view", "notes.md"]),
-            None,
+            &cli,
+            &resolved_for(&cli).ui.tier,
             model.caps,
             CapsSource::Probed,
         );

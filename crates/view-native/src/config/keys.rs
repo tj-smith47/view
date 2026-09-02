@@ -32,16 +32,21 @@ pub struct ConfigKey {
     pub derived: Option<&'static str>,
 }
 
-/// Every key any crate in this build reads, in the order the shipped
-/// example lists them: `[ui]`, `[engine]`, `[native]`, `[supervision]`,
-/// `[ai]`.
+/// Every key a user may set in `view.toml`, grouped by table:
+/// `[ui]`, `[engine]`, `[native]`, `[keys]`, `[supervision]`, `[ai]`,
+/// `[ai.review]`.
 ///
-/// Thirteen rows, and the count is a contract rather than an accident:
-/// eleven of them are resolved by this crate ([`super::ResolvedConfig::rows`]
-/// is that walk), and the two `[ai]` rows are metadata only -- that table
-/// is parsed and resolved by the crate that owns it, and the bin holds the
-/// two to each other, because `view-native` and `view-ai` may not name each
-/// other's types.
+/// The scope is the shipped example's own: every key that file documents
+/// has a row here, and a row here is a key that file documents
+/// (`the_registry_and_the_example_document_the_same_keys` compares the two
+/// sets, so neither can grow alone).
+///
+/// The split between the two resolvers is a contract rather than an
+/// accident: the rows whose table this crate parses are answered by
+/// [`super::ResolvedConfig::rows`], and the `[ai]`/`[ai.review]` rows are
+/// metadata only -- that table is parsed and resolved by the crate that
+/// owns it, and the bin holds the two to each other, because `view-native`
+/// and `view-ai` may not name each other's types.
 #[must_use]
 pub fn keys() -> &'static [ConfigKey] {
     static KEYS: OnceLock<Vec<ConfigKey>> = OnceLock::new();
@@ -90,30 +95,74 @@ pub fn keys() -> &'static [ConfigKey] {
             flag: None,
             derived: Some("true"),
         }));
-        rows.push(ConfigKey {
-            table: "supervision",
-            key: "auto_restart",
-            flag: None,
-            derived: Some("true"),
-        });
-        rows.push(ConfigKey {
-            table: "ai",
-            key: "enabled",
-            flag: None,
-            derived: Some("true"),
-        });
-        rows.push(ConfigKey {
-            table: "ai",
-            key: "agent",
-            flag: None,
-            derived: Some("claude-code"),
-        });
+        rows.extend([
+            ConfigKey {
+                table: "native",
+                key: "tree_width",
+                flag: None,
+                derived: Some("30"),
+            },
+            ConfigKey {
+                table: "keys",
+                key: "sidebar_wider",
+                flag: None,
+                derived: Some("<S-Right>, <C-w>>"),
+            },
+            ConfigKey {
+                table: "keys",
+                key: "sidebar_narrower",
+                flag: None,
+                derived: Some("<S-Left>, <C-w><lt>"),
+            },
+            ConfigKey {
+                table: "keys",
+                key: "composer_newline",
+                flag: None,
+                derived: Some("<S-CR>, <M-CR>"),
+            },
+            ConfigKey {
+                table: "supervision",
+                key: "auto_restart",
+                flag: None,
+                derived: Some("true"),
+            },
+            ConfigKey {
+                table: "ai",
+                key: "enabled",
+                flag: None,
+                derived: Some("true"),
+            },
+            ConfigKey {
+                table: "ai",
+                key: "agent",
+                flag: None,
+                derived: Some("claude-code"),
+            },
+            ConfigKey {
+                table: "ai",
+                key: "panel_width",
+                flag: None,
+                derived: Some("30"),
+            },
+            ConfigKey {
+                table: "ai.review",
+                key: "open_target",
+                flag: None,
+                derived: Some("current"),
+            },
+        ]);
         rows
     })
 }
 
 /// The environment variable name for a key, derived from its own path so
 /// the two can never disagree: `[native] picker` is `VIEW_NATIVE_PICKER`.
+///
+/// A nested table nests the same way the file spells it, with the dot that
+/// separates its segments written as the underscore that separates every
+/// other segment of the name: `[ai.review] open_target` is
+/// `VIEW_AI_REVIEW_OPEN_TARGET`, exactly as if the table were spelled
+/// `[ai_review]`. Nesting deeper adds a segment and nothing else.
 ///
 /// The `VIEW_*` namespace carries members that are not config at all
 /// (`VIEW_LOG`, and the harness's own names), so a resolver claims exactly
@@ -122,7 +171,7 @@ pub fn keys() -> &'static [ConfigKey] {
 pub fn env_name(key: &ConfigKey) -> String {
     format!(
         "VIEW_{}_{}",
-        key.table.to_uppercase(),
+        key.table.replace('.', "_").to_uppercase(),
         key.key.to_uppercase()
     )
 }
@@ -135,15 +184,89 @@ mod tests {
 
     use super::*;
 
+    /// The shipped example, embedded for the reason the loader's own copy
+    /// of this constant states: a moved example is a build failure rather
+    /// than a runtime read error.
+    const EXAMPLE_TOML: &str = include_str!("../../../../view.toml.example");
+
+    /// Every `table.key` pair the shipped example documents, live blocks and
+    /// commented-out ones alike -- a key a user is shown is a key a user
+    /// will set, whether or not this build reads its table yet.
+    ///
+    /// A commented line is read exactly like a live one after its leading
+    /// `#` comes off, which is what lets the `[ui]`/`[engine]` blocks count.
+    /// Prose in the same comment column is told apart by shape rather than
+    /// by position: only a line whose whole text before the first `=` is one
+    /// bare identifier is a key, so `agent = ["mycli", "--acp"]` inside a
+    /// sentence stays prose.
+    fn example_keys() -> BTreeSet<(String, String)> {
+        let mut table = String::new();
+        let mut found = BTreeSet::new();
+        for line in EXAMPLE_TOML.lines() {
+            let trimmed = line.trim();
+            let body = trimmed
+                .strip_prefix('#')
+                .map_or(trimmed, |rest| rest.trim_start());
+            if let Some(name) = body.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+                table = name.to_string();
+                continue;
+            }
+            let Some((key, _)) = body.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            if table.is_empty() || key.is_empty() {
+                continue;
+            }
+            if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                found.insert((table.clone(), key.to_string()));
+            }
+        }
+        found
+    }
+
+    /// The registry and the shipped example are the same set of keys, in
+    /// both directions and without a count written down anywhere: a key
+    /// documented for a user with no row here has no environment name and no
+    /// provenance row, and a row here the example never shows is a knob
+    /// nobody can find.
     #[test]
-    fn the_registry_carries_every_key_the_example_ships() {
-        assert_eq!(keys().len(), 13, "thirteen keys, five tables");
+    fn the_registry_and_the_example_document_the_same_keys() {
+        let registered: BTreeSet<(String, String)> = keys()
+            .iter()
+            .map(|row| (row.table.to_string(), row.key.to_string()))
+            .collect();
+        assert_eq!(
+            registered,
+            example_keys(),
+            "the registry and view.toml.example must document the same keys"
+        );
+    }
+
+    #[test]
+    fn the_rows_are_grouped_by_table() {
         let mut tables: Vec<&str> = keys().iter().map(|row| row.table).collect();
         tables.dedup();
+        let mut once = tables.clone();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(
+            tables.len(),
+            once.len(),
+            "a table's rows must be contiguous: {tables:?}"
+        );
         assert_eq!(
             tables,
-            vec!["ui", "engine", "native", "supervision", "ai"],
-            "the rows run in the order the shipped example lists the tables"
+            vec![
+                "ui",
+                "engine",
+                "native",
+                "keys",
+                "supervision",
+                "ai",
+                "ai.review"
+            ],
+            "the flag-bearing tables lead, then the file's own, then the sibling crate's"
         );
     }
 
@@ -154,9 +277,14 @@ mod tests {
             .filter(|row| row.table == "native")
             .map(|row| row.key)
             .collect();
-        let features: Vec<&str> = registry::features().iter().map(|f| f.id).collect();
+        // the switches walked from the registry, then the one `[native]`
+        // key that is not a switch -- so a feature this build ships is a
+        // config key by construction, and nothing else can slip in beside
+        // them unnoticed
+        let mut expected: Vec<&str> = registry::features().iter().map(|f| f.id).collect();
+        expected.push("tree_width");
         assert_eq!(
-            registered, features,
+            registered, expected,
             "a feature this build ships is a config key, in the registry's own order"
         );
     }
@@ -172,7 +300,8 @@ mod tests {
             );
             assert!(name.starts_with("VIEW_"), "{name} is outside the namespace");
             assert!(
-                name.contains(&row.table.to_uppercase()) && name.contains(&row.key.to_uppercase()),
+                name.contains(&row.table.replace('.', "_").to_uppercase())
+                    && name.contains(&row.key.to_uppercase()),
                 "{name} does not spell {}.{}",
                 row.table,
                 row.key
@@ -183,13 +312,18 @@ mod tests {
                 "{name} is not an environment variable name"
             );
         }
-        // the three the plan names outright, so a rewrite of the derivation
-        // that still passes the shape checks above cannot rename them
+        // the names spelled out elsewhere -- the plan's three, and the
+        // nested table, whose dot is the one part of the derivation a shape
+        // check cannot pin
         let spelled: Vec<String> = keys().iter().map(env_name).collect();
         for expected in [
             "VIEW_UI_TIER",
             "VIEW_NATIVE_PICKER",
+            "VIEW_NATIVE_TREE_WIDTH",
+            "VIEW_KEYS_SIDEBAR_WIDER",
             "VIEW_SUPERVISION_AUTO_RESTART",
+            "VIEW_AI_PANEL_WIDTH",
+            "VIEW_AI_REVIEW_OPEN_TARGET",
         ] {
             assert!(
                 spelled.iter().any(|name| name == expected),

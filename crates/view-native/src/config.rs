@@ -1,7 +1,16 @@
-//! The tables of `view.toml` this build reads: `[native]`, which native
-//! features a user has turned off, `[supervision]`, how far view may go
-//! on its own to recover a failed engine, and `[keys]`, which keys resize
-//! the sidebars.
+//! Config: the key registry, the file this build parses, and the
+//! precedence chain that turns the two into one answer per key.
+//!
+//! Three parts, in the order a value travels them. [`keys`] is the
+//! registry -- every key a user may set, as plain data, which is what the
+//! environment names, the flag mapping and the doctor's provenance rows are
+//! all generated from rather than transcribed. This file is the parse: the
+//! tables of `view.toml` this build reads, `[native]` for the native
+//! features a user has turned off, `[keys]` for which keys resize the
+//! sidebars, and `[supervision]` for how far view may go on its own to
+//! recover a failed engine. [`resolve`] is the chain, which layers a flag
+//! over an environment variable over that parse over view's own answer, and
+//! carries the layer each answer came from.
 //!
 //! An absent or empty file is the full experience, so every resolution path
 //! that finds nothing to read answers `all_enabled()` rather than failing.
@@ -86,9 +95,14 @@ struct ViewFile {
 /// spells no feature is refused by [`NativeConfig::from_parsed`]'s registry
 /// check (bool-valued) or by the visitor below (anything else), and both
 /// name the key.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 struct NativeTable {
-    tree_width: u16,
+    /// Optional rather than defaulted, for the reason
+    /// [`SupervisionTable`]'s own field states: a document that spelled the
+    /// default and one that left the key out resolve to the same width, and
+    /// only one of them is the *file's* answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree_width: Option<u16>,
     /// Never part of the file's own shape -- a resolution detail this
     /// struct carries to its reader -- so it stays out of the rendered
     /// TOML the example's drift guard reads.
@@ -96,16 +110,6 @@ struct NativeTable {
     tree_width_notice: Option<&'static str>,
     #[serde(flatten)]
     features: BTreeMap<String, bool>,
-}
-
-impl Default for NativeTable {
-    fn default() -> Self {
-        Self {
-            tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
-            tree_width_notice: None,
-            features: BTreeMap::new(),
-        }
-    }
 }
 
 /// The one `[native]` key that is not a feature switch.
@@ -157,7 +161,7 @@ impl<'de> serde::de::Visitor<'de> for NativeTableVisitor {
         while let Some(key) = map.next_key::<String>()? {
             if key == TREE_WIDTH_KEY {
                 let (width, notice) = resolve_tree_width(&map.next_value::<toml::Value>()?);
-                table.tree_width = width;
+                table.tree_width = Some(width);
                 table.tree_width_notice = notice;
                 continue;
             }
@@ -489,7 +493,10 @@ impl NativeConfig {
             disabled,
             // already resolved and clamped where the value was read, so the
             // number here is the number the tree opens at
-            tree_width: file.native.tree_width,
+            tree_width: file
+                .native
+                .tree_width
+                .unwrap_or(geometry::DEFAULT_PANEL_WIDTH_PCT),
             tree_width_notice: file.native.tree_width_notice,
         })
     }
@@ -576,13 +583,30 @@ pub fn ext_surfaces(cfg: &NativeConfig) -> Vec<Ext> {
 ///
 /// Only keys the registry carries: a `[native]` key that names no feature
 /// has already failed the parse by the time this runs, and a table this
-/// crate does not read has no key to attribute.
+/// crate does not read has no key to attribute. Every key of every table
+/// this crate *does* read owes an entry here --
+/// `every_key_this_crate_parses_records_whether_the_file_spelled_it` walks
+/// the registry against [`ViewFile`]'s own rendered shape, so a table
+/// gaining a loader gains this obligation mechanically rather than by
+/// somebody remembering.
 fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     let mut spelled: Vec<(&'static str, &'static str)> = registry::features()
         .iter()
         .filter(|feature| file.native.features.contains_key(feature.id))
         .map(|feature| ("native", feature.id))
         .collect();
+    if file.native.tree_width.is_some() {
+        spelled.push(("native", TREE_WIDTH_KEY));
+    }
+    for (key, value) in [
+        ("sidebar_wider", &file.keys.sidebar_wider),
+        ("sidebar_narrower", &file.keys.sidebar_narrower),
+        ("composer_newline", &file.keys.composer_newline),
+    ] {
+        if value.is_some() {
+            spelled.push(("keys", key));
+        }
+    }
     if file.supervision.auto_restart.is_some() {
         spelled.push(("supervision", "auto_restart"));
     }
@@ -837,6 +861,58 @@ mod tests {
                 "this crate reads [{name}], which spec section 11 does not specify"
             );
         }
+    }
+
+    /// A document spelling exactly one key, at a value that key accepts.
+    ///
+    /// A key whose table this crate reads and whose shape is not covered
+    /// here fails loudly rather than silently: the walk below is the point,
+    /// and a fixture it cannot build is a key nobody has taught it about.
+    fn document_spelling(table: &str, key: &str) -> String {
+        let value = match (table, key) {
+            ("native", TREE_WIDTH_KEY) => "25",
+            ("native", _) => "false",
+            ("keys", _) => "[\"<C-w>>\"]",
+            ("supervision", _) => "false",
+            _ => panic!("no fixture value for [{table}] {key}; teach this walk its shape"),
+        };
+        format!("[{table}]\n{key} = {value}\n")
+    }
+
+    /// Every registry key whose table this crate parses is a key whose
+    /// spelling the parse records, so the resolver can tell "your file said
+    /// so" from "view did" for all of them and not merely for the ones
+    /// somebody wired by hand.
+    ///
+    /// The domain is derived, not listed: `loaded_tables` is `ViewFile`'s
+    /// own rendered shape, so a table gaining a field here joins this walk
+    /// in the same edit, and its keys must reach `spelled_keys` before the
+    /// suite is green again.
+    #[test]
+    fn every_key_this_crate_parses_records_whether_the_file_spelled_it() {
+        let loaded = loaded_tables();
+        let walked = keys()
+            .iter()
+            .filter(|row| loaded.contains(row.table))
+            .inspect(|row| {
+                let document = document_spelling(row.table, row.key);
+                let cfg = ViewConfig::from_toml_str(&document)
+                    .unwrap_or_else(|e| panic!("[{}] {} fixture: {e}", row.table, row.key));
+                assert!(
+                    cfg.spells(row.table, row.key),
+                    "[{}] {} is parsed here but its spelling is not recorded",
+                    row.table,
+                    row.key
+                );
+                assert!(
+                    !ViewConfig::defaults().spells(row.table, row.key),
+                    "[{}] {} reads as spelled in a document that never mentions it",
+                    row.table,
+                    row.key
+                );
+            })
+            .count();
+        assert!(walked > 0, "the walk must reach at least one key");
     }
 
     #[test]

@@ -118,6 +118,31 @@ impl KeyBindings {
         true
     }
 
+    /// The keys `action` answers to, each written back as one notation --
+    /// a chord as the two halves it was split from, joined (`<C-w>` plus
+    /// `>` is `<C-w>>`).
+    ///
+    /// The canonical spelling rather than the user's: `<` is written back
+    /// as nvim writes it (`<lt>`), which [`rebind`](Self::rebind) reads
+    /// again as the same key. A report that shows a user which keys an
+    /// action answers to has no other source for the answer -- the
+    /// bindings are the only place the resolved set lives.
+    #[must_use]
+    pub fn spellings(&self, action: Action) -> Vec<String> {
+        let bindings = match action {
+            Action::Resize(Direction::Wider) => &self.wider,
+            Action::Resize(Direction::Narrower) => &self.narrower,
+            Action::ComposerNewline => &self.composer_newline,
+        };
+        bindings
+            .iter()
+            .map(|(first, second)| match second {
+                Some(follower) => format!("{first}{follower}"),
+                None => first.clone(),
+            })
+            .collect()
+    }
+
     /// The binding list `action` resolves from, so a rebind and a resolve
     /// cannot come to disagree about which list an action owns.
     fn keys_for(&mut self, action: Action) -> &mut Vec<Binding> {
@@ -257,6 +282,39 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// What a report shows for an action is the set the resolver actually
+    /// answers, written in the notation `rebind` reads back -- so a
+    /// spelling shown to a user is one they can paste into `view.toml` and
+    /// get the binding they were looking at.
+    #[test]
+    fn every_spelling_written_back_rebinds_to_the_same_action() {
+        for action in [
+            Action::Resize(Direction::Wider),
+            Action::Resize(Direction::Narrower),
+            Action::ComposerNewline,
+        ] {
+            let defaults = KeyBindings::default();
+            let written = defaults.spellings(action);
+            assert!(!written.is_empty(), "{action:?} answers to no key at all");
+
+            let mut round_tripped = KeyBindings::default();
+            assert!(
+                round_tripped.rebind(action, &written),
+                "{action:?} writes back {written:?}, which is not readable as keys"
+            );
+            assert_eq!(
+                round_tripped.spellings(action),
+                written,
+                "{action:?} does not survive its own notation"
+            );
+        }
+        assert_eq!(
+            KeyBindings::default().spellings(Action::Resize(Direction::Narrower)),
+            vec!["<S-Left>".to_string(), "<C-w><lt>".to_string()],
+            "a chord is written as its two halves joined, `<` as nvim writes it"
+        );
+    }
 
     #[test]
     fn the_defaults_are_the_shifted_arrows_and_nvims_own_window_chord() {

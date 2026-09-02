@@ -10,42 +10,18 @@
 
 use std::path::PathBuf;
 
+pub use view_core::config::Source;
+use view_core::config::{BOOL_EXPECTED, KEYS_EXPECTED, TIER_EXPECTED, WIDTH_EXPECTED};
 use view_core::model::Tier;
+use view_core::native::geometry;
+use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::registry;
 
 use super::keys::{env_name, keys, ConfigKey};
-use super::{NativeConfig, SupervisionConfig, ViewConfig};
-
-/// Where a resolved value came from, in the precedence order the spec
-/// states: a command-line flag beats an environment variable, which beats
-/// the config file, which beats the value view derives on its own.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    /// A flag on this invocation's command line.
-    Flag,
-    /// A `VIEW_*` variable the registry generates the name of.
-    Env,
-    /// The `view.toml` this session read.
-    File,
-    /// Nothing named it, so view answered for itself.
-    Derived,
-}
-
-impl Source {
-    /// The word a report prints for this layer.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Flag => "flag",
-            Self::Env => "environment",
-            Self::File => "config file",
-            Self::Derived => "derived",
-        }
-    }
-}
+use super::{KeysConfig, NativeConfig, SupervisionConfig, ViewConfig};
 
 /// One resolved answer and the reason it is that answer.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved<T> {
     /// What the key resolved to.
@@ -111,6 +87,7 @@ pub struct Overrides {
 }
 
 /// The `[ui]` table's resolved answers.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedUi {
     /// Which tier to render at, or `None` for the terminal's own answer.
@@ -121,6 +98,7 @@ pub struct ResolvedUi {
 }
 
 /// The `[engine]` table's resolved answers.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedEngine {
     /// The editor to spawn, or `None` for the bundled layout beside this
@@ -135,6 +113,7 @@ pub struct ResolvedEngine {
 }
 
 /// Every key this crate resolves, each with the reason it is that answer.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     /// The `[ui]` answers.
@@ -146,12 +125,46 @@ pub struct ResolvedConfig {
     /// rather than a value per key, so a consumer that already takes a
     /// [`ViewConfig`] keeps taking one.
     pub tables: ViewConfig,
+    /// One line per environment value view could not read, in the order the
+    /// registry lists the keys they were set for. The file layer already
+    /// owes a user a notice for a value it had to discard, and an
+    /// environment that silently stopped applying is the same mistake with
+    /// less to look at.
+    notices: Vec<String>,
     /// Where each feature's switch came from, in `registry::features()`
     /// order.
     native: Vec<Source>,
+    /// Where `[native] tree_width` came from.
+    tree_width: Source,
+    /// Where each `[keys]` action's bindings came from, in [`KEY_ACTIONS`]
+    /// order.
+    keys: [Source; KEY_ACTIONS.len()],
     /// Where `[supervision] auto_restart` came from.
     supervision: Source,
+    /// The `NVIM_APPNAME` this process already carries, which is what an
+    /// unset `[engine] appname` resolves to in the child. Captured here
+    /// rather than read at render time so a report is a statement about the
+    /// session it describes.
+    inherited_appname: Option<String>,
 }
+
+/// The profile nvim runs under when nothing names one, and therefore what
+/// an inherited-and-unset `[engine] appname` resolves to.
+const DEFAULT_APPNAME: &str = "nvim";
+
+/// The one name outside the `VIEW_*` namespace this resolver reads, and it
+/// reads it to *report* rather than to decide: an absent `[engine] appname`
+/// means the child inherits, and a report that printed nothing there would
+/// leave a user to go find out what it inherited.
+const INHERITED_APPNAME_ENV: &str = "NVIM_APPNAME";
+
+/// The `[keys]` actions, each beside the key that names it, in the order
+/// the registry lists them.
+const KEY_ACTIONS: [(&str, Action); 3] = [
+    ("sidebar_wider", Action::Resize(Direction::Wider)),
+    ("sidebar_narrower", Action::Resize(Direction::Narrower)),
+    ("composer_newline", Action::ComposerNewline),
+];
 
 /// Resolves every key against the process environment.
 #[must_use]
@@ -170,6 +183,7 @@ pub fn resolve_with(
     flags: &Overrides,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> ResolvedConfig {
+    let mut notices = Vec::new();
     let ui = ResolvedUi {
         // `[ui]` and `[engine]` are not tables `ViewFile` carries, so there
         // is nothing between the environment and the derived answer for
@@ -177,13 +191,13 @@ pub fn resolve_with(
         // every other key runs through
         tier: layer(
             flags.tier.map(Some),
-            env_value(env, "ui", "tier").and_then(|value| parse_tier(&value)),
+            env_read(env, "ui", "tier", TIER_EXPECTED, parse_tier, &mut notices),
             None,
             None,
         ),
         theme: layer(
             flags.theme.as_deref().map(parse_theme),
-            env_value(env, "ui", "theme").map(|value| parse_theme(&value)),
+            env_read(env, "ui", "theme", "", always(parse_theme), &mut notices),
             None,
             None,
         ),
@@ -191,19 +205,40 @@ pub fn resolve_with(
     let engine = ResolvedEngine {
         nvim_bin: layer(
             flags.nvim_bin.clone().map(Some),
-            env_value(env, "engine", "nvim_bin").map(|value| parse_nvim_bin(&value)),
+            env_read(
+                env,
+                "engine",
+                "nvim_bin",
+                "",
+                always(parse_nvim_bin),
+                &mut notices,
+            ),
             None,
             None,
         ),
         appname: layer(
             flags.appname.clone().map(Some),
-            env_value(env, "engine", "appname").map(Some),
+            env_read(
+                env,
+                "engine",
+                "appname",
+                "",
+                always(|value| Some(value.to_string())),
+                &mut notices,
+            ),
             None,
             None,
         ),
         single_grid: layer(
             flags.single_grid,
-            env_value(env, "engine", "single_grid").and_then(|value| parse_bool(&value)),
+            env_read(
+                env,
+                "engine",
+                "single_grid",
+                BOOL_EXPECTED,
+                parse_bool,
+                &mut notices,
+            ),
             None,
             false,
         ),
@@ -213,7 +248,14 @@ pub fn resolve_with(
     for feature in registry::features() {
         let switch = layer(
             None,
-            env_value(env, "native", feature.id).and_then(|value| parse_bool(&value)),
+            env_read(
+                env,
+                "native",
+                feature.id,
+                BOOL_EXPECTED,
+                parse_bool,
+                &mut notices,
+            ),
             file.spells("native", feature.id)
                 .then(|| !file.native.disabled.contains(&feature.id)),
             true,
@@ -223,9 +265,31 @@ pub fn resolve_with(
         }
         native.push(switch.source);
     }
+    let tree_width = layer(
+        None,
+        env_read(
+            env,
+            "native",
+            "tree_width",
+            WIDTH_EXPECTED,
+            parse_width,
+            &mut notices,
+        ),
+        file.spells("native", "tree_width")
+            .then_some(file.native.tree_width),
+        geometry::DEFAULT_PANEL_WIDTH_PCT,
+    );
+    let (bindings, key_sources) = resolve_keys(file, env, &mut notices);
     let auto_restart = layer(
         None,
-        env_value(env, "supervision", "auto_restart").and_then(|value| parse_bool(&value)),
+        env_read(
+            env,
+            "supervision",
+            "auto_restart",
+            BOOL_EXPECTED,
+            parse_bool,
+            &mut notices,
+        ),
         file.spells("supervision", "auto_restart")
             .then_some(file.supervision.auto_restart),
         SupervisionConfig::default().auto_restart,
@@ -236,21 +300,58 @@ pub fn resolve_with(
         tables: ViewConfig {
             native: NativeConfig {
                 disabled,
-                // a width and a key binding are the file's alone: neither is
-                // a registry key, so neither has a layer above the file to
-                // lose to
-                tree_width: file.native.tree_width,
+                tree_width: tree_width.value,
+                // the file layer's own notice, which an environment value
+                // above it neither answers for nor silences: a mistyped
+                // `tree_width` is still a mistyped `tree_width`
                 tree_width_notice: file.native.tree_width_notice,
             },
             supervision: SupervisionConfig {
                 auto_restart: auto_restart.value,
             },
-            keys: file.keys.clone(),
+            keys: KeysConfig {
+                bindings,
+                notices: file.keys.notices().to_vec(),
+            },
             spelled: file.spelled.clone(),
         },
+        notices,
         native,
+        tree_width: tree_width.source,
+        keys: key_sources,
         supervision: auto_restart.source,
+        inherited_appname: env(INHERITED_APPNAME_ENV).filter(|name| !name.is_empty()),
     }
+}
+
+/// The `[keys]` bindings every layer has had its say over, and where each
+/// action's own answer came from.
+///
+/// The file's bindings are the base rather than a value the chain picks
+/// between, because an action the environment names replaces only that
+/// action: the same all-or-nothing-per-action rule the file layer already
+/// resolves under, one layer up.
+fn resolve_keys(
+    file: &ViewConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+    notices: &mut Vec<String>,
+) -> (KeyBindings, [Source; KEY_ACTIONS.len()]) {
+    let mut bindings = file.keys.bindings().clone();
+    let mut sources = [Source::Derived; KEY_ACTIONS.len()];
+    for (index, (key, action)) in KEY_ACTIONS.into_iter().enumerate() {
+        if file.spells("keys", key) {
+            sources[index] = Source::File;
+        }
+        let Some(spellings) = env_read(env, "keys", key, KEYS_EXPECTED, parse_keys, notices) else {
+            continue;
+        };
+        if bindings.rebind(action, &spellings) {
+            sources[index] = Source::Env;
+        } else {
+            notices.push(discarded("keys", key, &spellings.join(" "), KEYS_EXPECTED));
+        }
+    }
+    (bindings, sources)
 }
 
 impl ResolvedConfig {
@@ -258,15 +359,23 @@ impl ResolvedConfig {
     /// came from, in registry order. The doctor's config section is this
     /// walk; nothing re-derives the list.
     ///
-    /// Eleven rows, not the registry's thirteen: the `[ai]` pair is parsed
-    /// and resolved by the crate that owns that table, and a caller that
-    /// can name both crates appends its answers to these.
+    /// Every registry row whose table is not `[ai]`, and no others: that
+    /// table is parsed and resolved by the crate that owns it, and a caller
+    /// that can name both crates appends its answers to these.
     #[must_use]
     pub fn rows(&self) -> Vec<(&'static ConfigKey, String, Source)> {
         keys()
             .iter()
             .filter_map(|key| self.answer(key).map(|(value, source)| (key, value, source)))
             .collect()
+    }
+
+    /// One line per environment value this session could not read. Empty
+    /// whenever every `VIEW_*` in play said something view understood,
+    /// which is the ordinary case.
+    #[must_use]
+    pub fn notices(&self) -> &[String] {
+        &self.notices
     }
 
     /// One key's rendered value and layer, or `None` for a key another
@@ -294,13 +403,36 @@ impl ResolvedConfig {
                 self.engine.nvim_bin.source,
             ),
             ("engine", "appname") => (
-                self.engine.appname.value.clone().unwrap_or_default(),
+                // an absent choice still runs the child under *some*
+                // profile, and the profile it runs under is the answer a
+                // report owes -- an empty cell would read as "no appname",
+                // which is not a state nvim has
+                self.engine
+                    .appname
+                    .value
+                    .clone()
+                    .or_else(|| self.inherited_appname.clone())
+                    .unwrap_or_else(|| DEFAULT_APPNAME.to_string()),
                 self.engine.appname.source,
             ),
             ("engine", "single_grid") => (
                 self.engine.single_grid.value.to_string(),
                 self.engine.single_grid.source,
             ),
+            ("native", "tree_width") => {
+                (self.tables.native.tree_width.to_string(), self.tree_width)
+            }
+            ("keys", name) => {
+                let index = KEY_ACTIONS.iter().position(|(key, _)| *key == name)?;
+                (
+                    self.tables
+                        .keys
+                        .bindings()
+                        .spellings(KEY_ACTIONS[index].1)
+                        .join(", "),
+                    self.keys[index],
+                )
+            }
             ("native", id) => (
                 (!self.tables.native.disabled.contains(&id)).to_string(),
                 *self
@@ -341,6 +473,46 @@ fn layer<T>(flag: Option<T>, env: Option<T>, file: Option<T>, derived: T) -> Res
         value: derived,
         source: Source::Derived,
     }
+}
+
+/// One key's environment value read through `parse`, and a notice for a
+/// value `parse` would not have.
+///
+/// A value view cannot read never fails the session -- an environment is as
+/// easy to mistype as a `tree_width`, and neither is a reason to refuse to
+/// open a file -- but it never falls through in silence either: the layer
+/// below answering while a user watches their own `VIEW_*` do nothing is
+/// the shape a notice exists for.
+fn env_read<T>(
+    env: &dyn Fn(&str) -> Option<String>,
+    table: &str,
+    key: &str,
+    expected: &str,
+    parse: impl Fn(&str) -> Option<T>,
+    notices: &mut Vec<String>,
+) -> Option<T> {
+    let raw = env_value(env, table, key)?;
+    let parsed = parse(&raw);
+    if parsed.is_none() {
+        notices.push(discarded(table, key, &raw, expected));
+    }
+    parsed
+}
+
+/// One key's discarded-value notice, with the environment name taken from
+/// the key's own registry row rather than restated.
+fn discarded(table: &str, key: &str, value: &str, expected: &str) -> String {
+    let name = keys()
+        .iter()
+        .find(|row| row.table == table && row.key == key)
+        .map_or_else(String::new, env_name);
+    view_core::config::discarded_env(&name, value, expected, table, key)
+}
+
+/// A parse that cannot fail, in the shape [`env_read`] takes: the value is
+/// always read, and what it reads *to* may still be the absence of a choice.
+fn always<T>(parse: impl Fn(&str) -> T) -> impl Fn(&str) -> Option<T> {
+    move |value| Some(parse(value))
 }
 
 /// What the environment says about one key, or `None` when it says
@@ -396,6 +568,23 @@ fn parse_theme(value: &str) -> Option<String> {
     (value != "auto").then(|| value.to_string())
 }
 
+/// A sidebar width, clamped the way the file layer clamps one, or `None`
+/// for text that is not a whole number -- which falls through to the layer
+/// below, for the reason [`parse_bool`] states. A number outside the range
+/// is not that case: it resolves at the nearest end, exactly as a
+/// `view.toml` asking for 5 or 95 does.
+fn parse_width(value: &str) -> Option<u16> {
+    value.parse::<i64>().ok().map(geometry::clamp_panel_width)
+}
+
+/// The key notations a value names, split on whitespace -- the one
+/// separator a key notation can never contain, which is what lets a list
+/// live in a variable that holds no lists. Whether the notations name keys
+/// this build can match is [`KeyBindings::rebind`]'s answer, not this one.
+fn parse_keys(value: &str) -> Option<Vec<String>> {
+    Some(value.split_whitespace().map(str::to_string).collect())
+}
+
 /// The editor a value names, or `None` for the word that names the layout
 /// beside this executable -- which is the same absence-of-a-choice the
 /// `[ui]` keys spell `auto`.
@@ -415,6 +604,12 @@ mod tests {
         None
     }
 
+    /// Whether a row belongs to the table the sibling crate owns, nested
+    /// sub-tables included.
+    fn is_ai(row: &ConfigKey) -> bool {
+        row.table == "ai" || row.table.starts_with("ai.")
+    }
+
     /// An environment carrying a legal value for every key this crate
     /// resolves, so a test that must show a layer being *suppressed* has
     /// something to suppress.
@@ -432,6 +627,8 @@ mod tests {
             ("ui", "theme") => "gruvbox",
             ("engine", "nvim_bin") => "/opt/nvim/bin/nvim",
             ("engine", "appname") => "work",
+            ("native", "tree_width") => "40",
+            ("keys", _) => "<C-w>>",
             _ => "false",
         }
     }
@@ -457,6 +654,13 @@ mod tests {
     /// `Source` -- since a chain that is right for the wrong reason
     /// answers with the right value from the wrong layer, and only the
     /// provenance can tell the two apart.
+    ///
+    /// The one adjacency no key can show today is flag-beats-file: every
+    /// flag this build accepts names a `[ui]` or `[engine]` key, and
+    /// neither table is one `ViewFile` parses. The first key that has both
+    /// -- `[engine] nvim_bin` once that table gets its loader -- owes this
+    /// test a fourth arm; nothing fails until then, which is what this
+    /// paragraph is for.
     #[test]
     fn flag_beats_env_beats_file_beats_derived() {
         let file = ViewConfig::from_toml_str("[supervision]\nauto_restart = true\n")
@@ -533,17 +737,27 @@ mod tests {
                 key.table,
                 key.key
             );
-            assert!(
-                !value.is_empty() || key.derived.is_none(),
-                "[{}] {} renders nothing, yet claims a derived value of {:?}",
-                key.table,
-                key.key,
-                key.derived
-            );
+            // the registry's own statement of the default, held to what the
+            // resolver actually answers -- so the text a user reads in the
+            // doctor's `derived` column and the text the chain produces are
+            // one fact, not two that drift
+            match key.derived {
+                Some(stated) => assert_eq!(
+                    value, stated,
+                    "[{}] {} states a derived default the chain does not produce",
+                    key.table, key.key
+                ),
+                None => assert!(
+                    !value.is_empty(),
+                    "[{}] {} renders nothing and states no derived default either",
+                    key.table,
+                    key.key
+                ),
+            }
         }
         // the `[ai]` rows are resolved a crate away, so what this crate can
         // hold them to is the registry's own statement of their defaults
-        for key in keys().iter().filter(|key| key.table == "ai") {
+        for key in keys().iter().filter(|key| is_ai(key)) {
             assert!(
                 key.derived.is_some(),
                 "[{}] {} is required, and no key may be",
@@ -612,7 +826,7 @@ mod tests {
     /// answer forever, with nothing to say so.
     #[test]
     fn every_resolved_key_reads_its_own_environment_name() {
-        for key in keys().iter().filter(|key| key.table != "ai") {
+        for key in keys().iter().filter(|key| !is_ai(key)) {
             let name = env_name(key);
             let env = |asked: &str| (asked == name).then(|| env_fixture(key).to_string());
             let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env);
@@ -643,9 +857,18 @@ mod tests {
         };
         let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env);
         let generated: Vec<String> = keys().iter().map(env_name).collect();
+        // the claim is over the `VIEW_*` namespace, which is the one the
+        // registry generates into and the one a user's other `VIEW_*` names
+        // live in. A name outside it is another program's vocabulary, and
+        // the resolver reads exactly one such name -- `NVIM_APPNAME`, to
+        // report the profile an unset `[engine] appname` inherits, never to
+        // decide anything
         for name in asked.borrow().iter() {
+            if name == INHERITED_APPNAME_ENV {
+                continue;
+            }
             assert!(
-                generated.contains(name),
+                name.starts_with("VIEW_") && generated.contains(name),
                 "the resolver read {name}, which no registry row generates"
             );
         }
@@ -706,14 +929,17 @@ mod tests {
             .collect();
         let owed: Vec<(&str, &str)> = keys()
             .iter()
-            .filter(|key| key.table != "ai")
+            .filter(|key| !is_ai(key))
             .map(|key| (key.table, key.key))
             .collect();
         assert_eq!(
             answered, owed,
-            "every registry key but the two `view-ai` resolves owes a row here"
+            "every registry key but the ones `view-ai` resolves owes a row here"
         );
-        assert_eq!(answered.len(), 11, "eleven rows, thirteen keys");
+        assert!(
+            answered.len() < keys().len(),
+            "the `[ai]` rows are another crate's to answer"
+        );
     }
 
     #[test]
@@ -736,6 +962,45 @@ mod tests {
             Source::Derived,
             "and text that names no tier leaves the sentinel"
         );
+    }
+
+    /// Falling through is only half the answer a discarded value owes. The
+    /// file layer already says so when it has to discard a `tree_width`,
+    /// and an environment that silently stopped applying leaves a user
+    /// staring at a variable they can see is set and cannot see doing
+    /// anything.
+    #[test]
+    fn a_value_the_environment_cannot_be_read_as_says_so() {
+        let env = |name: &str| match name {
+            "VIEW_UI_TIER" => Some("turbo".to_string()),
+            "VIEW_NATIVE_TREE_WIDTH" => Some("40%".to_string()),
+            "VIEW_KEYS_SIDEBAR_WIDER" => Some("<Nope-Right>".to_string()),
+            _ => None,
+        };
+        let resolved = resolve_with(&ViewConfig::defaults(), &Overrides::default(), &env);
+        let notices = resolved.notices().join("\n");
+        for (name, value) in [
+            ("VIEW_UI_TIER", "turbo"),
+            ("VIEW_NATIVE_TREE_WIDTH", "40%"),
+            ("VIEW_KEYS_SIDEBAR_WIDER", "<Nope-Right>"),
+        ] {
+            assert!(
+                notices.contains(name) && notices.contains(value),
+                "{name}={value} was discarded in silence: {notices}"
+            );
+        }
+        for (key, value, source) in resolved.rows() {
+            let Some(derived) = key.derived else {
+                continue;
+            };
+            assert_eq!(
+                (value.as_str(), source),
+                (derived, Source::Derived),
+                "[{}] {} took an answer from a value view could not read",
+                key.table,
+                key.key
+            );
+        }
     }
 
     #[test]

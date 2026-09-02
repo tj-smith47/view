@@ -13,6 +13,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use view_core::config::{
+    discarded_env, Source, BOOL_EXPECTED, OPEN_TARGET_EXPECTED, WIDTH_EXPECTED,
+};
 use view_core::msg::ReviewOpenTarget;
 use view_core::native::geometry;
 
@@ -32,6 +35,7 @@ pub enum AgentSpec {
 
 /// Resolved `[ai]` config: whether the agent panel and ACP client are on,
 /// and which agent to speak to.
+#[non_exhaustive]
 #[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiConfig {
@@ -41,7 +45,23 @@ pub struct AiConfig {
     panel_width_notice: Option<&'static str>,
     review_open_target: ReviewOpenTarget,
     review_open_target_notice: Option<&'static str>,
+    /// Where each key's answer came from, in [`AI_KEYS`] order.
+    sources: [Source; AI_KEYS.len()],
+    /// One line per environment value this crate could not read, on the
+    /// same terms the sibling resolver states: a discarded value is never
+    /// an error and never silent.
+    notices: Vec<String>,
 }
+
+/// The keys of this table, as the key registry spells their paths, in the
+/// order that registry lists them. The registry lives a crate away and may
+/// not be named from here, so the bin holds the two lists to each other.
+pub const AI_KEYS: [(&str, &str); 4] = [
+    ("ai", "enabled"),
+    ("ai", "agent"),
+    ("ai", "panel_width"),
+    ("ai.review", "open_target"),
+];
 
 impl AiConfig {
     /// The config-absent answer: agent on, speaking to `claude-code` -- the
@@ -53,11 +73,13 @@ impl AiConfig {
     pub fn default() -> Self {
         Self {
             enabled: true,
-            agent: AgentSpec::Id("claude-code".to_string()),
+            agent: AgentSpec::Id(DEFAULT_AGENT_ID.to_string()),
             panel_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
             panel_width_notice: None,
             review_open_target: ReviewOpenTarget::Current,
             review_open_target_notice: None,
+            sources: [Source::Derived; AI_KEYS.len()],
+            notices: Vec::new(),
         }
     }
 
@@ -75,21 +97,48 @@ impl AiConfig {
         // `toml::de::Error` is 128+ bytes on the msvc ABI, which makes an
         // unboxed `Result<_, AiConfigError>` a large-error return there
         let file: ConfigFile = toml::from_str(s).map_err(|e| AiConfigError::Toml(Box::new(e)))?;
+        // a key left out and a key written at its own default resolve to
+        // the same answer, and only one of them is the file's -- the same
+        // distinction `view-native`'s own loader draws, for the same reason
+        let spelled = [
+            file.ai.enabled.is_some(),
+            file.ai.agent.is_some(),
+            file.ai.panel_width.is_some(),
+            file.ai.review.open_target.is_some(),
+        ];
         let (panel_width, panel_width_notice) = resolve_panel_width(file.ai.panel_width);
         let (review_open_target, review_open_target_notice) =
             resolve_open_target(file.ai.review.open_target);
         Ok(Self {
-            enabled: file.ai.enabled,
-            agent: resolve_agent(file.ai.agent)?,
+            enabled: file.ai.enabled.unwrap_or(true),
+            agent: match file.ai.agent {
+                Some(wire) => resolve_agent(wire)?,
+                None => AgentSpec::Id(DEFAULT_AGENT_ID.to_string()),
+            },
             panel_width,
             panel_width_notice,
             review_open_target,
             review_open_target_notice,
+            sources: spelled.map(|written| {
+                if written {
+                    Source::File
+                } else {
+                    Source::Derived
+                }
+            }),
+            notices: Vec::new(),
         })
     }
 
-    /// Reads `view.toml` from `config_path`, or [`AiConfig::default`] when
-    /// there is no path to read or no file at it.
+    /// The **file layer alone**: `view.toml` at `config_path`, or
+    /// [`AiConfig::default`] when there is no path to read or no file at it.
+    ///
+    /// Not the answer a session runs on. The environment sits above this
+    /// layer, and `--clean` suppresses it entirely, so a caller resolving
+    /// config for a session calls [`AiConfig::resolve`] and this only
+    /// through it. This stays public for the callers that genuinely want
+    /// the file's own answer -- a doctor showing what a config file says,
+    /// separately from what the session resolved.
     ///
     /// # Errors
     ///
@@ -130,9 +179,9 @@ impl AiConfig {
     /// `view-native`'s.
     ///
     /// `clean` is view's triage mode, and skips both the file and the
-    /// environment: a mode that answered "view or your config" for the
-    /// eleven keys the sibling crate resolves while letting `VIEW_AI_AGENT`
-    /// through would be answering a different question here.
+    /// environment: a mode that answered "view or your config" for the keys
+    /// the sibling crate resolves while letting `VIEW_AI_AGENT` through
+    /// would be answering a different question here.
     ///
     /// # Errors
     ///
@@ -158,13 +207,63 @@ impl AiConfig {
             return Ok(Self::default());
         }
         let mut resolved = Self::load(config_path)?;
-        if let Some(enabled) = env_value(env, ENABLED_ENV).and_then(|value| parse_bool(&value)) {
-            resolved.enabled = enabled;
+        if let Some(value) = env_value(env, ENABLED_ENV) {
+            resolved.apply_env(0, parse_bool(&value), &value, BOOL_EXPECTED, |cfg, on| {
+                cfg.enabled = on;
+            });
         }
-        if let Some(agent) = env_value(env, AGENT_ENV).map(AgentSpec::Id) {
-            resolved.agent = agent;
+        if let Some(value) = env_value(env, AGENT_ENV) {
+            // no shape an id can fail: an environment carries no word
+            // boundaries, so every non-empty value is one adapter id
+            resolved.apply_env(1, Some(value.clone()), &value, "", |cfg, id| {
+                cfg.agent = AgentSpec::Id(id);
+            });
+        }
+        if let Some(value) = env_value(env, PANEL_WIDTH_ENV) {
+            let width = value.parse::<i64>().ok().map(geometry::clamp_panel_width);
+            resolved.apply_env(2, width, &value, WIDTH_EXPECTED, |cfg, pct| {
+                cfg.panel_width = pct;
+            });
+        }
+        if let Some(value) = env_value(env, OPEN_TARGET_ENV) {
+            // the file layer answers an unreadable target with `current`
+            // and a notice, because a review setting must never be what
+            // turns the agent off; the environment layer instead leaves the
+            // file's own answer standing, which is what every other
+            // discarded environment value in this build does
+            resolved.apply_env(
+                3,
+                parse_open_target(&value),
+                &value,
+                OPEN_TARGET_EXPECTED,
+                |cfg, target| {
+                    cfg.review_open_target = target;
+                },
+            );
         }
         Ok(resolved)
+    }
+
+    /// One key's environment layer: applied and marked when the value read,
+    /// noticed and left alone when it did not.
+    fn apply_env<T>(
+        &mut self,
+        index: usize,
+        parsed: Option<T>,
+        raw: &str,
+        expected: &str,
+        apply: impl Fn(&mut Self, T),
+    ) {
+        let (table, key) = AI_KEYS[index];
+        match parsed {
+            Some(value) => {
+                apply(self, value);
+                self.sources[index] = Source::Env;
+            }
+            None => self
+                .notices
+                .push(discarded_env(ENV_NAMES[index], raw, expected, table, key)),
+        }
     }
 
     /// The `VIEW_*` names this crate reads, for the crate that holds the
@@ -172,8 +271,40 @@ impl AiConfig {
     /// the `[ai]` rows as metadata and may not call this crate, so the two
     /// meet in the bin, which is the only crate that can name both.
     #[must_use]
-    pub fn env_names() -> [&'static str; 2] {
-        [ENABLED_ENV, AGENT_ENV]
+    pub fn env_names() -> [&'static str; AI_KEYS.len()] {
+        ENV_NAMES
+    }
+
+    /// Every `[ai]` key, its resolved value rendered for display, and the
+    /// layer that answered it -- the rows the sibling crate's own walk
+    /// cannot produce, in the order the key registry lists them.
+    #[must_use]
+    pub fn rows(&self) -> Vec<(&'static str, &'static str, String, Source)> {
+        AI_KEYS
+            .into_iter()
+            .enumerate()
+            .map(|(index, (table, key))| {
+                let value = match index {
+                    0 => self.enabled.to_string(),
+                    1 => match &self.agent {
+                        AgentSpec::Id(id) => id.clone(),
+                        AgentSpec::Command(words) => words.join(" "),
+                    },
+                    2 => self.panel_width.to_string(),
+                    _ => match self.review_open_target {
+                        ReviewOpenTarget::Current => "current".to_string(),
+                        ReviewOpenTarget::Split => "split".to_string(),
+                    },
+                };
+                (table, key, value, self.sources[index])
+            })
+            .collect()
+    }
+
+    /// One line per environment value this session could not read.
+    #[must_use]
+    pub fn notices(&self) -> &[String] {
+        &self.notices
     }
 
     /// Whether the agent panel and ACP client are on.
@@ -244,6 +375,21 @@ const ENABLED_ENV: &str = "VIEW_AI_ENABLED";
 /// crate could read one from without inventing a quoting rule.
 const AGENT_ENV: &str = "VIEW_AI_AGENT";
 
+/// The environment name for `[ai] panel_width`.
+const PANEL_WIDTH_ENV: &str = "VIEW_AI_PANEL_WIDTH";
+
+/// The environment name for `[ai.review] open_target`. A nested table nests
+/// in the name the same way it nests in the file: the dot between its
+/// segments is written as the underscore that separates every other segment.
+const OPEN_TARGET_ENV: &str = "VIEW_AI_REVIEW_OPEN_TARGET";
+
+/// Every name above, in [`AI_KEYS`] order.
+const ENV_NAMES: [&str; AI_KEYS.len()] = [ENABLED_ENV, AGENT_ENV, PANEL_WIDTH_ENV, OPEN_TARGET_ENV];
+
+/// The one adapter this build knows how to auto-provision, and what an
+/// absent `agent` resolves to.
+const DEFAULT_AGENT_ID: &str = "claude-code";
+
 /// What the environment says about one key, or `None` when it says
 /// nothing. An empty value is no value, so a variable set to nothing
 /// leaves the file's answer standing rather than becoming an agent id
@@ -298,9 +444,22 @@ const OPEN_TARGET_NOTICE: &str =
 fn resolve_open_target(value: Option<toml::Value>) -> (ReviewOpenTarget, Option<&'static str>) {
     match value.as_ref().and_then(toml::Value::as_str) {
         None if value.is_none() => (ReviewOpenTarget::Current, None),
-        Some("current") => (ReviewOpenTarget::Current, None),
-        Some("split") => (ReviewOpenTarget::Split, None),
+        Some(name) => match parse_open_target(name) {
+            Some(target) => (target, None),
+            None => (ReviewOpenTarget::Current, Some(OPEN_TARGET_NOTICE)),
+        },
         _ => (ReviewOpenTarget::Current, Some(OPEN_TARGET_NOTICE)),
+    }
+}
+
+/// The target a value names, or `None` for text naming neither. The one
+/// vocabulary both the file and the environment read, so the two can never
+/// accept different words for the same key.
+fn parse_open_target(value: &str) -> Option<ReviewOpenTarget> {
+    match value {
+        "current" => Some(ReviewOpenTarget::Current),
+        "split" => Some(ReviewOpenTarget::Split),
+        _ => None,
     }
 }
 
@@ -366,13 +525,18 @@ struct WireReviewTable {
 /// ignored, for the reason `[native]`'s key check states: a misspelled
 /// switch that parses as "leave the default alone" reads to a user exactly
 /// like a switch that worked.
-#[derive(Debug, Deserialize)]
+///
+/// Every field is optional rather than defaulted, so a document that
+/// spelled a key at its own default and one that left it out stay
+/// distinguishable past the parse: they resolve to the same answer, and
+/// only one of them is the *file's* answer.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireAiTable {
-    #[serde(default = "wire_enabled_default")]
-    enabled: bool,
-    #[serde(default = "wire_agent_default")]
-    agent: WireAgentSpec,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    agent: Option<WireAgentSpec>,
     /// Left as whatever was written, not typed as a number here: see
     /// [`resolve_panel_width`] for why a width is never allowed to fail
     /// this table.
@@ -380,27 +544,6 @@ struct WireAiTable {
     panel_width: Option<toml::Value>,
     #[serde(default)]
     review: WireReviewTable,
-}
-
-impl Default for WireAiTable {
-    fn default() -> Self {
-        Self {
-            enabled: wire_enabled_default(),
-            agent: wire_agent_default(),
-            panel_width: None,
-            review: WireReviewTable::default(),
-        }
-    }
-}
-
-/// `serde`'s `default` for [`WireAiTable::enabled`].
-fn wire_enabled_default() -> bool {
-    true
-}
-
-/// `serde`'s `default` for [`WireAiTable::agent`].
-fn wire_agent_default() -> WireAgentSpec {
-    WireAgentSpec::Id("claude-code".to_string())
 }
 
 /// The wire form of `agent`. Kept private and separate from the public
@@ -835,16 +978,37 @@ agent = "claude-code"
         assert_example_sets_every_field(&doc, "ai");
         let cfg = AiConfig::from_toml_str(EXAMPLE_TOML)
             .expect("view.toml.example's [ai] block must parse");
-        assert_eq!(cfg, AiConfig::default());
+        // the example spells every key at the value it already defaults to,
+        // which is two claims rather than one: the answers are the derived
+        // answers, *and* every one of them is the file's own -- the
+        // difference between "your config set this" and "view did", which
+        // is the whole reason the parse records a spelling at all
+        let spelled: Vec<String> = cfg.rows().into_iter().map(|(_, _, v, _)| v).collect();
+        let derived: Vec<String> = AiConfig::default()
+            .rows()
+            .into_iter()
+            .map(|(_, _, v, _)| v)
+            .collect();
+        assert_eq!(spelled, derived, "the example must ship the derived answer");
+        for (table, key, _, source) in cfg.rows() {
+            assert_eq!(
+                source,
+                Source::File,
+                "the example spells [{table}] {key}, so the file answered it"
+            );
+        }
+        assert!(cfg.notices().is_empty(), "{:?}", cfg.notices());
     }
 
-    /// An environment that turns the agent off and renames it, so a test
-    /// about a layer being applied and a test about it being suppressed
-    /// can drive the same one.
-    fn both_keys_set(name: &str) -> Option<String> {
+    /// An environment naming every key this crate reads, so a test about a
+    /// layer being applied and a test about it being suppressed can drive
+    /// the same one.
+    fn every_key_set(name: &str) -> Option<String> {
         match name {
             ENABLED_ENV => Some("false".to_string()),
             AGENT_ENV => Some("mycli".to_string()),
+            PANEL_WIDTH_ENV => Some("45".to_string()),
+            OPEN_TARGET_ENV => Some("split".to_string()),
             _ => None,
         }
     }
@@ -853,9 +1017,13 @@ agent = "claude-code"
     fn the_ai_keys_resolve_from_the_environment_over_the_file() {
         let dir = view_test_support::ScratchDir::new("ai-env-layer").expect("a scratch dir");
         let path = dir.join("view.toml");
-        std::fs::write(&path, "[ai]\nenabled = true\nagent = \"claude-code\"\n")
-            .expect("the fixture must be written");
-        let resolved = AiConfig::resolve_with(Some(&path), false, &both_keys_set)
+        std::fs::write(
+            &path,
+            "[ai]\nenabled = true\nagent = \"claude-code\"\npanel_width = 20\n\n\
+             [ai.review]\nopen_target = \"current\"\n",
+        )
+        .expect("the fixture must be written");
+        let resolved = AiConfig::resolve_with(Some(&path), false, &every_key_set)
             .expect("the fixture must resolve");
         assert!(
             !resolved.enabled(),
@@ -866,6 +1034,65 @@ agent = "claude-code"
             &AgentSpec::Id("mycli".into()),
             "VIEW_AI_AGENT names the adapter"
         );
+        assert_eq!(
+            resolved.panel_width(),
+            45,
+            "VIEW_AI_PANEL_WIDTH outranks 20"
+        );
+        assert_eq!(
+            resolved.review_open_target(),
+            ReviewOpenTarget::Split,
+            "VIEW_AI_REVIEW_OPEN_TARGET outranks the file's own target"
+        );
+        // the value and the reason, since a chain that is right for the
+        // wrong reason answers correctly from the wrong layer
+        for (table, key, _, source) in resolved.rows() {
+            assert_eq!(
+                source,
+                Source::Env,
+                "[{table}] {key} answered from somewhere other than the environment"
+            );
+        }
+        assert!(resolved.notices().is_empty(), "{:?}", resolved.notices());
+    }
+
+    /// An environment value this crate cannot read leaves the file's answer
+    /// standing -- and says so. A layer that silently stopped applying is
+    /// the one shape a user has nothing to debug with.
+    #[test]
+    fn an_environment_value_this_crate_cannot_read_is_noticed_not_swallowed() {
+        let dir = view_test_support::ScratchDir::new("ai-env-notice").expect("a scratch dir");
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\nenabled = false\npanel_width = 20\n")
+            .expect("the fixture must be written");
+        let env = |name: &str| match name {
+            ENABLED_ENV => Some("off".to_string()),
+            PANEL_WIDTH_ENV => Some("40%".to_string()),
+            OPEN_TARGET_ENV => Some("floating".to_string()),
+            _ => None,
+        };
+        let resolved =
+            AiConfig::resolve_with(Some(&path), false, &env).expect("the fixture must resolve");
+        assert!(!resolved.enabled(), "the file's answer still stands");
+        assert_eq!(resolved.panel_width(), 20, "and so does the file's width");
+        assert_eq!(
+            resolved.review_open_target(),
+            ReviewOpenTarget::Current,
+            "and the derived target, which no layer named"
+        );
+        let notices = resolved.notices().join("\n");
+        for name in [ENABLED_ENV, PANEL_WIDTH_ENV, OPEN_TARGET_ENV] {
+            assert!(notices.contains(name), "{name} was discarded in silence");
+        }
+        // enabled and panel_width the file's, agent and open_target view's
+        // own: a discarded environment value must not read as an answer
+        let owed = [Source::File, Source::Derived, Source::File, Source::Derived];
+        for ((table, key, _, source), expected) in resolved.rows().into_iter().zip(owed) {
+            assert_eq!(
+                source, expected,
+                "[{table}] {key} answered from the wrong layer"
+            );
+        }
     }
 
     #[test]
@@ -873,7 +1100,7 @@ agent = "claude-code"
         // a name published for the registry cross-check but read by
         // nothing would pass that check while doing nothing at all
         for name in AiConfig::env_names() {
-            let env = |asked: &str| (asked == name).then(|| both_keys_set(name)).flatten();
+            let env = |asked: &str| (asked == name).then(|| every_key_set(name)).flatten();
             let resolved =
                 AiConfig::resolve_with(None, false, &env).expect("no file, no failure path");
             assert_ne!(
@@ -893,7 +1120,7 @@ agent = "claude-code"
         // both layers present and both suppressed: `--clean` asks whether
         // view or a user's own configuration is at fault, and an answer
         // that let either through would answer something else
-        let resolved = AiConfig::resolve_with(Some(&path), true, &both_keys_set)
+        let resolved = AiConfig::resolve_with(Some(&path), true, &every_key_set)
             .expect("a clean session reads no file at all");
         assert_eq!(
             resolved,
