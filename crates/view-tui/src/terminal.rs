@@ -33,8 +33,10 @@ use view_surface::{CursorShape, Surface};
 /// [`restore`] that undoes every phase's effects regardless of how far
 /// entry got.
 ///
-/// This is the only place in the crate that enables raw mode, enters the
-/// alternate screen, or installs a panic hook: [`Term::init`] holds one of
+/// This is the only place in the crate that enables raw mode or enters the
+/// alternate screen, and the only one whose panic hook restores them
+/// ([`StderrGuard`] chains one that restores fd 2 and nothing else):
+/// [`Term::init`] holds one of
 /// these as a field rather than repeating the setup (`ratatui::try_init`
 /// does its own raw-mode/alt-screen/panic-hook dance, which would otherwise
 /// chain a second, redundant hook and re-enter the alternate screen on top
@@ -241,6 +243,93 @@ fn restore() {
     let _ = restore_bytes(&mut out);
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = out.flush();
+    // last, and inside `restore` rather than beside its callers: the panic
+    // hook runs this before the previous hook prints, so a panic message has
+    // to find the terminal on fd 2 again and not the session's log
+    #[cfg(unix)]
+    restore_stderr();
+}
+
+/// Where fd 2 pointed before [`StderrGuard::redirect`] took it, held
+/// process-wide because [`restore`] is a free function the panic hook runs
+/// with no guard value in scope.
+#[cfg(unix)]
+static SAVED_STDERR: std::sync::OnceLock<std::os::fd::OwnedFd> = std::sync::OnceLock::new();
+
+/// Keeps fd 2 off the terminal for as long as the value lives, restoring it
+/// on [`Drop`].
+///
+/// Anything in the process may write to stderr -- a system library's own
+/// diagnostic as much as view's code -- and while the TUI owns the terminal
+/// those bytes land at the emulator's cursor, over cells the differential
+/// painter believes it still owns and therefore never repaints. macOS is
+/// where this is observed: an AppKit pasteboard write that the OS refuses
+/// logs one such line, and the frame under it does not come back.
+///
+/// Restoring is idempotent and reachable three ways on purpose: [`restore`]
+/// puts fd 2 back before the panic hook prints, so a panic message reaches
+/// the terminal the same hook just restored; this value's [`Drop`] covers
+/// every ordinary return out of the session; and [`redirect`](Self::redirect)
+/// chains a hook of its own, so a panic between the redirect and
+/// [`TerminalGuard::enter_raw_mode`] -- which is where the hook that calls
+/// [`restore`] is installed -- still prints where a user can read it.
+///
+/// Unix only. The mechanism is `dup2` on fd 2, which rustix exposes under
+/// `cfg(not(windows))`; the Windows equivalent is `SetStdHandle` on a
+/// console handle, which no dependency of this crate offers and which the
+/// observed member of the class -- an Apple framework -- cannot reach.
+/// Same grounds as `view-engine`'s `KILLED_AT_SPAWN_WINDOW`: a unix-gated
+/// mitigation for a hazard whose only known trigger is unix.
+#[cfg(unix)]
+pub struct StderrGuard(());
+
+#[cfg(unix)]
+impl StderrGuard {
+    /// Duplicates the current fd 2 aside and puts `sink` in its place.
+    ///
+    /// Callers must run every `is_terminal` probe of stderr first: after
+    /// this, fd 2 answers for the sink and no longer for whatever the shell
+    /// opened. A second call keeps the first call's saved descriptor, so
+    /// the terminal is what a restore hands back rather than an earlier
+    /// redirect's sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if fd 2 cannot be duplicated
+    /// aside, or if `sink` cannot be put in its place.
+    pub fn redirect(sink: &std::fs::File) -> std::io::Result<Self> {
+        // close-on-exec: a child spawned mid-session must not inherit a
+        // second descriptor onto the user's terminal
+        let saved = rustix::io::fcntl_dupfd_cloexec(std::io::stderr(), 0)?;
+        if SAVED_STDERR.set(saved).is_ok() {
+            // `restore` already covers a panic once `TerminalGuard` has
+            // chained its own hook; this covers the window before that,
+            // where the message would otherwise print into the sink
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                restore_stderr();
+                prev(info);
+            }));
+        }
+        rustix::stdio::dup2_stderr(sink)?;
+        Ok(Self(()))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StderrGuard {
+    fn drop(&mut self) {
+        restore_stderr();
+    }
+}
+
+/// Points fd 2 back at whatever [`StderrGuard::redirect`] found there, or
+/// does nothing if no redirect ever happened.
+#[cfg(unix)]
+fn restore_stderr() {
+    if let Some(saved) = SAVED_STDERR.get() {
+        let _ = rustix::stdio::dup2_stderr(saved);
+    }
 }
 
 /// Maps a [`CursorShape`] to its DECSCUSR steady parameter: `2` (block),

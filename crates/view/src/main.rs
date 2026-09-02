@@ -758,6 +758,38 @@ fn caps_notice(cli: &Cli, caps: TermCaps, source: CapsSource) -> Option<String> 
     })
 }
 
+/// Points fd 2 away from the terminal for the rest of the session and
+/// returns the guard that hands it back, or `None` if there was nothing to
+/// point it at.
+///
+/// The `VIEW_LOG` file when the session is capturing one, so a diagnostic a
+/// library writes on its own -- macOS AppKit's, when the OS refuses a
+/// pasteboard write -- is triage material beside the rest of the session's
+/// record; the null device otherwise, because the alternative is the byte
+/// landing on the alternate screen at whatever cell the emulator's cursor
+/// sits on. Neither is a session-ending failure: an editor still runs with
+/// its stderr wherever it started.
+///
+/// Returned rather than dropped here: the value restores fd 2, and it must
+/// not do that while `main` still owns the terminal.
+#[cfg(unix)]
+#[must_use]
+fn route_stderr_off_the_terminal() -> Option<view_tui::terminal::StderrGuard> {
+    let sink = vlog::sink_dup().or_else(|| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .ok()
+    })?;
+    match view_tui::terminal::StderrGuard::redirect(&sink) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            vlog::log_with("startup", || format!("stderr stays on the terminal: {e}"));
+            None
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // startup's own VIEW_LOG "startup" line (see startup::paint_shell_frame)
     // measures the shell-paint budget from this instant, not from
@@ -795,6 +827,13 @@ fn main() -> Result<()> {
         // read afterwards
         eprintln!("view: {NO_TERMINAL_NOTICE}");
     }
+
+    // after every `is_terminal` question anything has left to ask of fd 2,
+    // and before the child below can inherit it: from here the descriptor
+    // answers for the sink, and a library's own diagnostic lands there
+    // instead of on cells the painter believes it still owns
+    #[cfg(unix)]
+    let _stderr = route_stderr_off_the_terminal();
 
     // ahead of `Term::init` rather than after it: `nvim --embed` runs no
     // startup at all -- no `init.lua`, no file opened -- until a UI
@@ -1393,6 +1432,42 @@ mod tests {
                  kill it"
             );
         }
+    }
+
+    /// fd 2 answers for the log or the null device from the redirect
+    /// onwards, so everything that asks whether a *terminal* is on it has
+    /// to have asked already -- `adopt_terminal_stdin`'s third fallback
+    /// reads exactly that -- and the one notice a session with no terminal
+    /// anywhere can still be read on has to be printed before the sink
+    /// exists, not into it. The far side is the screen: a redirect landing
+    /// after `Term::init` leaves the capability probe's own window open for
+    /// a library to write across.
+    #[test]
+    fn stderr_leaves_the_terminal_after_every_probe_of_it_and_before_the_screen() {
+        let redirect = offset_of("route_stderr_off_the_terminal()");
+        for (earlier, why) in [
+            (
+                "view_tui::input::adopt_terminal_stdin()",
+                "the stdin fallback asks whether a terminal is on fd 2, and \
+                 would adopt the sink",
+            ),
+            (
+                "eprintln!(\"view: {NO_TERMINAL_NOTICE}\")",
+                "the notice a terminal-less session is told goes into the \
+                 sink nobody has been told about",
+            ),
+        ] {
+            assert!(
+                offset_of(earlier) < redirect,
+                "`{earlier}` runs after the stderr redirect, so {why}"
+            );
+        }
+        assert!(
+            redirect < offset_of("Term::init("),
+            "the stderr redirect runs after the terminal is entered, so a \
+             library writing to fd 2 during capability detection still \
+             paints over the screen"
+        );
     }
 
     /// The one thing the guard cannot own, pinned because nothing else in

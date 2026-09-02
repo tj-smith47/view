@@ -55,6 +55,26 @@ pub fn init(process_start: Instant) {
     });
 }
 
+/// The sink's own file duplicated, for a caller that needs a descriptor of
+/// its own rather than a line on it -- `view-tui`'s stderr guard, which puts
+/// fd 2 on this file for the life of the session so a library's diagnostic
+/// becomes triage material instead of paint on the terminal.
+///
+/// A duplicate of the handle [`init`] opened, never a second open of the
+/// same path: two independently opened appenders keep two offsets and tear
+/// each other's lines. `None` when `VIEW_LOG` is unset, when its path could
+/// not be opened, or when the duplicate itself fails -- every one of which
+/// leaves the caller to pick its own fallback, since none of them is a
+/// reason a session should refuse to start.
+#[must_use]
+pub fn sink_dup() -> Option<std::fs::File> {
+    let Some(Some(file)) = SINK.get() else {
+        return None;
+    };
+    let file = file.lock().unwrap_or_else(PoisonError::into_inner);
+    file.try_clone().ok()
+}
+
 /// Writes one `<mono_ms> <topic> <payload>` line if [`init`] opened a sink;
 /// a single `Option` check and return otherwise -- the zero-overhead path
 /// this module's docs promise. `topic` is a short fixed tag (`"startup"`,
