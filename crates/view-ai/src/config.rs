@@ -124,6 +124,58 @@ impl AiConfig {
         }
     }
 
+    /// Every layer `[ai]` answers to, in the order spec section 11 states:
+    /// the environment over the file at `config_path`, over the defaults.
+    /// `[ai]` has no flags, so the chain starts one layer down from
+    /// `view-native`'s.
+    ///
+    /// `clean` is view's triage mode, and skips both the file and the
+    /// environment: a mode that answered "view or your config" for the
+    /// eleven keys the sibling crate resolves while letting `VIEW_AI_AGENT`
+    /// through would be answering a different question here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiConfigError`] for anything [`AiConfig::load`] does; an
+    /// environment value this crate cannot read is never an error, for the
+    /// reason [`resolve_panel_width`] states about a mistyped width.
+    pub fn resolve(config_path: Option<&Path>, clean: bool) -> Result<Self, AiConfigError> {
+        Self::resolve_with(config_path, clean, &|name| std::env::var(name).ok())
+    }
+
+    /// [`AiConfig::resolve`] against a caller-supplied environment, so the
+    /// chain is testable without mutating the process's own.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`AiConfig::resolve`].
+    pub fn resolve_with(
+        config_path: Option<&Path>,
+        clean: bool,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, AiConfigError> {
+        if clean {
+            return Ok(Self::default());
+        }
+        let mut resolved = Self::load(config_path)?;
+        if let Some(enabled) = env_value(env, ENABLED_ENV).and_then(|value| parse_bool(&value)) {
+            resolved.enabled = enabled;
+        }
+        if let Some(agent) = env_value(env, AGENT_ENV).map(AgentSpec::Id) {
+            resolved.agent = agent;
+        }
+        Ok(resolved)
+    }
+
+    /// The `VIEW_*` names this crate reads, for the crate that holds the
+    /// key registry and this loader to each other. `view-native` carries
+    /// the `[ai]` rows as metadata and may not call this crate, so the two
+    /// meet in the bin, which is the only crate that can name both.
+    #[must_use]
+    pub fn env_names() -> [&'static str; 2] {
+        [ENABLED_ENV, AGENT_ENV]
+    }
+
     /// Whether the agent panel and ACP client are on.
     #[must_use]
     pub fn enabled(&self) -> bool {
@@ -179,6 +231,37 @@ impl Default for AiConfig {
     /// names directly.
     fn default() -> Self {
         Self::default()
+    }
+}
+
+/// The environment name for `[ai] enabled`, spelled the way the key
+/// registry derives it from the key's own path.
+const ENABLED_ENV: &str = "VIEW_AI_ENABLED";
+
+/// The environment name for `[ai] agent`. A value here names an adapter
+/// id; the array form -- a command line with its own arguments -- is the
+/// file's, since an environment variable carries no word boundaries this
+/// crate could read one from without inventing a quoting rule.
+const AGENT_ENV: &str = "VIEW_AI_AGENT";
+
+/// What the environment says about one key, or `None` when it says
+/// nothing. An empty value is no value, so a variable set to nothing
+/// leaves the file's answer standing rather than becoming an agent id
+/// nothing can spawn.
+fn env_value(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    let value = env(name)?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// A switch's value, or `None` for text that is not one -- which falls
+/// through to the layer below rather than failing the session, the same
+/// way a mistyped `panel_width` does.
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
 }
 
@@ -753,5 +836,69 @@ agent = "claude-code"
         let cfg = AiConfig::from_toml_str(EXAMPLE_TOML)
             .expect("view.toml.example's [ai] block must parse");
         assert_eq!(cfg, AiConfig::default());
+    }
+
+    /// An environment that turns the agent off and renames it, so a test
+    /// about a layer being applied and a test about it being suppressed
+    /// can drive the same one.
+    fn both_keys_set(name: &str) -> Option<String> {
+        match name {
+            ENABLED_ENV => Some("false".to_string()),
+            AGENT_ENV => Some("mycli".to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_ai_keys_resolve_from_the_environment_over_the_file() {
+        let dir = view_test_support::ScratchDir::new("ai-env-layer").expect("a scratch dir");
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\nenabled = true\nagent = \"claude-code\"\n")
+            .expect("the fixture must be written");
+        let resolved = AiConfig::resolve_with(Some(&path), false, &both_keys_set)
+            .expect("the fixture must resolve");
+        assert!(
+            !resolved.enabled(),
+            "VIEW_AI_ENABLED=false outranks an `enabled = true` in the file"
+        );
+        assert_eq!(
+            resolved.agent_spec(),
+            &AgentSpec::Id("mycli".into()),
+            "VIEW_AI_AGENT names the adapter"
+        );
+    }
+
+    #[test]
+    fn every_published_env_name_is_one_this_crate_reads() {
+        // a name published for the registry cross-check but read by
+        // nothing would pass that check while doing nothing at all
+        for name in AiConfig::env_names() {
+            let env = |asked: &str| (asked == name).then(|| both_keys_set(name)).flatten();
+            let resolved =
+                AiConfig::resolve_with(None, false, &env).expect("no file, no failure path");
+            assert_ne!(
+                resolved,
+                AiConfig::default(),
+                "{name} reaches nothing this crate resolves"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_resolves_the_ai_keys_to_their_derived_defaults() {
+        let dir = view_test_support::ScratchDir::new("ai-clean").expect("a scratch dir");
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\nenabled = false\nagent = \"mycli\"\n")
+            .expect("the fixture must be written");
+        // both layers present and both suppressed: `--clean` asks whether
+        // view or a user's own configuration is at fault, and an answer
+        // that let either through would answer something else
+        let resolved = AiConfig::resolve_with(Some(&path), true, &both_keys_set)
+            .expect("a clean session reads no file at all");
+        assert_eq!(
+            resolved,
+            AiConfig::default(),
+            "--clean is the derived default for every [ai] key"
+        );
     }
 }

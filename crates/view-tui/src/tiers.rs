@@ -1066,7 +1066,10 @@ pub enum CapsSource {
     /// `cfg(not(unix))` arm -- so calling the result probed would claim a
     /// negotiation that never happened.
     Assumed,
-    /// `--tier` decided them outright and no terminal I/O ran.
+    /// A resolved `[ui] tier` decided them outright and no terminal I/O
+    /// ran. The label names no flag, because the flag is one of three
+    /// layers that can name a tier: `--tier`, `VIEW_UI_TIER`, and the
+    /// file's own key all arrive here as the same override.
     Override,
 }
 
@@ -1078,7 +1081,7 @@ impl CapsSource {
         match self {
             Self::Probed => "probed",
             Self::Assumed => "assumed",
-            Self::Override => "--tier override",
+            Self::Override => "tier override",
         }
     }
 }
@@ -2241,7 +2244,7 @@ mod tests {
         let (caps, probe, source) =
             resolve(Some(Tier::Basic)).expect("an override resolves without terminal I/O");
         assert_eq!(source, CapsSource::Override);
-        assert_eq!(source.label(), "--tier override");
+        assert_eq!(source.label(), "tier override");
         assert!(probe.is_none(), "an override leaves nothing to wait for");
         assert_eq!(caps, caps_for_override(Tier::Basic));
 

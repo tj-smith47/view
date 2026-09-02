@@ -9,10 +9,18 @@
 //! list written out here, so a feature can never exist in the table and be
 //! unspellable in config.
 
+mod keys;
+mod resolve;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub use keys::{env_name, keys, ConfigKey};
+pub use resolve::{
+    resolve, resolve_with, Overrides, Resolved, ResolvedConfig, ResolvedEngine, ResolvedUi, Source,
+    TierChoice,
+};
 use serde::{Deserialize, Serialize};
 use view_core::native::ext::{self, Ext};
 use view_core::native::geometry;
@@ -183,26 +191,23 @@ impl<'de> serde::de::Visitor<'de> for NativeTableVisitor {
 /// than ignored, for the reason `[native]`'s key check states: a misspelled
 /// switch that parses as "leave the default alone" reads to a user exactly
 /// like a switch that worked.
-#[derive(Debug, Deserialize, Serialize)]
+///
+/// The one field is optional rather than defaulted, so a document that
+/// spelled the default and one that left the key out stay distinguishable
+/// past the parse: they resolve to the same answer, and only one of them
+/// is the *file's* answer (see [`ViewConfig::spells`]).
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SupervisionTable {
-    #[serde(default = "yes")]
-    auto_restart: bool,
+    // `skip_serializing_if` is not cosmetic here: `toml`'s serializer
+    // refuses a `None`, and `loaded_tables` renders this struct to take
+    // the table names this crate reads
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_restart: Option<bool>,
 }
 
-/// `serde`'s `default` for [`SupervisionTable::auto_restart`], which is the
-/// only field whose absent value is not `bool`'s own default.
-fn yes() -> bool {
-    true
-}
-
-impl Default for SupervisionTable {
-    fn default() -> Self {
-        Self {
-            auto_restart: yes(),
-        }
-    }
-}
+/// What `[supervision] auto_restart` answers when nothing names it.
+const AUTO_RESTART_DEFAULT: bool = true;
 
 /// How far view may go on its own to recover a failed engine.
 ///
@@ -223,7 +228,9 @@ impl Default for SupervisionConfig {
     /// Automatic recovery on: the config-absent default, and what `--clean`
     /// resolves to.
     fn default() -> Self {
-        Self { auto_restart: true }
+        Self {
+            auto_restart: AUTO_RESTART_DEFAULT,
+        }
     }
 }
 
@@ -348,6 +355,11 @@ pub struct ViewConfig {
     pub supervision: SupervisionConfig,
     /// The `[keys]` table's resolved answers.
     pub keys: KeysConfig,
+    /// Which `table.key` pairs the document spelled at all. A key written
+    /// at the value it already defaults to resolves the same either way,
+    /// and only one of the two is the file's own answer -- which is the
+    /// difference between "your config turned this off" and "view did".
+    spelled: Vec<(&'static str, &'static str)>,
 }
 
 impl ViewConfig {
@@ -358,7 +370,18 @@ impl ViewConfig {
             native: NativeConfig::all_enabled(),
             supervision: SupervisionConfig::default(),
             keys: KeysConfig::default(),
+            spelled: Vec::new(),
         }
+    }
+
+    /// Whether the document spelled `table.key` at all, as opposed to
+    /// leaving it to its default. The resolver reads this to tell a file
+    /// that agreed with the default from a file that said nothing: both
+    /// answer the same value, and only the first came from the file.
+    pub(crate) fn spells(&self, table: &str, key: &str) -> bool {
+        self.spelled
+            .iter()
+            .any(|(spelled_table, spelled_key)| *spelled_table == table && *spelled_key == key)
     }
 
     /// Parses every table this build reads out of one TOML document.
@@ -376,9 +399,13 @@ impl ViewConfig {
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
-                auto_restart: file.supervision.auto_restart,
+                auto_restart: file
+                    .supervision
+                    .auto_restart
+                    .unwrap_or(AUTO_RESTART_DEFAULT),
             },
             keys: KeysConfig { bindings, notices },
+            spelled: spelled_keys(&file),
         })
     }
 
@@ -543,6 +570,23 @@ pub fn ext_surfaces(cfg: &NativeConfig) -> Vec<Ext> {
             _ => true,
         })
         .collect()
+}
+
+/// Which `table.key` pairs a parsed document actually spelled.
+///
+/// Only keys the registry carries: a `[native]` key that names no feature
+/// has already failed the parse by the time this runs, and a table this
+/// crate does not read has no key to attribute.
+fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
+    let mut spelled: Vec<(&'static str, &'static str)> = registry::features()
+        .iter()
+        .filter(|feature| file.native.features.contains_key(feature.id))
+        .map(|feature| ("native", feature.id))
+        .collect();
+    if file.supervision.auto_restart.is_some() {
+        spelled.push(("supervision", "auto_restart"));
+    }
+    spelled
 }
 
 /// Every registry id, comma separated, for an error message that shows a

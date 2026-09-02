@@ -29,6 +29,7 @@ use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::Effect;
 use view_core::theme::Theme;
 use view_engine::process::{stdin_operands, BundledEngine, EngineConfig, RemoteSpec};
+use view_native::config::{Overrides, ResolvedConfig, ResolvedEngine, TierChoice, ViewConfig};
 use view_tui::terminal::Term;
 use view_tui::tiers::CapsSource;
 
@@ -78,12 +79,26 @@ enum TierArg {
     Basic,
 }
 
-impl From<TierArg> for Tier {
+impl From<TierArg> for TierChoice {
     fn from(arg: TierArg) -> Self {
         match arg {
-            TierArg::Full => Tier::Full,
-            TierArg::Standard => Tier::Standard,
-            TierArg::Basic => Tier::Basic,
+            TierArg::Full => TierChoice::Full,
+            TierArg::Standard => TierChoice::Standard,
+            TierArg::Basic => TierChoice::Basic,
+        }
+    }
+}
+
+impl From<&Cli> for Overrides {
+    fn from(cli: &Cli) -> Self {
+        Self {
+            tier: cli.tier.map(TierChoice::from),
+            theme: cli.theme.clone(),
+            nvim_bin: cli.nvim_bin.clone(),
+            appname: cli.appname.clone(),
+            // a bare switch can only say yes: multigrid comes back by
+            // leaving it off, not by writing `--single-grid false`
+            single_grid: cli.single_grid.then_some(true),
         }
     }
 }
@@ -94,7 +109,8 @@ impl From<TierArg> for Tier {
     version = VERSION,
     disable_version_flag = true,
     about = "A modern terminal editor powered by Neovim",
-    after_help = "view's own flags (--tier, --clean, --appname, --config, --nvim-bin, --remote, ...) \
+    after_help = "view's own flags (--tier, --theme, --single-grid, --clean, --appname, --config, \
+                  --nvim-bin, --remote, ...) \
                   must appear before the first argument meant for nvim: once a token does \
                   not match one of view's flags, every remaining token -- including a later \
                   view flag -- is forwarded to nvim verbatim."
@@ -158,6 +174,16 @@ struct Cli {
     /// Override auto-detected terminal capabilities instead of probing
     #[arg(long)]
     tier: Option<TierArg>,
+    /// The colorscheme this session runs, as `:colorscheme` names it.
+    /// Absent derives view's own chrome from whatever the user's config
+    /// ended on, which is also what `auto` asks for.
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
+    /// Attaches without `ext_multigrid`, so nvim composites its own window
+    /// layout into one grid. The triage flag for a layout view draws
+    /// differently than nvim would.
+    #[arg(long)]
+    single_grid: bool,
     /// Report the terminal capabilities this session resolved and where
     /// they came from, as a notice inside the session rather than a line on
     /// the screen it is about to take over. Implied by `--tier`, whose whole
@@ -322,12 +348,17 @@ fn split_remote_target(value: &str) -> RemoteTarget<'_> {
 /// one a client reads as its own option, is refused by `Engine::spawn`
 /// before a connection is attempted, and everything else is the client's own
 /// to resolve and to report on.
-fn remote_spec(cli: &Cli, target: &RemoteTarget<'_>) -> RemoteSpec {
+fn remote_spec(cli: &Cli, engine: &ResolvedEngine, target: &RemoteTarget<'_>) -> RemoteSpec {
     let mut spec = RemoteSpec::new(target.destination);
     // a non-UTF-8 path cannot cross to the far side as text and is refused
     // by `deny_incoherent_remote` before this runs; falling back to the
     // remote `PATH` lookup keeps this total without inventing a name
-    if let Some(bin) = cli.nvim_bin.as_deref().and_then(std::path::Path::to_str) {
+    if let Some(bin) = engine
+        .nvim_bin
+        .value
+        .as_deref()
+        .and_then(std::path::Path::to_str)
+    {
         spec = spec.with_remote_nvim_bin(bin);
     }
     if let Some(port) = cli.ssh_port {
@@ -485,20 +516,21 @@ fn deny_incoherent_remote(cli: &Cli) -> Result<()> {
 /// therefore appends the flag itself via `with_arg` rather than switching
 /// constructors -- see [`Cli`]'s `clean` field for the rest of that
 /// distinction.
-fn engine_config(cli: &Cli) -> EngineConfig {
+fn engine_config(cli: &Cli, engine: &ResolvedEngine) -> EngineConfig {
     let mut cfg = EngineConfig::default();
     let target = cli.remote.as_deref().map(split_remote_target);
     match &target {
-        // `--nvim-bin` names the remote editor here and the local
-        // `nvim_bin` is left at its default: a remote spawn runs no local
+        // the resolved `nvim_bin` names the remote editor here and the
+        // local one is left at its default: a remote spawn runs no local
         // binary, so a path applied there would be a setting nothing reads
-        Some(target) => cfg = cfg.with_remote(remote_spec(cli, target)),
+        Some(target) => cfg = cfg.with_remote(remote_spec(cli, engine, target)),
         // a release layout answers with its own binary and runtime, so the
         // child runs the pinned pair rather than whatever PATH resolves; a
         // development build has none beside its executable and the PATH
-        // lookup is the honest fallback. `--nvim-bin` outranks both: an
-        // operator naming a binary has named the engine
-        None => match &cli.nvim_bin {
+        // lookup is the honest fallback. A named binary outranks both, and
+        // the bundled layout is what the derived answer means: only a
+        // caller that can look beside its own executable can resolve it
+        None => match &engine.nvim_bin.value {
             Some(bin) => cfg = cfg.with_nvim_bin(bin.clone()),
             None => {
                 if let Some(layout) = BundledEngine::resolve() {
@@ -510,7 +542,7 @@ fn engine_config(cli: &Cli) -> EngineConfig {
     if cli.clean {
         cfg = cfg.with_arg("--clean");
     }
-    if let Some(appname) = &cli.appname {
+    if let Some(appname) = &engine.appname.value {
         cfg = cfg.with_env("NVIM_APPNAME", appname.clone());
     }
     // ahead of `passthrough`, because the first file operand is the one nvim
@@ -548,8 +580,8 @@ fn engine_config(cli: &Cli) -> EngineConfig {
 /// Only a dash nvim reads as a file operand goes: one an option is carrying
 /// (`-c -`) is that option's value, and dropping it would leave the option
 /// holding whatever word came next.
-fn respawn_config(cli: &Cli) -> EngineConfig {
-    let mut cfg = engine_config(cli);
+fn respawn_config(cli: &Cli, engine: &ResolvedEngine) -> EngineConfig {
+    let mut cfg = engine_config(cli, engine);
     let dropped = stdin_operands(&cfg.extra_args);
     if !dropped.is_empty() {
         cfg.extra_args = std::mem::take(&mut cfg.extra_args)
@@ -653,43 +685,81 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     cli.config.clone().or_else(view_native::paths::config_path)
 }
 
+/// Every key this invocation resolves, and the layer each answer came
+/// from: a flag on the command line over a `VIEW_*` variable over `file`
+/// over the value view derives for itself.
+///
+/// `--clean` is view's own triage tool, and the question it asks is
+/// whether view or a user's own configuration is at fault. It already
+/// reads no file ([`resolve_config_path`] answers `None` for it), and it
+/// reads no environment either: a mode that answered that question for the
+/// file while leaving `VIEW_NATIVE_PICKER` in play would be answering a
+/// different one.
+#[must_use]
+fn resolve_session_config(cli: &Cli, file: &ViewConfig) -> ResolvedConfig {
+    let flags = Overrides::from(cli);
+    if cli.clean {
+        // the defaults rather than `file`, which `resolve_config_path` has
+        // already left unread for a clean session: stating both halves
+        // here makes the mode's contract this function's own rather than
+        // an agreement between two functions
+        return view_native::config::resolve_with(&ViewConfig::defaults(), &flags, &|_| None);
+    }
+    view_native::config::resolve(file, &flags)
+}
+
 /// Reads every table `view-native` owns out of `config_path`, once, ahead
-/// of the attach that the `[native]` answers decide the `ext_*` set for.
+/// of the spawn whose own editor is one of the answers the file is a layer
+/// of, and ahead of the attach that the `[native]` answers decide the
+/// `ext_*` set for.
 ///
 /// A config that cannot be read or parsed falls back to every default and
-/// says so through `model`'s own message surface rather than stderr: this
-/// runs behind the terminal's raw-mode alternate screen, where a stderr
-/// write is invisible at best. Falling back rather than refusing to start
-/// matches the loader's own contract that an absent file is the full
-/// experience -- an editor does not decline to open a file over a typo in
-/// an optional table -- but the user is told, because a silently ignored
-/// `picker = false` is a feature they turned off still taking their keys.
+/// hands the error back rather than reporting it: this runs before the
+/// terminal, the model and the effect executor exist, and the user is told
+/// by [`note_unread_config`] once they do. Falling back rather than
+/// refusing to start matches the loader's own contract that an absent file
+/// is the full experience -- an editor does not decline to open a file over
+/// a typo in an optional table -- but the user is told, because a silently
+/// ignored `picker = false` is a feature they turned off still taking their
+/// keys.
 ///
 /// The fallback is deliberately the *full* set of surfaces, not the safest
 /// one: a mistyped table must not also cost the user the palette and the
 /// message overlay, which is what a fail-closed answer here would do.
 fn load_view_config(
     config_path: Option<&std::path::Path>,
+) -> (
+    view_native::config::ViewConfig,
+    Option<view_native::config::NativeConfigError>,
+) {
+    match view_native::config::ViewConfig::load(config_path) {
+        Ok(file) => (file, None),
+        Err(err) => (view_native::config::ViewConfig::defaults(), Some(err)),
+    }
+}
+
+/// What a `view.toml` that could not be read owes the user, raised the
+/// moment there is a model to raise it on.
+///
+/// A notice rather than a stderr write: by the time this runs the terminal
+/// is in raw mode behind the alternate screen, where a bare stderr line is
+/// invisible at best (see `TerminalGuard`'s doc comment).
+fn note_unread_config(
+    err: &view_native::config::NativeConfigError,
     model: &mut Model,
     notices: &mut Vec<Effect>,
-) -> view_native::config::ViewConfig {
-    match view_native::config::ViewConfig::load(config_path) {
-        Ok(resolved) => resolved,
-        Err(err) => {
-            vlog::log_with("native", || format!("config unreadable: {err}"));
-            model.dirty = true;
-            // the surfaces attached below are the fail-open default, not an
-            // answer to what this user wrote, so nothing may later tell them
-            // to write a `[native]` line they may already have written --
-            // see `Model::config_was_read`
-            model.note_config_unread();
-            notices.extend(model.engine.record_native_notice(
-                format!("view: {err}; every native feature stays on this session"),
-                false,
-            ));
-            view_native::config::ViewConfig::defaults()
-        }
-    }
+) {
+    vlog::log_with("native", || format!("config unreadable: {err}"));
+    model.dirty = true;
+    // the surfaces attached below are the fail-open default, not an answer
+    // to what this user wrote, so nothing may later tell them to write a
+    // `[native]` line they may already have written -- see
+    // `Model::config_was_read`
+    model.note_config_unread();
+    notices.extend(model.engine.record_native_notice(
+        format!("view: {err}; every native feature stays on this session"),
+        false,
+    ));
 }
 
 /// Resolves `[ai]` from `view.toml` into `model.ai_enabled` and the width
@@ -702,18 +772,26 @@ fn load_view_config(
 /// Hoisted out of `main` so the fail-closed leg -- the one that rots
 /// silently, since a broken `[ai]` table is rare in practice -- is
 /// assertable directly rather than only by reading the match arm. Diverges
-/// from `AiConfig::load`'s own "no file is the full experience" contract on
-/// one path: a file that exists but cannot be read or parsed fails toward
-/// disabled rather than the enabled default the successful case leaves it
-/// at, so a broken config can only ever narrow what a user's untouched
-/// `view.toml` already granted, never silently widen it. The agent spec
-/// returned on that path is `AiConfig::default`'s, which is never acted on:
-/// `model.ai_enabled` is false, so nothing ever asks the worker to spawn.
+/// from `AiConfig::resolve`'s own "no file is the full experience" contract
+/// on one path: a file that exists but cannot be read or parsed fails
+/// toward disabled rather than the enabled default the successful case
+/// leaves it at, so a broken config can only ever narrow what a user's
+/// untouched `view.toml` already granted, never silently widen it. The
+/// agent spec returned on that path is `AiConfig::default`'s, which is
+/// never acted on: `model.ai_enabled` is false, so nothing ever asks the
+/// worker to spawn.
+///
+/// `clean` carries `--clean` across the crate boundary the key registry
+/// cannot: `[ai]`'s two keys are resolved by the crate that parses that
+/// table, and a triage mode that suppressed the file and the environment
+/// for eleven keys and let `VIEW_AI_AGENT` through would be answering a
+/// different question for the twelfth.
 fn seed_ai_enabled(
     config_path: Option<&std::path::Path>,
+    clean: bool,
     model: &mut Model,
 ) -> (Vec<Effect>, view_ai::AgentSpec) {
-    match view_ai::AiConfig::load(config_path) {
+    match view_ai::AiConfig::resolve(config_path, clean) {
         Ok(cfg) => {
             model.ai_enabled = cfg.enabled();
             model.ai_panel_width_pct = cfg.panel_width();
@@ -749,10 +827,17 @@ fn seed_ai_enabled(
 /// The same facts the `"startup"` `VIEW_LOG` line carries, phrased for a
 /// user rather than a log reader: a session is normally silent about its
 /// own capabilities, and asks for this either outright (`--print-caps`) or
-/// by overriding them (`--tier`, whose whole point is to change what this
-/// would have said).
-fn caps_notice(cli: &Cli, caps: TermCaps, source: CapsSource) -> Option<String> {
-    (cli.print_caps || cli.tier.is_some()).then(|| {
+/// by overriding them, whose whole point is to change what this would have
+/// said. The override is the *resolved* `[ui] tier` rather than the flag,
+/// so a session that named its tier in the environment is shown what it
+/// got exactly like one that named it on the command line.
+fn caps_notice(
+    cli: &Cli,
+    tier: Option<TierChoice>,
+    caps: TermCaps,
+    source: CapsSource,
+) -> Option<String> {
+    (cli.print_caps || tier.is_some()).then(|| {
         // rendered from the capability register, so the line a user reads
         // and the table the build enforces are one thing: a capability that
         // gains a row is printed here with no edit, and one printed here
@@ -811,7 +896,17 @@ fn main() -> Result<()> {
     }
     deny_incoherent_remote(&cli)?;
     deny_unsupported_stdin_relay(&cli.passthrough)?;
-    let cfg = engine_config(&cli);
+    // read and resolved ahead of the spawn, not after it: the editor the
+    // child runs is one of the keys the chain answers, so every layer has
+    // to be in hand before there is a child. One file read of a few
+    // hundred bytes and one environment sweep sit in front of the spawn
+    // for it, both far below the first-paint budget the spawn itself
+    // dominates
+    let config_path = resolve_config_path(&cli);
+    let (file, config_error) = load_view_config(config_path.as_deref());
+    let resolved = resolve_session_config(&cli, &file);
+    let view_config = resolved.tables.clone();
+    let cfg = engine_config(&cli, &resolved.engine);
     // read off the config rather than re-derived from `cli`: the client this
     // resolves is the client the spawn below runs, and the spec is gone once
     // `attach_in_background` consumes the config it belongs to
@@ -861,8 +956,8 @@ fn main() -> Result<()> {
     // `AttachGuard`).
     let mut attach = startup::attach_in_background(cfg);
 
-    let mut term =
-        Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
+    let mut term = Term::init(resolved.ui.tier.value.map(Tier::from))
+        .context("failed to initialize terminal backend")?;
     let (width, height) = term.size()?;
 
     // the cwd is resolved once at startup, before any picker ever opens:
@@ -907,20 +1002,18 @@ fn main() -> Result<()> {
     // `drained.toast_effects` -- see that binding's construction below.
     let mut pre_executor_effects: Vec<Effect> = Vec::new();
 
-    let config_path = resolve_config_path(&cli);
+    // the read itself happened before the spawn; this is the first point
+    // there is a model to raise its failure on
+    if let Some(err) = &config_error {
+        note_unread_config(err, &mut model, &mut pre_executor_effects);
+    }
 
-    // ahead of the attach below, and the one read in the whole startup that
-    // has to be: the `ext_*` set `nvim_ui_attach` requests follows the
-    // `[native]` switches, so a surface a user turned off is never taken
-    // from their plugins in the first place. Read once here and handed to
+    // the `ext_*` set `nvim_ui_attach` requests follows the `[native]`
+    // switches, so a surface a user turned off is never taken from their
+    // plugins in the first place. Resolved once above and handed to
     // `NativeSession` afterwards rather than read again there -- two reads
     // of one file can answer differently, and the attach would then have
     // externalized a surface the rest of the session believes it declined.
-    let view_config = load_view_config(
-        config_path.as_deref(),
-        &mut model,
-        &mut pre_executor_effects,
-    );
     let surfaces = view_native::config::ext_surfaces(&view_config.native);
     model.attach_surfaces(surfaces.clone());
 
@@ -958,7 +1051,8 @@ fn main() -> Result<()> {
     // the theme cache is keyed on the same path, so cold start can already
     // paint last session's colors before nvim answers `ui_attach` with its
     // own `default_colors_set`
-    let (ai_seed_effects, ai_agent) = seed_ai_enabled(config_path.as_deref(), &mut model);
+    let (ai_seed_effects, ai_agent) =
+        seed_ai_enabled(config_path.as_deref(), cli.clean, &mut model);
     pre_executor_effects.extend(ai_seed_effects);
 
     match &config_path {
@@ -1032,7 +1126,8 @@ fn main() -> Result<()> {
     // a bare stderr line is invisible until teardown scrolls it back --
     // which is where the unconditional capability line used to surface,
     // long after the session it described
-    if let Some(notice) = caps_notice(&cli, model.caps, term.caps_source()) {
+    if let Some(notice) = caps_notice(&cli, resolved.ui.tier.value, model.caps, term.caps_source())
+    {
         pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
     }
 
@@ -1187,7 +1282,7 @@ fn main() -> Result<()> {
 
     // built fresh per restart rather than stored once: `EngineConfig` is
     // consumed by the spawn it describes
-    let respawn = || respawn_config(&cli);
+    let respawn = || respawn_config(&cli, &resolved.engine);
     let (model, exit_code) = runtime::run(
         model,
         recovery::EngineSession {
@@ -1266,6 +1361,106 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use std::ffi::OsString;
+    use view_native::config::Source;
+
+    /// Every key a command line resolves, against an empty environment and
+    /// no config file: what the assertions below are about is the flag
+    /// layer, and a host that happens to export a `VIEW_*` name must not
+    /// be able to answer for it.
+    fn resolved_for(cli: &Cli) -> ResolvedConfig {
+        view_native::config::resolve_with(&ViewConfig::defaults(), &Overrides::from(cli), &|_| None)
+    }
+
+    /// [`super::engine_config`] for a command line alone, resolved the
+    /// hermetic way [`resolved_for`] describes. Shadows the production
+    /// name inside this module so every spawn assertion below runs through
+    /// the same chain a session does, without each one restating it.
+    fn engine_config(cli: &Cli) -> EngineConfig {
+        super::engine_config(cli, &resolved_for(cli).engine)
+    }
+
+    /// [`super::respawn_config`] on the same terms as [`engine_config`].
+    fn respawn_config(cli: &Cli) -> EngineConfig {
+        super::respawn_config(cli, &resolved_for(cli).engine)
+    }
+
+    /// Every flag the key registry claims is a flag this binary actually
+    /// parses. Walked rather than sampled: a registry row naming a flag
+    /// nobody can type is a promise the CLI never made.
+    #[test]
+    fn every_registry_flag_is_one_this_binary_accepts() {
+        let command = Cli::command();
+        let accepted: Vec<String> = command
+            .get_arguments()
+            .filter_map(clap::Arg::get_long)
+            .map(|long| format!("--{long}"))
+            .collect();
+        for flag in view_native::config::keys()
+            .iter()
+            .filter_map(|key| key.flag)
+        {
+            assert!(
+                accepted.iter().any(|long| long == flag),
+                "the registry claims {flag}, which this binary does not accept: {accepted:?}"
+            );
+        }
+    }
+
+    /// The other direction of the same claim: a flag typed on the command
+    /// line reaches the key it names, at the top of the chain.
+    #[test]
+    fn every_flag_the_registry_names_reaches_its_own_key() {
+        let cli = Cli::parse_from([
+            "view",
+            "--tier",
+            "basic",
+            "--theme",
+            "gruvbox",
+            "--nvim-bin",
+            "/opt/nvim/bin/nvim",
+            "--appname",
+            "work",
+            "--single-grid",
+        ]);
+        let resolved = resolved_for(&cli);
+        for (key, _, source) in resolved.rows() {
+            let expected = if key.flag.is_some() {
+                Source::Flag
+            } else {
+                Source::Derived
+            };
+            assert_eq!(
+                source, expected,
+                "[{}] {} answered from the wrong layer",
+                key.table, key.key
+            );
+        }
+        assert_eq!(resolved.ui.theme.value.as_deref(), Some("gruvbox"));
+        assert!(resolved.engine.single_grid.value);
+    }
+
+    /// `--clean` is the triage tool, and its question -- view, or this
+    /// user's configuration -- has one variable only while every other
+    /// layer is suppressed.
+    #[test]
+    fn clean_answers_every_key_from_its_derived_default() {
+        let file = ViewConfig::from_toml_str(
+            "[native]\npicker = false\n\n[supervision]\nauto_restart = false\n",
+        )
+        .expect("the fixture must parse");
+        let resolved = resolve_session_config(&Cli::parse_from(["view", "--clean"]), &file);
+        for (key, _, source) in resolved.rows() {
+            assert_eq!(
+                source,
+                Source::Derived,
+                "[{}] {} survived --clean",
+                key.table,
+                key.key
+            );
+        }
+        assert!(resolved.tables.native.enabled("picker"));
+        assert!(resolved.tables.supervision.auto_restart);
+    }
 
     /// `fn main`'s own body, and nothing else in the file: the sequence
     /// these pins describe is a sequence only inside one function, so a
@@ -1679,6 +1874,7 @@ mod tests {
         let mut model = Model::new();
         let notice = caps_notice(
             &Cli::parse_from(["view", "--print-caps"]),
+            None,
             model.caps,
             CapsSource::Probed,
         )
@@ -1701,14 +1897,16 @@ mod tests {
 
         // the second way to ask: `--tier` changes what this line would have
         // said, so the session that overrides is shown what it got
+        let cli = Cli::parse_from(["view", "--tier", "basic"]);
         let overridden = caps_notice(
-            &Cli::parse_from(["view", "--tier", "basic"]),
+            &cli,
+            resolved_for(&cli).ui.tier.value,
             model.caps,
             CapsSource::Override,
         )
         .expect("--tier implies the capability line");
         assert!(
-            overridden.contains("(--tier override)"),
+            overridden.contains("(tier override)"),
             "an overridden session must not be told its capabilities were probed, got {overridden:?}"
         );
     }
@@ -1718,6 +1916,7 @@ mod tests {
         let model = Model::new();
         let notice = caps_notice(
             &Cli::parse_from(["view", "notes.md"]),
+            None,
             model.caps,
             CapsSource::Probed,
         );
@@ -1782,7 +1981,12 @@ mod tests {
 
         let mut model = Model::with_term_size(80, 24);
         let mut notices = Vec::new();
-        let resolved = load_view_config(Some(&path), &mut model, &mut notices);
+        let (resolved, err) = load_view_config(Some(&path));
+        note_unread_config(
+            &err.expect("a file that is not TOML must be reported"),
+            &mut model,
+            &mut notices,
+        );
 
         assert_eq!(
             view_native::config::ext_surfaces(&resolved.native),
@@ -2620,7 +2824,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nenabled = \"not a bool\"\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (effects, _agent) = seed_ai_enabled(Some(&path), &mut model);
+        let (effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
         assert!(
             !model.ai_enabled,
             "an unreadable/invalid [ai] table must fail closed, not silently widen the surface"
@@ -2648,7 +2852,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nenabled = false\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (effects, _agent) = seed_ai_enabled(Some(&path), &mut model);
+        let (effects, _agent) = seed_ai_enabled(Some(&path), false, &mut model);
         assert!(
             !model.ai_enabled,
             "a valid [ai] enabled = false must seed the configured value, not the default"
@@ -2659,7 +2863,7 @@ mod tests {
         );
 
         let mut absent = Model::with_term_size(80, 24);
-        let (effects, agent) = seed_ai_enabled(None, &mut absent);
+        let (effects, agent) = seed_ai_enabled(None, false, &mut absent);
         assert!(
             absent.ai_enabled,
             "no config path at all is the documented default-on case"
@@ -2682,7 +2886,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nagent = [\"my-agent\", \"--flag\"]\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let (effects, agent) = seed_ai_enabled(Some(&path), &mut model);
+        let (effects, agent) = seed_ai_enabled(Some(&path), false, &mut model);
         assert!(effects.is_empty(), "{effects:?}");
         assert!(model.ai_enabled);
         assert_eq!(
