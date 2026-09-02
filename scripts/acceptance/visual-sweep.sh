@@ -243,6 +243,64 @@ BEGIN {
     }
 }'
 
+# One glyph of one `BorderSet`, read out of the charset that carries it:
+# `border_glyph ROUNDED top_left`. Everything here that looks for a frame is
+# built from these rather than from its own copy of the literals -- the day
+# the charset changed, three readers that had spelled the corners themselves
+# went blind at once and every one of them failed by claiming the box was
+# never drawn.
+border_glyph() {
+    awk -v set="$1" -v field="$2" '
+        $0 ~ ("pub const " set) { inside = 1 }
+        # a `const` name resolves through its own declaration, so a field
+        # written as one (`horizontal: LINE_H`) reads the same as a literal
+        /^const [A-Z_]+: char = / {
+            q = sprintf("%c", 39)
+            name = substr($0, 7, index($0, ":") - 7)
+            rest = substr($0, index($0, "= " q) + 3)
+            alias[name] = substr(rest, 1, index(rest, q) - 1)
+            next
+        }
+        inside && $0 ~ ("^ +" field ": ") {
+            # cut on the quotes rather than on a character count: a glyph is
+            # up to three bytes and awk counts bytes in this locale
+            q = sprintf("%c", 39)
+            if (index($0, q) == 0) {
+                split($0, parts, /[:, ]+/)
+                print alias[parts[3]]
+                exit
+            }
+            s = substr($0, index($0, field ": " q) + length(field) + 3)
+            print substr(s, 1, index(s, q) - 1)
+            exit
+        }
+    ' "$OVERLAY_RS"
+}
+
+# The frame glyphs every reader below pairs rows on. The sweep drives a UTF-8
+# tmux pane whose box-glyph probe answers yes, so `ROUNDED` is the set on
+# screen and the ASCII one cannot be: its corners are `+` and its edge `|`,
+# both of which occur in ordinary buffer text, and admitting them would read
+# a line of source as a box.
+BOX_TL=$(border_glyph ROUNDED top_left)
+BOX_TR=$(border_glyph ROUNDED top_right)
+BOX_BL=$(border_glyph ROUNDED bottom_left)
+BOX_BR=$(border_glyph ROUNDED bottom_right)
+BOX_V=$(border_glyph ROUNDED vertical)
+# A corner that came back empty, or one a terminal draws in ordinary text,
+# would make every box reader below answer "no box on screen" for a screen
+# full of them -- silently, since that is also the honest answer when the box
+# really is absent.
+for glyph in "$BOX_TL" "$BOX_TR" "$BOX_BL" "$BOX_BR" "$BOX_V"; do
+    case "$glyph" in
+    '' | ' ' | '-' | '|' | '+' | '=')
+        printf 'FAIL: a ROUNDED border glyph in %s reads as %s, which ordinary text is full of, so no reader here could tell a box from a buffer\n' \
+            "$OVERLAY_RS" "${glyph:-nothing this can read}" >&2
+        exit 1
+        ;;
+    esac
+done
+
 # Where the framed boxes on screen are, shared by everything that has a
 # question about their insides.
 #
@@ -251,19 +309,11 @@ BEGIN {
 # toast) are two independent spans rather than one span swallowing the
 # buffer between them. An odd border glyph out -- a box clipped by the
 # pane's edge -- ends the row's pairing rather than reaching to its end.
-# Both corner sets, because `BorderSet` has shipped both: the square corners
-# a standard-tier terminal used to get, and the rounded ones every terminal
-# that draws box glyphs gets now. A reader that knew only the square set
-# stopped seeing top and bottom edges the day the charset changed, and with
-# them every title -- which is painted into the top edge and nowhere else --
-# so every `wait_in_box` for one waited out its budget over a box that was
-# on screen the whole time.
+# The glyphs come in as `-v`, from `border_glyph` above, so the charset is
+# read out of `BorderSet` and never re-spelled here.
 BOX_AWK='
 function is_edge(g) {
-    return (g == "\342\224\202" || g == "\342\224\214" || g == "\342\224\220" ||
-            g == "\342\224\224" || g == "\342\224\230" ||
-            g == "\342\225\255" || g == "\342\225\256" ||
-            g == "\342\225\260" || g == "\342\225\257")
+    return (g == BOX_V || g == BOX_TL || g == BOX_TR || g == BOX_BL || g == BOX_BR)
 }
 # a box whose side is covered by a box drawn over it leaves the row with a
 # corner where its other side should be, and pairing across that would
@@ -271,10 +321,7 @@ function is_edge(g) {
 # Under-checking such a row is the safe way to be wrong; reporting the
 # buffer as a bleed is not.
 function clipped(l, r) {
-    return (l == "\342\224\220" || l == "\342\224\230" ||
-            l == "\342\225\256" || l == "\342\225\257" ||
-            r == "\342\224\214" || r == "\342\224\224" ||
-            r == "\342\225\255" || r == "\342\225\260")
+    return (l == BOX_TR || l == BOX_BR || r == BOX_TL || r == BOX_BL)
 }
 function edges_of(row, edge,   c, n) {
     n = 0
@@ -558,7 +605,7 @@ wait_no_box() {
             fail "the view session exited while waiting for $what"
             return 1
         fi
-        grep -q '┌' "$SCREEN" || return 0
+        grep -qF "$BOX_TL" "$SCREEN" || return 0
         el=$(elapsed "$start" "$(now)")
         if ! under "$el" "$budget"; then
             fail "$what is still framed on screen after ${budget}s"
@@ -569,7 +616,7 @@ wait_no_box() {
 }
 
 # The text of every framed box in the last capture.
-box_text() { LC_ALL=C awk "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
+box_text() { LC_ALL=C awk -v BOX_TL="$BOX_TL" -v BOX_TR="$BOX_TR" -v BOX_BL="$BOX_BL" -v BOX_BR="$BOX_BR" -v BOX_V="$BOX_V" "$BOX_AWK$BOX_TEXT_AWK" "$CELLS"; }
 
 # "row col leftmost nearest" for `text` in the last capture; empty when it is
 # not on screen at all.
@@ -807,6 +854,7 @@ assert_chrome() {
     settle
     findings=$(LC_ALL=C awk -v float_bg="$FLOAT_BG" \
         -v beneath_normal="$NORMAL_BG" -v beneath_cursor="$CURSORLINE_BG" \
+        -v BOX_TL="$BOX_TL" -v BOX_TR="$BOX_TR" -v BOX_BL="$BOX_BL" -v BOX_BR="$BOX_BR" -v BOX_V="$BOX_V" \
         'BEGIN { beneath[beneath_normal] = 1; beneath[beneath_cursor] = 1 }'"$BOX_AWK$CHROME_AWK" \
         "$CELLS") && return 0
     printf '%s\n' "$findings" >&2
@@ -1194,17 +1242,7 @@ esac
 # The mark a frozen toast stack sets into its top box's border run, read out
 # of the charset that carries it. The sweep drives a UTF-8 tmux pane whose
 # box-glyph probe answers yes, so the rounded set is the one on screen.
-TOAST_PAUSE_MARK=$(awk '
-    /pub const ROUNDED/ { inside = 1 }
-    inside && /pause: / {
-        # cut on the quotes rather than on a character count: the glyph is
-        # three bytes and awk counts bytes in this locale
-        q = sprintf("%c", 39)
-        s = substr($0, index($0, "pause: " q) + 8)
-        print substr(s, 1, index(s, q) - 1)
-        exit
-    }
-' "$OVERLAY_RS")
+TOAST_PAUSE_MARK=$(border_glyph ROUNDED pause)
 # A mark the frame is already drawn with, or none at all, would be on screen
 # whether the stack was frozen or not, and the leg below would report a
 # freeze that never happened.

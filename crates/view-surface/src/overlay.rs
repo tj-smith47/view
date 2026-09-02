@@ -44,7 +44,7 @@ const LINE_V: char = '│';
 /// drift from it.
 pub(crate) const PROMPT_MARK: char = '>';
 
-/// The six glyphs an overlay's frame is drawn from.
+/// The glyphs an overlay's frame is drawn from.
 ///
 /// A charset rather than a tier: painting is handed the glyphs to use, so
 /// the tier decision happens once, where the capabilities are known, and
@@ -66,6 +66,15 @@ pub struct BorderSet {
     /// terminal that cannot account for `╭` cannot account for `⏸` either,
     /// and one glyph of a frame drawn from a set the terminal does not have
     /// straddles a column boundary and shifts the whole run.
+    ///
+    /// One residual the box-glyph probe cannot answer for: `⏸` is
+    /// `East_Asian_Width=Neutral`, so one cell everywhere the width tables
+    /// are followed, but it is also `Emoji=Yes, Emoji_Presentation=No`, and
+    /// a terminal that forces emoji presentation on every `Emoji=Yes`
+    /// codepoint draws it two cells wide and shifts the run it sits in. The
+    /// probe writes a box-drawing glyph, which is `Ambiguous` and a
+    /// different question entirely, so it cannot see that -- a report of a
+    /// shifted toast border run starts here.
     pub pause: char,
 }
 

@@ -1,0 +1,7 @@
+crates/view-core/src/update/mod.rs	!model.engine.messages.paused() && 		-p view-core an_expiry_arriving_while_paused_is_ignored
+crates/view-core/src/model/messages.rs	ml:        if self.paused {\n            return None;\n        }\n		-p view-core pausing_disarms_the_slot_timer
+crates/view-tui/src/paint/toast.rs	(paused && area.width >= 3).then_some(last_col - 1)	None	-p view-tui the_paused_stack_renders_its_indicator
+crates/view-surface/src/lib.rs	paused: i == 0 && paused,	paused: false,	-p view-surface only_the_top_settled_toast_carries_the_pause_mark
+crates/view-surface/src/cache.rs	self.messages == engine.messages	self.messages.entries == engine.messages.entries	-p view-surface the_pause_key_rebuilds_the_frame_it_marks
+crates/view-core/src/update/mod.rs	ml:    // the first keypress is the end of the startup window\n	ml:    model.engine.messages.entries.retain(|e| e.is_persistent());\n    // the first keypress is the end of the startup window\n	-p view-core typing_never_takes_a_notice_off_the_stack
+crates/view-surface/src/cache.rs	- not state at all: `dirty`, `running`	- not state at all: `running`	-p view-surface every_model_field_is_a_paint_input_or_named_here

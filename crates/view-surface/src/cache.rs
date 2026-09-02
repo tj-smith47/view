@@ -67,6 +67,26 @@ impl Frame {
 /// keystroke routed at an open overlay mutates its state anyway, so frames
 /// with overlays open rebuild from scratch -- exactly what they did before
 /// this cache existed.
+///
+/// A field of `Model` or `EngineModel` that reaches no layer is named here
+/// instead, and `every_model_field_is_a_paint_input_or_named_here` fails on
+/// one that appears in neither place -- a new field silently absent from
+/// this snapshot is a frame reused after the thing it draws has changed:
+///
+/// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
+///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
+///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `mouse_capture`,
+///   `mouse_on`, `next_overlay_id`
+/// - read through a field already here: `engine` (this destructures it),
+///   `grid` (via `grid`), `hl` and `mode` (painters read them off the
+///   `Model` on the reuse path), `overlays` (via `had_overlays`),
+///   `statusline` (via `statusline_rows`), `toast_history` (only the
+///   palette's history view reads it, and that is an overlay)
+/// - a setting no layer's geometry follows on its own: `ai_trusted`,
+///   `ai_enabled`, `ai_panel`, `ai_panel_width_pct`,
+///   `ai_review_open_target`, `tree_width_pct`, `ext_surfaces`,
+///   `statusline_enabled` -- each one only reaches a layer through an open
+///   overlay, and an open overlay rebuilds
 #[derive(Debug)]
 struct Inputs {
     grid: (u16, u16),
@@ -85,11 +105,11 @@ struct Inputs {
     tabline: Option<view_core::model::TablineState>,
     cmdline: Option<view_core::model::CmdlineState>,
     popupmenu: Option<view_core::model::PopupmenuState>,
-    messages: Vec<view_core::model::MessageEntry>,
-    // not inferable from `messages`: the pause key changes no entry, only
-    // whether the top box carries the mark that says the stack is frozen,
-    // and a frame keyed on the entries alone hands back the unmarked one
-    messages_paused: bool,
+    // the whole stack, not its `entries` alone: the pause key changes no
+    // entry, only whether the top box carries the mark that says the stack
+    // is frozen, and a frame keyed on a projection of a painted struct hands
+    // back the frame from before whatever the projection dropped
+    messages: view_core::model::Messages,
     // the frame's only free-running input, and the reason it cannot be
     // inferred from `messages`: a motion frame moves the same entries to
     // different rows, so a cache keyed on the stack's contents alone would
@@ -117,8 +137,7 @@ impl Inputs {
             tabline: engine.tabline.clone(),
             cmdline: engine.cmdline.clone(),
             popupmenu: engine.popupmenu.clone(),
-            messages: engine.messages.entries.clone(),
-            messages_paused: engine.messages.paused(),
+            messages: engine.messages.clone(),
             toast_motion: model.toast_motion.clone(),
             absorbed: engine.absorbed_rows().cloned(),
         }
@@ -141,8 +160,7 @@ impl Inputs {
             && self.tabline == engine.tabline
             && self.cmdline == engine.cmdline
             && self.popupmenu == engine.popupmenu
-            && self.messages == engine.messages.entries
-            && self.messages_paused == engine.messages.paused()
+            && self.messages == engine.messages
             && self.toast_motion == model.toast_motion
             && self.absorbed.as_ref() == engine.absorbed_rows()
     }
@@ -338,6 +356,74 @@ mod tests {
     use view_core::msg::Msg;
     use view_core::native::speculate::{SpecStamp, SPECULATION_MAX_AGE};
     use view_core::update::update;
+
+    /// Every field `header` declares, by name.
+    fn declared_fields(source: &str, header: &str) -> Vec<String> {
+        assert!(source.contains(header), "{header} is no longer declared");
+        let body = source
+            .split_once(header)
+            .expect("just found above")
+            .1
+            .split_once("\n}")
+            .expect("the struct is never closed")
+            .0;
+        let names: Vec<String> = body
+            .lines()
+            .filter_map(|line| {
+                let declaration = line.trim();
+                let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
+                let (name, _) = declaration.split_once(':')?;
+                (!name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+                .then(|| name.to_string())
+            })
+            .collect();
+        assert!(!names.is_empty(), "{header} parsed to no fields at all");
+        names
+    }
+
+    /// The class pin behind `Inputs`: a paint-relevant field added to the
+    /// model and forgotten here reuses a frame that no longer draws it, and
+    /// nothing fails -- twice now, for `absorbed` and for the pause mark.
+    /// Every field is either captured or classified in the doc above
+    /// `Inputs`, and there is no third answer.
+    #[test]
+    fn every_model_field_is_a_paint_input_or_named_here() {
+        let cache = include_str!("cache.rs");
+        let model = include_str!("../../view-core/src/model.rs");
+        let capture = cache
+            .split_once("struct Inputs {")
+            .expect("Inputs is no longer declared")
+            .1;
+        let classified = cache
+            .split_once("#[derive(Debug)]\nstruct Inputs {")
+            .expect("Inputs is no longer declared")
+            .0;
+
+        let mut missing = Vec::new();
+        for (header, owner) in [
+            ("pub struct Model {", "Model"),
+            ("pub struct EngineModel {", "EngineModel"),
+        ] {
+            for field in declared_fields(model, header) {
+                if !capture.contains(&format!(".{field}"))
+                    && !classified.contains(&format!("`{field}`"))
+                {
+                    missing.push(format!("{owner}::{field}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these model fields are neither captured by `Inputs` nor named in \
+             its doc as reaching no layer:\n  {}\nCapture the field if a \
+             painter reads it, or add it to the classification above `Inputs` \
+             saying why it cannot change a frame",
+            missing.join("\n  ")
+        );
+    }
 
     fn model_with_grid(width: u16, height: u16) -> Model {
         let mut model = Model::new();
