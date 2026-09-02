@@ -544,17 +544,24 @@ impl<E: EngineOps> Executor<E> {
             // construction: `update` returns this only while a motion is
             // running and only once per frame, so the chain is at most the
             // frames one dismissal is quantized into and stops on its own.
-            // The degrade when the channel is unwired is the state-first
-            // frame with no interpolation over it -- exactly what a terminal
-            // below the full tier gets, and never a stack left mid-slide,
-            // since the model is already in its final state.
+            // Unlike every other timer here, a lost wakeup does not merely
+            // withhold a later state -- it holds the stack at the frame the
+            // motion had reached, since the tick that retires the motion is
+            // the same one that would have advanced it. So a refused thread
+            // answers `Msg::AnimDropped` on the channel it was going to use,
+            // which settles the stack the way a terminal below the full tier
+            // paints it. The unwired half of the same degrade is `dispatch`'s
+            // to fold, there being no channel here to carry it.
             Effect::ScheduleAnimTick { after } => {
                 if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("toast-motion", move || {
+                    let ticker = tx.clone();
+                    let armed = spawn_or_log("toast-motion", move || {
                         std::thread::sleep(after);
-                        let _ = tx.send(Msg::AnimTick);
+                        let _ = ticker.send(Msg::AnimTick);
                     });
+                    if !armed {
+                        let _ = tx.send(Msg::AnimDropped);
+                    }
                 }
                 Flow::Continue
             }

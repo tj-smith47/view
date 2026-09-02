@@ -542,6 +542,12 @@ pub enum Msg {
     /// nothing else: the model is already in its final state, so a tick that
     /// arrives with no motion live changes nothing and schedules nothing.
     AnimTick,
+    /// The wakeup that would have carried the next [`Msg::AnimTick`] was
+    /// never armed -- the OS refused the thread, or the loop's timer
+    /// channel is unwired -- so nothing else will ever advance or retire
+    /// the motion. Settles the stack on the frame it is already in, which
+    /// is what a terminal below the full tier paints anyway.
+    AnimDropped,
     /// The matcher worker's answer to one `Effect::PickerQuery`, streamed:
     /// the worker sends this as many times as its nucleo tick loop produces
     /// a new ranked prefix for a still-running Files scan, not once at the
@@ -1210,6 +1216,11 @@ pub enum Effect {
     /// an editor sitting still. `an_idle_stack_schedules_no_tick` is what
     /// holds that, since a scheduler that always re-arms looks identical
     /// from every other angle.
+    ///
+    /// The one effect here whose loss has to be told back to `update()`:
+    /// a motion nobody will tick is a stack frozen mid-slide, so a wakeup
+    /// that could not be armed answers [`Msg::AnimDropped`] instead of
+    /// going quiet.
     ScheduleAnimTick {
         after: Duration,
     },

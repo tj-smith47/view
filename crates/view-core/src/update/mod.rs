@@ -71,11 +71,17 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty |= motion.complete();
         }
     }
-    // taken ahead of the message so `departed_toast` can tell a notice that
-    // left the stack from one nvim replaced in place
+    // both taken ahead of the message: the count is what tells a notice
+    // that left the stack from one nvim replaced in place, and the slot is
+    // where the stack the user was looking at was actually drawing the
+    // notice that is about to leave
     let entries_before = model.engine.messages.entries.len();
+    let armed_before = model.engine.messages.armed_visible_slot(model.toast_rows());
     let mut effects = dispatch(model, msg);
-    let departed = model.engine.messages.departed_toast(entries_before);
+    let departed = model
+        .engine
+        .messages
+        .departed_toast(entries_before, armed_before);
     // the toast stack's dismissal timer belongs to its top slot, and the
     // ways an entry leaves that slot are spread across a dozen arms below
     // -- an expiry, a keypress, a deliberate sticky dismissal, an
@@ -671,15 +677,27 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let Some(motion) = model.toast_motion.as_mut() else {
                 return Vec::new();
             };
-            model.dirty = true;
             if motion.advance() {
-                vec![Effect::ScheduleAnimTick {
+                model.dirty = true;
+                return vec![Effect::ScheduleAnimTick {
                     after: crate::native::toast::MOTION_STEP,
-                }]
-            } else {
-                model.toast_motion = None;
-                Vec::new()
+                }];
             }
+            // no repaint on the way out: the frame already on screen is the
+            // settled stack, and every toast box compares unequal once the
+            // motion stops renumbering the slots, so asking for this frame
+            // recomposites the whole toast area into something nobody can
+            // tell from what it replaced
+            model.toast_motion = None;
+            Vec::new()
+        }
+        // the chain died before its motion did, so this is the retirement
+        // the last tick would have done: the model is already in its final
+        // state, and dropping the interpolation paints that state rather
+        // than leaving the stack held at whatever frame it reached
+        Msg::AnimDropped => {
+            model.dirty |= model.toast_motion.take().is_some();
+            Vec::new()
         }
         // nvim owns all buffer text (see the crate's hard rule): a `loaded:
         // true` reply is applied straight to the preview pane, but `loaded:

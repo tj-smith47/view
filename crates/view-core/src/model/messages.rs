@@ -70,6 +70,17 @@ impl MessageEntry {
         joined.split('\n').map(str::to_string).collect()
     }
 
+    /// How many physical lines [`Self::lines`] would return, without
+    /// building them.
+    #[must_use]
+    pub(crate) fn line_count(&self) -> usize {
+        self.content
+            .iter()
+            .map(|(_, t)| t.matches('\n').count())
+            .sum::<usize>()
+            .saturating_add(1)
+    }
+
     /// Whether nvim's own `msg_show` `kind` (per `api-ui-events.txt`'s kind
     /// table) names this an error or a warning: `"emsg"`, `"echoerr"`,
     /// `"wmsg"`, `"lua_error"`, `"rpc_error"`, `"shell_err"`. These must be
@@ -214,11 +225,6 @@ pub struct Messages {
     /// entry is already gone from `entries` and this is the only copy left.
     /// Paid once per toast, when the slot changes hands, never per update.
     armed_lines: Vec<Vec<Span>>,
-    /// How many entries stood ahead of the armed one, so the boxes that
-    /// slide up are exactly the ones that were below it: a sticky entry
-    /// takes no slot but does take a box, so the vacated box is not always
-    /// the topmost one.
-    armed_index: usize,
 }
 
 /// Which of `items` fit in `budget`, given each one's cost and whether it
@@ -358,10 +364,8 @@ impl Messages {
             return None;
         }
         self.armed_slot = top;
-        let armed = top.and_then(|id| self.entries.iter().position(|e| e.id() == id));
-        self.armed_index = armed.unwrap_or(0);
-        self.armed_lines = armed
-            .and_then(|i| self.entries.get(i))
+        self.armed_lines = top
+            .and_then(|id| self.entries.iter().find(|e| e.id() == id))
             .map(|e| {
                 e.lines()
                     .into_iter()
@@ -389,15 +393,44 @@ impl Messages {
     /// on every keystroke of the search. A departure shrinks the stack; a
     /// replacement does not.
     ///
+    /// `slot_before` is [`Self::armed_visible_slot`] taken over the same
+    /// pre-message stack, and it carries the other half of the answer: a
+    /// notice the row budget was not showing has nothing to slide out of,
+    /// and animating one would start the stack from a frame that was never
+    /// on screen. The oldest transient is both the first the budget evicts
+    /// and the first the slot queue arms, so the two meet on any stack
+    /// taller than its terminal.
+    ///
     /// Read before [`Self::arm_top_slot`] re-arms, which is what leaves the
     /// leaving entry's copy still in place to be read.
     #[must_use]
-    pub(crate) fn departed_toast(&self, entries_before: usize) -> Option<(Vec<Vec<Span>>, usize)> {
+    pub(crate) fn departed_toast(
+        &self,
+        entries_before: usize,
+        slot_before: Option<usize>,
+    ) -> Option<(Vec<Vec<Span>>, usize)> {
         let armed = self.armed_slot?;
+        let slot = slot_before?;
         if self.entries.len() >= entries_before || self.entries.iter().any(|e| e.id() == armed) {
             return None;
         }
-        Some((self.armed_lines.clone(), self.armed_index))
+        Some((self.armed_lines.clone(), slot))
+    }
+
+    /// Where the armed toast sits in the painted stack, counted over the
+    /// boxes the row budget is actually showing, or `None` when it is
+    /// showing none of it or nothing is armed.
+    #[must_use]
+    pub(crate) fn armed_visible_slot(&self, max_rows: usize) -> Option<usize> {
+        let armed = self.armed_slot?;
+        let mut slot = 0;
+        for (entry, shown) in self.entries.iter().zip(self.keep_visible(max_rows)) {
+            if entry.id() == armed {
+                return shown.then_some(slot);
+            }
+            slot += usize::from(shown);
+        }
+        None
     }
 
     /// Whether the startup hold is still parking foreign transient
@@ -692,6 +725,29 @@ impl Messages {
             .collect()
     }
 
+    /// Which entries the row budget is showing, in `entries` order. Costed
+    /// off each entry's own line count rather than its rendered spans, so
+    /// the answer is free of the allocation [`Self::visible_toasts`] pays
+    /// for the boxes it hands back.
+    fn keep_visible(&self, max_rows: usize) -> Vec<bool> {
+        let costs: Vec<(bool, usize)> = self
+            .entries
+            .iter()
+            .map(|e| (e.outranks_transient(), e.line_count().saturating_add(2)))
+            .collect();
+        let mut keep = keep_within(&costs, max_rows);
+        // a stack with no room for even one framed box shows the newest
+        // notice clipped rather than nothing at all: a truncated line still
+        // says something happened, an empty screen says the message was
+        // never raised
+        if !keep.iter().any(|k| *k) {
+            if let Some(last) = keep.last_mut() {
+                *last = true;
+            }
+        }
+        keep
+    }
+
     /// The toast boxes actually visible in a stack `max_rows` tall, oldest
     /// first: one box per entry, holding that entry's own physical lines
     /// (its content split on its own embedded newlines) and costing those
@@ -709,36 +765,16 @@ impl Messages {
     /// clips it, which is a truncated notice instead of no notice at all.
     #[must_use]
     pub fn visible_toasts(&self, max_rows: usize) -> Vec<Vec<Vec<Span>>> {
-        let boxes: Vec<(bool, Vec<Vec<Span>>)> = self
-            .entries
+        self.entries
             .iter()
-            .map(|e| {
-                let lines = e
-                    .lines()
+            .zip(self.keep_visible(max_rows))
+            .filter(|(_, shown)| *shown)
+            .map(|(e, _)| {
+                e.lines()
                     .into_iter()
                     .map(|l| vec![Span::plain(l)])
-                    .collect();
-                (e.outranks_transient(), lines)
+                    .collect()
             })
-            .collect();
-        let costs: Vec<(bool, usize)> = boxes
-            .iter()
-            .map(|(persistent, lines)| (*persistent, lines.len().saturating_add(2)))
-            .collect();
-        let mut keep = keep_within(&costs, max_rows);
-        // a stack with no room for even one framed box shows the newest
-        // notice clipped rather than nothing at all: a truncated line still
-        // says something happened, an empty screen says the message was
-        // never raised
-        if !keep.iter().any(|k| *k) {
-            if let Some(last) = keep.last_mut() {
-                *last = true;
-            }
-        }
-        boxes
-            .into_iter()
-            .zip(keep)
-            .filter_map(|((_, lines), k)| k.then_some(lines))
             .collect()
     }
 }

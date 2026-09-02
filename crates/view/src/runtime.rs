@@ -186,6 +186,7 @@ pub(crate) fn dispatch<E: EngineOps>(
             Effect::ReprobeExternalWrite { path } => Some(Msg::ExternalWatchDegraded {
                 reason: reprobe_unscheduled(path),
             }),
+            Effect::ScheduleAnimTick { .. } => Some(Msg::AnimDropped),
             _ => None,
         });
         if let Some(Some(answer)) = dropped {
@@ -2894,6 +2895,71 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&root);
         });
+    }
+
+    /// The one timer whose loss cannot be shrugged off: every other
+    /// `Effect` here withholds a *later* state when its wakeup never
+    /// arrives, but the tick that retires a toast motion is the same one
+    /// that advances it, so a motion nobody will ever tick holds the stack
+    /// at the frame it reached -- the departed notice still drawn and the
+    /// live boxes still a full box low, for the rest of the session, and
+    /// with `toast_motion` staying `Some` no later dismissal animates
+    /// either. Driven through `dispatch` with no `toast_timer` wired,
+    /// which is the reachable half of the degrade.
+    #[test]
+    fn an_unarmed_motion_wakeup_settles_the_stack_instead_of_freezing_it() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.caps.tier = view_core::model::Tier::Full;
+        let _ = model
+            .engine
+            .messages
+            .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let mut msgs = vec![Msg::Redraw(vec![view_core::events::UiEvent::GridResize {
+            grid: 1,
+            width: 80,
+            height: 24,
+        }])];
+        msgs.extend(["first", "second"].map(|text| {
+            Msg::Redraw(vec![view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, text.to_string())],
+                replace_last: false,
+            }])
+        }));
+        for msg in msgs {
+            let _ = dispatch(&mut model, &executor, &mut follow_ups, msg);
+        }
+        let first = model.engine.messages.entries[0].id();
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::ToastExpired { id: first },
+        );
+
+        assert_eq!(
+            model.toast_motion, None,
+            "a wakeup that was never armed must settle the stack, not \
+             strand it mid-slide"
+        );
+        assert_eq!(
+            model
+                .engine
+                .messages
+                .visible_toasts(model.toast_rows())
+                .len(),
+            1,
+            "the notice that left is gone from the stack it settled into"
+        );
     }
 
     /// The boundary proof this suite actually needs, driven through

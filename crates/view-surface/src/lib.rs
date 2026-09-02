@@ -588,11 +588,8 @@ fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
 /// The departing box is pushed last, so it composites over the stack
 /// arriving underneath it instead of being cleared by it.
 fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
-    let (grid_w, grid_h) = bounds;
-    let stack = model
-        .engine
-        .messages
-        .visible_toasts(usize::from(grid_h).max(3));
+    let (grid_w, _) = bounds;
+    let stack = model.engine.messages.visible_toasts(model.toast_rows());
     let leaving = model.toast_motion.as_ref().map(|motion| {
         let (lines, slot) = motion.exiting();
         let (width, height) = toast_box(lines, grid_w);
@@ -1935,6 +1932,50 @@ mod tests {
     /// Below the full tier the state-first frame is the only frame: the
     /// stack paints its final state the instant the notice leaves, with no
     /// departing box and nothing offset.
+    /// The motion's first frame is the stack the user was already looking
+    /// at (the spec's state-first rule): what it interpolates from must be
+    /// what was on screen, never a notice the row budget was not showing.
+    /// The oldest transient is both what the budget evicts first and what
+    /// the slot queue arms first, so the two collide on any stack too tall
+    /// for its terminal.
+    #[test]
+    fn a_notice_the_row_budget_never_showed_leaves_without_a_motion() {
+        let mut model = model_with_grid(20, 9);
+        model.caps.tier = view_core::model::Tier::Full;
+        for text in ["first", "second", "third", "fourth"] {
+            apply(
+                &mut model,
+                UiEvent::MsgShow {
+                    kind: "echomsg".into(),
+                    content: vec![(0, text.into())],
+                    replace_last: false,
+                },
+            );
+        }
+        let before = toasts(&render(&model));
+        assert_eq!(
+            toast_texts(&render(&model)),
+            vec![
+                vec!["second".to_string()],
+                vec!["third".to_string()],
+                vec!["fourth".to_string()],
+            ],
+            "the budget shows three of the four boxes"
+        );
+
+        let first = model.engine.messages.entries[0].id();
+        let _ = update(&mut model, Msg::ToastExpired { id: first });
+        assert_eq!(
+            model.toast_motion, None,
+            "a notice that was never painted has nothing to slide out of"
+        );
+        assert_eq!(
+            toasts(&render(&model)),
+            before,
+            "the stack the budget was already showing does not move"
+        );
+    }
+
     #[test]
     fn below_full_tier_the_stack_jumps_to_its_final_state() {
         let full = {

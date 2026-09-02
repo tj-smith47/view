@@ -924,6 +924,17 @@ impl Model {
     /// carry live editor state the user still needs while the panel is open
     /// -- the ruler and the search count among it. The share stays a share
     /// of what an overlay may actually have.
+    /// The rows the toast stack is laid out in: the engine grid's own
+    /// height, floored at one framed box so a stack is never budgeted out
+    /// of existence on a terminal too small to hold one. Read by the
+    /// renderer that lays the boxes out and by `update`'s own read of which
+    /// notice the budget is showing -- one budget, because two would let
+    /// the model animate a box the frame never drew.
+    #[must_use]
+    pub fn toast_rows(&self) -> usize {
+        usize::from(self.engine.grid().size().1).max(3)
+    }
+
     #[must_use]
     pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
         let top = self.chrome_rows();

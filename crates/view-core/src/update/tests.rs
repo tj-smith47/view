@@ -10561,6 +10561,16 @@ fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
 fn animating_model() -> Model {
     let mut m = started_model();
     m.caps.tier = crate::model::Tier::Full;
+    // a grid tall enough for the whole stack: on a terminal whose row
+    // budget is not showing the notice that leaves, nothing slides
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::GridResize {
+            grid: 1,
+            width: 80,
+            height: 24,
+        }]),
+    );
     m
 }
 
@@ -10652,14 +10662,27 @@ fn a_tick_after_the_motion_ends_schedules_nothing() {
     );
 
     let mut frames = 1;
+    let mut painted = 1;
     loop {
+        m.dirty = false;
         let effects = update(&mut m, Msg::AnimTick);
         if tick_waits(&effects).is_empty() {
             break;
         }
+        painted += usize::from(m.dirty);
         frames += 1;
         assert!(frames <= 64, "the motion never ended");
     }
+    assert!(
+        !m.dirty,
+        "the wakeup that retires a finished motion asks for no frame: the \
+         stack it would repaint is the one already on screen"
+    );
+    assert_eq!(
+        painted,
+        usize::from(crate::native::toast::MOTION_STEPS),
+        "a dismissal costs the frames it is quantized into and no more"
+    );
     assert_eq!(
         frames,
         usize::from(crate::native::toast::MOTION_STEPS),
@@ -10711,6 +10734,231 @@ fn a_second_dismissal_mid_motion_does_not_open_a_second_chain() {
         usize::from(crate::native::toast::MOTION_STEPS),
         "the restarted motion still gets its whole interval"
     );
+}
+
+/// The degrade the executor folds back when a motion's next wakeup could
+/// not be armed at all: the stack settles on the state it is already in --
+/// which is what a terminal below the full tier paints -- instead of
+/// standing at whatever frame it had reached, with `toast_motion` left
+/// `Some` and every later dismissal riding a chain that will never tick.
+#[test]
+fn a_wakeup_that_was_never_armed_settles_the_stack() {
+    let mut m = animating_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second")]),
+    );
+    let first = m.engine.messages.entries[0].id();
+    let _ = update(&mut m, Msg::ToastExpired { id: first });
+    m.dirty = false;
+
+    let effects = update(&mut m, Msg::AnimDropped);
+    assert_eq!(m.toast_motion, None, "the motion is retired, not parked");
+    assert!(m.dirty, "settling on the final state is a frame");
+    assert_eq!(
+        tick_waits(&effects),
+        Vec::<Duration>::new(),
+        "and nothing is asked for again: {effects:?}"
+    );
+
+    let second = m.engine.messages.entries[0].id();
+    let effects = update(&mut m, Msg::ToastExpired { id: second });
+    assert_eq!(
+        tick_waits(&effects),
+        vec![crate::native::toast::MOTION_STEP],
+        "a later dismissal still opens its own chain: {effects:?}"
+    );
+}
+
+/// Two halves of the same moment, both at the full tier, because the tier
+/// gate is the one place presentation could reach into timing: the notice
+/// promoted into the vacated slot starts its own full dismissal timer while
+/// the stack is still mid-slide, and what slides is the notice that just
+/// left rather than the one that was leaving when the second landed.
+#[test]
+fn a_dismissal_mid_motion_arms_the_promoted_slot_and_carries_the_newer_notice() {
+    let mut m = animating_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second"), echomsg("third")]),
+    );
+    let first = m.engine.messages.entries[0].id();
+    let second = m.engine.messages.entries[1].id();
+    let _ = update(&mut m, Msg::ToastExpired { id: first });
+    let _ = update(&mut m, Msg::AnimTick);
+    let effects = update(&mut m, Msg::ToastExpired { id: second });
+
+    assert_eq!(
+        armed_slots(&effects),
+        vec![m.engine.messages.entries[0].id()],
+        "the promoted notice gets a whole timeout of its own, mid-motion \
+         or not: motion is presentation, timing is behavior"
+    );
+    let motion = m.toast_motion.as_ref().expect("a motion");
+    assert_eq!(
+        motion
+            .exiting()
+            .0
+            .iter()
+            .map(|line| line.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>(),
+        vec!["second".to_string()],
+        "the newer dismissal takes the motion over -- the box that was \
+         half-way out ends where it is, and the stack under it re-seats \
+         against the notice leaving now"
+    );
+    assert_eq!(
+        motion.elapsed_steps, 0,
+        "and it is given the whole interval from the start"
+    );
+}
+
+/// Every route that can change `Messages::entries`, walked against the one
+/// question the motion asks: did a notice the stack was actually showing
+/// leave it? The routes disagree about far more than that -- one entry or
+/// the whole log, a fresh id in place of an old one, entries arriving
+/// rather than leaving -- and each of them reaches the motion through a
+/// different arm.
+///
+/// The cost this pins alongside it: a route that takes several notices at
+/// once animates the one that held the slot and takes the rest without a
+/// frame. One stack, one motion, one clock is what the exit was specified
+/// as, so a burst is one box leaving and the rest ending.
+#[test]
+fn only_a_notice_the_stack_was_showing_leaves_with_a_motion() {
+    fn stacked() -> Model {
+        let mut m = animating_model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![echomsg("first"), echomsg("second"), echomsg("third")]),
+        );
+        m
+    }
+    fn held() -> Model {
+        let mut m = Model::new();
+        m.caps.tier = crate::model::Tier::Full;
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::GridResize {
+                    grid: 1,
+                    width: 80,
+                    height: 24,
+                },
+                echomsg("first"),
+                echomsg("second"),
+            ]),
+        );
+        m
+    }
+    type Route = (
+        &'static str,
+        fn() -> Model,
+        Box<dyn Fn(&mut Model)>,
+        Option<&'static str>,
+        Vec<&'static str>,
+    );
+    let routes: Vec<Route> = vec![
+        (
+            "the top slot's own expiry",
+            stacked,
+            Box::new(|m: &mut Model| {
+                let first = m.engine.messages.entries[0].id();
+                let _ = update(m, Msg::ToastExpired { id: first });
+            }),
+            Some("first"),
+            vec!["second", "third"],
+        ),
+        (
+            "a keypress ageing out every read transient",
+            stacked,
+            Box::new(|m: &mut Model| {
+                m.engine.messages.note_flush();
+                let _ = update(
+                    m,
+                    Msg::Key(Key {
+                        notation: "j".into(),
+                    }),
+                );
+            }),
+            Some("first"),
+            vec![],
+        ),
+        (
+            "nvim clearing the whole log",
+            stacked,
+            Box::new(|m: &mut Model| {
+                let _ = update(m, Msg::Redraw(vec![UiEvent::MsgClear]));
+            }),
+            Some("first"),
+            vec![],
+        ),
+        (
+            "a progress line overwriting itself",
+            stacked,
+            Box::new(|m: &mut Model| {
+                let _ = update(
+                    m,
+                    Msg::Redraw(vec![UiEvent::MsgShow {
+                        kind: "echomsg".into(),
+                        content: vec![(0, "fourth".into())],
+                        replace_last: true,
+                    }]),
+                );
+            }),
+            None,
+            vec!["first", "second", "fourth"],
+        ),
+        (
+            "nvim's clear-then-show flush",
+            stacked,
+            Box::new(|m: &mut Model| {
+                let _ = update(m, Msg::Redraw(vec![UiEvent::MsgClear, echomsg("fourth")]));
+            }),
+            None,
+            vec!["fourth"],
+        ),
+        (
+            "another notice arriving on a live stack",
+            stacked,
+            Box::new(|m: &mut Model| {
+                let _ = update(m, Msg::Redraw(vec![echomsg("fourth")]));
+            }),
+            None,
+            vec!["first", "second", "third", "fourth"],
+        ),
+        (
+            "the startup hold letting go of what it parked",
+            held,
+            Box::new(|m: &mut Model| {
+                let _ = m
+                    .engine
+                    .messages
+                    .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+            }),
+            None,
+            vec!["first", "second"],
+        ),
+    ];
+
+    for (route, base, act, animates, left_standing) in routes {
+        let mut m = base();
+        act(&mut m);
+        let leaving: Option<Vec<String>> = m.toast_motion.as_ref().map(|motion| {
+            motion
+                .exiting()
+                .0
+                .iter()
+                .map(|line| line.iter().map(|s| s.text.as_str()).collect())
+                .collect()
+        });
+        assert_eq!(
+            leaving,
+            animates.map(|text| vec![text.to_string()]),
+            "{route}"
+        );
+        assert_eq!(visible_texts(&m), left_standing, "{route}");
+    }
 }
 
 /// The spec's interruptible rule: input during an animation completes it on

@@ -196,6 +196,7 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         // one whose lines answer "was the loop woken while nothing was
         // moving": a short burst per dismissal, silence between them
         Msg::AnimTick => log("toast", "anim-tick"),
+        Msg::AnimDropped => log("toast", "anim-dropped"),
         Msg::ToastExpired { .. } => log("toast", "expired"),
         Msg::MappingsClaimed { claimed } => {
             log_with("native", || {
