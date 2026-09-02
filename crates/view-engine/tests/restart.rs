@@ -515,6 +515,60 @@ fn a_startup_that_recovered_nothing_leaves_its_own_messages_standing() {
     );
 }
 
+/// The other bound, at the crossing the code guard alone was answering for:
+/// a swap whose owner is still editing, met by a session that gave nvim the
+/// message area back. nvim decides that case itself (`e`, with a `W325`
+/// warning), and both halves of the answer have to survive this ext set --
+/// the work stays with its owner, and the warning stays where nvim put it,
+/// which is the only account either session has that two editors are over one
+/// file.
+#[test]
+fn a_live_owners_swap_is_left_alone_when_nvim_owns_the_message_area() {
+    let dir = scratch("live-owner-grid-messages");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+
+    let owner = Engine::spawn(editing(&dir, &file)).unwrap();
+    owner.handle.ui_attach(80, 24, NVIM_OWNS_MESSAGES).unwrap();
+    write_unsaved_edit(&owner, "the owner is still editing this");
+    assert!(
+        !swap_files(&dir).is_empty(),
+        "the owner flushed no swap file, so the second session below would \
+         meet no prompt at all"
+    );
+
+    let second = Engine::spawn(editing(&dir, &file)).unwrap();
+    second.handle.ui_attach(80, 24, NVIM_OWNS_MESSAGES).unwrap();
+
+    assert_not_parked(&second);
+    assert_eq!(
+        first_line(&second),
+        "what is on disk",
+        "the second session recovered a swap its owner is still editing"
+    );
+    assert!(
+        swap_guard_live(&second),
+        "the session carries no SwapExists guard, so a count of zero \
+         answered prompts says nothing"
+    );
+    assert_eq!(
+        swap_events(&second),
+        0,
+        "view answered a prompt nvim had already decided for a live owner"
+    );
+    assert_eq!(
+        swap_global(&second, "view_swap_reported"),
+        "'<unset>'",
+        "the startup opened a recovery window over a swap it recovered \
+         nothing from, and so redrew nvim's W325 away"
+    );
+    assert_eq!(
+        first_line(&owner),
+        "the owner is still editing this",
+        "the owner lost the edit it never wrote"
+    );
+}
+
 /// The prompt an embedded engine cannot ask: a session started over a
 /// crashed one's swap file is not handed `-r` (only a restart is), so it
 /// meets nvim's own `[O]pen/[E]dit/[R]ecover/[D]elete/[Q]uit` question the
