@@ -303,7 +303,9 @@ mod tests {
     /// A program a test runs is a committed file, never one the test writes:
     /// a sibling test's `fork` landing inside the write's open-descriptor
     /// window inherits the writable descriptor, and Linux then refuses the
-    /// exec with `ETXTBSY`.
+    /// exec with `ETXTBSY`. Unix-gated with both of its consumers: on
+    /// Windows it is dead code, and `-D warnings` makes that a build break.
+    #[cfg(unix)]
     fn fixture(name: &str) -> std::path::PathBuf {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../scripts/test-fixtures")
