@@ -794,13 +794,20 @@ impl PtySession {
         f(self.parser.screen())
     }
 
+    /// The one place a chunk leaves the reader channel and enters this
+    /// session's state, so recording cannot be skipped by whichever path
+    /// happened to take the chunk off the channel.
+    fn absorb(&mut self, chunk: &[u8]) {
+        if let Some(raw) = &mut self.raw {
+            let room = RAW_RECORD_LIMIT.saturating_sub(raw.len());
+            raw.extend_from_slice(&chunk[..room.min(chunk.len())]);
+        }
+        self.parser.process(chunk);
+    }
+
     fn drain_available(&mut self) {
         while let Ok(chunk) = self.rx.try_recv() {
-            if let Some(raw) = &mut self.raw {
-                let room = RAW_RECORD_LIMIT.saturating_sub(raw.len());
-                raw.extend_from_slice(&chunk[..room.min(chunk.len())]);
-            }
-            self.parser.process(&chunk);
+            self.absorb(&chunk);
         }
     }
 
@@ -830,7 +837,7 @@ impl PtySession {
         while Instant::now() < deadline {
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(chunk) => {
-                    self.parser.process(&chunk);
+                    self.absorb(&chunk);
                     if predicate(self.parser.screen()) {
                         return true;
                     }
@@ -1133,6 +1140,29 @@ mod tests {
         // startup output, the current-state-check-first path wait_for must
         // take rather than blocking for a chunk that may never arrive again
         assert!(session.wait_for("already-there", Duration::from_secs(5)));
+    }
+
+    // A wait is the only way most callers ever advance the stream, so a
+    // recording that skips the bytes a wait consumed answers about a screen
+    // nobody drained: recording on plus a satisfied wait must mean the
+    // satisfying bytes are in the recording. Ordered by construction -- the
+    // needle is the child's whole output and nothing has drained before the
+    // wait, so the chunk carrying it can only arrive inside the wait.
+    #[test]
+    fn a_wait_records_the_bytes_it_observed() {
+        let mut session =
+            testenv::spawning(|| PtySession::spawn("/bin/echo", &["recorded-by-the-wait"], 80, 24))
+                .unwrap();
+        session.record_raw_output();
+        assert!(session.wait_for(
+            "recorded-by-the-wait",
+            view_test_support::host_deadline(Duration::from_secs(5))
+        ));
+        let raw = String::from_utf8_lossy(session.raw_output()).into_owned();
+        assert!(
+            raw.contains("recorded-by-the-wait"),
+            "the wait observed the needle but the recording never saw it; raw:\n{raw:?}"
+        );
     }
 
     #[test]
