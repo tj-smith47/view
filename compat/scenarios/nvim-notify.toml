@@ -47,13 +47,17 @@ steps = [
   # keystroke sent the moment the install window closes.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
   { send = "<Esc>" },
-  { send = ":lua require('notify')('notify-compat-marker')<CR>" },
+  # An explicit dwell rather than nvim-notify's own five-second default:
+  # view's handover toasts stand over the cells this float draws into and
+  # retire a slot at a time, so a default float would be gone before the
+  # grid beneath them was readable and the wait below would be racing it.
+  { send = ":lua require('notify')('notify-compat-marker', nil, { timeout = 60000 })<CR>" },
   # The notification's body text rendered in the grid by nvim-notify's own
   # floating window. Without the plugin the require() fails with E5108
   # instead, so no fallback path can render this text.
-  { wait_for = "notify-compat-marker", timeout_ms = 15000 },
-  # The float times out and disappears; the message persisting in
-  # nvim-notify's own history API is the durable plugin-specific fact.
+  { wait_for = "notify-compat-marker", timeout_ms = 30000 },
+  # The message persisting in nvim-notify's own history API is the durable
+  # plugin-specific fact, independent of how long its float stands.
   { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
   # The takeover, read from the plugin that would otherwise have drawn it:
   # a vim.notify call reaches view through ext_messages and is painted as
@@ -64,8 +68,12 @@ steps = [
   { send = ":lua vim.notify('vim-notify-marker')<CR>" },
   { wait_for = "vim-notify-marker", timeout_ms = 15000 },
   { probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "absent" },
+  # Generous for the overlay's title row specifically: view's own handover
+  # toasts stack downward from the top of the grid and stand over it until
+  # each retires on its own timer, one slot at a time. Nothing sweeps them
+  # -- typing is not a dismissal -- so the wait outlives the stack.
   { send = "\\fm" },
-  { wait_for = "Messages", timeout_ms = 5000 },
+  { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]
 
@@ -90,21 +98,26 @@ steps = [
   # keystroke sent the moment the install window closes.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
   { send = "<Esc>" },
-  { send = ":lua require('notify')('notify-compat-marker')<CR>" },
+  # An explicit dwell rather than nvim-notify's own five-second default:
+  # view's handover toasts stand over the cells this float draws into and
+  # retire a slot at a time, so a default float would be gone before the
+  # grid beneath them was readable and the wait below would be racing it.
+  { send = ":lua require('notify')('notify-compat-marker', nil, { timeout = 60000 })<CR>" },
   # nvim-notify's float lands on the message area, which view owns here, so
   # view raises its own notice about it -- over the very cells the float
-  # drew into, both being top-right boxes. Down it goes, the same way, and
-  # only then is the grid readable. It stays down: the notice is raised
-  # from a float *sighting*, and nvim-notify repositions its window only
-  # while sliding, not through the seconds it then stands still.
+  # drew into, both being top-right boxes. Down goes that notice, and the
+  # transient stack beside it retires on its own; only then is the grid
+  # readable. The notice stays down: it is raised from a float *sighting*,
+  # and nvim-notify repositions its window only while sliding, not through
+  # the seconds it then stands still.
   { wait_for = "view: notify is drawing over", timeout_ms = 15000 },
   { send = "<Esc>" },
   # The notification's body text rendered in the grid by nvim-notify's own
   # floating window. Without the plugin the require() fails with E5108
   # instead, so no fallback path can render this text.
-  { wait_for = "notify-compat-marker", timeout_ms = 15000 },
-  # The float times out and disappears; the message persisting in
-  # nvim-notify's own history API is the durable plugin-specific fact.
+  { wait_for = "notify-compat-marker", timeout_ms = 30000 },
+  # The message persisting in nvim-notify's own history API is the durable
+  # plugin-specific fact, independent of how long its float stands.
   { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
   # The takeover, read from the plugin that would otherwise have drawn it:
   # a vim.notify call reaches view through ext_messages and is painted as
@@ -115,8 +128,12 @@ steps = [
   { send = ":lua vim.notify('vim-notify-marker')<CR>" },
   { wait_for = "vim-notify-marker", timeout_ms = 15000 },
   { probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "absent" },
+  # Generous for the overlay's title row specifically: view's own handover
+  # toasts stack downward from the top of the grid and stand over it until
+  # each retires on its own timer, one slot at a time. Nothing sweeps them
+  # -- typing is not a dismissal -- so the wait outlives the stack.
   { send = "\\fm" },
-  { wait_for = "Messages", timeout_ms = 5000 },
+  { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]
 
@@ -166,7 +183,10 @@ steps = [
   { send = "\\fm" },
   # The minimal fixture has no plugin to intercept vim.notify at all, so
   # this is the one state that shows view's own history overlay with
-  # nothing routed through a plugin first.
-  { wait_for = "Messages", timeout_ms = 15000 },
+  # nothing routed through a plugin first. The send above is also this
+  # launch's first keystroke, which ends the startup hold and puts every
+  # entry it parked onto the stack -- so the title this waits for opens
+  # underneath that stack and is readable only as it retires.
+  { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]

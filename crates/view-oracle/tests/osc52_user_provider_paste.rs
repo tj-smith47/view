@@ -180,14 +180,21 @@ fn a_paste_with_an_empty_clipboard_returns_at_once_instead_of_wedging() {
     session
         .send(b"\"+p")
         .expect("the paste keys must reach the session");
+    // read before the clock starts: this is a screen read, not a key, and
+    // the leg times how long the session takes to accept typing again
+    let below = common::newlines_below_toasts(&session.screen());
     let started = Instant::now();
     // the newlines put the marker below the startup toast stack: a box holds
     // its slot for the transient timeout, so a marker typed onto row 1 is
     // occluded rather than missing, and the wait would read the stack's own
-    // expiry as this leg's latency. A wedged paste swallows these keys too,
-    // so the discriminator is unchanged
+    // expiry as this leg's latency.
+    //
+    // The discriminator survives them. A wedged paste raises nvim's
+    // hit-enter prompt, which eats the `i` and answers to `<CR>`, so the
+    // rest of this burst arrives in normal mode -- where `still-alive`
+    // spells motions and never appears on screen as itself.
     session
-        .send(format!("i\r\r\r\r\r\r\r\r\r\r{AFTER_PASTE}\x1b").as_bytes())
+        .send(format!("i{below}{AFTER_PASTE}\x1b").as_bytes())
         .expect("the follow-up keys must reach the session");
     let alive = session.wait_for(AFTER_PASTE, Duration::from_secs(8));
     let elapsed = started.elapsed();

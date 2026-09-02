@@ -404,9 +404,10 @@ fn key_in_engine_focus_becomes_rpc_input_effect() {
 }
 
 #[test]
-fn a_keypress_dismisses_the_already_flushed_transient_backlog_and_marks_dirty() {
-    // the front notice is the one entry with a running slot timer, so the
-    // keypress clears what is queued behind it and leaves it to that timer
+fn typing_never_takes_a_notice_off_the_stack() {
+    // the toast stack's one lifetime is the slot timer (spec 7.1, motion
+    // rule 5): a notice queued behind another has not been read yet, so
+    // typing past it is not evidence that it was
     let mut m = started_model();
     let _ = update(
         &mut m,
@@ -421,75 +422,6 @@ fn a_keypress_dismisses_the_already_flushed_transient_backlog_and_marks_dirty() 
                 content: vec![(0, "queued behind it".into())],
                 replace_last: false,
             },
-            UiEvent::Flush,
-        ]),
-    );
-    assert_eq!(m.engine.messages.entries.len(), 2);
-    m.dirty = false;
-
-    let _ = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "l".into(),
-        }),
-    );
-    assert_eq!(
-        m.engine
-            .messages
-            .entries
-            .iter()
-            .flat_map(crate::model::MessageEntry::lines)
-            .collect::<Vec<_>>(),
-        vec!["info".to_string()],
-        "a queued transient toast that already survived one Flush must be dismissed on the next \
-         keypress, and the armed one must not"
-    );
-    assert!(
-        m.dirty,
-        "dismissing a visible toast must mark the model dirty for a repaint"
-    );
-}
-
-#[test]
-fn a_keypress_leaves_the_armed_toast_to_its_own_timer() {
-    // the disconfirm that named this rule: the keystrokes spelling
-    // `<leader>fp` reach `route_key` before the verb they invoke does, so a
-    // keypress that retired the front notice would empty the stack the
-    // pause key was pressed to hold
-    let mut m = started_model();
-    let _ = update(
-        &mut m,
-        Msg::Redraw(vec![
-            UiEvent::MsgShow {
-                kind: "echomsg".into(),
-                content: vec![(0, "read me".into())],
-                replace_last: false,
-            },
-            UiEvent::Flush,
-        ]),
-    );
-
-    for notation in ["\\", "f", "p"] {
-        let _ = update(
-            &mut m,
-            Msg::Key(Key {
-                notation: notation.into(),
-            }),
-        );
-    }
-    assert_eq!(
-        m.engine.messages.entries.len(),
-        1,
-        "the notice holding the armed slot outlives the keys that reach a native verb"
-    );
-}
-
-#[test]
-fn a_keypress_never_dismisses_a_persistent_toast() {
-    let mut m = model();
-    let _ = update(
-        &mut m,
-        Msg::Redraw(vec![
             UiEvent::MsgShow {
                 kind: "echoerr".into(),
                 content: vec![(0, "boom".into())],
@@ -498,42 +430,22 @@ fn a_keypress_never_dismisses_a_persistent_toast() {
             UiEvent::Flush,
         ]),
     );
+    let standing = visible_texts(&m);
+    assert_eq!(standing.len(), 3);
 
-    let _ = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "l".into(),
-        }),
-    );
+    for notation in ["l", "j", "\\", "f", "p"] {
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: notation.into(),
+            }),
+        );
+    }
     assert_eq!(
-        m.engine.messages.entries.len(),
-        1,
-        "an error/warn-kind toast must persist across a keypress"
+        visible_texts(&m),
+        standing,
+        "the whole stack outlives ordinary typing, the keys that spell a native verb included"
     );
-}
-
-#[test]
-fn a_keypress_does_not_dismiss_a_transient_toast_shown_in_the_same_batch_pre_flush() {
-    // no Flush yet: the toast has not necessarily been painted even
-    // once, so it must survive this keypress and only be dismissed on
-    // the one after -- guarantees at least one visible frame
-    let mut m = model();
-    let _ = update(
-        &mut m,
-        Msg::Redraw(vec![UiEvent::MsgShow {
-            kind: "echomsg".into(),
-            content: vec![(0, "info".into())],
-            replace_last: false,
-        }]),
-    );
-
-    let _ = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "l".into(),
-        }),
-    );
-    assert_eq!(m.engine.messages.entries.len(), 1);
 }
 
 // routing table: focus x input-kind -> effect. Pins the seam native
@@ -8864,9 +8776,11 @@ fn the_interrupt_key_puts_the_same_bytes_on_the_wire_modal_or_not() {
 
 /// Every key runs the keypress bookkeeping the rest of `update` owes it,
 /// including the keys the modal answers: an annunciator on screen may not
-/// quietly change what a keypress means anywhere else in the model.
+/// quietly change what a keypress means anywhere else in the model. The
+/// startup hold is that bookkeeping -- the first key ends the window,
+/// whichever key it is.
 #[test]
-fn a_key_the_modal_answers_still_ages_out_a_read_toast() {
+fn a_key_the_modal_answers_still_ends_the_startup_hold() {
     for notation in [
         SupervisionChoice::Interrupt.key(),
         SupervisionChoice::Dismiss.key(),
@@ -8879,13 +8793,12 @@ fn a_key_the_modal_answers_still_ages_out_a_read_toast() {
                 observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
             },
         );
-        m.engine
-            .messages
-            .push("echomsg".to_string(), vec![(0, "written".into())], false);
-        m.engine.messages.note_flush();
+        let _ = m
+            .engine
+            .record_message("echomsg".to_string(), vec![(0, "written".into())], false);
         assert!(
-            visible_texts(&m).iter().any(|line| line == "written"),
-            "{:?}",
+            !visible_texts(&m).iter().any(|line| line == "written"),
+            "parked by the hold, not stacked: {:?}",
             visible_texts(&m)
         );
 
@@ -8896,8 +8809,8 @@ fn a_key_the_modal_answers_still_ages_out_a_read_toast() {
             }),
         );
         assert!(
-            !visible_texts(&m).iter().any(|line| line == "written"),
-            "{notation:?} skipped the transient dismissal: {:?}",
+            visible_texts(&m).iter().any(|line| line == "written"),
+            "{notation:?} skipped the startup-hold release: {:?}",
             visible_texts(&m)
         );
     }
@@ -11061,10 +10974,9 @@ fn only_a_notice_the_stack_was_showing_leaves_with_a_motion() {
             vec!["second", "third"],
         ),
         (
-            "a keypress ageing out the read transients queued behind the armed one",
+            "a keypress, which takes nothing off the stack",
             stacked,
             Box::new(|m: &mut Model| {
-                m.engine.messages.note_flush();
                 let _ = update(
                     m,
                     Msg::Key(Key {
@@ -11073,7 +10985,7 @@ fn only_a_notice_the_stack_was_showing_leaves_with_a_motion() {
                 );
             }),
             None,
-            vec!["first"],
+            vec!["first", "second", "third"],
         ),
         (
             "nvim clearing the whole log",

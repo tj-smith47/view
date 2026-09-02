@@ -195,18 +195,32 @@ fn wait_for_toast(session: &mut ViewPtySession, token: &str, timeout: Duration) 
 /// top slot's timer runs, so a notice raised behind a launch's handover
 /// lines is not armed until they have gone, and a leg that echoes into that
 /// queue measures the queue rather than its own subject. Nothing is typed to
-/// clear them: a keypress retires the queue behind the armed slot but leaves
-/// the armed notice to its own timer, which is the one this waits out. Only
-/// the first launch against a shared isolated home raises any, so this
-/// returns immediately for every leg after it.
+/// clear them either -- a slot timer is the only thing that retires a
+/// transient. Only the first launch against a shared isolated home raises
+/// any, so this returns at once for every leg after it.
+///
+/// The budget is the drain it is actually waiting on -- one timeout per box
+/// standing, plus one for a box that arrives late -- rather than a number,
+/// so a launch that gains a notice does not silently outrun it. Asserted,
+/// not discarded: a swallowed timeout here surfaces as an unrelated leg
+/// failing on a screen it never got to itself.
 fn wait_for_quiet_toast_stack(session: &mut ViewPtySession) {
-    let budget = view_core::native::toast::TRANSIENT_TOAST_TIMEOUT * 4;
-    let _ = session.wait_for_screen(budget, |screen| {
-        !screen
-            .contents()
-            .lines()
-            .any(|row| row.contains('╭') || row.contains("+-"))
-    });
+    let standing = u32::try_from(boxes_on_screen(&session.screen())).unwrap_or(u32::MAX);
+    let budget = view_test_support::host_deadline(
+        view_core::native::toast::TRANSIENT_TOAST_TIMEOUT * standing.saturating_add(1),
+    );
+    assert!(
+        session.wait_for_screen(budget, |screen| boxes_on_screen(&screen.contents()) == 0),
+        "the {standing} toast(s) this launch raised never drained in {budget:?}, so every \
+         leg after this one starts behind them; last screen:\n{}",
+        session.screen()
+    );
+}
+
+/// How many framed boxes are on `screen`, counted by their top-left corner
+/// in either charset.
+fn boxes_on_screen(screen: &str) -> usize {
+    screen.matches('╭').count() + screen.matches("+-").count()
 }
 
 /// [`spawn_view_pty`] with the message surface left to view, for a test
@@ -1966,18 +1980,27 @@ fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
 fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
     use view_core::native::toast::TRANSIENT_TOAST_TIMEOUT;
 
+    // the round's own stack height, which is also how many timeouts the
+    // whole stack takes to drain one slot at a time
+    const TOASTS_PER_ROUND: u32 = 5;
+
     let mut session = spawn_view_pty_owning_messages();
 
     for round in 1..=3u32 {
         let token = format!("slot{round}token");
         let dispatched = Instant::now();
         session
-            .send(format!("\x1b:for i in range(1,5) | echomsg '{token}' . i | endfor\r").as_bytes())
+            .send(
+                format!(
+                    "\x1b:for i in range(1,{TOASTS_PER_ROUND}) | echomsg '{token}' . i | endfor\r"
+                )
+                .as_bytes(),
+            )
             .unwrap();
         assert!(
             wait_for_toast(
                 &mut session,
-                &format!("{token}5"),
+                &format!("{token}{TOASTS_PER_ROUND}"),
                 view_test_support::host_deadline(Duration::from_secs(5))
             ),
             "screen never showed the fifth of five echomsg lines; last screen:\n{}",
@@ -1995,13 +2018,14 @@ fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
         // top at four timeouts and expires at five, so a screen read past
         // the fourth is a round this thread slept through and the fifth slot
         // may legitimately own the top by now -- a token gone there says
-        // nothing about which timer was armed. Clear the stack with a
-        // keypress and dispatch again rather than conclude from it.
+        // nothing about which timer was armed. Wait the round out and
+        // dispatch again rather than conclude from it: nothing but a slot
+        // timer retires a transient, so the recovery rides out the whole
+        // five-slot drain rather than clearing it with a key.
         if dispatched.elapsed() >= TRANSIENT_TOAST_TIMEOUT * 4 {
-            session.send(b"\x1b").unwrap();
             assert!(
                 session.wait_for_screen(
-                    view_test_support::host_deadline(TRANSIENT_TOAST_TIMEOUT),
+                    view_test_support::host_deadline(TRANSIENT_TOAST_TIMEOUT * TOASTS_PER_ROUND),
                     |s| { !s.contents().contains(&token) }
                 ),
                 "the stalled round's toasts never left the screen, so the next \
@@ -2011,7 +2035,7 @@ fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
             continue;
         }
         assert!(
-            toast_shows(&screen, &format!("{token}5")),
+            toast_shows(&screen, &format!("{token}{TOASTS_PER_ROUND}")),
             "the last of five stacked toasts expired before it ever reached the \
              top slot -- its timer ran while it was queued behind four others; \
              read {:?} after the dispatch; last screen:\n{screen}",

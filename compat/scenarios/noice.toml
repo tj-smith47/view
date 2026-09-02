@@ -91,9 +91,14 @@ steps = [
   # (`lua/noice/view/nui.lua:41`), which is one plugin, not two.
   { assert_absent = "view: noice is drawing over" },
   # And the history the notice's own third line points at is one key away,
-  # holding what view recorded of this launch.
+  # holding what view recorded of this launch. The generous timeout is for
+  # the overlay's title row specifically: view's own startup handover toasts
+  # stack downward from the top of the grid and stand over it until each
+  # retires on its own timer, one slot at a time. Nothing sweeps them --
+  # typing is not a dismissal -- so the wait outlives the stack rather than
+  # racing it.
   { send = "\\fm" },
-  { wait_for = "Messages", timeout_ms = 5000 },
+  { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]
 
@@ -128,8 +133,11 @@ steps = [
   # than about a noice that failed to start (is_running() above already
   # proves it did).
   { probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent\" end)()')", expect = "absent" },
+  # Generous for the same reason as the unaccommodated state's own read of
+  # this title: the toast stack standing over the overlay's top border
+  # retires a slot at a time, and no keystroke shortens that.
   { send = "\\fm" },
-  { wait_for = "Messages", timeout_ms = 5000 },
+  { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]
 
@@ -180,7 +188,10 @@ steps = [
   { send = "\\fm" },
   # The minimal fixture has no plugin to route vim.notify through at all,
   # so this is the one state that shows view's own history overlay with
-  # nothing routed through a plugin first.
-  { wait_for = "Messages", timeout_ms = 15000 },
+  # nothing routed through a plugin first. The send above is also this
+  # launch's first keystroke, which ends the startup hold and puts every
+  # entry it parked onto the stack -- so the title this waits for opens
+  # underneath that stack and is readable only as it retires.
+  { wait_for = "Messages", timeout_ms = 30000 },
   { send = "<Esc>" },
 ]

@@ -164,12 +164,11 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
 
     // the notices are toasts anchored over the top rows of the grid, so the
     // first cells of an empty buffer are legitimately covered while they are
-    // up. The newlines put the typed character below the whole standing
-    // stack -- a first launch raises three three-row boxes, and this burst
-    // arrives inside one flush generation, which is the window the toast
-    // stack deliberately holds a notice through -- rather than depending on
-    // a dismissal this leg would have to race.
-    session.send(b"i\r\r\r\r\r\r\r\r\r\rZ").unwrap();
+    // up. The newlines put the typed character below whatever stack this
+    // launch actually raised, rather than depending on a dismissal: nothing
+    // but a slot timer retires a toast.
+    let below = common::newlines_below_toasts(&session.screen());
+    session.send(format!("i{below}Z").as_bytes()).unwrap();
     assert!(
         session.wait_for("Z", Duration::from_secs(5)),
         "typed character never appeared on screen; screen:\n{}",

@@ -4315,10 +4315,9 @@ mod tests {
              the toast on every loop pass for as long as the stall lasts"
         );
 
-        // a keypress dismisses transient toasts; this one describes a
-        // condition that is still true, and the keypress that would drop it
-        // is the one it exists to explain
-        assert!(!model.engine.messages.dismiss_transient_on_keypress(false));
+        // the deliberate sticky gesture leaves it too: this line describes a
+        // condition that is still true, and only its raiser retracts one
+        assert!(!model.engine.messages.dismiss_sticky());
         assert_eq!(
             visible_texts(&model),
             vec![WedgeKind::WriteSide.notice().to_string()]

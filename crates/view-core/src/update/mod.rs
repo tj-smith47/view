@@ -1174,36 +1174,20 @@ fn ai_panel_size(model: &Model) -> (usize, usize) {
 /// caller has to carry in because the bookkeeping above may already have
 /// closed it.
 fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<Effect> {
-    // any keypress is "the user is reading again": gives a
-    // transient (info-kind) toast a readable duration bounded by
-    // real activity instead of a wall-clock timer the runtime
-    // never delivers to `update`; runs regardless of focus, since
-    // the semantic is user activity, not specifically engine input
+    // the first keypress is the end of the startup window
     let cmdline_open = model.engine.cmdline.is_some();
-    // ahead of the dismissal, never after it: the first keypress is the end
-    // of the startup window, and a message drained onto the stack by a key
-    // the same call is about to dismiss on would be shown and retired in one
-    // frame. Draining re-stamps `shown_at_flush`, which is what the
-    // at-least-one-visible-frame guard inside the dismissal reads
     model.dirty |= model
         .engine
         .messages
         .resolve_startup_hold(HoldOutcome::Release);
-    if model
-        .engine
-        .messages
-        .dismiss_transient_on_keypress(cmdline_open)
-    {
-        model.dirty = true;
-    }
     // the fallback, not the rule: a prompt view itself answered retires on
     // the `cmdline_hide` that key causes (see `UiEvent::CmdlineHide`), and
     // this catches only the prompt nothing view sent resolved -- nvim's own
     // Lua answering its own question, where view forwarded no key to set
-    // the flag that arm reads. Such a prompt's overlay
-    // follows the same lazy-dismiss timing as its underlying MessageEntry
-    // (see dismiss_transient_on_keypress), since nvim sends no msg_clear on
-    // resolution and there is nothing else left to notice it by.
+    // the flag that arm reads. The question's own entry goes with the
+    // overlay: a prompt routes `Route::Prompt` and so owns no idle timer,
+    // and nvim sends no msg_clear on resolution, so nothing else would ever
+    // take it down.
     // excludes the AI trust prompt and the external-write conflict prompt:
     // neither has a paired cmdline_show to have gone quiet, so
     // `cmdline_open` reads `false` for either from the moment it opens, and
@@ -1218,6 +1202,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         )
     {
         model.pop_focused_overlay();
+        let _ = model.engine.messages.dismiss_answered_prompt();
         model.dirty = true;
     }
     // <Esc> closes a picker sitting directly on top of the stack.

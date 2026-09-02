@@ -23,13 +23,6 @@ pub struct MessageId(u64);
 pub struct MessageEntry {
     pub kind: String,
     pub content: Vec<(u64, String)>,
-    /// `Messages::flush_generation` at the moment this entry was pushed.
-    /// Not part of nvim's wire contract -- purely local bookkeeping for
-    /// `Messages::dismiss_transient_on_keypress`'s "at least one visible
-    /// frame before dismissal" guarantee. Never set directly; every
-    /// `MessageEntry` is built by `Messages::push`, which stamps this from
-    /// its own counter.
-    shown_at_flush: u64,
     /// Whether this entry is the one locally-raised condition notice (see
     /// `Messages::set_native_condition`) rather than a record of something
     /// that happened. Marked rather than matched on text or kind, so
@@ -205,10 +198,6 @@ pub struct Messages {
     /// would otherwise start after: the first redraw batch after attach can
     /// already carry a plugin's setup-time complaint.
     startup_hold: crate::native::toast::StartupHold,
-    /// Bumped by `note_flush` on every `Flush` UI event; stamped onto each
-    /// new entry as `MessageEntry::shown_at_flush`. See
-    /// `dismiss_transient_on_keypress`.
-    flush_generation: u64,
     /// The next [`MessageId`] `push` stamps; bumped on every call, replace
     /// included, so every pushed entry -- even one that overwrites another
     /// in place -- gets an identity distinct from what stood there before.
@@ -296,7 +285,6 @@ impl Messages {
         let entry = MessageEntry {
             kind,
             content,
-            shown_at_flush: self.flush_generation,
             condition: false,
             id,
         };
@@ -409,11 +397,10 @@ impl Messages {
     /// the remainder of one: a notice paused mid-read has not been read yet.
     ///
     /// Only the timing is frozen. A motion already in flight plays to its
-    /// end and new notices still arrive, but nothing leaves on its own: the
-    /// keypress dismissal ([`Self::dismiss_transient_on_keypress`]) is off
-    /// too, since a stack that holds while the user reads it cannot be
-    /// emptied by the act of reading. The deliberate exits -- an
-    /// `msg_clear`, a sticky dismissal, a replace -- still apply.
+    /// end and new notices still arrive; nothing leaves on its own, since
+    /// the slot timer is the only thing that retires a transient and this
+    /// holds it. The deliberate exits -- an `msg_clear`, a sticky
+    /// dismissal, a replace -- still apply.
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
         if !self.paused {
@@ -534,14 +521,8 @@ impl Messages {
     /// user can see changed.
     ///
     /// [`HoldOutcome::Release`](crate::native::toast::HoldOutcome::Release)
-    /// drains the held set onto the stack in arrival order and **re-stamps
-    /// every drained entry to the current flush generation**. Without the
-    /// re-stamp a drained entry carries the generation it was pushed at,
-    /// many flushes ago, and `dismiss_transient_on_keypress` -- which keeps
-    /// a transient only while `shown_at_flush == current` -- drops it on the
-    /// very keypress that released it, painting zero frames. The stamp is
-    /// the same convention `UiEvent::Flush` maintains for a freshly pushed
-    /// toast.
+    /// drains the held set onto the stack in arrival order, where the top
+    /// one is armed like any other arrival.
     ///
     /// [`HoldOutcome::Collapse`](crate::native::toast::HoldOutcome::Collapse)
     /// leaves the held set where it is -- in the history ring alone -- and
@@ -580,9 +561,7 @@ impl Messages {
         if self.held.is_empty() {
             return false;
         }
-        let current = self.flush_generation;
-        for mut entry in self.held.drain(..) {
-            entry.shown_at_flush = current;
+        for entry in self.held.drain(..) {
             self.entries.push(entry);
         }
         true
@@ -668,9 +647,8 @@ impl Messages {
             return true;
         }
         // raised through `push_native` and marked afterwards, rather than
-        // built here: the flush stamp every entry carries keeps exactly one
-        // source, and a condition is a native notice in every respect but
-        // its lifetime
+        // built here: a condition is a native notice in every respect but
+        // its lifetime, and one construction site is what keeps it so
         self.push_native(text.to_string(), false);
         if let Some(raised) = self.entries.last_mut() {
             raised.condition = true;
@@ -678,59 +656,15 @@ impl Messages {
         true
     }
 
-    /// Marks one full paint cycle as having happened -- one call per
-    /// `Flush` UI event -- so that a transient entry's age in frames, and
-    /// therefore whether it has survived long enough to be dismissable, is
-    /// answerable at all.
-    pub fn note_flush(&mut self) {
-        self.flush_generation = self.flush_generation.wrapping_add(1);
-    }
-
-    /// Drops the backlog of transient entries that have already survived at
-    /// least one full paint cycle since they were shown, leaving
-    /// `is_persistent` entries, the notice holding the armed slot, and --
-    /// while `cmdline_open` -- `is_prompt` ones in place. Called from
-    /// `update` on the user's next keypress: clears queued notices the user
-    /// has visibly moved on from, on an event the clockless model already
-    /// receives. An entry pushed in the same flush generation as the pending
-    /// keypress has not necessarily been painted even once yet, so it
-    /// survives this pass and is only dismissed on the *next* keypress
-    /// instead, guaranteeing every transient toast is visible for at least
-    /// one frame. Returns whether anything was actually dropped, so the
-    /// caller knows whether to mark the model dirty for a repaint.
-    ///
-    /// The entry in the armed slot is exempt because it is the one entry
-    /// with a running dismissal timer ([`Self::arm_top_slot`]) -- the very
-    /// wall-clock mechanism this heuristic was written to stand in for
-    /// before the slot model existed. Two mechanisms retiring one notice is
-    /// what makes the pause key unimplementable: pause holds the timer, and
-    /// the three keystrokes that reach `<leader>fp` would otherwise retire
-    /// the notice before the verb they spell arrives.
-    #[must_use]
-    pub fn dismiss_transient_on_keypress(&mut self, cmdline_open: bool) -> bool {
-        // spec 7.1 motion rule 5: the stack holds for as long as pause is on
-        if self.paused {
-            return false;
-        }
-        let before = self.entries.len();
-        let current = self.flush_generation;
-        let armed = self.armed_slot;
-        self.entries.retain(|e| {
-            e.is_persistent()
-                || (cmdline_open && e.is_prompt())
-                || e.shown_at_flush == current
-                || Some(e.id()) == armed
-        });
-        self.entries.len() != before
-    }
-
     /// Drops the question an answered prompt was asking, so its box leaves
     /// with the prompt instead of lingering over the buffer as ordinary
-    /// text. The counterpart to the `cmdline_open` guard in
-    /// [`Self::dismiss_transient_on_keypress`], which holds that question
-    /// up for exactly as long as the cmdline asking it is open: this is
-    /// what ends it at the same moment, rather than at whatever unrelated
-    /// keystroke happens next.
+    /// text.
+    ///
+    /// A question routes [`crate::native::toast::Route::Prompt`] and so owns
+    /// no idle timer: this and an `msg_clear` are the only things that end
+    /// one, which is why `route_key`'s fallback -- for a prompt nvim's own
+    /// Lua answered without view forwarding the key -- calls it beside
+    /// popping the overlay.
     #[must_use]
     pub fn dismiss_answered_prompt(&mut self) -> bool {
         let before = self.entries.len();
@@ -742,11 +676,10 @@ impl Messages {
     /// a sticky toast. Returns whether anything was actually dropped, so the
     /// caller knows whether to mark the model dirty for a repaint.
     ///
-    /// The counterpart to [`Self::dismiss_transient_on_keypress`], and
-    /// deliberately not folded into it: that one fires on *any* keypress,
-    /// and an error dismissed by the next motion is an error the user never
-    /// read. Stickiness is what makes an error legible; a way out is what
-    /// keeps it from occluding the buffer forever once it has been.
+    /// Deliberately a gesture of its own rather than anything incidental: an
+    /// error dismissed by the next motion is an error the user never read.
+    /// Stickiness is what makes an error legible; a way out is what keeps it
+    /// from occluding the buffer forever once it has been.
     ///
     /// A raised condition (see [`Self::set_native_condition`]) survives: it
     /// asserts that something *is currently true*, so clearing it would

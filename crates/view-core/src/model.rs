@@ -1346,19 +1346,18 @@ impl EngineModel {
         self.record_native_notice_once_as("native", family, text)
     }
 
-    /// [`Self::record_native_notice_once`] for a notice that has to still be
-    /// on screen after the next keystroke: the `"native_sticky"` kind, which
-    /// routes [`crate::native::toast::Route::Sticky`] and so survives both
-    /// the idle expiry and `Messages::dismiss_transient_on_keypress`.
+    /// [`Self::record_native_notice_once`] for a notice that has to outlive
+    /// the idle expiry: the `"native_sticky"` kind, which routes
+    /// [`crate::native::toast::Route::Sticky`] and so is handed no timer at
+    /// all.
     ///
     /// For a notice whose subject the user's own typing keeps producing. A
-    /// plugin drawing over an owned surface is the case: the keystroke that
-    /// summons the float is the keystroke that would dismiss the transient
-    /// line about it, and the detection that follows re-raises it ~150 ms
-    /// later, so a transient line cycles on and off for as long as the user
-    /// types instead of standing to be read. It leaves the way every sticky
-    /// entry does -- replaced by its own family, cleared by nvim, or
-    /// dismissed deliberately ([`Messages::dismiss_sticky`]).
+    /// plugin drawing over an owned surface is the case: the float is
+    /// summoned and re-detected on a cadence faster than a transient
+    /// notice's four seconds, so a transient line cycles on and off for as
+    /// long as the user types instead of standing to be read. It leaves the
+    /// way every sticky entry does -- replaced by its own family, cleared by
+    /// nvim, or dismissed deliberately ([`Messages::dismiss_sticky`]).
     pub fn record_native_notice_sticky_once(
         &mut self,
         family: &str,
@@ -1905,28 +1904,16 @@ mod tests {
         }
     }
 
-    /// Releasing drains in arrival order and re-stamps, because the very
-    /// next thing the keypress that released does is dismiss transients
-    /// that have not had a frame -- which, unstamped, is all of them.
     #[test]
-    fn releasing_drains_in_order_and_restamps_so_the_releasing_key_cannot_wipe_it() {
+    fn releasing_drains_the_held_set_in_arrival_order() {
         let mut model = Model::new();
         showed(&mut model, "echomsg", "one");
         showed(&mut model, "echomsg", "two");
-        for _ in 0..4 {
-            model.engine.messages.note_flush();
-        }
         assert!(model
             .engine
             .messages
             .resolve_startup_hold(crate::native::toast::HoldOutcome::Release));
         assert_eq!(stack(&model), vec!["one".to_string(), "two".to_string()]);
-        let _ = model.engine.messages.dismiss_transient_on_keypress(false);
-        assert_eq!(
-            stack(&model),
-            vec!["one".to_string(), "two".to_string()],
-            "the key that released them took them straight back off"
-        );
     }
 
     /// A collapsed hold has a notice standing that says where the parked
@@ -2107,35 +2094,22 @@ mod tests {
     }
 
     #[test]
-    fn a_confirm_question_survives_a_keypress_that_the_prompt_is_still_waiting_on() {
+    fn a_confirm_question_stands_until_its_prompt_closes() {
         // nvim re-arms a confirm prompt on a key that answers none of its
         // choices, and re-emits only `cmdline_show` -- never the `msg_show`
-        // carrying the question. Dismissing the question on that keypress
-        // leaves the user an answer line with nothing to answer.
+        // carrying the question -- so nothing incidental may take it down.
+        // It owns no idle timer either (Route::Prompt), which leaves the
+        // prompt closing as the one thing that ends it.
         let mut messages = Messages::default();
         messages.push(
             "confirm".to_string(),
             vec![(0, "Save changes?".into())],
             false,
         );
-        messages.note_flush();
-        assert!(!messages.dismiss_transient_on_keypress(true));
+        assert!(messages.arm_top_slot().is_none());
         assert_eq!(messages.entries.len(), 1);
-    }
 
-    #[test]
-    fn a_confirm_question_is_dismissed_once_its_prompt_has_closed() {
-        // the other side of the rule: with the prompt gone the question is
-        // ordinary transient text, so it must not outlive user activity the
-        // way an error does
-        let mut messages = Messages::default();
-        messages.push(
-            "confirm".to_string(),
-            vec![(0, "Save changes?".into())],
-            false,
-        );
-        messages.note_flush();
-        assert!(messages.dismiss_transient_on_keypress(false));
+        assert!(messages.dismiss_answered_prompt());
         assert!(messages.entries.is_empty());
     }
 
@@ -2149,30 +2123,6 @@ mod tests {
         );
         messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
         assert_eq!(texts(&messages.visible_lines(3)), vec!["Save changes?"]);
-    }
-
-    #[test]
-    fn dismiss_transient_on_keypress_drops_transient_entries_seen_at_least_one_flush() {
-        let mut messages = Messages::default();
-        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
-        // not yet flushed: must survive this pass, guaranteeing at least
-        // one painted frame before an info toast can be dismissed
-        assert!(!messages.dismiss_transient_on_keypress(false));
-        assert_eq!(messages.entries.len(), 1);
-
-        messages.note_flush();
-        assert!(messages.dismiss_transient_on_keypress(false));
-        assert!(messages.entries.is_empty());
-    }
-
-    #[test]
-    fn dismiss_transient_on_keypress_never_drops_a_persistent_entry() {
-        let mut messages = Messages::default();
-        messages.push("echoerr".to_string(), vec![(0, "boom".into())], false);
-        messages.note_flush();
-        messages.note_flush();
-        assert!(!messages.dismiss_transient_on_keypress(false));
-        assert_eq!(messages.entries.len(), 1);
     }
 
     #[test]
@@ -2200,28 +2150,15 @@ mod tests {
     }
 
     #[test]
-    fn a_condition_notice_survives_the_keypresses_that_dismiss_transient_text() {
+    fn a_condition_notice_survives_the_gesture_that_dismisses_a_sticky_one() {
         let mut messages = Messages::default();
         assert!(messages.set_native_condition(Some("engine stalled")));
-        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
-        messages.note_flush();
-        messages.note_flush();
-        assert!(messages.dismiss_transient_on_keypress(false));
-        assert_eq!(texts(&messages.visible_lines(4)), vec!["engine stalled"]);
-    }
-
-    #[test]
-    fn a_frozen_stack_survives_the_keypresses_that_dismiss_transient_text() {
-        let mut messages = Messages::default();
-        messages.push("echomsg".to_string(), vec![(0, "first".into())], false);
-        messages.push("echomsg".to_string(), vec![(0, "second".into())], false);
-        messages.note_flush();
-        messages.toggle_pause();
-        assert!(!messages.dismiss_transient_on_keypress(false));
+        messages.push("echoerr".to_string(), vec![(0, "boom".into())], false);
+        assert!(messages.dismiss_sticky());
         assert_eq!(
             texts(&messages.visible_lines(8)),
-            vec!["first", "second"],
-            "spec 7.1 rule 5: the whole stack holds for as long as pause is on"
+            vec!["engine stalled"],
+            "a condition asserts something is true now, so only its raiser retracts it"
         );
     }
 

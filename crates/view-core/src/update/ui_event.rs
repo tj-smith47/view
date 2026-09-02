@@ -114,11 +114,6 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // idempotent past the first Flush: see Model::content_painted's
             // doc comment for why this never resets
             model.content_painted = true;
-            // records that one full paint cycle has happened, so a
-            // transient toast pushed in this same batch is guaranteed at
-            // least one visible frame before dismiss_transient_on_keypress
-            // can drop it (see Messages::note_flush)
-            model.engine.messages.note_flush();
             Vec::new()
         }
         UiEvent::ModeInfoSet {

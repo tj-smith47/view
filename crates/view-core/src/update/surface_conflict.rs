@@ -618,17 +618,15 @@ mod tests {
         );
     }
 
-    /// The live failure this shape was built from, and the one the first fix
-    /// for it produced. A cmdline session types a key every ~200 ms; each key
-    /// dismisses whatever transient toast has had its frame, and arms the
-    /// scan that sights the menu again ~150 ms later. So a transient line
-    /// here is not "raised once" -- it is raised, wiped, raised, wiped, for
-    /// as long as the user types, on the one path this feature exists to
-    /// serve. This drives that whole cycle: every keystroke a user makes
-    /// while the menu stands, with the sighting the keystroke arms, and the
-    /// line has to be readable throughout.
+    /// The live failure this shape was built from. A cmdline session types a
+    /// key every ~200 ms, and each key arms the scan that sights the menu
+    /// again ~150 ms later -- a cadence far inside a transient notice's own
+    /// four seconds, so an expiring line here is raised, retired, raised,
+    /// retired, for as long as the user types, on the one path this feature
+    /// exists to serve. This drives that cycle and the line has to be
+    /// readable throughout.
     #[test]
-    fn the_notice_stands_through_the_keystrokes_that_keep_summoning_the_float() {
+    fn the_notice_stands_through_the_sightings_that_keep_finding_the_float() {
         let mut model = captured_session();
         open_cmdline(&mut model);
         let expected = vec![
@@ -640,16 +638,7 @@ mod tests {
         assert_eq!(notices(&model), expected);
 
         for key in 1..=8 {
-            // the keystroke: a frame has been painted since the line landed,
-            // which is the whole condition a transient dismissal needs
-            model.engine.messages.note_flush();
-            let _ = model.engine.messages.dismiss_transient_on_keypress(true);
-            assert_eq!(
-                notices(&model),
-                expected,
-                "keystroke {key} took the notice off the screen"
-            );
-            // and the scan that keystroke armed, 150 ms later
+            // the scan a keystroke arms, 150 ms later
             model.dirty = false;
             let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
             assert_eq!(notices(&model), expected, "sighting {key} stacked a copy");
@@ -1352,10 +1341,10 @@ mod tests {
             notices(&model)
         );
 
-        // and the keystroke that wipes a transient line
-        model.engine.messages.note_flush();
-        let _ = model.engine.messages.dismiss_transient_on_keypress(true);
-        assert_eq!(notices(&model), standing, "a keystroke took it down");
+        // and the idle expiry a transient line would have owned: this kind
+        // is handed no timer at all
+        assert!(model.engine.messages.arm_top_slot().is_none());
+        assert_eq!(notices(&model), standing, "an idle timer took it down");
     }
 
     /// The decided wording, line for line: the three-line shape the message

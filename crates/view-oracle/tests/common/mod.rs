@@ -399,3 +399,19 @@ pub fn test_region(text: &str) -> String {
     };
     "\n".repeat(text[..at].matches('\n').count()) + &text[at..]
 }
+
+/// Enough `<CR>`s in insert mode to put the next typed character below every
+/// toast box standing on `screen`.
+///
+/// A toast is the one surface anchored over the top rows of the grid, and
+/// nothing but a slot timer retires one (spec 7.1, motion rule 5), so a leg
+/// that asserts screen text either waits out the whole stack or types below
+/// it. Derived from the boxes actually up rather than written down: a launch
+/// that gains a notice would otherwise land the marker back underneath one,
+/// and the failure reads as the text never having been typed.
+pub fn newlines_below_toasts(screen: &str) -> String {
+    // three rows per box -- one line of text between two frame rows -- and
+    // one more so the marker clears the last of them
+    let boxes = screen.matches('╭').count();
+    "\r".repeat(boxes * 3 + 1)
+}
