@@ -17,8 +17,9 @@
     awk '/^# CAPTURE-SOURCE-BEGIN/{f=1;next} /^# CAPTURE-SOURCE-END/{f=0} f' \
       scripts/acceptance/capture-conpty.ps1 | sed '1d;$d' > src/main.rs
 
-  Both arms then report their source sha256, so a doc quoting the two
-  streams can show they came from one program.
+  Both arms then report a fingerprint of that source, carriage returns
+  excluded, so a doc quoting the two streams can show they came from one
+  program rather than two that resemble each other.
 
   The capture program builds against view-oracle's own PtySession rather
   than opening a pty of its own: the hermetic environment a spawned editor
@@ -40,6 +41,11 @@
 .PARAMETER Cols, Rows
   The pty size. Run a second capture at another size to confirm the
   recorded figures move with the input.
+
+.PARAMETER NoCpr
+  Leaves the child's cursor-position request unanswered, which is what the
+  tree's own responder does today. The control run for the finding: under
+  ConPTY nothing at all reaches the master until that request is answered.
 #>
 param(
   [string]$Repo = "$HOME\view-src",
@@ -112,9 +118,9 @@ use view_oracle::pty::{PtySession, QueryPolicy};
 use view_test_support::host_deadline;
 
 /// The corpus entry this capture replays: corpus/insert-basic.toml, the
-/// shortest scripted script in the oracle's corpus, hand-translated from
-/// its key notation because the corpus drivers send notation over RPC and
-/// a pty takes bytes.
+/// shortest entry in the oracle's corpus, hand-translated from its key
+/// notation because the corpus drivers send notation over RPC and a pty
+/// takes bytes.
 const INPUT_NOTATION: &str = "ihello world<Esc>0x";
 const INPUT_BYTES: &[u8] = b"ihello world\x1b0x";
 
