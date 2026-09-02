@@ -12,7 +12,7 @@ use crate::handle::{EngineError, EngineHandle};
 use crate::heartbeat::{HeartbeatProber, HeartbeatWatch};
 use rmpv::Value;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -203,6 +203,92 @@ pub fn remote_reconnect_backoff(base: Duration, attempt: u32) -> Duration {
     base.saturating_mul(1u32.checked_shl(doublings).unwrap_or(u32::MAX))
 }
 
+/// The pinned engine a release archive ships beside the `view` executable:
+/// the binary itself and the runtime directory it was built against.
+///
+/// Resolution is paths and nothing else. What version the layout turns out
+/// to be running is the engine's own answer, obtained from a live handshake
+/// rather than from a file beside it: a version written down here would be
+/// what the archive *claimed*, which is exactly the reading that cannot
+/// notice a binary somebody replaced.
+///
+/// `#[non_exhaustive]`: cross-crate callers obtain one from
+/// [`resolve`](Self::resolve) rather than building one, so a field added
+/// here reaches them through the same constructor.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundledEngine {
+    /// The pinned nvim binary shipped beside this executable.
+    pub bin: PathBuf,
+    /// The runtime directory that binary was built against, which
+    /// [`EngineConfig::with_bundled`] exports as the child's `$VIMRUNTIME`.
+    pub runtime: PathBuf,
+}
+
+impl BundledEngine {
+    /// The layout shipped beside the running executable, or `None` in a
+    /// build that has none.
+    ///
+    /// `None` is a legitimate answer, not a failure: a development build
+    /// runs out of a target directory with no archive layout around it, and
+    /// the spawn falls back to the `PATH` lookup
+    /// [`EngineConfig::default`] carries.
+    #[must_use]
+    pub fn resolve() -> Option<Self> {
+        Self::resolve_from(&std::env::current_exe().ok()?)
+    }
+
+    /// The layout relative to an arbitrary executable path, so the
+    /// resolution is testable without installing anything.
+    ///
+    /// The shape is the one the release archive produces, spelled here and
+    /// nowhere else so the producer and the consumer cannot drift:
+    ///
+    /// ```text
+    /// <prefix>/bin/view              the running executable
+    /// <prefix>/libexec/view/nvim     the pinned engine
+    /// <prefix>/libexec/view/share/nvim/runtime
+    /// ```
+    ///
+    /// Both halves must be present. A binary with no runtime beside it
+    /// starts and then sources not one runtime file, so a half-planted
+    /// layout answers `None` and leaves the working `PATH` engine in place
+    /// rather than replacing it with a crippled bundled one.
+    #[must_use]
+    pub fn resolve_from(exe: &Path) -> Option<Self> {
+        let engine = exe.parent()?.parent()?.join("libexec").join("view");
+        let bin = engine.join(bundled_engine_file_name());
+        let runtime = engine.join("share").join("nvim").join("runtime");
+        (bin.is_file() && runtime.is_dir()).then_some(Self { bin, runtime })
+    }
+}
+
+/// The engine's file name inside a bundled layout, carrying the host's own
+/// executable suffix: the archive ships `nvim.exe` on Windows and `nvim`
+/// everywhere else, and a name written without the suffix resolves to
+/// nothing on the one platform that has one.
+fn bundled_engine_file_name() -> String {
+    format!("nvim{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// `dir` ahead of `inherited`, in the syntax this host's own `PATH` uses.
+///
+/// A directory whose name carries the separator cannot be expressed in a
+/// `PATH` list on any platform, so there is no case to detect here: an
+/// install path holding one is already unusable to every program that reads
+/// `PATH`, this one included.
+fn front_path(dir: &Path, inherited: Option<OsString>) -> OsString {
+    let mut fronted = dir.to_path_buf().into_os_string();
+    match inherited.filter(|rest| !rest.is_empty()) {
+        Some(rest) => {
+            fronted.push(if cfg!(windows) { ";" } else { ":" });
+            fronted.push(rest);
+            fronted
+        }
+        None => fronted,
+    }
+}
+
 /// Configuration for spawning an embedded Neovim process.
 ///
 /// `#[non_exhaustive]`: the hermetic environment plan an isolated spawn
@@ -213,7 +299,8 @@ pub fn remote_reconnect_backoff(base: Duration, attempt: u32) -> Duration {
 #[non_exhaustive]
 pub struct EngineConfig {
     /// Path to the `nvim` binary. Defaults to `"nvim"`, resolved via `PATH`;
-    /// release packaging replaces this default with a bundled binary path.
+    /// [`with_bundled`](Self::with_bundled) replaces that default with the
+    /// engine a release archive ships beside the executable.
     ///
     /// A remote spawn does not use it: the editor runs on the far side, and
     /// [`RemoteSpec::remote_nvim_bin`] names it there.
@@ -259,6 +346,13 @@ pub struct EngineConfig {
     /// touch it directly.
     #[cfg(unix)]
     stdin_relay: Option<std::os::fd::OwnedFd>,
+    /// The layout [`with_bundled`](Self::with_bundled) pinned this spawn to,
+    /// whose runtime and binary directory [`env_plan`](Self::env_plan)
+    /// exports. Private for the reason `hermetic` is: which engine runs and
+    /// which runtime it reads are one decision, and a caller that could set
+    /// this field alone would describe a bundled engine reading whatever
+    /// runtime the host carries.
+    bundled: Option<BundledEngine>,
     /// The remote target [`build_command`] routes the spawn through, or
     /// `None` for a local child. Private for the same reason `hermetic` is:
     /// where the child runs decides what its whole environment plan means,
@@ -280,6 +374,7 @@ impl Default for EngineConfig {
             hermetic: false,
             #[cfg(unix)]
             stdin_relay: None,
+            bundled: None,
             remote: None,
         }
     }
@@ -344,6 +439,31 @@ impl EngineConfig {
     #[must_use]
     pub fn with_nvim_bin(mut self, bin: impl Into<PathBuf>) -> Self {
         self.nvim_bin = bin.into();
+        self
+    }
+
+    /// Spawns the engine `layout` names, with the runtime that binary was
+    /// built against ([`BundledEngine`]).
+    ///
+    /// Three things at once, because they are one decision: the binary
+    /// replaces the `PATH` lookup, `$VIM`/`$VIMRUNTIME` name the layout's
+    /// own runtime rather than whatever the host exports or the engine
+    /// would derive for itself, and the binary's directory is fronted on
+    /// the child's `PATH` so a plugin shelling out to `nvim`, or reading
+    /// the runtime out of `PATH`, sees the pin instead of whatever else the
+    /// machine carries.
+    ///
+    /// The environment half rides [`env_plan`](Self::env_plan) and is
+    /// applied after everything else there, including a hermetic config's
+    /// own clearing of `$VIM`/`$VIMRUNTIME`: that clearing exists so a
+    /// child derives its runtime rather than inheriting the host's, and a
+    /// layout is the derivation, named outright. A remote spawn ignores the
+    /// layout entirely -- its paths are this machine's, and name nothing on
+    /// the far side.
+    #[must_use]
+    pub fn with_bundled(mut self, layout: BundledEngine) -> Self {
+        self.nvim_bin = layout.bin.clone();
+        self.bundled = Some(layout);
         self
     }
 
@@ -491,6 +611,11 @@ impl EngineConfig {
     ///    covers the caller who set one deliberately, which is what an
     ///    isolated config must refuse whoever asks.
     ///
+    /// A config carrying a [`BundledEngine`] adds one more layer after all
+    /// of those, for the reason [`with_bundled`](Self::with_bundled) states:
+    /// the runtime a bundled binary reads is not a preference any of the
+    /// layers above may overrule.
+    ///
     /// # A hermetic plan for a child on another machine
     ///
     /// Where the child runs decides both what the first layer may enumerate
@@ -611,6 +736,37 @@ impl EngineConfig {
                     &mut plan,
                     OsStr::new(crate::env::HERMETIC_HOME_VAR),
                     Some(crate::env::hermetic_home().into_os_string()),
+                );
+            }
+        }
+        // last, and unconditionally: which engine binary runs decides which
+        // runtime is the right one, so this layer outranks both a caller's
+        // own value and the hermetic layer's clearing. A remote spawn is
+        // exempt for the reason `HOME` is -- these paths are this machine's
+        if let Some(layout) = self.bundled.as_ref().filter(|_| self.remote.is_none()) {
+            if let Some(vim) = layout.runtime.parent() {
+                plan_set(
+                    &mut plan,
+                    OsStr::new("VIM"),
+                    Some(vim.to_path_buf().into_os_string()),
+                );
+            }
+            plan_set(
+                &mut plan,
+                OsStr::new("VIMRUNTIME"),
+                Some(layout.runtime.clone().into_os_string()),
+            );
+            if let Some(dir) = layout.bin.parent() {
+                // the plan's own PATH when a caller set one, since fronting
+                // must prepend to what the child would otherwise receive
+                let inherited = plan
+                    .iter()
+                    .find(|(name, _)| crate::env::env_names_eq(name, OsStr::new("PATH")))
+                    .map_or_else(|| std::env::var_os("PATH"), |(_, value)| value.clone());
+                plan_set(
+                    &mut plan,
+                    OsStr::new("PATH"),
+                    Some(front_path(dir, inherited)),
                 );
             }
         }
@@ -3408,6 +3564,140 @@ mod config_tests {
             enumerated.len(),
             "the remote plan and the lists it is built from no longer have one \
              entry each; plan {plan:?}"
+        );
+    }
+
+    /// Plants the layout a release archive ships -- the executable under
+    /// `bin/`, the engine and its runtime under `libexec/view/` -- and
+    /// answers with the executable's path, which is what
+    /// [`BundledEngine::resolve_from`] resolves against.
+    fn plant_layout(root: &Path, with_runtime: bool) -> PathBuf {
+        let engine = root.join("libexec").join("view");
+        if with_runtime {
+            std::fs::create_dir_all(engine.join("share").join("nvim").join("runtime")).unwrap();
+        } else {
+            std::fs::create_dir_all(&engine).unwrap();
+        }
+        std::fs::write(engine.join(bundled_engine_file_name()), b"").unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join(format!("view{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&exe, b"").unwrap();
+        exe
+    }
+
+    #[test]
+    fn bundled_layout_resolves_beside_the_executable() {
+        let root = view_test_support::ScratchDir::new("bundled-layout").unwrap();
+        let exe = plant_layout(&root, true);
+        let engine = root.join("libexec").join("view");
+        assert_eq!(
+            BundledEngine::resolve_from(&exe),
+            Some(BundledEngine {
+                bin: engine.join(bundled_engine_file_name()),
+                runtime: engine.join("share").join("nvim").join("runtime"),
+            }),
+            "the layout a release archive ships is not the one the editor \
+             resolves beside itself, so a released binary spawns whatever \
+             nvim the machine happens to carry"
+        );
+    }
+
+    /// A development build has no layout beside its executable, and neither
+    /// has an installation missing half of one: both answer `None`, and the
+    /// spawn falls back to the `PATH` lookup
+    /// [`EngineConfig::default`] carries.
+    ///
+    /// The half-planted case is the silent one. A binary with no runtime
+    /// beside it starts and then fails to source a single runtime file, so
+    /// resolving it would trade a working `PATH` engine for a crippled
+    /// bundled one.
+    #[test]
+    fn absent_layout_falls_back_to_path_nvim() {
+        let root = view_test_support::ScratchDir::new("bundled-absent").unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let bare = bin.join(format!("view{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&bare, b"").unwrap();
+        assert_eq!(BundledEngine::resolve_from(&bare), None);
+
+        let half = view_test_support::ScratchDir::new("bundled-half").unwrap();
+        let exe = plant_layout(&half, false);
+        assert_eq!(
+            BundledEngine::resolve_from(&exe),
+            None,
+            "a layout whose runtime is missing resolved anyway, so the \
+             editor spawns an engine that can source none of its own \
+             runtime files"
+        );
+
+        assert_eq!(
+            EngineConfig::default().nvim_bin,
+            PathBuf::from("nvim"),
+            "the fallback a build with no layout lands on is not the PATH \
+             lookup"
+        );
+    }
+
+    /// The plan half of the two live-child proofs in
+    /// `tests/env_isolation.rs`: the child is handed the layout's own
+    /// runtime rather than the parent's value or none, and `$VIM` names the
+    /// directory the engine derives every other runtime path from.
+    #[test]
+    fn a_bundled_plan_exports_the_layouts_own_runtime() {
+        let root = view_test_support::ScratchDir::new("bundled-runtime").unwrap();
+        let exe = plant_layout(&root, true);
+        let layout = BundledEngine::resolve_from(&exe).expect("the layout was just planted");
+        let plan = spawned_env(&EngineConfig::default().with_bundled(layout.clone()));
+        let planned = |name: &str| {
+            plan.iter()
+                .find(|(known, _)| known == name)
+                .and_then(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            planned("VIMRUNTIME").map(PathBuf::from),
+            Some(layout.runtime.clone()),
+            "the child resolves its runtime files somewhere other than the \
+             layout beside it; plan {plan:?}"
+        );
+        assert_eq!(
+            planned("VIM").map(PathBuf::from),
+            layout.runtime.parent().map(Path::to_path_buf),
+            "$VIM does not name the directory the layout's runtime sits in, \
+             so the child derives its other runtime paths from elsewhere; \
+             plan {plan:?}"
+        );
+    }
+
+    /// Fronting is a prepend, never a replacement: the child resolves the
+    /// bundled engine first, and every entry the parent had is still behind
+    /// it, so `:terminal` and `system()` still find the user's own tools.
+    #[test]
+    fn path_fronting_prepends_and_never_replaces() {
+        let root = view_test_support::ScratchDir::new("bundled-path").unwrap();
+        let exe = plant_layout(&root, true);
+        let layout = BundledEngine::resolve_from(&exe).expect("the layout was just planted");
+        let cfg = EngineConfig::default()
+            .with_env("PATH", "/decoy/bin")
+            .with_bundled(layout.clone());
+        let (_, path) = cfg
+            .env_plan()
+            .into_iter()
+            .find(|(name, _)| name == "PATH")
+            .expect("a bundled plan fronts the child's PATH");
+        let path = path.expect("the fronted PATH is a value, not a removal");
+        let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(
+            entries.first().map(PathBuf::as_path),
+            layout.bin.parent(),
+            "the bundled engine's own directory is not what a child \
+             resolves `nvim` from first; PATH {path:?}"
+        );
+        assert!(
+            entries.contains(&PathBuf::from("/decoy/bin")),
+            "fronting replaced the PATH the parent had instead of \
+             prepending to it, so a child shells out to none of the user's \
+             own tools; PATH {path:?}"
         );
     }
 }

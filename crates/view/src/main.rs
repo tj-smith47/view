@@ -28,7 +28,7 @@ use std::time::Instant;
 use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::Effect;
 use view_core::theme::Theme;
-use view_engine::process::{stdin_operands, EngineConfig, RemoteSpec};
+use view_engine::process::{stdin_operands, BundledEngine, EngineConfig, RemoteSpec};
 use view_tui::terminal::Term;
 use view_tui::tiers::CapsSource;
 
@@ -493,11 +493,19 @@ fn engine_config(cli: &Cli) -> EngineConfig {
         // `nvim_bin` is left at its default: a remote spawn runs no local
         // binary, so a path applied there would be a setting nothing reads
         Some(target) => cfg = cfg.with_remote(remote_spec(cli, target)),
-        None => {
-            if let Some(bin) = &cli.nvim_bin {
-                cfg = cfg.with_nvim_bin(bin.clone());
+        // a release layout answers with its own binary and runtime, so the
+        // child runs the pinned pair rather than whatever PATH resolves; a
+        // development build has none beside its executable and the PATH
+        // lookup is the honest fallback. `--nvim-bin` outranks both: an
+        // operator naming a binary has named the engine
+        None => match &cli.nvim_bin {
+            Some(bin) => cfg = cfg.with_nvim_bin(bin.clone()),
+            None => {
+                if let Some(layout) = BundledEngine::resolve() {
+                    cfg = cfg.with_bundled(layout);
+                }
             }
-        }
+        },
     }
     if cli.clean {
         cfg = cfg.with_arg("--clean");
@@ -1562,6 +1570,19 @@ mod tests {
     fn a_bare_positional_argument_is_the_only_argument_the_cli_adds() {
         let cfg = engine_config(&Cli::parse_from(["view", "notes.txt"]));
         assert_eq!(cfg.extra_args, vec![OsString::from("notes.txt")]);
+        assert!(cfg.env_plan().is_empty(), "{:?}", cfg.env_plan());
+    }
+
+    /// A build with no release layout beside its executable -- this test
+    /// binary, and every development build -- spawns the `nvim` its user's
+    /// own `PATH` names, with nothing exported at it. The bundled branch is
+    /// pinned by `BundledEngine::resolve_from`'s own tests, which can plant
+    /// a layout; what this holds is the fallback, which no released binary
+    /// exercises and which would otherwise be provable only by absence.
+    #[test]
+    fn a_build_with_no_layout_beside_it_spawns_the_path_engine() {
+        let cfg = engine_config(&Cli::parse_from(["view"]));
+        assert_eq!(cfg.nvim_bin, std::path::PathBuf::from("nvim"));
         assert!(cfg.env_plan().is_empty(), "{:?}", cfg.env_plan());
     }
 

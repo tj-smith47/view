@@ -574,3 +574,146 @@ fn an_isolated_spawn_refuses_a_home_holding_a_planted_credential() {
         "the refusal does not name the planted credential file: {refused}"
     );
 }
+
+/// The host's own pinned engine, asked of the engine itself: the binary it
+/// runs as and the runtime that binary reads. Only it can answer the second
+/// one, and a layout planted against a runtime the binary was not built
+/// against would spawn a child that fails for reasons of its own.
+///
+/// A plain headless child rather than an embedded one, for the reason
+/// [`every_probed_variable_is_one_getenv_can_report`] uses one: nothing
+/// here needs an RPC session, and both streams are read because which one a
+/// headless editor writes `:echo` to is its own choice.
+#[cfg(unix)]
+fn host_engine() -> (PathBuf, PathBuf) {
+    let out = std::process::Command::new("nvim")
+        .args([
+            "--clean",
+            "-n",
+            "--headless",
+            "-c",
+            r#"echo v:progpath . "|" . $VIMRUNTIME"#,
+            "-c",
+            "qa!",
+        ])
+        .output()
+        .expect("the pinned engine is on PATH for every test in this tree");
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (bin, runtime) = reported
+        .lines()
+        .find_map(|line| line.split_once('|'))
+        .expect("the engine reports its own path and runtime");
+    (PathBuf::from(bin.trim()), PathBuf::from(runtime.trim()))
+}
+
+/// Plants the layout a release archive ships -- `bin/view` beside
+/// `libexec/view/nvim` and its runtime -- inside `dir`, and answers with
+/// the executable path `BundledEngine::resolve_from` resolves against.
+///
+/// The engine and its runtime are symlinks to the host's own, so the child
+/// these tests spawn is a real editor. Symlinks rather than copies because
+/// a test never writes the program it runs (`.claude/rules/rust.md`), which
+/// is also why this half is `cfg(unix)`: creating a symlink on Windows
+/// needs developer mode or an elevated process.
+#[cfg(unix)]
+fn plant_bundled_layout(dir: &Path) -> PathBuf {
+    let (bin, runtime) = host_engine();
+    let engine = dir.join("libexec").join("view");
+    std::fs::create_dir_all(engine.join("share").join("nvim")).unwrap();
+    std::os::unix::fs::symlink(&bin, engine.join("nvim")).unwrap();
+    std::os::unix::fs::symlink(&runtime, engine.join("share").join("nvim").join("runtime"))
+        .unwrap();
+    let bin_dir = dir.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    // never executed: it is the path the layout is resolved *relative to*
+    let exe = bin_dir.join("view");
+    std::fs::write(&exe, b"").unwrap();
+    exe
+}
+
+/// A bundled child reads the runtime shipped beside its own binary, not one
+/// the parent handed down and not none at all: the pin is only a pin if the
+/// binary and the runtime files come from the same archive.
+///
+/// The parent's value is planted deliberately, and with the host's own
+/// runtime rather than a marker: an export that stopped happening would
+/// leave the child working perfectly while reading a runtime nobody pinned,
+/// which is the failure this asserts against.
+#[cfg(unix)]
+#[test]
+fn bundled_spawn_exports_its_own_vimruntime() {
+    let dir = view_test_support::ScratchDir::new("bundled-runtime").unwrap();
+    let exe = plant_bundled_layout(&dir);
+    let (_, host_runtime) = host_engine();
+    let layout = view_engine::process::BundledEngine::resolve_from(&exe)
+        .expect("the layout was just planted");
+    let cfg = EngineConfig::default()
+        .with_arg("--clean")
+        .with_arg("-n")
+        .with_env("VIMRUNTIME", &host_runtime)
+        .with_bundled(layout.clone());
+    let engine = Engine::spawn(cfg).unwrap();
+    let seen = engine.handle.eval_str("$VIMRUNTIME").unwrap();
+    assert_eq!(
+        seen,
+        layout.runtime.display().to_string(),
+        "the child reads its runtime from {seen}, not from the layout \
+         shipped beside its own binary"
+    );
+    let rtp = engine.handle.eval_str("&runtimepath").unwrap();
+    assert!(
+        rtp.contains(&seen),
+        "the exported runtime never reached 'runtimepath' ({rtp}), so the \
+         variable names a directory the child sources nothing from"
+    );
+}
+
+/// A bundled child resolves `nvim` to the binary beside it, even with
+/// another one earlier on the parent's own `PATH`: a plugin that shells out
+/// to `nvim` or reads the runtime out of `PATH` must see the pin rather
+/// than whatever the machine carries.
+///
+/// The decoy is a symlink to the same engine, so what discriminates is
+/// which *path* the child names, never whether the other one would run.
+#[cfg(unix)]
+#[test]
+fn bundled_spawn_fronts_its_bin_dir_on_child_path() {
+    let dir = view_test_support::ScratchDir::new("bundled-fronting").unwrap();
+    let exe = plant_bundled_layout(&dir);
+    let (host_bin, _) = host_engine();
+    let decoy = dir.join("decoy");
+    std::fs::create_dir_all(&decoy).unwrap();
+    std::os::unix::fs::symlink(&host_bin, decoy.join("nvim")).unwrap();
+    let layout = view_engine::process::BundledEngine::resolve_from(&exe)
+        .expect("the layout was just planted");
+    let cfg = EngineConfig::default()
+        .with_arg("--clean")
+        .with_arg("-n")
+        .with_env(
+            "PATH",
+            format!(
+                "{}:{}",
+                decoy.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .with_bundled(layout.clone());
+    let engine = Engine::spawn(cfg).unwrap();
+    let seen = engine.handle.eval_str("exepath('nvim')").unwrap();
+    assert_eq!(
+        seen,
+        layout.bin.display().to_string(),
+        "the child resolves nvim to {seen}, so anything it shells out to \
+         runs an engine nobody pinned"
+    );
+    let path = engine.handle.eval_str("$PATH").unwrap();
+    assert!(
+        path.contains(&decoy.display().to_string()),
+        "fronting replaced the child's PATH ({path}) instead of prepending \
+         to it, so it shells out to none of the user's own tools"
+    );
+}
