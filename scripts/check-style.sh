@@ -372,6 +372,52 @@ check_acceptance_expectations() {
   return $acceptfail
 }
 
+# A program a test runs is a committed fixture under scripts/test-fixtures/,
+# never one the test writes: a sibling test's fork landing inside the
+# write's open-descriptor window inherits the writable descriptor into its
+# child, and Linux then refuses the exec with ETXTBSY (`#!` scripts
+# included). Measured, that window is 5-12 us wide and the odds run with the
+# test binary's own fork rate, so the failure lands once in thousands of
+# runs, never on demand, and surfaces as whatever the spawn's caller
+# degrades a failed spawn to.
+#
+# Keyed on the mode literal itself rather than on the call that carries it:
+# this tree spells the same act three ways -- `from_mode(0o755)`,
+# `perms.set_mode(0o755)` and the UFCS `set_mode(&mut perms, 0o755)`, which
+# is the spelling the site this pin exists for actually used, and which a
+# pattern anchored on the call plus its first argument reads straight past.
+# Counted per file rather than per line, the way the condition-notice pin
+# below counts call sites: a line number moves under any edit above it and a
+# count does not, while a second site in an already-listed file still parts
+# the two numbers. Precision over recall, the trade this file makes
+# elsewhere too -- 0o755 is the mode every site in this tree writes, and one
+# written 0o700 or 0o777 would pass unseen.
+#
+# Each row is a path, its pinned number of occurrences, and the grounds that
+# let them stay written rather than becoming a fixture.
+WRITTEN_PROGRAM_SITES='
+crates/view-ai/src/provision.rs 3 an installer making the binary it just unpacked runnable, which is the product doing its job rather than a test writing a program, plus the doc that states the mode
+crates/view-engine/src/process.rs 3 the ETXTBSY pin itself, where the write is the whole point, and two wrappers spawned through spawn_past_busy_text
+crates/view-engine/tests/checktime_live.rs 1 a --nvim-bin wrapper, spawned through that same retry
+crates/view-oracle/tests/smoke.rs 2 a --nvim-bin wrapper spawned through that retry, plus a directory mode this walk cannot tell apart from a file mode
+'
+check_written_programs() {
+  local expected actual
+  expected=$(printf '%s\n' "$WRITTEN_PROGRAM_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
+  actual=$(grep -r --include='*.rs' '0o755' crates 2>/dev/null \
+    | sed 's/:.*//' | LC_ALL=C sort | uniq -c | awk '{ print $2, $1 }' | LC_ALL=C sort) || actual=""
+  if [ "$expected" = "$actual" ]; then
+    return 0
+  fi
+  printf 'pinned:\n%s\nfound:\n%s\n' "$expected" "$actual"
+  echo "STYLE FAIL: a source makes a file executable outside the pinned set"
+  echo "  A program a test runs is a committed fixture under scripts/test-fixtures/,"
+  echo "  because a sibling test's fork inside the write's descriptor window makes"
+  echo "  the exec fail with ETXTBSY once in thousands of runs, naming nothing. If"
+  echo "  this site is genuinely not that, move the pin in this file and say why."
+  return 1
+}
+
 # The two width walks alone, run against a scratch crate root rather than
 # this tree: the walks read only crates/view-engine, so grading them does
 # not need the README, the scripts directory or the god-file classifier the
@@ -401,12 +447,26 @@ if [ "${1:-}" = "--acceptance" ]; then
   check_acceptance_expectations
   exit $?
 fi
+# The written-program pin alone, graded the same way: its own blind spot is
+# a walk that stops matching the spelling a site uses, which reads exactly
+# like a clean tree.
+if [ "${1:-}" = "--written-programs" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --written-programs ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_written_programs
+  exit $?
+fi
 
 fail=0
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1
   check_lua_chunk_width || fail=1
   check_string_literal_width || fail=1
+  check_written_programs || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi

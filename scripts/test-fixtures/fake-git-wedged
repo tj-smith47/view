@@ -1,0 +1,13 @@
+#!/bin/sh
+# A stand-in for a `git status` that never answers: a stale index lock, a
+# credential helper waiting on a network that will not answer. For the bound
+# on a status refresh, which is the only clearer of `git_refresh_in_flight`
+# -- without one the sidebar's decorations freeze for the rest of the
+# session.
+#
+# `exec`, not a bare `sleep`: without it this shell stays as the sleep's
+# parent, the killed pid is this one, and the grandchild holds the stdout
+# pipe open for the full sleep regardless of the kill.
+set -eu
+
+exec sleep 5

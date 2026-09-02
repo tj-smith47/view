@@ -292,5 +292,91 @@ new_accept_case
 } > "$CASE/$ACC"
 expect_accept 0 '' 'a leg that copies a whole config and probes the live scheme'
 
+# ---------------------------------------------------------------------------
+# the written-program pin: a program a test runs is a committed fixture, so
+# the set of sources that make a file runnable is pinned per file. Its own
+# blind spot is a walk that stops matching the spelling a site uses, which
+# reads exactly like a clean tree -- the shape below plants each population
+# in the UFCS spelling the site this pin exists for actually used, which is
+# the one a call-anchored pattern reads straight past.
+#
+# The four rows mirror the checker's own WRITTEN_PROGRAM_SITES: a pin that
+# legitimately moves moves here too, and a clean case that stopped matching
+# the tree is a case nobody watched fail.
+# ---------------------------------------------------------------------------
+plant_modes() {
+  mkdir -p "$(dirname "$CASE/$1")"
+  : > "$CASE/$1"
+  i=0
+  while [ "$i" -lt "$2" ]; do
+    printf 'std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);\n' \
+      >> "$CASE/$1"
+    i=$((i + 1))
+  done
+}
+
+new_written_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/crates"
+  plant_modes 'crates/view-ai/src/provision.rs' 3
+  plant_modes 'crates/view-engine/src/process.rs' 3
+  plant_modes 'crates/view-engine/tests/checktime_live.rs' 1
+  plant_modes 'crates/view-oracle/tests/smoke.rs' 2
+}
+
+# The report's whole content is the population it walked, so the found rows
+# are the tokens; the header collapses to a guard name so rewording the
+# advice under it is not a regression.
+expect_written() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --written-programs "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^found:$/ { infound = 1; next }
+    /^STYLE FAIL: a source makes a file executable outside the pinned set$/ {
+      infound = 0; print "written-programs"; next
+    }
+    infound && NF == 2 { print $1 "=" $2 }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want rc=%s findings [%s]\n  got  rc=%s findings [%s]\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+}
+
+new_written_case
+expect_written 0 '' 'the pinned population, in the spelling a call-anchored pattern misses'
+
+new_written_case
+plant_modes 'crates/view-native/src/tree/git.rs' 1
+expect_written 1 "crates/view-ai/src/provision.rs=3 \
+crates/view-engine/src/process.rs=3 \
+crates/view-engine/tests/checktime_live.rs=1 \
+crates/view-native/src/tree/git.rs=1 crates/view-oracle/tests/smoke.rs=2 \
+written-programs" \
+  'a source outside the pinned set writing a program of its own'
+
+new_written_case
+plant_modes 'crates/view-oracle/tests/smoke.rs' 3
+expect_written 1 "crates/view-ai/src/provision.rs=3 \
+crates/view-engine/src/process.rs=3 \
+crates/view-engine/tests/checktime_live.rs=1 crates/view-oracle/tests/smoke.rs=3 \
+written-programs" \
+  'a second site inside a file the pin already lists'
+
+new_written_case
+rm -f "$CASE/crates/view-engine/tests/checktime_live.rs"
+expect_written 1 "crates/view-ai/src/provision.rs=3 \
+crates/view-engine/src/process.rs=3 crates/view-oracle/tests/smoke.rs=2 \
+written-programs" \
+  'a pinned site that no longer exists, which the pin would otherwise vouch for'
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

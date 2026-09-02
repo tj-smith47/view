@@ -64,7 +64,17 @@ pub fn status(root: &Path) -> Vec<GitEntry> {
 /// to "nothing to decorate".
 #[must_use]
 pub fn status_bounded(root: &Path) -> (Vec<GitEntry>, bool) {
-    run_git_status(root, Path::new("git"), GIT_STATUS_TIMEOUT)
+    status_bounded_with(root, Path::new("git"), GIT_STATUS_TIMEOUT)
+}
+
+/// [`status_bounded`]'s degrade, taking the program and the deadline so a
+/// test can prove the mapping itself: every failure [`run_git_status`] names
+/// -- a `git` nothing resolves, one the kernel refuses to exec, a `fork` a
+/// memory-pressed host declines -- reaches a caller as the same empty,
+/// untimed-out result a clean tree reports, since the tree renders
+/// undecorated either way.
+fn status_bounded_with(root: &Path, program: &Path, timeout: Duration) -> (Vec<GitEntry>, bool) {
+    run_git_status(root, program, timeout).unwrap_or((Vec::new(), false))
 }
 
 /// `status`'s implementation, taking the program to run so a test can prove
@@ -80,7 +90,20 @@ pub fn status_bounded(root: &Path) -> (Vec<GitEntry>, bool) {
 /// fails to spawn identically on every platform. `timeout` is injected
 /// (rather than always [`GIT_STATUS_TIMEOUT`]) so a test can prove the
 /// bound itself without waiting out the real production deadline.
-fn run_git_status(root: &Path, program: &Path, timeout: Duration) -> (Vec<GitEntry>, bool) {
+///
+/// The spawn's own `io::Error` travels out rather than folding into the
+/// empty result [`status_bounded_with`] degrades it to: a `git` the kernel
+/// refuses to exec and a `fork` a memory-pressed host declines are both
+/// indistinguishable from a clean tree once the cause is dropped, so a test
+/// that meant to prove one of them passes on the other, and a failure names
+/// nothing. `std::io::Result` rather than an enum of this module's own,
+/// since a payload only `cfg(test)` reads trips `dead_code` in the plain
+/// lib build.
+fn run_git_status(
+    root: &Path,
+    program: &Path,
+    timeout: Duration,
+) -> std::io::Result<(Vec<GitEntry>, bool)> {
     let mut cmd = Command::new(program);
     cmd.current_dir(root)
         .stdout(std::process::Stdio::piped())
@@ -101,19 +124,28 @@ fn run_git_status(root: &Path, program: &Path, timeout: Duration) -> (Vec<GitEnt
             "--",
             ".",
         ]);
-    let Ok(child) = cmd.spawn() else {
-        return (Vec::new(), false);
-    };
+    let child = cmd.spawn()?;
     let Some(output) = wait_with_timeout(child, timeout) else {
-        return (Vec::new(), true);
+        return Ok((Vec::new(), true));
     };
-    if !output.status.success() {
-        return (Vec::new(), false);
+    match output.status.code() {
+        // a directory outside any repository is `git`'s own 128, and every
+        // other refusal it reports reads the same way here: nothing to
+        // decorate
+        Some(code) if code != 0 => return Ok((Vec::new(), false)),
+        // no code at all is a signal, which is not `git` answering
+        None => {
+            return Err(std::io::Error::other(format!(
+                "git did not exit on its own: {}",
+                output.status
+            )))
+        }
+        Some(_) => {}
     }
     let Ok(text) = String::from_utf8(output.stdout) else {
-        return (Vec::new(), false);
+        return Ok((Vec::new(), false));
     };
-    (parse_porcelain_v2(&text), false)
+    Ok((parse_porcelain_v2(&text), false))
 }
 
 /// Runs `child` to completion, polling rather than blocking, killing (and
@@ -268,6 +300,20 @@ mod tests {
         root
     }
 
+    /// A program a test runs is a committed file, never one the test writes:
+    /// a sibling test's `fork` landing inside the write's open-descriptor
+    /// window inherits the writable descriptor, and Linux then refuses the
+    /// exec with `ETXTBSY`.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/test-fixtures")
+            .join(name)
+            .canonicalize()
+            .expect("the test fixtures are committed alongside the crate");
+        assert!(path.is_file(), "{path:?} is not a file");
+        path
+    }
+
     fn git(root: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
             .current_dir(root)
@@ -348,6 +394,11 @@ mod tests {
     /// would report a decoration here. See `run_git_status`'s doc for why
     /// the absence is a program nothing resolves rather than an emptied
     /// `PATH`.
+    ///
+    /// Both halves are asserted, because the empty result alone cannot tell
+    /// a missing program from a `git` this host refused to exec for an
+    /// unrelated reason: the kind names which one happened, and the degrade
+    /// is read through the same function production calls.
     #[test]
     fn an_unrunnable_git_reports_no_decorations_not_an_error() {
         let root = scratch("no-git-on-path");
@@ -357,11 +408,12 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "init"]);
         std::fs::write(root.join("a.txt"), "two\n").expect("modify a.txt");
 
-        let (entries, timed_out) = run_git_status(
-            &root,
-            Path::new("view-git-that-is-not-installed"),
-            GIT_STATUS_TIMEOUT,
-        );
+        let missing = Path::new("view-git-that-is-not-installed");
+        let err = run_git_status(&root, missing, GIT_STATUS_TIMEOUT)
+            .expect_err("a git that never started is a spawn failure, not a result");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+
+        let (entries, timed_out) = status_bounded_with(&root, missing, GIT_STATUS_TIMEOUT);
         assert!(
             entries.is_empty(),
             "with no git to run the tree must report no decorations, not \
@@ -375,45 +427,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The other spawn-side refusal, and the one the dropped cause used to
+    /// render as a clean tree: a program the kernel will not exec while
+    /// anyone holds a write descriptor on it. `target_os = "linux"` for the
+    /// reason `view-engine`'s own `ETXTBSY` pin states -- macOS runs a `#!`
+    /// script with a writer still holding it, so the premise is false there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_git_this_host_refuses_to_exec_is_named_as_that_refusal() {
+        let root = scratch("busy-git");
+        let program = root.join("git");
+        std::fs::copy(fixture("fake-git-wedged"), &program).expect("copy the fixture");
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&program)
+            .expect("hold a write descriptor open on the program");
+
+        let err = run_git_status(&root, &program, GIT_STATUS_TIMEOUT)
+            .expect_err("a program the kernel refuses to exec is not a clean tree");
+        assert_eq!(err.kind(), std::io::ErrorKind::ExecutableFileBusy, "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The falsifiable check the deadline exists to satisfy: a `git` that
     /// never exits must not hang this module forever, or the sidebar's git
     /// decorations freeze for the rest of the session (`apply_git` is the
-    /// only clearer of `git_refresh_in_flight`). A fake `git` -- a script
-    /// that sleeps well past a short injected timeout, handed to the status
-    /// call outright as the program to run -- proves the call returns
-    /// `(empty, true)` in bounded wall-clock time rather than blocking for
-    /// the sleep's full duration.
-    // The fake `git` this test spawns is a `#!/bin/sh` script and the
-    // permission bits it sets are POSIX-only; a wedged-child bound is not a
-    // platform-specific property, but this particular way of simulating one
-    // is, so this test is unix-only rather than the fix itself.
+    /// only clearer of `git_refresh_in_flight`). A fake `git` -- the
+    /// committed `fake-git-wedged` fixture, which sleeps well past a short
+    /// injected timeout, handed to the status call outright as the program
+    /// to run -- proves the call returns `(empty, true)` in bounded
+    /// wall-clock time rather than blocking for the sleep's full duration.
+    // The fake `git` this test spawns is a `#!/bin/sh` fixture: a
+    // wedged-child bound is not a platform-specific property, but this
+    // particular way of simulating one is, so the test is unix-only rather
+    // than the bound it proves.
     #[cfg(unix)]
     #[test]
     fn a_wedged_git_is_killed_at_its_deadline_not_awaited_forever() {
         let root = scratch("wedged-git");
-        std::fs::create_dir_all(&root).expect("create root");
-        let bin_dir = scratch("wedged-git-bin");
-        let fake_git = bin_dir.join("git");
-        // `exec sleep 5`, not a bare `sleep 5`: without `exec`, `sh` forks a
-        // child to run `sleep` and stays around as its parent, so killing
-        // the pid this test's `Command` actually holds (`sh`'s) leaves the
-        // grandchild `sleep` running and still holding the stdout pipe
-        // open, which would then block `spawn_pipe_drain`'s read until the
-        // full 5s sleep elapses regardless of the kill. `exec` replaces
-        // `sh`'s own process image with `sleep`'s, so the pid this test
-        // kills and the pid actually sleeping are one and the same.
-        std::fs::write(&fake_git, "#!/bin/sh\nexec sleep 5\n").expect("write fake git");
-        let mut perms = std::fs::metadata(&fake_git)
-            .expect("stat fake git")
-            .permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&fake_git, perms).expect("chmod fake git");
 
         // named outright rather than shadowed onto a `PATH`: the
-        // environment stays untouched, so the script's own `sleep` and the
+        // environment stays untouched, so the fixture's own `sleep` and the
         // `/bin/sh` its shebang names resolve exactly as they always would
         let started = std::time::Instant::now();
-        let (entries, timed_out) = run_git_status(&root, &fake_git, Duration::from_millis(200));
+        let (entries, timed_out) = run_git_status(
+            &root,
+            &fixture("fake-git-wedged"),
+            Duration::from_millis(200),
+        )
+        .unwrap_or_else(|err| panic!("the wedged-git fixture must run: {err}"));
         let elapsed = started.elapsed();
 
         assert!(entries.is_empty(), "a killed child reports no decorations");
@@ -425,7 +488,6 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&bin_dir);
     }
 
     #[test]
