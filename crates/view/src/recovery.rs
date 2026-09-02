@@ -557,7 +557,7 @@ mod tests {
         let ops = crate::engine_ops::FakeOps::default();
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
-        let mut theme = crate::bridge::ThemeBridge::new(None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
         let mut model = dead_modal();
         let mut state = LoopState::default();
 
@@ -589,7 +589,7 @@ mod tests {
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
-        let mut theme = crate::bridge::ThemeBridge::new(None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
         let mut model = Model::with_term_size(80, 24);
         let mut state = LoopState::default();
 
@@ -619,7 +619,7 @@ mod tests {
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
-        let mut theme = crate::bridge::ThemeBridge::new(None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
         let mut model = Model::with_term_size(80, 24);
         let mut state = LoopState::default();
 
@@ -662,7 +662,7 @@ mod tests {
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
-        let mut theme = crate::bridge::ThemeBridge::new(None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
         let mut model = Model::with_term_size(80, 24);
         let mut state = LoopState::default();
 
@@ -704,7 +704,7 @@ mod tests {
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
-        let mut theme = crate::bridge::ThemeBridge::new(None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
         let mut model = Model::with_term_size(80, 24);
         let mut state = LoopState {
             connection_lost: true,
@@ -907,7 +907,7 @@ mod tests {
         // fires `VimEnter` as a blocked request, and one nobody answers
         // leaves nvim waiting inside its own startup rather than editing
         let mut native = crate::native::NativeSession::inert();
-        let mut theme = crate::bridge::ThemeBridge::new(None);
+        let mut theme = crate::bridge::ThemeBridge::new(None, None);
         let outcome = crate::startup::run_cutover(
             &mut model,
             &fresh.executor,

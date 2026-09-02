@@ -317,6 +317,7 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.probe_swap_recovery(generation)
                     }
                     RpcCall::Redraw => self.ops.redraw(),
+                    RpcCall::Colorscheme { name } => self.ops.colorscheme(&name),
                     RpcCall::ClaimStdoutTty => self.ops.claim_stdout_tty(),
                     RpcCall::RegisterMappings { specs, channel_id } => {
                         self.ops.register_mappings(&specs, channel_id)

@@ -78,6 +78,103 @@ struct ViewFile {
     keys: KeysTable,
     #[serde(default)]
     engine: EngineTable,
+    #[serde(default)]
+    ui: UiTable,
+}
+
+/// The `[ui]` table's wire shape: which rendering tier a session paints at
+/// and which colorscheme it runs. Unknown keys are refused rather than
+/// ignored, for the reason `[supervision]`'s own check states.
+///
+/// Both fields stay `String`-typed here rather than parsed by serde, for the
+/// reason [`EngineTable`]'s own do: each vocabulary includes a word that
+/// means *no choice* (`"auto"`, on both keys), which is a resolution answer
+/// rather than a type, and the same word has to read the same way when it
+/// arrives through the environment or a flag instead.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UiTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme: Option<String>,
+}
+
+/// The `[ui]` table's resolved answers, as the file gave them.
+///
+/// Doubly optional on both keys, and the two `None`s say different things:
+/// the outer one is the file naming nothing this layer can answer with (an
+/// absent key, or a value view could not read -- see [`Self::notice`]), and
+/// the inner one is the file naming `auto`, which is a choice the user did
+/// make and which resolves to view deciding. A single `Option` would
+/// collapse those, and the collapse is visible: a mistyped tier would
+/// resolve as the file's own `auto` and the doctor would print `config file`
+/// beside a layer that chose nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UiFile {
+    tier: Option<Option<TierChoice>>,
+    theme: Option<Option<String>>,
+    /// What a value this build could not read owes the user, on the same
+    /// terms `[native] tree_width` answers under: never a reason to refuse
+    /// the file, never a silent fall-through either.
+    notice: Option<String>,
+}
+
+/// The word that names view deciding for itself, and therefore the absence
+/// of a choice, on every `[ui]` key.
+const AUTO: &str = "auto";
+
+/// A tier a user named, `Some(None)` for the word that names the absence of
+/// a choice, and `None` for text that names no tier at all -- which falls
+/// through to the layer below, for the reason [`resolve::parse_bool`] states.
+///
+/// Shared by the file, environment and flag layers so one word cannot mean
+/// two things depending on where it was written. Surrounding space goes the
+/// way the environment layer already drops it.
+fn parse_tier(value: &str) -> Option<Option<TierChoice>> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        AUTO => Some(None),
+        "full" => Some(Some(TierChoice::Full)),
+        "standard" => Some(Some(TierChoice::Standard)),
+        "basic" => Some(Some(TierChoice::Basic)),
+        _ => None,
+    }
+}
+
+/// The colorscheme a value names, or `None` for the word that names the
+/// absence of a choice. Any other text is a colorscheme name: nvim owns the
+/// vocabulary, and a name this build has never heard of is answered by the
+/// engine that has.
+///
+/// There is no text that means "derive it" beyond `auto` itself, so an empty
+/// value names no colorscheme rather than one called "" -- the same rule
+/// [`parse_appname`] holds one table over.
+fn parse_theme(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value != AUTO).then(|| value.to_string())
+}
+
+/// The `[ui]` table's answers with each key's own vocabulary applied, and
+/// the notice a value neither vocabulary accepts owes the user.
+fn resolve_ui(table: &UiTable) -> UiFile {
+    let mut notice = None;
+    let tier = table.tier.as_deref().and_then(|raw| {
+        let parsed = parse_tier(raw);
+        if parsed.is_none() {
+            notice = Some(view_core::config::discarded_file(
+                raw,
+                view_core::config::TIER_EXPECTED,
+                "ui",
+                "tier",
+            ));
+        }
+        parsed
+    });
+    UiFile {
+        tier,
+        theme: table.theme.as_deref().map(parse_theme),
+        notice,
+    }
 }
 
 /// The `[engine]` table's wire shape: which editor a session spawns and
@@ -429,6 +526,12 @@ pub struct ViewConfig {
     /// they read the resolved ones, where a flag and the environment have
     /// already had their say over which editor a session actually spawns.
     engine: EngineFile,
+    /// The `[ui]` table's answers. Crate-private for the reason
+    /// [`Self::engine`] is: no consumer reads the file's `[ui]` answers
+    /// directly -- they read the resolved ones, where a flag and the
+    /// environment have already had their say over the tier a session paints
+    /// at and the colorscheme it runs.
+    ui: UiFile,
     /// Which `table.key` pairs the document spelled at all. A key written
     /// at the value it already defaults to resolves the same either way,
     /// and only one of the two is the file's own answer -- which is the
@@ -445,6 +548,7 @@ impl ViewConfig {
             supervision: SupervisionConfig::default(),
             keys: KeysConfig::default(),
             engine: EngineFile::default(),
+            ui: UiFile::default(),
             spelled: Vec::new(),
         }
     }
@@ -484,6 +588,7 @@ impl ViewConfig {
                 nvim_bin: file.engine.nvim_bin.as_deref().and_then(parse_nvim_bin),
                 appname: file.engine.appname.as_deref().and_then(parse_appname),
             },
+            ui: resolve_ui(&file.ui),
             spelled: spelled_keys(&file),
         })
     }
@@ -694,6 +799,12 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     if file.engine.appname.is_some() {
         spelled.push(("engine", "appname"));
     }
+    if file.ui.tier.is_some() {
+        spelled.push(("ui", "tier"));
+    }
+    if file.ui.theme.is_some() {
+        spelled.push(("ui", "theme"));
+    }
     spelled
 }
 
@@ -829,9 +940,9 @@ mod tests {
     static SPECIFIED_TABLES: [&str; 7] = [
         "native",
         "keys",
-        "ui",
-        "engine",
         "supervision",
+        "engine",
+        "ui",
         "ai",
         "ai.review",
     ];
@@ -958,6 +1069,8 @@ mod tests {
             ("native", _) => "false",
             ("keys", _) => "[\"<C-w>>\"]",
             ("supervision", _) => "false",
+            ("ui", "tier") => "\"basic\"",
+            ("ui", "theme") => "\"gruvbox\"",
             ("engine", "nvim_bin") => "\"/opt/nvim/bin/nvim\"",
             ("engine", "appname") => "\"work\"",
             ("engine", "single_grid") => "false",
@@ -1081,6 +1194,88 @@ mod tests {
         assert!(
             err.to_string().contains("expected a boolean"),
             "the refusal must be the nested-table type error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn absent_ui_table_resolves_to_none_for_both_keys() {
+        let cfg = ViewConfig::from_toml_str("[native]\npicker = false\n")
+            .expect("a document with no [ui] table must parse");
+        assert_eq!(
+            (&cfg.ui.tier, &cfg.ui.theme),
+            (&None, &None),
+            "a table the document never opened names neither a tier nor a colorscheme"
+        );
+        assert!(
+            !cfg.spells("ui", "tier") && !cfg.spells("ui", "theme"),
+            "a table the document never opened spelled neither of its keys"
+        );
+    }
+
+    #[test]
+    fn the_literal_auto_parses_to_the_same_none() {
+        let cfg = ViewConfig::from_toml_str("[ui]\ntier = \"auto\"\ntheme = \"auto\"\n")
+            .expect("the shipped example's own values must parse");
+        assert_eq!(
+            (cfg.ui.tier, cfg.ui.theme.clone()),
+            (Some(None), Some(None)),
+            "`auto` is the word for view deciding, which is the same decision an absent key \
+             leaves -- one encoding, reached two ways"
+        );
+        assert!(
+            cfg.spells("ui", "tier") && cfg.spells("ui", "theme"),
+            "a file that agreed with the default is still the file's own answer"
+        );
+    }
+
+    #[test]
+    fn a_named_tier_and_a_named_theme_are_read() {
+        let cfg = ViewConfig::from_toml_str("[ui]\ntier = \"basic\"\ntheme = \"gruvbox\"\n")
+            .expect("named values must parse");
+        assert_eq!(cfg.ui.tier, Some(Some(TierChoice::Basic)));
+        assert_eq!(cfg.ui.theme, Some(Some("gruvbox".to_string())));
+    }
+
+    #[test]
+    fn a_tier_this_build_cannot_read_is_a_notice_not_a_refusal() {
+        // the same rule `[native] tree_width` resolves under: a value view
+        // cannot read is never a reason to refuse to open a file, and never
+        // falls through in silence either
+        let cfg = ViewConfig::from_toml_str("[ui]\ntier = \"turbo\"\n")
+            .expect("a tier this build cannot read must not fail the file");
+        assert_eq!(
+            cfg.ui.tier, None,
+            "an unreadable tier answers from the layer below rather than claiming the file's \
+             own `auto`"
+        );
+        let notice = cfg.ui.notice.as_deref().unwrap_or_default();
+        for fact in ["turbo", view_core::config::TIER_EXPECTED, "[ui] tier"] {
+            assert!(notice.contains(fact), "{fact} is missing from {notice:?}");
+        }
+        assert!(
+            cfg.spells("ui", "tier"),
+            "the file still spelled the key, whatever it resolved to"
+        );
+    }
+
+    #[test]
+    fn an_empty_theme_names_no_colorscheme() {
+        // there is no text that means "derive it": leaving the key out is how
+        // a user says it, the same rule `[engine] appname` holds
+        let cfg = ViewConfig::from_toml_str("[ui]\ntheme = \"  \"\n")
+            .expect("an empty theme must parse rather than fail the file");
+        assert_eq!(cfg.ui.theme, Some(None));
+    }
+
+    #[test]
+    fn unknown_ui_key_is_an_error_not_a_no_op() {
+        // the transposed spelling of a key that is real, which is the shape a
+        // silent default would be indistinguishable from
+        let err = ViewConfig::from_toml_str("[ui]\nthme = \"gruvbox\"\n")
+            .expect_err("a misspelled [ui] key must be an error, not a silent default");
+        assert!(
+            err.to_string().contains("thme"),
+            "the error must name the offending key, got: {err}"
         );
     }
 

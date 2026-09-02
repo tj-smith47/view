@@ -3630,6 +3630,23 @@ mod tests {
         );
     }
 
+    /// The failure the applying chunk reports is a different message from
+    /// the switch the autocmd reports, on the same method: a session that
+    /// read the two as one would tell a user their scheme was applied at
+    /// the moment it was refused.
+    #[test]
+    fn a_refused_colorscheme_decodes_to_the_missing_message_not_the_switch() {
+        let decoded = decode_bridge_event(&[
+            Value::from("colorscheme_failed"),
+            Value::from("nonexistent-scheme"),
+        ]);
+        assert!(
+            matches!(decoded, Some(Msg::ColorSchemeMissing { ref name })
+                if name == "nonexistent-scheme"),
+            "got {decoded:?}"
+        );
+    }
+
     #[test]
     fn a_clipboard_get_with_a_valid_register_decodes_to_the_request() {
         let token = ReplyToken { msgid: 5 };

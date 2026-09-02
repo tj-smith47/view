@@ -268,6 +268,17 @@ pub enum Msg {
     ColorSchemeChanged {
         name: String,
     },
+    /// The colorscheme [`RpcCall::Colorscheme`] named is one nvim could not
+    /// find, reported by the chunk that tried to apply it rather than
+    /// inferred from a [`Self::ColorSchemeChanged`] that never arrived.
+    ///
+    /// A negative asked for as a positive: waiting for the announcement not
+    /// to come needs a deadline, and every deadline short enough to be
+    /// useful is one a plugin manager's own startup can outlast. The chunk
+    /// already knows, because it is the caller of the command that failed.
+    ColorSchemeMissing {
+        name: String,
+    },
     /// The `DiagnosticChanged` autocmd registered by [`RpcCall::RegisterBridge`]
     /// fired; `errors`/`warnings` are `vim.diagnostic.count(0)`'s totals for
     /// severities 1 and 2, computed inside the Lua callback itself (a
@@ -1680,6 +1691,27 @@ pub enum RpcCall {
     /// emitted this effect.
     GetDefaultHl {
         generation: u64,
+    },
+    /// Runs nvim's own `:colorscheme name`, the answer `[ui] theme` gives
+    /// when it names one.
+    ///
+    /// The command, never a palette: view holds no colors of its own, so a
+    /// named scheme is applied by the engine that owns the vocabulary and
+    /// view's chrome is then derived from the highlight table nvim reports
+    /// for it, exactly as it is for a scheme the user's own config chose.
+    /// A second palette view maintained beside nvim's would be a set of
+    /// colors nvim does not know about, which is the one thing the theme
+    /// contract forbids.
+    ///
+    /// Issued off nvim's own `VimEnter` rather than at attach: the point of
+    /// naming a scheme in `view.toml` is to end on it, and a scheme applied
+    /// before the user's config sources is one that config then replaces.
+    ///
+    /// Fire-and-forget like every other `RpcCall`, with the one failure the
+    /// caller cannot predict -- a name nvim cannot find -- crossing back as
+    /// [`Msg::ColorSchemeMissing`] rather than blocking anyone.
+    Colorscheme {
+        name: String,
     },
     /// Reads what this engine recovered on the user's behalf while starting,
     /// and answers with the reading as [`Msg::SwapRecovered`], tagged with

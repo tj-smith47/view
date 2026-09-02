@@ -67,6 +67,23 @@ pub fn discarded_env(name: &str, value: &str, expected: &str, table: &str, key: 
     )
 }
 
+/// [`discarded_env`]'s file-side twin: what the `view.toml` this session
+/// read wrote, what it had to be, and which key answers from somewhere else
+/// because of it.
+///
+/// The environment name is what the two sentences cannot share -- a file
+/// value has none -- so the key's own `[table] key` opens the line instead
+/// of trailing it. Everything after that is word for word the environment's,
+/// for the reason [`discarded_env`] states: two format strings drift the
+/// moment either is reworded.
+#[must_use]
+pub fn discarded_file(value: &str, expected: &str, table: &str, key: &str) -> String {
+    format!(
+        "view: [{table}] {key} = {value} is not {expected} -- it answers from the layer below \
+         it this run"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -94,5 +111,22 @@ mod tests {
         for fact in ["VIEW_UI_TIER", "turbo", TIER_EXPECTED, "[ui] tier"] {
             assert!(notice.contains(fact), "{fact} is missing from {notice:?}");
         }
+    }
+
+    /// The file's own line carries the same three facts it can carry, and
+    /// closes the same way: a user who mistyped one key in two places must
+    /// not have to learn two sentences to read what happened.
+    #[test]
+    fn a_discarded_file_value_reads_like_its_environment_twin() {
+        let file = discarded_file("turbo", TIER_EXPECTED, "ui", "tier");
+        for fact in ["[ui] tier", "turbo", TIER_EXPECTED] {
+            assert!(file.contains(fact), "{fact} is missing from {file:?}");
+        }
+        let env = discarded_env("VIEW_UI_TIER", "turbo", TIER_EXPECTED, "ui", "tier");
+        let tail = "answers from the layer below it this run";
+        assert!(
+            file.ends_with(tail) && env.ends_with(tail),
+            "both notices must close on the same clause: {file:?} / {env:?}"
+        );
     }
 }

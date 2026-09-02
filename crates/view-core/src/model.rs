@@ -136,6 +136,15 @@ pub struct Model {
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
     /// ask for it itself. Empty until startup sets it.
     pub cwd: PathBuf,
+    /// The colorscheme `[ui] theme` named, or `None` when it named none and
+    /// view derives its chrome from whatever the user's own config ends on.
+    ///
+    /// Seeded once at startup from the resolved config
+    /// (`crates/view/src/main.rs` seeds it the same way `cwd` and
+    /// `ai_trusted` are), because `update()` reads no config file itself.
+    /// Read at exactly one point -- nvim's `VimEnter`, the first moment the
+    /// user's own config has finished having its say -- and never after.
+    pub colorscheme: Option<String>,
     /// Whether this session's project has been granted AI agent access,
     /// resolved once at startup from `view-ai`'s own trust store
     /// (`crates/view/src/main.rs` seeds it the same way `cwd` and
@@ -295,6 +304,7 @@ impl Model {
             config_was_read: true,
             surface_conflicts: crate::native::surfaces::SurfaceConflicts::default(),
             cwd: PathBuf::new(),
+            colorscheme: None,
             ai_trusted: false,
             ai_enabled: true,
             ai_panel_width_pct: geometry::DEFAULT_PANEL_WIDTH_PCT,

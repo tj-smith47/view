@@ -85,7 +85,7 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
 /// params into the message its consumer reads, or `None` when this build
 /// has no consumer for the event. Each event names its own payload shape
 /// (see [`crate::nvim_api::REGISTER_BRIDGE_CHUNK`]'s doc): `colorscheme`
-/// carries the scheme's name alone, `diagnostics` an `(errors, warnings)`
+/// and `colorscheme_failed` carry the scheme's name alone, `diagnostics` an `(errors, warnings)`
 /// count pair, `git` the branch name alone, `buffer` a `(name, modified)`
 /// pair, and `float` the twelve positional fields
 /// [`decode_float_observed`] names.
@@ -105,6 +105,13 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
     };
     match event.as_str()? {
         "colorscheme" => Some(Msg::ColorSchemeChanged {
+            name: first.as_str().unwrap_or_default().to_owned(),
+        }),
+        // not an autocmd's event at all: the one chunk that applies a
+        // colorscheme on view's behalf reports its own failure here, rather
+        // than through a second method that would need its own registration
+        // to survive a restart
+        "colorscheme_failed" => Some(Msg::ColorSchemeMissing {
             name: first.as_str().unwrap_or_default().to_owned(),
         }),
         "diagnostics" => {

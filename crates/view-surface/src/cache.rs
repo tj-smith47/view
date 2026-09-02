@@ -75,8 +75,8 @@ impl Frame {
 ///
 /// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
 ///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
-///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `mouse_capture`,
-///   `mouse_on`, `next_overlay_id`
+///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
+///   `mouse_capture`, `mouse_on`, `next_overlay_id`
 /// - read through a field already here: `engine` (this destructures it),
 ///   `grid` (via `grid`), `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `overlays` (via `had_overlays`),

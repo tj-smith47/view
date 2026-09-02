@@ -1,9 +1,7 @@
 //! The pure state transition: `Msg` in, `Model` mutated, `Effect`s out.
 
 use crate::model::{Focus, Model, MouseCapture, OverlayKind, Tier};
-use crate::msg::{
-    DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
-};
+use crate::msg::{DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, RpcCall};
 use crate::native::ai_panel::TranscriptScroll;
 use crate::native::diff::BufTextChangedEvent;
 use crate::native::keys::{Action, Resolved};
@@ -30,6 +28,7 @@ pub(super) mod review;
 mod supervision;
 mod surface_conflict;
 pub(crate) mod surfaces;
+mod theme;
 mod ui_event;
 mod watch;
 
@@ -41,6 +40,7 @@ use surfaces::{
     open_message_history, open_picker, picker_preview_request, picker_source_for_verb,
     toggle_ai_panel, toggle_tree_sidebar, tree_git_refresh_effect,
 };
+use theme::{on_colorscheme_missing, on_vim_enter};
 use ui_event::apply_ui_event;
 use watch::{
     on_checktime_reply, on_confirm_external_removal, on_external_watch_degraded,
@@ -238,26 +238,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 exit_code: 128 + signal,
             }]
         }
-        Msg::EngineRequest(EngineRequest::VimEnter { token }) => vec![
-            Effect::Reply {
-                token,
-                value: ReplyValue::Nil,
-            },
-            // after the reply, never before it: nvim is blocked inside the
-            // `rpcrequest` this answers, and a probe queued ahead of the
-            // answer would be waiting on the engine that is waiting on view.
-            // This is also the first moment the reading is final -- nvim
-            // opens the files it was given, and replays their swap files,
-            // before `VimEnter` fires
-            Effect::Rpc(RpcCall::ProbeSwapRecovery {
-                generation: model.supervision.renew_swap_probe(),
-            }),
-            // and the first moment claiming a terminal is free: nvim's own
-            // tty defaults have finished looking for one by now, so the
-            // claim buys `ui_send` delivery without the startup query and
-            // keystroke-eating wait that finding it earlier would have cost
-            Effect::Rpc(RpcCall::ClaimStdoutTty),
-        ],
+        Msg::EngineRequest(EngineRequest::VimEnter { token }) => on_vim_enter(model, token),
         // delegated, not answered here: the worker owns the reply (see
         // Effect::ClipboardRead/ClipboardWrite's docs), so this loop never
         // blocks on the system clipboard the way a direct Effect::Reply
@@ -508,6 +489,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             Vec::new()
         }
+        Msg::ColorSchemeMissing { name } => on_colorscheme_missing(model, &name),
         Msg::DiagnosticsChanged { errors, warnings } => {
             model
                 .engine

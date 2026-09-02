@@ -1328,7 +1328,7 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         model.ai_trusted = true;
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -2918,7 +2918,7 @@ mod tests {
             .messages
             .resolve_startup_hold(view_core::native::toast::HoldOutcome::Release);
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -2985,7 +2985,7 @@ mod tests {
             let mut model = Model::with_term_size(80, 24);
             model.cwd = root.clone();
             let mut native = NativeSession::inert();
-            let mut bridge = ThemeBridge::new(None);
+            let mut bridge = ThemeBridge::new(None, None);
             let mut follow_ups = FollowUps {
                 native: &mut native,
                 theme: &mut bridge,
@@ -3430,7 +3430,7 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3605,7 +3605,7 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3648,7 +3648,7 @@ mod tests {
             height: 24,
         });
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3697,7 +3697,7 @@ mod tests {
             height: 24,
         });
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3766,7 +3766,7 @@ mod tests {
         model.engine.mode.current = "insert".to_string();
         model.dirty = false;
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3819,7 +3819,7 @@ mod tests {
             .apply_grid(view_core::grid::GridOp::CursorGoto { row: 3, col: 5 });
         model.engine.mode.current = "insert".to_string();
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3861,7 +3861,7 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3885,7 +3885,7 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -3914,7 +3914,7 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
@@ -4021,7 +4021,7 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,

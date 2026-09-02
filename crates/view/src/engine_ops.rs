@@ -60,6 +60,9 @@ pub trait EngineOps {
     /// Asks nvim to repaint from scratch and retract the messages it has
     /// shown (see `RpcCall::Redraw`).
     fn redraw(&self) -> Result<(), EngineError>;
+    /// Runs nvim's own `:colorscheme name`, reporting a name nvim cannot
+    /// find asynchronously rather than here (see `RpcCall::Colorscheme`).
+    fn colorscheme(&self, name: &str) -> Result<(), EngineError>;
     /// Declares this UI's stdout a real terminal, starting `ui_send`
     /// delivery (see `RpcCall::ClaimStdoutTty`).
     fn claim_stdout_tty(&self) -> Result<(), EngineError>;
@@ -282,6 +285,9 @@ impl EngineOps for EngineHandle {
     fn redraw(&self) -> Result<(), EngineError> {
         self.redraw()
     }
+    fn colorscheme(&self, name: &str) -> Result<(), EngineError> {
+        self.colorscheme(name)
+    }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         self.claim_stdout_tty()
     }
@@ -448,6 +454,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn redraw(&self) -> Result<(), EngineError> {
         (**self).redraw()
+    }
+    fn colorscheme(&self, name: &str) -> Result<(), EngineError> {
+        (**self).colorscheme(name)
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         (**self).claim_stdout_tty()
@@ -618,6 +627,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn redraw(&self) -> Result<(), EngineError> {
         (**self).redraw()
+    }
+    fn colorscheme(&self, name: &str) -> Result<(), EngineError> {
+        (**self).colorscheme(name)
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         (**self).claim_stdout_tty()
@@ -813,6 +825,9 @@ impl EngineOps for FakeOps {
     }
     fn redraw(&self) -> Result<(), EngineError> {
         self.record("redraw()".to_string())
+    }
+    fn colorscheme(&self, name: &str) -> Result<(), EngineError> {
+        self.record(format!("colorscheme({name})"))
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {
         self.record("claim_stdout_tty()".to_string())
@@ -1042,6 +1057,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn redraw(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn colorscheme(&self, _name: &str) -> Result<(), EngineError> {
         Ok(())
     }
     fn claim_stdout_tty(&self) -> Result<(), EngineError> {

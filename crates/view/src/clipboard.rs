@@ -892,6 +892,9 @@ mod tests {
         fn redraw(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn colorscheme(&self, _name: &str) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn claim_stdout_tty(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

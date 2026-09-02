@@ -1115,16 +1115,25 @@ fn main() -> Result<()> {
         }
     }
 
-    // the theme cache is keyed on the same path, so cold start can already
-    // paint last session's colors before nvim answers `ui_attach` with its
-    // own `default_colors_set`
+    // the theme cache is keyed on the same path and on the resolved theme
+    // choice, so cold start can already paint last session's colors --
+    // last session under *this* colorscheme's -- before nvim answers
+    // `ui_attach` with its own `default_colors_set`
     let (ai_seed_effects, ai_agent) =
         seed_ai_enabled(config_path.as_deref(), cli.clean, &mut model);
     pre_executor_effects.extend(ai_seed_effects);
 
+    // seeded before the cache read below, which is keyed on it, and read
+    // again at `VimEnter` -- the first moment the user's own config has
+    // finished having its say over the colorscheme (see
+    // `RpcCall::Colorscheme`). `update()` reads no config file itself, so
+    // the choice has to arrive on `Model` as already-resolved state, the
+    // same way `cwd` and `ai_trusted` do
+    model.colorscheme = resolved.ui.theme.value.clone();
+
     match &config_path {
         Some(path) => {
-            let (cached, notice) = theme_cache::load(path);
+            let (cached, notice) = theme_cache::load(path, model.colorscheme.as_deref());
             vlog::log_with("theme", || {
                 format!(
                     "cache {} path={}",
@@ -1303,7 +1312,8 @@ fn main() -> Result<()> {
     }
     // built alongside it, for the same reason: a config that sets a
     // colorscheme has already fired the bridge's own autocmd by now
-    let mut theme_bridge = bridge::ThemeBridge::new(config_path.as_deref());
+    let mut theme_bridge =
+        bridge::ThemeBridge::new(config_path.as_deref(), model.colorscheme.as_deref());
     let mut follow_ups = runtime::FollowUps {
         native: &mut native,
         theme: &mut theme_bridge,
@@ -1402,7 +1412,11 @@ fn main() -> Result<()> {
 /// read side).
 fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
     if let Some(path) = config_path {
-        if let Some(notice) = theme_cache::store(Theme::from_hl(model.engine.hl()), path) {
+        if let Some(notice) = theme_cache::store(
+            Theme::from_hl(model.engine.hl()),
+            path,
+            model.colorscheme.as_deref(),
+        ) {
             eprintln!("{notice}");
         }
     }
@@ -1931,6 +1945,24 @@ mod tests {
             "the loop channel is declared before the attach guard, so its \
              receiver outlives the guard: an abandoned startup joins a \
              thread parked in the `EngineReady` send, holding the child"
+        );
+    }
+
+    /// `[ui] theme` reaches the session through exactly one assignment, and
+    /// dropping it fails nothing: the cache read and the store below it
+    /// would agree on `None`, the `VimEnter` arm would send no
+    /// `RpcCall::Colorscheme`, and every test in the tree would still pass
+    /// while the key silently did nothing. So the assignment is pinned, and
+    /// so is its position -- the cache slot is keyed on the resolved choice,
+    /// so a seed after the read would look the answer up under the wrong
+    /// scheme's hash on every cold start.
+    #[test]
+    fn the_resolved_theme_is_seeded_onto_the_model_before_the_cache_is_read() {
+        let seed = offset_of("model.colorscheme = resolved.ui.theme.value");
+        assert!(
+            seed < offset_of("theme_cache::load("),
+            "the theme cache is read before the choice it is keyed on is \
+             seeded, so a named scheme reads back the unnamed slot"
         );
     }
 

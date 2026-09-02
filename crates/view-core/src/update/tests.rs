@@ -14,7 +14,7 @@ use super::*;
 use crate::events::UiEvent;
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, OverlayId, OverlayKind};
-use crate::msg::{BufferHandle, ExitInfo, RegisterType, ReplyToken};
+use crate::msg::{BufferHandle, ExitInfo, RegisterType, ReplyToken, ReplyValue};
 use crate::native::ai_event::{
     AiCommand, PermissionOption, PermissionOptionKind, PermissionOutcome,
 };

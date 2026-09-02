@@ -104,6 +104,38 @@ nvim_bin = "bundled"       # default: "bundled" -- the pinned engine beside
                            # rather than quietly ignored. It goes live in
                            # the change that gives the attach its flip
 
+# [ui] is what view paints with: how much of the terminal's own capability
+# it uses, and which colorscheme the session runs. Both keys derive when the
+# key is absent, and "auto" is that same absence written down.
+#
+# tier is the summary of the startup capability probe -- synchronized
+# output, truecolor, the kitty keyboard protocol -- and naming one here
+# forces it for terminals the probe reads wrong (a multiplexer that answers
+# for itself rather than for the terminal behind it). `view --doctor` prints
+# which probe decided each capability, so a forced tier is a last resort
+# rather than a first guess.
+#
+# theme names a colorscheme for nvim to run. view holds no palette of its
+# own: nvim applies the scheme with its own :colorscheme and view derives
+# its chrome from the highlight table nvim then reports, which is why any
+# name your plugins can load works here and why "auto" -- deriving from
+# whatever colorscheme your own config ends on -- costs nothing extra. A
+# name nvim cannot find is reported and the derived chrome stands.
+#
+# Both keys are also flags for a single session -- view --tier basic and
+# view --theme gruvbox -- and a flag outranks this file, as does the
+# matching VIEW_UI_* variable.
+
+[ui]
+tier = "auto"              # default: "auto" -- the probed terminal
+                           # capability set. full | standard | basic force a
+                           # tier when a probe is wrong; `view --doctor`
+                           # prints which probe decided
+theme = "auto"             # default: "auto" -- view derives its chrome from
+                           # whatever colorscheme your config ends on. A
+                           # name runs nvim's own :colorscheme and derives
+                           # from that instead
+
 # [ai] turns the agent panel and its ACP client on or off, and names which
 # agent view speaks to. "claude-code" is the one adapter this build knows
 # how to auto-provision on its own; naming another known adapter id or an
@@ -131,13 +163,3 @@ open_target = "current"    # default: "current" -- the window you are in, the
                            # "split" leaves what you were reading beside it.
                            # Anything else opens in the current window and
                            # says so.
-
-# The table below is commented out because THIS BUILD DOES NOT READ IT yet.
-# Uncommenting it is harmless -- view ignores tables it has no loader for --
-# but it will not change anything either. It is listed so the shape it will
-# take is no surprise, and it goes live here in the same change that gives
-# it a loader.
-#
-# [ui]
-# tier = "auto"              # auto | full | standard | basic
-# theme = "auto"             # auto = derive from nvim colorscheme

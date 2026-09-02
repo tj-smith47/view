@@ -104,10 +104,13 @@ pub(crate) struct ThemeBridge {
 }
 
 impl ThemeBridge {
-    /// The writer for `config_path`'s cache slot.
-    pub(crate) fn new(config_path: Option<&Path>) -> Self {
+    /// The writer for `config_path`'s cache slot at the colorscheme
+    /// `choice` names, which is the same slot the cold-start read comes
+    /// from: a session must write back the entry it would read next time,
+    /// not the one a differently-themed session owns.
+    pub(crate) fn new(config_path: Option<&Path>, choice: Option<&str>) -> Self {
         Self {
-            target: config_path.and_then(crate::theme_cache::cache_target),
+            target: config_path.and_then(|path| crate::theme_cache::cache_target(path, choice)),
             pending: Pending::Idle,
             written: None,
         }
@@ -841,7 +844,7 @@ mod tests {
     /// A session started without a config file has no cache slot to write.
     #[test]
     fn a_session_with_no_config_path_writes_nothing_and_stays_idle() {
-        let mut bridge = ThemeBridge::new(None);
+        let mut bridge = ThemeBridge::new(None, None);
         let mut model = settled_model();
         let _ = bridge.follow_up(&mut model, Trigger::Switched);
         let _ = bridge.follow_up(&mut model, Trigger::Applied);

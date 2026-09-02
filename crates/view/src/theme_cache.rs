@@ -180,17 +180,34 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The cache file path for `config_path` under `state_dir`: pure and
-/// env-free so path construction is directly testable, separate from the
-/// env-resolution [`view_native::paths::state_dir`] performs for the public
-/// API.
+/// The cache file path for `config_path` under `state_dir`, at the
+/// colorscheme `theme` names: pure and env-free so path construction is
+/// directly testable, separate from the env-resolution
+/// [`view_native::paths::state_dir`] performs for the public API.
 ///
 /// The directory comes from [`view_native::paths::cache_dir`] rather than
 /// being joined here, so every file view caches lands in one directory a
 /// user can inspect or delete wholesale.
+///
+/// `theme` joins the key rather than being validated against what is stored:
+/// a named colorscheme changes what the engine will report, so an entry
+/// written under one choice says nothing about a session running another,
+/// and a changed choice must miss. Keying it makes that miss structural --
+/// there is no stale entry to detect, because the stale entry is not at this
+/// path. `None` -- the derived answer, and the only key that existed before
+/// this -- keeps its own slot byte for byte, so a build that starts naming a
+/// scheme orphans no cache a user already has.
+///
+/// The separator cannot appear in a path: neither Unix nor Windows admits a
+/// NUL byte in one, so no `(path, theme)` pair can hash as another.
 #[must_use]
-fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
-    let hash = fnv1a(config_path.as_os_str().as_encoded_bytes());
+fn cache_path(state_dir: &Path, config_path: &Path, theme: Option<&str>) -> PathBuf {
+    let mut key = config_path.as_os_str().as_encoded_bytes().to_vec();
+    if let Some(theme) = theme {
+        key.push(0);
+        key.extend_from_slice(theme.as_bytes());
+    }
+    let hash = fnv1a(&key);
     view_native::paths::cache_dir(state_dir).join(format!("theme-{hash:016x}.toml"))
 }
 
@@ -216,8 +233,8 @@ fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
 /// theme, and unconditionally seeding either one registers those two groups
 /// with all-false attributes, permanently defeating that fallback.
 #[must_use]
-pub fn load(config_path: &Path) -> (Option<Theme>, Option<String>) {
-    let Some(path) = cache_target(config_path) else {
+pub fn load(config_path: &Path, theme: Option<&str>) -> (Option<Theme>, Option<String>) {
+    let Some(path) = cache_target(config_path, theme) else {
         return (
             None,
             Some(
@@ -236,9 +253,9 @@ pub fn load(config_path: &Path) -> (Option<Theme>, Option<String>) {
 /// session resolves the path a single time and never reads the environment
 /// again from inside a loop pass.
 #[must_use]
-pub(crate) fn cache_target(config_path: &Path) -> Option<PathBuf> {
+pub(crate) fn cache_target(config_path: &Path, theme: Option<&str>) -> Option<PathBuf> {
     let state_dir = view_native::paths::state_dir()?;
-    Some(cache_path(&state_dir, config_path))
+    Some(cache_path(&state_dir, config_path, theme))
 }
 
 /// [`load`]'s implementation given an already-resolved cache file path, so
@@ -311,15 +328,16 @@ pub(crate) fn load_from_path(path: &Path) -> (Option<Theme>, Option<String>) {
     }
 }
 
-/// Persists `theme` for `config_path`, returning a diagnostic on any
+/// Persists `theme` for `config_path` under the colorscheme `choice` names,
+/// returning a diagnostic on any
 /// failure (no state directory, a directory-creation error, a write error).
 /// Never printed here -- see [`load`]'s doc comment for why -- and
 /// otherwise ignored by every failure mode: a cache write is a best-effort
 /// convenience for the *next* startup, never something the current session
 /// should fail over.
 #[must_use]
-pub fn store(theme: Theme, config_path: &Path) -> Option<String> {
-    let Some(path) = cache_target(config_path) else {
+pub fn store(theme: Theme, config_path: &Path, choice: Option<&str>) -> Option<String> {
+    let Some(path) = cache_target(config_path, choice) else {
         return Some(
             "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; cannot cache theme for next startup"
                 .to_string(),
@@ -480,8 +498,8 @@ mod tests {
     fn cache_path_is_deterministic_and_namespaced_under_view() {
         let state_dir = Path::new("/state");
         let config_path = Path::new("/home/x/.config/view/view.toml");
-        let p1 = cache_path(state_dir, config_path);
-        let p2 = cache_path(state_dir, config_path);
+        let p1 = cache_path(state_dir, config_path, None);
+        let p2 = cache_path(state_dir, config_path, None);
         assert_eq!(p1, p2);
         assert_eq!(p1.parent(), Some(Path::new("/state/view")));
         assert!(p1
@@ -495,9 +513,58 @@ mod tests {
     #[test]
     fn cache_path_differs_for_different_config_paths() {
         let state_dir = Path::new("/state");
-        let p1 = cache_path(state_dir, Path::new("/a/view.toml"));
-        let p2 = cache_path(state_dir, Path::new("/b/view.toml"));
+        let p1 = cache_path(state_dir, Path::new("/a/view.toml"), None);
+        let p2 = cache_path(state_dir, Path::new("/b/view.toml"), None);
         assert_ne!(p1, p2);
+    }
+
+    /// The cold-start defect this key exists to prevent, observed rather
+    /// than argued: a session that names a colorscheme paints from the
+    /// entry a session under the same config path but a *different* theme
+    /// choice wrote, for the one frame before the engine answers. Keying on
+    /// the config path alone makes those two sessions one slot, so the
+    /// named run's first frame shows the derived run's colors.
+    ///
+    /// Falsifiable by construction: drop the theme from the key and the two
+    /// paths below become equal, and the second `load_from_path` hands back
+    /// the first run's theme instead of a miss.
+    #[test]
+    fn theme_cache_key_includes_the_resolved_choice() {
+        let dir = tmp_dir("theme-choice-key");
+        let state_dir = dir.path();
+        let config_path = Path::new("/home/x/.config/view/view.toml");
+
+        let derived = cache_path(state_dir, config_path, None);
+        let named = cache_path(state_dir, config_path, Some("gruvbox"));
+        let other = cache_path(state_dir, config_path, Some("tokyonight"));
+        assert_ne!(
+            derived, named,
+            "a named colorscheme changes what the engine will report, so it cannot share the \
+             derived run's slot"
+        );
+        assert_ne!(
+            named, other,
+            "and two named schemes cannot share one either"
+        );
+        assert_eq!(
+            named,
+            cache_path(state_dir, config_path, Some("gruvbox")),
+            "the same choice under the same config path is the same slot, or nothing would \
+             ever hit"
+        );
+
+        // the frame the key change exists to prevent: what the derived run
+        // left behind must not be what the named run paints from
+        let previous = Theme::with_colors(Some(0x00_11_22), Some(0x33_44_55));
+        assert_eq!(store_to_path(previous, &derived), None);
+        let (hit, _) = load_from_path(&derived);
+        assert_eq!(hit, Some(previous), "the run that wrote it still hits");
+        let (miss, _) = load_from_path(&named);
+        assert_eq!(
+            miss, None,
+            "a changed theme choice repaints from the engine's own answer rather than from the \
+             previous run's colors"
+        );
     }
 
     #[test]
@@ -723,10 +790,10 @@ mod tests {
         let second_config = Path::new("/home/second/.config/view/view.toml");
         let first_theme = Theme::with_colors(Some(0x0A0A0A), Some(0x0B0B0B));
         let second_theme = Theme::with_colors(Some(0x0C0C0C), Some(0x0D0D0D));
-        assert_eq!(store(first_theme, first_config), None);
-        assert_eq!(store(second_theme, second_config), None);
-        let (first_loaded, _) = load(first_config);
-        let (second_loaded, _) = load(second_config);
+        assert_eq!(store(first_theme, first_config, None), None);
+        assert_eq!(store(second_theme, second_config, None), None);
+        let (first_loaded, _) = load(first_config, None);
+        let (second_loaded, _) = load(second_config, None);
         let cache_dir = view_native::paths::cache_dir(&dir);
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&cache_dir)
             .expect("the cache directory must exist after two stores")
@@ -947,8 +1014,15 @@ mod tests {
 
         let config_path = Path::new("/home/x/.config/view/view.toml");
         let theme = Theme::with_colors(Some(0x123456), Some(0x654321));
-        let store_notice = store(theme, config_path);
-        let (loaded, load_notice) = load(config_path);
+        let store_notice = store(theme, config_path, None);
+        let (loaded, load_notice) = load(config_path, None);
+        // the public pair keys on the choice the same way `cache_path`
+        // does, or the resolved theme would reach the read side and not the
+        // write side and every named session would miss its own entry
+        let named = Theme::with_colors(Some(0xAB_CD_EF), Some(0xFE_DC_BA));
+        let named_store = store(named, config_path, Some("gruvbox"));
+        let (named_loaded, _) = load(config_path, Some("gruvbox"));
+        let (crossed, _) = load(config_path, Some("tokyonight"));
 
         match prev {
             Some(v) => std::env::set_var("XDG_STATE_HOME", v),
@@ -959,5 +1033,11 @@ mod tests {
         assert_eq!(store_notice, None, "a clean store must carry no diagnostic");
         assert_eq!(loaded, Some(theme));
         assert_eq!(load_notice, None, "a clean hit must carry no diagnostic");
+        assert_eq!(named_store, None);
+        assert_eq!(named_loaded, Some(named), "a named choice round-trips too");
+        assert_eq!(
+            crossed, None,
+            "and never reads back through another scheme's slot"
+        );
     }
 }

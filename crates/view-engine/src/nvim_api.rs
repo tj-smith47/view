@@ -660,6 +660,32 @@ if vim.g.clipboard == nil then
   }
 end";
 
+/// Applies the colorscheme `[ui] theme` named, and answers on the
+/// `view_bridge` method when nvim cannot find it.
+///
+/// `pcall` rather than a bare `vim.cmd.colorscheme`: a name nvim has no
+/// runtime file for raises `E185`, and an uncaught error inside a
+/// notification's chunk is a message with no name attached to it in a
+/// session that is still sourcing plugins. Catching it lets view say which
+/// key named the scheme, which nvim has no way to know.
+///
+/// The name arrives as an argument rather than interpolated into the source,
+/// unlike nothing else here -- every other chunk is constant. A colorscheme
+/// name is the one piece of caller data that reaches Lua at all, and a name
+/// carrying a quote or a newline concatenated into a chunk would be a
+/// user's `view.toml` writing Lua.
+///
+/// The failure rides the `view_bridge` method the autocmd group already uses
+/// rather than one of its own: it is the same "something happened to the
+/// colorscheme" channel, decoded by the same `decode_bridge_event`, and a
+/// second method name would be a second registration to keep alive across a
+/// restart.
+const COLORSCHEME_CHUNK: &str = "\
+local channel, name = ...
+if not pcall(vim.cmd.colorscheme, name) then
+  pcall(vim.rpcnotify, channel, 'view_bridge', 'colorscheme_failed', name)
+end";
+
 /// Lists every listed, loaded buffer for the picker's `Source::Buffers`
 /// corpus, verified live against the pinned engine -- see
 /// `docs/picker-buffer-list-wire-capture.md` for the captured reply shapes
@@ -2841,6 +2867,31 @@ impl EngineHandle {
         )
     }
 
+    /// Runs nvim's own `:colorscheme name` (see [`COLORSCHEME_CHUNK`] for
+    /// why it is wrapped, and [`view_core::msg::RpcCall::Colorscheme`] for
+    /// why the command rather than a palette).
+    ///
+    /// A notification, not a request, for the same reason
+    /// [`redraw`](Self::redraw) is one: the runtime loop issues it and
+    /// nothing blocks on a result. The one outcome a caller cannot predict
+    /// -- a scheme nvim cannot find -- comes back asynchronously on the
+    /// `view_bridge` method instead, so the loop that issued this never
+    /// waits on the config sourcing that may still be running around it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn colorscheme(&self, name: &str) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(COLORSCHEME_CHUNK),
+                Value::Array(vec![Value::from(self.channel_id), Value::from(name)]),
+            ],
+        )
+    }
+
     /// Evaluates `expr` via `nvim_eval` and renders the result as a string,
     /// the state-parity probe engine-attached oracles use to compare their
     /// decoded screen state against nvim's own ground truth (buffer text,
@@ -4679,6 +4730,43 @@ mod tests {
             params,
             vec![Value::from(HOLD_NOTIFY_CHUNK), Value::Array(Vec::new())]
         );
+    }
+
+    /// The name travels as an argument, and the source is the same constant
+    /// for every scheme. A name concatenated into the chunk would be a
+    /// user's `view.toml` writing Lua -- a scheme called `x'); os.exit()--`
+    /// is a valid TOML string and would be a valid statement.
+    #[test]
+    fn colorscheme_sends_the_name_as_an_argument_never_as_source() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        let hostile = "x'); os.exit()--";
+        h.colorscheme(hostile).unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(
+            params,
+            vec![
+                Value::from(COLORSCHEME_CHUNK),
+                Value::Array(vec![Value::from(h.channel_id), Value::from(hostile)])
+            ]
+        );
+        assert!(
+            !COLORSCHEME_CHUNK.contains(hostile),
+            "the name reached the source, which is the injection \
+             this shape exists to make unrepresentable"
+        );
+    }
+
+    /// The chunk's two halves: it catches the failure rather than letting
+    /// nvim report an anonymous `E185` out of a notification, and it reports
+    /// what it caught back over the channel it was handed. A chunk that lost
+    /// either half would still pass the wire-shape test above.
+    #[test]
+    fn the_colorscheme_chunk_catches_the_failure_and_reports_it() {
+        assert!(COLORSCHEME_CHUNK.contains("pcall(vim.cmd.colorscheme, name)"));
+        assert!(COLORSCHEME_CHUNK.contains("'colorscheme_failed'"));
     }
 
     #[test]

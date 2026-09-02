@@ -18,7 +18,10 @@ use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::registry;
 
 use super::keys::{env_name, keys, ConfigKey};
-use super::{parse_nvim_bin, KeysConfig, NativeConfig, SupervisionConfig, ViewConfig, BUNDLED};
+use super::{
+    parse_nvim_bin, parse_theme, parse_tier, KeysConfig, NativeConfig, SupervisionConfig,
+    ViewConfig, AUTO, BUNDLED,
+};
 
 /// One resolved answer and the reason it is that answer.
 #[non_exhaustive]
@@ -185,23 +188,27 @@ pub fn resolve_with(
 ) -> ResolvedConfig {
     let mut notices = Vec::new();
     let ui = ResolvedUi {
-        // `[ui]` and `[engine]` are not tables `ViewFile` carries, so there
-        // is nothing between the environment and the derived answer for
-        // their keys; the flag and environment layers are the same code
-        // every other key runs through
+        // the file's answers arrive already doubly optional (see `UiFile`):
+        // the outer `None` is "this layer named nothing", which is exactly
+        // what `layer` falls through on, so a mistyped tier and an absent
+        // one reach the derived answer by the same route
         tier: layer(
             flags.tier.map(Some),
             env_read(env, "ui", "tier", TIER_EXPECTED, parse_tier, &mut notices),
-            None,
+            file.ui.tier,
             None,
         ),
         theme: layer(
             flags.theme.as_deref().map(parse_theme),
             env_read(env, "ui", "theme", "", always(parse_theme), &mut notices),
-            None,
+            file.ui.theme.clone(),
             None,
         ),
     };
+    // the file layer's own notice, which an environment value above it
+    // neither answers for nor silences: a mistyped tier is still a mistyped
+    // tier, the same terms `[native] tree_width`'s notice is carried on
+    notices.extend(file.ui.notice.clone());
     let engine = ResolvedEngine {
         nvim_bin: layer(
             flags.nvim_bin.clone().map(Some),
@@ -316,6 +323,7 @@ pub fn resolve_with(
                 notices: file.keys.notices().to_vec(),
             },
             engine: file.engine.clone(),
+            ui: file.ui.clone(),
             spelled: file.spelled.clone(),
         },
         notices,
@@ -389,12 +397,12 @@ impl ResolvedConfig {
                 self.ui
                     .tier
                     .value
-                    .map_or("auto", TierChoice::label)
+                    .map_or(AUTO, TierChoice::label)
                     .to_string(),
                 self.ui.tier.source,
             ),
             ("ui", "theme") => (
-                self.ui.theme.value.clone().unwrap_or_else(|| "auto".into()),
+                self.ui.theme.value.clone().unwrap_or_else(|| AUTO.into()),
                 self.ui.theme.source,
             ),
             ("engine", "nvim_bin") => (
@@ -548,27 +556,6 @@ fn parse_bool(value: &str) -> Option<bool> {
         "false" => Some(false),
         _ => None,
     }
-}
-
-/// A tier a user named, `Some(None)` for the word that names the absence
-/// of a choice, and `None` for text that names no tier at all -- which
-/// falls through to the layer below, for the reason [`parse_bool`] states.
-fn parse_tier(value: &str) -> Option<Option<TierChoice>> {
-    match value.to_ascii_lowercase().as_str() {
-        "auto" => Some(None),
-        "full" => Some(Some(TierChoice::Full)),
-        "standard" => Some(Some(TierChoice::Standard)),
-        "basic" => Some(Some(TierChoice::Basic)),
-        _ => None,
-    }
-}
-
-/// The colorscheme a value names, or `None` for the word that names the
-/// absence of a choice. Any other text is a colorscheme name: nvim owns
-/// the vocabulary, and a name this build has never heard of is answered by
-/// the engine that has.
-fn parse_theme(value: &str) -> Option<String> {
-    (value != "auto").then(|| value.to_string())
 }
 
 /// A sidebar width, clamped the way the file layer clamps one, or `None`
@@ -1091,6 +1078,88 @@ mod tests {
                 source: Source::File
             },
             "a named profile replaces the inherited one"
+        );
+    }
+
+    /// The chain, exercised at `[ui] tier`'s own call site rather than only
+    /// where the chain is written: this key is reachable from all four
+    /// layers, so the file's answer standing where no flag and no
+    /// environment named one -- and losing the moment either does -- is
+    /// what makes the file layer real for it.
+    #[test]
+    fn tier_from_file_loses_to_the_flag() {
+        let file = ViewConfig::from_toml_str("[ui]\ntier = \"basic\"\ntheme = \"gruvbox\"\n")
+            .expect("the fixture must parse");
+        assert_eq!(
+            resolve_with(&file, &Overrides::default(), &no_env).ui.tier,
+            Resolved {
+                value: Some(TierChoice::Basic),
+                source: Source::File
+            },
+            "with nothing above it the file is what named the tier"
+        );
+        assert_eq!(
+            resolve_with(&file, &Overrides::default(), &no_env).ui.theme,
+            Resolved {
+                value: Some("gruvbox".to_string()),
+                source: Source::File
+            },
+            "and the colorscheme beside it"
+        );
+        let flags = Overrides {
+            tier: Some(TierChoice::Full),
+            theme: Some("auto".to_string()),
+            ..Overrides::default()
+        };
+        assert_eq!(
+            resolve_with(&file, &flags, &no_env).ui.tier,
+            Resolved {
+                value: Some(TierChoice::Full),
+                source: Source::Flag
+            },
+            "the flag outranks the file"
+        );
+        assert_eq!(
+            resolve_with(&file, &flags, &no_env).ui.theme,
+            Resolved {
+                value: None,
+                source: Source::Flag
+            },
+            "and `--theme auto` is a flag that names the absence of a choice, which still \
+             outranks a file that named one"
+        );
+        let env = |name: &str| (name == "VIEW_UI_TIER").then(|| "standard".to_string());
+        assert_eq!(
+            resolve_with(&file, &Overrides::default(), &env).ui.tier,
+            Resolved {
+                value: Some(TierChoice::Standard),
+                source: Source::Env
+            },
+            "and the environment sits between them"
+        );
+    }
+
+    /// A tier the file spelled at a value this build cannot read answers
+    /// from the layer below and says so, rather than resolving to the
+    /// file's own `auto` -- which would be a provenance row naming a layer
+    /// that chose nothing.
+    #[test]
+    fn a_file_tier_view_cannot_read_falls_through_with_a_notice() {
+        let file =
+            ViewConfig::from_toml_str("[ui]\ntier = \"turbo\"\n").expect("the fixture must parse");
+        let resolved = resolve_with(&file, &Overrides::default(), &no_env);
+        assert_eq!(
+            resolved.ui.tier,
+            Resolved {
+                value: None,
+                source: Source::Derived
+            }
+        );
+        let notices = resolved.notices().join("\n");
+        assert!(
+            notices.contains("turbo") && notices.contains("[ui] tier"),
+            "the file's own discarded value must reach the same notice list an \
+             environment's does: {notices:?}"
         );
     }
 

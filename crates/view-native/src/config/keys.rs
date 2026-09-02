@@ -56,13 +56,13 @@ pub fn keys() -> &'static [ConfigKey] {
                 table: "ui",
                 key: "tier",
                 flag: Some("--tier"),
-                derived: Some("auto"),
+                derived: Some(super::AUTO),
             },
             ConfigKey {
                 table: "ui",
                 key: "theme",
                 flag: Some("--theme"),
-                derived: Some("auto"),
+                derived: Some(super::AUTO),
             },
             ConfigKey {
                 table: "engine",

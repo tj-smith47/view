@@ -146,6 +146,13 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::ColorSchemeChanged { name } => {
             log_with("theme", || format!("colorscheme name={name}"));
         }
+        // the two lines read together answer why a resolved `[ui] theme` is
+        // not the one painting: a session that resolved a name logs this or
+        // the `ColorSchemeChanged` above it, and one that resolved none logs
+        // neither
+        Msg::ColorSchemeMissing { name } => {
+            log_with("theme", || format!("colorscheme-missing name={name}"));
+        }
         Msg::HlProbeReply { generation, fg, bg } => {
             log_with("theme", || {
                 format!("probe-reply generation={generation} fg={fg:?} bg={bg:?}")

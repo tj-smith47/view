@@ -1469,7 +1469,7 @@ mod tests {
                 &executor,
                 &mut crate::runtime::FollowUps {
                     native: &mut crate::native::NativeSession::inert(),
-                    theme: &mut crate::bridge::ThemeBridge::new(None),
+                    theme: &mut crate::bridge::ThemeBridge::new(None, None),
                     speculate: crate::speculate::SpeculationClock::default(),
                 },
                 CutoverInput {
@@ -1541,7 +1541,7 @@ mod tests {
             &executor,
             &mut crate::runtime::FollowUps {
                 native: &mut crate::native::NativeSession::inert(),
-                theme: &mut crate::bridge::ThemeBridge::new(None),
+                theme: &mut crate::bridge::ThemeBridge::new(None, None),
                 speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
@@ -1587,7 +1587,7 @@ mod tests {
             &executor,
             &mut crate::runtime::FollowUps {
                 native: &mut crate::native::NativeSession::inert(),
-                theme: &mut crate::bridge::ThemeBridge::new(None),
+                theme: &mut crate::bridge::ThemeBridge::new(None, None),
                 speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
@@ -1628,7 +1628,7 @@ mod tests {
             &executor,
             &mut crate::runtime::FollowUps {
                 native: &mut crate::native::NativeSession::inert(),
-                theme: &mut crate::bridge::ThemeBridge::new(None),
+                theme: &mut crate::bridge::ThemeBridge::new(None, None),
                 speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
@@ -1677,7 +1677,7 @@ mod tests {
             &executor,
             &mut crate::runtime::FollowUps {
                 native: &mut crate::native::NativeSession::inert(),
-                theme: &mut crate::bridge::ThemeBridge::new(None),
+                theme: &mut crate::bridge::ThemeBridge::new(None, None),
                 speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
@@ -1720,7 +1720,7 @@ mod tests {
             &executor,
             &mut crate::runtime::FollowUps {
                 native: &mut native,
-                theme: &mut crate::bridge::ThemeBridge::new(None),
+                theme: &mut crate::bridge::ThemeBridge::new(None, None),
                 speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {

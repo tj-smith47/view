@@ -3,7 +3,10 @@
 //! `Msg::ColorSchemeChanged`, a scheme set by the user's own config is
 //! observed at all (which is what registering before `nvim_ui_attach` buys),
 //! and the colors that follow the announcement really do re-derive the
-//! chrome a painter reads.
+//! chrome a painter reads. `[ui] theme`'s own call rides the same method in
+//! both directions, so its two outcomes -- the session ends up wearing the
+//! named scheme, or nvim refuses a name it has no file for -- are proven
+//! here beside them.
 //!
 //! The differential corpus cannot express any of this. Both of its legs
 //! consume the same event stream, so a bridge that registered nothing would
@@ -267,6 +270,67 @@ fn a_colorscheme_set_by_the_users_own_config_is_still_observed() {
         session.switch_name(&mut m).as_deref(),
         Some(SCHEME),
         "a scheme set during config sourcing must still reach view"
+    );
+}
+
+/// What `[ui] theme` actually does, against a real engine: the call view
+/// issues at `VimEnter` puts nvim in the named scheme, and view learns the
+/// name through the same autocmd a user's own `:colorscheme` fires. There is
+/// one palette in the session and this is the proof nvim owns it -- nothing
+/// view holds decided `g:colors_name`.
+#[test]
+fn a_named_theme_puts_the_live_session_in_that_colorscheme() {
+    let session = Session::start("ui-theme-named", "");
+    let mut m = model();
+
+    session
+        .engine
+        .handle
+        .colorscheme(SCHEME)
+        .expect("the call `[ui] theme` issues must reach a live engine");
+
+    assert_eq!(
+        session.switch_name(&mut m).as_deref(),
+        Some(SCHEME),
+        "the scheme view asked for must be announced back like any other switch"
+    );
+    assert_eq!(
+        session.eval("g:colors_name"),
+        SCHEME,
+        "and the session must actually be wearing it"
+    );
+}
+
+/// The other half, and the one no unit test can settle: whether nvim's own
+/// refusal really is a refusal this chunk catches. A name nvim cannot find
+/// comes back as the typed message -- not as an anonymous `E185` in a
+/// session that is still sourcing plugins, and not as a switch that never
+/// happened.
+#[test]
+fn a_theme_nvim_cannot_find_reports_itself_by_name() {
+    let session = Session::start("ui-theme-missing", "");
+    let mut m = model();
+    let missing = "view-nonexistent-scheme";
+
+    session.engine.handle.colorscheme(missing).unwrap();
+
+    let reported = session.wait_for(&mut m, ARRIVAL, |msg| match msg {
+        Msg::ColorSchemeMissing { name } => Some(name.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        reported.as_deref(),
+        Some(missing),
+        "a scheme nvim has no runtime file for must report itself by name"
+    );
+    assert_ne!(
+        // `get`, not the bare variable: a session that never loaded a scheme
+        // has no `g:colors_name` at all, and reading one directly is `E121`
+        // -- which would make this assertion fail on the very outcome it is
+        // asserting for
+        session.eval("get(g:, 'colors_name', '')"),
+        missing,
+        "and nothing may claim the session is wearing a scheme it refused"
     );
 }
 
