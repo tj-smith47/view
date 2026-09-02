@@ -1360,13 +1360,46 @@ impl Drop for Engine {
 /// inside it from both Lua and Vimscript. nvim still shows `E325` and parks
 /// the session on the dialog, then applies the dialog's own default, which
 /// opens the file from disk and drops everything the swap held. The identical
-/// autocommand given as `--cmd` recovers the swap and leaves an ordinary
-/// session (mode `n`, nothing blocking), which is also what a real terminal
-/// nvim does with it.
+/// autocommand given as `--cmd` recovers the swap, which is also what a real
+/// terminal nvim does with it.
 ///
-/// Answering is what erases every other trace that a prompt was asked: no
-/// `E325` notice, no message to the UI, and a recovered buffer that looks
-/// exactly like a buffer whose file simply held that text.
+/// Answering erases the trace of the *prompt*: no `E325` notice, and a
+/// recovered buffer that looks exactly like a buffer whose file simply held
+/// that text. It erases nothing of the replay itself, which nvim reports in
+/// several lines whatever answered for it -- see below.
+///
+/// # Why the recovery redraws, and only sometimes
+///
+/// nvim writes its own multi-line report about every swap it replays (the
+/// swap file's name, `Recovery completed`, what to check). Where that report
+/// goes is the attached UI's answer, not this autocommand's, and the two
+/// answers are not the same session:
+///
+/// - With `ext_messages` attached, nvim puts no message in the grid at all.
+///   The report crosses as `msg_show`, becomes view's own overlay, and view
+///   decides when it is over (`view_core::update::supervision`, which redraws
+///   only where the reading says the recovery went well).
+/// - Without it -- `[native] notifications = false`, the shipped `minimal`
+///   fixture's own config -- nvim keeps its message area and writes the report
+///   into the grid. Measured on the pinned engine: the report overflows the
+///   last row, `need_wait_return` is set, and the main loop parks on
+///   `Press ENTER` the moment `VimEnter` returns. Every *deferred* request is
+///   swallowed for as long as that prompt stands, view's own swap probe among
+///   them, so the session comes up on a screen of nvim's report with no
+///   account of the recovery anywhere and no engine answering.
+///
+/// So the `VimEnter` handler issues `:redraw` in exactly the second case,
+/// which repaints the buffer over the report and clears the pending
+/// hit-enter (`ex_redraw`'s own `need_wait_return = false`). Both terms are
+/// load-bearing: without `ext_messages` in the test, a startup would repaint
+/// over a report view had not decided about yet, and without the recovery
+/// term it would clear a hit-enter prompt raised by the *user's* config on
+/// every launch. `nvim_list_uis` is the predicate because it is nvim's own
+/// (`ui_has(kUIMessages)` is true when any attached UI carries it).
+///
+/// A swap met mid-session gets no redraw: the window is closed by then, and a
+/// hit-enter prompt there is ordinary nvim behavior that the user's next key
+/// answers.
 ///
 /// # The recovery window, and why the reading is taken inside it
 ///
@@ -1445,6 +1478,12 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      window = true \
      before = vim.v.errmsg \
      end \
+     local function grid_messages() \
+     for _, ui in ipairs(vim.api.nvim_list_uis()) do \
+     if ui.ext_messages then return false end \
+     end \
+     return true \
+     end \
      local function look() \
      if not window then return end \
      vim.g.view_swap_reported = 1 \
@@ -1491,8 +1530,10 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      group = group, \
      desc = 'Close the recovery window the startup has finished', \
      callback = function() \
+     local recovering = window \
      look() \
      window = false \
+     if recovering and grid_messages() then vim.cmd('redraw') end \
      end, \
      })";
 
@@ -1505,7 +1546,9 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// afterwards from session-wide state. `recovered` is the buffers that came
 /// back holding work the file on disk does not have, `reported` says nvim
 /// replayed a swap at all -- and therefore wrote the multi-line report that
-/// sits over the buffer until something redraws it -- and `failure` is the
+/// sits over the buffer until something redraws it, which is view's own call
+/// wherever `ext_messages` routes that report to view rather than to the grid
+/// (see [`SWAP_RECOVERY_CMD`]) -- and `failure` is the
 /// error the recovery raised, or empty.
 ///
 /// Asked twice per connection, and the two readings answer different halves.
@@ -1632,7 +1675,8 @@ const RECOVERY_ARG: &str = "-r";
 ///
 /// The condition is nvim's own, measured against the pinned engine rather
 /// than assumed: `-r` with a file recovers that file's swap and leaves an
-/// ordinary editable session behind (mode `n`, nothing blocking), while `-r`
+/// ordinary editable session behind (mode `n`, and nothing blocking once
+/// [`SWAP_RECOVERY_CMD`] has dealt with the report nvim writes), while `-r`
 /// with no file at all means "list every swap file you can find", which
 /// prints that list to a UI that has just attached, parks the engine at the
 /// prompt acknowledging it, and then exits. A restart is exactly the moment
@@ -3612,6 +3656,22 @@ mod tests {
             SWAP_RECOVERY_CMD.contains("if vim.v.swapchoice ~= '' then return end"),
             "an unconditional answer overrules nvim's own verdict on a swap \
              a live process still owns: {SWAP_RECOVERY_CMD}"
+        );
+    }
+
+    /// Both terms the recovery's own redraw is conditioned on, pinned as text
+    /// because dropping either leaves a session that still recovers and still
+    /// answers: without the recovery term view clears a config's own startup
+    /// output on every launch, and without the grid term it repaints over a
+    /// report `ext_messages` had already routed to view, where the decision to
+    /// take it away is view's own and not this startup's.
+    #[test]
+    fn the_recovery_redraw_needs_both_a_recovery_and_a_grid_message_area() {
+        assert!(
+            SWAP_RECOVERY_CMD
+                .contains("if recovering and grid_messages() then vim.cmd('redraw') end"),
+            "the recovery redraw lost a term it cannot be issued without: \
+             {SWAP_RECOVERY_CMD}"
         );
     }
 

@@ -190,6 +190,14 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
 ///   is over -- the `msg_clear` [`RpcCall::Redraw`] answers with is what
 ///   takes it off the buffer, leaving the notice, which `Messages::clear`
 ///   keeps, as the account of it.
+/// - A session that gave the messages surface back has no overlay to retract
+///   and never reaches this decision holding one: the report went into the
+///   grid, where it parks the engine on a hit-enter prompt that swallows the
+///   very probe this reading comes from, so the engine clears it at `VimEnter`
+///   and the reading arrives over a screen already repainted (see
+///   `view_engine::process`'s swap-recovery command). The branches below still
+///   hold there; what differs is only that the redraw they ask for lands on a
+///   report nothing is showing any more.
 /// - **Recovered, damaged, or not at all, with an error recorded.** The
 ///   engine's error is the only standing account of what happened to the
 ///   user's work, and view did not put it there: redrawing it away would

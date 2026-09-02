@@ -393,6 +393,128 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
     assert_os_agrees(&engine);
 }
 
+/// The surfaces left attached by a `[native]` table that turns
+/// `notifications` and `palette` off -- the shipped `minimal` fixture's own
+/// config, and the set the supervision bench cell runs under. nvim keeps its
+/// message area there, writes the recovery report into the grid, and parks on
+/// a hit-enter prompt as soon as that report overflows the last row.
+const NVIM_OWNS_MESSAGES: &[&str] = &["ext_linegrid", "ext_tabline"];
+
+/// Fails when the session is parked at a prompt nobody typed at.
+///
+/// Both halves are asked because neither alone answers it. A hit-enter prompt
+/// swallows every *deferred* request for as long as it stands, so a session
+/// that answers `nvim_eval` at all is past it; `nvim_get_mode` is answered
+/// from the prompt itself and says which prompt, so a bare timeout would
+/// report only that nvim went quiet.
+fn assert_not_parked(engine: &Engine) {
+    let deferred = engine
+        .handle
+        .request_timeout(
+            "nvim_eval",
+            vec![rmpv::Value::from("1")],
+            common::rpc_deadline(),
+        )
+        .is_ok();
+    assert!(
+        deferred,
+        "the session answered no deferred request: it is parked at a prompt \
+         nobody can answer (blocking = {})",
+        blocking(engine)
+    );
+    assert!(
+        !blocking(engine),
+        "the session is at a prompt nobody can answer"
+    );
+}
+
+/// The startup that hands the replacement its predecessor's work, under the
+/// ext set that leaves nvim its own message area: the report nvim writes
+/// about the recovery must not be left standing as a hit-enter prompt, which
+/// gates every deferred request the session owes -- view's own swap probe
+/// among them, so the user would be told nothing about the recovery either.
+#[test]
+fn a_restart_recovers_without_parking_when_nvim_owns_the_message_area() {
+    let dir = scratch("recovers-swap-grid-messages");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+
+    let engine = Engine::spawn(editing(&dir, &file)).unwrap();
+    engine.handle.ui_attach(80, 24, NVIM_OWNS_MESSAGES).unwrap();
+    write_unsaved_edit(&engine, "never written to disk");
+    kill_out_of_band(engine.pid());
+
+    let engine = engine
+        .restart(editing(&dir, &file))
+        .expect("a crashed engine must restart");
+    engine.handle.ui_attach(80, 24, NVIM_OWNS_MESSAGES).unwrap();
+
+    assert_not_parked(&engine);
+    assert_eq!(
+        first_line(&engine),
+        "never written to disk",
+        "the restart did not recover the swap file's contents"
+    );
+}
+
+/// The same guarantee for the other startup that replays a swap: a plain
+/// spawn carries no `-r`, meets the prompt through `SwapExists` instead, and
+/// writes the same report once the answer is given.
+#[test]
+fn an_answered_prompt_leaves_no_park_when_nvim_owns_the_message_area() {
+    let dir = scratch("answered-prompt-grid-messages");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+    crash_with_unsaved_edit(&dir, &file, "never written to disk");
+
+    let engine = Engine::spawn(editing(&dir, &file)).unwrap();
+    engine.handle.ui_attach(80, 24, NVIM_OWNS_MESSAGES).unwrap();
+
+    assert_not_parked(&engine);
+    assert_eq!(
+        first_line(&engine),
+        "never written to disk",
+        "the session came up on the file as it is on disk, discarding what \
+         the swap held"
+    );
+}
+
+/// The bound on the redraw the two tests above ask for: only a recovery's own
+/// report may be taken away. Everything else nvim's message area holds at the
+/// end of a startup is the user's config talking, hit-enter prompt included,
+/// and clearing that would silence a session's own output on every launch
+/// under this ext set.
+///
+/// `-c` runs after the files are opened and before `VimEnter`, which is
+/// exactly the window the guard governs, so a config printing more lines than
+/// the message area holds leaves the prompt standing where the redraw would
+/// be issued.
+#[test]
+fn a_startup_that_recovered_nothing_leaves_its_own_messages_standing() {
+    let dir = scratch("noisy-config-grid-messages");
+    let engine = Engine::spawn(
+        session(&dir)
+            .with_arg("-c")
+            .with_arg("echo \"one\\ntwo\\nthree\""),
+    )
+    .unwrap();
+    engine.handle.ui_attach(80, 24, NVIM_OWNS_MESSAGES).unwrap();
+
+    // the attach returns while the startup that raises the prompt is still
+    // running, and the prompt swallows every deferred request, so there is no
+    // barrier to order this behind -- only the fast reading, taken until it
+    // answers or the bound runs out
+    let deadline = common::rpc_poll_deadline();
+    while !blocking(&engine) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        blocking(&engine),
+        "the session's own startup output was cleared away by a redraw no \
+         recovery asked for"
+    );
+}
+
 /// The prompt an embedded engine cannot ask: a session started over a
 /// crashed one's swap file is not handed `-r` (only a restart is), so it
 /// meets nvim's own `[O]pen/[E]dit/[R]ecover/[D]elete/[Q]uit` question the
