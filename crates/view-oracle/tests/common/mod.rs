@@ -285,10 +285,7 @@ pub fn startup_budget(fixed: Duration) -> view_test_support::HostBudget {
 /// flag a production line for comparing an elapsed time to a literal, which
 /// is a thing production code is entitled to do.
 pub fn workspace_test_sources() -> Vec<(String, String)> {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("this crate sits inside the workspace's crates directory")
-        .to_owned();
+    let crates = crates_root();
     let mut found = Vec::new();
     let mut members: Vec<PathBuf> = std::fs::read_dir(&crates)
         .expect("the workspace's crates directory must be readable")
@@ -351,6 +348,26 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     }
     paths.sort();
     paths
+}
+
+/// The workspace's `crates` directory.
+fn crates_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate sits inside the workspace's crates directory")
+        .to_owned()
+}
+
+/// The whole of the file [`workspace_test_sources`] listed under `name`,
+/// production region included.
+///
+/// A test resolves a bare constant against the declarations around it, and
+/// those can sit above the `#[cfg(test)]` the test region starts at -- read
+/// through the test region alone, `MOTION_SLOW` is an unknown identifier
+/// rather than the absolute duration it is.
+#[must_use]
+pub fn whole_source(name: &str) -> String {
+    std::fs::read_to_string(crates_root().join(name)).unwrap_or_default()
 }
 
 /// `source` as (path under `crates`, contents), keeping only the part after

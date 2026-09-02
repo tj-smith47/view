@@ -186,7 +186,7 @@ fn no_timing_test_bounds_a_measured_span_with_an_undeclared_absolute() {
             // DECLARED_ABSOLUTES and in the fixture below
             continue;
         }
-        for found in absolute_span_bounds(&source) {
+        for found in absolute_span_bounds(&source, &common::whole_source(&name)) {
             if is_declared(&name, &found) {
                 continue;
             }
@@ -293,7 +293,7 @@ mod tests {
 
 #[test]
 fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
-    let found: Vec<usize> = absolute_span_bounds(ESCAPING_SHAPES)
+    let found: Vec<usize> = absolute_span_bounds(ESCAPING_SHAPES, ESCAPING_SHAPES)
         .iter()
         .map(|found| found.number)
         .collect();
@@ -319,11 +319,28 @@ fn the_walk_sees_every_shape_a_line_at_a_time_reader_missed() {
 }
 
 #[test]
+fn a_bound_named_from_a_constant_above_the_test_module_is_still_read() {
+    // the shape: a production `pub const ... Duration`, which the test
+    // region the walk clips a `src` file to does not contain, standing as
+    // the whole value of a bound inside that region
+    let source = "pub const MOTION_SLOW: Duration = Duration::from_millis(120);\n#[cfg(test)]\nmod tests {\n    fn t() {\n        assert!(elapsed <= MOTION_SLOW);\n    }\n}\n";
+    let found = absolute_span_bounds(&common::test_region(source), source);
+    let at: Vec<usize> = found.iter().map(|found| found.number).collect();
+    assert_eq!(
+        at,
+        vec![5],
+        "a constant declared where the test region cannot see it still \
+         names an absolute, and a bound written with its name is the same \
+         bound written with its value"
+    );
+}
+
+#[test]
 fn an_indented_test_module_is_reported_at_the_lines_it_occupies() {
     // the shape: a `#[cfg(test)]` that is not in column one, which is what
     // a test module nested inside another module looks like
     let source = "fn f() {}\nmod outer {\n    #[cfg(test)]\n    mod tests {\n                          let got = rx.recv_timeout(Duration::from_secs(2));\n    }\n}\n";
-    let found = absolute_span_bounds(&common::test_region(source));
+    let found = absolute_span_bounds(&common::test_region(source), source);
     let at: Vec<usize> = found.iter().map(|found| found.number).collect();
     assert_eq!(
         at,
@@ -385,16 +402,18 @@ struct AbsoluteBound {
 /// and the failure it produces on a loaded host is a timed-out receive
 /// rather than a failed assertion. All three read through the statement
 /// rather than the line, so wrapping hides none of them, and all three
-/// resolve a bare constant against the file's own `const` declarations, so
-/// naming the literal does not launder it.
+/// resolve a bare constant against `declarations` -- the whole file, not
+/// the test region `source` is clipped to, since a test's bound can name a
+/// production constant declared above the test module and reading only the
+/// region would take it for an identifier of unknown value.
 ///
 /// Which side is the span is settled by what it is called, per
 /// [`MEASURED_SPANS`], which is where this rule stops: a bound on a span
 /// named outside that list is not read at all.
-fn absolute_span_bounds(source: &str) -> Vec<AbsoluteBound> {
+fn absolute_span_bounds(source: &str, declarations: &str) -> Vec<AbsoluteBound> {
     let lines: Vec<&str> = source.lines().collect();
+    let consts = absolute_constants(&statements(declarations));
     let statements = statements(source);
-    let consts = absolute_constants(&statements);
     let mut found = Vec::new();
     let mut push = |at: usize, statement: &Statement| {
         let number = statement.lines.get(at).copied().unwrap_or(1);

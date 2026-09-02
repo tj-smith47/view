@@ -646,7 +646,12 @@ fn push_rect_rows(layer: &Layer, out: &mut Vec<u16>) {
 /// `framed` and every laid line but differed in kind would keep the old
 /// kind's chrome group (a statusline's, say, instead of a float's) on every
 /// row judged unchanged. A reorder in `render`'s push order is what would
-/// make that reachable.
+/// make that reachable -- and so, now, would a variable-length family of
+/// framed kinds, since the toast stack pushes one layer per visible notice
+/// and every framed overlay behind it shifts by however many that is. What
+/// keeps the toast family itself out of the collision is that toast layers
+/// carry no borders, so they take the both-rects-whole branch above rather
+/// than any row-by-row answer.
 fn push_changed_rows(
     was: &PaintedOverlay,
     now: &Layer,

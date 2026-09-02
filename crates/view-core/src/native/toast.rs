@@ -177,13 +177,16 @@ pub const MOTION_STEP: Duration = Duration::from_millis(20);
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToastMotion {
-    pub phase: MotionPhase,
+    /// What is leaving. Read from outside this crate only through
+    /// [`Self::exiting`], which is the whole reader the renderer needs.
+    pub(crate) phase: MotionPhase,
     /// Frames played so far, `0..MOTION_STEPS`. The frame painted at step
     /// `e` sits `(e + 1) / MOTION_STEPS` of the way through the motion, so
     /// the last painted frame is the settled one and the tick that would
     /// make this `MOTION_STEPS` ends the motion instead of painting a
-    /// seventh frame.
-    pub elapsed_steps: u16,
+    /// seventh frame. Read through [`Self::cells_of`], never directly:
+    /// how far along a frame is, is the curve's answer, not a caller's.
+    pub(crate) elapsed_steps: u16,
 }
 
 /// What the toast stack is interpolating.
