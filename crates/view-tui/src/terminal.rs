@@ -41,6 +41,7 @@ use view_surface::{CursorShape, Surface};
 /// does its own raw-mode/alt-screen/panic-hook dance, which would otherwise
 /// chain a second, redundant hook and re-enter the alternate screen on top
 /// of this one).
+#[must_use = "dropping the guard restores the terminal immediately"]
 pub struct TerminalGuard;
 
 impl TerminalGuard {
@@ -281,6 +282,7 @@ static SAVED_STDERR: std::sync::OnceLock<std::os::fd::OwnedFd> = std::sync::Once
 /// Same grounds as `view-engine`'s `KILLED_AT_SPAWN_WINDOW`: a unix-gated
 /// mitigation for a hazard whose only known trigger is unix.
 #[cfg(unix)]
+#[must_use = "dropping the guard puts fd 2 back on the terminal immediately"]
 pub struct StderrGuard(());
 
 #[cfg(unix)]
@@ -311,6 +313,9 @@ impl StderrGuard {
                 prev(info);
             }));
         }
+        // on a dup2 failure the saved fd and hook above stay armed: both are
+        // benign no-ops with fd 2 untouched, and installing them first keeps
+        // every instant after fd 2 flips covered by a restoring hook
         rustix::stdio::dup2_stderr(sink)?;
         Ok(Self(()))
     }
