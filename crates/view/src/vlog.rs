@@ -66,6 +66,10 @@ pub fn init(process_start: Instant) {
 /// not be opened, or when the duplicate itself fails -- every one of which
 /// leaves the caller to pick its own fallback, since none of them is a
 /// reason a session should refuse to start.
+///
+/// Unix-gated with its consumer: on Windows it is dead code, and
+/// `-D warnings` makes that a build break.
+#[cfg(unix)]
 #[must_use]
 pub fn sink_dup() -> Option<std::fs::File> {
     let Some(Some(file)) = SINK.get() else {
