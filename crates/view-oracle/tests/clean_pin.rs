@@ -10,11 +10,11 @@
 //! the hermetic environment plan, which repoints `XDG_CONFIG_HOME` at a
 //! directory under its own home (`view_engine::env`'s
 //! `HERMETIC_STDPATH_VARS`) rather than leaving the host's standing. The
-//! control below is
-//! what keeps the pin from being a statement about neither: it runs the same
-//! probe against an engine with neither layer, and fails if the fixture never
-//! painted anything, if the probe cannot see what it paints, or if the plant
-//! never reached a child in the first place.
+//! control below is what keeps the pin from being a statement about
+//! neither: it runs the same probe against an engine with neither layer,
+//! and fails if the fixture never painted anything, if the probe cannot
+//! see what it paints, or if the plant never reached a child in the first
+//! place.
 //!
 //! Lives alone in this integration binary because it mutates process
 //! environment: each Cargo integration test file is its own process, so the
