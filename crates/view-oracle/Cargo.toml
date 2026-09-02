@@ -22,6 +22,13 @@ vt100 = "0.16.2"
 # consumer of that fixture crate
 [dev-dependencies]
 view-test-support = { version = "0.0.1", path = "../view-test-support" }
+# test-support on the engine, for tests only: EngineHandle::start is the one
+# constructor that leaves the raw notification channel attached, and the
+# multigrid wire capture needs the undecoded argument tuples a pumped
+# connection has already folded into typed events by the time a caller sees
+# them. The lib dependency above stays featureless, so no ordinary build of
+# this crate carries it.
+view-engine = { version = "0.0.1", path = "../view-engine", features = ["test-support"] }
 
 # Process groups are a Unix mechanism; killpg is what lets a session kill
 # everything its pty child spawned, not just the child. Windows keeps the
