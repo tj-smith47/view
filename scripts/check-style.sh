@@ -396,7 +396,7 @@ check_acceptance_expectations() {
 # Each row is a path, its pinned number of occurrences, and the grounds that
 # let them stay written rather than becoming a fixture.
 WRITTEN_PROGRAM_SITES='
-crates/view-ai/src/provision.rs 3 an installer making the binary it just unpacked runnable, which is the product doing its job rather than a test writing a program, plus the doc that states the mode
+crates/view-ai/src/provision.rs 3 an installer making the binary it just unpacked runnable, the doc that states the mode, and one test writing a script that resolve_node only stats and never execs
 crates/view-engine/src/process.rs 3 the ETXTBSY pin itself, where the write is the whole point, and two wrappers spawned through spawn_past_busy_text
 crates/view-engine/tests/checktime_live.rs 1 a --nvim-bin wrapper, spawned through that same retry
 crates/view-oracle/tests/smoke.rs 2 a --nvim-bin wrapper spawned through that retry, plus a directory mode this walk cannot tell apart from a file mode
