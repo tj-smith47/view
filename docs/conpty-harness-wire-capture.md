@@ -24,7 +24,10 @@ sits downstream of that.
 | capture source | `fnv1a-64 7bf5482143b17c5f over 24475 bytes` | identical |
 
 The source fingerprint is printed by the capture itself, so the two arms
-are one program rather than two that resemble each other.
+are one program rather than two that resemble each other. It fingerprints
+the program as it ran: editing the script moves the value on both arms
+together, and what the figure asserts is that the arms agree, never that
+this particular hex reappears.
 
 ## Capture method
 
