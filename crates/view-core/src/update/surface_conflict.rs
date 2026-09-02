@@ -648,8 +648,13 @@ mod tests {
             );
         }
 
-        // the way out is the deliberate one every sticky entry has
-        assert!(model.engine.messages.dismiss_sticky());
+        // the way out is `d` in the message history, which retracts one
+        // family; an incidental <Esc> deliberately leaves this notice up
+        assert!(!model.engine.messages.dismiss_sticky());
+        assert_eq!(notices(&model), expected, "<Esc> is not this notice's exit");
+        assert!(model
+            .engine
+            .withdraw_native_notice("view: cmp_menu is drawing over "));
         assert!(notices(&model).is_empty());
     }
 

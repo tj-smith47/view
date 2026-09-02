@@ -29,7 +29,7 @@ mod paste;
 pub(super) mod review;
 mod supervision;
 mod surface_conflict;
-mod surfaces;
+pub(crate) mod surfaces;
 mod ui_event;
 mod watch;
 
@@ -1262,11 +1262,17 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // for the whole session.
             //
             // What that costs is real and smaller: an `<Esc>` leaving
-            // insert or visual takes a standing toast with it, so a
-            // sticky message can go before it has been read. It stays
-            // readable -- every dismissed entry is in the message history
-            // (`<leader>fm`) -- and a way out that always works is worth
-            // more than a dismissal that is always deliberate.
+            // insert or visual takes a standing wire error with it, so a
+            // sticky message can go before it has been read. Its text
+            // stays readable in the message history (`<leader>fm`), and a
+            // way out that always works is worth more than a dismissal
+            // that is always deliberate.
+            //
+            // What it must not cost is a notice view raised about a
+            // condition that is still true: its standing-ness is the
+            // claim, and unlike the text it does not come back. Those
+            // carry a family and `dismiss_sticky` leaves them alone; `d`
+            // in that same history is their one way down.
             //
             // The busy modal is excluded outright. It offers `<Esc>` as its
             // own dismissal (`SupervisionChoice::Dismiss`), and the error

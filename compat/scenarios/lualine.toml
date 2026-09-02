@@ -32,6 +32,24 @@ steps = [
   # this scenario: with no real key press sent, mode() stays "i" while
   # every substring assertion below keeps passing against the literal text
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # And view's own conflict notice down, before anything reads the cells it
+  # stands on. This fixture loads noice, which claims surfaces view owns, so
+  # a default launch here raises the sticky notice about it -- a box across
+  # the top rows that is the point of that feature and is in the way of this
+  # one. `d` in the message history is its dismissal: `<Esc>` takes down
+  # nvim's own sticky errors and deliberately leaves a notice view raised
+  # about a condition that is still true, which this one is for as long as
+  # the plugin holds the surface. One claimant raises one notice and a heavy
+  # fixture has several, so this walks the newest rows rather than the top
+  # one, and closes the overlay behind it.
+  { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
   # noice's startup health notifications overlay the upper grid rows for
   # the first few seconds after launch; the timeout must outlast their
   # dismissal.
@@ -60,6 +78,24 @@ steps = [
   # this scenario: with no real key press sent, mode() stays "i" while
   # every substring assertion below keeps passing against the literal text
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # And view's own conflict notice down, before anything reads the cells it
+  # stands on. This fixture loads noice, which claims surfaces view owns, so
+  # a default launch here raises the sticky notice about it -- a box across
+  # the top rows that is the point of that feature and is in the way of this
+  # one. `d` in the message history is its dismissal: `<Esc>` takes down
+  # nvim's own sticky errors and deliberately leaves a notice view raised
+  # about a condition that is still true, which this one is for as long as
+  # the plugin holds the surface. One claimant raises one notice and a heavy
+  # fixture has several, so this walks the newest rows rather than the top
+  # one, and closes the overlay behind it.
+  { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
   # noice's startup health notifications overlay the upper grid rows for
   # the first few seconds after launch; the timeout must outlast their
   # dismissal.
@@ -80,6 +116,17 @@ steps = [
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   { send = "ihello<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # The conflict notice down first, for the reason the state above spells
+  # out: it is a box over the cells this reads, and `<Esc>` no longer takes
+  # a notice view raised about a standing condition down.
+  { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
   { wait_for = "hello", timeout_ms = 15000 },
   { assert_absent = "E5108" },
   # native.statusline = false hands laststatus back, so lualine's own

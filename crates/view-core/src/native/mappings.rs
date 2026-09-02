@@ -347,6 +347,22 @@ fn render_review_table() -> String {
     out
 }
 
+/// The message-history overlay's keys as a markdown table, for the same
+/// reason [`render_review_table`] exists. These keys never reach nvim --
+/// the overlay answers them itself -- so neither the default-key table nor
+/// the review table ranges over them, which is why they went undocumented.
+///
+/// Test-only, and private with it: the page carries the rendered table, and
+/// the test below is the only thing that needs to render it again.
+#[cfg(test)]
+fn render_history_table() -> String {
+    let mut out = String::from("| key | does |\n| --- | --- |\n");
+    for (key, does) in crate::update::surfaces::HISTORY_KEYS {
+        out.push_str(&format!("| `{key}` | {does} |\n"));
+    }
+    out
+}
+
 /// Display metadata for a feature in [`REGISTRY_EXEMPT_FEATURES`] -- the same
 /// three facts [`registry::FeatureDesc`] carries for a feature the registry
 /// tracks. A claim on an exempt feature's key needs exactly these to report
@@ -662,6 +678,20 @@ mod tests {
                 "{page} is stale, it must carry:\n{table}"
             );
         }
+    }
+
+    /// The third table on that page, pinned the same way and here for the
+    /// same reason: the overlay's keys reach a user only through the page,
+    /// since nothing registers them with nvim.
+    #[test]
+    fn the_keys_page_renders_the_history_overlay_keys_this_build_answers() {
+        let table = render_history_table();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/keymaps.md");
+        let text = std::fs::read_to_string(&path).expect("docs/keymaps.md must be readable");
+        assert!(
+            text.contains(&table),
+            "docs/keymaps.md is stale, it must carry:\n{table}"
+        );
     }
 
     #[test]

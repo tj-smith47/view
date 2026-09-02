@@ -278,6 +278,52 @@ stays in the history:
 
 which `<leader>fm` also opens.
 
+`<Esc>` clears nvim's own errors and warnings, and only those. A notice
+view raised itself about something it went and checked -- a plugin drawing
+over the command line, a file that stopped being readable -- stays up while
+that is still true, because nothing re-raises it once it is gone. Those
+come down one at a time, with `d` in the history.
+
+## The message history
+
+The history overlay lists what view has said this session, newest first,
+and scrolls:
+
+| key | does |
+| --- | --- |
+| `j` | select the next entry |
+| `k` | select the previous entry |
+| `<C-d>` | select half a screen further down |
+| `<C-u>` | select half a screen further up |
+| `gg` | select the newest entry |
+| `G` | select the oldest entry |
+| `y` | copy the selected entry verbatim, to the system clipboard and over OSC 52 |
+| `d` | take down the standing notice the selected entry belongs to |
+
+`<Esc>` closes it.
+
+`y` copies the selected line byte for byte -- a path with a space in it
+arrives with the space, and nothing is trimmed, quoted or reworded. It goes
+to your system clipboard and, in the same keystroke, out as an OSC 52
+escape, so a `view` running over SSH puts the line on the clipboard of the
+machine you are reading it on:
+
+```vim
+:View notifications
+" > view: file /home/tj/my notes/plan v2.md is no longer readable
+" y     -- that line, exactly, on your clipboard
+```
+
+If there is no system clipboard to reach, view says so once and the copy
+still goes to its own registers and out over OSC 52.
+
+`d` takes down the notice the selected entry belongs to, wherever the
+entry sits in the history -- including an older wording of a notice that
+has since re-worded itself. It does not delete the entry: the history is
+the record of what was said, and that stays true whether or not the line
+is still on screen. On a message from nvim, which has no notice standing
+behind it, `d` does nothing.
+
 ## `:View`
 
 The command is registered whatever you have turned off, so a feature is

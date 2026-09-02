@@ -38,6 +38,11 @@ const TARGET_NEEDLE: &str = "my notes/plan";
 /// nvim's default leader, which the isolated home never overrides.
 const LEADER: &str = "\\";
 
+/// The window a key's repaint is waited out in: long enough for a frame on
+/// a loaded host, short enough that a key that changed nothing fails here
+/// rather than stalling the suite.
+const SETTLE: Duration = Duration::from_secs(5);
+
 /// As much of the unreachable-clipboard notice as fits on one 80-column
 /// toast row without risking a wrap mid-phrase. The full wording is pinned
 /// in `view-core`'s own `an_unreachable_system_clipboard_notices_once`;
@@ -98,6 +103,11 @@ fn session_with_history(label: &str) -> (view_oracle::PtySession, common::Scratc
 
 /// Opens the history and moves the selection down onto `TARGET`, which sits
 /// `FILLER` rows below the top of a newest-first list.
+///
+/// Every key here is driven as the bytes a terminal actually sends, which
+/// is the point of doing it on a pty: `gg` is two `g` events and reaches
+/// the overlay only if the prefix is held between them. A test that injects
+/// a single `"gg"` notation proves nothing about the key a user presses.
 fn scroll_to_target(session: &mut view_oracle::PtySession) {
     session
         .send(format!("{LEADER}fm").as_bytes())
@@ -107,11 +117,39 @@ fn scroll_to_target(session: &mut view_oracle::PtySession) {
         "<leader>fm never opened the message history; screen:\n{}",
         session.screen()
     );
+
+    // the newest entry, which is where the overlay opens and the one row
+    // this session can name without knowing which notices its own startup
+    // raised behind the fixture
+    let newest = format!("> history filler {FILLER}");
+    assert!(
+        session.wait_for(&newest, SETTLE),
+        "the history did not open on the newest entry; screen:\n{}",
+        session.screen()
+    );
+
+    session
+        .send(b"G")
+        .expect("the scroll keys must reach the session");
+    assert!(
+        session.wait_for_screen(SETTLE, |screen| !screen.contents().contains(&newest)),
+        "`G` left the selection on the newest entry; screen:\n{}",
+        session.screen()
+    );
+    session
+        .send(b"gg")
+        .expect("the scroll keys must reach the session");
+    assert!(
+        session.wait_for(&newest, SETTLE),
+        "two `g` presses did not bring the selection back to the top; screen:\n{}",
+        session.screen()
+    );
+
     session
         .send("j".repeat(FILLER).as_bytes())
         .expect("the scroll keys must reach the session");
     assert!(
-        session.wait_for(TARGET_NEEDLE, Duration::from_secs(10)),
+        session.wait_for("> view-history-copy", Duration::from_secs(10)),
         "the target row never scrolled into the overlay; screen:\n{}",
         session.screen()
     );

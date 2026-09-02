@@ -171,6 +171,14 @@ pub struct MessageHistoryState {
     /// `selected` row already -- a second offset here would be a second
     /// opinion about which rows are on screen.
     selected: usize,
+
+    /// Whether the last key was the first `g` of a `gg`.
+    ///
+    /// Held here rather than in the router's shared `pending_chord`, which
+    /// belongs to the sidebars' configurable bindings and is dropped for
+    /// every other overlay on the way in. One overlay-local prefix is the
+    /// whole of what this needs, and it dies with the snapshot.
+    pending_g: bool,
 }
 
 impl MessageHistoryState {
@@ -179,7 +187,20 @@ impl MessageHistoryState {
         Self {
             entries: history.entries().cloned().collect(),
             selected: 0,
+            pending_g: false,
         }
+    }
+
+    /// Arms the `g` prefix, so the next `g` is a `gg`.
+    pub fn arm_g(&mut self) {
+        self.pending_g = true;
+    }
+
+    /// Whether a `g` was pending, clearing it either way: a keystroke
+    /// spends the prefix whatever the key turns out to be, so `gj` moves
+    /// down by one rather than leaving a `g` armed behind it.
+    pub fn take_g(&mut self) -> bool {
+        std::mem::take(&mut self.pending_g)
     }
 
     #[must_use]
@@ -199,6 +220,7 @@ impl MessageHistoryState {
     /// Moves the selection to `index`, clamped to the last entry, and
     /// reports whether it actually moved (the caller's cue to repaint).
     /// An empty snapshot has nothing to select and never moves.
+    #[must_use]
     pub fn select(&mut self, index: usize) -> bool {
         let Some(last) = self.entries.len().checked_sub(1) else {
             return false;
@@ -212,6 +234,7 @@ impl MessageHistoryState {
     /// [`Self::select`] relative to where the selection already is, saturating
     /// at both ends rather than wrapping: a `j` at the bottom of the history
     /// stays at the bottom, the same as it does in a buffer.
+    #[must_use]
     pub fn move_selection(&mut self, delta: isize) -> bool {
         let step = delta.unsigned_abs();
         let target = if delta < 0 {

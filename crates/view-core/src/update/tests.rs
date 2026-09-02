@@ -7848,8 +7848,85 @@ fn the_history_overlay_scrolls_past_its_visible_rows() {
         39 >= rows,
         "`G` must reach an entry outside the {rows} rows the frame first drew"
     );
-    let _ = press(&mut m, "gg");
+    // two separate `g` events, which is all `encode_key` can hand the
+    // router: a single "gg" notation is not in its range
+    let _ = press(&mut m, "g");
+    assert_eq!(
+        history_view(&m).selected,
+        Some(39),
+        "one `g` is a prefix, not a motion"
+    );
+    let _ = press(&mut m, "g");
     assert_eq!(history_view(&m).selected, Some(0));
+
+    let _ = press(&mut m, "G");
+    let _ = press(&mut m, "g");
+    let _ = press(&mut m, "j");
+    assert_eq!(
+        history_view(&m).selected,
+        Some(39),
+        "a `j` after a `g` saturates at the bottom -- and spends the prefix"
+    );
+    let _ = press(&mut m, "g");
+    assert_eq!(
+        history_view(&m).selected,
+        Some(39),
+        "the spent prefix must not make this lone `g` a `gg`"
+    );
+}
+
+/// The population walk behind `gg`: every key `HISTORY_KEYS` documents is
+/// pressed the way the input layer actually delivers it -- one notation per
+/// `KeyEvent`, a multi-character entry split into its presses -- and has to
+/// change something. A key answered only by a notation `encode_key` cannot
+/// build is a dead gesture with a green test, which is exactly how `gg`
+/// shipped.
+#[test]
+fn every_documented_history_key_answers_a_real_keystroke() {
+    for (key, what) in crate::update::surfaces::HISTORY_KEYS {
+        // every entry carries a family of its own, so `d` has a notice to
+        // retract wherever the selection lands
+        let mut m = Model::with_term_size(80, 24);
+        let _ = m
+            .engine
+            .messages
+            .resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+        for i in 0..40 {
+            let family = format!("view: line {i} ");
+            let _ = m
+                .engine
+                .record_native_notice_once(&family, format!("{family}is standing."));
+        }
+        open_history(&mut m);
+        // from the middle, so a key moving either way has somewhere to go
+        let _ = press(&mut m, "<C-d>");
+        let before = history_view(&m).selected;
+        m.dirty = false;
+
+        let mut effects = Vec::new();
+        for notation in real_key_events(key) {
+            effects = press(&mut m, notation);
+        }
+
+        let after = history_view(&m).selected;
+        assert!(
+            before != after || !effects.is_empty() || m.dirty,
+            "`{key}` ({what}) is documented but does nothing when pressed as the \
+             key event(s) the input layer can actually build"
+        );
+    }
+}
+
+/// The notations `view_tui::keys::encode_key` would emit for a documented
+/// key: a bracketed name is one event, anything else is one event per
+/// character.
+fn real_key_events(key: &str) -> Vec<&str> {
+    if key.starts_with('<') {
+        return vec![key];
+    }
+    key.char_indices()
+        .map(|(at, ch)| &key[at..at + ch.len_utf8()])
+        .collect()
 }
 
 /// Both effects, from the one arm, exactly as the engine-initiated
@@ -7903,6 +7980,21 @@ fn the_copied_text_is_the_entry_verbatim() {
         lines,
         &vec![entry.to_string()],
         "the copy must be the entry's own text, byte for byte"
+    );
+
+    // nvim's own docs say a message can contain line breaks, which is why
+    // `MessageEntry::lines` exists; the copy carries the break rather than
+    // flattening the row it was drawn as
+    let wrapped = "E5108: Error executing lua\n\tstack traceback:\n\t\t[C]: in function 'error'";
+    let mut m = model_with_history(&[wrapped]);
+    let effects = press(&mut m, "y");
+    let Some(Effect::ClipboardWrite { lines, .. }) = effects.first() else {
+        panic!("the copy key must emit a local write first: {effects:?}");
+    };
+    assert_eq!(
+        lines,
+        &vec![wrapped.to_string()],
+        "an entry's embedded newlines are part of it"
     );
 }
 
@@ -11413,4 +11505,43 @@ fn below_full_tier_a_dismissal_still_arms_the_next_slot() {
         );
         assert_eq!(visible_texts(&m), vec!["second".to_string()], "{tier:?}");
     }
+}
+
+/// `<Esc>` is the way out of nvim's own sticky errors, which is why it is
+/// not narrowed to a mode. A notice view raised about a condition that is
+/// still true is a different population: nothing re-raises it, so an
+/// `<Esc>` leaving insert mode would spend the conflict notice -- and its
+/// remedy line -- for the rest of the session. The family is what separates
+/// the two, and `d` in the history is what retires the family-carrying half.
+#[test]
+fn an_incidental_esc_must_not_take_down_the_conflict_notice() {
+    let family = "view: noice.nvim is using ";
+    let mut m = started_model();
+    let _ = m
+        .engine
+        .record_native_notice_sticky_once(family, format!("{family}the cmdline, which view owns."));
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "emsg".into(),
+            content: vec![(0, "E492: Not an editor command".into())],
+            replace_last: false,
+        }]),
+    );
+    assert!(m.engine.has_native_notice(family));
+
+    let _ = press(&mut m, "<Esc>");
+
+    assert!(
+        m.engine.has_native_notice(family),
+        "an incidental <Esc> must leave a standing conflict notice up"
+    );
+    assert!(
+        !m.engine
+            .messages
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "emsg"),
+        "<Esc> must still be the way out of nvim's own sticky errors"
+    );
 }

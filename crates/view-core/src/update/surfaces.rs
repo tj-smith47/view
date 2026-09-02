@@ -265,11 +265,55 @@ pub(super) fn open_message_history(model: &mut Model) -> Vec<Effect> {
 /// constant.
 const HISTORY_CHROME_ROWS: u16 = 4;
 
+/// Every key this overlay answers, with what the docs page says about it.
+///
+/// The one list: [`message_history_key`] matches these notations and
+/// `crate::native::mappings::render_history_table` renders them, so a key
+/// added to the overlay and not to the page fails
+/// `the_keys_page_renders_the_history_overlay_keys_this_build_answers`,
+/// and one that is documented but dead fails
+/// `every_documented_history_key_answers_a_real_keystroke`.
+///
+/// `gg` is two `g` presses; every other entry is one key event.
+///
+/// Test-only, like the table renderer it feeds: the page carries the
+/// rendered rows and the walk presses them, and nothing in a running
+/// session reads this list.
+#[cfg(test)]
+pub(crate) const HISTORY_KEYS: &[(&str, &str)] = &[
+    ("j", "select the next entry"),
+    ("k", "select the previous entry"),
+    ("<C-d>", "select half a screen further down"),
+    ("<C-u>", "select half a screen further up"),
+    ("gg", "select the newest entry"),
+    ("G", "select the oldest entry"),
+    (
+        "y",
+        "copy the selected entry verbatim, to the system clipboard and over OSC 52",
+    ),
+    (
+        "d",
+        "take down the standing notice the selected entry belongs to",
+    ),
+];
+
 /// One keypress aimed at the open message-history overlay.
 ///
 /// `<Esc>` never reaches here (see the caller's guard): closing an overlay
 /// is the router's shared fallback, not a key of this overlay's own.
+///
+/// `d` retires a notice view raised about a condition it observed, which is
+/// exactly the population `Messages::dismiss_sticky` leaves standing for
+/// it. nvim's own sticky errors carry no family, so `d` no-ops on them and
+/// `<Esc>` is their way out -- between the two, every persistent entry has
+/// one exit and no entry has two.
 pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effect> {
+    // `gg` reaches the router as two `g` events -- `encode_key` emits one
+    // notation per key event -- and `dispatch` drops the shared chord
+    // prefix for every overlay but the sidebars, so the first half is held
+    // on the overlay's own state. Taken here, before the key is answered,
+    // so any other key spends it.
+    let armed = history_mut(model).is_some_and(MessageHistoryState::take_g);
     // the two keys that reach past the overlay answer first, so neither is
     // holding a borrow of it while it touches the message log beside it
     match notation {
@@ -298,7 +342,11 @@ pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effe
         "k" => state.move_selection(-1),
         "<C-d>" => state.move_selection(page),
         "<C-u>" => state.move_selection(-page),
-        "gg" => state.select(0),
+        "g" if armed => state.select(0),
+        "g" => {
+            state.arm_g();
+            false
+        }
         "G" => state.select(usize::MAX),
         _ => false,
     };

@@ -408,12 +408,14 @@ fn run<E: EngineOps, S: MsgSink, C: ClipboardBackend + Send + 'static>(
                 // after the shadow write above, so the notice can promise
                 // what it promises: the copy is already recoverable by this
                 // session's own `"+p` before the user is told the system
-                // clipboard was not part of it. `send` rather than
-                // `try_send` because this thread has nothing else to do
-                // while the loop drains, and a dropped notice would leave
-                // the user with a copy they believe went nowhere
+                // clipboard was not part of it. `try_send` because this
+                // thread is not free: a `Query` behind this one owes nvim
+                // an answer inside READ_BUDGET, and blocking on a full
+                // queue would spend that budget on an advisory line. The
+                // whole cost of losing it is that the user is not told
+                // once about something the copy already worked around.
                 if !reached {
-                    let _ = msgs.send(Msg::ClipboardUnavailable);
+                    let _ = msgs.try_send(Msg::ClipboardUnavailable);
                 }
                 if let Some(token) = token {
                     let _ = route.reply(job.epoch, token, ReplyValue::Nil);

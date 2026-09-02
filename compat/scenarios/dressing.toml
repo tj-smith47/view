@@ -39,11 +39,23 @@ steps = [
   # it stands on. This fixture loads noice, which claims surfaces view
   # owns, so a default launch here raises the sticky notice about it -- a
   # box across the top rows that is the point of that feature and is in
-  # the way of this one. `<Esc>` in normal mode is its dismissal.
+  # the way of this one.
   # Waited for by name first: on a cold cache lazy.nvim is still
   # cloning at the first idle, so the notice can land after a
   # keystroke sent the moment the install window closes.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # `d` in the message history is its dismissal: `<Esc>` takes down nvim's
+  # own sticky errors and deliberately leaves a notice view raised about a
+  # condition that is still true, which this one is for as long as the
+  # plugin holds the surface. One claimant raises one notice and a heavy
+  # fixture has several, so this walks the newest rows rather than the top
+  # one, and closes the overlay behind it.
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
   { wait_for = "dressing-prompt", timeout_ms = 15000 },
@@ -79,11 +91,23 @@ steps = [
   # it stands on. This fixture loads noice, which claims surfaces view
   # owns, so a default launch here raises the sticky notice about it -- a
   # box across the top rows that is the point of that feature and is in
-  # the way of this one. `<Esc>` in normal mode is its dismissal.
+  # the way of this one.
   # Waited for by name first: on a cold cache lazy.nvim is still
   # cloning at the first idle, so the notice can land after a
   # keystroke sent the moment the install window closes.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # `d` in the message history is its dismissal: `<Esc>` takes down nvim's
+  # own sticky errors and deliberately leaves a notice view raised about a
+  # condition that is still true, which this one is for as long as the
+  # plugin holds the surface. One claimant raises one notice and a heavy
+  # fixture has several, so this walks the newest rows rather than the top
+  # one, and closes the overlay behind it.
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
   { wait_for = "dressing-prompt", timeout_ms = 15000 },

@@ -716,10 +716,19 @@ impl Messages {
     /// asserts that something *is currently true*, so clearing it would
     /// state a falsehood until whoever raised it noticed and re-raised it.
     /// It is retracted by that raiser, when the condition ends.
+    ///
+    /// So does a notice carrying a family ([`MessageEntry::family`]), for
+    /// the same reason and with a sharper edge: view raises those about a
+    /// condition it went and observed, and nothing re-raises one while the
+    /// condition holds, so a blanket dismissal here would spend it for the
+    /// session. Those are retired one family at a time, by `d` in the
+    /// message history. The two populations partition the persistent
+    /// entries with no overlap: nvim's wire errors carry no family.
     #[must_use]
     pub fn dismiss_sticky(&mut self) -> bool {
         let before = self.entries.len();
-        self.entries.retain(|e| !e.is_persistent() || e.condition);
+        self.entries
+            .retain(|e| !e.is_persistent() || e.condition || e.family().is_some());
         self.entries.len() != before
     }
 

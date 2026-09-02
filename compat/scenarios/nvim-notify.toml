@@ -41,17 +41,38 @@ steps = [
   # it stands on. This fixture loads noice, which claims surfaces view
   # owns, so a default launch here raises the sticky notice about it -- a
   # box across the top rows that is the point of that feature and is in
-  # the way of this one. `<Esc>` in normal mode is its dismissal.
+  # the way of this one.
   # Waited for by name first: on a cold cache lazy.nvim is still
   # cloning at the first idle, so the notice can land after a
   # keystroke sent the moment the install window closes.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # `d` in the message history is its dismissal: `<Esc>` takes down nvim's
+  # own sticky errors and deliberately leaves a notice view raised about a
+  # condition that is still true, which this one is for as long as the
+  # plugin holds the surface. One claimant raises one notice and a heavy
+  # fixture has several, so this walks the newest rows rather than the top
+  # one, and closes the overlay behind it.
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # An explicit dwell rather than nvim-notify's own five-second default:
   # view's handover toasts stand over the cells this float draws into and
   # retire a slot at a time, so a default float would be gone before the
   # grid beneath them was readable and the wait below would be racing it.
   { send = ":lua require('notify')('notify-compat-marker', nil, { timeout = 60000 })<CR>" },
+  # nvim-notify's float lands on the message area, which view owns here, so
+  # view raises its own notice about it -- over the very cells the float
+  # drew into, both being top-right boxes. Down it goes, the same way the
+  # startup notice did, before anything reads those cells.
+  { wait_for = "view: notify is drawing over", timeout_ms = 15000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
+  { send = "<Esc>" },
   # The notification's body text rendered in the grid by nvim-notify's own
   # floating window. Without the plugin the require() fails with E5108
   # instead, so no fallback path can render this text.
@@ -92,11 +113,23 @@ steps = [
   # it stands on. This fixture loads noice, which claims surfaces view
   # owns, so a default launch here raises the sticky notice about it -- a
   # box across the top rows that is the point of that feature and is in
-  # the way of this one. `<Esc>` in normal mode is its dismissal.
+  # the way of this one.
   # Waited for by name first: on a cold cache lazy.nvim is still
   # cloning at the first idle, so the notice can land after a
   # keystroke sent the moment the install window closes.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # `d` in the message history is its dismissal: `<Esc>` takes down nvim's
+  # own sticky errors and deliberately leaves a notice view raised about a
+  # condition that is still true, which this one is for as long as the
+  # plugin holds the surface. One claimant raises one notice and a heavy
+  # fixture has several, so this walks the newest rows rather than the top
+  # one, and closes the overlay behind it.
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # An explicit dwell rather than nvim-notify's own five-second default:
   # view's handover toasts stand over the cells this float draws into and
@@ -111,6 +144,9 @@ steps = [
   # and nvim-notify repositions its window only while sliding, not through
   # the seconds it then stands still.
   { wait_for = "view: notify is drawing over", timeout_ms = 15000 },
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # The notification's body text rendered in the grid by nvim-notify's own
   # floating window. Without the plugin the require() fails with E5108
@@ -147,11 +183,23 @@ steps = [
   # it stands on. This fixture loads noice, which claims surfaces view
   # owns, so a default launch here raises the sticky notice about it -- a
   # box across the top rows that is the point of that feature and is in
-  # the way of this one. `<Esc>` in normal mode is its dismissal.
+  # the way of this one.
   # Waited for by name first: on a cold cache lazy.nvim is still
   # cloning at the first idle, so the notice can land after a
   # keystroke sent the moment the install window closes.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
+  # `d` in the message history is its dismissal: `<Esc>` takes down nvim's
+  # own sticky errors and deliberately leaves a notice view raised about a
+  # condition that is still true, which this one is for as long as the
+  # plugin holds the surface. One claimant raises one notice and a heavy
+  # fixture has several, so this walks the newest rows rather than the top
+  # one, and closes the overlay behind it.
+  # The command form rather than `<leader>fm`: `:View` is registered
+  # whatever the config turns off, and one of these states turns the
+  # notifications feature (and with it that key) off.
+  { send = ":View notifications<CR>" },
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # One switch takes one surface: the message area goes back to nvim while
   # the command line stays externalized, which is the granularity a single
