@@ -3,12 +3,13 @@
 //! allowlist deciding which of everything else on the host reaches a
 //! hermetic child at all.
 //!
-//! Pointing the four `XDG_*_HOME` variables at private directories does not
-//! by itself detach a child from the host's editor setup. A handful of
-//! other variables re-point the same lookups from outside those
-//! directories, run commands before any of them are consulted, or (for the
-//! two search-path variables) fall back to system-wide defaults when unset,
-//! so that clearing them selects a host path rather than no path at all.
+//! Pointing the four `XDG_*_HOME` variables at private directories
+//! ([`HERMETIC_STDPATH_VARS`]) does not by itself detach a child from the
+//! host's editor setup. A handful of other variables re-point the same
+//! lookups from outside those directories, run commands before any of them
+//! are consulted, or (for the two search-path variables) fall back to
+//! system-wide defaults when unset, so that clearing them selects a host
+//! path rather than no path at all.
 //!
 //! The lists are enumerated from the pinned engine's own documentation
 //! (`:help starting`, `:help standard-path`, `:help remote-plugin-manifest`,
@@ -179,6 +180,71 @@ pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CON
 /// variables stay passthrough: process creation and the child's own
 /// profile-shaped lookups need them. That residual is accepted, not closed.
 pub const HERMETIC_HOME_VAR: &str = "HOME";
+
+/// The four standard-path roots a hermetic spawn names outright, each with
+/// its position under [`hermetic_home`]: the directory the same variable's
+/// own Unix default already resolves to there.
+///
+/// [`HERMETIC_HOME_VAR`] moves a child's home, and on Unix that moves every
+/// `stdpath()` with it, since all four default to a directory under
+/// `$HOME`. Windows derives none of them from `HOME`: `stdpath('state')` and
+/// `stdpath('data')` come from `%LOCALAPPDATA%` and `stdpath('cache')` from
+/// `%TEMP%` (`get_xdg_home`, the engine's `os/stdpaths.c`), which are
+/// passthrough variables, so a plan that relies on the derivation leaves
+/// every "isolated" child on one Windows account sharing the operator's own
+/// standard directories -- reading their `nvim` configuration tree, and
+/// racing each other's `mkdir` of the swap directory under their state
+/// tree, which surfaces as an `E303` refusing the buffer of whichever child
+/// loses (gh-windows, run 33634619480).
+///
+/// Naming them replaces a derivation that holds on one platform with one
+/// that holds on both, and changes nothing on Unix in effect: each value
+/// here is the path the child derived anyway.
+///
+/// Unlike [`HERMETIC_HOME_VAR`], a caller's own entry for one of these
+/// outranks the hermetic layer. Delivering a pinned configuration through
+/// `XDG_CONFIG_HOME` to an otherwise isolated child is how the measurement
+/// matrix measures a configuration at all (see
+/// [`crate::process::EngineConfig::isolated`]), so these are defaults
+/// filling in what the sweep removed, never a refusal.
+pub const HERMETIC_STDPATH_VARS: &[(&str, &[&str])] = &[
+    ("XDG_CONFIG_HOME", &[".config"]),
+    ("XDG_DATA_HOME", &[".local", "share"]),
+    ("XDG_STATE_HOME", &[".local", "state"]),
+    ("XDG_CACHE_HOME", &[".cache"]),
+];
+
+/// [`HERMETIC_STDPATH_VARS`] resolved against [`hermetic_home`]: the value a
+/// hermetic spawn gives each standard-path root.
+#[must_use]
+pub fn hermetic_stdpath_dirs() -> Vec<(&'static str, PathBuf)> {
+    let home = hermetic_home();
+    HERMETIC_STDPATH_VARS
+        .iter()
+        .map(|(name, parts)| {
+            (
+                *name,
+                parts.iter().fold(home.clone(), |dir, part| dir.join(part)),
+            )
+        })
+        .collect()
+}
+
+/// The directory Neovim gives its own state and data trees under the
+/// standard-path roots [`HERMETIC_STDPATH_VARS`] names.
+///
+/// `nvim` everywhere but Windows, which suffixes `-data` on the state and
+/// data roots so configuration and data do not share one directory
+/// (`get_xdg_home`, the engine's `os/stdpaths.c`). Always this and never a
+/// read of `NVIM_APPNAME`, which [`HOST_REDIRECT_VARS`] removes.
+#[must_use]
+pub fn engine_state_dir_name() -> &'static str {
+    if cfg!(windows) {
+        "nvim-data"
+    } else {
+        "nvim"
+    }
+}
 
 /// What a hermetic spawn points [`HOST_SEARCH_PATH_VARS`] and
 /// [`HOST_SUBPROCESS_CONFIG_VARS`] at when the child runs on a *remote*
@@ -532,9 +598,9 @@ fn build_target_dir() -> PathBuf {
 /// same funnels that prepare [`empty_search_path`].
 ///
 /// A directory of its own rather than [`empty_search_path`], because a home
-/// is *written* by its legitimate holders: an embedded Neovim creates
-/// `$HOME/.local/state/nvim` for its log the moment it starts when no
-/// `XDG_STATE_HOME` redirects it, so pointing `HOME` at the directory whose
+/// is *written* by its legitimate holders: an embedded Neovim creates its
+/// log directory under the state root [`HERMETIC_STDPATH_VARS`] points here
+/// the moment it starts, so pointing `HOME` at the directory whose
 /// emptiness every spawn re-checks would let the first child's state veto
 /// every spawn after it. Under the build tree for the same reason as the
 /// search path: the system temp dir is world-writable with a guessable
@@ -607,17 +673,22 @@ fn prepare_home_dir(path: &Path) -> io::Result<()> {
         }
         return Err(home_refusal(path, Path::new(&name)));
     }
-    // An embedded Neovim creates `$HOME/.local/state/nvim/swap` on demand
-    // when it opens its first buffer, and two children starting together
-    // both find it missing and both mkdir it: the loser's mkdir returns
-    // EEXIST, which nvim reports as E303 and then refuses the buffer, so a
-    // concurrent spawn fails for a reason that has nothing to do with what
-    // it was doing. `create_dir_all` is idempotent under the same race, so
-    // creating the directory retires it rather than leaving the outcome to
-    // whichever child wins. After the scan above, never before it: a
-    // planted non-directory `.local` must be diagnosed by the refusal that
-    // names it, not by a raw ENOTDIR from this line.
-    std::fs::create_dir_all(path.join(".local").join("state").join("nvim").join("swap"))?;
+    // An embedded Neovim creates the swap directory under its state root on
+    // demand when it opens its first buffer, and two children starting
+    // together both find it missing and both mkdir it: the loser's mkdir
+    // returns EEXIST, which nvim reports as E303 and then refuses the
+    // buffer, so a concurrent spawn fails for a reason that has nothing to
+    // do with what it was doing. `create_dir_all` is idempotent under the
+    // same race, so creating the directory retires it rather than leaving
+    // the outcome to whichever child wins. After the scan above, never
+    // before it: a planted non-directory `.local` must be diagnosed by the
+    // refusal that names it, not by a raw ENOTDIR from this line.
+    std::fs::create_dir_all(
+        path.join(".local")
+            .join("state")
+            .join(engine_state_dir_name())
+            .join("swap"),
+    )?;
     Ok(())
 }
 
@@ -1017,12 +1088,15 @@ mod tests {
     /// carrying the state a previous child left.
     #[test]
     fn the_swap_directory_exists_before_any_child_can_race_for_it() {
-        let swap = Path::new(".local/state/nvim/swap");
+        let swap = Path::new(".local")
+            .join("state")
+            .join(engine_state_dir_name())
+            .join("swap");
         let dir = scratch("home-swap-race");
 
         prepare_home_dir(&dir).unwrap();
         assert!(
-            dir.join(swap).is_dir(),
+            dir.join(&swap).is_dir(),
             "a fresh home left {} to whichever child mkdirs it first",
             swap.display()
         );
@@ -1030,17 +1104,71 @@ mod tests {
         // idempotent over the state it just wrote, since every spawn
         // re-prepares the one home the whole workspace shares
         prepare_home_dir(&dir).unwrap();
-        assert!(dir.join(swap).is_dir());
+        assert!(dir.join(&swap).is_dir());
 
-        // and over a home a child already wrote its own state into,
-        // where `.local/state/nvim` exists but the swap directory does not
+        // and over a home a child already wrote its own state into, where
+        // the engine's state directory exists but the swap directory does not
         let used = scratch("home-swap-race-used");
-        std::fs::create_dir_all(used.join(".local/state/nvim")).unwrap();
-        std::fs::write(used.join(".local/state/nvim/log"), b"startup").unwrap();
+        let state = used
+            .join(".local")
+            .join("state")
+            .join(engine_state_dir_name());
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("log"), b"startup").unwrap();
         prepare_home_dir(&used).unwrap();
         assert!(
-            used.join(swap).is_dir(),
+            used.join(&swap).is_dir(),
             "a home carrying a previous child's state still races for the swap directory"
+        );
+    }
+
+    /// The roots the plan names must land under the home it also names, and
+    /// none of them may be passthrough: an allowlisted name carries the
+    /// host's own value past every layer of the plan, which is the shape
+    /// that left Windows children sharing one state directory.
+    #[test]
+    fn every_named_standard_path_root_resolves_under_the_hermetic_home() {
+        let home = hermetic_home();
+        let dirs = hermetic_stdpath_dirs();
+        assert_eq!(dirs.len(), HERMETIC_STDPATH_VARS.len());
+        for (name, dir) in dirs {
+            assert!(
+                dir.starts_with(&home),
+                "{name} points at {}, outside the hermetic home",
+                dir.display()
+            );
+            assert!(
+                !is_hermetic_passthrough(OsStr::new(name)),
+                "{name} is allowlisted, so the host's own value reaches the \
+                 child whatever the plan names"
+            );
+        }
+    }
+
+    /// The swap directory the preparation owns must be the one a child
+    /// derives from the state root the same plan hands it, or the mkdir
+    /// race it retires is a race the child still runs.
+    #[test]
+    fn the_prepared_swap_directory_sits_under_the_state_root_the_plan_names() {
+        let dir = scratch("home-swap-under-state");
+        prepare_home_dir(&dir).unwrap();
+        let state = hermetic_stdpath_dirs()
+            .into_iter()
+            .find(|(name, _)| *name == "XDG_STATE_HOME")
+            .map(|(_, dir)| dir)
+            .expect("the plan names no state root");
+        let relative = state
+            .strip_prefix(hermetic_home())
+            .expect("the state root sits outside the hermetic home");
+        let swap = dir
+            .join(relative)
+            .join(engine_state_dir_name())
+            .join("swap");
+        assert!(
+            swap.is_dir(),
+            "{} is missing, so the preparation owns a directory no child \
+             asks for and every child still mkdirs its own",
+            swap.display()
         );
     }
 

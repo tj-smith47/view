@@ -7,8 +7,10 @@
 //!
 //! Two layers stand between that plant and the child, and either one alone
 //! would satisfy the assertion: `--clean`, which discards user config, and
-//! the hermetic environment sweep, which drops `XDG_CONFIG_HOME` outright
-//! because no allowlist in `view_engine::env` names it. The control below is
+//! the hermetic environment plan, which repoints `XDG_CONFIG_HOME` at a
+//! directory under its own home (`view_engine::env`'s
+//! `HERMETIC_STDPATH_VARS`) rather than leaving the host's standing. The
+//! control below is
 //! what keeps the pin from being a statement about neither: it runs the same
 //! probe against an engine with neither layer, and fails if the fixture never
 //! painted anything, if the probe cannot see what it paints, or if the plant

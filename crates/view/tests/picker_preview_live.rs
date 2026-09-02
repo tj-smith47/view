@@ -31,15 +31,16 @@ struct Session {
 }
 
 impl Session {
-    /// `-n` (no swapfile): every isolated spawn in this test binary shares
-    /// one hermetic HOME (`crate::env::hermetic_home`), so concurrent
-    /// `:edit` calls across this file's tests race to create the same
-    /// `.local/state/nvim/swap` directory -- exactly the kind of shared,
-    /// incidental state a swapfile has no bearing on for a test that
-    /// never crashes nvim and never needs recovery.
+    /// Every isolated spawn in this test binary shares one hermetic HOME
+    /// (`view_engine::env::hermetic_home`), so concurrent `:edit` calls
+    /// across this file's tests reach one swap directory. The spawn funnel
+    /// creates it before any child asks for it, which is what retires the
+    /// race; `-n` does not, since this session attaches no UI and nvim
+    /// applies that flag only after it has waited for one (see
+    /// `EngineConfig::isolated`).
     fn start(name: &str) -> Self {
         let dir = ScratchDir::new(&format!("picker-preview-live-{name}")).unwrap();
-        let cfg = EngineConfig::isolated().with_arg("-n");
+        let cfg = EngineConfig::isolated();
         let (engine, _pump, rx) = common::spawn_with_pump(cfg, 64);
         Self { engine, rx, dir }
     }

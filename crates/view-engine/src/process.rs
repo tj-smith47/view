@@ -287,9 +287,20 @@ impl Default for EngineConfig {
 
 impl EngineConfig {
     /// A config whose child ignores every nvim setting the host carries: no
-    /// user config, plugins or shada (`--clean`), no swap file (`-n`), and
-    /// none of the environment variables that reach past those flags to
-    /// redirect the child's configuration anyway (see [`crate::env`]).
+    /// user config, plugins or shada (`--clean`), no swap file once a UI is
+    /// attached (`-n`), and none of the environment variables that reach
+    /// past those flags to redirect the child's configuration anyway (see
+    /// [`crate::env`]).
+    ///
+    /// `-n` carries that caveat and no other flag here does: it sets
+    /// `'updatecount'` to 0, and nvim applies it only after
+    /// `remote_ui_wait_for_attach` returns, which for an `--embed` child is
+    /// where it parks servicing RPC. A caller that drives such a child
+    /// without ever attaching a UI runs every command it sends ahead of
+    /// that, with the swapfile still on -- so what keeps two isolated
+    /// children off one swap directory is
+    /// [`crate::env::prepare_hermetic_home`] owning that directory before
+    /// either starts, never this flag.
     ///
     /// For everything that measures the engine rather than a user's editor
     /// (the oracle's reference sessions, the engine's own tests), whose
@@ -458,13 +469,21 @@ impl EngineConfig {
     /// would leave a child reading the host's own editor configuration, and
     /// nothing about that fails visibly.
     ///
-    /// The hermetic plan itself is two layers, in this order:
+    /// The hermetic plan itself is three layers, in this order:
     ///
-    /// 1. [`crate::env::hermetic_sweep`], which removes every host variable
+    /// 1. [`crate::env::HERMETIC_STDPATH_VARS`], the four standard-path
+    ///    roots, each pointed under the hermetic home. Ahead of the sweep
+    ///    and skipping a name a caller already planned, for the same reason
+    ///    the sweep skips one: these are what a child gets when nobody
+    ///    chose, and the sweep taking them straight back would leave the
+    ///    child deriving its own roots again -- from `HOME` on Unix, and
+    ///    from the operator's own `%LOCALAPPDATA%` on Windows, which is the
+    ///    gap that constant exists to close.
+    /// 2. [`crate::env::hermetic_sweep`], which removes every host variable
     ///    the allowlist does not name, and skips a name a caller already
     ///    planned: the sweep drops what the host merely happens to export,
     ///    and a variable a caller asked for is not that.
-    /// 2. [`crate::env::HOST_REDIRECT_VARS`],
+    /// 3. [`crate::env::HOST_REDIRECT_VARS`],
     ///    [`crate::env::HOST_SEARCH_PATH_VARS`],
     ///    [`crate::env::HOST_SUBPROCESS_CONFIG_VARS`] and
     ///    [`crate::env::HERMETIC_HOME_VAR`], unconditionally. The
@@ -492,6 +511,12 @@ impl EngineConfig {
     ///   prepared local directories, which name nothing on the far side.
     ///   The substitute neutralizes the same lookups and needs no
     ///   preparation to do it.
+    /// - The standard-path defaults are not planned either, for the reason
+    ///   `HOME` is not: each names a directory under a home this host
+    ///   prepared, which is a path the far side does not have. The remote
+    ///   plan removes the same four instead
+    ///   ([`crate::env::REMOTE_SWEEP_VARS`]), leaving the remote child to
+    ///   derive them from its own home.
     /// - `HOME` is the exemption: it is not planned at all, and the remote
     ///   child keeps the one its own login environment gives it. A hermetic
     ///   home is *written* by its holder -- an embedded Neovim creates
@@ -549,13 +574,18 @@ impl EngineConfig {
         }
         if self.hermetic {
             let far_side = self.remote.is_some();
+            if !far_side {
+                for (name, dir) in crate::env::hermetic_stdpath_dirs() {
+                    plan_default(&mut plan, OsStr::new(name), Some(dir.into_os_string()));
+                }
+            }
             if far_side {
                 for name in crate::env::REMOTE_SWEEP_VARS {
-                    plan_sweep(&mut plan, OsStr::new(name));
+                    plan_default(&mut plan, OsStr::new(name), None);
                 }
             } else {
                 for (name, _) in crate::env::hermetic_sweep() {
-                    plan_sweep(&mut plan, &name);
+                    plan_default(&mut plan, &name, None);
                 }
             }
             for name in crate::env::HOST_REDIRECT_VARS {
@@ -603,14 +633,15 @@ fn plan_set(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr, value: O
     }
 }
 
-/// Records `name` as removed by the hermetic sweep, leaving any entry the
-/// plan already carries for it alone.
+/// Records `name`'s disposition only where the plan does not already carry
+/// one, leaving any entry it does carry alone: the shape of both layers
+/// whose subject is what nobody chose -- the hermetic sweep (`None`, what
+/// the host merely happens to export) and the standard-path defaults
+/// (`Some`, what the sweep just took away).
 ///
-/// The sweep's subject is what the host happens to export, which a caller's
-/// own entry for the same name is not: a caller that set a variable
-/// deliberately gets to keep it, and one that asked for something an
-/// isolated spawn refuses outright loses it to the layer applied after this
-/// one instead.
+/// A caller that set a variable deliberately gets to keep it, and one that
+/// asked for something an isolated spawn refuses outright loses it to the
+/// unconditional layer applied after this one instead.
 ///
 /// The name is the whole test here, and that is deliberately *not* the test
 /// the pty and plain-`Command` funnel applies, which compares the builder's
@@ -622,12 +653,16 @@ fn plan_set(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr, value: O
 /// so it is the side that answers correctly, and matching the weaker rule
 /// to make the two identical would mean discarding a variable a caller
 /// asked for because of what some unrelated machine happens to export.
-fn plan_sweep(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr) {
+fn plan_default(
+    plan: &mut Vec<(OsString, Option<OsString>)>,
+    name: &OsStr,
+    value: Option<OsString>,
+) {
     if !plan
         .iter()
         .any(|(known, _)| crate::env::env_names_eq(known, name))
     {
-        plan.push((name.to_os_string(), None));
+        plan.push((name.to_os_string(), value));
     }
 }
 
@@ -2697,6 +2732,7 @@ mod config_tests {
         );
         let overridden = crate::env::empty_search_path().into_os_string();
         let home = crate::env::hermetic_home().into_os_string();
+        let roots = crate::env::hermetic_stdpath_dirs();
         for (name, _) in swept {
             let expected = if crate::env::HOST_SEARCH_PATH_VARS
                 .iter()
@@ -2705,6 +2741,11 @@ mod config_tests {
                 Some(overridden.clone())
             } else if crate::env::env_names_eq(&name, OsStr::new(crate::env::HERMETIC_HOME_VAR)) {
                 Some(home.clone())
+            } else if let Some((_, root)) = roots
+                .iter()
+                .find(|(root, _)| crate::env::env_names_eq(&name, OsStr::new(root)))
+            {
+                Some(root.clone().into_os_string())
             } else {
                 None
             };
@@ -2764,6 +2805,46 @@ mod config_tests {
             plan.contains(&(OsString::from("HOME"), Some(home))),
             "HOME still names the operator's own home, so a subprocess of an \
              isolated child resolves its credentials out of it; plan {plan:?}"
+        );
+    }
+
+    /// A local isolated plan names every standard-path root outright rather
+    /// than leaving the child to derive one. The derivation is a `HOME`
+    /// derivation on Unix only: Windows resolves the state, data and cache
+    /// roots from passthrough variables of the operator's own, so a plan
+    /// that named none of them handed every child there one shared state
+    /// directory (see [`crate::env::HERMETIC_STDPATH_VARS`]).
+    #[test]
+    fn an_isolated_plan_names_every_standard_path_root_under_the_hermetic_home() {
+        let plan = spawned_env(&EngineConfig::isolated());
+        for (name, dir) in crate::env::hermetic_stdpath_dirs() {
+            assert!(
+                plan.contains(&(OsString::from(name), Some(dir.clone().into_os_string()))),
+                "{name} is not pointed at {}, so the child derives its own \
+                 standard paths; plan {plan:?}",
+                dir.display()
+            );
+        }
+    }
+
+    /// The half that keeps the measurement matrix working: a caller
+    /// delivering a pinned configuration through one of these roots outranks
+    /// the default, unlike `HOME`, which an isolated spawn refuses whoever
+    /// asks.
+    #[test]
+    fn a_callers_own_standard_path_root_outranks_the_hermetic_default() {
+        let planted = crate::env::hermetic_home().join("caller-chosen-config");
+        let cfg = EngineConfig::isolated().with_env("XDG_CONFIG_HOME", &planted);
+        let plan = spawned_env(&cfg);
+        assert!(
+            plan.contains(&(
+                OsString::from("XDG_CONFIG_HOME"),
+                Some(planted.clone().into_os_string())
+            )),
+            "the hermetic default clobbered the configuration a caller \
+             delivered at {}, so an isolated spawn can no longer measure a \
+             configuration at all; plan {plan:?}",
+            planted.display()
         );
     }
 

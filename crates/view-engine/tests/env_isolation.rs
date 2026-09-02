@@ -6,7 +6,7 @@
 //! child reading nothing at all.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 use view_engine::process::{Engine, EngineConfig};
 
@@ -225,6 +225,164 @@ fn an_isolated_child_searches_no_system_wide_config_directory() {
             !rtp.contains(&planted),
             "the host's search path reached 'runtimepath' ({rtp}), so the \
              child sources plugins from it"
+        );
+    });
+}
+
+/// The standard-path roots whose value must sit under the hermetic home.
+/// `log` is `state` under another name and is walked anyway, since nothing
+/// in this tree decides that and an engine-pin bump could part them.
+const ROOTS_UNDER_THE_HOME: &[&str] = &["config", "data", "state", "cache", "log"];
+
+/// The two list-valued roots, which resolve from the search-path variables
+/// an isolated plan points at the prepared empty directory rather than at
+/// anything under the home.
+const ROOTS_UNDER_THE_SEARCH_PATH: &[&str] = &["config_dirs", "data_dirs"];
+
+/// The root an isolated plan deliberately leaves the host's: it resolves
+/// from `XDG_RUNTIME_DIR`, which is hermetic passthrough because a private
+/// replacement deep inside a scratch tree risks overflowing the 104-byte
+/// limit on a unix socket path (`view_engine::env`'s module documentation).
+const ROOTS_LEFT_TO_THE_HOST: &[&str] = &["run"];
+
+/// Whether `path`, as a child reported it, sits under `root`.
+///
+/// Compared as text with the separator folded and, on Windows, the case:
+/// the child renders a path with its own separator and the operating system
+/// reads two spellings differing only in case as one directory, so a byte
+/// comparison would report a correct answer as a leak.
+fn is_under(path: &str, root: &Path) -> bool {
+    path_key(path).starts_with(&path_key(&root.to_string_lossy()))
+}
+
+/// One spelling of a path, for the comparisons above and below: the
+/// separator folded, and the case folded too where the host folds it.
+fn path_key(text: &str) -> String {
+    let text = text.replace('\\', "/");
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text
+    }
+}
+
+/// Every value `stdpath()` accepts, read off the pinned engine's own
+/// documentation: the `{what}` parameter's type line, which spells the
+/// accepted values as a quoted alternation.
+///
+/// Read from the runtime rather than written down here so that a root added
+/// by an engine-pin bump fails the classification below by name, instead of
+/// reaching children unclassified while every assertion stays green.
+fn documented_stdpath_roots(doc: &str) -> Vec<String> {
+    doc.lines()
+        .find(|line| line.contains("'config_dirs'") && line.contains("'state'"))
+        .map(|line| {
+            line.split('\'')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Where every standard path an isolated child resolves must land, and the
+/// classification covering the roots the engine documents.
+///
+/// The engine derives these from the four `XDG_*_HOME` variables, and on
+/// Unix a hermetic `HOME` moves all four with it. Windows derives none of
+/// them from `HOME` -- state and data come from `%LOCALAPPDATA%`, cache from
+/// `%TEMP%`, both hermetic passthrough -- so before those roots were named
+/// outright every isolated child on one Windows account read the operator's
+/// own configuration tree and raced the others for the swap directory under
+/// their shared state tree (gh-windows, run 33634619480, `E303`).
+///
+/// The swap assertion is the one that catches a root named at the wrong
+/// place: the preparation creates that directory ahead of every spawn, so a
+/// child deriving any other one finds it missing.
+#[test]
+fn an_isolated_childs_standard_paths_all_resolve_under_the_hermetic_directories() {
+    with_prepared_dirs(|| {
+        let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+
+        let runtime = engine.handle.eval_str("$VIMRUNTIME").unwrap();
+        let doc = Path::new(&runtime).join("doc").join("vimfn.txt");
+        let text = std::fs::read_to_string(&doc)
+            .map_err(|err| format!("{} is unreadable: {err}", doc.display()))
+            .expect("the pinned engine ships the documentation this reads");
+        let documented = documented_stdpath_roots(&text);
+        assert!(
+            !documented.is_empty(),
+            "{} no longer spells the accepted stdpath values where this reads \
+             them, so the classification below covers nothing",
+            doc.display()
+        );
+        for root in &documented {
+            let classified = [
+                ROOTS_UNDER_THE_HOME,
+                ROOTS_UNDER_THE_SEARCH_PATH,
+                ROOTS_LEFT_TO_THE_HOST,
+            ]
+            .iter()
+            .filter(|group| group.contains(&root.as_str()))
+            .count();
+            assert_eq!(
+                classified, 1,
+                "stdpath('{root}') is in {classified} of this file's three \
+                 groups, so where an isolated child resolves it is unstated"
+            );
+        }
+
+        let home = view_engine::env::hermetic_home();
+        for root in ROOTS_UNDER_THE_HOME {
+            let path = engine
+                .handle
+                .eval_str(&format!("stdpath('{root}')"))
+                .unwrap();
+            assert!(
+                is_under(&path, &home),
+                "stdpath('{root}') is {path}, outside the hermetic home {}, so \
+                 the child shares it with every other account on this machine",
+                home.display()
+            );
+        }
+
+        let empty = view_engine::env::empty_search_path();
+        for root in ROOTS_UNDER_THE_SEARCH_PATH {
+            let joined = engine
+                .handle
+                .eval_str(&format!("join(stdpath('{root}'), ',')"))
+                .unwrap();
+            for path in joined.split(',').filter(|path| !path.is_empty()) {
+                assert!(
+                    is_under(path, &empty),
+                    "stdpath('{root}') carries {path}, outside the prepared \
+                     empty search path {}, so the child sources whatever sits \
+                     there",
+                    empty.display()
+                );
+            }
+        }
+
+        let state = engine.handle.eval_str("stdpath('state')").unwrap();
+        let expected = view_engine::env::hermetic_stdpath_dirs()
+            .into_iter()
+            .find(|(name, _)| *name == "XDG_STATE_HOME")
+            .map(|(_, dir)| dir.join(view_engine::env::engine_state_dir_name()))
+            .expect("the plan names no state root");
+        assert_eq!(
+            path_key(&state),
+            path_key(&expected.to_string_lossy()),
+            "the child resolves its state root to {state}, not to {}, so the \
+             swap directory every spawn's preparation owns is not the one it \
+             mkdirs",
+            expected.display()
+        );
+        let swap = Path::new(&state).join("swap");
+        assert!(
+            swap.is_dir(),
+            "{} does not exist, so two children starting together race for it",
+            swap.display()
         );
     });
 }

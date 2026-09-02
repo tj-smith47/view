@@ -401,14 +401,21 @@ impl SpawnEnv for std::process::Command {
 /// setting a name to exactly what the host already holds -- fails loudly:
 /// the child simply does not receive the variable.
 ///
-/// `EngineConfig::env_plan` applies the same layers in the same order but
-/// decides the sweep by *name*, keeping anything a caller planned, because
-/// it holds the caller's entries as a list and can tell. Neither builder
-/// here can: `CommandBuilder` answers for every host variable and
+/// `EngineConfig::env_plan` applies the same layers but decides the sweep
+/// by *name*, keeping anything a caller planned, because it holds the
+/// caller's entries as a list and can tell. Neither builder here can:
+/// `CommandBuilder` answers for every host variable and
 /// `std::process::Command` for none. So the two funnels part company on
 /// exactly one input -- a caller setting a swept name to the host's own
 /// value, kept there and dropped here -- and this side takes the loud half
 /// of that rather than guessing.
+///
+/// The standard-path roots are the one layer applied in a different place:
+/// last here, after the sweep has taken the host's own values away, so that
+/// "the builder holds nothing for this name" is the same question the plan
+/// answers by looking for a caller's entry. On the plan's side they run
+/// first, ahead of a sweep that decides by name and would otherwise take
+/// them straight back.
 ///
 /// # Errors
 ///
@@ -436,6 +443,14 @@ pub fn make_hermetic<E: SpawnEnv>(cmd: &mut E) -> Result<(), OracleError> {
         OsStr::new(view_engine::env::HERMETIC_HOME_VAR),
         home.as_os_str(),
     );
+    // after the sweep, so an unset name is one nobody chose rather than one
+    // the host merely exported: a caller's own root survives, exactly as it
+    // does on the engine's own funnel
+    for (name, dir) in view_engine::env::hermetic_stdpath_dirs() {
+        if cmd.value_of(OsStr::new(name)).is_none() {
+            cmd.set(OsStr::new(name), dir.as_os_str());
+        }
+    }
     Ok(())
 }
 
