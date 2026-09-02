@@ -12,7 +12,9 @@
 //! `clipboard_roundtrip.rs`'s module doc for the sweep and the one variable
 //! that opts out of it), so a session spawned here is headless by
 //! construction and the second claim is deterministic rather than a
-//! property of whoever's desktop the suite ran on.
+//! property of whoever's desktop the suite ran on -- on Linux, where a
+//! display variable is what reachability hangs on; the headless row states
+//! its own narrower gate.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -194,7 +196,17 @@ fn a_copied_history_line_reaches_both_the_terminal_and_the_local_register() {
 /// A headless host is told once, not once per copy: the worker reports every
 /// unreachable write and the model's family dedupe is what turns a session's
 /// worth of them into one line.
+///
+/// `target_os = "linux"`, not `unix`: headless-by-construction rests on
+/// stripping `DISPLAY`/`WAYLAND_DISPLAY`, an X11/Wayland fact. macOS has no
+/// display variable to strip -- `NSPasteboard` answers regardless, and on a
+/// session without a full window server it sometimes accepts the connection
+/// and refuses the write, a fault `write_system` deliberately keeps to a
+/// `VIEW_LOG` line rather than this notice (crates/view/src/clipboard.rs).
+/// The once-per-session dedupe itself stays pinned everywhere by
+/// `view-core`'s `an_unreachable_system_clipboard_notices_once`.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_headless_session_notices_an_unreachable_clipboard_once() {
     let (mut session, _paths) = session_with_history("history-copy-headless");
     scroll_to_target(&mut session);
