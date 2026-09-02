@@ -86,6 +86,10 @@ struct Inputs {
     cmdline: Option<view_core::model::CmdlineState>,
     popupmenu: Option<view_core::model::PopupmenuState>,
     messages: Vec<view_core::model::MessageEntry>,
+    // not inferable from `messages`: the pause key changes no entry, only
+    // whether the top box carries the mark that says the stack is frozen,
+    // and a frame keyed on the entries alone hands back the unmarked one
+    messages_paused: bool,
     // the frame's only free-running input, and the reason it cannot be
     // inferred from `messages`: a motion frame moves the same entries to
     // different rows, so a cache keyed on the stack's contents alone would
@@ -114,6 +118,7 @@ impl Inputs {
             cmdline: engine.cmdline.clone(),
             popupmenu: engine.popupmenu.clone(),
             messages: engine.messages.entries.clone(),
+            messages_paused: engine.messages.paused(),
             toast_motion: model.toast_motion.clone(),
             absorbed: engine.absorbed_rows().cloned(),
         }
@@ -137,6 +142,7 @@ impl Inputs {
             && self.cmdline == engine.cmdline
             && self.popupmenu == engine.popupmenu
             && self.messages == engine.messages.entries
+            && self.messages_paused == engine.messages.paused()
             && self.toast_motion == model.toast_motion
             && self.absorbed.as_ref() == engine.absorbed_rows()
     }
@@ -525,6 +531,39 @@ mod tests {
             .layers
             .iter()
             .any(|l| matches!(l.kind, LayerKind::Toast { .. })));
+        assert_eq!((cache.frames, cache.rebuilds), (2, 2));
+    }
+
+    /// The pause key changes no message entry: it flips one bool, and the
+    /// only thing on screen that answers to it is a mark in the top box's
+    /// border run. A frame keyed on the entries alone is handed back
+    /// unmarked, and the freeze the mark exists to show goes invisible --
+    /// which is what a live session showed before this joined `Inputs`.
+    #[test]
+    fn the_pause_key_rebuilds_the_frame_it_marks() {
+        let mut model = model_with_grid(20, 6);
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "echo".into(),
+                content: vec![(0, "read me".into())],
+                replace_last: false,
+            },
+        );
+        let mut cache = SurfaceCache::new();
+        let _ = cache.render(&model);
+
+        model.engine.messages.toggle_pause();
+        let surface = cache.render(&model);
+
+        assert!(
+            surface
+                .layers
+                .iter()
+                .any(|l| matches!(l.kind, LayerKind::Toast { paused: true, .. })),
+            "the reused frame must be rebuilt with the mark on: {:?}",
+            surface.layers
+        );
         assert_eq!((cache.frames, cache.rebuilds), (2, 2));
     }
 

@@ -808,8 +808,8 @@ fn composite_layers(
                 );
             }
             LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
-            LayerKind::Toast { lines, .. } => {
-                toast::paint_toast(lines, &theme, borders, area, damage, buf);
+            LayerKind::Toast { lines, paused, .. } => {
+                toast::paint_toast(lines, *paused, &theme, borders, area, damage, buf);
             }
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, damage, buf),
@@ -2029,6 +2029,17 @@ mod tests {
         );
     }
 
+    /// Drives `<leader>fp`, the toast stack's pause key.
+    fn pause_notifications(model: &mut Model) {
+        let _ = view_core::update::update(
+            model,
+            view_core::msg::Msg::FeatureInvoke {
+                feature: "notifications".to_string(),
+                verb: "pause".to_string(),
+            },
+        );
+    }
+
     /// Opens the tree sidebar already holding a scan, so its selection is a
     /// real row that a later keystroke can move.
     fn open_tree_with_entries(model: &mut Model) {
@@ -3089,6 +3100,78 @@ mod tests {
         );
     }
 
+    /// A freeze the user cannot see is indistinguishable from a stuck
+    /// editor (spec 7.1, motion rule 5), so the mark is read off painted
+    /// cells rather than off the layer's own flag -- in both charsets, and
+    /// on the top box alone.
+    #[test]
+    fn the_paused_stack_renders_its_indicator() {
+        // "read me" (7 cells) and "and me" (6) on a 20-wide grid: boxes 9
+        // and 8 wide, three rows each, both right-anchored
+        let top_edges = |caps: view_core::model::TermCaps, paused: bool| -> Vec<String> {
+            let mut model = Model::new();
+            model.caps = caps;
+            model.engine.apply_grid(GridOp::Resize {
+                width: 20,
+                height: 8,
+            });
+            for text in ["read me", "and me"] {
+                apply(
+                    &mut model,
+                    view_core::events::UiEvent::MsgShow {
+                        kind: "echomsg".into(),
+                        content: vec![(0, text.into())],
+                        replace_last: false,
+                    },
+                );
+            }
+            if paused {
+                pause_notifications(&mut model);
+            }
+            let surface = view_surface::render(&model);
+            let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+            terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            surface
+                .layers
+                .iter()
+                .filter(|l| matches!(l.kind, LayerKind::Toast { .. }))
+                .map(|l| {
+                    (l.rect.col..l.rect.col + l.rect.width)
+                        .map(|c| buf[(c, l.rect.row)].symbol())
+                        .collect()
+                })
+                .collect()
+        };
+        let rounded =
+            view_core::model::TermCaps::from_probe(true, true, true).with_unicode_boxes(true);
+        let ascii = view_core::model::TermCaps::default();
+
+        assert_eq!(
+            top_edges(rounded, false),
+            ["╭───────╮", "╭──────╮"],
+            "an unpaused stack marks nothing"
+        );
+        assert_eq!(
+            top_edges(rounded, true),
+            ["╭──────⏸╮", "╭──────╮"],
+            "a frozen stack marks its top box one cell in from the corner \
+             every box is anchored to, and nothing below it"
+        );
+        assert_eq!(
+            top_edges(ascii, false),
+            ["+-------+", "+------+"],
+            "an unpaused stack marks nothing in ASCII either"
+        );
+        assert_eq!(
+            top_edges(ascii, true),
+            ["+------=+", "+------+"],
+            "a terminal that cannot account for a box glyph cannot account \
+             for the pause glyph either: the mark degrades with the charset \
+             it belongs to"
+        );
+    }
+
     /// A theme with no `MsgArea` foreground -- e.g. a colorscheme that
     /// only sets `guibg` on `MsgArea`, or a pre-attach/no-colorscheme
     /// `Theme::default()` -- must still get a visible border. Disconfirm:
@@ -3179,7 +3262,15 @@ mod tests {
                     &Damage::full(),
                     buf,
                 );
-                toast::paint_toast(&[], &theme, BorderSet::ASCII, area, &Damage::full(), buf);
+                toast::paint_toast(
+                    &[],
+                    false,
+                    &theme,
+                    BorderSet::ASCII,
+                    area,
+                    &Damage::full(),
+                    buf,
+                );
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -4899,6 +4990,7 @@ mod tests {
             lines,
             slot: 0,
             x_offset: 0,
+            paused: false,
         }
     }
 

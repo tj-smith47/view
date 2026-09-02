@@ -404,7 +404,9 @@ fn key_in_engine_focus_becomes_rpc_input_effect() {
 }
 
 #[test]
-fn a_keypress_dismisses_an_already_flushed_transient_toast_and_marks_dirty() {
+fn a_keypress_dismisses_the_already_flushed_transient_backlog_and_marks_dirty() {
+    // the front notice is the one entry with a running slot timer, so the
+    // keypress clears what is queued behind it and leaves it to that timer
     let mut m = started_model();
     let _ = update(
         &mut m,
@@ -414,10 +416,15 @@ fn a_keypress_dismisses_an_already_flushed_transient_toast_and_marks_dirty() {
                 content: vec![(0, "info".into())],
                 replace_last: false,
             },
+            UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "queued behind it".into())],
+                replace_last: false,
+            },
             UiEvent::Flush,
         ]),
     );
-    assert_eq!(m.engine.messages.entries.len(), 1);
+    assert_eq!(m.engine.messages.entries.len(), 2);
     m.dirty = false;
 
     let _ = update(
@@ -426,13 +433,54 @@ fn a_keypress_dismisses_an_already_flushed_transient_toast_and_marks_dirty() {
             notation: "l".into(),
         }),
     );
-    assert!(
-        m.engine.messages.entries.is_empty(),
-        "a transient toast that already survived one Flush must be dismissed on the next keypress"
+    assert_eq!(
+        m.engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(crate::model::MessageEntry::lines)
+            .collect::<Vec<_>>(),
+        vec!["info".to_string()],
+        "a queued transient toast that already survived one Flush must be dismissed on the next \
+         keypress, and the armed one must not"
     );
     assert!(
         m.dirty,
         "dismissing a visible toast must mark the model dirty for a repaint"
+    );
+}
+
+#[test]
+fn a_keypress_leaves_the_armed_toast_to_its_own_timer() {
+    // the disconfirm that named this rule: the keystrokes spelling
+    // `<leader>fp` reach `route_key` before the verb they invoke does, so a
+    // keypress that retired the front notice would empty the stack the
+    // pause key was pressed to hold
+    let mut m = started_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "read me".into())],
+                replace_last: false,
+            },
+            UiEvent::Flush,
+        ]),
+    );
+
+    for notation in ["\\", "f", "p"] {
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: notation.into(),
+            }),
+        );
+    }
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
+        "the notice holding the armed slot outlives the keys that reach a native verb"
     );
 }
 
@@ -6209,6 +6257,114 @@ fn only_the_top_slot_arms_a_timer() {
     );
 }
 
+/// `<leader>fp`, as the model sees it.
+fn invoke_pause() -> Msg {
+    Msg::FeatureInvoke {
+        feature: "notifications".to_string(),
+        verb: "pause".to_string(),
+    }
+}
+
+#[test]
+fn an_expiry_arriving_while_paused_is_ignored() {
+    // `Effect::ScheduleToastExpiry` has no cancellation, so the timer armed
+    // before the key was pressed is still asleep and still lands. Obeying it
+    // retires the notice the user paused in order to read, which is the
+    // complaint pause exists to answer.
+    let mut m = started_model();
+    let _ = update(&mut m, Msg::Redraw(vec![echomsg("read me")]));
+    let top = m.engine.messages.entries[0].id();
+
+    let _ = update(&mut m, invoke_pause());
+    let _ = update(&mut m, Msg::ToastExpired { id: top });
+
+    assert_eq!(
+        visible_texts(&m),
+        vec!["read me".to_string()],
+        "a timer armed before the pause key must not retire the notice it \
+         was armed for"
+    );
+}
+
+#[test]
+fn pausing_disarms_the_slot_timer() {
+    let mut m = started_model();
+    let effects = update(&mut m, invoke_pause());
+    assert_eq!(
+        armed_slots(&effects),
+        Vec::new(),
+        "the pause key itself arms nothing: {effects:?}"
+    );
+
+    let effects = update(&mut m, Msg::Redraw(vec![echomsg("frozen")]));
+    assert_eq!(
+        armed_slots(&effects),
+        Vec::new(),
+        "a notice reaching the top slot while pause is on gets no timer: \
+         {effects:?}"
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec!["frozen".to_string()],
+        "pause freezes the timing, it does not stop the stack from taking \
+         new notices"
+    );
+}
+
+#[test]
+fn unpausing_arms_the_full_timeout_not_the_remainder() {
+    // a notice that was paused mid-read has not been read yet, so it gets
+    // the whole window back rather than whatever was left of the timer that
+    // was running when the key was pressed
+    let mut m = started_model();
+    let effects = update(&mut m, Msg::Redraw(vec![echomsg("read me")]));
+    let top = m.engine.messages.entries[0].id();
+    assert_eq!(armed_slots(&effects), vec![top]);
+
+    let _ = update(&mut m, invoke_pause());
+    let effects = update(&mut m, invoke_pause());
+
+    assert_eq!(
+        armed_slots(&effects),
+        vec![top],
+        "leaving pause must re-arm the entry still holding the top slot: \
+         {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScheduleToastExpiry { after, .. }
+                if *after == crate::native::toast::TRANSIENT_TOAST_TIMEOUT)),
+        "the re-armed slot gets a full timeout: {effects:?}"
+    );
+}
+
+#[test]
+fn unpausing_arms_whichever_slot_the_stack_ended_up_with() {
+    // the stack keeps moving while pause is on -- a keypress dismisses the
+    // top notice, an `msg_clear` empties it -- so the entry armed on the way
+    // out is whichever one is at the front then, not the one that was there
+    // when the key was pressed
+    let mut m = started_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second")]),
+    );
+    let first = m.engine.messages.entries[0].id();
+    let second = m.engine.messages.entries[1].id();
+
+    let _ = update(&mut m, invoke_pause());
+    m.engine.messages.entries.retain(|e| e.id() != first);
+    let effects = update(&mut m, invoke_pause());
+
+    assert_eq!(
+        armed_slots(&effects),
+        vec![second],
+        "the slot armed on unpause is the one the stack actually holds: \
+         {effects:?}"
+    );
+}
+
 #[test]
 fn a_sticky_entry_does_not_hold_the_slot_queue() {
     // a sticky notice is dismissed deliberately, never by a timer, so it
@@ -10776,6 +10932,41 @@ fn a_wakeup_that_was_never_armed_settles_the_stack() {
 /// the stack is still mid-slide, and what slides is the notice that just
 /// left rather than the one that was leaving when the second landed.
 #[test]
+fn pausing_leaves_a_live_exit_motion_to_finish() {
+    // motion is presentation, timing is behavior (spec 7.1, motion rule 5):
+    // the pause key governs when the next notice retires, and freezing a
+    // half-played slide would leave a box parked mid-flight instead
+    let mut m = animating_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("first"), echomsg("second")]),
+    );
+    let first = m.engine.messages.entries[0].id();
+    let _ = update(&mut m, Msg::ToastExpired { id: first });
+    assert!(
+        m.toast_motion.is_some(),
+        "the dismissal must have started an exit motion to pause during"
+    );
+
+    let effects = update(&mut m, invoke_pause());
+    assert!(
+        m.toast_motion.is_some(),
+        "pause must not cancel a motion already in flight"
+    );
+    assert!(
+        armed_slots(&effects).is_empty(),
+        "and it still arms nothing: {effects:?}"
+    );
+
+    let mut ticks = 0;
+    while m.toast_motion.is_some() {
+        let _ = update(&mut m, Msg::AnimTick);
+        ticks += 1;
+        assert!(ticks <= crate::native::toast::MOTION_STEPS + 1, "{ticks}");
+    }
+}
+
+#[test]
 fn a_dismissal_mid_motion_arms_the_promoted_slot_and_carries_the_newer_notice() {
     let mut m = animating_model();
     let _ = update(
@@ -10870,7 +11061,7 @@ fn only_a_notice_the_stack_was_showing_leaves_with_a_motion() {
             vec!["second", "third"],
         ),
         (
-            "a keypress ageing out every read transient",
+            "a keypress ageing out the read transients queued behind the armed one",
             stacked,
             Box::new(|m: &mut Model| {
                 m.engine.messages.note_flush();
@@ -10881,8 +11072,8 @@ fn only_a_notice_the_stack_was_showing_leaves_with_a_motion() {
                     }),
                 );
             }),
-            Some("first"),
-            vec![],
+            None,
+            vec!["first"],
         ),
         (
             "nvim clearing the whole log",

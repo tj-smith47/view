@@ -2211,6 +2211,21 @@ mod tests {
     }
 
     #[test]
+    fn a_frozen_stack_survives_the_keypresses_that_dismiss_transient_text() {
+        let mut messages = Messages::default();
+        messages.push("echomsg".to_string(), vec![(0, "first".into())], false);
+        messages.push("echomsg".to_string(), vec![(0, "second".into())], false);
+        messages.note_flush();
+        messages.toggle_pause();
+        assert!(!messages.dismiss_transient_on_keypress(false));
+        assert_eq!(
+            texts(&messages.visible_lines(8)),
+            vec!["first", "second"],
+            "spec 7.1 rule 5: the whole stack holds for as long as pause is on"
+        );
+    }
+
+    #[test]
     fn a_progress_message_replaces_its_own_previous_line_not_the_raised_condition() {
         // the canonical wedge is an nvim too busy to read its stdin while
         // still flushing progress lines, so a raised condition and a

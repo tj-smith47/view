@@ -44,6 +44,7 @@ use super::{
 /// not repainting is not this painter's to touch.
 pub(super) fn paint_toast(
     lines: &[Vec<Span>],
+    paused: bool,
     theme: &Theme,
     borders: BorderSet,
     area: ratatui::layout::Rect,
@@ -66,7 +67,7 @@ pub(super) fn paint_toast(
         bg: msg.bg,
         ..ResolvedStyle::default()
     });
-    paint_toast_border(area, borders, border_style, damage, buf);
+    paint_toast_border(area, borders, paused, border_style, damage, buf);
 
     let inner = inset_by_one(area);
     // every toast line is a single `StyleRole::Plain` span (see
@@ -113,9 +114,17 @@ fn inset_by_one(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
 /// toast is the one float `view-surface` hands over unframed, and a second
 /// literal set would have kept drawing box-drawing glyphs at a terminal that
 /// cannot render them long after every other float stopped.
+///
+/// `paused` sets that charset's own pause mark into the top run, one cell in
+/// from the right corner -- the corner the eye already tracks, since every
+/// box in the stack is right-anchored there. Under three cells wide the top
+/// run is corners alone and the mark is dropped rather than drawn over one
+/// of them: a corner replaced by a mark reads as a broken frame, and a box
+/// that narrow is a sliver on its way off the right edge.
 fn paint_toast_border(
     area: ratatui::layout::Rect,
     borders: BorderSet,
+    paused: bool,
     style: Style,
     damage: &Damage,
     buf: &mut Buffer,
@@ -124,6 +133,7 @@ fn paint_toast_border(
         return;
     }
     let last_col = area.width - 1;
+    let mark = (paused && area.width >= 3).then_some(last_col - 1);
     let last_row = area.height - 1;
     let top_row = damage.covers_row_of(area, 0);
     let bottom_row = damage.covers_row_of(area, last_row);
@@ -131,6 +141,7 @@ fn paint_toast_border(
         let (top, bottom) = match col {
             0 => (borders.top_left, borders.bottom_left),
             c if c == last_col => (borders.top_right, borders.bottom_right),
+            c if mark == Some(c) => (borders.pause, borders.horizontal),
             _ => (borders.horizontal, borders.horizontal),
         };
         if top_row {

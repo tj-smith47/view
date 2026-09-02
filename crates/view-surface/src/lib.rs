@@ -120,10 +120,17 @@ pub enum LayerKind {
     /// span (a toast has no per-segment structure to preserve), kept as a
     /// span-vec rather than a `String` so the layer honestly carries the
     /// same overlay-row shape every other overlay layer does.
+    /// `paused` is set on the box at the top of the settled stack, and only
+    /// there, while `Messages::paused` holds: the mark it puts in the border
+    /// run is the whole of what tells a user a frozen stack apart from a
+    /// stuck editor. The box on its way out never carries it -- its timer is
+    /// already spent, and marking it would move the indicator down the stack
+    /// for the length of a slide.
     Toast {
         lines: Vec<Vec<Span>>,
         slot: usize,
         x_offset: u16,
+        paused: bool,
     },
     /// The open tabs, present once nvim has sent a `tabline_update`.
     Tabline(TablineState),
@@ -589,6 +596,7 @@ fn toast_box(lines: &[Vec<Span>], grid_w: u16) -> (u16, u16) {
 /// arriving underneath it instead of being cleared by it.
 fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
     let (grid_w, _) = bounds;
+    let paused = model.engine.messages.paused();
     let stack = model.engine.messages.visible_toasts(model.toast_rows());
     let leaving = model.toast_motion.as_ref().map(|motion| {
         let (lines, slot) = motion.exiting();
@@ -613,13 +621,19 @@ fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
         if i == vacated {
             vacated_row = row;
         }
-        let slot = if i >= vacated { i.saturating_add(1) } else { i };
         let at = if i >= vacated {
             row.saturating_add(y_shift)
         } else {
             row
         };
-        layers.push(toast_layer(lines, slot, 0, at, bounds, offset, model.caps));
+        let placement = Placement {
+            slot: if i >= vacated { i.saturating_add(1) } else { i },
+            x_offset: 0,
+            paused: i == 0 && paused,
+        };
+        layers.push(toast_layer(
+            lines, placement, at, bounds, offset, model.caps,
+        ));
         row = row.saturating_add(height);
     }
     if let Some(leaving) = leaving {
@@ -628,15 +642,12 @@ fn toast_layers(model: &Model, bounds: (u16, u16), offset: u16) -> Vec<Layer> {
         } else {
             row
         };
-        let layer = toast_layer(
-            leaving.lines,
-            leaving.slot,
-            leaving.x_offset,
-            at,
-            bounds,
-            offset,
-            model.caps,
-        );
+        let placement = Placement {
+            slot: leaving.slot,
+            x_offset: leaving.x_offset,
+            paused: false,
+        };
+        let layer = toast_layer(leaving.lines, placement, at, bounds, offset, model.caps);
         // a box that has travelled its own width is entirely past the right
         // edge; it leaves the stack rather than sitting in it as an empty
         // rect the paint shadow still has to pair against
@@ -655,12 +666,20 @@ struct Leaving {
     y_shift: u16,
 }
 
+/// Everything about one toast box that is not its content or its row: the
+/// three [`LayerKind::Toast`] fields a caller decides, carried together so
+/// the builder below stays inside clippy's argument budget.
+struct Placement {
+    slot: usize,
+    x_offset: u16,
+    paused: bool,
+}
+
 /// One toast box as a [`Layer`]: right-anchored to the grid, shifted
 /// `x_offset` cells further right while it is on its way out.
 fn toast_layer(
     lines: Vec<Vec<Span>>,
-    slot: usize,
-    x_offset: u16,
+    placement: Placement,
     row: u16,
     bounds: (u16, u16),
     offset: u16,
@@ -668,15 +687,18 @@ fn toast_layer(
 ) -> Layer {
     let (grid_w, _) = bounds;
     let (width, height) = toast_box(&lines, grid_w);
-    let col = grid_w.saturating_sub(width).saturating_add(x_offset);
+    let col = grid_w
+        .saturating_sub(width)
+        .saturating_add(placement.x_offset);
     overlay_layer(
         Rect::new(row, col, width, height),
         bounds,
         offset,
         LayerKind::Toast {
             lines,
-            slot,
-            x_offset,
+            slot: placement.slot,
+            x_offset: placement.x_offset,
+            paused: placement.paused,
         },
         caps,
     )
@@ -1231,6 +1253,7 @@ mod tests {
                     lines,
                     slot,
                     x_offset,
+                    ..
                 } => Some((
                     *slot,
                     *x_offset,
@@ -2002,6 +2025,71 @@ mod tests {
                  tier arrives at on its last"
             );
         }
+    }
+
+    /// The mark reports the mode, not one notice's own timer, so it rides
+    /// the box at the top of the settled stack whatever that box is -- a
+    /// sticky error included, which takes no slot in the timer queue at all.
+    /// It never rides the box on its way out: that timer is already spent,
+    /// and marking it would walk the indicator down the stack for the
+    /// length of a slide.
+    #[test]
+    fn only_the_top_settled_toast_carries_the_pause_mark() {
+        let mut model = model_with_grid(20, 12);
+        for (kind, text) in [("emsg", "boom"), ("echomsg", "after"), ("echomsg", "later")] {
+            apply(
+                &mut model,
+                UiEvent::MsgShow {
+                    kind: kind.into(),
+                    content: vec![(0, text.into())],
+                    replace_last: false,
+                },
+            );
+        }
+        model.caps.tier = view_core::model::Tier::Full;
+        let pause = |model: &mut Model| {
+            let _ = update(
+                model,
+                Msg::FeatureInvoke {
+                    feature: "notifications".to_string(),
+                    verb: "pause".to_string(),
+                },
+            );
+        };
+
+        pause(&mut model);
+        assert_eq!(
+            pause_marks(&render(&model)),
+            vec![(0, true), (1, false), (2, false)],
+            "one mark, on the box at the top of the stack"
+        );
+
+        pause(&mut model);
+        let after = model.engine.messages.entries[1].id();
+        let _ = update(&mut model, Msg::ToastExpired { id: after });
+        assert!(
+            model.toast_motion.is_some(),
+            "the dismissal must be mid-slide for the leaving box to be asked about"
+        );
+        pause(&mut model);
+        assert_eq!(
+            pause_marks(&render(&model)),
+            vec![(0, true), (2, false), (1, false)],
+            "the leaving box (slot 1, painted last) carries no mark, and the \
+             settled top keeps it"
+        );
+    }
+
+    /// Each toast layer's `(slot, paused)` in paint order.
+    fn pause_marks(surface: &Surface) -> Vec<(usize, bool)> {
+        surface
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.kind {
+                LayerKind::Toast { slot, paused, .. } => Some((*slot, *paused)),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

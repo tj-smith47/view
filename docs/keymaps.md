@@ -17,6 +17,7 @@ the keys view registers disagree.
 | `<leader>fg` | `picker` | `:View picker grep` |
 | `<leader>e` | `tree` | `:View tree toggle` |
 | `<leader>fm` | `notifications` | `:View notifications history` |
+| `<leader>fp` | `notifications` | `:View notifications pause` |
 | `<leader>ai` | `ai` | `:View ai toggle` |
 
 ## `<leader>ai` reads the panel before it acts

@@ -188,6 +188,27 @@ fn wait_for_toast(session: &mut ViewPtySession, token: &str, timeout: Duration) 
     session.wait_for_screen(timeout, |screen| toast_shows(&screen.contents(), token))
 }
 
+/// Waits out whatever the session's own launch put on the toast stack, so a
+/// leg about one message's lifetime starts from an empty stack.
+///
+/// The stack drains one slot at a time (spec 7.1, motion rule 5): only the
+/// top slot's timer runs, so a notice raised behind a launch's handover
+/// lines is not armed until they have gone, and a leg that echoes into that
+/// queue measures the queue rather than its own subject. Nothing is typed to
+/// clear them: a keypress retires the queue behind the armed slot but leaves
+/// the armed notice to its own timer, which is the one this waits out. Only
+/// the first launch against a shared isolated home raises any, so this
+/// returns immediately for every leg after it.
+fn wait_for_quiet_toast_stack(session: &mut ViewPtySession) {
+    let budget = view_core::native::toast::TRANSIENT_TOAST_TIMEOUT * 4;
+    let _ = session.wait_for_screen(budget, |screen| {
+        !screen
+            .contents()
+            .lines()
+            .any(|row| row.contains('╭') || row.contains("+-"))
+    });
+}
+
 /// [`spawn_view_pty`] with the message surface left to view, for a test
 /// whose subject is what view does with a message rather than what nvim
 /// draws without one.
@@ -200,6 +221,7 @@ fn spawn_view_pty_owning_messages() -> ViewPtySession {
         MESSAGES_ON,
     );
     let _ = session.wait_for("~", Duration::from_secs(5));
+    wait_for_quiet_toast_stack(&mut session);
     session
 }
 

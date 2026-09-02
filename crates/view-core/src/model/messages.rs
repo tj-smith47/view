@@ -225,6 +225,9 @@ pub struct Messages {
     /// entry is already gone from `entries` and this is the only copy left.
     /// Paid once per toast, when the slot changes hands, never per update.
     armed_lines: Vec<Vec<Span>>,
+    /// Whether the pause key is holding the stack open. See
+    /// [`Self::toggle_pause`].
+    paused: bool,
 }
 
 /// Which of `items` fit in `budget`, given each one's cost and whether it
@@ -374,10 +377,48 @@ impl Messages {
             })
             .unwrap_or_default();
         let id = top?;
+        // the bookkeeping above still runs while paused -- which entry holds
+        // the slot keeps changing under a frozen stack, and `departed_toast`
+        // and the unpause both read it -- but no timer is handed out
+        if self.paused {
+            return None;
+        }
         // the queue holds only entries `route` calls `Route::Transient`,
         // which is the one route that owns an idle timeout at all
         let after = crate::native::toast::timeout_for(crate::native::toast::Route::Transient)?;
         Some(crate::msg::Effect::ScheduleToastExpiry { id, after })
+    }
+
+    /// Whether the pause key is holding the toast stack open.
+    ///
+    /// Read by the painter as well as by the update loop: a freeze the user
+    /// cannot see is indistinguishable from a stuck editor, so the top box
+    /// carries a mark for as long as this is set.
+    #[must_use]
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Flips the pause key.
+    ///
+    /// While it is on, [`Self::arm_top_slot`] hands out no dismissal timer
+    /// and `Msg::ToastExpired` obeys none -- the same timer, held, rather
+    /// than a second mechanism (spec 7.1, motion rule 5). Turning it off
+    /// forgets which slot was armed, which is what makes the next
+    /// [`Self::arm_top_slot`] give the top slot a whole timeout rather than
+    /// the remainder of one: a notice paused mid-read has not been read yet.
+    ///
+    /// Only the timing is frozen. A motion already in flight plays to its
+    /// end and new notices still arrive, but nothing leaves on its own: the
+    /// keypress dismissal ([`Self::dismiss_transient_on_keypress`]) is off
+    /// too, since a stack that holds while the user reads it cannot be
+    /// emptied by the act of reading. The deliberate exits -- an
+    /// `msg_clear`, a sticky dismissal, a replace -- still apply.
+    pub fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        if !self.paused {
+            self.armed_slot = None;
+        }
     }
 
     /// What the armed toast slot just lost, if it lost anything: the
@@ -645,25 +686,40 @@ impl Messages {
         self.flush_generation = self.flush_generation.wrapping_add(1);
     }
 
-    /// Drops every transient entry that has already survived at least one
-    /// full paint cycle since it was shown, leaving `is_persistent` entries
-    /// and -- while `cmdline_open` -- `is_prompt` ones in place. Called
-    /// from `update` on the user's next keypress: gives an info-level toast
-    /// a readable duration bounded by real user activity -- an event the
-    /// clockless model already receives -- rather than a wall-clock
-    /// timer the runtime never delivers to `update`. An entry pushed in the same
-    /// flush generation as the pending keypress has not necessarily been
-    /// painted even once yet, so it survives this pass and is only
-    /// dismissed on the *next* keypress instead, guaranteeing every
-    /// transient toast is visible for at least one frame. Returns whether
-    /// anything was actually dropped, so the caller knows whether to mark
-    /// the model dirty for a repaint.
+    /// Drops the backlog of transient entries that have already survived at
+    /// least one full paint cycle since they were shown, leaving
+    /// `is_persistent` entries, the notice holding the armed slot, and --
+    /// while `cmdline_open` -- `is_prompt` ones in place. Called from
+    /// `update` on the user's next keypress: clears queued notices the user
+    /// has visibly moved on from, on an event the clockless model already
+    /// receives. An entry pushed in the same flush generation as the pending
+    /// keypress has not necessarily been painted even once yet, so it
+    /// survives this pass and is only dismissed on the *next* keypress
+    /// instead, guaranteeing every transient toast is visible for at least
+    /// one frame. Returns whether anything was actually dropped, so the
+    /// caller knows whether to mark the model dirty for a repaint.
+    ///
+    /// The entry in the armed slot is exempt because it is the one entry
+    /// with a running dismissal timer ([`Self::arm_top_slot`]) -- the very
+    /// wall-clock mechanism this heuristic was written to stand in for
+    /// before the slot model existed. Two mechanisms retiring one notice is
+    /// what makes the pause key unimplementable: pause holds the timer, and
+    /// the three keystrokes that reach `<leader>fp` would otherwise retire
+    /// the notice before the verb they spell arrives.
     #[must_use]
     pub fn dismiss_transient_on_keypress(&mut self, cmdline_open: bool) -> bool {
+        // spec 7.1 motion rule 5: the stack holds for as long as pause is on
+        if self.paused {
+            return false;
+        }
         let before = self.entries.len();
         let current = self.flush_generation;
+        let armed = self.armed_slot;
         self.entries.retain(|e| {
-            e.is_persistent() || (cmdline_open && e.is_prompt()) || e.shown_at_flush == current
+            e.is_persistent()
+                || (cmdline_open && e.is_prompt())
+                || e.shown_at_flush == current
+                || Some(e.id()) == armed
         });
         self.entries.len() != before
     }

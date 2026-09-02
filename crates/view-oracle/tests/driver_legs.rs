@@ -162,11 +162,14 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
         session.screen()
     );
 
-    // the notice is a toast anchored over the top rows of the grid, so the
-    // first cell of an empty buffer is legitimately covered while it is up.
-    // The newlines put the typed character on a line below it rather than
-    // depending on a dismissal this leg would have to race.
-    session.send(b"i\r\r\r\rZ").unwrap();
+    // the notices are toasts anchored over the top rows of the grid, so the
+    // first cells of an empty buffer are legitimately covered while they are
+    // up. The newlines put the typed character below the whole standing
+    // stack -- a first launch raises three three-row boxes, and this burst
+    // arrives inside one flush generation, which is the window the toast
+    // stack deliberately holds a notice through -- rather than depending on
+    // a dismissal this leg would have to race.
+    session.send(b"i\r\r\r\r\r\r\r\r\r\rZ").unwrap();
     assert!(
         session.wait_for("Z", Duration::from_secs(5)),
         "typed character never appeared on screen; screen:\n{}",

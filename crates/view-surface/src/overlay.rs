@@ -60,6 +60,13 @@ pub struct BorderSet {
     pub bottom_right: char,
     pub horizontal: char,
     pub vertical: char,
+    /// The mark a frozen toast stack sets into its top box's border run
+    /// (spec 7.1, motion rule 5). A charset field rather than a literal at
+    /// the painter, so it degrades down exactly the path the corners do: a
+    /// terminal that cannot account for `╭` cannot account for `⏸` either,
+    /// and one glyph of a frame drawn from a set the terminal does not have
+    /// straddles a column boundary and shifts the whole run.
+    pub pause: char,
 }
 
 impl BorderSet {
@@ -72,6 +79,7 @@ impl BorderSet {
         bottom_right: '╯',
         horizontal: LINE_H,
         vertical: LINE_V,
+        pause: '⏸',
     };
 
     /// Pure ASCII: the frame a terminal that cannot be trusted with
@@ -84,6 +92,11 @@ impl BorderSet {
         bottom_right: '+',
         horizontal: '-',
         vertical: '|',
+        // `|` is this set's own vertical edge and would read as a corner
+        // artifact in a horizontal run; `=` is the one-cell ASCII shape
+        // closest to the pause glyph's two parallel bars, and it stands out
+        // against a run of `-`.
+        pause: '=',
     };
 
     /// The border charset for `caps`: [`TermCaps::unicode_boxes`] and

@@ -181,8 +181,13 @@ fn a_paste_with_an_empty_clipboard_returns_at_once_instead_of_wedging() {
         .send(b"\"+p")
         .expect("the paste keys must reach the session");
     let started = Instant::now();
+    // the newlines put the marker below the startup toast stack: a box holds
+    // its slot for the transient timeout, so a marker typed onto row 1 is
+    // occluded rather than missing, and the wait would read the stack's own
+    // expiry as this leg's latency. A wedged paste swallows these keys too,
+    // so the discriminator is unchanged
     session
-        .send(format!("i{AFTER_PASTE}\x1b").as_bytes())
+        .send(format!("i\r\r\r\r\r\r\r\r\r\r{AFTER_PASTE}\x1b").as_bytes())
         .expect("the follow-up keys must reach the session");
     let alive = session.wait_for(AFTER_PASTE, Duration::from_secs(8));
     let elapsed = started.elapsed();

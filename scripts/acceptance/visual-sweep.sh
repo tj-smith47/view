@@ -251,10 +251,19 @@ BEGIN {
 # toast) are two independent spans rather than one span swallowing the
 # buffer between them. An odd border glyph out -- a box clipped by the
 # pane's edge -- ends the row's pairing rather than reaching to its end.
+# Both corner sets, because `BorderSet` has shipped both: the square corners
+# a standard-tier terminal used to get, and the rounded ones every terminal
+# that draws box glyphs gets now. A reader that knew only the square set
+# stopped seeing top and bottom edges the day the charset changed, and with
+# them every title -- which is painted into the top edge and nowhere else --
+# so every `wait_in_box` for one waited out its budget over a box that was
+# on screen the whole time.
 BOX_AWK='
 function is_edge(g) {
     return (g == "\342\224\202" || g == "\342\224\214" || g == "\342\224\220" ||
-            g == "\342\224\224" || g == "\342\224\230")
+            g == "\342\224\224" || g == "\342\224\230" ||
+            g == "\342\225\255" || g == "\342\225\256" ||
+            g == "\342\225\260" || g == "\342\225\257")
 }
 # a box whose side is covered by a box drawn over it leaves the row with a
 # corner where its other side should be, and pairing across that would
@@ -263,7 +272,9 @@ function is_edge(g) {
 # buffer as a bleed is not.
 function clipped(l, r) {
     return (l == "\342\224\220" || l == "\342\224\230" ||
-            r == "\342\224\214" || r == "\342\224\224")
+            l == "\342\225\256" || l == "\342\225\257" ||
+            r == "\342\224\214" || r == "\342\224\224" ||
+            r == "\342\225\255" || r == "\342\225\260")
 }
 function edges_of(row, edge,   c, n) {
     n = 0
@@ -1180,6 +1191,31 @@ case "$FOCUSED_TITLE" in
     ;;
 esac
 
+# The mark a frozen toast stack sets into its top box's border run, read out
+# of the charset that carries it. The sweep drives a UTF-8 tmux pane whose
+# box-glyph probe answers yes, so the rounded set is the one on screen.
+TOAST_PAUSE_MARK=$(awk '
+    /pub const ROUNDED/ { inside = 1 }
+    inside && /pause: / {
+        # cut on the quotes rather than on a character count: the glyph is
+        # three bytes and awk counts bytes in this locale
+        q = sprintf("%c", 39)
+        s = substr($0, index($0, "pause: " q) + 8)
+        print substr(s, 1, index(s, q) - 1)
+        exit
+    }
+' "$OVERLAY_RS")
+# A mark the frame is already drawn with, or none at all, would be on screen
+# whether the stack was frozen or not, and the leg below would report a
+# freeze that never happened.
+case "$TOAST_PAUSE_MARK" in
+'' | ' ' | '-' | '|' | '+' | '─' | '│' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘')
+    printf 'FAIL: the pause mark in %s is %s, which a framed box is full of already, so finding it on screen would prove nothing about a frozen stack\n' \
+        "$OVERLAY_RS" "${TOAST_PAUSE_MARK:-nothing this can read}" >&2
+    exit 1
+    ;;
+esac
+
 # What each surface writes into its own frame when it is the one that
 # opened, read out of the code that writes it.
 #
@@ -1441,6 +1477,11 @@ BARE
 
     local desc want_desc pressed=0 skipped=0
     while read -r feature lhs verb; do
+        # the pause key is driven by `leg_toast_and_history` instead: it
+        # marks a box that is already standing rather than opening one, and
+        # the shape below presses its key onto a bare buffer, where there is
+        # nothing for the mark to land on and nothing to wait for
+        [ "$feature/$verb" != notifications/pause ] || continue
         key=$(tmux_key "$lhs") || return 1
         marker=$(marker_for "$feature" "$verb") || return 1
         desc=$(mapping_desc "$key") || return 1
@@ -1510,6 +1551,49 @@ leg_toast_and_history() {
         return 1
     fi
     pass "an unoverlapped toast has only its own frame to its left (column $bare_left)"
+
+    # The pause key, on the standing box above. It freezes the stack's
+    # dismissal timing and says so with a mark in the top box's border run --
+    # a freeze the user cannot see is indistinguishable from a stuck editor.
+    # The mark sits on the frame rather than inside it, so it is read off the
+    # cell table; `wait_in_box` pairs vertical edges and only ever sees
+    # interior rows. This box is a sticky error, which is the case worth
+    # driving live: it takes no slot in the timer queue at all, and the mark
+    # still has to be on it, because what it reports is the mode.
+    local pause_lhs pause_key toast_row marked
+    pause_lhs=$(printf '%s\n' "$ENTRY_POINTS" |
+        awk '$1 == "notifications" && $3 == "pause" { print $2 }')
+    [ -n "$pause_lhs" ] || {
+        fail 'no notifications/pause row in DEFAULT_MAPS any more, so there is no key to freeze the stack with'
+        return 1
+    }
+    pause_key=$(tmux_key "$pause_lhs") || return 1
+    if [ "$(mapping_desc "$pause_key")" != "$(printf "$DESC_FORMAT" notifications pause)" ]; then
+        skip "$pause_lhs is this config's own key, which outranks view's notifications pause default"
+    else
+        read -r toast_row _ _ _ <<<"$(text_span 'Not an editor command')"
+        mark
+        send_text "$pause_key"
+        wait_change "$REACTION_SECS" "$pause_lhs" >/dev/null
+        settle
+        marked=$(LC_ALL=C awk -F'\t' -v r="$((toast_row - 1))" -v g="$TOAST_PAUSE_MARK" \
+            '$1 == r && $6 == g { n++ } END { print n + 0 }' "$CELLS")
+        if [ "$marked" != 1 ]; then
+            fail "the frozen stack's top border run carries $marked '$TOAST_PAUSE_MARK' marks, not 1"
+            return 1
+        fi
+        pass "$pause_lhs marks the frozen stack's top box with '$TOAST_PAUSE_MARK'"
+
+        mark
+        send_text "$pause_key"
+        wait_change "$REACTION_SECS" "leaving pause" >/dev/null
+        settle
+        if grep -qF "$TOAST_PAUSE_MARK" "$SCREEN"; then
+            fail "the pause mark is still on screen after the freeze was lifted"
+            return 1
+        fi
+        pass 'pressing it again lifts the freeze and takes the mark with it'
+    fi
 
     # and the history browser over it. An error toast is sticky (see
     # `toast::route`), so this is two overlays on screen at once, which is

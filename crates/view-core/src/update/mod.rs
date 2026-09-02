@@ -432,6 +432,15 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "notifications" && verb == "history" {
                 return open_message_history(model);
             }
+            if feature == "notifications" && verb == "pause" {
+                // no notice of its own: raising one would push an entry onto
+                // the very stack the key is freezing, and the top box's mark
+                // is the feedback. The tail's `arm_top_slot` is what re-arms
+                // the slot on the way back out.
+                model.engine.messages.toggle_pause();
+                model.dirty = true;
+                return Vec::new();
+            }
             // The open review's own vocabulary, arriving from the
             // buffer-local mappings `RpcCall::ReviewShow` installs on the
             // file under review (and from `:View review <verb>` typed by
@@ -662,7 +671,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // happened. Losing that race is "already handled", not an error
             // -- but obeying it would retire whatever now sits at that id,
             // an entry that has not had its own turn at the front yet
-            if model.engine.messages.top_slot() == Some(id) {
+            //
+            // `Effect::ScheduleToastExpiry` has no cancellation either, so
+            // the timer armed before the pause key was pressed is still
+            // asleep and still lands: obeying it would retire the exact
+            // notice the user paused in order to read.
+            if !model.engine.messages.paused() && model.engine.messages.top_slot() == Some(id) {
                 model.engine.messages.entries.retain(|e| e.id() != id);
                 model.dirty = true;
             }
