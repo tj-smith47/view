@@ -563,6 +563,30 @@ fn engine_config(cli: &Cli, engine: &ResolvedEngine) -> EngineConfig {
     cfg
 }
 
+/// What a local spawn that failed owes the user: which editor view tried to
+/// run, and which layer named it.
+///
+/// A resolved value with no provenance in its error message leaves the
+/// precedence chain unusable for triage. "check --nvim-bin / PATH" sends a
+/// user to two places they may have touched neither of, when the answer is
+/// that their own `view.toml` named an editor that is not there.
+fn spawn_failure_context(engine: &ResolvedEngine) -> String {
+    match &engine.nvim_bin.value {
+        Some(bin) => format!(
+            "failed to spawn `{}`, the editor named by the {}",
+            bin.display(),
+            engine.nvim_bin.source.label()
+        ),
+        // the derived answer, whose two halves are both absent: no engine
+        // shipped beside this binary and no `nvim` on PATH, so naming a
+        // path here would name one nothing chose
+        None => "failed to spawn the nvim process: no engine ships beside this binary and \
+                 `nvim` was not found on PATH (name one with --nvim-bin, VIEW_ENGINE_NVIM_BIN \
+                 or [engine] nvim_bin)"
+            .to_string(),
+    }
+}
+
 /// The config a *replacement* engine is spawned from, when the one this
 /// session started with died.
 ///
@@ -1226,8 +1250,9 @@ fn main() -> Result<()> {
             return anyhow::Error::new(err).context(context);
         }
         match failure {
-            startup::AttachFailure::Spawn(err) => anyhow::Error::new(err)
-                .context("failed to spawn the nvim process (check --nvim-bin / PATH)"),
+            startup::AttachFailure::Spawn(err) => {
+                anyhow::Error::new(err).context(spawn_failure_context(&resolved.engine))
+            }
             startup::AttachFailure::Attach(err) => anyhow::Error::new(err)
                 .context("engine attach failed or timed out after nvim started"),
         }
@@ -1423,6 +1448,62 @@ mod tests {
     /// [`super::respawn_config`] on the same terms as [`engine_config`].
     fn respawn_config(cli: &Cli) -> EngineConfig {
         super::respawn_config(cli, &resolved_for(cli).engine)
+    }
+
+    /// A spawn that failed names the editor it tried and the layer that
+    /// chose it, at every layer that can choose one. Walked rather than
+    /// sampled on the file arm alone: the whole point of the provenance is
+    /// that a user reading the failure can tell which of their four places
+    /// to go fix, and a message that named only the path would send someone
+    /// editing `view.toml` to a flag they never typed.
+    #[test]
+    fn a_failed_spawn_names_the_editor_and_the_layer_that_named_it() {
+        let file = ViewConfig::from_toml_str("[engine]\nnvim_bin = \"/nope/from-file\"\n")
+            .expect("the fixture must parse");
+        let env =
+            |name: &str| (name == "VIEW_ENGINE_NVIM_BIN").then(|| "/nope/from-env".to_string());
+        let flag = Overrides {
+            nvim_bin: Some(std::path::PathBuf::from("/nope/from-flag")),
+            ..Overrides::default()
+        };
+        for (flags, env, path, layer) in [
+            (
+                flag,
+                &env as &dyn Fn(&str) -> Option<String>,
+                "/nope/from-flag",
+                Source::Flag,
+            ),
+            (Overrides::default(), &env, "/nope/from-env", Source::Env),
+            (
+                Overrides::default(),
+                &(|_: &str| None),
+                "/nope/from-file",
+                Source::File,
+            ),
+        ] {
+            let resolved = view_native::config::resolve_with(&file, &flags, env);
+            let context = spawn_failure_context(&resolved.engine);
+            assert!(
+                context.contains(path) && context.contains(layer.label()),
+                "a spawn failure from the {} names neither {path} nor its layer: {context}",
+                layer.label()
+            );
+        }
+    }
+
+    /// The derived arm of the same message: nothing named an editor, so
+    /// there is no path to print and the message says where one could be
+    /// named instead.
+    #[test]
+    fn a_failed_spawn_with_nothing_named_points_at_every_place_one_could_be() {
+        let resolved = resolved_for(&Cli::parse_from(["view"]));
+        let context = spawn_failure_context(&resolved.engine);
+        for place in ["--nvim-bin", "VIEW_ENGINE_NVIM_BIN", "nvim_bin"] {
+            assert!(
+                context.contains(place),
+                "{place} is not offered by the derived failure: {context}"
+            );
+        }
     }
 
     /// Every flag the key registry claims is a flag this binary actually

@@ -18,7 +18,7 @@ use view_core::native::keys::{Action, Direction, KeyBindings};
 use view_core::native::registry;
 
 use super::keys::{env_name, keys, ConfigKey};
-use super::{KeysConfig, NativeConfig, SupervisionConfig, ViewConfig};
+use super::{parse_nvim_bin, KeysConfig, NativeConfig, SupervisionConfig, ViewConfig, BUNDLED};
 
 /// One resolved answer and the reason it is that answer.
 #[non_exhaustive]
@@ -213,7 +213,8 @@ pub fn resolve_with(
                 always(parse_nvim_bin),
                 &mut notices,
             ),
-            None,
+            file.spells("engine", "nvim_bin")
+                .then(|| file.engine.nvim_bin.clone()),
             None,
         ),
         appname: layer(
@@ -226,7 +227,8 @@ pub fn resolve_with(
                 always(|value| Some(value.to_string())),
                 &mut notices,
             ),
-            None,
+            file.spells("engine", "appname")
+                .then(|| file.engine.appname.clone()),
             None,
         ),
         single_grid: layer(
@@ -313,6 +315,7 @@ pub fn resolve_with(
                 bindings,
                 notices: file.keys.notices().to_vec(),
             },
+            engine: file.engine.clone(),
             spelled: file.spelled.clone(),
         },
         notices,
@@ -399,7 +402,7 @@ impl ResolvedConfig {
                     .nvim_bin
                     .value
                     .as_ref()
-                    .map_or_else(|| "bundled".into(), |path| path.display().to_string()),
+                    .map_or_else(|| BUNDLED.to_string(), |path| path.display().to_string()),
                 self.engine.nvim_bin.source,
             ),
             ("engine", "appname") => (
@@ -585,13 +588,6 @@ fn parse_keys(value: &str) -> Option<Vec<String>> {
     Some(value.split_whitespace().map(str::to_string).collect())
 }
 
-/// The editor a value names, or `None` for the word that names the layout
-/// beside this executable -- which is the same absence-of-a-choice the
-/// `[ui]` keys spell `auto`.
-fn parse_nvim_bin(value: &str) -> Option<PathBuf> {
-    (value != "bundled").then(|| PathBuf::from(value))
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -655,16 +651,16 @@ mod tests {
     /// answers with the right value from the wrong layer, and only the
     /// provenance can tell the two apart.
     ///
-    /// The one adjacency no key can show today is flag-beats-file: every
-    /// flag this build accepts names a `[ui]` or `[engine]` key, and
-    /// neither table is one `ViewFile` parses. The first key that has both
-    /// -- `[engine] nvim_bin` once that table gets its loader -- owes this
-    /// test a fourth arm; nothing fails until then, which is what this
-    /// paragraph is for.
+    /// Flag-beats-file is `[engine] nvim_bin`'s own arm, and it is the only
+    /// key that can show that adjacency directly: it is the one key this
+    /// build both accepts a flag for and parses out of the file, so the two
+    /// layers meet with nothing between them.
     #[test]
     fn flag_beats_env_beats_file_beats_derived() {
-        let file = ViewConfig::from_toml_str("[supervision]\nauto_restart = true\n")
-            .expect("the fixture must parse");
+        let file = ViewConfig::from_toml_str(
+            "[supervision]\nauto_restart = true\n\n[engine]\nnvim_bin = \"/from/file/nvim\"\n",
+        )
+        .expect("the fixture must parse");
         let env = |name: &str| match name {
             "VIEW_UI_TIER" => Some("basic".to_string()),
             "VIEW_SUPERVISION_AUTO_RESTART" => Some("false".to_string()),
@@ -674,6 +670,34 @@ mod tests {
             tier: Some(TierChoice::Full),
             ..Overrides::default()
         };
+
+        assert_eq!(
+            resolve_with(
+                &file,
+                &Overrides {
+                    nvim_bin: Some(PathBuf::from("/from/flag/nvim")),
+                    ..Overrides::default()
+                },
+                &no_env,
+            )
+            .engine
+            .nvim_bin,
+            Resolved {
+                value: Some(PathBuf::from("/from/flag/nvim")),
+                source: Source::Flag
+            },
+            "the flag outranks the file"
+        );
+        assert_eq!(
+            resolve_with(&file, &Overrides::default(), &no_env)
+                .engine
+                .nvim_bin,
+            Resolved {
+                value: Some(PathBuf::from("/from/file/nvim")),
+                source: Source::File
+            },
+            "and with no flag the file is what named the editor"
+        );
 
         let resolved = resolve_with(&file, &flags, &env);
         assert_eq!(
@@ -1029,6 +1053,45 @@ mod tests {
         );
         assert_eq!(row(&resolved, "ui", "theme").0, "auto");
         assert_eq!(row(&resolved, "engine", "nvim_bin").0, "bundled");
+    }
+
+    /// An unset `appname` is answered by the chain, not by a special case
+    /// inside the table: the resolved value stays `None` so the spawn adds
+    /// no `NVIM_APPNAME` and the child inherits whatever the process
+    /// carries, while the report still names the profile that will be.
+    #[test]
+    fn appname_absent_inherits_the_environment() {
+        let file = ViewConfig::from_toml_str("[engine]\nnvim_bin = \"bundled\"\n")
+            .expect("the fixture must parse");
+        let inherited = |name: &str| (name == "NVIM_APPNAME").then(|| "review".to_string());
+
+        let resolved = resolve_with(&file, &Overrides::default(), &inherited);
+        assert_eq!(
+            resolved.engine.appname,
+            Resolved {
+                value: None,
+                source: Source::Derived
+            },
+            "a table that named no profile sets no NVIM_APPNAME in the child"
+        );
+        assert_eq!(
+            row(&resolved, "engine", "appname"),
+            ("review".to_string(), Source::Derived),
+            "and the report names the profile the child will actually run under"
+        );
+
+        let named = ViewConfig::from_toml_str("[engine]\nappname = \"work\"\n")
+            .expect("the fixture must parse");
+        assert_eq!(
+            resolve_with(&named, &Overrides::default(), &inherited)
+                .engine
+                .appname,
+            Resolved {
+                value: Some("work".to_string()),
+                source: Source::File
+            },
+            "a named profile replaces the inherited one"
+        );
     }
 
     #[test]

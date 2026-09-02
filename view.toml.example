@@ -75,6 +75,35 @@ composer_newline = ["<S-CR>", "<M-CR>"]
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for the modal's own Restart
 
+# [engine] names the editor view runs and the profile it runs under, and
+# both are derived when the key is absent. A release ships a pinned nvim
+# beside the view binary and runs that one; a build with none beside it
+# falls back to the nvim on your PATH. Naming an absolute path here runs
+# that editor instead.
+#
+# Both keys are also flags for a single session -- view --nvim-bin PATH and
+# view --appname NAME -- and a flag outranks this file, as does the matching
+# VIEW_ENGINE_* variable. A path that cannot be spawned is reported naming
+# the path and the layer that named it, so a failure is traceable to the
+# thing that caused it.
+
+[engine]
+nvim_bin = "bundled"       # default: "bundled" -- the pinned engine beside
+                           # this binary, or the nvim on PATH in a build
+                           # that ships none. An absolute path runs that
+                           # editor instead
+# appname = "work"         # default: whatever NVIM_APPNAME already names,
+                           # and nvim's own profile when nothing does. Set
+                           # it for an isolated config and state directory;
+                           # view never requires one. There is no value here
+                           # that means inherit -- leaving the key out is
+                           # how you say it, which is why this line ships
+                           # commented rather than empty
+# single_grid = false      # NOT READ YET: this build always attaches with
+                           # ext_multigrid, and uncommenting this is refused
+                           # rather than quietly ignored. It goes live in
+                           # the change that gives the attach its flip
+
 # [ai] turns the agent panel and its ACP client on or off, and names which
 # agent view speaks to. "claude-code" is the one adapter this build knows
 # how to auto-provision on its own; naming another known adapter id or an
@@ -103,17 +132,12 @@ open_target = "current"    # default: "current" -- the window you are in, the
                            # Anything else opens in the current window and
                            # says so.
 
-# The tables below are commented out because THIS BUILD DOES NOT READ THEM
-# yet. Uncommenting one is harmless -- view ignores tables it has no loader
-# for -- but it will not change anything either. They are listed so the
-# shape they will take is no surprise, and each one goes live here in the
-# same change that gives it a loader.
+# The table below is commented out because THIS BUILD DOES NOT READ IT yet.
+# Uncommenting it is harmless -- view ignores tables it has no loader for --
+# but it will not change anything either. It is listed so the shape it will
+# take is no surprise, and it goes live here in the same change that gives
+# it a loader.
 #
 # [ui]
 # tier = "auto"              # auto | full | standard | basic
 # theme = "auto"             # auto = derive from nvim colorscheme
-#
-# [engine]
-# nvim_bin = "bundled"       # "bundled" | absolute path
-# appname = ""               # NVIM_APPNAME passthrough for isolated profiles
-# single_grid = false

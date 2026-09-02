@@ -68,7 +68,7 @@ pub fn keys() -> &'static [ConfigKey] {
                 table: "engine",
                 key: "nvim_bin",
                 flag: Some("--nvim-bin"),
-                derived: Some("bundled"),
+                derived: Some(super::BUNDLED),
             },
             ConfigKey {
                 table: "engine",

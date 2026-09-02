@@ -76,6 +76,71 @@ struct ViewFile {
     supervision: SupervisionTable,
     #[serde(default)]
     keys: KeysTable,
+    #[serde(default)]
+    engine: EngineTable,
+}
+
+/// The `[engine]` table's wire shape: which editor a session spawns and
+/// which profile it runs under. Unknown keys are refused rather than
+/// ignored, for the reason `[supervision]`'s own check states.
+///
+/// `single_grid` is deliberately absent, and its absence is the refusal:
+/// the attach flip that reads it has not landed, and a key that parses into
+/// a value nothing acts on is a setting that lies. The shipped example
+/// documents it commented, with that stated beside it.
+///
+/// Both fields stay `String`-typed here rather than parsed by serde. The
+/// vocabulary each accepts includes a word that means *no choice*
+/// (`"bundled"`, and the empty profile), which is a resolution answer
+/// rather than a type, and the same word has to read the same way when it
+/// arrives through the environment instead.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EngineTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nvim_bin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    appname: Option<String>,
+}
+
+/// The `[engine]` table's resolved answers, as the file gave them.
+///
+/// `None` is the absence of a choice on both keys, and which absence
+/// differs per key: an unnamed `nvim_bin` is the bundled layout beside this
+/// executable, which only a caller that can look beside its own executable
+/// resolves to a path, and an unnamed `appname` is whatever profile the
+/// process already carries. Whether the file said so at all is
+/// [`ViewConfig::spells`]'s answer rather than a third state here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EngineFile {
+    nvim_bin: Option<PathBuf>,
+    appname: Option<String>,
+}
+
+/// The word that names the engine shipped beside this executable, and
+/// therefore the absence of a named editor.
+const BUNDLED: &str = "bundled";
+
+/// The editor a value names, or `None` for the word that names the layout
+/// beside this executable -- which is the same absence-of-a-choice the
+/// `[ui]` keys spell `auto`.
+///
+/// Shared by the file and environment layers so one word cannot mean two
+/// things depending on where it was written. Surrounding space goes the way
+/// the environment layer already drops it: a name a shell left padded is
+/// the name, and an entirely blank one names nothing at all.
+fn parse_nvim_bin(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    (!value.is_empty() && value != BUNDLED).then(|| PathBuf::from(value))
+}
+
+/// The profile a value names, or `None` when it names none.
+///
+/// There is no text that means "inherit": leaving the key out is how a user
+/// says it, so an empty value is no value rather than a profile named "".
+fn parse_appname(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// The `[native]` table's wire shape: the feature switches, whose key set is
@@ -359,6 +424,11 @@ pub struct ViewConfig {
     pub supervision: SupervisionConfig,
     /// The `[keys]` table's resolved answers.
     pub keys: KeysConfig,
+    /// The `[engine]` table's answers. Crate-private, unlike its
+    /// neighbours: no consumer reads the file's engine answers directly --
+    /// they read the resolved ones, where a flag and the environment have
+    /// already had their say over which editor a session actually spawns.
+    engine: EngineFile,
     /// Which `table.key` pairs the document spelled at all. A key written
     /// at the value it already defaults to resolves the same either way,
     /// and only one of the two is the file's own answer -- which is the
@@ -374,6 +444,7 @@ impl ViewConfig {
             native: NativeConfig::all_enabled(),
             supervision: SupervisionConfig::default(),
             keys: KeysConfig::default(),
+            engine: EngineFile::default(),
             spelled: Vec::new(),
         }
     }
@@ -409,6 +480,10 @@ impl ViewConfig {
                     .unwrap_or(AUTO_RESTART_DEFAULT),
             },
             keys: KeysConfig { bindings, notices },
+            engine: EngineFile {
+                nvim_bin: file.engine.nvim_bin.as_deref().and_then(parse_nvim_bin),
+                appname: file.engine.appname.as_deref().and_then(parse_appname),
+            },
             spelled: spelled_keys(&file),
         })
     }
@@ -609,6 +684,15 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     }
     if file.supervision.auto_restart.is_some() {
         spelled.push(("supervision", "auto_restart"));
+    }
+    // the wire value's presence, not the resolved one's: `nvim_bin =
+    // "bundled"` resolves to the same absent path a missing key does, and
+    // only one of the two is the file's own answer
+    if file.engine.nvim_bin.is_some() {
+        spelled.push(("engine", "nvim_bin"));
+    }
+    if file.engine.appname.is_some() {
+        spelled.push(("engine", "appname"));
     }
     spelled
 }
@@ -874,6 +958,9 @@ mod tests {
             ("native", _) => "false",
             ("keys", _) => "[\"<C-w>>\"]",
             ("supervision", _) => "false",
+            ("engine", "nvim_bin") => "\"/opt/nvim/bin/nvim\"",
+            ("engine", "appname") => "\"work\"",
+            ("engine", "single_grid") => "false",
             _ => panic!("no fixture value for [{table}] {key}; teach this walk its shape"),
         };
         format!("[{table}]\n{key} = {value}\n")
@@ -888,31 +975,48 @@ mod tests {
     /// own rendered shape, so a table gaining a field here joins this walk
     /// in the same edit, and its keys must reach `spelled_keys` before the
     /// suite is green again.
+    ///
+    /// A table this crate reads may still refuse one of its own keys --
+    /// `[engine] single_grid` is documented for a user and read by nothing
+    /// until the attach flip lands -- which is a granularity `loaded_tables`
+    /// cannot express, since a table renders its name and none of its keys.
+    /// The loader's own refusal is what states it instead: a key it will not
+    /// parse is a key it owes no recording, and a key it accepts owes one.
+    /// The refusal has to name the key, so a fixture broken for some other
+    /// reason cannot quietly leave the walk.
     #[test]
     fn every_key_this_crate_parses_records_whether_the_file_spelled_it() {
         let loaded = loaded_tables();
-        let walked = keys()
-            .iter()
-            .filter(|row| loaded.contains(row.table))
-            .inspect(|row| {
-                let document = document_spelling(row.table, row.key);
-                let cfg = ViewConfig::from_toml_str(&document)
-                    .unwrap_or_else(|e| panic!("[{}] {} fixture: {e}", row.table, row.key));
-                assert!(
-                    cfg.spells(row.table, row.key),
-                    "[{}] {} is parsed here but its spelling is not recorded",
-                    row.table,
-                    row.key
-                );
-                assert!(
-                    !ViewConfig::defaults().spells(row.table, row.key),
-                    "[{}] {} reads as spelled in a document that never mentions it",
-                    row.table,
-                    row.key
-                );
-            })
-            .count();
-        assert!(walked > 0, "the walk must reach at least one key");
+        let mut parsed = 0;
+        for row in keys().iter().filter(|row| loaded.contains(row.table)) {
+            let document = document_spelling(row.table, row.key);
+            let cfg = match ViewConfig::from_toml_str(&document) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    assert!(
+                        e.to_string().contains(row.key),
+                        "[{}] {} is refused by a message that does not name it: {e}",
+                        row.table,
+                        row.key
+                    );
+                    continue;
+                }
+            };
+            parsed += 1;
+            assert!(
+                cfg.spells(row.table, row.key),
+                "[{}] {} is parsed here but its spelling is not recorded",
+                row.table,
+                row.key
+            );
+            assert!(
+                !ViewConfig::defaults().spells(row.table, row.key),
+                "[{}] {} reads as spelled in a document that never mentions it",
+                row.table,
+                row.key
+            );
+        }
+        assert!(parsed > 0, "the walk must reach at least one key");
     }
 
     #[test]
@@ -977,6 +1081,87 @@ mod tests {
         assert!(
             err.to_string().contains("expected a boolean"),
             "the refusal must be the nested-table type error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn absent_engine_table_resolves_to_bundled() {
+        let cfg = ViewConfig::from_toml_str("[native]\npicker = false\n")
+            .expect("a document with no [engine] table must parse");
+        assert_eq!(
+            cfg.engine.nvim_bin, None,
+            "no named editor is the bundled layout, which only a caller beside its own \
+             executable can resolve to a path"
+        );
+        assert!(
+            !cfg.spells("engine", "nvim_bin") && !cfg.spells("engine", "appname"),
+            "a table the document never opened spelled neither of its keys"
+        );
+    }
+
+    #[test]
+    fn the_bundled_word_is_a_spelled_key_and_still_no_path() {
+        let cfg = ViewConfig::from_toml_str("[engine]\nnvim_bin = \"bundled\"\n")
+            .expect("the shipped example's own value must parse");
+        assert_eq!(
+            cfg.engine.nvim_bin, None,
+            "`bundled` names the layout beside this executable, not a path"
+        );
+        assert!(
+            cfg.spells("engine", "nvim_bin"),
+            "a file that agreed with the default is still the file's own answer"
+        );
+    }
+
+    #[test]
+    fn an_absolute_path_overrides_bundled() {
+        let cfg = ViewConfig::from_toml_str("[engine]\nnvim_bin = \"/opt/nvim/bin/nvim\"\n")
+            .expect("a named editor must parse");
+        assert_eq!(
+            cfg.engine.nvim_bin.as_deref(),
+            Some(Path::new("/opt/nvim/bin/nvim"))
+        );
+    }
+
+    #[test]
+    fn an_appname_is_read_and_an_empty_one_names_no_profile() {
+        let cfg = ViewConfig::from_toml_str("[engine]\nappname = \"work\"\n")
+            .expect("a named profile must parse");
+        assert_eq!(cfg.engine.appname.as_deref(), Some("work"));
+
+        // the same rule the environment layer already holds: an empty value
+        // is no value, and there is no text that means "inherit" -- leaving
+        // the key out is how a user says it
+        let cfg = ViewConfig::from_toml_str("[engine]\nappname = \"  \"\n")
+            .expect("an empty profile must parse rather than fail the file");
+        assert_eq!(cfg.engine.appname, None);
+        assert!(
+            cfg.spells("engine", "appname"),
+            "the file still spelled the key, whatever it resolved to"
+        );
+    }
+
+    #[test]
+    fn unknown_engine_key_is_an_error_not_a_no_op() {
+        // the transposed spelling of a key that is real, which is the shape
+        // a silent default would be indistinguishable from
+        let err = ViewConfig::from_toml_str("[engine]\nnvim_bim = \"x\"\n")
+            .expect_err("a misspelled [engine] key must be an error, not a silent default");
+        assert!(
+            err.to_string().contains("nvim_bim"),
+            "the error must name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn single_grid_is_refused_until_the_attach_flip_gives_it_a_reader() {
+        // a key that resolved to a value nothing acts on is a setting that
+        // lies; refusing it is what keeps the example's own comment honest
+        let err = ViewConfig::from_toml_str("[engine]\nsingle_grid = true\n")
+            .expect_err("a key with no reader must be refused rather than read");
+        assert!(
+            err.to_string().contains("single_grid"),
+            "the refusal must name the key, got: {err}"
         );
     }
 
