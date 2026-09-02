@@ -1,0 +1,148 @@
+== host
+  label:      conpty-unanswered
+  os:         windows
+  arch:       x86_64
+  cpus:       2
+  load:       unreported
+  size:       80x24
+  engine:     C:\Users\Administrator\nvim-win64\bin\nvim.exe
+  version:    NVIM v0.12.4
+  source:     fnv1a-64 7bf5482143b17c5f over 24475 bytes
+  child TERM: xterm-256color, COLORTERM truecolor
+  queries:    answered as a full-tier terminal
+  cursor pos: left unanswered, as the tree's own responder leaves it
+  script:     ihello world<Esc>0x (corpus/insert-basic.toml)
+
+== startup stream
+  painted:  false
+  cpr answered: 0
+  bytes:    4
+  escaped:
+    \x1b[6n
+  hex:
+    1b 5b 36 6e
+
+== scripted stream
+  sent:     ihello world\x1b0x
+  settled:  false
+  bytes:    0
+  escaped:
+  hex:
+
+== parsed grid after the script
+  cursor:         row 0 col 0
+  parser size:    24 rows 80 cols
+  contents lines: 0
+  contents:
+  cells:
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+
+== resize 80x24 to 100x30
+  first byte:  nothing arrived
+  last byte:   nothing arrived
+  sampled at:  200µs resolution
+  bytes:       0
+  bytes:    0
+  escaped:
+  hex:
+
+== parsed grid after the resize
+  cursor:         row 0 col 0
+  parser size:    30 rows 100 cols
+  contents lines: 0
+  contents:
+  cells:
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+    |
+
+== engine-driven redraw at the same size (ctrl-l)
+  first byte:  nothing arrived
+  last byte:   nothing arrived
+  sampled at:  200µs resolution
+  bytes:       0
+  bytes:    0
+  escaped:
+  hex:
+
+  quit status: None
+
+== cursor-position request with no editor
+  command:  cmd.exe /c echo hi
+  status:   None
+  carries the request: true
+  bytes:    4
+  escaped:
+    \x1b[6n
+  hex:
+    1b 5b 36 6e
+
+== exit code
+  painted:     false
+  cpr answered: 0
+  sent:        :cq 3<CR>
+  exit_code(): the child never exited
+
+== clock
+  rounds:            200000
+  identical pairs:   148405
+  smallest non-zero: 100ns
+  mean pair cost:    26ns
+
+== teardown
+  editor pid:  4108
+  cpr answered: 0
+  it spawned:  none
+  after kill:  editor status Some(ExitStatus { code: 1, signal: None })
+  survivors:   none
+  kill lever:  per-child only (portable_pty::Child::kill)
