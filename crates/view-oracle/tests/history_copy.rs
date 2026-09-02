@@ -49,6 +49,10 @@ const SETTLE: Duration = Duration::from_secs(5);
 /// toast row without risking a wrap mid-phrase. The full wording is pinned
 /// in `view-core`'s own `an_unreachable_system_clipboard_notices_once`;
 /// what this file is about is how many times it appears.
+///
+/// Gated with its only consumer, the linux-only headless row: elsewhere it
+/// is dead code, and `-D warnings` makes that a build break.
+#[cfg(target_os = "linux")]
 const NOTICE_OPENING: &str = "view: no system";
 
 fn wait_for_bytes(session: &mut view_oracle::PtySession, needle: &[u8], timeout: Duration) -> bool {
