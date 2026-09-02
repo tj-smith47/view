@@ -914,7 +914,7 @@ impl Engine {
             ours
         };
         let spawned_at = Instant::now();
-        let mut guard = ChildGuard(Some(spawn_past_busy_text(&mut command)?));
+        let mut guard = ChildGuard(Some(spawn_past_busy_text(&mut command, || {})?));
         // the child's own ends are the child's from here on. A `Command`
         // holds any handle it was configured with until it is dropped, so on
         // Windows this is what closes the parent's copy of the child's stdin
@@ -2215,10 +2215,19 @@ fn relay_stdin_fd(source: std::os::fd::RawFd) -> std::io::Result<()> {
 /// refuse the exec at all -- it kills the image afterwards -- so on that
 /// platform the same writer arrives at the handshake instead, and
 /// [`killed_at_spawn`] is what retries it.
-fn spawn_past_busy_text(command: &mut Command) -> std::io::Result<Child> {
+///
+/// `refused` runs after each refusal, before its backoff. Production passes
+/// `|| {}`, which monomorphises away; the retry test releases its writer
+/// from here, so the release is ordered by the refusal itself rather than
+/// raced against the backoff by a sleeping thread.
+fn spawn_past_busy_text(
+    command: &mut Command,
+    mut refused: impl FnMut(),
+) -> std::io::Result<Child> {
     for attempt in 1..BUSY_TEXT_ATTEMPTS {
         match command.spawn() {
             Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                refused();
                 std::thread::sleep(BUSY_TEXT_BACKOFF * attempt);
             }
             outcome => return outcome,
@@ -2428,17 +2437,22 @@ mod busy_text_tests {
         let dir = view_test_support::ScratchDir::new("busy-text-retry").unwrap();
         let (program, writer) = busy_program(&dir);
 
-        // released from another thread while the spawn is in its backoff,
-        // which is the shape of the real race: the descriptor belongs to a
-        // process this one cannot wait on
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(15));
-            drop(writer);
-        });
-
-        let mut child = spawn_past_busy_text(&mut Command::new(&program))
-            .expect("a program whose writer let go is a program that runs");
+        // released from inside the retry's own refusal hook: the first
+        // attempt is refused with the writer still open, the second runs
+        // free -- ordered by construction, never by racing a sleep
+        let mut writer = Some(writer);
+        let mut refusals = 0u32;
+        let mut child = spawn_past_busy_text(&mut Command::new(&program), || {
+            refusals += 1;
+            drop(writer.take());
+        })
+        .expect("a program whose writer let go is a program that runs");
         assert!(child.wait().unwrap().success());
+        assert_eq!(
+            refusals, 1,
+            "the retry was exercised exactly once, on the attempt the open \
+             writer refused"
+        );
     }
 }
 

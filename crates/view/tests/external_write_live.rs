@@ -44,15 +44,6 @@ use view_test_support::{settle_mtime, ScratchDir};
 /// healthy pair answers in milliseconds.
 const ARRIVAL: Duration = Duration::from_secs(10);
 
-/// How long the unlink-then-rewrite row waits before putting its file back.
-///
-/// Chosen against both edges rather than against `FILE_GONE_GRACE` itself:
-/// longer than one coalesce window, so a grace shortened to nothing looks
-/// while the file is still absent and the row fails; shorter than the real
-/// grace with room to spare, so the rewrite is on disk before the second
-/// look is taken on a host with other work on it.
-const REWRITE_DELAY: Duration = Duration::from_millis(60);
-
 /// Everything one case needs live at once: a watched scratch root, a real
 /// engine holding the file open, and the two channels the halves answer on.
 struct Watched {
@@ -322,18 +313,13 @@ fn a_save_that_unlinks_before_rewriting_never_says_anything() {
         model.engine.messages.entries
     );
 
-    // the rewrite lands after the moment a grace of zero would have looked
-    // again and before the real grace ends, which is the only timing in
-    // which this row can tell a grace sized for a save from one that is not
-    let target = case.path.clone();
-    let writer = std::thread::spawn(move || {
-        std::thread::sleep(REWRITE_DELAY);
-        std::fs::write(&target, "changed-externally\n").expect("write the target again");
-    });
-    std::thread::sleep(view_ai::FILE_GONE_GRACE);
+    // on disk before the second look by construction, never raced against
+    // it with sleeps a loaded host reorders; the grace's size and its being
+    // spent are pinned in `the_grace_outlasts_the_absence_a_save_can_leave`
+    // and `the_re_probe_waits_out_the_save_before_looking_again`
+    std::fs::write(&case.path, "changed-externally\n").expect("write the target again");
     let confirming = case.second_look(&mut model);
     let _ = update(&mut model, confirming);
-    writer.join().expect("the rewrite thread must not panic");
 
     assert!(
         model.engine.messages.entries.is_empty(),
@@ -369,7 +355,6 @@ fn a_removed_watched_file_is_announced_once_the_grace_confirms_it() {
         model.engine.messages.entries
     );
 
-    std::thread::sleep(view_ai::FILE_GONE_GRACE);
     let confirming = case.second_look(&mut model);
     let _ = update(&mut model, confirming);
 
