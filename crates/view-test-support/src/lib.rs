@@ -17,7 +17,7 @@
 //! which a trailing statement never can.
 //!
 //! A dedicated leaf crate rather than a home in `view-core`: `view-core` is
-//! pure by charter (no I/O, no filesystem -- see its own module doc), and
+//! pure by rule (no I/O, no filesystem -- see its own module doc), and
 //! `view-native`'s tests and `view`'s tests are two different downstream
 //! branches of `core ← surface ← {native, ai}` with no other common
 //! dependency both can reach a shared helper through. This crate sits

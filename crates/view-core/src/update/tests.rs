@@ -6342,7 +6342,7 @@ fn echomsg(text: &str) -> UiEvent {
 
 #[test]
 fn a_toast_behind_another_starts_its_timer_when_it_reaches_the_top() {
-    // the charter's sentence, as a test: a notice that arrived behind
+    // the rule, as a test: a notice that arrived behind
     // another has not been read yet, so its timer must not have been
     // running while it was queued -- it starts on the expiry that promotes
     // it, at the full timeout, not at whatever was left of one armed when

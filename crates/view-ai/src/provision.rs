@@ -1,7 +1,7 @@
 //! ACP adapter auto-provisioning: resolving a known adapter id to a
 //! downloaded, checksum-verified, extracted, launchable entry path.
 //!
-//! Mechanism only, per the charter's own split: this module owns
+//! Mechanism only, per the design spec's own split: this module owns
 //! downloading, verifying, extracting, and caching against a hand-
 //! maintained [`AdapterPin`] table closed at compile time, on
 //! `view-core::native::registry`'s own precedent (a runtime-registered

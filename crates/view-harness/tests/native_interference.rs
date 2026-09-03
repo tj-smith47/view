@@ -1,4 +1,4 @@
-//! Non-interference proof (the design spec's own charter exit gate): opening a
+//! Non-interference proof (the design spec's own exit gate): opening a
 //! native feature (picker, tree, notifications/message-history) and closing
 //! it again must leave nvim's own engine state -- buffer text, cursor, mode,
 //! registers, marks -- exactly as it was before. Drives
@@ -24,8 +24,8 @@
 //! allowlist of the read-only calls these open/close paths are known to
 //! produce (`Input`, the picker's `buffers` source's `ListBuffers`) and
 //! panics on anything else, rather than assuming `Input` is the only kind
-//! and silently dropping a future state-mutating call this charter-exit
-//! gate exists to catch.
+//! and silently dropping a future state-mutating call this exit gate
+//! exists to catch.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;

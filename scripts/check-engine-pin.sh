@@ -114,8 +114,8 @@ for workflow in .github/workflows/ci.yml .github/workflows/bench.yml \
     *) echo "PIN FAIL: $workflow not found, or it no longer installs nvim"; fail=1 ;;
   esac
 done
-# The charter welds the single_grid knob's lifespan to the pin: a promise
-# to re-evaluate it on every bump is only kept if bumping the pin without
+# The single_grid knob's lifespan is welded to the pin: the promise to
+# re-evaluate it on every bump is only kept if bumping the pin without
 # touching the doc's re-evaluation line fails the same gate.
 check_multigrid_reevaluation() {
   local doc="docs/multigrid.md" line doc_pin

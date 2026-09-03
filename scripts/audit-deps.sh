@@ -146,7 +146,7 @@ for crate in view view-engine view-surface view-native view-ai view-tui view-ora
 done
 
 # view-test-support (the ScratchDir fixture, see its own module doc) is
-# dev-only by charter: it exists to be pulled in as a [dev-dependencies]
+# dev-only by design: it exists to be pulled in as a [dev-dependencies]
 # entry by any crate's own tests, never as a normal dependency of anything
 # that ships. check_absent's presence-only test can't express that -- it
 # would also reject the legitimate dev-dependency edges view-native and

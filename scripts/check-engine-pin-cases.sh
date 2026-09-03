@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Case matrix for check-engine-pin.sh's single_grid re-evaluation weld
-# (the charter's "re-evaluate the knob at every engine-pin bump" promise,
-# welded so a bump with no re-evaluation fails the same gate that already
-# refuses a hardcoded nvim version). Every case runs the checker against a
+# (the "re-evaluate the knob at every engine-pin bump" promise, welded so a
+# bump with no re-evaluation fails the same gate that already refuses a
+# hardcoded nvim version). Every case runs the checker against a
 # scratch copy of the real repo's pin-relevant files with only the pin
 # and/or the doc's re-evaluation line mutated, and asserts both the exit
 # status and whether the re-evaluation failure was the one that fired --

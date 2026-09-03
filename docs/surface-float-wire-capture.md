@@ -94,7 +94,8 @@ Three properties of that arrangement are load-bearing:
   no variable set outside survives to name the file. The scenario locates
   it by walking up from the session's cwd to the repo.
 
-One deviation from the charter's wording is recorded here rather than
+One deviation from the wording this capture was specified with is recorded
+here rather than
 papered over: the heavy fixture pins nvim-cmp with `cmp-buffer` as its only
 source and configures insert mode alone, so no cmdline float exists until
 one is asked for. The chunk calls the pinned cmp's own

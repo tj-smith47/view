@@ -917,7 +917,8 @@ mod tests {
         assert_eq!(
             ext_surfaces(&resolved("")),
             view_core::model::Model::new().attached_surfaces(),
-            "the model's default set and the set a config-less session attaches              must be the same set"
+            "the model's default set and the set a config-less session attaches \
+             must be the same set"
         );
     }
 

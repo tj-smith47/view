@@ -29,7 +29,7 @@ pub enum SessionState {
 /// One agent session's lifecycle as the doctor reports it: session id
 /// (carried inside `session_state`'s `Active` case via the panel, not
 /// duplicated here), agent identity, state, last activity, and pending
-/// edit count -- the exact fields the charter's own doctor contract names.
+/// edit count -- the exact fields the doctor contract names.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AiStatus {

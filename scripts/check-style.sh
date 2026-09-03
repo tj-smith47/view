@@ -44,6 +44,14 @@ check_narrative_markers() {
   if grep -rniE "${anchor}\\btask [0-9]+([^[:alnum:] ]|\$)" "${targets[@]}"; then
     echo "STYLE FAIL: session-narrative comment marker (task)"; fail=1
   fi
+  # references to a planning charter: the charters live under .claude/,
+  # which no clone of this tree carries, so a comment or doc pointing at one
+  # names a document its reader cannot open instead of stating the rule the
+  # code holds. Case-insensitive and prefix-anchored on the word, which also
+  # takes "charters", "chartered" and the possessive.
+  if grep -rniE "${anchor}\\bcharter" "${targets[@]}"; then
+    echo "STYLE FAIL: planning-charter reference"; fail=1
+  fi
   # spec-task tags (T4/T5/T6): a comment/doc must state what the code does,
   # never which spec task produced it. Two shapes: a slash-joined sequence
   # (T4/T5/T6, T10/T11), which has no legitimate non-task-tag reading
@@ -608,6 +616,11 @@ if [ -d scripts ]; then
   other_scripts=$(find scripts -name '*.sh' ! -name "$(basename "$0")")
   if [ -n "$other_scripts" ] && echo "$other_scripts" | xargs grep -nE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]'; then
     echo "STYLE FAIL: review-finding reference in script comment"; fail=1
+  fi
+  # the charter ban above reaches sources and docs; scripts carry the same
+  # comments and are walked here instead
+  if [ -n "$other_scripts" ] && echo "$other_scripts" | xargs grep -niE '\bcharter'; then
+    echo "STYLE FAIL: planning-charter reference in script comment"; fail=1
   fi
 fi
 check_acceptance_expectations || fail=1

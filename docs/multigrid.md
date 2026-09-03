@@ -28,10 +28,10 @@ single_grid = false   # default: false -- view composites nvim's windows
 ```
 
 `single_grid = true` (or `--single-grid` for one session) drops
-`ext_multigrid` from the attach request. nvim then draws the classic
-single grid and view renders it the way it did before multigrid became the
-default: one pane, no compositor. Every other `[native]`/`[ui]` switch is unaffected --
-this knob only changes how the grid protocol addresses windows, never
+`ext_multigrid` from the attach request. nvim then draws the classic single
+grid and view renders it the way it did before multigrid became the default:
+one pane, no compositor. Every other `[native]`/`[ui]` switch is unaffected
+-- this knob only changes how the grid protocol addresses windows, never
 which surfaces are externalized (`ext_linegrid`, `ext_cmdline`, etc. still
 follow `[native]`, see `crates/view-native/src/config.rs`'s `ext_surfaces`).
 

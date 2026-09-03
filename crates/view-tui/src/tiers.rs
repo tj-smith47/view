@@ -1805,7 +1805,7 @@ mod tests {
                 expect_boxes: false,
             },
             Capture {
-                // the observed defect this whole charter answers: ssh does
+                // the observed defect the readback answers: ssh does
                 // not forward COLORTERM, and the readback is the only thing
                 // on this login that knows the terminal renders 24-bit
                 section: "F. mbp over ssh, COLORTERM unset",
