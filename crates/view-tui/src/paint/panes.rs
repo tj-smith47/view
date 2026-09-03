@@ -1,18 +1,23 @@
 //! The pane compositor: every visible grid painted where nvim placed it,
-//! and the chrome view draws in the space left between them.
+//! and view's own chrome drawn over the space between them.
 //!
 //! Under `ext_multigrid` a window's text arrives in a grid of its own and
 //! the picture on screen is something view builds rather than something
-//! nvim sent. The column between two side-by-side windows is what that
-//! leaves over, and it is view's to draw: the separator here resolves
-//! through [`ChromeGroup::WinSeparator`] and takes its glyph from the
-//! probed box-drawing charset, so a user's colorscheme still decides what
-//! the space between windows looks like.
+//! nvim sent. nvim does not leave the column between two side-by-side
+//! windows empty -- it paints a separator there into the global grid, and
+//! `docs/multigrid-wire-capture.md` records the line
+//! (`grid_line [1, 0, 40, [["│", 12]], false]`, "the separator column 40
+//! belonging to grid 1"). What multigrid changes is that grid 1 now holds
+//! *only* chrome, so view can restyle that column instead of having to
+//! pick it out of buffer text: the global-grid pane paints first,
+//! [`paint_separators`] overpaints its separator cells with a glyph from
+//! the probed box-drawing charset styled through
+//! [`ChromeGroup::WinSeparator`], and a user's colorscheme decides what the
+//! result looks like.
 //!
 //! Single-grid sessions come through here unchanged: nvim places no window
-//! of its own, the registry answers one pane -- the global grid at the
-//! origin -- and the loop below reduces to the one [`super::paint_grid`]
-//! call it always made.
+//! of its own, so [`GridRegistry::has_panes`] is false and this reduces to
+//! the one [`super::paint_grid`] call the compositor always made.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as TermRect;
@@ -95,15 +100,19 @@ fn pane_theme(theme: &Theme, pane: &Pane, cursor: Option<GridId>) -> Theme {
     inactive
 }
 
-/// Draws the column immediately right of each window box, on the rows where
-/// a second window sits directly across it.
+/// Overpaints the column immediately right of each window box, on the rows
+/// where a second window sits directly across it.
 ///
-/// Derived from the boxes rather than read off a wire event: nvim announces
-/// where each window sits and nothing at all about the space between them.
-/// A neighbour across the column is what makes that space a separator --
-/// the same predicate rules out a box against the layer's right edge, one
-/// whose neighbour is hidden, and the rows of a split where the window
-/// across is only as tall as its own half.
+/// Which cells those are is derived from the boxes, not read off the wire:
+/// nvim paints its own glyph into that column of the global grid but names
+/// no event for where the column *is*, and the pane origins already say.
+/// A neighbour across the column is what makes the space a separator -- the
+/// same predicate rules out a box against the layer's right edge, one whose
+/// neighbour is hidden, and the rows of a split where the window across is
+/// only as tall as its own half.
+///
+/// Runs after every pane so the global grid's own cells are underneath it;
+/// what lands is view's glyph and view's style, over nvim's.
 fn paint_separators(
     windows: &[TermRect],
     theme: &Theme,

@@ -222,12 +222,17 @@ impl GridRegistry {
     /// later frame that no longer needs it, exactly as
     /// [`crate::model::Model::take_paint_damage`] drains both its inputs
     /// unconditionally.
+    ///
+    /// The global grid's own row list is moved out rather than copied into
+    /// a fresh one, so a session with no window panes -- every session the
+    /// default attach opens -- costs exactly the allocation the drain it
+    /// replaced cost, which was none.
     pub(crate) fn take_damage(&mut self) -> GridDamage {
         let mut full = std::mem::take(&mut self.placement_dirty);
-        let mut rows = Vec::new();
         let global = self.global.take_dirty();
         full |= global.full;
-        rows.extend(global.rows);
+        let mut rows = global.rows;
+        let from_global = rows.len();
         for slot in &mut self.slots {
             let damage = slot.grid.take_dirty();
             let Some(placed) = slot.placed.as_ref() else {
@@ -245,10 +250,15 @@ impl GridRegistry {
             );
         }
         if full {
-            GridDamage::full()
-        } else {
-            GridDamage { full: false, rows }
+            return GridDamage::full();
         }
+        // two side-by-side panes redraw the same screen row on the same
+        // frame, and every consumer of this list scans it linearly
+        if rows.len() > from_global {
+            rows.sort_unstable();
+            rows.dedup();
+        }
+        GridDamage { full: false, rows }
     }
 
     /// The cells of one grid, or `None` for an id nvim has never named.
@@ -287,6 +297,11 @@ impl GridRegistry {
     /// grid behind it, and dropping the placement would lose a pane that
     /// never reappears.
     pub fn apply(&mut self, op: GridEvent) {
+        // deliberately over-approximating: the arms below discard some
+        // placement events (one naming the global grid, one naming a grid
+        // past the ceiling), and this counts those too. The safe direction
+        // -- a spare whole-frame repaint on a desynced stream, against a
+        // moved window whose vacated rows nothing ever repaints
         self.placement_dirty |= !matches!(op, GridEvent::Cells { .. });
         match op {
             GridEvent::Cells { grid, op } => self.apply_cells(grid, op),

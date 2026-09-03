@@ -4,3 +4,12 @@ left     │right
          │          
          │          
                     
+--- fg ---
+AAAAAAAAABAAAAAAAAAA
+AAAAAAAAABAAAAAAAAAA
+AAAAAAAAABAAAAAAAAAA
+AAAAAAAAABAAAAAAAAAA
+AAAAAAAAABAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAA
+A = Reset
+B = Rgb(204, 221, 238)

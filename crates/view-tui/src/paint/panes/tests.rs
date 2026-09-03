@@ -16,12 +16,21 @@ use crate::paint::{composite_into, Damage};
 /// read at: grid 1 is the whole screen, the two window grids are 9 and 10
 /// columns wide, and column 9 is the one neither of them occupies.
 ///
-/// Taken from `docs/multigrid-wire-capture.md`'s vsplit cycle, in its
-/// order: the grids are sized, then placed, and the cursor lands in the new
-/// window last.
+/// Event order follows `docs/multigrid-wire-capture.md`'s own vsplit cycle
+/// -- `win_pos [2]`, then both `grid_resize`, then `win_pos [4]` -- so the
+/// fixture also exercises the tolerance that cycle demands: a window placed
+/// before the grid behind it has a size.
 const LEFT: u64 = 4;
 const RIGHT: u64 = 2;
 const SEPARATOR_COL: u16 = 9;
+/// The highlight nvim paints its own separator column with, and the one a
+/// colorscheme gives view's `WinSeparator`. Distinct on purpose: the frame
+/// showing view's is what proves the overpaint, since both sides draw a
+/// glyph in the same cell.
+const ENGINE_SEPARATOR_HL: u64 = 12;
+const VIEW_SEPARATOR_HL: u64 = 13;
+const ENGINE_SEPARATOR_FG: u32 = 0x0011_2233;
+const VIEW_SEPARATOR_FG: u32 = 0x00CC_DDEE;
 /// A fixture terminal whose box-glyph probe came back saying it accounts
 /// for a box-drawing glyph as one cell, and one whose did not: the bit the
 /// separator charset is keyed on, named rather than spelled at a call site.
@@ -55,51 +64,91 @@ fn vsplit() -> Model {
     model.term_width = WIDTH;
     model.term_height = HEIGHT;
     model.caps = model.caps.with_unicode_boxes(DRAWS_BOX_GLYPHS);
-    drive(
-        &mut model,
-        vec![
-            UiEvent::GridResize {
-                grid: 1,
-                width: u64::from(WIDTH),
-                height: u64::from(HEIGHT),
-            },
-            UiEvent::GridResize {
-                grid: LEFT,
-                width: u64::from(SEPARATOR_COL),
-                height: 5,
-            },
-            UiEvent::GridResize {
-                grid: RIGHT,
-                width: 10,
-                height: 5,
-            },
-            UiEvent::WinPos {
-                grid: LEFT,
-                win: WinHandle(1001),
-                startrow: 0,
-                startcol: 0,
-                width: u64::from(SEPARATOR_COL),
-                height: 5,
-            },
-            UiEvent::WinPos {
-                grid: RIGHT,
-                win: WinHandle(1000),
-                startrow: 0,
-                startcol: u64::from(SEPARATOR_COL) + 1,
-                width: 10,
-                height: 5,
-            },
-            line(LEFT, 0, "left", 0),
-            line(RIGHT, 0, "right", 0),
-            UiEvent::GridCursorGoto {
-                grid: LEFT,
-                row: 0,
-                col: 0,
-            },
-            UiEvent::Flush,
-        ],
-    );
+    let mut events = vec![
+        UiEvent::GridResize {
+            grid: 1,
+            width: u64::from(WIDTH),
+            height: u64::from(HEIGHT),
+        },
+        attr(ENGINE_SEPARATOR_HL, ENGINE_SEPARATOR_FG),
+        attr(VIEW_SEPARATOR_HL, VIEW_SEPARATOR_FG),
+        UiEvent::HlGroupSet {
+            name: "WinSeparator".to_string(),
+            hl_id: VIEW_SEPARATOR_HL,
+        },
+        UiEvent::WinPos {
+            grid: RIGHT,
+            win: WinHandle(1000),
+            startrow: 0,
+            startcol: u64::from(SEPARATOR_COL) + 1,
+            width: 10,
+            height: 5,
+        },
+        UiEvent::GridResize {
+            grid: LEFT,
+            width: u64::from(SEPARATOR_COL),
+            height: 5,
+        },
+        UiEvent::GridResize {
+            grid: RIGHT,
+            width: 10,
+            height: 5,
+        },
+        UiEvent::WinPos {
+            grid: LEFT,
+            win: WinHandle(1001),
+            startrow: 0,
+            startcol: 0,
+            width: u64::from(SEPARATOR_COL),
+            height: 5,
+        },
+    ];
+    // grid 1 keeps carrying the separator column under multigrid (the
+    // capture's `grid_line [1, 0, 40, [["|", 12]]]`, one cell per window
+    // row), so every assertion below is about which of the two glyphs
+    // survives rather than about an empty cell
+    events.extend((0..5).map(|row| UiEvent::GridLine {
+        grid: 1,
+        row,
+        col_start: u64::from(SEPARATOR_COL),
+        cells: vec![GridCell {
+            text: "\u{2502}".to_string(),
+            hl_id: ENGINE_SEPARATOR_HL,
+            repeat: 1,
+        }],
+    }));
+    events.extend([
+        line(LEFT, 0, "left", 0),
+        line(RIGHT, 0, "right", 0),
+        UiEvent::GridCursorGoto {
+            grid: LEFT,
+            row: 0,
+            col: 0,
+        },
+        UiEvent::Flush,
+    ]);
+    drive(&mut model, events);
     model
+}
+
+fn attr(hl_id: u64, fg: u32) -> UiEvent {
+    UiEvent::HlAttrDefine {
+        id: hl_id,
+        fg: Some(fg),
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        reverse: false,
+    }
+}
+
+fn rgb(color: u32) -> Option<ratatui::style::Color> {
+    Some(ratatui::style::Color::Rgb(
+        (color >> 16) as u8,
+        (color >> 8) as u8,
+        color as u8,
+    ))
 }
 
 /// Composites `model` into a fresh buffer, the whole frame at once.
@@ -119,8 +168,9 @@ fn row_text(buf: &Buffer, row: u16) -> String {
         .collect()
 }
 
-/// Every cell of the column two windows leave between them carries view's
-/// own separator glyph, and neither window's own text is displaced by it.
+/// Every cell of the column between the two windows carries view's own
+/// separator -- its glyph and its style, over the one nvim painted into
+/// grid 1 underneath -- and neither window's text is displaced by it.
 #[test]
 fn two_windows_paint_with_one_separator_column() {
     let buf = frame(&vsplit());
@@ -143,17 +193,25 @@ fn two_windows_paint_with_one_separator_column() {
             "\u{2502}",
             "row {row} of the column between the two windows carries no separator"
         );
+        assert_eq!(
+            buf[(SEPARATOR_COL, row)].style().fg,
+            rgb(VIEW_SEPARATOR_FG),
+            "row {row} kept the engine's own separator style, so nothing was overpainted"
+        );
     }
 }
 
 /// A terminal whose box-glyph probe never came back draws the separator in
-/// ASCII, the same one-cell degrade every other view frame takes.
+/// ASCII, the same one-cell degrade every other view frame takes -- and the
+/// cell underneath holds nvim's `|`, so the ASCII glyph landing there is
+/// the overpaint proving itself.
 #[test]
 fn a_terminal_without_box_glyphs_separates_in_ascii() {
     let mut model = vsplit();
     model.caps = model.caps.with_unicode_boxes(NO_BOX_GLYPHS);
     let buf = frame(&model);
     assert_eq!(buf[(SEPARATOR_COL, 0)].symbol(), "|");
+    assert_eq!(buf[(SEPARATOR_COL, 0)].style().fg, rgb(VIEW_SEPARATOR_FG));
 }
 
 /// The window the cursor is not in takes `NormalNC` where its cells carry
@@ -229,7 +287,9 @@ fn a_float_paints_above_the_windows_it_overlaps() {
 }
 
 /// `win_hide` takes a pane off screen without destroying its grid, so the
-/// cells it still holds must not reach the frame.
+/// cells it still holds must not reach the frame -- and with nothing across
+/// the column any more, view stops overpainting it and grid 1's own cell
+/// shows through untouched.
 #[test]
 fn a_hidden_pane_paints_nothing() {
     let mut model = vsplit();
@@ -244,9 +304,9 @@ fn a_hidden_pane_paints_nothing() {
         row_text(&buf, 0)
     );
     assert_eq!(
-        buf[(SEPARATOR_COL, 0)].symbol(),
-        " ",
-        "a separator was drawn beside a window that is no longer on screen"
+        buf[(SEPARATOR_COL, 0)].style().fg,
+        rgb(ENGINE_SEPARATOR_FG),
+        "view drew its own separator beside a window that is no longer on screen"
     );
 }
 
@@ -355,6 +415,22 @@ fn a_panes_redraw_damages_its_own_rows_alone() {
         damage.rows,
         vec![2],
         "a pane's row must reach the frame in screen coordinates"
+    );
+
+    // both panes redrawing the same screen row is the ordinary case for a
+    // vsplit, and every consumer of this list scans it linearly
+    drive(
+        &mut model,
+        vec![
+            line(LEFT, 2, "y", 0),
+            line(RIGHT, 2, "z", 0),
+            UiEvent::Flush,
+        ],
+    );
+    assert_eq!(
+        model.take_paint_damage().rows,
+        vec![2],
+        "two panes redrawing one screen row reported it twice"
     );
 }
 
@@ -482,14 +558,14 @@ fn a_split_separates_only_the_rows_a_window_faces() {
     let buf = frame(&model);
     for row in [0, 1, 3, 4] {
         assert_eq!(
-            buf[(SEPARATOR_COL, row)].symbol(),
-            "\u{2502}",
-            "row {row} faces the right-hand window and carries no separator"
+            buf[(SEPARATOR_COL, row)].style().fg,
+            rgb(VIEW_SEPARATOR_FG),
+            "row {row} faces the right-hand window and kept the engine's separator"
         );
     }
     assert_eq!(
-        buf[(SEPARATOR_COL, 2)].symbol(),
-        " ",
+        buf[(SEPARATOR_COL, 2)].style().fg,
+        rgb(ENGINE_SEPARATOR_FG),
         "view drew over the statusline row the engine owns"
     );
 }
@@ -502,15 +578,47 @@ const UPDATE: &str = "VIEW_UPDATE_GOLDENS";
 /// The `:vsplit` frame as one terminal of the named capability answers
 /// draws it, rendered through the real painter rather than a second
 /// rasterizer.
+///
+/// Glyphs alone would not pin this feature: nvim paints its own `\u{2502}`
+/// into the same column, so a dump of text only reads identically whether
+/// view overpainted it or left it alone -- the separator paint could be
+/// deleted and two of the three goldens would still pass. The `fg` block is
+/// what closes that: one letter per cell for its resolved foreground, with
+/// the colors themselves in a legend, so which side owns the column is on
+/// the face of the committed file.
 fn dump(sync: bool, truecolor: bool, kitty: bool, unicode_boxes: bool) -> String {
     let mut model = vsplit();
     model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty)
         .with_unicode_boxes(unicode_boxes);
     let buf = frame(&model);
-    (0..buf.area.height)
+    let mut out: Vec<String> = (0..buf.area.height)
         .map(|row| row_text(&buf, row))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    out.push("--- fg ---".to_string());
+    let mut legend: Vec<ratatui::style::Color> = Vec::new();
+    for row in 0..buf.area.height {
+        out.push(
+            (0..buf.area.width)
+                .map(|col| match buf[(col, row)].style().fg {
+                    None => '.',
+                    Some(color) => {
+                        let seen = legend.iter().position(|c| *c == color).unwrap_or_else(|| {
+                            legend.push(color);
+                            legend.len() - 1
+                        });
+                        char::from(b'A' + u8::try_from(seen).unwrap_or(b'Z' - b'A'))
+                    }
+                })
+                .collect(),
+        );
+    }
+    for (index, color) in legend.iter().enumerate() {
+        out.push(format!(
+            "{} = {color:?}",
+            char::from(b'A' + u8::try_from(index).unwrap_or(b'Z' - b'A'))
+        ));
+    }
+    out.join("\n")
 }
 
 fn assert_golden(name: &str, actual: &str) {
