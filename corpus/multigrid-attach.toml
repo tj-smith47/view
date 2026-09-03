@@ -1,0 +1,10 @@
+# The multigrid floor: a session that attaches with `ext_multigrid` and is
+# never asked to split anything still holds the same grids the reference
+# engine does. Nvim opens one window grid beside the global one at attach
+# (`docs/multigrid-wire-capture.md`, "The grid id space"), so even this
+# entry compares two grids where a default-set entry compares one.
+schema = 1
+name = "multigrid-attach"
+input = "ihello multigrid<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

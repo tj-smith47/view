@@ -99,6 +99,36 @@ pub fn attr_rows(surface: &Surface, grid: &Grid, hl: &HlTable) -> Vec<String> {
     rows
 }
 
+/// Renders one grid's own cells to one `String` per grid row, with no
+/// [`Surface`] and so no compositing at all: the form a per-grid comparison
+/// needs under `ext_multigrid`, where each window's text lives in a grid of
+/// its own and the picture on screen is a thing view's compositor builds
+/// rather than a thing nvim sent.
+///
+/// A cell's whole text per column, for the reason [`screen_rows`] states.
+#[must_use]
+pub fn grid_rows(grid: &Grid) -> Vec<String> {
+    let (_, height) = grid.size();
+    (0..height).map(|row| grid.row_text(row)).collect()
+}
+
+/// The attr-parity counterpart of [`grid_rows`]: one
+/// [`crate::attr::ResolvedAttr`] fingerprint string per grid row, resolving
+/// each cell's `hl_id` through `hl` exactly as [`attr_rows`] does for the
+/// composited canvas.
+#[must_use]
+pub fn grid_attr_rows(grid: &Grid, hl: &HlTable) -> Vec<String> {
+    let (width, height) = grid.size();
+    (0..height)
+        .map(|r| {
+            row_fingerprint((0..width).map(|c| {
+                grid.cell(r, c)
+                    .map_or(ResolvedAttr::DEFAULT, |cell| resolve_attr(hl, cell.hl_id))
+            }))
+        })
+        .collect()
+}
+
 /// Writes the `EngineGrid` layer's per-cell attr fingerprints into `rows` at
 /// the same canvas offset [`paint_grid`] paints the grid's text into, so the
 /// attr row for a grid line and its glyph row share a canvas index.

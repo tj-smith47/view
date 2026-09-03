@@ -23,6 +23,15 @@
 //!   sessions' independent id assignments never register as a difference
 //!   (see [`crate::attr`]'s docs).
 //!
+//! - [`Divergence::PaneGrid`] / [`Divergence::PaneAttr`]: the same two
+//!   rendering axes, per grid, for the entries that attach with
+//!   `ext_multigrid` ([`compare_grids`]). Under that vocabulary nvim sends
+//!   each window's text in a grid of its own and the screen picture is
+//!   something view's compositor builds, so a comparison over one composited
+//!   image would be asserting that view draws separators the way nvim does
+//!   -- the opposite of the feature. These two name the grid, so a repro
+//!   says which window diverged.
+//!
 //! [`masked_rows`] excludes rows [`crate::ReferenceSession`] cannot ever
 //! agree on by construction: its `RefGrid` never receives
 //! `Cmdline*`/`Msg*`/`Tabline*`/`Popupmenu*` content (see
@@ -476,6 +485,24 @@ pub enum Divergence {
         view: String,
         reference: String,
     },
+    /// Glyph row `row` of grid `grid` disagreed, under a multigrid attach.
+    /// The per-grid counterpart of [`Divergence::Grid`]; no mask, because a
+    /// grid holds only what nvim painted into it and none of view's own
+    /// chrome.
+    PaneGrid {
+        grid: u64,
+        row: u16,
+        view: String,
+        reference: String,
+    },
+    /// Highlight row `row` of grid `grid` disagreed: the per-grid
+    /// counterpart of [`Divergence::Attr`].
+    PaneAttr {
+        grid: u64,
+        row: u16,
+        view: String,
+        reference: String,
+    },
 }
 
 /// [`Divergence`]'s variant, stripped of its payload: the granularity a
@@ -502,8 +529,11 @@ impl Divergence {
     pub fn kind(&self) -> DivergenceKind {
         match self {
             Self::State { .. } => DivergenceKind::State,
-            Self::Grid { .. } => DivergenceKind::Grid,
-            Self::Attr { .. } => DivergenceKind::Attr,
+            // a per-grid text divergence is a text divergence: the axis a
+            // minimizer must not reduce across is glyphs-versus-attributes,
+            // and which attach mode produced it does not change that
+            Self::Grid { .. } | Self::PaneGrid { .. } => DivergenceKind::Grid,
+            Self::Attr { .. } | Self::PaneAttr { .. } => DivergenceKind::Attr,
         }
     }
 }
@@ -591,6 +621,133 @@ pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -
         state: ref_state,
         screen: ref_screen,
     } = reference;
+    let mut divergences = diff_state(view_state, ref_state);
+
+    diff_rows(
+        ViewRows(&view_screen.rows),
+        ReferenceRows(&ref_screen.rows),
+        mask,
+        &mut divergences,
+        |row, v, r| Divergence::Grid {
+            row,
+            view: v.to_string(),
+            reference: r.to_string(),
+        },
+    );
+    diff_rows(
+        ViewRows(&view_screen.attr_rows),
+        ReferenceRows(&ref_screen.attr_rows),
+        mask,
+        &mut divergences,
+        |row, v, r| Divergence::Attr {
+            row,
+            view: v.to_string(),
+            reference: r.to_string(),
+        },
+    );
+
+    divergences
+}
+
+/// One side's per-grid screens, in [`GridRegistry::grid_ids`] order: the
+/// grid id nvim assigned paired with that grid's own glyph and attr dumps.
+///
+/// [`GridRegistry::grid_ids`]: view_core::grid::registry::GridRegistry::grid_ids
+pub type GridScreens = Vec<(u64, Screen)>;
+
+/// The view side of a per-grid comparison. Separate types from
+/// [`ViewGrids`]'s counterpart for the reason [`ViewSide`] gives.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewGrids<'a> {
+    pub state: &'a StateSnapshot,
+    pub grids: &'a [(u64, Screen)],
+}
+
+/// The reference applier's side of a per-grid comparison. See [`ViewGrids`].
+#[derive(Debug, Clone, Copy)]
+pub struct ReferenceGrids<'a> {
+    pub state: &'a StateSnapshot,
+    pub grids: &'a [(u64, Screen)],
+}
+
+/// [`compare`]'s multigrid form: the same state probes, and the rendering
+/// diff taken grid by grid over the ids the two sides were addressed by
+/// instead of over one composited image.
+///
+/// A grid present on only one side is diffed against an empty one rather
+/// than skipped, the same way [`diff_rows`] treats a row the shorter side
+/// does not have: a side that stopped receiving (or stopped keeping) a whole
+/// grid is the loudest thing this comparison can find, and skipping it would
+/// make an oracle that compares nothing look identical to one that compares
+/// everything.
+///
+/// No mask parameter: a grid carries what nvim painted into it and nothing
+/// view's own compositor draws, so there is no row here that the two sides
+/// cannot agree on by construction (see this module's own docs).
+#[must_use]
+pub fn compare_grids(view: ViewGrids<'_>, reference: ReferenceGrids<'_>) -> Vec<Divergence> {
+    let ViewGrids {
+        state: view_state,
+        grids: view_grids,
+    } = view;
+    let ReferenceGrids {
+        state: ref_state,
+        grids: ref_grids,
+    } = reference;
+    let mut divergences = diff_state(view_state, ref_state);
+
+    let empty = Screen {
+        rows: Vec::new(),
+        attr_rows: Vec::new(),
+    };
+    let mut ids: Vec<u64> = view_grids
+        .iter()
+        .chain(ref_grids.iter())
+        .map(|(id, _)| *id)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+
+    for id in ids {
+        let find = |grids: &'_ [(u64, Screen)]| {
+            grids
+                .iter()
+                .find(|(grid, _)| *grid == id)
+                .map_or_else(|| empty.clone(), |(_, screen)| screen.clone())
+        };
+        let view_screen = find(view_grids);
+        let ref_screen = find(ref_grids);
+        diff_rows(
+            ViewRows(&view_screen.rows),
+            ReferenceRows(&ref_screen.rows),
+            &[],
+            &mut divergences,
+            |row, v, r| Divergence::PaneGrid {
+                grid: id,
+                row,
+                view: v.to_string(),
+                reference: r.to_string(),
+            },
+        );
+        diff_rows(
+            ViewRows(&view_screen.attr_rows),
+            ReferenceRows(&ref_screen.attr_rows),
+            &[],
+            &mut divergences,
+            |row, v, r| Divergence::PaneAttr {
+                grid: id,
+                row,
+                view: v.to_string(),
+                reference: r.to_string(),
+            },
+        );
+    }
+
+    divergences
+}
+
+/// The state-probe half both comparison shapes share, field by field.
+fn diff_state(view_state: &StateSnapshot, ref_state: &StateSnapshot) -> Vec<Divergence> {
     let mut divergences = Vec::new();
 
     if view_state.buffer_lines != ref_state.buffer_lines {
@@ -642,29 +799,6 @@ pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -
             reference: format!("{:?}", ref_state.marks),
         });
     }
-
-    diff_rows(
-        ViewRows(&view_screen.rows),
-        ReferenceRows(&ref_screen.rows),
-        mask,
-        &mut divergences,
-        |row, v, r| Divergence::Grid {
-            row,
-            view: v.to_string(),
-            reference: r.to_string(),
-        },
-    );
-    diff_rows(
-        ViewRows(&view_screen.attr_rows),
-        ReferenceRows(&ref_screen.attr_rows),
-        mask,
-        &mut divergences,
-        |row, v, r| Divergence::Attr {
-            row,
-            view: v.to_string(),
-            reference: r.to_string(),
-        },
-    );
 
     divergences
 }

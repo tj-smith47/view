@@ -1,0 +1,9 @@
+# The other half of the float pair: opened and then closed, which is the
+# transition rather than the end state. A side that never created the
+# float's grid and a side that created and destroyed it agree here, so this
+# entry is only evidence beside `multigrid-float-open`.
+schema = 1
+name = "multigrid-float-closed"
+input = "iunder the float<Esc>:let g:oracle_float = nvim_open_win(nvim_create_buf(v:false, v:true), v:false, {'relative': 'editor', 'row': 2, 'col': 4, 'width': 20, 'height': 3, 'border': 'single'})<CR>:call nvim_win_close(g:oracle_float, v:true)<CR>"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

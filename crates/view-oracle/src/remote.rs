@@ -169,16 +169,20 @@ pub fn stub_config() -> Result<EngineConfig, OracleError> {
     Ok(cfg)
 }
 
-/// An [`EngineSession`] reached through [`stub_config`], for a caller driving
-/// its own script (the corpus runner's remote leg) rather than one of the
-/// cases below.
+/// An [`EngineSession`] reached through [`stub_config`] and attached with
+/// `surfaces`, for a caller driving its own script (the corpus runner's
+/// remote leg) rather than one of the cases below.
 ///
 /// # Errors
 ///
 /// Whatever [`stub_config`] reports, and otherwise whatever
 /// [`EngineSession::spawn_configured`] reports.
-pub fn spawn_stub_session(cols: u16, rows: u16) -> Result<EngineSession, OracleError> {
-    EngineSession::spawn_configured(stub_config()?, cols, rows)
+pub fn spawn_stub_session(
+    cols: u16,
+    rows: u16,
+    surfaces: &[&str],
+) -> Result<EngineSession, OracleError> {
+    EngineSession::spawn_configured(stub_config()?, cols, rows, surfaces)
 }
 
 /// One case of the remote battery.
@@ -362,7 +366,12 @@ fn parentless_open() -> Result<Vec<Divergence>, OracleError> {
     }
 
     let opening = |cfg: EngineConfig| -> Result<EngineSession, OracleError> {
-        EngineSession::spawn_configured(cfg.with_arg(OsStr::new(PARENTLESS_FILE)), COLS, ROWS)
+        EngineSession::spawn_configured(
+            cfg.with_arg(OsStr::new(PARENTLESS_FILE)),
+            COLS,
+            ROWS,
+            view_engine::UI_EXT_OPTIONS,
+        )
     };
     let mut remote = opening(stub_config()?)?;
     let mut local = opening(EngineConfig::isolated())?;

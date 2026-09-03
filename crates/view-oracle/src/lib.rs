@@ -73,6 +73,7 @@ use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
 use view_core::events::UiEvent;
+use view_core::grid::registry::GridId;
 use view_core::model::Model;
 use view_core::msg::{Effect, Msg, RpcCall};
 use view_core::update::update;
@@ -85,14 +86,20 @@ use view_surface::Surface;
 pub use compat::CompatSession;
 pub use minimize::{ddmin, join_tokens, tokenize};
 pub use parity::{
-    compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, ReferenceSide, Screen,
-    StateSnapshot, ViewSide,
+    compare, compare_grids, masked_rows, snapshot, Divergence, DivergenceKind, GridScreens, Probe,
+    ReferenceGrids, ReferenceSide, Screen, StateSnapshot, ViewGrids, ViewSide,
 };
 pub use pty::{
     kill_process_group, make_hermetic, PtySession, QueryPolicy, QueryResponder, SpawnEnv,
     BARELY_LATE_ANSWER_DELAY, LATE_ANSWER_DELAY,
 };
 pub use reference::ReferenceSession;
+/// The `nvim_ui_attach` option sets a driver attaches with, re-exported from
+/// the crates that own the vocabulary: a runner that picks a set for one
+/// side of a comparison names the same list the other side's attach takes,
+/// and reads it from the owner rather than restating six option keys.
+pub use view_core::native::ext::{ALL_NAMES_MULTIGRID as UI_EXT_OPTIONS_MULTIGRID, MULTIGRID_NAME};
+pub use view_engine::UI_EXT_OPTIONS;
 
 /// The workspace root this crate was built from, resolved from its own
 /// manifest rather than from a caller's working directory.
@@ -470,7 +477,19 @@ impl EngineSession {
     /// `ui_attach` handshake fails or times out, or the quiesce-protocol
     /// setup commands cannot be written to the connection.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, OracleError> {
-        Self::spawn_configured(EngineConfig::isolated(), cols, rows)
+        Self::spawn_with_ext(cols, rows, view_engine::UI_EXT_OPTIONS)
+    }
+
+    /// [`spawn`](Self::spawn) attaching with `surfaces` instead of the full
+    /// `ext_*` set: the front door a corpus entry carrying its own ext set
+    /// comes through, which is what makes a multigrid entry expressible
+    /// without a second driver.
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn`](Self::spawn).
+    pub fn spawn_with_ext(cols: u16, rows: u16, surfaces: &[&str]) -> Result<Self, OracleError> {
+        Self::spawn_configured(EngineConfig::isolated(), cols, rows, surfaces)
     }
 
     /// [`spawn`](Self::spawn), with the engine reached over the system `ssh`
@@ -495,7 +514,12 @@ impl EngineSession {
         rows: u16,
         remote: view_engine::process::RemoteSpec,
     ) -> Result<Self, OracleError> {
-        Self::spawn_configured(EngineConfig::isolated().with_remote(remote), cols, rows)
+        Self::spawn_configured(
+            EngineConfig::isolated().with_remote(remote),
+            cols,
+            rows,
+            view_engine::UI_EXT_OPTIONS,
+        )
     }
 
     /// The body both front doors above share, open to a caller that needs an
@@ -512,11 +536,14 @@ impl EngineSession {
     /// # Errors
     ///
     /// As [`spawn`](Self::spawn).
-    pub fn spawn_configured(cfg: EngineConfig, cols: u16, rows: u16) -> Result<Self, OracleError> {
+    pub fn spawn_configured(
+        cfg: EngineConfig,
+        cols: u16,
+        rows: u16,
+        surfaces: &[&str],
+    ) -> Result<Self, OracleError> {
         let mut engine = Engine::spawn(cfg)?;
-        engine
-            .handle
-            .ui_attach(cols, rows, view_engine::UI_EXT_OPTIONS)?;
+        engine.handle.ui_attach(cols, rows, surfaces)?;
         // no consumer ever drains this channel: EngineSession polls
         // DamagePump::take_damage directly instead (leg (c) is
         // harness-owned polling, not a blocking recv on a sink), and
@@ -708,6 +735,31 @@ impl EngineSession {
                 self.model.engine.hl(),
             ),
         }
+    }
+
+    /// Captures one [`Screen`] per grid nvim has named, in
+    /// `GridRegistry::grid_ids` order: the per-grid form [`crate::compare_grids`]
+    /// diffs for a multigrid entry, taken from the registry itself rather
+    /// than from a rendered [`Surface`], since the composited picture is the
+    /// thing a multigrid comparison must not be about.
+    #[must_use]
+    pub fn grid_screens(&self) -> crate::GridScreens {
+        let grids = self.model.engine.grids();
+        grids
+            .grid_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let grid = grids.grid(id)?;
+                let GridId(number) = id;
+                Some((
+                    number,
+                    Screen {
+                        rows: raster::grid_rows(grid),
+                        attr_rows: raster::grid_attr_rows(grid, self.model.engine.hl()),
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// Evaluates `expr` against the real engine and returns its result as

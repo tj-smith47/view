@@ -1,0 +1,8 @@
+# A window resized after two splits: every grid but the resized one keeps
+# the cells it was last painted with, and nvim re-sends only what changed,
+# so a grid rebuilt from scratch on resize diverges here and nowhere else.
+schema = 1
+name = "multigrid-resize"
+input = "ifilled<Esc>:vsplit<CR>:split<CR>:resize 4<CR>"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

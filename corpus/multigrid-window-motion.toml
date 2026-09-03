@@ -1,0 +1,9 @@
+# Motion between windows, with the cursor left on a different line in each:
+# `grid_cursor_goto` names a window grid under `ext_multigrid` and the
+# global grid without it, which the capture calls the one place the two
+# vocabularies do not overlap at all.
+schema = 1
+name = "multigrid-window-motion"
+input = "ione<CR>two<CR>three<Esc>:vsplit<CR>gg<C-w>wG<C-w>w"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

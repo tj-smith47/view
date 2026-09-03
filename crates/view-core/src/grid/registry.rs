@@ -219,6 +219,23 @@ impl GridRegistry {
             .map(|s| &s.grid)
     }
 
+    /// Every grid nvim has named, global first and the rest in ascending id
+    /// order.
+    ///
+    /// Placement is not a filter here, unlike [`panes_in_z_order`]: a hidden
+    /// window's grid still holds the cells nvim last painted into it, and a
+    /// caller comparing grid content against a second applier has to see the
+    /// same set of grids the wire named.
+    ///
+    /// [`panes_in_z_order`]: Self::panes_in_z_order
+    #[must_use]
+    pub fn grid_ids(&self) -> Vec<GridId> {
+        let mut ids: Vec<GridId> = self.slots.iter().map(|slot| slot.id).collect();
+        ids.sort_unstable();
+        ids.insert(0, GLOBAL_GRID);
+        ids
+    }
+
     /// Applies one decoded grid or window operation.
     ///
     /// An operation naming a grid that has no size yet records the
@@ -634,6 +651,27 @@ mod tests {
         assert!(
             registry.grid(GridId(9999)).is_none(),
             "the ceiling admitted a grid past MAX_GRIDS"
+        );
+    }
+
+    #[test]
+    fn every_named_grid_is_listed_whether_or_not_it_is_on_screen() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GridId(4), 40, 11);
+        resize(&mut registry, GridId(2), 39, 23);
+        registry.apply(GridEvent::Hide { grid: GridId(4) });
+
+        assert_eq!(
+            registry.grid_ids(),
+            vec![GLOBAL_GRID, GridId(2), GridId(4)],
+            "a hidden grid still holds cells and must stay listed"
+        );
+
+        registry.apply(GridEvent::Destroy { grid: GridId(4) });
+        assert_eq!(
+            registry.grid_ids(),
+            vec![GLOBAL_GRID, GridId(2)],
+            "a destroyed grid is gone from the listing"
         );
     }
 

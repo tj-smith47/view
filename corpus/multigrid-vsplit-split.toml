@@ -1,0 +1,11 @@
+# Both split directions with different text in the windows: under
+# `ext_multigrid` each window's text lands in a grid of its own, so an
+# applier that routed every `grid_line` to one grid reproduces the buffer
+# text through the state probe and still paints the wrong windows. Two
+# buffers rather than one because a single shared buffer would agree
+# cell-for-cell across grids even when the routing is wrong.
+schema = 1
+name = "multigrid-vsplit-split"
+input = ":vsplit<CR>:enew<CR>ileft side<Esc><C-w>wiright side<Esc>:split<CR>"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

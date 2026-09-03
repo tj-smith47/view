@@ -1,0 +1,8 @@
+# A closed window: `win_close` then `grid_destroy`, and the id is never
+# reissued. Both sides must forget the grid's cells -- a side that kept them
+# still agrees on every surviving grid and disagrees only on the count.
+schema = 1
+name = "multigrid-close-window"
+input = ":vsplit<CR>:enew<CR>igone soon<Esc>:close<CR>"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

@@ -171,10 +171,16 @@ fn a_host_variable_reaches_neither_side_of_the_stand_in_comparison() {
         stub_config().expect("the stub client and a preparable hermetic home"),
         COLS,
         ROWS,
+        view_engine::UI_EXT_OPTIONS,
     )
     .expect("a stand-in route session must start");
-    let mut local = EngineSession::spawn_configured(EngineConfig::isolated(), COLS, ROWS)
-        .expect("a local session must start");
+    let mut local = EngineSession::spawn_configured(
+        EngineConfig::isolated(),
+        COLS,
+        ROWS,
+        view_engine::UI_EXT_OPTIONS,
+    )
+    .expect("a local session must start");
 
     for (side, session) in [("stand-in route", &mut remote), ("local", &mut local)] {
         assert_eq!(

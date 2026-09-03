@@ -1,5 +1,5 @@
 //! [`ReferenceSession`]: a real embedded engine (same transport, decode, and
-//! `UI_EXT_OPTIONS` as [`crate::EngineSession`]) applying the decoded events
+//! attach set as [`crate::EngineSession`]) applying the decoded events
 //! with [`RefGrid`], a deliberately naive grid applier independent of
 //! `view_core::grid::Grid`. The pairing is the differential oracle: feed the
 //! same input to both, and any disagreement in the resulting screen text
@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use view_core::events::{clamp_dim, saturate_u16, GridCell, UiEvent};
 use view_engine::handle::EngineHandle;
@@ -58,14 +58,6 @@ struct RefGrid {
     rows: Vec<Vec<Cell>>,
     cursor_row: u16,
     cursor_col: u16,
-    /// Highlight definitions this side has received, keyed by the
-    /// per-session `hl_id` its own `grid_line` cells reference. Independent
-    /// of `view_core::hl::HlTable` for the same reason the rest of this
-    /// grid is independent of `view_core::grid::Grid` (see the module's
-    /// DO-NOT-CONSOLIDATE note): the oracle compares the resolved
-    /// [`ResolvedAttr`] content, never the raw id, so the two sides' id
-    /// spaces never have to agree. See [`crate::attr`]'s docs.
-    attrs: HashMap<u64, ResolvedAttr>,
 }
 
 impl RefGrid {
@@ -76,17 +68,7 @@ impl RefGrid {
             rows: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
-            attrs: HashMap::new(),
         }
-    }
-
-    /// Records one `hl_attr_define`'s resolved attributes under its
-    /// `hl_id`, the reference-side counterpart of `view_core`'s
-    /// `HlTable::attrs` insert. Grid content already stores each cell's raw
-    /// `hl_id` (see [`put_line`](Self::put_line)); this table is what
-    /// [`attr_row`](Self::attr_row) later resolves those ids through.
-    fn define_attr(&mut self, id: u64, attr: ResolvedAttr) {
-        self.attrs.insert(id, attr);
     }
 
     /// Rebuilds `rows` at the new size, copying the overlapping region from
@@ -229,16 +211,20 @@ impl RefGrid {
     }
 
     /// Renders `row`'s per-cell highlight identity, each cell's stored
-    /// `hl_id` resolved through [`attrs`](Self::attrs) into a
-    /// [`ResolvedAttr`] (defaulting for `hl_id` 0 and any undefined id, the
-    /// same fallback the view side's `resolve_attr` applies). The attr-parity
-    /// counterpart of [`row_text`](Self::row_text).
-    fn attr_row(&self, row: u16) -> String {
+    /// `hl_id` resolved through `attrs` into a [`ResolvedAttr`] (defaulting
+    /// for `hl_id` 0 and any undefined id, the same fallback the view side's
+    /// `resolve_attr` applies). The attr-parity counterpart of
+    /// [`row_text`](Self::row_text).
+    ///
+    /// The table is the session's rather than this grid's: `hl_attr_define`
+    /// names no grid on the wire, so one table serves every grid a multigrid
+    /// session holds.
+    fn attr_row(&self, row: u16, attrs: &HashMap<u64, ResolvedAttr>) -> String {
         self.rows
             .get(usize::from(row))
             .map(|cells| {
                 row_fingerprint(cells.iter().map(|c| {
-                    self.attrs
+                    attrs
                         .get(&c.hl_id)
                         .copied()
                         .unwrap_or(ResolvedAttr::DEFAULT)
@@ -247,6 +233,24 @@ impl RefGrid {
             .unwrap_or_default()
     }
 }
+
+/// The id nvim gives the global grid, in both attach modes and for the whole
+/// life of a connection (`docs/multigrid-wire-capture.md`, "The grid id
+/// space"). Spelled from the capture rather than imported from the registry
+/// this module exists to second-guess, like the rest of this applier.
+const GLOBAL_GRID: u64 = 1;
+
+/// What [`ReferenceSession::global`] answers if the global grid is somehow
+/// missing, which spawn makes unreachable: an empty grid degrades to an
+/// empty screen dump, where a lookup that panicked would take a whole
+/// differential run down over a state no wire event can produce.
+static EMPTY_GRID: RefGrid = RefGrid {
+    width: 0,
+    height: 0,
+    rows: Vec::new(),
+    cursor_row: 0,
+    cursor_col: 0,
+};
 
 /// `UiEvent::Unknown` names a real `--clean` nvim session emits on every
 /// healthy run, pinned from an empirical capture of the pinned nvim build
@@ -272,7 +276,22 @@ const KNOWN_UNMODELED_EVENTS: &[&str] = &[
 pub struct ReferenceSession {
     engine: Engine,
     pump: DamagePump,
-    grid: RefGrid,
+    /// Every grid nvim has addressed, by its own id. One entry (the global
+    /// grid, id [`GLOBAL_GRID`]) for a session attached without
+    /// `ext_multigrid`, where nvim puts the whole picture there; one per
+    /// window besides it when multigrid is negotiated.
+    grids: BTreeMap<u64, RefGrid>,
+    /// Highlight definitions this side has received, keyed by the
+    /// per-session `hl_id` its own `grid_line` cells reference. Independent
+    /// of `view_core::hl::HlTable` for the same reason [`RefGrid`] is
+    /// independent of `view_core::grid::Grid` (see the module's
+    /// DO-NOT-CONSOLIDATE note): the oracle compares the resolved
+    /// [`ResolvedAttr`] content, never the raw id, so the two sides' id
+    /// spaces never have to agree. See [`crate::attr`]'s docs.
+    attrs: HashMap<u64, ResolvedAttr>,
+    /// The grid the last `grid_cursor_goto` named, which is a window grid
+    /// under multigrid and the global grid without it.
+    cursor_grid: u64,
     mode: String,
     /// Names of `UiEvent::Unknown` events observed, in arrival order,
     /// unfiltered: an unrecognized redraw event class is a potential
@@ -321,7 +340,21 @@ impl ReferenceSession {
     /// `ui_attach` handshake fails or times out, or the quiesce-protocol
     /// setup commands cannot be written to the connection.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, OracleError> {
-        Self::spawn_configured(EngineConfig::isolated(), cols, rows)
+        Self::spawn_with_ext(cols, rows, view_engine::UI_EXT_OPTIONS)
+    }
+
+    /// [`spawn`](Self::spawn) attaching with `surfaces` instead of the full
+    /// `ext_*` set, the reference-side counterpart of
+    /// [`EngineSession::spawn_with_ext`](crate::EngineSession::spawn_with_ext):
+    /// a corpus entry carries its own ext set, and the two sides of a
+    /// comparison must attach with the same one or the comparison is about
+    /// the attach rather than about the applier.
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn`](Self::spawn).
+    pub fn spawn_with_ext(cols: u16, rows: u16, surfaces: &[&str]) -> Result<Self, OracleError> {
+        Self::spawn_configured(EngineConfig::isolated(), cols, rows, surfaces)
     }
 
     /// Same as [`spawn`](Self::spawn), but with a caller-supplied
@@ -332,17 +365,22 @@ impl ReferenceSession {
     /// # Errors
     ///
     /// Same as [`spawn`](Self::spawn).
-    pub fn spawn_configured(cfg: EngineConfig, cols: u16, rows: u16) -> Result<Self, OracleError> {
+    pub fn spawn_configured(
+        cfg: EngineConfig,
+        cols: u16,
+        rows: u16,
+        surfaces: &[&str],
+    ) -> Result<Self, OracleError> {
         let mut engine = Engine::spawn(cfg)?;
-        engine
-            .handle
-            .ui_attach(cols, rows, view_engine::UI_EXT_OPTIONS)?;
+        engine.handle.ui_attach(cols, rows, surfaces)?;
         let (sink, _unused_rx) = std::sync::mpsc::sync_channel(64);
         let (pump, _cutover) = engine.start_pump(sink);
         let session = Self {
             engine,
             pump,
-            grid: RefGrid::new(),
+            grids: BTreeMap::from([(GLOBAL_GRID, RefGrid::new())]),
+            attrs: HashMap::new(),
+            cursor_grid: GLOBAL_GRID,
             mode: String::new(),
             unknown_events_raw: Vec::new(),
             markers: QuiesceMarkers::default(),
@@ -434,7 +472,8 @@ impl ReferenceSession {
     pub fn screen_rows(&self) -> Vec<String> {
         let chrome = self.chrome_rows();
         let mut rows: Vec<String> = (0..chrome).map(|_| String::new()).collect();
-        rows.extend((0..self.grid.height).map(|r| self.grid.row_text(r)));
+        let global = self.global();
+        rows.extend((0..global.height).map(|r| global.row_text(r)));
         rows
     }
 
@@ -449,8 +488,46 @@ impl ReferenceSession {
     pub fn attr_rows(&self) -> Vec<String> {
         let chrome = self.chrome_rows();
         let mut rows: Vec<String> = (0..chrome).map(|_| String::new()).collect();
-        rows.extend((0..self.grid.height).map(|r| self.grid.attr_row(r)));
+        let global = self.global();
+        rows.extend((0..global.height).map(|r| global.attr_row(r, &self.attrs)));
         rows
+    }
+
+    /// Captures one [`crate::Screen`] per grid this session has been
+    /// addressed by, in ascending grid id: the reference-side counterpart of
+    /// [`EngineSession::grid_screens`](crate::EngineSession::grid_screens),
+    /// and the form [`crate::compare_grids`] diffs for a multigrid entry.
+    #[must_use]
+    pub fn grid_screens(&self) -> crate::GridScreens {
+        self.grids
+            .iter()
+            .map(|(id, grid)| {
+                (
+                    *id,
+                    crate::Screen {
+                        rows: (0..grid.height).map(|r| grid.row_text(r)).collect(),
+                        attr_rows: (0..grid.height)
+                            .map(|r| grid.attr_row(r, &self.attrs))
+                            .collect(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The global grid, which holds the whole picture without
+    /// `ext_multigrid` and the chrome between windows with it. Always
+    /// present: it is created at spawn and nvim never destroys it.
+    fn global(&self) -> &RefGrid {
+        self.grids.get(&GLOBAL_GRID).unwrap_or(&EMPTY_GRID)
+    }
+
+    /// The grid `id`, created empty if nvim has not addressed it before:
+    /// under multigrid a `grid_resize` is a grid's first appearance as often
+    /// as a `win_pos` is, so an applier that waited for a placement would
+    /// drop the resize that sizes the window it is about to paint.
+    fn grid_mut(&mut self, id: u64) -> &mut RefGrid {
+        self.grids.entry(id).or_insert_with(RefGrid::new)
     }
 
     /// Captures this side's [`crate::Screen`] -- glyph rows plus per-cell
@@ -489,10 +566,14 @@ impl ReferenceSession {
         self.engine.handle.get_mode().map_err(Into::into)
     }
 
-    /// The current cursor `(row, col)`, as last set by `GridCursorGoto`.
+    /// The current cursor `(row, col)`, as last set by `GridCursorGoto`,
+    /// inside the grid that event named -- which is a window grid under
+    /// multigrid and the global grid without it.
     #[must_use]
     pub fn cursor(&self) -> (u16, u16) {
-        (self.grid.cursor_row, self.grid.cursor_col)
+        self.grids
+            .get(&self.cursor_grid)
+            .map_or((0, 0), |grid| (grid.cursor_row, grid.cursor_col))
     }
 
     /// The current mode name, as last set by `ModeChange`.
@@ -557,30 +638,37 @@ impl ReferenceSession {
     /// place.
     fn apply(&mut self, ev: UiEvent) {
         match ev {
-            UiEvent::GridResize { width, height, .. } => {
-                self.grid.resize(clamp_dim(width), clamp_dim(height));
+            UiEvent::GridResize {
+                grid,
+                width,
+                height,
+            } => {
+                self.grid_mut(grid)
+                    .resize(clamp_dim(width), clamp_dim(height));
             }
             UiEvent::GridLine {
+                grid,
                 row,
                 col_start,
                 cells,
-                ..
             } => {
-                self.grid
+                self.grid_mut(grid)
                     .put_line(saturate_u16(row), saturate_u16(col_start), &cells);
             }
-            UiEvent::GridCursorGoto { row, col, .. } => {
-                self.grid.cursor_goto(saturate_u16(row), saturate_u16(col));
+            UiEvent::GridCursorGoto { grid, row, col } => {
+                self.cursor_grid = grid;
+                self.grid_mut(grid)
+                    .cursor_goto(saturate_u16(row), saturate_u16(col));
             }
             UiEvent::GridScroll {
+                grid,
                 top,
                 bot,
                 left,
                 right,
                 rows,
-                ..
             } => {
-                self.grid.scroll(
+                self.grid_mut(grid).scroll(
                     saturate_u16(top),
                     saturate_u16(bot),
                     saturate_u16(left),
@@ -588,8 +676,15 @@ impl ReferenceSession {
                     rows,
                 );
             }
-            UiEvent::GridClear { .. } => {
-                self.grid.clear();
+            UiEvent::GridClear { grid } => {
+                self.grid_mut(grid).clear();
+            }
+            // the grid and its cells are gone; the global grid is never
+            // destroyed, so an event naming it can only be a desynced
+            // stream and dropping the screen's own surface on one is not a
+            // recoverable state
+            UiEvent::GridDestroy { grid } if grid != GLOBAL_GRID => {
+                self.grids.remove(&grid);
             }
             UiEvent::ModeChange { mode, .. } => {
                 self.mode = mode;
@@ -637,7 +732,7 @@ impl ReferenceSession {
                 underline,
                 reverse,
             } => {
-                self.grid.define_attr(
+                self.attrs.insert(
                     id,
                     ResolvedAttr {
                         fg,
@@ -675,10 +770,13 @@ impl ReferenceSession {
             // session does not have (it attaches without `stdout_tty`, so
             // nvim never sends one here in the first place)
             | UiEvent::UiSend { .. }
-            // the placement vocabulary, which nvim emits only to a UI
-            // attached with `ext_multigrid`; this session attaches without
-            // it, so its whole grid is grid 1 and no window is ever placed
-            // over it
+            // the placement vocabulary: where a grid sits on screen, which
+            // only a compositor needs. This applier holds grids, never a
+            // picture built out of them, and the comparison a multigrid
+            // entry makes is per grid for exactly that reason (see
+            // `crate::compare_grids`). `grid_destroy` is the one member of
+            // the set that is not placement -- it takes a grid's cells with
+            // it -- and it is handled above.
             | UiEvent::GridDestroy { .. }
             | UiEvent::WinPos { .. }
             | UiEvent::WinFloatPos { .. }
@@ -840,7 +938,7 @@ mod tests {
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
 
-        reference_side.grid.rows[0][0] = Cell {
+        reference_side.grid_mut(GLOBAL_GRID).rows[0][0] = Cell {
             text: "Z".to_string(),
             hl_id: 0,
         };

@@ -1,0 +1,9 @@
+# A second tab page and back. The windows of the tab that stops being
+# current are hidden rather than destroyed, and they come back through a
+# bare `win_pos` with no paired show event, so a side that dropped a hidden
+# grid's cells has nothing to revive.
+schema = 1
+name = "multigrid-tabnew"
+input = "ifirst tab<Esc>:tabnew<CR>isecond tab<Esc>gt"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

@@ -73,9 +73,34 @@ pub const ALL_NAMES: &[&str] = &[
     Ext::Tabline.as_str(),
 ];
 
+/// The `nvim_ui_attach` option that makes nvim address each window's grid
+/// separately (`docs/multigrid-wire-capture.md`).
+///
+/// Not an [`Ext`] variant and not in [`ALL`]: it externalizes no surface, it
+/// changes how every grid on the wire is addressed, so [`Model::owns`] has
+/// nothing to answer about it and a session that asked for it would still
+/// own exactly the surfaces [`ALL`] names.
+///
+/// [`Model::owns`]: crate::model::Model::owns
+pub const MULTIGRID_NAME: &str = "ext_multigrid";
+
+/// [`ALL_NAMES`] plus [`MULTIGRID_NAME`], for the oracle sides that attach
+/// under the multigrid vocabulary. Spelled out rather than concatenated
+/// because a slice cannot be built from another one in a `const`;
+/// `the_multigrid_set_is_the_default_set_plus_one_option` denies the two
+/// lists drifting apart.
+pub const ALL_NAMES_MULTIGRID: &[&str] = &[
+    Ext::LineGrid.as_str(),
+    Ext::Cmdline.as_str(),
+    Ext::Popupmenu.as_str(),
+    Ext::Messages.as_str(),
+    Ext::Tabline.as_str(),
+    MULTIGRID_NAME,
+];
+
 #[cfg(test)]
 mod tests {
-    use super::{Ext, ALL, ALL_NAMES};
+    use super::{Ext, ALL, ALL_NAMES, ALL_NAMES_MULTIGRID, MULTIGRID_NAME};
 
     #[test]
     fn every_name_is_its_own_variants_spelling() {
@@ -94,5 +119,16 @@ mod tests {
             );
         }
         assert_eq!(ALL[0], Ext::LineGrid, "the grid protocol attaches first");
+    }
+
+    #[test]
+    fn the_multigrid_set_is_the_default_set_plus_one_option() {
+        let (head, tail) = ALL_NAMES_MULTIGRID.split_at(ALL_NAMES.len());
+        assert_eq!(head, ALL_NAMES, "the multigrid set opens with the default");
+        assert_eq!(tail, [MULTIGRID_NAME], "and adds exactly the one option");
+        assert!(
+            !ALL_NAMES.contains(&MULTIGRID_NAME),
+            "the default set must not negotiate multigrid"
+        );
     }
 }

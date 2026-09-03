@@ -45,8 +45,8 @@ use view_harness::page;
 use view_harness::results::load_results;
 use view_oracle::review::{DiffReviewCase, ReviewDriver, ReviewStep, NORMALIZE_KEYS};
 use view_oracle::{
-    compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
-    ReferenceSession, ReferenceSide, ViewSide,
+    compare, compare_grids, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence,
+    EngineSession, ReferenceGrids, ReferenceSession, ReferenceSide, ViewGrids, ViewSide,
 };
 
 /// Terminal size every corpus entry runs at. Fixed rather than a
@@ -474,6 +474,9 @@ fn settle_status(
 /// local route -- both reduce toward, or generate against, a failure
 /// signature, and a transport that can fail on its own would put a second
 /// variable inside that predicate.
+///
+/// `ext` is the attach set both sides negotiate, and with it the shape of
+/// the comparison they are scored by (see [`compare_pair`]).
 fn run_tokens(
     tokens: &[String],
     cols: u16,
@@ -481,9 +484,10 @@ fn run_tokens(
     silence: Duration,
     deadline: Duration,
     route: EngineRoute,
+    ext: &[&str],
 ) -> Result<EntryOutcome, view_oracle::OracleError> {
     let start = Instant::now();
-    let (mut engine, mut reference) = spawn_pair(cols, rows, silence, deadline, route)?;
+    let (mut engine, mut reference) = spawn_pair(cols, rows, silence, deadline, route, ext)?;
 
     let (engine_keys, reference_keys) =
         match tokens.iter().position(|t| t == INJECT_DIVERGENCE_TOKEN) {
@@ -512,6 +516,7 @@ fn run_tokens(
         EngineSettled(engine_settled),
         ReferenceSettled(reference_settled),
         start,
+        ext,
     )
 }
 
@@ -536,12 +541,13 @@ fn spawn_pair(
     silence: Duration,
     deadline: Duration,
     route: EngineRoute,
+    ext: &[&str],
 ) -> Result<(EngineSession, ReferenceSession), view_oracle::OracleError> {
     let mut engine = match route {
-        EngineRoute::Local => EngineSession::spawn(cols, rows)?,
-        EngineRoute::StubRemote => view_oracle::remote::spawn_stub_session(cols, rows)?,
+        EngineRoute::Local => EngineSession::spawn_with_ext(cols, rows, ext)?,
+        EngineRoute::StubRemote => view_oracle::remote::spawn_stub_session(cols, rows, ext)?,
     };
-    let mut reference = ReferenceSession::spawn(cols, rows)?;
+    let mut reference = ReferenceSession::spawn_with_ext(cols, rows, ext)?;
     let _ = engine.quiesce(silence, deadline)?;
     let _ = reference.quiesce(silence, deadline)?;
     let _ = engine.surface();
@@ -550,34 +556,63 @@ fn spawn_pair(
 
 /// Probes both sides and diffs them: the comparison tail every run shape
 /// shares, so a plain corpus entry and a diff-review one are scored by the
-/// same state probes, the same masked grid diff, and the same rule about an
+/// same state probes, the same grid diff, and the same rule about an
 /// unsettled side.
+///
+/// `ext` decides which grid diff that is. Without `ext_multigrid` nvim sends
+/// one grid holding the whole picture, and the two sides are diffed over
+/// their composited screens with view's own overlay rows masked out. With
+/// it, each window's text arrives in a grid of its own and the picture is
+/// something view's compositor builds, so the diff is per grid instead --
+/// comparing the composited images there would assert that view draws
+/// separators and float borders the way nvim does, which is the opposite of
+/// what the mode is for.
 fn compare_pair(
     engine: &mut EngineSession,
     reference: &mut ReferenceSession,
     engine_settled: EngineSettled,
     reference_settled: ReferenceSettled,
     start: Instant,
+    ext: &[&str],
 ) -> Result<EntryOutcome, view_oracle::OracleError> {
+    // both captures on both paths: the composited one is what keeps every
+    // entry, multigrid included, driving a capture through the production
+    // cached renderer (see `spawn_pair`), and only the comparison below
+    // decides which of the two an entry is scored by
     let surface = engine.surface();
     let view_screen = engine.screen();
     let mask = masked_rows(&surface);
     let ref_screen = reference.screen();
+    let view_grids = engine.grid_screens();
+    let ref_grids = reference.grid_screens();
 
     let view_state = snapshot(engine)?;
     let ref_state = snapshot(reference)?;
 
-    let divergences = compare(
-        ViewSide {
-            state: &view_state,
-            screen: &view_screen,
-        },
-        ReferenceSide {
-            state: &ref_state,
-            screen: &ref_screen,
-        },
-        &mask,
-    );
+    let divergences = if ext.contains(&view_oracle::MULTIGRID_NAME) {
+        compare_grids(
+            ViewGrids {
+                state: &view_state,
+                grids: &view_grids,
+            },
+            ReferenceGrids {
+                state: &ref_state,
+                grids: &ref_grids,
+            },
+        )
+    } else {
+        compare(
+            ViewSide {
+                state: &view_state,
+                screen: &view_screen,
+            },
+            ReferenceSide {
+                state: &ref_state,
+                screen: &ref_screen,
+            },
+            &mask,
+        )
+    };
 
     let EngineSettled(engine_settled) = engine_settled;
     let ReferenceSettled(reference_settled) = reference_settled;
@@ -610,6 +645,7 @@ fn run_entry(
             silence,
             deadline,
             route,
+            entry.ext_options,
         ),
     }
 }
@@ -634,7 +670,8 @@ fn run_review_entry(
     route: EngineRoute,
 ) -> Result<EntryOutcome, view_oracle::OracleError> {
     let start = Instant::now();
-    let (mut engine, mut reference) = spawn_pair(COLS, ROWS, silence, deadline, route)?;
+    let (mut engine, mut reference) =
+        spawn_pair(COLS, ROWS, silence, deadline, route, entry.ext_options)?;
 
     engine.arm_and_input(&entry.input)?;
     reference.arm_and_input(&entry.input)?;
@@ -683,6 +720,7 @@ fn run_review_entry(
         EngineSettled(engine_settled),
         ReferenceSettled(reference_settled),
         start,
+        entry.ext_options,
     )
 }
 
@@ -820,12 +858,17 @@ impl FailureSignature {
         }
         outcome.divergences.first().map(|d| match d {
             Divergence::State { field, .. } => Self::State(field.clone()),
-            Divergence::Grid { .. } => Self::Grid,
+            // the grid id is dropped here for the same reason the row index
+            // is: a reduced script opens fewer windows, so the grid its
+            // divergence lands on shifts exactly as the row does, and a
+            // predicate keyed on it would stop ddmin at the first candidate
+            // that still fails. The report line carries the id
+            Divergence::Grid { .. } | Divergence::PaneGrid { .. } => Self::Grid,
             // coarse like Grid (no per-row identity, since a minimized
             // script's diverging row is expected to shift): kept a distinct
             // signature from Grid so a minimizer never reduces an
             // attr-render divergence toward an unrelated text-render one
-            Divergence::Attr { .. } => Self::Attr,
+            Divergence::Attr { .. } | Divergence::PaneAttr { .. } => Self::Attr,
         })
     }
 
@@ -851,10 +894,19 @@ fn minimize_tokens(
     rows: u16,
     silence: Duration,
     deadline: Duration,
+    ext: &[&str],
 ) -> Vec<String> {
     ddmin(tokens, |candidate| {
-        run_tokens(candidate, cols, rows, silence, deadline, EngineRoute::Local)
-            .is_ok_and(|outcome| target.matches(&outcome))
+        run_tokens(
+            candidate,
+            cols,
+            rows,
+            silence,
+            deadline,
+            EngineRoute::Local,
+            ext,
+        )
+        .is_ok_and(|outcome| target.matches(&outcome))
     })
 }
 
@@ -907,8 +959,16 @@ fn minimize_command(path: &Path, inject_divergence_at: Option<usize>) -> Result<
     let tokens = build_tokens(&entry, inject_divergence_at);
     let original_len = tokens.len();
 
-    let baseline = run_tokens(&tokens, COLS, ROWS, silence, deadline, EngineRoute::Local)
-        .with_context(|| format!("running baseline for {}", entry.name))?;
+    let baseline = run_tokens(
+        &tokens,
+        COLS,
+        ROWS,
+        silence,
+        deadline,
+        EngineRoute::Local,
+        entry.ext_options,
+    )
+    .with_context(|| format!("running baseline for {}", entry.name))?;
     let Some(target) = FailureSignature::from_outcome(&baseline) else {
         bail!(
             "{} does not currently reproduce a divergence or timeout; nothing to minimize",
@@ -916,7 +976,15 @@ fn minimize_command(path: &Path, inject_divergence_at: Option<usize>) -> Result<
         );
     };
 
-    let minimized = minimize_tokens(tokens, target, COLS, ROWS, silence, deadline);
+    let minimized = minimize_tokens(
+        tokens,
+        target,
+        COLS,
+        ROWS,
+        silence,
+        deadline,
+        entry.ext_options,
+    );
     let minimized_input = join_tokens(&minimized);
 
     println!("minimized: {original_len} keys -> {} keys", minimized.len());
@@ -1035,6 +1103,7 @@ where
                     ROWS,
                     quiesce.silence,
                     quiesce.deadline,
+                    corpus::DEFAULT_EXT_OPTIONS,
                 );
                 let path = quarantine_entry(quarantine_dir, seed, round, &minimized, pin)?;
                 println!(
@@ -1100,6 +1169,7 @@ fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
                 quiesce.silence,
                 quiesce.deadline,
                 EngineRoute::Local,
+                corpus::DEFAULT_EXT_OPTIONS,
             )
         },
     )?;
@@ -1138,7 +1208,7 @@ fn quarantine_entry(
         &name,
         &join_tokens(tokens),
         engine_pin,
-        "default",
+        corpus::DEFAULT_EXT_SET,
         corpus::DEFAULT_QUIESCE_SILENCE_MS,
         corpus::DEFAULT_QUIESCE_DEADLINE_MS,
     )

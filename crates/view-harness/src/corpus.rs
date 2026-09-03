@@ -23,12 +23,33 @@ use view_oracle::review::DiffReviewCase;
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
 
-/// The only `ext_set` name recognized today: `wire::UI_EXT_OPTIONS`, the
-/// full `ext_*` set both `EngineSession` and `ReferenceSession` always
-/// request on attach. A named set (rather than the set itself living in
-/// the entry) leaves room for a future reduced-ext-set fixture without
-/// changing this field's shape.
-const DEFAULT_EXT_SET: &str = "default";
+/// The `ext_set` name every entry authored before multigrid carries: the
+/// full `ext_*` set view itself attaches with. A named set (rather than the set itself living in the
+/// entry) is what lets an entry name a vocabulary without restating six
+/// option keys, and what makes a set the runner does not know a load error
+/// instead of an attach that silently asked for nothing.
+pub const DEFAULT_EXT_SET: &str = "default";
+
+/// The options [`DEFAULT_EXT_SET`] resolves to, for the generated scripts
+/// that have no corpus file to read an `ext_set` from and drive the default
+/// vocabulary (the same reason [`DEFAULT_QUIESCE_SILENCE_MS`] is `pub`).
+pub const DEFAULT_EXT_OPTIONS: &[&str] = view_oracle::UI_EXT_OPTIONS;
+
+/// The `ext_set` name for the entries that attach with `ext_multigrid` on
+/// top of the default set, where nvim addresses each window's grid
+/// separately (`docs/multigrid-wire-capture.md`).
+const MULTIGRID_EXT_SET: &str = "multigrid";
+
+/// The `nvim_ui_attach` options each recognized `ext_set` name stands for.
+/// The one place a name is resolved, so the loader's validation and the
+/// runner's attach can never disagree about what a name means.
+fn ext_options(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        DEFAULT_EXT_SET => Some(DEFAULT_EXT_OPTIONS),
+        MULTIGRID_EXT_SET => Some(view_oracle::UI_EXT_OPTIONS_MULTIGRID),
+        _ => None,
+    }
+}
 
 /// Default quiesce silence window, matching the window
 /// `view-oracle`'s own end-to-end parity test
@@ -75,6 +96,11 @@ pub struct CorpusEntry {
     pub input: String,
     pub engine_pin: String,
     pub ext_set: String,
+    /// The `nvim_ui_attach` options [`ext_set`](Self::ext_set) names,
+    /// resolved once at load: both sides of the comparison attach with this,
+    /// and an entry that reached the runner has already been proven to name
+    /// a set that exists.
+    pub ext_options: &'static [&'static str],
     pub quiesce_silence_ms: u64,
     pub quiesce_deadline_ms: u64,
     /// The hunk-decision case this entry drives, for the entries that drive
@@ -101,7 +127,7 @@ pub enum CorpusError {
     #[error("unsupported corpus schema {0} (only schema = 1 is recognized)")]
     UnsupportedSchema(u32),
     /// `ext_set` named a set this loader does not recognize.
-    #[error("unknown ext_set {0:?} (only \"default\" is recognized)")]
+    #[error("unknown ext_set {0:?} (only \"default\" and \"multigrid\" are recognized)")]
     UnknownExtSet(String),
     /// `diff_review` named a case no [`DiffReviewCase`] answers to. A hard
     /// load error rather than a skipped entry: an entry naming a case that
@@ -128,9 +154,9 @@ pub fn parse(raw_toml: &str) -> Result<CorpusEntry, CorpusError> {
     if raw.schema != SUPPORTED_SCHEMA {
         return Err(CorpusError::UnsupportedSchema(raw.schema));
     }
-    if raw.ext_set != DEFAULT_EXT_SET {
+    let Some(ext_options) = ext_options(&raw.ext_set) else {
         return Err(CorpusError::UnknownExtSet(raw.ext_set));
-    }
+    };
     let diff_review = match raw.diff_review {
         None => None,
         Some(name) => {
@@ -142,6 +168,7 @@ pub fn parse(raw_toml: &str) -> Result<CorpusEntry, CorpusError> {
         input: raw.input,
         engine_pin: raw.engine_pin,
         ext_set: raw.ext_set,
+        ext_options,
         quiesce_silence_ms: raw.quiesce_silence_ms.unwrap_or(DEFAULT_QUIESCE_SILENCE_MS),
         quiesce_deadline_ms: raw
             .quiesce_deadline_ms
@@ -272,6 +299,7 @@ ext_set = "default"
         assert_eq!(entry.input, "ihello world<Esc>0x");
         assert_eq!(entry.engine_pin, "v0.12.4");
         assert_eq!(entry.ext_set, "default");
+        assert_eq!(entry.ext_options, view_oracle::UI_EXT_OPTIONS);
         // defaults applied when the TOML omits the quiesce overrides
         assert_eq!(entry.quiesce_silence_ms, DEFAULT_QUIESCE_SILENCE_MS);
         assert_eq!(entry.quiesce_deadline_ms, DEFAULT_QUIESCE_DEADLINE_MS);
@@ -339,6 +367,18 @@ engine_pin = "v0.12.4"
         assert!(
             matches!(err, CorpusError::UnknownDiffReviewCase(ref s) if s == "accept-everything"),
             "expected UnknownDiffReviewCase(\"accept-everything\"), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_multigrid_ext_set_resolves_to_the_multigrid_options() {
+        let toml = VALID.replace(r#"ext_set = "default""#, r#"ext_set = "multigrid""#);
+        let entry = parse(&toml).expect("the multigrid ext set must parse");
+        assert_eq!(entry.ext_set, "multigrid");
+        assert_eq!(
+            entry.ext_options,
+            view_oracle::UI_EXT_OPTIONS_MULTIGRID,
+            "a multigrid entry must attach with ext_multigrid"
         );
     }
 

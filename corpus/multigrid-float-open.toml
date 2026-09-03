@@ -1,0 +1,9 @@
+# A float left open, so its own grid is compared while it exists: the
+# border is part of the float's grid rather than of the screen behind it
+# (`docs/multigrid-wire-capture.md`, "Window-layout ground truth"), which is
+# why this compares grids and not one composited picture.
+schema = 1
+name = "multigrid-float-open"
+input = "iunder the float<Esc>:call nvim_open_win(nvim_create_buf(v:false, v:true), v:false, {'relative': 'editor', 'row': 2, 'col': 4, 'width': 20, 'height': 3, 'border': 'single'})<CR>"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"

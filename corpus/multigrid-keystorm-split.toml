@@ -1,0 +1,10 @@
+# A keystroke storm driven across a split layout: edits, yanks, a put, an
+# undo and a redo, with window switches in between, so the redraw traffic
+# for several grids interleaves inside single frames the way the capture
+# describes. The corpus counterpart of the fuzz rounds, pinned rather than
+# generated.
+schema = 1
+name = "multigrid-keystorm-split"
+input = ":vsplit<CR>ione two<CR>three four<Esc><C-w>wggVjy<C-w>wGp0dwu<C-r>A!<Esc><C-w>wdd<C-w>wP"
+engine_pin = "v0.12.4"
+ext_set = "multigrid"
