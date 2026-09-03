@@ -131,10 +131,14 @@ pub fn shim_taps_spec(
     use std::ffi::OsString;
     use std::path::PathBuf;
 
+    // recorded before the program is moved into the shell's argv, and
+    // kept when the inner spec was itself a wrapper: what the spawn
+    // measures does not change by being wrapped again
+    let measured_program = inner.measured_program.unwrap_or(inner.program);
     let mut args = vec![
         OsString::from("-c"),
         OsString::from("exec 9>\"$VIEW_BENCH_TAP_PATH\"; exec \"$0\" \"$@\""),
-        inner.program.into_os_string(),
+        measured_program.clone().into_os_string(),
     ];
     args.extend(inner.args);
     let mut env = inner.env;
@@ -148,6 +152,7 @@ pub fn shim_taps_spec(
         args,
         env,
         cwd: inner.cwd,
+        measured_program: Some(measured_program),
     }
 }
 
@@ -1253,6 +1258,7 @@ pub fn run_pty_floor(
             std::ffi::OsString::from("xterm-256color"),
         )],
         cwd: Some(cwd.to_path_buf()),
+        measured_program: None,
     };
     let mut session = BenchSession::spawn(&spec)?;
     if !session.settle(SettleBound {

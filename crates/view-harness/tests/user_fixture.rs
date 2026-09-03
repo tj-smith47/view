@@ -69,6 +69,7 @@ fn side(root: &std::path::Path, tag: &str, fixture: &std::path::Path) -> SpawnSp
         args: vec![scratch.into_os_string()],
         env,
         cwd: Some(dir),
+        measured_program: None,
     }
 }
 

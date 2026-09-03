@@ -916,11 +916,22 @@ fn require_named_bins_reach_their_rows(cli: &Cli, cells: &[CellId]) -> Result<()
     Ok(())
 }
 
+/// Where one arm of the measured editor is built: `arm` names the target
+/// directory the arm's own profile writes into, and `None` is the default
+/// build every row without an instrumentation requirement measures.
+fn default_view_bin(arm: Option<&str>) -> PathBuf {
+    let mut path = target_root();
+    if let Some(arm) = arm {
+        path.push(arm);
+    }
+    path.join("release").join("view")
+}
+
 fn resolve_view_bin(cli: &Cli) -> Result<PathBuf> {
     let path = cli
         .view_bin
         .clone()
-        .unwrap_or_else(|| target_root().join("release").join("view"));
+        .unwrap_or_else(|| default_view_bin(None));
     if !path.exists() {
         bail!(
             "view binary {} does not exist; run via `task bench` (which builds it) or pass --view-bin",
@@ -971,18 +982,16 @@ fn main() -> Result<()> {
         taps_view: cli
             .taps_view_bin
             .clone()
-            .unwrap_or_else(|| target_root().join("taps").join("release").join("view")),
+            .unwrap_or_else(|| default_view_bin(Some("taps"))),
         nospec_view: cli
             .nospec_view_bin
             .clone()
-            .unwrap_or_else(|| target_root().join("nospec").join("release").join("view")),
+            .unwrap_or_else(|| default_view_bin(Some("nospec"))),
         #[cfg(unix)]
-        taps_nospec_view: cli.taps_nospec_view_bin.clone().unwrap_or_else(|| {
-            target_root()
-                .join("taps-nospec")
-                .join("release")
-                .join("view")
-        }),
+        taps_nospec_view: cli
+            .taps_nospec_view_bin
+            .clone()
+            .unwrap_or_else(|| default_view_bin(Some("taps-nospec"))),
         nvim: nvim_bin,
     };
 
@@ -1694,6 +1703,54 @@ mod tests {
             "{FIRST_PAINT_MARKER_LINES} marker lines no longer overflow a \
              {}-row grid",
             view_bench::session::GRID_ROWS
+        );
+    }
+
+    /// One side's spawn inputs, with the paths never resolved: what these
+    /// assertions read is the program a spec measures, which no directory
+    /// on this host takes part in.
+    fn side_for_test() -> cell_world::SideSetup {
+        cell_world::SideSetup {
+            env: Vec::new(),
+            cwd: PathBuf::from("/nonexistent/never-entered"),
+            scratch_file: PathBuf::from("/nonexistent/never-entered/scratch.txt"),
+        }
+    }
+
+    /// Every arm of the measured editor the matrix resolves a path for has
+    /// to answer for view's notice stack, and the bare engine paired
+    /// against it must not. Asked through the builders rather than off a
+    /// path written out here: a spawn wrapped in the tap shim runs a
+    /// shell, so what it measures is visible only to the code that wrapped
+    /// it -- and a takedown that read the spawned program instead went
+    /// silent on every taps row without a single test noticing.
+    #[test]
+    fn every_view_spawn_the_matrix_builds_answers_for_its_notices() {
+        let nvim = PathBuf::from("nvim");
+        for arm in [None, Some("taps"), Some("nospec"), Some("taps-nospec")] {
+            let bin = default_view_bin(arm);
+            let bins = EditorBins {
+                view: &bin,
+                nvim: &nvim,
+            };
+            assert!(
+                view_bench::notices::runs_view(&view_spec_from(side_for_test(), bins)),
+                "{} is a view spawn that would not be asked for its notices",
+                bin.display()
+            );
+            #[cfg(unix)]
+            assert!(
+                view_bench::notices::runs_view(&view_bench::scenarios::taps::shim_taps_spec(
+                    view_spec_from(side_for_test(), bins),
+                    Path::new("/nonexistent/never-opened/tap.fifo"),
+                )),
+                "{} under the tap shim would not be asked for its notices",
+                bin.display()
+            );
+        }
+        assert!(
+            !view_bench::notices::runs_view(&nvim_spec_from(side_for_test(), &nvim)),
+            "the baseline side would be typed view's own ex-command"
         );
     }
 

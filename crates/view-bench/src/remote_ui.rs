@@ -135,10 +135,8 @@ impl RemoteUiServer {
     #[must_use]
     pub fn client_spec(&self, nvim: &SpawnSpec) -> SpawnSpec {
         SpawnSpec {
-            program: nvim.program.clone(),
             args: client_args(&self.socket),
-            env: nvim.env.clone(),
-            cwd: nvim.cwd.clone(),
+            ..nvim.clone()
         }
     }
 
@@ -196,6 +194,7 @@ mod tests {
             args: vec![OsString::from("/scratch/scratch.txt")],
             env: vec![(OsString::from("TERM"), OsString::from("xterm-256color"))],
             cwd: Some(PathBuf::from("/scratch")),
+            measured_program: None,
         }
     }
 

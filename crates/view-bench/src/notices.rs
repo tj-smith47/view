@@ -76,16 +76,23 @@ pub fn history_command() -> String {
 
 /// Whether `spec` runs view rather than a bare editor.
 ///
-/// Read off the program a session was spawned with, not off which side of a
-/// pair it measures: the null-pair calibration the gate opens with drives
-/// the echo scenario with a bare editor in the measured side's place, and a
-/// takedown that keyed on the side would have typed view's own command at
-/// an editor that has never heard of it.
+/// Read off the program under measurement, not off which side of a pair
+/// the spec occupies: a bare editor can hold the measured side, and a
+/// takedown keyed on the side would type view's own command at an editor
+/// that has never heard of it.
+///
+/// [`SpawnSpec::measured_program`] rather than the program spawned, and
+/// never the arguments: a spawn wrapped in a shell shim runs `sh`, so the
+/// spawned program answers no for a view session, while an argument scan
+/// answers yes for any spawn that merely names the binary -- including a
+/// bare editor handed view's own scratch file.
 #[must_use]
 pub fn runs_view(spec: &SpawnSpec) -> bool {
-    spec.program
+    spec.measured_program
+        .as_ref()
+        .unwrap_or(&spec.program)
         .file_stem()
-        .is_some_and(|stem| stem.eq_ignore_ascii_case(VIEW_PROGRAM))
+        .is_some_and(|stem| stem == std::ffi::OsStr::new(VIEW_PROGRAM))
 }
 
 /// Clears view's notice stack off `session`: waits for view's own bootstrap
@@ -95,7 +102,9 @@ pub fn runs_view(spec: &SpawnSpec) -> bool {
 /// `repaint_quiet` is the caller's own quiet span for one round trip to
 /// nvim and back, floored at [`REPAINT_QUIET`]; a caller measuring over an
 /// injected-latency transport passes the widened span it already uses for
-/// its startup settle.
+/// its startup settle. The wait for view's own bootstrap backs off from
+/// that span, since every attempt made before the bootstrap answers leaves
+/// an error in the engine's message stream for the walk below to clear.
 ///
 /// A session that is not running view answers immediately: a bare editor
 /// draws no notice over its buffer, and the overlay keys below would be a
@@ -132,7 +141,8 @@ pub fn take_down(
     // already drew, and the command sent on the strength of it comes back
     // `E492`. The overlay arriving is the one observable that says the
     // registration has run; ask for it until it does.
-    while !open_history(session, repaint_quiet, until)? {
+    let mut attempt_quiet = repaint_quiet;
+    while !open_history(session, attempt_quiet, until)? {
         if Instant::now() >= until {
             return Err(BenchError::Desync {
                 context: format!(
@@ -146,6 +156,12 @@ pub fn take_down(
         // the command line, and any error nvim put on it, go back down
         // before the next attempt types over them
         session.send(b"\x1b")?;
+        // every attempt that lands before the registration exists leaves
+        // one more `E492` in the engine's own message stream, which view
+        // surfaces as one more notice for the walk below to take down;
+        // backing off keeps a cold start's wait a handful of attempts
+        // rather than one per repaint window
+        attempt_quiet = attempt_quiet.saturating_mul(2).min(CLEAR_QUIET);
     }
     session.send(b"\x1b")?;
     // the transients go next and they go by waiting: `d` retracts a family
@@ -258,27 +274,50 @@ mod tests {
             args: Vec::new(),
             env: Vec::new(),
             cwd: None,
+            measured_program: None,
         }
     }
 
-    /// The takedown's whole subject is view's own notices, and the gate
-    /// opens with a null-pair calibration that drives the measured side of
-    /// the echo scenario with a bare editor -- so "which side" is not the
-    /// question, "which program" is. Every build of view the matrix spawns
-    /// answers yes; the engine it spawns answers no.
+    /// The takedown's whole subject is view's own notices, so what it asks
+    /// is which program a session measures. Every spec this crate builds
+    /// for a view session is asked here through the builder that produces
+    /// it, never through a path written out beside it: the shim answering
+    /// for the shell it spawns rather than the binary it wraps is what
+    /// silenced the takedown on every taps row once already, and a path
+    /// literal cannot see that.
+    #[cfg(unix)]
     #[test]
-    fn only_a_session_running_view_has_a_notice_stack_to_take_down() {
-        for program in [
-            "target/release/view",
-            "target/taps/release/view",
-            "target/nospec/release/view",
-            "/usr/local/bin/view.exe",
-        ] {
-            assert!(runs_view(&spec_running(program)), "{program}");
-        }
-        for program in ["/usr/bin/nvim", "target/engine/bin/nvim", "nvim"] {
-            assert!(!runs_view(&spec_running(program)), "{program}");
-        }
+    fn every_view_spawn_this_crate_builds_answers_for_its_notices() {
+        use crate::scenarios::{echo_speculated_rtt, taps};
+
+        let scratch = view_test_support::ScratchDir::new("notices-builders").unwrap();
+        let tap_path = scratch.path().join("tap.fifo");
+
+        let shimmed = taps::shim_taps_spec(spec_running("target/taps/release/view"), &tap_path);
+        assert_eq!(shimmed.program, std::path::PathBuf::from("sh"));
+        assert!(
+            runs_view(&shimmed),
+            "the tap shim hides the measured program behind the shell it execs from"
+        );
+        assert!(
+            !runs_view(&taps::shim_taps_spec(spec_running("nvim"), &tap_path)),
+            "a bare engine under the same shim is still a bare engine"
+        );
+
+        let rtt = echo_speculated_rtt::remote_rtt_view_spec(
+            scratch.path().to_path_buf(),
+            Vec::new(),
+            std::path::Path::new("target/taps/release/view"),
+            std::path::Path::new("nvim"),
+            std::path::Path::new("scratch.txt"),
+            &tap_path,
+            0,
+        )
+        .expect("the committed delay relay and its stub client arm the tier spec");
+        assert!(
+            runs_view(&rtt),
+            "an RTT tier measures the same editor through a relay"
+        );
     }
 
     /// The two silences a refusal has to tell apart: a view that has not
@@ -364,8 +403,14 @@ mod tests {
     /// Walks the scenario sources rather than a list of the ones anybody
     /// remembered: a new row fails here until it either clears the stack or
     /// writes down why its samples cannot be under a notice.
+    ///
+    /// A census of what each source intends, which is all a source walk can
+    /// see: that a call actually clears anything is a property of the spec
+    /// handed to it, pinned by
+    /// `every_view_spawn_this_crate_builds_answers_for_its_notices` and its
+    /// mirror over the harness's own builders.
     #[test]
-    fn every_scenario_source_answers_for_the_notice_stack() {
+    fn every_scenario_source_is_classified_for_the_notice_stack() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scenarios");
         let mut sources: Vec<(String, String)> = Vec::new();
         let mut stack = vec![root.clone()];
@@ -405,8 +450,8 @@ mod tests {
             assert_eq!(
                 clears,
                 grounds == TAKES_THEM_DOWN,
-                "{name}: the table and the source disagree about whether it clears the \
-                 notice stack (grounds on file: {grounds:?})"
+                "{name}: the table and the source disagree about whether it asks for the \
+                 notice stack to come down (grounds on file: {grounds:?})"
             );
         }
     }

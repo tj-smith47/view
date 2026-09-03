@@ -724,6 +724,7 @@ mod tests {
             args,
             env: Vec::new(),
             cwd: None,
+            measured_program: None,
         };
         let outcome = run(
             ViewSpec(&spec),

@@ -37,6 +37,18 @@ pub fn fixture_content() -> String {
 
 /// Parses the line label at `at`, returning its number when the cells hold
 /// a well-formed `L%06d`.
+/// When the fixture-label search runs out, given what the takedowns before
+/// it cost.
+///
+/// The takedown is a precondition of the search rather than a part of it:
+/// charged to the same budget, one takedown at a cold heavy start's cost
+/// leaves no room for the second search this loop exists to make, and a
+/// session that would have become ready fails as an invisible fixture
+/// label instead.
+fn readiness_deadline(started: Instant, settle_deadline: Duration, takedowns: Duration) -> Instant {
+    started + settle_deadline + takedowns
+}
+
 fn label_at(session: &mut BenchSession, at: crate::boundaries::CellPos) -> Option<u32> {
     let text = row_text_at(session, at);
     let digits = text.strip_prefix('L')?;
@@ -65,7 +77,8 @@ impl SideState {
         // static screen, so one settle pass can succeed before the engine
         // attaches and the fixture renders. Readiness here is the fixture
         // label actually being on screen, re-settling until the deadline.
-        let deadline = Instant::now() + settle_deadline;
+        let started = Instant::now();
+        let mut takedowns = Duration::ZERO;
         let (label_at, top_line) = loop {
             if !session.settle(SettleBound {
                 quiet: Duration::from_secs(2),
@@ -81,19 +94,23 @@ impl SideState {
             // inside the loop because the label can be under a notice: the
             // search below cannot run until the stack is down. A retry
             // therefore pays the takedown again, its drain settle included.
+            let before = Instant::now();
             crate::notices::take_down(
                 &mut session,
                 spec,
                 crate::notices::REPAINT_QUIET,
                 settle_deadline,
             )?;
+            takedowns += before.elapsed();
             if let Some(origin) = find_label_origin(&mut session) {
                 break origin;
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= readiness_deadline(started, settle_deadline, takedowns) {
                 return Err(BenchError::Desync {
                     context: format!(
-                        "no L-numbered fixture line visible within {settle_deadline:?}; screen:\n{}",
+                        "no L-numbered fixture line visible within {settle_deadline:?} of \
+                         readiness, {takedowns:?} of it spent taking view's notices \
+                         down; screen:\n{}",
                         session.screen_text()
                     ),
                 });
@@ -299,6 +316,27 @@ mod tests {
         assert_eq!(lines.next().unwrap(), "L000001 scroll benchmark line");
         assert_eq!(content.lines().count(), FIXTURE_LINES);
         assert!(content.ends_with("L100000 scroll benchmark line\n"));
+    }
+
+    /// A cold heavy start pays ~13s to take view's notices down, and the
+    /// readiness loop needs a second search after the first one misses.
+    #[test]
+    fn the_label_search_keeps_its_retry_after_a_takedown_spends_the_startup_budget() {
+        let started = Instant::now();
+        let settle_deadline = Duration::from_secs(30);
+        let takedown = Duration::from_millis(13_200);
+        let settle = Duration::from_secs(2);
+
+        let after_first = started + settle + takedown;
+        assert!(
+            after_first < readiness_deadline(started, settle_deadline, takedown),
+            "the first miss must leave the loop room to search again"
+        );
+        let after_second = after_first + settle + takedown;
+        assert!(
+            after_second < readiness_deadline(started, settle_deadline, takedown * 2),
+            "the second search must be allowed to finish before the deadline refuses"
+        );
     }
 
     #[test]

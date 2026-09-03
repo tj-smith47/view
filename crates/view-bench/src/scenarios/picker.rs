@@ -357,10 +357,8 @@ pub fn run(
 /// is the process cwd, so the corpus is selected by where view starts.
 fn spec_with_cwd(spec: &SpawnSpec, cwd: &Path) -> SpawnSpec {
     SpawnSpec {
-        program: spec.program.clone(),
-        args: spec.args.clone(),
-        env: spec.env.clone(),
         cwd: Some(cwd.to_path_buf()),
+        ..spec.clone()
     }
 }
 
@@ -665,8 +663,35 @@ fn observe_streaming(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::{debounced, SCAN_SAMPLES, SCAN_WARMUP};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    use super::{debounced, spec_with_cwd, SCAN_SAMPLES, SCAN_WARMUP};
     use crate::sampling::Distribution;
+    use crate::session::SpawnSpec;
+
+    /// Selecting the corpus moves where a spawn starts and nothing else.
+    ///
+    /// The base is shaped like a wrapped spawn, where the program spawned
+    /// and the program measured differ: a derivation that rebuilt the spec
+    /// field by field would drop the second, and the session it spawns
+    /// stops being recognisable as view to everything that asks.
+    #[test]
+    fn a_corpus_root_changes_where_a_spawn_starts_and_nothing_else() {
+        let base = SpawnSpec {
+            program: PathBuf::from("sh"),
+            args: vec![OsString::from("-c"), OsString::from("exec view")],
+            env: vec![(OsString::from("TERM"), OsString::from("xterm-256color"))],
+            cwd: Some(PathBuf::from("/elsewhere")),
+            measured_program: Some(PathBuf::from("target/release/view")),
+        };
+        let derived = spec_with_cwd(&base, Path::new("/corpus"));
+        assert_eq!(derived.cwd, Some(PathBuf::from("/corpus")));
+        assert_eq!(derived.program, base.program);
+        assert_eq!(derived.args, base.args);
+        assert_eq!(derived.env, base.env);
+        assert_eq!(derived.measured_program, base.measured_program);
+    }
 
     /// The count whose estimator this row shipped on, kept here as the
     /// thing the check below refuses rather than as history: a bar that

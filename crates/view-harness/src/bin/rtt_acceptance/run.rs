@@ -478,6 +478,7 @@ pub fn main() -> Result<()> {
             args: vec![nvim_side.scratch_file.into_os_string()],
             env: nvim_side.env,
             cwd: Some(nvim_side.cwd),
+            measured_program: None,
         };
 
         let tier_start = Instant::now();

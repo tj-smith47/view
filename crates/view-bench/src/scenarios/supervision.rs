@@ -511,10 +511,15 @@ mod tests {
     /// A sample recovers the swap it left itself and no other, so the one
     /// environment entry that decides where swap files land is the one
     /// entry a sample may rewrite.
+    ///
+    /// Shaped like a wrapped spawn, where the program spawned and the
+    /// program measured differ: a derivation that rebuilt the spec field
+    /// by field would drop the second and leave the sample's session
+    /// unrecognisable as view.
     #[test]
     fn each_sample_gets_its_own_state_directory_and_nothing_else_moves() {
         let base = SpawnSpec {
-            program: PathBuf::from("view"),
+            program: PathBuf::from("sh"),
             args: vec![OsString::from("scratch.txt")],
             env: vec![
                 (OsString::from("XDG_CONFIG_HOME"), OsString::from("/cfg")),
@@ -522,6 +527,7 @@ mod tests {
                 (OsString::from("TERM"), OsString::from("xterm-256color")),
             ],
             cwd: None,
+            measured_program: Some(PathBuf::from("view")),
         };
         let first = own_state_home(&base);
         let second = own_state_home(&base);
@@ -533,6 +539,7 @@ mod tests {
         assert_eq!(first.env[0], base.env[0]);
         assert_eq!(first.env[2], base.env[2]);
         assert_eq!(first.args, base.args);
+        assert_eq!(first.measured_program, base.measured_program);
     }
 
     #[test]

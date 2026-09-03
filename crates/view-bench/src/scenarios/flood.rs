@@ -717,6 +717,7 @@ mod tests {
             args: Vec::new(),
             env: Vec::new(),
             cwd: None,
+            measured_program: None,
         }
     }
 

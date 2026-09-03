@@ -203,6 +203,7 @@ pub(crate) fn view_spec_from(side: SideSetup, bins: EditorBins<'_>) -> SpawnSpec
         ],
         env: side.env,
         cwd: Some(side.cwd),
+        measured_program: None,
     }
 }
 
@@ -213,6 +214,7 @@ pub(crate) fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
         args: vec![side.scratch_file.into_os_string()],
         env: side.env,
         cwd: Some(side.cwd),
+        measured_program: None,
     }
 }
 

@@ -139,6 +139,7 @@ fn remote_memory_spec_from(side: SideSetup, bins: EditorBins<'_>) -> Result<Spaw
         args,
         env,
         cwd: Some(side.cwd),
+        measured_program: None,
     })
 }
 

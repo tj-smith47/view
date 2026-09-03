@@ -81,6 +81,7 @@ fn a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing() {
         ],
         env: vec![(OsString::from("TERM"), OsString::from("xterm-256color"))],
         cwd: Some(dir.to_path_buf()),
+        measured_program: None,
     };
 
     let server = RemoteUiServer::start(&bare, dir.join("ui.sock")).expect("headless server");

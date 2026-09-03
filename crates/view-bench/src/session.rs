@@ -32,6 +32,13 @@ pub struct SpawnSpec {
     pub args: Vec<OsString>,
     pub env: Vec<(OsString, OsString)>,
     pub cwd: Option<PathBuf>,
+    /// The binary the spawn measures when `program` is a wrapper that
+    /// execs it, and `None` when the two are the same. A wrapper is opaque
+    /// to everything downstream: read off `program`, a shell shim is a
+    /// shell, and a caller asking what is under measurement gets the
+    /// wrapper's answer instead of the editor's. Recorded by whoever wraps
+    /// the spawn, since only that code knows what it wrapped.
+    pub measured_program: Option<PathBuf>,
 }
 
 /// The spawn spec for the side under measurement.

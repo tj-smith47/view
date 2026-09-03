@@ -245,6 +245,7 @@ pub fn remote_rtt_view_spec(
         ],
         env,
         cwd: Some(cwd),
+        measured_program: None,
     };
     Ok(taps::shim_taps_spec(inner, tap_path))
 }
