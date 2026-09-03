@@ -506,22 +506,23 @@ single-grid arm: `grid_destroy`, `win_close`, `win_float_pos`,
 every name below, which is what the capture test asserts on rather than a
 list anyone maintains by hand. Five of them (`chdir`, `option_set`,
 `set_icon`, `set_title`, `update_menu`) are already unknown under
-single-grid and are unrelated to this work; the other six are exactly the
-multigrid delta.
+single-grid and are unrelated to this work.
+
+Of the six names that are the multigrid delta, five now decode into the
+placement vocabulary the pane registry applies (`grid_destroy`,
+`win_close`, `win_float_pos`, `win_hide`, `win_pos`), as does
+`win_external_pos` from the third arm. `win_viewport_margins` is the one
+left: it reports a float's border thickness, which the float's own grid
+already includes, so nothing reads it.
 
 ### Names view's decoder has no variant for
 
 ```
 chdir
-grid_destroy
 option_set
 set_icon
 set_title
 update_menu
-win_close
-win_float_pos
-win_hide
-win_pos
 win_viewport_margins
 ```
 

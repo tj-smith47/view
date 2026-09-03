@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
+use crate::grid::registry::{self, GridEvent, GridId, GridRegistry};
 use crate::grid::{Grid, GridOp};
 use crate::hl::{HlAttr, HlTable, ProbedDefaults};
 use crate::native::geometry::{self, OverlayBox, OverlayRect};
@@ -274,7 +275,7 @@ impl Model {
     pub fn new() -> Self {
         Self {
             engine: EngineModel {
-                grid: Grid::new(),
+                grids: GridRegistry::new(),
                 hl: HlTable::new(),
                 mode: ModeState::default(),
                 cmdline: None,
@@ -1036,7 +1037,7 @@ impl Model {
         // would resurface as damage on some later frame that no longer
         // needs it
         let hl_changed = self.engine.hl.take_dirty();
-        let grid = self.engine.grid.take_dirty();
+        let grid = self.engine.grids.global_mut().take_dirty();
         if hl_changed {
             crate::grid::GridDamage::full()
         } else {
@@ -1073,13 +1074,14 @@ impl Default for Model {
 /// wire.
 #[non_exhaustive]
 pub struct EngineModel {
-    /// The engine grid. Private, and reachable only through
-    /// [`EngineModel::grid`] and [`EngineModel::apply_grid`], because it is
-    /// one of the two paint inputs that track their own damage: a `pub`
-    /// field makes `engine.grid = Grid::new()` compile, which installs a
-    /// tracker holding none of the damage the replacement caused and clips
-    /// the next frame to nothing.
-    grid: Grid,
+    /// Every grid nvim has named, and the windows placed over them.
+    /// Private, and reachable only through [`EngineModel::grids`],
+    /// [`EngineModel::grid`] and the two appliers, because the grid inside
+    /// it is one of the two paint inputs that track their own damage: a
+    /// `pub` field makes `engine.grids = GridRegistry::new()` compile, which
+    /// installs a tracker holding none of the damage the replacement caused
+    /// and clips the next frame to nothing.
+    grids: GridRegistry,
     /// The highlight table, private for the same reason `grid` is; see
     /// [`EngineModel::hl`] and the mutators beside it. Whole-table
     /// replacement stays available through [`EngineModel::replace_hl`],
@@ -1128,15 +1130,37 @@ impl EngineModel {
     #[must_use]
     #[inline]
     pub fn grid(&self) -> &Grid {
-        &self.grid
+        self.grids.global()
     }
 
-    /// Applies one decoded `ext_linegrid` operation to the grid. The only
-    /// way to mutate it, so every mutation goes through the tracker that
-    /// records which rows it touched.
+    /// Every grid and pane, for reading.
+    #[must_use]
+    #[inline]
+    pub fn grids(&self) -> &GridRegistry {
+        &self.grids
+    }
+
+    /// Applies one decoded `ext_linegrid` operation to the global grid,
+    /// which is the whole picture until `ext_multigrid` is negotiated. The
+    /// only way to mutate it, so every mutation goes through the tracker
+    /// that records which rows it touched.
     #[inline]
     pub fn apply_grid(&mut self, op: GridOp) {
-        self.grid.apply(op);
+        self.grids.apply_cells(registry::GLOBAL_GRID, op);
+    }
+
+    /// Applies one cell operation to the grid nvim addressed it to.
+    #[inline]
+    pub(crate) fn apply_grid_to(&mut self, grid: GridId, op: GridOp) {
+        self.grids.apply_cells(grid, op);
+    }
+
+    /// Applies one operation to the grid it names, which is how every
+    /// redraw event reaches the registry: nvim addresses each one, and the
+    /// global grid is addressed like any other.
+    #[inline]
+    pub fn apply_grid_event(&mut self, ev: GridEvent) {
+        self.grids.apply(ev);
     }
 
     /// The highlight table, for reading: default colors, per-id attributes,
@@ -1219,7 +1243,8 @@ impl EngineModel {
     /// | `mouse_on` | `mouse_off` | yes |
     /// | `statusline`'s `msg_*` segments | the same event, empty | yes, via [`crate::native::statusline::StatuslineState::forget_engine_segments`] |
     /// | `statusline`'s bridge segments | view's own bridge, re-fired on install | no |
-    /// | `grid` | a fresh attach redraws every cell | no |
+    /// | `grids`' global cells | a fresh attach redraws every cell | no |
+    /// | `grids`' window grids and every pane | grid ids are per-connection, so both the panes and the cells behind them belong to a session that ended | yes |
     /// | `hl` | the replacement's own table replaces it | no |
     /// | `mode` | the replacement announces its modes on attach | no |
     /// | `messages`, `toast_history` | scrollback, not a point-in-time state | no |
@@ -1235,6 +1260,7 @@ impl EngineModel {
     pub fn forget_overlays(&mut self) {
         self.cmdline = None;
         self.popupmenu = None;
+        self.grids.forget_grids();
         let _ = self.float_absorption.forget();
         self.tabline = None;
         self.mouse_on = false;

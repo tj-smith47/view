@@ -2,6 +2,9 @@
 //!
 //! [`Grid`] holds no I/O and no RPC awareness; it is a pure sink for
 //! [`GridOp`] values that a higher layer decodes from nvim redraw events.
+//! [`registry`] addresses many of them by the id nvim gives each one.
+
+pub mod registry;
 
 /// A single grid cell: display text and the highlight group it was painted with.
 #[derive(Debug, Clone, PartialEq, Eq)]

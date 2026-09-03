@@ -480,6 +480,15 @@ fn answered_by(redraw: &[UiEvent], cell: &PredictedCell) -> bool {
         // the place its glyph was predicted for, and no later batch is
         // obliged to say so cell by cell
         UiEvent::GridScroll { .. } | UiEvent::GridClear { .. } | UiEvent::GridResize { .. } => true,
+        // the same answer for the same reason, one level up: a window that
+        // moved, hid, closed or died carries its grid's cells to a different
+        // place on screen (or off it) without resending one of them
+        UiEvent::GridDestroy { .. }
+        | UiEvent::WinPos { .. }
+        | UiEvent::WinFloatPos { .. }
+        | UiEvent::WinExternalPos { .. }
+        | UiEvent::WinHide { .. }
+        | UiEvent::WinClose { .. } => true,
         // a viewport that moved is read by `reconcile` itself, one reading
         // earlier and against the last one this window reported -- the event
         // on its own says nothing, since nvim sends it for every cursor move

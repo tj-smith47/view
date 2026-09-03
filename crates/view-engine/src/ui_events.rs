@@ -48,6 +48,12 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "grid_cursor_goto" => decode_grid_cursor_goto(args).unwrap_or_else(unknown),
         "grid_scroll" => decode_grid_scroll(args).unwrap_or_else(unknown),
         "grid_clear" => decode_grid_clear(args).unwrap_or_else(unknown),
+        "grid_destroy" => decode_grid_destroy(args).unwrap_or_else(unknown),
+        "win_pos" => decode_win_pos(args).unwrap_or_else(unknown),
+        "win_float_pos" => decode_win_float_pos(args).unwrap_or_else(unknown),
+        "win_external_pos" => decode_win_external_pos(args).unwrap_or_else(unknown),
+        "win_hide" => decode_win_hide(args).unwrap_or_else(unknown),
+        "win_close" => decode_win_close(args).unwrap_or_else(unknown),
         "win_viewport" => decode_win_viewport(args).unwrap_or_else(unknown),
         "hl_attr_define" => decode_hl_attr_define(args).unwrap_or_else(unknown),
         "default_colors_set" => decode_default_colors_set(args).unwrap_or_else(unknown),
@@ -126,6 +132,70 @@ fn decode_grid_scroll(args: &[Value]) -> Option<UiEvent> {
 fn decode_grid_clear(args: &[Value]) -> Option<UiEvent> {
     let [grid, ..] = args else { return None };
     Some(UiEvent::GridClear {
+        grid: as_u64(grid)?,
+    })
+}
+
+fn decode_grid_destroy(args: &[Value]) -> Option<UiEvent> {
+    let [grid, ..] = args else { return None };
+    Some(UiEvent::GridDestroy {
+        grid: as_u64(grid)?,
+    })
+}
+
+fn decode_win_pos(args: &[Value]) -> Option<UiEvent> {
+    let [grid, win, startrow, startcol, width, height, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::WinPos {
+        grid: as_u64(grid)?,
+        win: WinHandle(decode_ext_handle(win)?),
+        startrow: as_u64(startrow)?,
+        startcol: as_u64(startcol)?,
+        width: as_u64(width)?,
+        height: as_u64(height)?,
+    })
+}
+
+fn decode_win_float_pos(args: &[Value]) -> Option<UiEvent> {
+    // the pinned engine sends eleven fields, four more than the seven older
+    // frontends assume; `anchor`, `anchor_row`, `anchor_col` and
+    // `mouse_enabled` are skipped by position rather than named, since only
+    // the resolved `screen_*` pair positions a pane
+    let [grid, win, _anchor, anchor_grid, _anchor_row, _anchor_col, _mouse_enabled, zindex, compindex, screen_row, screen_col, ..] =
+        args
+    else {
+        return None;
+    };
+    Some(UiEvent::WinFloatPos {
+        grid: as_u64(grid)?,
+        win: WinHandle(decode_ext_handle(win)?),
+        anchor_grid: as_u64(anchor_grid)?,
+        zindex: as_u64(zindex)?,
+        compindex: as_u64(compindex)?,
+        screen_row: as_u64(screen_row)?,
+        screen_col: as_u64(screen_col)?,
+    })
+}
+
+fn decode_win_external_pos(args: &[Value]) -> Option<UiEvent> {
+    let [grid, win, ..] = args else { return None };
+    Some(UiEvent::WinExternalPos {
+        grid: as_u64(grid)?,
+        win: WinHandle(decode_ext_handle(win)?),
+    })
+}
+
+fn decode_win_hide(args: &[Value]) -> Option<UiEvent> {
+    let [grid, ..] = args else { return None };
+    Some(UiEvent::WinHide {
+        grid: as_u64(grid)?,
+    })
+}
+
+fn decode_win_close(args: &[Value]) -> Option<UiEvent> {
+    let [grid, ..] = args else { return None };
+    Some(UiEvent::WinClose {
         grid: as_u64(grid)?,
     })
 }
@@ -625,6 +695,112 @@ mod tests {
             curcol: 3,
         };
         assert_eq!(evs, vec![expected.clone(), expected]);
+    }
+
+    /// Every tuple here is quoted from `docs/multigrid-wire-capture.md`,
+    /// which is the only source for what these six events carry: a field
+    /// order recalled rather than captured is the defect the capture
+    /// protocol exists to prevent.
+    #[test]
+    fn decodes_the_multigrid_placement_vocabulary() {
+        let params = vec![
+            arr(vec![
+                Value::from("grid_destroy"),
+                arr(vec![Value::from(4u64)]),
+            ]),
+            // win_pos [2, ext(1:1000), 0, 41, 39, 23]
+            arr(vec![
+                Value::from("win_pos"),
+                arr(vec![
+                    Value::from(2u64),
+                    Value::Ext(1, vec![0xcd, 0x03, 0xe8]),
+                    Value::from(0u64),
+                    Value::from(41u64),
+                    Value::from(39u64),
+                    Value::from(23u64),
+                ]),
+            ]),
+            // win_float_pos [7, ext(1:1004), "NW", 1, 2.0, 4.0, true, 50, 1, 2, 4]
+            arr(vec![
+                Value::from("win_float_pos"),
+                arr(vec![
+                    Value::from(7u64),
+                    Value::Ext(1, vec![0xcd, 0x03, 0xec]),
+                    Value::from("NW"),
+                    Value::from(1u64),
+                    Value::from(2.0),
+                    Value::from(4.0),
+                    Value::from(true),
+                    Value::from(50u64),
+                    Value::from(1u64),
+                    Value::from(2u64),
+                    Value::from(4u64),
+                ]),
+            ]),
+            // win_external_pos [4, ext(1:1001)]
+            arr(vec![
+                Value::from("win_external_pos"),
+                arr(vec![
+                    Value::from(4u64),
+                    Value::Ext(1, vec![0xcd, 0x03, 0xe9]),
+                ]),
+            ]),
+            arr(vec![Value::from("win_hide"), arr(vec![Value::from(6u64)])]),
+            arr(vec![Value::from("win_close"), arr(vec![Value::from(4u64)])]),
+        ];
+
+        let evs = decode_redraw(&params);
+
+        assert_eq!(
+            evs,
+            vec![
+                UiEvent::GridDestroy { grid: 4 },
+                UiEvent::WinPos {
+                    grid: 2,
+                    win: WinHandle(1000),
+                    startrow: 0,
+                    startcol: 41,
+                    width: 39,
+                    height: 23,
+                },
+                UiEvent::WinFloatPos {
+                    grid: 7,
+                    win: WinHandle(1004),
+                    anchor_grid: 1,
+                    zindex: 50,
+                    compindex: 1,
+                    screen_row: 2,
+                    screen_col: 4,
+                },
+                UiEvent::WinExternalPos {
+                    grid: 4,
+                    win: WinHandle(1001),
+                },
+                UiEvent::WinHide { grid: 6 },
+                UiEvent::WinClose { grid: 4 },
+            ]
+        );
+    }
+
+    /// The float's position lives at the end of a tuple four fields longer
+    /// than the seven older frontends assume, so a decoder that stopped
+    /// short would read the anchor as the position.
+    #[test]
+    fn a_truncated_win_float_pos_decodes_to_unknown() {
+        let params = vec![arr(vec![
+            Value::from("win_float_pos"),
+            arr(vec![
+                Value::from(7u64),
+                Value::Ext(1, vec![0xcd, 0x03, 0xec]),
+                Value::from("NW"),
+                Value::from(1u64),
+                Value::from(2.0),
+                Value::from(4.0),
+                Value::from(true),
+            ]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert!(matches!(&evs[0], UiEvent::Unknown { name } if name == "win_float_pos"));
     }
 
     /// A tuple too short to carry a topline is worth nothing to the reader

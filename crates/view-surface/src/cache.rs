@@ -78,7 +78,9 @@ impl Frame {
 ///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
 ///   `mouse_capture`, `mouse_on`, `next_overlay_id`
 /// - read through a field already here: `engine` (this destructures it),
-///   `grid` (via `grid`), `hl` and `mode` (painters read them off the
+///   `grids` (via `grid`, which is the global grid's size -- the panes it
+///   also holds reach no layer while the compositor paints that grid
+///   alone), `hl` and `mode` (painters read them off the
 ///   `Model` on the reuse path), `overlays` (via `had_overlays`),
 ///   `statusline` (via `statusline_rows`), `toast_history` (only the
 ///   palette's history view reads it, and that is an overlay)
@@ -422,6 +424,71 @@ mod tests {
              painter reads it, or add it to the classification above `Inputs` \
              saying why it cannot change a frame",
             missing.join("\n  ")
+        );
+    }
+
+    /// The half the classification above cannot carry on its own: `grids`
+    /// is classified there as reaching no layer, which is true only while
+    /// every painter in this crate draws the global grid alone. The day one
+    /// reads the pane list, that sentence becomes the projection this
+    /// cache's whole class of misses is made of -- a frame keyed on one
+    /// grid's size, reused after a window moved.
+    #[test]
+    fn a_render_that_reads_panes_must_key_the_cache_on_them() {
+        let cache = include_str!("cache.rs");
+        let keyed = cache
+            .split_once("struct Inputs {")
+            .expect("Inputs is no longer declared")
+            .1
+            .split_once("impl SurfaceCache")
+            .expect("Inputs' capture and comparison are no longer declared")
+            .0;
+        let holds_panes = ["panes_in_z_order", "grids()"]
+            .iter()
+            .any(|reader| keyed.contains(reader));
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // a plain read_dir misses module subdirectories (overlay/ already
+        // exists), and a render source added there must not escape the walk
+        let mut dirs = vec![src.clone()];
+        let mut scanned = 0;
+        while let Some(dir) = dirs.pop() {
+            let listing = std::fs::read_dir(&dir).expect("this crate's own src/ must be readable");
+            for entry in listing.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension() != Some("rs".as_ref()) {
+                    continue;
+                }
+                // this file is skipped because the assertion below carries both
+                // needles in its own body, so scanning it answers about itself
+                if path.file_name() == Some("cache.rs".as_ref()) {
+                    continue;
+                }
+                let source =
+                    std::fs::read_to_string(&path).expect("a listed source must be readable");
+                let name = path.display();
+                scanned += 1;
+                for reader in ["panes_in_z_order", ".grids()"] {
+                    assert!(
+                        !source.contains(reader) || holds_panes,
+                        "{name} paints from {reader} while `Inputs` captures no \
+                         pane geometry, so a frame survives a window moving, \
+                         resizing, hiding or closing. Capture the panes in \
+                         `Inputs` (whole, not a projection) and say so in its \
+                         classification"
+                    );
+                }
+            }
+        }
+        assert!(
+            scanned > 0,
+            "the walk reached no source under {}, so it proves nothing about \
+             what this crate paints from",
+            src.display()
         );
     }
 

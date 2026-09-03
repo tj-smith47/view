@@ -452,6 +452,10 @@ struct Probes {
     without_ext_messages: Vec<String>,
     /// That arm's full transcript.
     dump: String,
+    /// The names that arm left undecoded. It is the only arm that emits
+    /// `win_external_pos` at all, so it is the only place a decoder for it
+    /// can be proven against the engine rather than against a fixture.
+    undecoded: Vec<String>,
     /// What nvim answered when a window was asked to go external.
     external: String,
 }
@@ -503,6 +507,7 @@ fn probe_extras() -> Probes {
     Probes {
         without_ext_messages: transcript.names(),
         dump: transcript.dump(),
+        undecoded: ui.undecoded.clone(),
         external,
     }
 }
@@ -591,6 +596,22 @@ fn the_multigrid_vocabulary_the_doc_publishes_is_the_one_the_pinned_engine_emits
         "every event the multigrid arm emitted already decodes to a typed \
          variant, so this capture describes the vocabulary view already \
          believes in rather than the one multigrid adds"
+    );
+    // the only arm that emits `win_external_pos`: its decode is otherwise
+    // proven against a hand-built tuple, which cannot catch a field order
+    // this engine spells differently
+    assert!(
+        probes
+            .without_ext_messages
+            .contains(&"win_external_pos".to_string()),
+        "the external-window probe emitted no win_external_pos, so nothing \
+         here exercises that decoder: {:?}",
+        probes.without_ext_messages
+    );
+    assert!(
+        !probes.undecoded.contains(&"win_external_pos".to_string()),
+        "win_external_pos reached decode_redraw and came back Unknown, so \
+         the variant does not match what this engine sends"
     );
 
     let doc_path = view_oracle::workspace_root().join(DOC);

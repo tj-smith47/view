@@ -39,6 +39,52 @@ pub enum UiEvent {
     },
     /// `grid` was cleared to the default background.
     GridClear { grid: u64 },
+    /// `grid` is gone. `ext_multigrid` only, and nvim never reissues the id.
+    GridDestroy { grid: u64 },
+    /// `win`'s ordinary (non-floating) window occupies `grid`, with its
+    /// first text cell at screen `(startrow, startcol)`. `ext_multigrid`
+    /// only.
+    ///
+    /// `width` and `height` repeat the size of the grid itself, which the
+    /// matching `grid_resize` also carries; the registry sizes a pane from
+    /// the grid rather than from here, so a cycle that resizes and moves a
+    /// window in either order lands on one answer.
+    WinPos {
+        grid: u64,
+        win: WinHandle,
+        startrow: u64,
+        startcol: u64,
+        width: u64,
+        height: u64,
+    },
+    /// `win`'s floating window occupies `grid` at screen
+    /// `(screen_row, screen_col)`, above the window layer at `zindex` and,
+    /// within one zindex, in `compindex` order. `ext_multigrid` only.
+    ///
+    /// The wire tuple carries four more fields -- `anchor`, `anchor_row`,
+    /// `anchor_col` and `mouse_enabled` -- and the first three are the
+    /// unresolved form of the position: `screen_row`/`screen_col` are what
+    /// nvim already resolved them to, so a compositor that decoded the
+    /// anchor would only re-derive an answer it was handed.
+    WinFloatPos {
+        grid: u64,
+        win: WinHandle,
+        anchor_grid: u64,
+        zindex: u64,
+        compindex: u64,
+        screen_row: u64,
+        screen_col: u64,
+    },
+    /// `win` left the window layout for a UI window of its own, so its
+    /// `grid` has no box on this screen. `ext_multigrid` only.
+    WinExternalPos { grid: u64, win: WinHandle },
+    /// `grid`'s window is off screen but alive, as every window of a tab
+    /// page that stops being current is. `ext_multigrid` only, and there is
+    /// no paired "show": the window returns through a bare `win_pos`.
+    WinHide { grid: u64 },
+    /// `grid`'s window closed. `ext_multigrid` only, and always followed by
+    /// `grid_destroy` for the same grid in the same cycle.
+    WinClose { grid: u64 },
     /// A window's visible region: `topline` and `botline` are the first and
     /// last buffer lines `win` is showing (`topline` zero-based, `botline`
     /// exclusive, as nvim sends them), and `curline`/`curcol` are the
@@ -271,4 +317,11 @@ pub fn clamp_dim(dim: u64) -> u16 {
 #[must_use]
 pub fn saturate_u16(v: u64) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
+}
+
+/// Saturates a wire `u64` stacking index into `u32`, the same way
+/// [`saturate_u16`] treats a coordinate.
+#[must_use]
+pub fn saturate_u32(v: u64) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
 }

@@ -4,7 +4,8 @@
 //! message, cmdline, popupmenu and tabline event nvim can send -- and it
 //! changes for reasons the message fold beside it never shares.
 
-use crate::events::{clamp_dim, saturate_u16, UiEvent};
+use crate::events::{clamp_dim, saturate_u16, saturate_u32, UiEvent};
+use crate::grid::registry::{GridEvent, GridId};
 use crate::grid::GridOp;
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, Model, OverlayKind, PopupmenuState, TablineState};
@@ -19,60 +20,105 @@ use crate::native::statusline::SegmentUpdate;
 /// as a `TryResize` the same way a terminal resize does.
 pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
     match ev {
-        UiEvent::GridResize { width, height, .. } => {
+        UiEvent::GridResize {
+            grid,
+            width,
+            height,
+        } => {
             // clamp untrusted wire dimensions: a desynced or malformed
             // grid_resize must not allocate unboundedly, and a plain `as
             // u16` cast would silently truncate 65536 to 0
-            model.engine.apply_grid(GridOp::Resize {
-                width: clamp_dim(width),
-                height: clamp_dim(height),
-            });
-            Vec::new()
+            cells(
+                model,
+                grid,
+                GridOp::Resize {
+                    width: clamp_dim(width),
+                    height: clamp_dim(height),
+                },
+            )
         }
         UiEvent::GridLine {
+            grid,
             row,
             col_start,
-            cells,
-            ..
-        } => {
-            model.engine.apply_grid(GridOp::PutLine {
+            cells: run,
+        } => cells(
+            model,
+            grid,
+            GridOp::PutLine {
                 row: saturate_u16(row),
                 col_start: saturate_u16(col_start),
-                cells: cells
+                cells: run
                     .into_iter()
                     .map(|c| (c.text, c.hl_id, c.repeat))
                     .collect(),
-            });
-            Vec::new()
-        }
-        UiEvent::GridCursorGoto { row, col, .. } => {
-            model.engine.apply_grid(GridOp::CursorGoto {
+            },
+        ),
+        UiEvent::GridCursorGoto { grid, row, col } => cells(
+            model,
+            grid,
+            GridOp::CursorGoto {
                 row: saturate_u16(row),
                 col: saturate_u16(col),
-            });
-            Vec::new()
-        }
+            },
+        ),
         UiEvent::GridScroll {
+            grid,
             top,
             bot,
             left,
             right,
             rows,
-            ..
-        } => {
-            model.engine.apply_grid(GridOp::Scroll {
+        } => cells(
+            model,
+            grid,
+            GridOp::Scroll {
                 top: saturate_u16(top),
                 bot: saturate_u16(bot),
                 left: saturate_u16(left),
                 right: saturate_u16(right),
                 rows: i32::try_from(rows).unwrap_or(if rows > 0 { i32::MAX } else { i32::MIN }),
-            });
-            Vec::new()
+            },
+        ),
+        UiEvent::GridClear { grid } => cells(model, grid, GridOp::Clear),
+        UiEvent::GridDestroy { grid } => place(model, GridEvent::Destroy { grid: GridId(grid) }),
+        UiEvent::WinPos {
+            grid,
+            startrow,
+            startcol,
+            ..
+        } => place(
+            model,
+            GridEvent::Window {
+                grid: GridId(grid),
+                startrow: saturate_u16(startrow),
+                startcol: saturate_u16(startcol),
+            },
+        ),
+        UiEvent::WinFloatPos {
+            grid,
+            anchor_grid,
+            zindex,
+            compindex,
+            screen_row,
+            screen_col,
+            ..
+        } => place(
+            model,
+            GridEvent::Float {
+                grid: GridId(grid),
+                anchor_grid: GridId(anchor_grid),
+                screen_row: saturate_u16(screen_row),
+                screen_col: saturate_u16(screen_col),
+                zindex: saturate_u32(zindex),
+                compindex: saturate_u32(compindex),
+            },
+        ),
+        UiEvent::WinExternalPos { grid, .. } => {
+            place(model, GridEvent::External { grid: GridId(grid) })
         }
-        UiEvent::GridClear { .. } => {
-            model.engine.apply_grid(GridOp::Clear);
-            Vec::new()
-        }
+        UiEvent::WinHide { grid } => place(model, GridEvent::Hide { grid: GridId(grid) }),
+        UiEvent::WinClose { grid } => place(model, GridEvent::Close { grid: GridId(grid) }),
         UiEvent::HlAttrDefine {
             id,
             fg,
@@ -309,6 +355,22 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         // this applier ever sees it
         UiEvent::WinViewport { .. } | UiEvent::Unknown { .. } => Vec::new(),
     }
+}
+
+/// Applies one cell operation to the grid the wire named, producing no
+/// effects. A grid id view has never seen is not an error: nvim names a new
+/// grid before it sizes it, and the registry records it either way.
+fn cells(model: &mut Model, grid: u64, op: GridOp) -> Vec<Effect> {
+    model.engine.apply_grid_to(GridId(grid), op);
+    Vec::new()
+}
+
+/// Applies one window-placement operation, producing no effects. Nothing
+/// repaints differently for it yet: the compositor still draws the global
+/// grid alone.
+fn place(model: &mut Model, ev: GridEvent) -> Vec<Effect> {
+    model.engine.apply_grid_event(ev);
+    Vec::new()
 }
 
 /// The forwarding policy for one `nvim_ui_send` payload.

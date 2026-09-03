@@ -674,7 +674,17 @@ impl ReferenceSession {
             // no cell content either: bytes bound for a terminal this
             // session does not have (it attaches without `stdout_tty`, so
             // nvim never sends one here in the first place)
-            | UiEvent::UiSend { .. } => {}
+            | UiEvent::UiSend { .. }
+            // the placement vocabulary, which nvim emits only to a UI
+            // attached with `ext_multigrid`; this session attaches without
+            // it, so its whole grid is grid 1 and no window is ever placed
+            // over it
+            | UiEvent::GridDestroy { .. }
+            | UiEvent::WinPos { .. }
+            | UiEvent::WinFloatPos { .. }
+            | UiEvent::WinExternalPos { .. }
+            | UiEvent::WinHide { .. }
+            | UiEvent::WinClose { .. } => {}
         }
     }
 
