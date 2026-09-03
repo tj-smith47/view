@@ -10,6 +10,7 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Status: pre-alpha](https://img.shields.io/badge/Status-pre--alpha-orange.svg)](#roadmap)
 
+[Install](#install) &bull;
 [Features](#features) &bull;
 [Not a distro](#not-another-neovim-distro) &bull;
 [Performance](#performance) &bull;
@@ -185,12 +186,60 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
       LSP UI move to view's side one subsystem at a time, each only after
       the differential oracle proves parity over a committed corpus.
 
+## Install
+
+Every release ships a bundle per platform: the `view` binary and the exact
+Neovim the release was tested against, together in one archive. Nothing else
+is needed on the machine, and the bundled engine is used in preference to any
+`nvim` already on your `PATH`.
+
+```bash
+# pick your platform from https://github.com/tj-smith47/view/releases/latest
+tar xzf view-v0.1.0-aarch64-apple-darwin.tar.gz
+./view-v0.1.0-aarch64-apple-darwin/bin/view yourfile.rs
+```
+
+Move the whole extracted directory where you keep local software and put its
+`bin/` on your `PATH`; the editor finds its engine relative to itself, so the
+directory stays intact:
+
+```
+view-v0.1.0-aarch64-apple-darwin/
+├── bin/view
+└── libexec/view/
+    ├── nvim
+    └── share/nvim/runtime/
+```
+
+On Windows the archive is a `.zip` with the same shape (`bin\view.exe`,
+`libexec\view\nvim.exe`).
+
+### Verifying a download
+
+Releases are signed with [cosign](https://docs.sigstore.dev) keylessly, so
+the signing identity is the release workflow itself and there is no key to
+trust. Every archive ships a `.sig` and a `.pem` beside it, and a
+`view_<version>_checksums.txt` covers all of them.
+
+```bash
+cosign verify-blob \
+  --certificate view-v0.1.0-aarch64-apple-darwin.tar.gz.pem \
+  --signature view-v0.1.0-aarch64-apple-darwin.tar.gz.sig \
+  --certificate-identity "https://github.com/tj-smith47/view/.github/workflows/release.yml@refs/tags/v0.1.0" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  view-v0.1.0-aarch64-apple-darwin.tar.gz
+```
+
+```bash
+sha256sum --check --ignore-missing view_0.1.0_checksums.txt
+```
+
 ## Building from source
 
-You will need stable Rust, [Task](https://taskfile.dev), and Neovim
-`v0.12.4` on your `PATH` (the engine is pinned; see `.engine-pin`). Release
-builds will eventually bundle Neovim so only the pre-built binary needs
-nothing installed.
+You will need stable Rust, [Task](https://taskfile.dev), and the Neovim
+version `.engine-pin` names on your `PATH`. A source
+build resolves `nvim` from your `PATH`; only the released bundles carry an
+engine of their own.
 
 ```bash
 git clone https://github.com/tj-smith47/view.git

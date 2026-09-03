@@ -50,8 +50,25 @@ floor_for() {
   case "$1" in
     .github/workflows/ci.yml) echo 16 ;;
     .github/workflows/bench.yml) echo 3 ;;
+    .github/workflows/release.yml) echo 1 ;;
     *) echo "" ;;
   esac
+}
+# The release config and the packaging it drives ship the engine rather than
+# installing it for a test, so they read the pin instead of naming a version
+# -- and a version named in either is the one a reader would trust while the
+# archive carried something else.
+check_pin_free() {
+  local file="$1"
+  [ -f "$file" ] || { echo "PIN FAIL: $file not found"; fail=1; return; }
+  if grep -nE 'v[0-9]+\.[0-9]+\.[0-9]+' "$file"; then
+    echo "PIN FAIL: $file: engine version literal above (must derive from .engine-pin)"
+    fail=1
+  fi
+  if grep -nE 'neovim/releases/download/v[0-9]' "$file"; then
+    echo "PIN FAIL: $file: hardcoded nvim download above (must derive from .engine-pin)"
+    fail=1
+  fi
 }
 # Which workflows to check is derived, not listed: a third one that installs
 # the engine is checked the moment it exists, rather than the next time
@@ -74,10 +91,13 @@ done
 # and the other direction: a workflow that carried a floor and no longer
 # installs anything (renamed, deleted, or quietly stripped of its install
 # steps) is a gate that stopped gating
-for workflow in .github/workflows/ci.yml .github/workflows/bench.yml; do
+for workflow in .github/workflows/ci.yml .github/workflows/bench.yml \
+  .github/workflows/release.yml; do
   case " $installers " in
     *" $workflow "*) ;;
     *) echo "PIN FAIL: $workflow not found, or it no longer installs nvim"; fail=1 ;;
   esac
 done
+check_pin_free .anodizer.yaml
+check_pin_free scripts/package-bundle.sh
 exit $fail

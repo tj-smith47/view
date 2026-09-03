@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # The platform list has one definition, `.anodizer.yaml`, and this job is
+  # how the matrix reads it: a target added there is built, bundled and
+  # published without a second edit here.
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install anodizer
+        uses: taiki-e/install-action@v2
+        with:
+          tool: anodizer
+
+      - name: Read the release targets
+        id: targets
+        run: echo "matrix=$(anodizer targets --json)" >> "$GITHUB_OUTPUT"
+
+  bundle:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix.outputs.targets) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # The aarch64 leg is the only one whose triple is not the runner's own,
+      # and a TUI editor's dependency tree reaches libc; the GNU cross linker
+      # is what closes that gap without a container.
+      - name: Install the aarch64 linux cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build the release binary
+        run: cargo build --release --locked -p view --target ${{ matrix.target }}
+
+      # The bundled engine is the version .engine-pin names, resolved by
+      # scripts/package-bundle.sh at build time. A literal here would be a
+      # second version to keep in step, which scripts/check-engine-pin.sh
+      # refuses across every workflow for exactly that reason.
+      - name: Stage and archive the bundled pair
+        shell: bash
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          echo "bundling view ${GITHUB_REF_NAME} with engine ${ENGINE_PIN} for ${{ matrix.target }}"
+          root="bundles/view-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          case "${{ matrix.target }}" in
+            *-windows-*) out="${root}.zip" ;;
+            *) out="${root}.tar.gz" ;;
+          esac
+          suffix=""
+          case "${{ matrix.target }}" in *-windows-*) suffix=".exe" ;; esac
+          bash scripts/package-bundle.sh stage "${{ matrix.target }}" \
+            "target/${{ matrix.target }}/release/view${suffix}" "$root"
+          bash scripts/package-bundle.sh archive "$root" "$PWD/$out"
+          rm -rf "$root" "$root.engine"
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: bundles/*
+          if-no-files-found: error
+
+  publish:
+    needs: bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless cosign: the signing identity is this workflow's own OIDC
+      # token, so there is no key to store, rotate or leak.
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download every bundle
+        uses: actions/download-artifact@v4
+        with:
+          path: bundles
+          pattern: bundle-*
+          merge-multiple: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign every bundle
+        run: |
+          for artifact in bundles/view-*; do
+            cosign sign-blob --yes \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              "$artifact"
+          done
+
+      # The gate this job exists to pass: every artifact that will be
+      # published verifies against the certificate published beside it, from
+      # this workflow's own identity. A signature nobody verified before
+      # upload is a signature discovered broken by the first user to try.
+      - name: Verify every signature
+        env:
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+        run: |
+          verified=0
+          for artifact in bundles/view-*; do
+            case "$artifact" in *.sig|*.pem) continue ;; esac
+            cosign verify-blob \
+              --certificate "${artifact}.pem" \
+              --signature "${artifact}.sig" \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$artifact"
+            verified=$((verified + 1))
+          done
+          [ "$verified" -gt 0 ] || { echo "no artifact was verified"; exit 1; }
+          echo "cosign verify-blob passed for $verified artifacts"
+
+      - name: Install anodizer
+        uses: taiki-e/install-action@v2
+        with:
+          tool: anodizer
+
+      # The binaries and their archives are already built and signed above,
+      # so anodizer runs the stages only it can: the changelog from commit
+      # subjects, the checksum file, and the GitHub release the bundles,
+      # signatures and certificates upload to.
+      - name: Publish the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: anodizer release --skip build,archive

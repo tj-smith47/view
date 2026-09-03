@@ -1,0 +1,64 @@
+# Every field anodizer 0.23.0 derives on its own is absent here on purpose:
+# the project name, the crate version, the tag template, the release repo,
+# the checksum algorithm and file name, the dist directory and the archive
+# names are all read from the workspace, the git remote and Cargo.toml.
+# docs/anodizer-release-capture.md records that inventory against the
+# installed version, so the shortness below is a measured result rather
+# than an omission.
+
+defaults:
+  # The one list a Rust workspace does not carry: Cargo.toml names no
+  # release triples. `anodizer targets --json` turns this into the release
+  # workflow's build matrix, so adding a platform is an edit here and
+  # nowhere else.
+  targets:
+    - x86_64-unknown-linux-gnu
+    - aarch64-unknown-linux-gnu
+    - x86_64-apple-darwin
+    - aarch64-apple-darwin
+    - x86_64-pc-windows-msvc
+
+crates:
+  # Eleven workspace members compile and exactly one ships; a workspace
+  # carries no marker for which, so the shipping crate is named.
+  - name: view
+    path: crates/view
+    # anodizer derives release ordering from the crate's path dependencies
+    # and then requires every one of them to appear above. The ten library
+    # crates are not released, so the derivation is overridden rather than
+    # answered by listing crates that ship nothing.
+    depends_on: []
+    # The shipped artifact is a pair: the editor under `bin/` and the pinned
+    # engine under `libexec/view/`, which is the prefix the binary resolves
+    # its engine from. anodizer's archiver places binaries at the archive
+    # root and offers no path prefix for them, so scripts/package-bundle.sh
+    # builds the archives and anodizer publishes what it produced.
+    archives: false
+    checksum:
+      extra_files:
+        - "bundles/*"
+
+release:
+  # The bundles, their cosign signatures and their certificates, all
+  # produced by the release workflow before this config is ever read.
+  extra_files:
+    - "bundles/*"
+
+changelog:
+  filters:
+    # Release machinery and in-tree hygiene are not release notes. Every
+    # other conventional prefix reaches a group below, so an unfiltered
+    # subject that matches no group still lands under "Other".
+    exclude:
+      - '^(docs|chore|test|ci|style|build|revert)(\(.+\))?:'
+    exclude_version_sync_commits: true
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?:'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^(fix|refactor)(\(.+\))?:'
+      order: 1
+    - title: Performance
+      regexp: '^perf(\(.+\))?:'
+      order: 2

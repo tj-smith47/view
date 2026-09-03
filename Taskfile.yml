@@ -375,7 +375,7 @@ tasks:
 
   release:check:
     desc: Dry-run the release — validate config and would-be artifacts, no tag, no publish
-    cmd: anodizer check
+    cmd: anodizer check config
 
   release:tag:
     desc: Cut the release tag, changelog generated from commit subjects — never hand-edit CHANGELOG.md
@@ -388,8 +388,8 @@ tasks:
       - anodizer publish
 
   release:verify:
-    desc: Verify the published artifacts and signatures against the cut release
-    cmd: anodizer verify
+    desc: Verify this host can run the configured release — required tools, tokens, endpoints, and the per-publisher reconcile table
+    cmd: anodizer preflight
 
   mutate:
     desc: "Prove a battery of guards load-bearing: each row is deleted, its tests run, the file restored (task mutate -- .claude/mutations/task-19.tsv)"
