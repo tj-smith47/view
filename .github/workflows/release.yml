@@ -3,36 +3,46 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # The rehearsal: build, bundle, sign and verify every platform without
+  # publishing anything, so the pipeline is provable before a tag is spent
+  # on it. Publishing stays on the tag alone.
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  # The same SSOT the sibling repos use: a repo variable
+  # (`gh variable set ANODIZER_VERSION`) so one bump follows every workflow
+  # that installs the tool. The literal is the floor until that variable is
+  # set here, and it is the version docs/anodizer-release-capture.md was
+  # taken against, which is what .anodizer.yaml is written for.
+  ANODIZER_VERSION: ${{ vars.ANODIZER_VERSION || 'v0.23.0' }}
 
 jobs:
   # The platform list has one definition, `.anodizer.yaml`, and this job is
   # how the matrix reads it: a target added there is built, bundled and
   # published without a second edit here.
-  matrix:
+  plan:
     runs-on: ubuntu-latest
     outputs:
-      targets: ${{ steps.targets.outputs.matrix }}
+      matrix: ${{ steps.anodizer.outputs.split-matrix }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install anodizer
-        uses: taiki-e/install-action@v2
+      - name: Install anodizer and derive the target matrix
+        id: anodizer
+        uses: tj-smith47/anodizer-action@v1
         with:
-          tool: anodizer
-
-      - name: Read the release targets
-        id: targets
-        run: echo "matrix=$(anodizer targets --json)" >> "$GITHUB_OUTPUT"
+          version: ${{ env.ANODIZER_VERSION }}
+          install-only: true
 
   bundle:
-    needs: matrix
+    needs: plan
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.matrix.outputs.targets) }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
@@ -63,20 +73,32 @@ jobs:
       # scripts/package-bundle.sh at build time. A literal here would be a
       # second version to keep in step, which scripts/check-engine-pin.sh
       # refuses across every workflow for exactly that reason.
-      - name: Stage and archive the bundled pair
+      - name: Stage, check and archive the bundled pair
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          ENGINE_PIN=$(cat .engine-pin)
-          echo "bundling view ${GITHUB_REF_NAME} with engine ${ENGINE_PIN} for ${{ matrix.target }}"
-          root="bundles/view-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          case "${{ matrix.target }}" in
-            *-windows-*) out="${root}.zip" ;;
-            *) out="${root}.tar.gz" ;;
-          esac
+          root="bundles/view-${GITHUB_REF_NAME}-${TARGET}"
           suffix=""
-          case "${{ matrix.target }}" in *-windows-*) suffix=".exe" ;; esac
-          bash scripts/package-bundle.sh stage "${{ matrix.target }}" \
-            "target/${{ matrix.target }}/release/view${suffix}" "$root"
+          out="${root}.tar.gz"
+          case "$TARGET" in
+            *-windows-*) suffix=".exe"; out="${root}.zip" ;;
+          esac
+          bash scripts/package-bundle.sh stage "$TARGET" \
+            "target/${TARGET}/release/view${suffix}" "$root"
+
+          # The archive has to carry the pinned engine, not merely have been
+          # built by a script that reads the pin. Asked of the staged binary
+          # wherever it can answer, which is every leg whose triple is the
+          # runner's own architecture.
+          ENGINE_PIN=$(cat .engine-pin)
+          case "${TARGET}:$(uname -m)" in
+            x86_64-*:x86_64 | aarch64-*:arm64 | aarch64-*:aarch64)
+              "$root/libexec/view/nvim${suffix}" --version | head -1 | grep -F "${ENGINE_PIN#v}" ;;
+            *)
+              echo "cross-built for ${TARGET}; its engine cannot run on $(uname -m)" ;;
+          esac
+
           bash scripts/package-bundle.sh archive "$root" "$PWD/$out"
           rm -rf "$root" "$root.engine"
 
@@ -88,7 +110,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: bundle
+    needs: [plan, bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -127,10 +149,11 @@ jobs:
       - name: Verify every signature
         env:
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+          TARGETS: ${{ needs.plan.outputs.matrix }}
         run: |
           verified=0
           for artifact in bundles/view-*; do
-            case "$artifact" in *.sig|*.pem) continue ;; esac
+            case "$artifact" in *.sig | *.pem) continue ;; esac
             cosign verify-blob \
               --certificate "${artifact}.pem" \
               --signature "${artifact}.sig" \
@@ -139,19 +162,26 @@ jobs:
               "$artifact"
             verified=$((verified + 1))
           done
-          [ "$verified" -gt 0 ] || { echo "no artifact was verified"; exit 1; }
-          echo "cosign verify-blob passed for $verified artifacts"
-
-      - name: Install anodizer
-        uses: taiki-e/install-action@v2
-        with:
-          tool: anodizer
+          # Counted against the matrix rather than against zero: one leg
+          # whose artifact never arrived would otherwise leave a sweep that
+          # verified the rest looking like a clean one.
+          expected=$(echo "$TARGETS" | jq '.include | length')
+          if [ "$verified" -ne "$expected" ]; then
+            echo "verified $verified artifacts, expected $expected"
+            exit 1
+          fi
+          echo "cosign verify-blob passed for all $verified artifacts"
 
       # The binaries and their archives are already built and signed above,
       # so anodizer runs the stages only it can: the changelog from commit
       # subjects, the checksum file, and the GitHub release the bundles,
-      # signatures and certificates upload to.
+      # signatures and certificates upload to. Skipped on a manual run,
+      # which exists to prove the pipeline without spending a version.
       - name: Publish the release
+        if: github.event_name == 'push'
+        uses: tj-smith47/anodizer-action@v1
+        with:
+          version: ${{ env.ANODIZER_VERSION }}
+          args: release --skip build,archive
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: anodizer release --skip build,archive

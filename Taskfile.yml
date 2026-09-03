@@ -374,20 +374,16 @@ tasks:
     cmd: anodizer init
 
   release:check:
-    desc: Dry-run the release — validate config and would-be artifacts, no tag, no publish
+    desc: Validate .anodizer.yaml against the installed anodizer — no build, no tag, no publish
     cmd: anodizer check config
 
   release:tag:
-    desc: Cut the release tag, changelog generated from commit subjects — never hand-edit CHANGELOG.md
-    cmd: anodizer tag --changelog
-
-  release:publish:
-    desc: The real release — build, sign, publish to GitHub Releases (runs the ci gate first)
+    desc: Cut the release tag, changelog generated from commit subjects — pushing it is what publishes, via .github/workflows/release.yml
     cmds:
       - task: ci
-      - anodizer publish
+      - anodizer tag --changelog
 
-  release:verify:
+  release:preflight:
     desc: Verify this host can run the configured release — required tools, tokens, endpoints, and the per-publisher reconcile table
     cmd: anodizer preflight
 

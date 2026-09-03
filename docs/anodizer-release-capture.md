@@ -5,10 +5,13 @@ What the installed anodizer actually does, captured from the tool before
 same defect class as a hand-written download URL that re-derives names the
 tool already knows: it agrees with reality until the tool moves.
 
-Captured 2026-09-03 on dev-linux. Every fenced block below is the tool's own
-output, with one substitution: the U+2014 dash anodizer prints in its status
-lines is rendered `--`, because `scripts/check-style.sh` bans that character
-from `docs/` and `README.md`.
+Captured 2026-09-03 on dev-linux. Every fenced block below is the tool's
+own output, byte for byte, with exactly one substitution: the U+2014 dash
+anodizer prints inside its prose is written `--`, because
+`scripts/check-style.sh` bans that character from `docs/` and `README.md`.
+Nothing else is changed: the status bullets, check marks and arrows the
+tool prints are reproduced as it prints them, and no line is elided.
+Blocks needing no substitution at all are marked where that is the case.
 
 ## Version
 
@@ -37,7 +40,12 @@ Commands:
   healthcheck  Check availability of required external tools
   preflight    Verify the environment can run the configured release: required tools, env
                vars/secrets (presence only -- values are never printed), endpoint reachability,
-               docker daemon, and loadable key material, all derived from the resolved config.
+               docker daemon, and loadable key material, all derived from the resolved config. Every
+               failure is reported in one pass and the exit code is non-zero when anything is
+               missing. The same checks run automatically at the start of `anodizer release`. Also
+               prints the per-publisher reconcile table (is the target version already published?);
+               only a required publisher's content divergence exits non-zero -- an already-complete
+               or unreachable publisher does not
   man          Generate man pages to stdout
   jsonschema   Output JSON Schema for .anodizer.yaml
   resolve-tag  Resolve a git tag to its matching crate in the config
@@ -47,17 +55,33 @@ Commands:
   tag          Auto-tag based on commit message directives
   continue     Resume a release after a transient failure or after `--prepare`/`--split`
   publish      Run only the publish stages (release, blob, publish) from a completed dist/
-  promote      Promote an already-published artifact from a pre-release track to a stable track
-  bump         Bump crate versions (Conventional Commits -> semver level)
+  promote      Promote an already-published artifact from a pre-release track to a stable track,
+               without rebuilding
+  bump         Bump crate versions (Conventional Commits → semver level)
   announce     Run only the announce stage from a completed dist/
   notify       Send a notification through configured announce integrations
   mcp          MCP server management
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -f, --config <CONFIG>  Path to config file (overrides auto-detection)
+      --verbose          Enable verbose output
+      --debug            Enable debug output
+  -q, --quiet            Suppress non-error output
+      --strict           Strict mode: configured features that silently skip become hard errors
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 
 Two of the repo's `release:*` task targets named commands this version does
 not have. `anodizer check` now requires a subcommand (`check config`), and
-`anodizer verify` is gone; `Taskfile.yml` was corrected to `anodizer check
-config` and `anodizer preflight` in the same change as this capture.
+`anodizer verify` is gone. `Taskfile.yml` was corrected in the same change
+as this capture: `release:check` runs `anodizer check config`,
+`release:verify` became `release:preflight` running `anodizer preflight`
+(the command that actually exists, named for what it does), and
+`release:publish` was removed, because publishing is what pushing a tag
+does and a local target for it would upload artifacts that never passed the
+workflow's signing and verification.
 
 ## Schema
 
@@ -120,8 +144,13 @@ $ anodizer targets --json
 {"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","artifact":"dist-Linux"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","artifact":"dist-Linux"},{"os":"macos-latest","target":"x86_64-apple-darwin","artifact":"dist-macOS"},{"os":"macos-latest","target":"aarch64-apple-darwin","artifact":"dist-macOS"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","artifact":"dist-Windows"}]}
 ```
 
-`.github/workflows/release.yml` feeds that JSON straight into
-`strategy.matrix`, so the platform list has exactly one definition.
+`.github/workflows/release.yml` does not run that command itself. The
+first-party `tj-smith47/anodizer-action@v1` already exposes it: an
+`install-only: true` step emits the same JSON as its `split-matrix` output,
+which the workflow feeds to `strategy.matrix`. That is the mechanism the
+sibling repos use to install and run the tool, and the version comes from
+the same `vars.ANODIZER_VERSION` repo variable they read, so the platform
+list has exactly one definition and the tool has exactly one install path.
 
 ## Why the archiver does not build the bundle
 
@@ -137,15 +166,27 @@ with no glob is dropped. That much works. The binary is the problem:
 
 - `strip_binary_directory: false` still placed the binary at the archive
   root.
-- `ids: ["no-such-build"]` skipped the whole archive rather than producing a
-  binary-free one: `skipped archives[a] -- crate probe has no binaries
-  matching ids ["no-such-build"] (set meta: true if this is intentional)`.
-- `meta: true` archives are built once for the whole crate, not once per
-  target: `meta archive for crate 'probe' target 'unknown' has zero files`.
-  A per-target engine cannot ride one.
 - `wrap_in_directory` accepts a template and did place the binary under
-  `probe-0.0.0-.../bin`, but a `dst` climbing back out of it is refused:
-  `tar.gz: adding engine-stage/.../nvim as probe-.../bin/../libexec/view/nvim`.
+  `probe-0.0.0-SNAPSHOT--x86_64-unknown-linux-gnu/bin`, but a `dst` climbing
+  back out of it is refused outright.
+- `ids: ["no-such-build"]` skipped the whole archive rather than producing a
+  binary-free one.
+- `meta: true` archives are built once for the whole crate, with no target,
+  so no per-target engine can ride one.
+
+```
+$ anodizer release --snapshot
+    Creating archives
+     • creating ./dist/A_x86_64-unknown-linux-gnu.tar.gz
+       Error archive failed: tar.gz: adding engine-stage/x86_64-unknown-linux-gnu/nvim as probe-0.0.0-SNAPSHOT--x86_64-unknown-linux-gnu/bin/../libexec/view/nvim
+       Error tar.gz: adding engine-stage/x86_64-unknown-linux-gnu/nvim as probe-0.0.0-SNAPSHOT--x86_64-unknown-linux-gnu/bin/../libexec/view/nvim
+
+$ anodizer release --snapshot   # with that entry removed
+    Creating archives
+     Warning skipped archives[b] -- crate probe has no binaries matching ids ["no-such-build"] (set `meta: true` if this is intentional)
+       Error archive failed: archive: meta archive for crate 'probe' target 'unknown' has zero files. Check your `files:` patterns -- meta archives must bundle at least one file.
+       Error archive: meta archive for crate 'probe' target 'unknown' has zero files. Check your `files:` patterns -- meta archives must bundle at least one file.
+```
 
 Build hooks were the remaining escape and are not one: `{{ .Target }}` and
 `{{ Target }}` both render empty in a `builds[].hooks.post` command, and a
@@ -164,23 +205,26 @@ stages skipped:
 
 ```
 $ anodizer release --snapshot --skip build,archive
+     Warning git tag --points-at exited non-zero; returning no tags
    Preparing release
+     Warning error finding tags matching template: git tag --list failed: fatal: not a git repository (or any of the parent directories): .git
      Warning no git tags found, defaulting to v0.0.0 (snapshot mode).
    Archiving source
-     - skipped source archive -- not enabled
+     • skipped source archive -- not enabled
   Cataloging dependencies
-     - skipped SBOM -- none configured
+     • skipped SBOM -- none configured
    Computing checksums
-     - combined checksums -> ./dist/probe_0.0.0-SNAPSHOT-none_checksums.txt
+     • combined checksums → ./dist/probe_0.0.0-SNAPSHOT-_checksums.txt
    Verifying release
-     - verify-release skipped: disabled by config
+     • verify-release skipped: disabled by config
      Summary
-     - publishers  none ran (publish stages did not run)
+     • publishers  none ran (publish stages did not run)
+     • run flags   submitter_gated=false announce_gated=false
   Finalizing
-     - wrote ./dist/metadata.json
-     - wrote ./dist/artifacts.json
+     • wrote ./dist/metadata.json
+     • wrote ./dist/artifacts.json
 
-$ cat dist/probe_0.0.0-SNAPSHOT-none_checksums.txt
+$ cat dist/probe_0.0.0-SNAPSHOT-_checksums.txt
 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  probe-v1-linux.tar.gz
 98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4  probe-v1-mac.tar.gz
 ```
@@ -211,14 +255,26 @@ discovers is broken.
 
 `anodizer healthcheck` confirms cosign is a tool the pipeline can see:
 
+No substitution applies to this block; it carries no U+2014 dash.
+
 ```
 $ anodizer healthcheck
-   - Anodizer Environment Health Check
-   - ========================================
-   - OK cargo                Rust package manager (cargo 1.98.0 (797e8a9bc 2026-08-05))
-   - OK git                  Version control (git version 2.53.0)
-   - OK cosign               Sigstore container signing (GitVersion:    v2.4.3)
-   - OK gpg                  GNU Privacy Guard (signing) (gpg (GnuPG) 2.4.8)
+   • Anodizer Environment Health Check
+   • ========================================
+   • ✓ cargo                Rust package manager (cargo 1.98.0 (797e8a9bc 2026-08-05))
+   • ✓ git                  Version control (git version 2.53.0)
+   • ✓ docker               Container runtime (Docker version 29.4.3, build 055a478)
+   • ✗ podman               Container runtime (Linux-only alt backend)
+   • ✓ nfpm                 Linux package builder (deb/rpm/apk) (nfpm: a simple and 0-dependencies apk, arch linux, deb, ipk, msix, and rpm packager written in Go)
+   • ✓ cargo-zigbuild       Cross-compilation via Zig (cargo-zigbuild 0.22.1)
+   • ✗ zig                  Zig toolchain (linker/libc behind cargo-zigbuild)
+   • ✓ cross                Cross-compilation via Docker (cross 0.2.5)
+   • ✓ gpg                  GNU Privacy Guard (signing) (gpg (GnuPG) 2.4.8)
+   • ✓ cosign               Sigstore container signing (GitVersion:    v2.4.3)
+   • ✗ aws                  AWS CLI (S3 blob storage)
+   • ✓ gsutil               Google Cloud Storage CLI (gsutil version: 5.27)
+   • ✗ az                   Azure CLI (Blob storage)
+   • 9 available, 4 missing
 ```
 
 ## The engine's own prefix, and the parsers
@@ -249,8 +305,47 @@ PARSE ok=true translation_unit
 ```
 
 The packaging therefore copies `lib/nvim/parser` onto the runtime
-directory, which is on `runtimepath` and searched wherever the binary sits.
-The Windows asset needs the same treatment for a different reason: its
-`bin/` holds `lua51.dll`, `DbgHelp.dll` and `win32yank.exe` beside
+directory, which is on `runtimepath` and searched wherever the binary sits,
+and then asserts the destination exists so an engine that moves its parsers
+upstream fails the build instead of shipping an editor that highlights
+nothing. The Windows asset needs the same treatment for a different reason:
+its `bin/` holds `lua51.dll`, `DbgHelp.dll` and `win32yank.exe` beside
 `nvim.exe`, and `nvim.exe` does not start without them. The script copies
 the whole of `bin/` into `libexec/view/` for that reason, on every platform.
+
+## Building the Windows zip
+
+Measured on a real Windows host (PowerShell 5.1, Git for Windows), three
+ways of writing the `.zip` from the Git Bash step the workflow runs:
+
+```
+$ # A: the Git Bash path handed to PowerShell as-is
+Compress-Archive : The path '\c\Users\Administrator\t15probe' either does not exist or is not a
+valid file system path.
+A exit=1
+
+$ # B: the same path through cygpath
+B exit=0
+bundle\libexec\
+bundle\bin\view.exe
+bundle\libexec\view\share\
+bundle\libexec\view\nvim.exe
+
+$ # C: Windows' own bsdtar, tar -a -cf
+C exit=0
+bundle/
+bundle/bin/
+bundle/libexec/
+bundle/libexec/view/
+bundle/libexec/view/nvim.exe
+bundle/libexec/view/share/nvim/runtime/filetype.lua
+```
+
+A is the bug: Git Bash prints POSIX-style paths that Windows cannot
+resolve. B works but writes backslash-separated entry names, which every
+non-Windows unzip reads as part of the file name rather than as
+directories. C is what the packaging uses:
+`"$SYSTEMROOT/System32/tar.exe" -a -cf`, which is present on every Windows
+runner (`bsdtar 3.8.4 - libarchive 3.8.4`), needs no path translation, and
+writes the forward-slash names the format specifies. The `tar` on Git
+Bash's own `PATH` is GNU tar 1.35, which writes no zip container at all.

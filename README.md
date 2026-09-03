@@ -84,7 +84,10 @@ Numbers below are recorded baselines on a Linux dev host, Neovim `v0.12.4`,
 1000 samples per cell, measured *paired*: view and bare Neovim in the same
 run, same host, same config, samples interleaved. Reproduce with
 `task perf-audit`, which gates every recorded row and reports the `user`
-row above as uncovered until that recording lands.
+row above as uncovered until that recording lands. The Neovim version there
+is the provenance of these recordings, not a claim about what view ships or
+requires: it names the engine the numbers were measured against, and it
+stays fixed at that value even after `.engine-pin` moves on.
 
 | | view | bare Neovim |
 |---|---|---|

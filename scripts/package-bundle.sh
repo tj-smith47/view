@@ -57,7 +57,17 @@ engine_prefix() {
     *.zip) unzip -q "$workdir/$asset" -d "$workdir" ;;
     *) tar xzf "$workdir/$asset" -C "$workdir" ;;
   esac
-  find "$workdir" -maxdepth 1 -mindepth 1 -type d -print | head -1
+  # A glob rather than `find | head`: closing the pipe on the first match
+  # leaves find killed by SIGPIPE under `set -o pipefail`, and taking the
+  # first of several would pick an engine prefix at random. The engine's
+  # assets unpack to exactly one directory, so anything else is a surprise
+  # worth stopping on.
+  local dirs=("$workdir"/*/)
+  if [ "${#dirs[@]}" -ne 1 ] || [ ! -d "${dirs[0]}" ]; then
+    echo "PACKAGE FAIL: expected one engine prefix under $workdir, found ${#dirs[@]}" >&2
+    return 1
+  fi
+  echo "${dirs[0]%/}"
 }
 
 stage() {
@@ -71,10 +81,16 @@ stage() {
   chmod +x "$root/$BIN_DIR/view$suffix"
   cp -R "$prefix/bin/." "$root/$ENGINE_DIR/"
   cp -R "$prefix/share/nvim/runtime/." "$root/$RUNTIME_DIR/"
-  if [ -d "$prefix/lib/nvim/parser" ]; then
-    cp -R "$prefix/lib/nvim/parser" "$root/$RUNTIME_DIR/parser"
-  fi
+  cp -R "$prefix/lib/nvim/parser" "$root/$RUNTIME_DIR/parser"
   chmod +x "$root/$ENGINE_DIR/nvim$suffix"
+  # Asserted at the destination, and on a parser rather than on the
+  # directory holding it: an engine that moved or emptied its parsers
+  # upstream would otherwise ship an editor that starts, opens files and
+  # highlights nothing, with the build still green.
+  if ! compgen -G "$root/$RUNTIME_DIR/parser/*" > /dev/null; then
+    echo "PACKAGE FAIL: the bundle ships no treesitter parsers" >&2
+    return 1
+  fi
 }
 
 archive() {
@@ -82,10 +98,14 @@ archive() {
   parent="$(cd -- "$(dirname -- "$root")" && pwd)"
   base="$(basename -- "$root")"
   case "$out" in
-    # Git Bash carries no zip(1), and its tar writes no zip container; the
-    # PowerShell that every Windows runner has is the one archiver present.
-    *.zip) powershell -NoProfile -Command \
-      "Compress-Archive -Path '$parent/$base' -DestinationPath '$out' -Force" ;;
+    # Windows ships its own bsdtar, which writes a zip container the GNU tar
+    # on Git Bash's PATH cannot. Two alternatives were measured on a real
+    # Windows host and rejected: a Git Bash path handed to PowerShell's
+    # Compress-Archive is not a path Windows resolves ("either does not
+    # exist or is not a valid file system path"), and cygpath'ing it works
+    # but writes backslash-separated entry names that every non-Windows
+    # unzip reads as part of the file name.
+    *.zip) "${SYSTEMROOT:-C:/Windows}/System32/tar.exe" -C "$parent" -a -cf "$out" "$base" ;;
     *) tar -C "$parent" -czf "$out" "$base" ;;
   esac
 }

@@ -14,8 +14,20 @@ fail=0
 # The floor is a ratchet pinned PER FILE to the current read count -- bump
 # it when adding jobs, never lower it. A total across both workflows cannot
 # notice every bench leg losing its pin reads while ci.yml keeps its own.
+# Every spelling of an install that resolves its own version. Its own
+# function so the release config and the packaging are held to it too: a
+# floating URL is a floating URL wherever it is written.
+check_floating() {
+  local file="$1" floating
+  for floating in 'download/stable/' 'brew install neovim' 'choco install neovim' \
+    'apt install neovim' 'apt-get install neovim'; do
+    if grep -qF "$floating" "$file"; then
+      echo "PIN FAIL: $file: floating install remains: $floating"; fail=1
+    fi
+  done
+}
 check_workflow() {
-  local file="$1" floor="$2" reads floating
+  local file="$1" floor="$2" reads
   # an absent/renamed workflow file must not silently pass: grep's exit 2
   # on missing files was previously swallowed by `|| true`, turning every
   # check below into a no-op that still exited 0
@@ -30,12 +42,7 @@ check_workflow() {
     echo "PIN FAIL: $file: hardcoded nvim version literal above (must derive from .engine-pin)"
     fail=1
   fi
-  for floating in 'download/stable/' 'brew install neovim' 'choco install neovim' \
-    'apt install neovim' 'apt-get install neovim'; do
-    if grep -qF "$floating" "$file"; then
-      echo "PIN FAIL: $file: floating install remains: $floating"; fail=1
-    fi
-  done
+  check_floating "$file"
   # marketplace setup actions (rhysd/action-setup-vim, */setup-neovim, ...)
   # resolve their own nvim version internally, bypassing the pin entirely
   if grep -nE 'uses:.*setup-(neo)?vim' "$file"; then
@@ -58,8 +65,12 @@ floor_for() {
 # installing it for a test, so they read the pin instead of naming a version
 # -- and a version named in either is the one a reader would trust while the
 # archive carried something else.
+# A second argument marks a file that performs the install itself, which
+# must then be shown reading the pin: a file with no literal in it is only
+# half the property, since one that resolves the version some other way is
+# just as adrift.
 check_pin_free() {
-  local file="$1"
+  local file="$1" performs_install="${2:-}"
   [ -f "$file" ] || { echo "PIN FAIL: $file not found"; fail=1; return; }
   if grep -nE 'v[0-9]+\.[0-9]+\.[0-9]+' "$file"; then
     echo "PIN FAIL: $file: engine version literal above (must derive from .engine-pin)"
@@ -67,6 +78,11 @@ check_pin_free() {
   fi
   if grep -nE 'neovim/releases/download/v[0-9]' "$file"; then
     echo "PIN FAIL: $file: hardcoded nvim download above (must derive from .engine-pin)"
+    fail=1
+  fi
+  check_floating "$file"
+  if [ -n "$performs_install" ] && ! grep -qF '.engine-pin' "$file"; then
+    echo "PIN FAIL: $file: installs the engine without reading .engine-pin"
     fail=1
   fi
 }
@@ -99,5 +115,5 @@ for workflow in .github/workflows/ci.yml .github/workflows/bench.yml \
   esac
 done
 check_pin_free .anodizer.yaml
-check_pin_free scripts/package-bundle.sh
+check_pin_free scripts/package-bundle.sh performs-the-install
 exit $fail

@@ -85,6 +85,18 @@ fn the_archive_layout_matches_what_the_binary_resolves() {
     let exe = bundle
         .join("bin")
         .join(format!("view{}", std::env::consts::EXE_SUFFIX));
+    // Asserted before resolving, because `resolve_from` never stats the
+    // executable it is handed: it only walks up from that path. Without
+    // this, a packaging that put the editor somewhere other than `bin/`
+    // would still resolve against the path this test constructed, and the
+    // producer half of the layout would go unchecked.
+    assert!(
+        exe.is_file(),
+        "scripts/package-bundle.sh planted no editor at bin/, so the archive \
+         has nothing at the path its engine is resolved relative to; \
+         planted: {:?}",
+        walk(&bundle)
+    );
     let resolved = BundledEngine::resolve_from(&exe);
     assert!(
         resolved.is_some(),
