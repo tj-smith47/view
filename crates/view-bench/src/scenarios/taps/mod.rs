@@ -131,14 +131,20 @@ pub fn shim_taps_spec(
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    // recorded before the program is moved into the shell's argv, and
-    // kept when the inner spec was itself a wrapper: what the spawn
-    // measures does not change by being wrapped again
-    let measured_program = inner.measured_program.unwrap_or(inner.program);
+    // what the spawn measures is recorded rather than left to be read off
+    // the shell this puts in its place, and an inner spec that was itself a
+    // wrapper keeps its own answer: being wrapped again does not change
+    // which binary is under measurement
+    let measured_program = inner
+        .measured_program
+        .unwrap_or_else(|| inner.program.clone());
     let mut args = vec![
         OsString::from("-c"),
         OsString::from("exec 9>\"$VIEW_BENCH_TAP_PATH\"; exec \"$0\" \"$@\""),
-        measured_program.clone().into_os_string(),
+        // the inner spawn's own program, so wrapping a wrapper execs the
+        // inner shell with its own script rather than handing that script
+        // to the editor as an argument
+        inner.program.into_os_string(),
     ];
     args.extend(inner.args);
     let mut env = inner.env;

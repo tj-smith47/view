@@ -35,8 +35,6 @@ pub fn fixture_content() -> String {
     content
 }
 
-/// Parses the line label at `at`, returning its number when the cells hold
-/// a well-formed `L%06d`.
 /// When the fixture-label search runs out, given what the takedowns before
 /// it cost.
 ///
@@ -49,6 +47,8 @@ fn readiness_deadline(started: Instant, settle_deadline: Duration, takedowns: Du
     started + settle_deadline + takedowns
 }
 
+/// Parses the line label at `at`, returning its number when the cells hold
+/// a well-formed `L%06d`.
 fn label_at(session: &mut BenchSession, at: crate::boundaries::CellPos) -> Option<u32> {
     let text = row_text_at(session, at);
     let digits = text.strip_prefix('L')?;
@@ -336,6 +336,11 @@ mod tests {
         assert!(
             after_second < readiness_deadline(started, settle_deadline, takedown * 2),
             "the second search must be allowed to finish before the deadline refuses"
+        );
+        assert!(
+            after_second >= readiness_deadline(started, settle_deadline, Duration::ZERO),
+            "a deadline that did not accumulate what the takedowns cost would refuse the \
+             second search, so the accumulation is what this pins"
         );
     }
 

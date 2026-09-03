@@ -48,9 +48,10 @@ pub(crate) struct SideState {
 
 impl SideState {
     /// Prepares a spawned session for sampling: settle, enter insert
-    /// mode, then locate the buffer origin by typing and erasing a probe
-    /// character (the one observation that works identically across both
-    /// editors and any chrome/gutter layout).
+    /// mode, take view's own standing notices off the screen, then locate
+    /// the buffer origin by typing and erasing a probe character (the one
+    /// observation that works identically across both editors and any
+    /// chrome/gutter layout).
     ///
     /// `probe_timeout` bounds the probe's own two round trips (type, then
     /// erase) the same way `protocol.sample_timeout` bounds a regular
@@ -89,13 +90,21 @@ impl SideState {
                 ),
             });
         }
-        notices::take_down(&mut session, spec, startup_quiet, settle_deadline)?;
-        session.send(b"i")?;
         // entering insert mode is itself a plugin-load trigger under a
         // lazy-loading config (completion engines, noice warning toasts
-        // that float over the text area); a second, stricter settle here
-        // absorbs that churn so no toast can occlude the sampled cells
-        if !session.settle(SettleBound {
+        // that float over the text area), so the churn it raises has to
+        // drain before the probe. The trigger is pulled before the
+        // takedown rather than after it: the takedown's own drain then
+        // outwaits that churn in the same span it spends on the toasts
+        // already standing, instead of a session paying two of them.
+        session.send(b"i")?;
+        let runs_view = notices::runs_view(spec);
+        notices::take_down(&mut session, spec, startup_quiet, settle_deadline)?;
+        if runs_view {
+            // the takedown's own keys end in normal mode
+            session.send(b"i")?;
+        } else if !session.settle(SettleBound {
+            // a bare editor has no takedown behind it to drain the churn
             quiet: notices::CLEAR_QUIET,
             deadline: settle_deadline,
         }) {
@@ -106,7 +115,6 @@ impl SideState {
                 ),
             });
         }
-        let runs_view = notices::runs_view(spec);
         let at = probe_origin(&mut session, probe_timeout)?;
         refuse_if_occluded(&mut session, runs_view, at)?;
         Ok(Self {

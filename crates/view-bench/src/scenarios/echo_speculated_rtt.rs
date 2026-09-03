@@ -61,6 +61,27 @@ pub const STUB_TARGET: &str = "view-rtt-acceptance-stub-host";
 /// than measuring an actual zero-transport-latency spawn.
 pub const RTT_TIERS_MS: [u64; 4] = [0, 25, 100, 300];
 
+/// How many of a tier's own injected round trips a span sized for a local
+/// spawn is widened by, when that span bounds a wait the relay sits in the
+/// middle of.
+const TIER_ROUND_TRIPS: u64 = 20;
+
+/// `base`, widened for a tier that injects `rtt_ms` of transport latency.
+///
+/// A span sized for a local spawn bounds a wait whose every round trip now
+/// pays that delay twice, so at 100ms+ it is spent before the traffic it
+/// waits on can land: a sample times out on a live session, and a startup
+/// settle's quiet clock is satisfied by the pre-attach frame standing
+/// static while attach is still in flight. Both spans widen by the same
+/// multiple of the tier's delay, so a tier can never be given a bound for
+/// one wait and a floor for the other.
+#[must_use]
+pub fn widened_for_tier(base: Duration, rtt_ms: u64) -> Duration {
+    base.max(Duration::from_millis(
+        rtt_ms.saturating_mul(TIER_ROUND_TRIPS),
+    ))
+}
+
 /// The committed userspace byte relay (`scripts/test-fixtures/delay-relay`)
 /// this module arms in front of the stand-in `ssh` client.
 ///

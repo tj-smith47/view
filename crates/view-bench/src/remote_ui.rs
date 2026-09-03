@@ -75,6 +75,15 @@ pub fn client_args(socket: &Path) -> Vec<OsString> {
     ]
 }
 
+/// The spec [`RemoteUiServer::client_spec`] derives, taken apart from the
+/// server so what a derivation keeps can be read without one running.
+fn client_spec_for(nvim: &SpawnSpec, socket: &Path) -> SpawnSpec {
+    SpawnSpec {
+        args: client_args(socket),
+        ..nvim.clone()
+    }
+}
+
 impl RemoteUiServer {
     /// Starts the headless half of the control arm, returning once its
     /// socket is accepting connections.
@@ -134,10 +143,7 @@ impl RemoteUiServer {
     /// every path the fixture resolves.
     #[must_use]
     pub fn client_spec(&self, nvim: &SpawnSpec) -> SpawnSpec {
-        SpawnSpec {
-            args: client_args(&self.socket),
-            ..nvim.clone()
-        }
+        client_spec_for(nvim, &self.socket)
     }
 
     /// Blocks until the socket exists, the server has exited, or the
@@ -211,6 +217,28 @@ mod tests {
             ],
             "the control arm must hold the same buffer as the arms it is compared against"
         );
+    }
+
+    /// The client keeps everything about the spawn it derives from except
+    /// the arguments, the record of what the spawn measures included: the
+    /// base here is shaped like a wrapped spawn, where the program spawned
+    /// and the program measured differ, so a derivation rebuilt field by
+    /// field leaves the session unrecognisable as view.
+    #[test]
+    fn the_client_keeps_everything_but_the_arguments_of_the_spec_it_derives() {
+        let base = SpawnSpec {
+            program: PathBuf::from("sh"),
+            args: vec![OsString::from("-c"), OsString::from("exec view")],
+            env: vec![(OsString::from("TERM"), OsString::from("xterm-256color"))],
+            cwd: Some(PathBuf::from("/scratch")),
+            measured_program: Some(PathBuf::from("target/release/view")),
+        };
+        let derived = client_spec_for(&base, Path::new("/scratch/ui.sock"));
+        assert_eq!(derived.args, client_args(Path::new("/scratch/ui.sock")));
+        assert_eq!(derived.program, base.program);
+        assert_eq!(derived.env, base.env);
+        assert_eq!(derived.cwd, base.cwd);
+        assert_eq!(derived.measured_program, base.measured_program);
     }
 
     #[test]

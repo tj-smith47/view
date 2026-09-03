@@ -393,7 +393,7 @@ pub fn main() -> Result<()> {
         // tier's own injected delay; a genuine desync (the failure mode
         // this bound exists to catch) still fails well inside the widened
         // window, since it never depends on the relay's sleep at all
-        let sample_timeout = Duration::from_secs(5).max(Duration::from_millis(rtt_ms * 20));
+        let sample_timeout = echo_speculated_rtt::widened_for_tier(Duration::from_secs(5), rtt_ms);
         let protocol = Protocol {
             samples: cli.samples,
             warmup: cli.warmup,
@@ -415,7 +415,7 @@ pub fn main() -> Result<()> {
         // is watching. Scaled by the same multiplier as `sample_timeout`
         // above so real attach traffic landing before the span elapses
         // resets the quiet clock instead of racing it.
-        let startup_quiet = DEFAULT_STARTUP_QUIET.max(Duration::from_millis(rtt_ms * 20));
+        let startup_quiet = echo_speculated_rtt::widened_for_tier(DEFAULT_STARTUP_QUIET, rtt_ms);
 
         // Direct probe of the relay itself, decoupled from anything
         // `echo_speculated::run` measures below: `gated_ratio_p50` and

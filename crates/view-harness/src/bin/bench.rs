@@ -1754,6 +1754,84 @@ mod tests {
         );
     }
 
+    /// The echo scenario's own pre-sampling sequence, run against a live
+    /// taps-shimmed session on the plugin-bearing fixture.
+    ///
+    /// What no unit test reaches: whether a takedown that runs *after* the
+    /// session enters insert mode still ends with a bare screen and a
+    /// session that types, and whether the churn entering insert mode
+    /// triggers is really absorbed by the takedown's own drain. Ignored by
+    /// default -- it spawns a real editor on the heavy fixture and costs
+    /// tens of seconds. Needs the taps build
+    /// (`cargo build --release -p view --features bench-taps --target-dir
+    /// target/taps`).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "live heavy-fixture session; run with `cargo test -p view-harness --bin bench -- --ignored the_echo_preamble`"]
+    fn the_echo_preamble_leaves_a_taps_shimmed_heavy_session_clear_and_typing() {
+        use std::time::Instant;
+        use view_bench::scenarios::echo::DEFAULT_STARTUP_QUIET;
+        use view_bench::session::{BenchSession, SettleBound};
+
+        let view_bin = default_view_bin(Some("taps"));
+        assert!(
+            view_bin.is_file(),
+            "{} does not exist; build the taps arm first",
+            view_bin.display()
+        );
+        let nvim = PathBuf::from("nvim");
+        let world = CellWorld::create("heavy").unwrap();
+        let side = world.side("heavy", "view").unwrap();
+        let tap_path = side.cwd.join("tap.fifo");
+        let _pipe = view_bench::scenarios::taps::TapPipe::create(&tap_path).unwrap();
+        let spec = view_bench::scenarios::taps::shim_taps_spec(
+            view_spec_from(
+                side,
+                EditorBins {
+                    view: &view_bin,
+                    nvim: &nvim,
+                },
+            ),
+            &tap_path,
+        );
+        let settle_deadline = Duration::from_secs(60);
+
+        let mut session = BenchSession::spawn(&spec).unwrap();
+        assert!(session.settle(SettleBound {
+            quiet: DEFAULT_STARTUP_QUIET,
+            deadline: settle_deadline,
+        }));
+        println!("== after the startup settle ==\n{}", session.screen_text());
+
+        session.send(b"i").unwrap();
+        let started = Instant::now();
+        view_bench::notices::take_down(&mut session, &spec, DEFAULT_STARTUP_QUIET, settle_deadline)
+            .unwrap();
+        println!("take_down took {:?}", started.elapsed());
+        session.send(b"i").unwrap();
+
+        // the character a sample types: it reaches the buffer only from
+        // insert mode, and it reaches the screen only with nothing
+        // standing over the cells it lands in
+        let baseline = session.count_char_cells("x");
+        session.send(b"x").unwrap();
+        // the scenario's own bound on one sample's wait, which is what
+        // this character is
+        let deadline = Instant::now() + view_bench::scenarios::Protocol::default().sample_timeout;
+        while session.count_char_cells("x") <= baseline {
+            assert!(
+                Instant::now() < deadline,
+                "the typed character never appeared; screen:\n{}",
+                session.screen_text()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        println!(
+            "== after the preamble, one character typed ==\n{}",
+            session.screen_text()
+        );
+    }
+
     /// Arguments that would leave a measured editor without the fixture
     /// configuration the cell exists to measure it under.
     const CONFIG_STRIPPING_ARGS: &[&str] = &["--clean", "-u", "-U", "--noplugin"];

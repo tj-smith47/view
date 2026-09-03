@@ -46,6 +46,14 @@ pub const CLEAR_QUIET: Duration =
 /// [`take_down`], which takes whichever is larger.
 pub const REPAINT_QUIET: Duration = Duration::from_millis(500);
 
+/// How long an `<Esc>` needs before the byte after it is a keystroke of
+/// its own rather than the tail of a key sequence: the engine reads a
+/// printable arriving inside its own `ttimeoutlen` as that key modified,
+/// so an ex-command typed inside the window opens no command line and
+/// leaves its text in the buffer instead. Generous against the engine's
+/// 50ms default, since nothing here is timed.
+const MODE_SETTLE: Duration = Duration::from_millis(150);
+
 /// The `:View` form that opens the message history, in the two words
 /// [`view_core::native::mappings::default_maps`] spells it with.
 const HISTORY_FEATURE: &str = "notifications";
@@ -133,7 +141,7 @@ pub fn take_down(
     // errors, and it leaves whatever mode the session was in so the
     // ex-command below is typed at the command line rather than into a
     // buffer
-    session.send(b"\x1b")?;
+    leave_mode(session)?;
     // A quiet screen is not a started view. `:View` is created by the
     // registration view runs at `VimEnter`, and nvim reaches `VimEnter`
     // only after sourcing a config that can spend seconds in Lua without
@@ -155,15 +163,15 @@ pub fn take_down(
         }
         // the command line, and any error nvim put on it, go back down
         // before the next attempt types over them
-        session.send(b"\x1b")?;
+        leave_mode(session)?;
         // every attempt that lands before the registration exists leaves
         // one more `E492` in the engine's own message stream, which view
         // surfaces as one more notice for the walk below to take down;
         // backing off keeps a cold start's wait a handful of attempts
         // rather than one per repaint window
-        attempt_quiet = attempt_quiet.saturating_mul(2).min(CLEAR_QUIET);
+        attempt_quiet = backed_off(attempt_quiet, repaint_quiet);
     }
-    session.send(b"\x1b")?;
+    leave_mode(session)?;
     // the transients go next and they go by waiting: `d` retracts a family
     // and a toast on a timer carries none, so a stack still draining is a
     // stack that will paint a box over the overlay below. Run after the
@@ -195,7 +203,7 @@ pub fn take_down(
     // cannot see how many notices carry a family, and the steps past the
     // last entry cost nothing
     session.send(&WALK_STEP.repeat(DEFAULT_CAPACITY))?;
-    session.send(b"\x1b")?;
+    leave_mode(session)?;
     if !session.settle(SettleBound {
         quiet: repaint_quiet,
         deadline: remaining(until),
@@ -208,6 +216,30 @@ pub fn take_down(
             ),
         });
     }
+    Ok(())
+}
+
+/// The quiet span the next bootstrap attempt waits for: the one just
+/// spent, doubled, and held at the span a draining toast stack needs.
+///
+/// Held no lower than `floor`, the caller's own span for one round trip:
+/// on a latency-injected transport that span is the larger of the two, and
+/// a ceiling applied over it would ask for less quiet than the transport
+/// needs -- which is satisfied by the static screen standing before the
+/// reply lands, the class of bug [`REPAINT_QUIET`] documents.
+fn backed_off(attempt_quiet: Duration, floor: Duration) -> Duration {
+    attempt_quiet.saturating_mul(2).min(CLEAR_QUIET.max(floor))
+}
+
+/// Leaves whatever mode the session is in, waiting out [`MODE_SETTLE`] so
+/// the next keys are read as their own.
+///
+/// # Errors
+///
+/// Returns [`BenchError`] only when the write to the pty fails.
+fn leave_mode(session: &mut BenchSession) -> Result<(), BenchError> {
+    session.send(b"\x1b")?;
+    std::thread::sleep(MODE_SETTLE);
     Ok(())
 }
 
@@ -304,6 +336,14 @@ mod tests {
             "a bare engine under the same shim is still a bare engine"
         );
 
+        // the tier spec is built by its own arming step, which needs a
+        // Python interpreter for the relay: a host without one cannot run
+        // the leg this row belongs to either, and failing here would
+        // charge that absence to a predicate that has no opinion on it
+        if let Some(reason) = echo_speculated_rtt::delay_relay_unavailable_reason() {
+            eprintln!("the RTT tier spec is not built on this host: {reason}");
+            return;
+        }
         let rtt = echo_speculated_rtt::remote_rtt_view_spec(
             scratch.path().to_path_buf(),
             Vec::new(),
@@ -330,6 +370,37 @@ mod tests {
         assert!(unknown_command_note("~\n~\nscratch.txt").is_empty());
     }
 
+    /// The span a caller passes is the one its own transport needs for a
+    /// round trip, and the tiered RTT leg passes spans larger than the
+    /// ceiling the retry holds at: a backoff that applied that ceiling
+    /// over the caller's span would ask a 300ms tier for less quiet than
+    /// one trip takes, and the static screen standing before the reply
+    /// lands would satisfy it.
+    #[cfg(unix)]
+    #[test]
+    fn the_bootstrap_backoff_never_asks_for_less_quiet_than_the_caller_did() {
+        use crate::scenarios::{echo::DEFAULT_STARTUP_QUIET, echo_speculated_rtt};
+
+        for rtt_ms in echo_speculated_rtt::RTT_TIERS_MS {
+            let floor = echo_speculated_rtt::widened_for_tier(DEFAULT_STARTUP_QUIET, rtt_ms)
+                .max(REPAINT_QUIET);
+            let mut quiet = floor;
+            for attempt in 1..=8u32 {
+                quiet = backed_off(quiet, floor);
+                assert!(
+                    quiet >= floor,
+                    "attempt {attempt} at the {rtt_ms}ms tier waits {quiet:?}, under the \
+                     {floor:?} the caller asked for"
+                );
+                assert!(
+                    quiet <= CLEAR_QUIET.max(floor),
+                    "attempt {attempt} at the {rtt_ms}ms tier waits {quiet:?}, past the span a \
+                     draining toast stack needs"
+                );
+            }
+        }
+    }
+
     /// The constant this module exists for, read against the timeout the
     /// toast module actually schedules a transient on rather than against
     /// the constant this file already imports: a route change that stops
@@ -344,6 +415,38 @@ mod tests {
             CLEAR_QUIET > scheduled,
             "{CLEAR_QUIET:?} does not outlast the scheduled {scheduled:?}"
         );
+    }
+
+    /// Every `.rs` file under `root`, as its path relative to `root` and
+    /// its text, sorted by path.
+    fn rust_sources(root: &std::path::Path) -> Vec<(String, String)> {
+        let mut sources: Vec<(String, String)> = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    // a build directory left beside a crate holds
+                    // generated code, which nobody writes a literal in
+                    if path.file_name().is_some_and(|name| name == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let name = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                sources.push((name, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+        sources.sort_by(|a, b| a.0.cmp(&b.0));
+        sources
     }
 
     /// What a scenario source does about the notices view draws over the
@@ -412,27 +515,7 @@ mod tests {
     #[test]
     fn every_scenario_source_is_classified_for_the_notice_stack() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scenarios");
-        let mut sources: Vec<(String, String)> = Vec::new();
-        let mut stack = vec![root.clone()];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|ext| ext != "rs") {
-                    continue;
-                }
-                let name = path
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                sources.push((name, std::fs::read_to_string(&path).unwrap()));
-            }
-        }
-        sources.sort_by(|a, b| a.0.cmp(&b.0));
+        let sources = rust_sources(&root);
 
         let listed: Vec<&str> = SCENARIO_TREATMENT.iter().map(|(name, _)| *name).collect();
         let found: Vec<&str> = sources.iter().map(|(name, _)| name.as_str()).collect();
@@ -452,6 +535,243 @@ mod tests {
                 grounds == TAKES_THEM_DOWN,
                 "{name}: the table and the source disagree about whether it asks for the \
                  notice stack to come down (grounds on file: {grounds:?})"
+            );
+        }
+    }
+    /// Every `SpawnSpec` literal in the tree, against the answer it writes
+    /// for [`SpawnSpec::measured_program`] and why that answer is the
+    /// right one.
+    ///
+    /// Rows are `(path under `crates/`, answer, grounds)`, in source order
+    /// within a file.
+    const SPAWN_SPEC_LITERALS: &[(&str, &str, &str)] = &[
+        (
+            "view-bench/src/notices.rs",
+            "None",
+            "a test spec whose program is the one it measures",
+        ),
+        (
+            "view-bench/src/remote_ui.rs",
+            "..nvim.clone()",
+            "the pty-hosted client re-points the spawn it derives from at a socket; what runs \
+             is unchanged",
+        ),
+        (
+            "view-bench/src/remote_ui.rs",
+            "None",
+            "a test spec whose program is the one it measures",
+        ),
+        (
+            "view-bench/src/remote_ui.rs",
+            "Some(PathBuf::from(\"target/release/view\"))",
+            "a test base shaped like a wrapped spawn, so a derivation that dropped the record \
+             fails there",
+        ),
+        (
+            "view-bench/src/scenarios/echo_speculated_rtt.rs",
+            "None",
+            "the tier's inner spawn names the binary it runs; the tap shim it is handed to \
+             records that binary as it moves it into the shell's argv",
+        ),
+        (
+            "view-bench/src/scenarios/flood.rs",
+            "None",
+            "a test spec naming a program that cannot be spawned at all",
+        ),
+        (
+            "view-bench/src/scenarios/picker.rs",
+            "..spec.clone()",
+            "a corpus root moves where a spawn starts, not what it runs",
+        ),
+        (
+            "view-bench/src/scenarios/picker.rs",
+            "Some(PathBuf::from(\"target/release/view\"))",
+            "a test base shaped like a wrapped spawn, so a derivation that dropped the record \
+             fails there",
+        ),
+        (
+            "view-bench/src/scenarios/remote_memory.rs",
+            "None",
+            "a test spec whose program is the one it measures",
+        ),
+        (
+            "view-bench/src/scenarios/supervision.rs",
+            "Some(PathBuf::from(\"view\"))",
+            "a test base shaped like a wrapped spawn, so a derivation that dropped the record \
+             fails there",
+        ),
+        (
+            "view-bench/src/scenarios/taps/mod.rs",
+            "Some(measured_program)",
+            "the one wrapper in the tree: it spawns a shell and measures the binary that \
+             shell execs",
+        ),
+        (
+            "view-bench/src/scenarios/taps/mod.rs",
+            "None",
+            "the pty floor control spawns a shell that never becomes an editor, so there is \
+             no view under it to measure",
+        ),
+        (
+            "view-bench/tests/remote_ui.rs",
+            "None",
+            "a bare engine spawned as itself",
+        ),
+        (
+            "view-harness/src/bin/bench/cell_world.rs",
+            "None",
+            "a matrix cell's view side spawns the binary it measures",
+        ),
+        (
+            "view-harness/src/bin/bench/cell_world.rs",
+            "None",
+            "a matrix cell's baseline spawns the engine it measures",
+        ),
+        (
+            "view-harness/src/bin/bench/remote_rows.rs",
+            "None",
+            "a remote row spawns view directly, reaching its engine over the transport",
+        ),
+        (
+            "view-harness/src/bin/rtt_acceptance/run.rs",
+            "None",
+            "the tier's baseline spawns the engine it measures",
+        ),
+        (
+            "view-harness/tests/user_fixture.rs",
+            "None",
+            "a side spec whose program the caller fills in with the binary it measures",
+        ),
+    ];
+
+    /// The answer each `SpawnSpec` literal in `source` writes for
+    /// `measured_program`, in source order: the field's own expression, or
+    /// the struct-update tail the literal inherits it through.
+    fn measured_program_answers(source: &str) -> Vec<String> {
+        // spelled in two pieces so the walk does not find itself
+        let needle = concat!("SpawnSpec", " {");
+        let mut answers = Vec::new();
+        let mut cursor = 0;
+        while let Some(offset) = source[cursor..].find(needle) {
+            let at = cursor + offset;
+            cursor = at + needle.len();
+            // a return type and the definition itself are written the same
+            // way a literal is, path qualifier included
+            let mut head = source[..at].trim_end();
+            while let Some(qualified) = head.strip_suffix("::") {
+                head = qualified
+                    .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_')
+                    .trim_end();
+            }
+            if head.ends_with("->") || head.ends_with("struct") {
+                continue;
+            }
+            let open = cursor - 1;
+            let mut depth = 0usize;
+            let mut close = open;
+            for (offset, ch) in source[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = open + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut answer = String::from("(no answer)");
+            for field in top_level_fields(&source[open + 1..close]) {
+                if let Some(expression) = field.strip_prefix("measured_program:") {
+                    answer = expression.trim().to_string();
+                    break;
+                }
+                if field.starts_with("..") {
+                    answer = field;
+                }
+            }
+            answers.push(answer);
+            cursor = close;
+        }
+        answers
+    }
+
+    /// The fields of one struct literal's body, whitespace collapsed, split
+    /// on the commas that are not inside a nested expression.
+    fn top_level_fields(body: &str) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut depth = 0i32;
+        let mut current = String::new();
+        for ch in body.chars() {
+            match ch {
+                '{' | '[' | '(' => depth += 1,
+                '}' | ']' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    fields.push(std::mem::take(&mut current));
+                    continue;
+                }
+                _ => {}
+            }
+            current.push(ch);
+        }
+        fields.push(current);
+        fields
+            .iter()
+            .map(|field| field.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|field| !field.is_empty())
+            .collect()
+    }
+
+    /// Walks the tree's own `SpawnSpec` literals rather than the builders
+    /// anybody remembered: the field is an `Option`, so a literal that
+    /// moves its program into a wrapper's argv and answers `None` compiles,
+    /// passes every builder pin, and leaves the takedown inert on whatever
+    /// rows it serves. A new literal fails here until its author writes the
+    /// answer down.
+    #[test]
+    fn every_spawn_spec_literal_is_listed_against_what_it_measures() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut found: Vec<(String, String)> = Vec::new();
+        for (name, source) in rust_sources(&crates) {
+            for answer in measured_program_answers(&source) {
+                found.push((name.clone(), answer));
+            }
+        }
+        for (name, _, grounds) in SPAWN_SPEC_LITERALS {
+            assert!(
+                !grounds.is_empty(),
+                "{name}: a listed literal has no grounds for the answer it writes"
+            );
+        }
+        let mut files: Vec<&str> = found
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(SPAWN_SPEC_LITERALS.iter().map(|(name, _, _)| *name))
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        for name in files {
+            let built: Vec<&str> = found
+                .iter()
+                .filter(|(file, _)| file == name)
+                .map(|(_, answer)| answer.as_str())
+                .collect();
+            let listed: Vec<&str> = SPAWN_SPEC_LITERALS
+                .iter()
+                .filter(|(file, _, _)| *file == name)
+                .map(|(_, answer, _)| *answer)
+                .collect();
+            assert_eq!(
+                built, listed,
+                "{name}: the spawn specs this file builds and the answers SPAWN_SPEC_LITERALS \
+                 lists for it disagree -- a spawn that moves its program into a wrapper's \
+                 arguments has to record the binary it measures, or nothing downstream \
+                 recognises the session as view"
             );
         }
     }
