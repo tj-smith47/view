@@ -1025,8 +1025,9 @@ impl Model {
     /// [`crate::grid::GridDamage`].
     ///
     /// The one place damage is drained, because it is the one place that
-    /// sees every input a composite reads: the grid's own changed rows, and
-    /// the highlight table behind every cell's resolved style. A highlight
+    /// sees every input a composite reads: every visible pane's own changed
+    /// rows ([`crate::grid::registry::GridRegistry::take_damage`]), and the
+    /// highlight table behind every cell's resolved style. A highlight
     /// change has no rows of its own -- it can restyle the whole screen at
     /// once -- so it collapses to whole-frame damage. Draining a paint input
     /// anywhere else would clip a frame against a subset of what it paints
@@ -1037,7 +1038,7 @@ impl Model {
         // would resurface as damage on some later frame that no longer
         // needs it
         let hl_changed = self.engine.hl.take_dirty();
-        let grid = self.engine.grids.global_mut().take_dirty();
+        let grid = self.engine.grids.take_damage();
         if hl_changed {
             crate::grid::GridDamage::full()
         } else {

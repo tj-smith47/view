@@ -8,7 +8,7 @@
 //! module: no I/O, no RPC, and every wire-sourced value already saturated by
 //! the decoder that produced it.
 
-use crate::grid::{Grid, GridOp};
+use crate::grid::{Grid, GridDamage, GridOp};
 
 /// A grid's identity as nvim assigns it. The global grid keeps the id the
 /// engine gives it rather than a sentinel, so single-grid and multigrid
@@ -181,6 +181,11 @@ pub struct GridRegistry {
     global: Grid,
     slots: Vec<Slot>,
     cursor: Option<GridId>,
+    /// Set by any event that moves, reveals or removes a box on screen.
+    /// Such an event names no cells at all, and the rows a vacated box
+    /// leaves behind belong to whatever was under it, so the layout
+    /// changing is the one thing a per-pane row list cannot express.
+    placement_dirty: bool,
 }
 
 impl GridRegistry {
@@ -191,6 +196,7 @@ impl GridRegistry {
             global: Grid::new(),
             slots: Vec::new(),
             cursor: None,
+            placement_dirty: false,
         }
     }
 
@@ -201,10 +207,48 @@ impl GridRegistry {
         &self.global
     }
 
-    /// The global grid, for the crate-private damage drain.
-    #[inline]
-    pub(crate) fn global_mut(&mut self) -> &mut Grid {
-        &mut self.global
+    /// Drains what changed since the last call, in screen rows.
+    ///
+    /// Per pane, not per screen: a pane's own rows are grid-local, so each
+    /// one's damage is offset by the row its box starts at and the frame
+    /// repaints the rows a window actually redrew rather than every row a
+    /// window could have. A layout change has no rows of its own -- the box
+    /// that moved uncovers whatever was beneath it -- so it collapses to
+    /// the whole frame, which is also what a resized or cleared grid
+    /// already reports for itself.
+    ///
+    /// Every grid is drained, hidden and unplaced ones included: a change
+    /// left in one of their trackers would resurface as damage on some
+    /// later frame that no longer needs it, exactly as
+    /// [`crate::model::Model::take_paint_damage`] drains both its inputs
+    /// unconditionally.
+    pub(crate) fn take_damage(&mut self) -> GridDamage {
+        let mut full = std::mem::take(&mut self.placement_dirty);
+        let mut rows = Vec::new();
+        let global = self.global.take_dirty();
+        full |= global.full;
+        rows.extend(global.rows);
+        for slot in &mut self.slots {
+            let damage = slot.grid.take_dirty();
+            let Some(placed) = slot.placed.as_ref() else {
+                continue;
+            };
+            if placed.hidden {
+                continue;
+            }
+            full |= damage.full;
+            rows.extend(
+                damage
+                    .rows
+                    .iter()
+                    .map(|row| row.saturating_add(placed.origin.0)),
+            );
+        }
+        if full {
+            GridDamage::full()
+        } else {
+            GridDamage { full: false, rows }
+        }
     }
 
     /// The cells of one grid, or `None` for an id nvim has never named.
@@ -243,6 +287,7 @@ impl GridRegistry {
     /// grid behind it, and dropping the placement would lose a pane that
     /// never reappears.
     pub fn apply(&mut self, op: GridEvent) {
+        self.placement_dirty |= !matches!(op, GridEvent::Cells { .. });
         match op {
             GridEvent::Cells { grid, op } => self.apply_cells(grid, op),
             // the global grid is never destroyed and never placed, so an
@@ -369,11 +414,22 @@ impl GridRegistry {
                 return Some(hit);
             }
         }
-        if self.slots.iter().any(|slot| slot.placed.is_some()) {
+        if self.has_panes() {
             return None;
         }
         let (width, height) = self.global.size();
         (col < width && row < height).then_some((GLOBAL_GRID, col, row))
+    }
+
+    /// Whether nvim has placed a window of its own anywhere.
+    ///
+    /// False for every single-grid session and for a multigrid one before
+    /// its first `win_pos` lands, which is the case a compositor answers
+    /// without building the pane list at all: the global grid is the whole
+    /// picture and there is no space between windows to draw in.
+    #[must_use]
+    pub fn has_panes(&self) -> bool {
+        self.slots.iter().any(|slot| slot.placed.is_some())
     }
 
     /// The grid nvim last placed the cursor in.
@@ -394,6 +450,9 @@ impl GridRegistry {
     pub(crate) fn forget_grids(&mut self) {
         self.slots.clear();
         self.cursor = None;
+        // every box those grids held is gone from the screen at once, and
+        // no cell op will ever name the rows they occupied
+        self.placement_dirty = true;
     }
 
     /// Where `(col, row)` lands inside `pane`, if it lands inside it at all.
@@ -673,6 +732,63 @@ mod tests {
             vec![GLOBAL_GRID, GridId(2)],
             "a destroyed grid is gone from the listing"
         );
+    }
+
+    /// The three answers the drain owes a compositor: a grid with no box on
+    /// screen contributes nothing (and does not hoard its rows for a later
+    /// frame that no longer needs them), a placement change repaints the
+    /// frame it rearranged, and a placed grid's rows arrive where its box
+    /// actually sits.
+    #[test]
+    fn damage_is_reported_per_pane_in_screen_rows() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GLOBAL_GRID, 80, 24);
+        resize(&mut registry, GridId(5), 40, 5);
+        let _ = registry.take_damage();
+
+        put(&mut registry, GridId(5), 1);
+        let unplaced = registry.take_damage();
+        assert!(
+            !unplaced.full && unplaced.rows.is_empty(),
+            "a grid with no box on screen damaged the frame: {unplaced:?}"
+        );
+
+        registry.apply(GridEvent::Window {
+            grid: GridId(5),
+            startrow: 12,
+            startcol: 0,
+        });
+        assert!(
+            registry.take_damage().full,
+            "a window appeared and the rows it covered were never repainted"
+        );
+
+        put(&mut registry, GridId(5), 1);
+        assert_eq!(
+            registry.take_damage().rows,
+            vec![13],
+            "a pane's row reached the frame in its own coordinates, not the screen's"
+        );
+
+        registry.apply(GridEvent::Hide { grid: GridId(5) });
+        let _ = registry.take_damage();
+        put(&mut registry, GridId(5), 2);
+        let hidden = registry.take_damage();
+        assert!(
+            !hidden.full && hidden.rows.is_empty(),
+            "a hidden pane damaged the frame: {hidden:?}"
+        );
+    }
+
+    fn put(registry: &mut GridRegistry, grid: GridId, row: u16) {
+        registry.apply(GridEvent::Cells {
+            grid,
+            op: GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: vec![("x".into(), 0, 1)],
+            },
+        });
     }
 
     fn resize(registry: &mut GridRegistry, grid: GridId, width: u16, height: u16) {

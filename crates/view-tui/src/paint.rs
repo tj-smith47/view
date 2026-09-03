@@ -15,6 +15,7 @@ use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 
+mod panes;
 mod toast;
 
 /// The terminal-space rows a frame's composite must repaint, so a redraw
@@ -798,10 +799,11 @@ fn composite_layers(
         // sidebar's top edge until something else damages that row.
         match &layer.kind {
             LayerKind::EngineGrid => {
-                paint_grid(
-                    model.engine.grid(),
+                panes::paint_panes(
+                    model.engine.grids(),
                     &theme,
                     model.engine.hl(),
+                    borders,
                     area,
                     damage,
                     buf,

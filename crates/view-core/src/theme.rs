@@ -240,6 +240,19 @@ chrome_groups! {
     /// call's status glyph both resolve through it, which is what makes
     /// them read as beside the conversation rather than part of it.
     NonText => "NonText", Normal;
+    /// nvim's builtin group for the column between two side-by-side windows
+    /// (`:h hl-WinSeparator`). Under `ext_multigrid` each window's text
+    /// arrives in a grid of its own and the space between them is view's to
+    /// draw, so the separator it paints there resolves through the group a
+    /// colorscheme already themes nvim's own split column with.
+    WinSeparator => "WinSeparator", Normal;
+    /// nvim's builtin group for buffer text in a window that is not the
+    /// current one (`:h hl-NormalNC`). A pane the cursor is not in takes it
+    /// in place of `Normal` wherever its cells carry no highlight of their
+    /// own, which is exactly the substitution nvim makes -- so a
+    /// colorscheme that dims inactive windows dims view's inactive panes,
+    /// and one that says nothing leaves them reading like the active one.
+    NormalNC => "NormalNC", Normal;
     /// nvim's builtin success-message group (`:h hl-OkMsg`), the positive
     /// counterpart of [`ChromeGroup::ErrorMsg`]. A completed tool call's
     /// check glyph resolves through it, so the two outcomes take the
