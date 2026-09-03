@@ -709,14 +709,14 @@ pub fn compare_grids(view: ViewGrids<'_>, reference: ReferenceGrids<'_>) -> Vec<
     ids.dedup();
 
     for id in ids {
-        let find = |grids: &'_ [(u64, Screen)]| {
-            grids
-                .iter()
-                .find(|(grid, _)| *grid == id)
-                .map_or_else(|| empty.clone(), |(_, screen)| screen.clone())
-        };
-        let view_screen = find(view_grids);
-        let ref_screen = find(ref_grids);
+        let view_screen = view_grids
+            .iter()
+            .find(|(grid, _)| *grid == id)
+            .map_or(&empty, |(_, screen)| screen);
+        let ref_screen = ref_grids
+            .iter()
+            .find(|(grid, _)| *grid == id)
+            .map_or(&empty, |(_, screen)| screen);
         diff_rows(
             ViewRows(&view_screen.rows),
             ReferenceRows(&ref_screen.rows),

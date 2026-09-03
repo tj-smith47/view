@@ -2227,6 +2227,15 @@ end"
 /// on this crate, so one of the two would be holding a copy.
 pub const UI_EXT_OPTIONS: &[&str] = view_core::native::ext::ALL_NAMES;
 
+/// [`UI_EXT_OPTIONS`] plus `ext_multigrid`, the vocabulary under which nvim
+/// addresses each window's grid separately
+/// (`docs/multigrid-wire-capture.md`). Lives beside [`UI_EXT_OPTIONS`] so
+/// the attach vocabulary has one home for anything that attaches through
+/// this crate.
+pub const UI_EXT_OPTIONS_MULTIGRID: &[&str] = view_core::native::ext::ALL_NAMES_MULTIGRID;
+
+pub use view_core::native::ext::MULTIGRID_NAME;
+
 /// The non-`ext_` option [`EngineHandle::claim_stdout_tty`] sets, declaring
 /// that this UI's stdout is a real terminal.
 ///

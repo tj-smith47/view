@@ -95,11 +95,10 @@ pub use pty::{
 };
 pub use reference::ReferenceSession;
 /// The `nvim_ui_attach` option sets a driver attaches with, re-exported from
-/// the crates that own the vocabulary: a runner that picks a set for one
-/// side of a comparison names the same list the other side's attach takes,
-/// and reads it from the owner rather than restating six option keys.
-pub use view_core::native::ext::{ALL_NAMES_MULTIGRID as UI_EXT_OPTIONS_MULTIGRID, MULTIGRID_NAME};
-pub use view_engine::UI_EXT_OPTIONS;
+/// the crate that owns every attach: a runner that picks a set for one side
+/// of a comparison names the same list the other side's attach takes, and
+/// reads it from the owner rather than restating the option keys.
+pub use view_engine::{MULTIGRID_NAME, UI_EXT_OPTIONS, UI_EXT_OPTIONS_MULTIGRID};
 
 /// The workspace root this crate was built from, resolved from its own
 /// manifest rather than from a caller's working directory.

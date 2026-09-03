@@ -64,14 +64,11 @@ struct Driver {
 }
 
 impl Driver {
-    fn start() -> Self {
+    fn start(ext: &[&str]) -> Self {
         let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(256);
         let (_pump, _cutover) = engine.start_pump(tx);
-        engine
-            .handle
-            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
-            .unwrap();
+        engine.handle.ui_attach(80, 24, ext).unwrap();
         Self {
             engine,
             rx,
@@ -234,7 +231,7 @@ fn load(name: &str) -> CorpusEntry {
 fn assert_no_interference(entry_name: &str, expect_feature: &str) {
     let entry = load(entry_name);
 
-    let mut driver = Driver::start();
+    let mut driver = Driver::start(entry.ext_options);
     driver.register_native_mappings();
     driver.seed_baseline();
 

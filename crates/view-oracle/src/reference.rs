@@ -289,9 +289,6 @@ pub struct ReferenceSession {
     /// [`ResolvedAttr`] content, never the raw id, so the two sides' id
     /// spaces never have to agree. See [`crate::attr`]'s docs.
     attrs: HashMap<u64, ResolvedAttr>,
-    /// The grid the last `grid_cursor_goto` named, which is a window grid
-    /// under multigrid and the global grid without it.
-    cursor_grid: u64,
     mode: String,
     /// Names of `UiEvent::Unknown` events observed, in arrival order,
     /// unfiltered: an unrecognized redraw event class is a potential
@@ -380,7 +377,6 @@ impl ReferenceSession {
             pump,
             grids: BTreeMap::from([(GLOBAL_GRID, RefGrid::new())]),
             attrs: HashMap::new(),
-            cursor_grid: GLOBAL_GRID,
             mode: String::new(),
             unknown_events_raw: Vec::new(),
             markers: QuiesceMarkers::default(),
@@ -522,10 +518,15 @@ impl ReferenceSession {
         self.grids.get(&GLOBAL_GRID).unwrap_or(&EMPTY_GRID)
     }
 
-    /// The grid `id`, created empty if nvim has not addressed it before:
-    /// under multigrid a `grid_resize` is a grid's first appearance as often
-    /// as a `win_pos` is, so an applier that waited for a placement would
-    /// drop the resize that sizes the window it is about to paint.
+    /// The grid `id`, created empty if nvim has not addressed it before.
+    /// Creating on demand rather than on a placement event is what the wire
+    /// requires: "every new grid's first appearance was a
+    /// `win_viewport_margins` naming it, ahead of its own `grid_resize`;
+    /// `win_pos` and `win_float_pos` always arrived after it [...] a decoder
+    /// [...] must not treat `win_pos` as a grid's creation point"
+    /// (`docs/multigrid-wire-capture.md`, "The grid id space"). This applier
+    /// discards the placement events entirely, so waiting for one would mean
+    /// dropping every event a grid receives.
     fn grid_mut(&mut self, id: u64) -> &mut RefGrid {
         self.grids.entry(id).or_insert_with(RefGrid::new)
     }
@@ -564,16 +565,6 @@ impl ReferenceSession {
     /// times out, or the reply shape is malformed.
     pub fn get_mode(&mut self) -> Result<(String, bool), OracleError> {
         self.engine.handle.get_mode().map_err(Into::into)
-    }
-
-    /// The current cursor `(row, col)`, as last set by `GridCursorGoto`,
-    /// inside the grid that event named -- which is a window grid under
-    /// multigrid and the global grid without it.
-    #[must_use]
-    pub fn cursor(&self) -> (u16, u16) {
-        self.grids
-            .get(&self.cursor_grid)
-            .map_or((0, 0), |grid| (grid.cursor_row, grid.cursor_col))
     }
 
     /// The current mode name, as last set by `ModeChange`.
@@ -656,7 +647,6 @@ impl ReferenceSession {
                     .put_line(saturate_u16(row), saturate_u16(col_start), &cells);
             }
             UiEvent::GridCursorGoto { grid, row, col } => {
-                self.cursor_grid = grid;
                 self.grid_mut(grid)
                     .cursor_goto(saturate_u16(row), saturate_u16(col));
             }

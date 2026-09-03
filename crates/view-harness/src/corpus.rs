@@ -24,10 +24,11 @@ use view_oracle::review::DiffReviewCase;
 const SUPPORTED_SCHEMA: u32 = 1;
 
 /// The `ext_set` name every entry authored before multigrid carries: the
-/// full `ext_*` set view itself attaches with. A named set (rather than the set itself living in the
-/// entry) is what lets an entry name a vocabulary without restating six
-/// option keys, and what makes a set the runner does not know a load error
-/// instead of an attach that silently asked for nothing.
+/// full `ext_*` set view itself attaches with. A named set (rather than the
+/// set itself living in the entry) is what lets an entry name a vocabulary
+/// without restating five option keys, and what makes a set the runner does
+/// not know a load error instead of an attach that silently asked for
+/// nothing.
 pub const DEFAULT_EXT_SET: &str = "default";
 
 /// The options [`DEFAULT_EXT_SET`] resolves to, for the generated scripts
