@@ -556,6 +556,39 @@ pub fn host_load() -> Option<f64> {
     }
 }
 
+/// Every pid the kernel lists as a direct child of `pid`, across all of its
+/// threads.
+///
+/// The `children` files are per-thread, not per-process: a fork is
+/// attributed to the thread that made it, so the main thread's file alone
+/// misses a child forked from any other thread -- which is where every
+/// engine this workspace spawns is forked from, the parent-death signal
+/// naming a thread rather than a process. A thread that exits between the
+/// listing and the read is skipped rather than failing the walk.
+///
+/// Linux only: nothing else publishes this without a full process-table
+/// walk, and a test that needs it says so with its own `cfg`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn child_pids(pid: u32) -> Vec<u32> {
+    let mut pids = Vec::new();
+    for thread in std::fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let Ok(contents) = std::fs::read_to_string(thread.path().join("children")) else {
+            continue;
+        };
+        pids.extend(
+            contents
+                .split_whitespace()
+                .filter_map(|e| e.parse::<u32>().ok()),
+        );
+    }
+    pids
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

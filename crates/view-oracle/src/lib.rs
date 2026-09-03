@@ -100,6 +100,11 @@ pub use reference::ReferenceSession;
 /// reads it from the owner rather than restating the option keys.
 pub use view_engine::{MULTIGRID_NAME, UI_EXT_OPTIONS, UI_EXT_OPTIONS_MULTIGRID};
 
+/// The spawn a harness child that outlives its call frame takes, re-exported
+/// beside this crate's other process hygiene so a driver crate reaches it
+/// without a dependency on the engine.
+pub use view_engine::spawn_tied_to_this_process;
+
 /// The workspace root this crate was built from, resolved from its own
 /// manifest rather than from a caller's working directory.
 #[must_use]

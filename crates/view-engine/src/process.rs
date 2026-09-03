@@ -2516,6 +2516,28 @@ fn spawn_engine_child(mut command: Command) -> std::io::Result<Child> {
     reply_rx.recv().map_err(|_| gone())?
 }
 
+/// Spawns a long-lived child that the operating system ends when this
+/// process does, for an owner outside this crate whose `Drop` covers only
+/// the exits it chooses.
+///
+/// The same spawn an engine takes, so the coverage is the same: on Linux the
+/// child carries `PR_SET_PDEATHSIG`, and a parent killed outright takes it
+/// along; on every other platform the child outlives such a parent and the
+/// owner's `Drop` remains the only thing that reaps it.
+///
+/// A spawn rather than an arming step a caller applies to its own `Command`:
+/// the signal names the *thread* that forked the child, so arming it on a
+/// thread that returns before the child is wanted kills the child there.
+/// This entry point forks where that cannot happen.
+///
+/// # Errors
+///
+/// Whatever the spawn itself reports, plus [`std::io::ErrorKind::Other`] if
+/// the thread the fork is handed to could not be reached.
+pub fn spawn_tied_to_this_process(command: Command) -> std::io::Result<Child> {
+    spawn_engine_child(command)
+}
+
 /// Adds the `pre_exec` closure that arms the parent-death signal, reading
 /// the parent pid here rather than in the child so the child has a value to
 /// compare its own `getppid` against.

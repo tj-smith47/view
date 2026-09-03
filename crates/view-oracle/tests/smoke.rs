@@ -383,40 +383,22 @@ fn spawn_view_pty_raw_isolated_with_args(
     build_view_pty(extra_args, None, policy)
 }
 
-/// Polls Linux's child-tracking files for a direct child of `parent_pid`
-/// whose `/proc/<pid>/comm` equals `comm`, or `None` once `timeout` elapses.
+/// Polls for a direct child of `parent_pid` whose `/proc/<pid>/comm` equals
+/// `comm`, or `None` once `timeout` elapses.
 ///
 /// `view` never exposes its embedded nvim's pid on its own API surface (by
 /// design: only `view-engine` speaks to the child at all), so a black-box
 /// pty test has no way to find it except by walking procfs from the
 /// outside. Linux-only: this file's only caller is gated the same way,
 /// since the other tests here don't need to reach into the process tree.
-///
-/// Every thread under `/proc/<pid>/task/` is read, never the main thread's
-/// file alone: the kernel attributes a fork to the thread that made it, and
-/// view forks its engine from a thread of its own (see `spawn_engine_child`,
-/// which arms the parent-death signal and so has to fork somewhere that
-/// outlives the attach). The same union `view-bench`'s `direct_children`
-/// performs, for the same reason.
 #[cfg(target_os = "linux")]
 fn wait_for_child_pid(parent_pid: u32, comm: &str, timeout: Duration) -> Option<u32> {
     let deadline = Instant::now() + timeout;
-    let task_dir = format!("/proc/{parent_pid}/task");
     while Instant::now() < deadline {
-        for thread in std::fs::read_dir(&task_dir).into_iter().flatten().flatten() {
-            let Ok(contents) = std::fs::read_to_string(thread.path().join("children")) else {
-                continue;
-            };
-            for tok in contents.split_whitespace() {
-                if let Ok(candidate) = tok.parse::<u32>() {
-                    let comm_path = format!("/proc/{candidate}/comm");
-                    if std::fs::read_to_string(&comm_path)
-                        .map(|c| c.trim() == comm)
-                        .unwrap_or(false)
-                    {
-                        return Some(candidate);
-                    }
-                }
+        for candidate in view_test_support::child_pids(parent_pid) {
+            let comm_path = format!("/proc/{candidate}/comm");
+            if std::fs::read_to_string(&comm_path).is_ok_and(|c| c.trim() == comm) {
+                return Some(candidate);
             }
         }
         std::thread::sleep(Duration::from_millis(20));

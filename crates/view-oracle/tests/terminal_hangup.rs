@@ -38,42 +38,15 @@ const SETTLED: Duration = Duration::from_millis(500);
 /// `view-core`'s `Msg::Terminated` arm produces.
 const HANGUP_STATUS: i32 = 129;
 
-/// The pids the kernel lists as children of `pid`, across every thread it has.
-///
-/// Linux only: the `children` files are the only interface that answers this
-/// without a full process-table walk, and the reap assertion below is skipped
-/// rather than approximated where they do not exist. Every thread under
-/// `/proc/<pid>/task/` is read because the kernel attributes a fork to the
-/// thread that made it, and view forks its engine off the main thread; a
-/// thread that exits between the listing and its read is skipped rather than
-/// failing the walk.
-#[cfg(target_os = "linux")]
-fn children_of(pid: u32) -> Vec<u32> {
-    let mut pids = Vec::new();
-    for thread in std::fs::read_dir(format!("/proc/{pid}/task"))
-        .into_iter()
-        .flatten()
-        .flatten()
-    {
-        let Ok(contents) = std::fs::read_to_string(thread.path().join("children")) else {
-            continue;
-        };
-        pids.extend(
-            contents
-                .split_whitespace()
-                .filter_map(|e| e.parse::<u32>().ok()),
-        );
-    }
-    pids
-}
-
 /// The pid of the `nvim` `view` spawned, once it has one.
 #[cfg(target_os = "linux")]
 fn engine_child_of(pid: u32) -> Option<u32> {
-    children_of(pid).into_iter().find(|child| {
-        std::fs::read_to_string(format!("/proc/{child}/comm"))
-            .is_ok_and(|comm| comm.trim() == "nvim")
-    })
+    view_test_support::child_pids(pid)
+        .into_iter()
+        .find(|child| {
+            std::fs::read_to_string(format!("/proc/{child}/comm"))
+                .is_ok_and(|comm| comm.trim() == "nvim")
+        })
 }
 
 /// Whether the OS still holds a process-table entry for `pid`.
