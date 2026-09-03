@@ -449,8 +449,9 @@ fn render_native_toml(native: &BTreeMap<String, bool>) -> String {
 /// Only a `present` state that declares no `native` table takes the `None`
 /// path. Every `present`-named scenario file in `compat/scenarios/`
 /// declares exactly this shape (no `native` key at all), and the three
-/// fixtures they run against each commit their own `[native]` table with
-/// every feature off -- that committed table, not the all-enabled default
+/// fixtures they run against each commit their own `[native]` table
+/// switching off every feature that only decides who renders a surface --
+/// that committed table, not the all-enabled default
 /// below, is what a `present` state has always evidenced. A `superseded`/
 /// `deferred`/`native-only` state that omits `native` keeps its
 /// longstanding meaning instead: a bare `[native]` header, i.e. every

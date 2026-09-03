@@ -6,9 +6,15 @@
 # work it did faster. The takeovers carry their own gates: task
 # compat-supersede against this fixture's live plugins, and the
 # laststatus-superseded / laststatus-restored corpus entries.
+#
+# `palette` and `notifications` are absent below on purpose. They decide the
+# `ext_*` set the session attaches with, not merely who draws the surface:
+# switched off, nvim keeps the command line and the message area and paints
+# them into the grid, so the view arm applies that damage on top of its own
+# rendering -- strictly more work than the nvim arm does, which is the
+# opposite of the neutrality the paragraph above asks for. A state that means
+# to measure the detached protocol asks for it in its own `native` override.
 [native]
 picker = false
 tree = false
 statusline = false
-notifications = false
-palette = false

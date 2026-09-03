@@ -122,8 +122,17 @@ const KITTY: Answer = (b"\x1b[?u", b"\x1b[?1u");
 /// not forward that variable.
 const TRUECOLOR: Answer = (b"\x1bP$qm\x1b\\", b"\x1bP1$r0;48;2;1;2;3m\x1b\\");
 
+/// The box-glyph question -- one rounded corner written from a known
+/// column, then a CPR -- and the answer of a terminal that advanced the
+/// glyph by exactly one cell: the cursor at row 1, column 2, which is what
+/// every capture in `docs/terminal-probe-wire-capture.md` but section E
+/// reports. A child that sees this draws its borders in box-drawing
+/// characters instead of falling back to the locale hint and ASCII, which
+/// is a different frame and therefore different paint work.
+const BOX_GLYPH: Answer = (b"\r\xe2\x95\xad\x1b[6n\r\x1b[K", b"\x1b[1;2R");
+
 const DA1_ONLY: &[Answer] = &[DA1];
-const FULL_TIER: &[Answer] = &[SYNC, KITTY, TRUECOLOR, DA1];
+const FULL_TIER: &[Answer] = &[SYNC, KITTY, TRUECOLOR, BOX_GLYPH, DA1];
 
 impl QueryPolicy {
     /// The query/reply pairs a session under this policy answers.
@@ -977,13 +986,18 @@ impl Drop for PtySession {
 // the same coverage of the scanner that decides what this pty answers.
 #[cfg(test)]
 mod responder_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::path::PathBuf;
+
     use super::*;
 
-    /// The probe batch `view-tui` writes, in the order it writes it.
+    /// The probe batch `view-tui` writes, in the order `Probe::start`
+    /// writes it.
     fn probe_batch() -> Vec<u8> {
         let mut batch = SYNC.0.to_vec();
         batch.extend_from_slice(KITTY.0);
+        batch.extend_from_slice(TRUECOLOR.0);
+        batch.extend_from_slice(BOX_GLYPH.0);
         batch.extend_from_slice(DA1.0);
         batch
     }
@@ -1029,6 +1043,8 @@ mod responder_tests {
         let mut r = QueryResponder::new(FULL_TIER);
         let mut expected = SYNC.1.to_vec();
         expected.extend_from_slice(KITTY.1);
+        expected.extend_from_slice(TRUECOLOR.1);
+        expected.extend_from_slice(BOX_GLYPH.1);
         expected.extend_from_slice(DA1.1);
         assert_eq!(r.replies_for(&probe_batch()), expected);
     }
@@ -1053,6 +1069,167 @@ mod responder_tests {
         assert!(QueryPolicy::Silent.answers().is_empty());
         let mut r = QueryResponder::new(QueryPolicy::Silent.answers());
         assert!(r.replies_for(&probe_batch()).is_empty());
+    }
+
+    /// `view-tui`'s capability register, read as source text.
+    ///
+    /// Walked where it is written rather than imported: this crate may not
+    /// depend on view-tui (its module doc, and the crossterm/ratatui reach
+    /// rows in `scripts/audit-deps.sh` that such an edge would trip), so a
+    /// row added there has to be reached this way or not at all.
+    fn tiers_source() -> (PathBuf, String) {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.pop(); // crates/
+        let path = path.join("view-tui").join("src").join("tiers.rs");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("{} must be readable: {err}", path.display()));
+        (path, text)
+    }
+
+    /// Everything after `const {name}:`, which is where each of the readers
+    /// below starts.
+    fn after_const<'a>(source: &'a str, name: &str) -> &'a str {
+        let opener = format!("const {name}:");
+        let start = source
+            .find(&opener)
+            .unwrap_or_else(|| panic!("view-tui's tiers.rs declares no {name}"))
+            + opener.len();
+        &source[start..]
+    }
+
+    /// The struct-literal body of the [`CapabilityRow`] constant `name`,
+    /// ended on `};` rather than on the first `;`: a row's own fields carry
+    /// closures and string literals that hold one.
+    fn row_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let rest = after_const(source, name);
+        let end = rest
+            .find("};")
+            .unwrap_or_else(|| panic!("{name} is no struct literal"));
+        &rest[..end]
+    }
+
+    /// The value of the struct field `name` in `body`, up to its comma.
+    fn field<'a>(body: &'a str, name: &str) -> &'a str {
+        let opener = format!("{name}:");
+        let start = body
+            .find(&opener)
+            .unwrap_or_else(|| panic!("no {name} field in {body}"))
+            + opener.len();
+        let rest = &body[start..];
+        let end = rest.find(',').unwrap_or(rest.len());
+        rest[..end].trim()
+    }
+
+    /// The bytes the string literal `text` (already stripped of its quotes)
+    /// stands for.
+    fn unescape(text: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                continue;
+            }
+            match chars.next().expect("an escape with nothing after it") {
+                'x' => {
+                    let digits: String = [
+                        chars.next().expect("a hex escape's first digit"),
+                        chars.next().expect("a hex escape's second digit"),
+                    ]
+                    .into_iter()
+                    .collect();
+                    out.push(u8::from_str_radix(&digits, 16).expect("two hex digits"));
+                }
+                'r' => out.push(b'\r'),
+                'n' => out.push(b'\n'),
+                't' => out.push(b'\t'),
+                '0' => out.push(0),
+                '\\' => out.push(b'\\'),
+                '"' => out.push(b'"'),
+                '\'' => out.push(b'\''),
+                other => panic!("unhandled escape \\{other} in {text}"),
+            }
+        }
+        out
+    }
+
+    /// The bytes the query constant `name` puts on the wire, whichever of
+    /// the two spellings tiers.rs writes it in (`b"..."`, or a `"..."`
+    /// holding non-ASCII followed by `.as_bytes()`).
+    fn query_bytes(source: &str, name: &str) -> Vec<u8> {
+        let rest = after_const(source, name);
+        let open = rest
+            .find('"')
+            .unwrap_or_else(|| panic!("{name} is no literal"));
+        // walked rather than delimited by the last quote on the statement:
+        // a query's own bytes carry `;`, `"` and `\\` escapes, so nothing
+        // shorter than an escape-aware scan finds where it really ends
+        let mut text = String::new();
+        let mut chars = rest[open + 1..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return unescape(&text),
+                '\\' => {
+                    text.push(c);
+                    text.push(chars.next().expect("an escape with nothing after it"));
+                }
+                _ => text.push(c),
+            }
+        }
+        panic!("{name}'s literal is unterminated")
+    }
+
+    // The whole point of `AnswerFullTier`: a child under it must reach the
+    // tier the budget rows name. A capability probe this pty leaves
+    // unanswered sends the child to its fallback instead, so every row that
+    // depends on the resulting caps -- what the paint clips, which charset
+    // the borders draw in -- silently measures a terminal no host presents.
+    #[test]
+    fn the_full_tier_answers_every_capability_view_tui_probes_for() {
+        let (path, source) = tiers_source();
+        // read from the initializer rather than through `declaration`: the
+        // array's own length is written `[CapabilityRow; 4]`, so the first
+        // `;` on the line ends the type and not the statement
+        let register = source
+            .split_once("static REGISTER")
+            .expect("view-tui's tiers.rs declares no REGISTER")
+            .1;
+        let list = register
+            .split_once("= [")
+            .expect("REGISTER must be a literal array")
+            .1;
+        let list = list
+            .split_once(']')
+            .expect("REGISTER's array must be closed")
+            .0;
+        let rows: Vec<&str> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(
+            !rows.is_empty(),
+            "no rows read out of REGISTER in {}: the walk below would assert nothing",
+            path.display()
+        );
+        for row in rows {
+            let body = row_body(&source, row);
+            let capability = field(body, "capability").trim_matches('"');
+            let query = field(body, "query");
+            let bytes = query_bytes(&source, query);
+            let answered = FULL_TIER
+                .iter()
+                .any(|(asked, _)| bytes.windows(asked.len()).any(|window| window == *asked));
+            assert!(
+                answered,
+                "REGISTER's {capability} row asks {query} and FULL_TIER answers nothing inside \
+                 it, so a child under AnswerFullTier resolves that capability from its fallback \
+                 rather than from this pty and runs at caps no terminal presents. Give FULL_TIER \
+                 an Answer pairing {query}'s bytes with the reply \
+                 docs/terminal-probe-wire-capture.md records for it"
+            );
+        }
     }
 }
 

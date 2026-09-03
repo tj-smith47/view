@@ -1570,10 +1570,10 @@ impl Drop for Engine {
 ///   The report crosses as `msg_show`, becomes view's own overlay, and view
 ///   decides when it is over (`view_core::update::supervision`, which redraws
 ///   only where the reading says the recovery went well).
-/// - Without it -- `[native] notifications = false`, the shipped `minimal`
-///   fixture's own config -- nvim keeps its message area and writes the report
-///   into the grid. Measured on the pinned engine: the report overflows the
-///   last row, `need_wait_return` is set, and the main loop parks on
+/// - Without it -- `[native] notifications = false` -- nvim keeps its message
+///   area and writes the report into the grid. Measured on the pinned
+///   engine: the report overflows the last row,
+///   `need_wait_return` is set, and the main loop parks on
 ///   `Press ENTER` the moment `VimEnter` returns. Every *deferred* request is
 ///   swallowed for as long as that prompt stands, view's own swap probe among
 ///   them, so the session comes up on a screen of nvim's report with no
