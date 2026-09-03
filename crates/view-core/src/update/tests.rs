@@ -14,8 +14,8 @@ use super::*;
 use crate::events::UiEvent;
 use crate::grid::registry::{GridId, GLOBAL_GRID};
 use crate::hl::HlAttr;
-use crate::model::{CmdlineState, OverlayId, OverlayKind};
-use crate::msg::{BufferHandle, ExitInfo, RegisterType, ReplyToken, ReplyValue};
+use crate::model::{CmdlineState, MouseCapture, OverlayId, OverlayKind};
+use crate::msg::{BufferHandle, ExitInfo, MouseInput, RegisterType, ReplyToken, ReplyValue};
 use crate::native::ai_event::{
     AiCommand, PermissionOption, PermissionOptionKind, PermissionOutcome,
 };
@@ -654,6 +654,85 @@ fn a_click_on_a_separator_reaches_no_engine_window() {
         effects.is_empty(),
         "the separator column is view's own chrome, and nvim has no window \
          under it: {effects:?}"
+    );
+}
+
+#[test]
+fn a_release_on_a_separator_still_ends_the_gesture() {
+    let mut m = vsplit_model();
+    assert!(
+        matches!(
+            &update(&mut m, click(3, 41))[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GridId(5),
+                ..
+            })]
+        ),
+        "fixture: the press must claim the right window's grid"
+    );
+    // the pointer wanders left, off the pane and onto the separator the
+    // press never touched, and lets go there
+    let dragged = update(&mut m, mouse("drag", 3, 40));
+    let released = update(&mut m, mouse("release", 3, 40));
+    for (label, effects) in [("drag", &dragged), ("release", &released)] {
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::Rpc(RpcCall::InputMouse {
+                    grid: GridId(5),
+                    row: 3,
+                    col: 0,
+                    ..
+                })]
+            ),
+            "the {label} belongs to the gesture the press started, clamped \
+             to that grid's nearest cell; swallowing it leaves nvim stuck \
+             mid-selection: {effects:?}"
+        );
+    }
+    assert_eq!(
+        m.mouse_capture(),
+        None,
+        "the release ends the gesture wherever it landed"
+    );
+}
+
+#[test]
+fn a_release_on_a_reserved_chrome_row_still_ends_the_gesture() {
+    use crate::events::{TabEntry, TabHandle};
+    let mut m = vsplit_model();
+    // a second tab reserves the tabline row, so terminal row 4 is grid row 3
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::TablineUpdate {
+            current: TabHandle(1),
+            tabs: vec![
+                TabEntry {
+                    tab: TabHandle(1),
+                    name: "a".into(),
+                },
+                TabEntry {
+                    tab: TabHandle(2),
+                    name: "b".into(),
+                },
+            ],
+        }]),
+    );
+    assert_eq!(m.chrome_rows(), 1, "fixture: the tabline must be reserved");
+    let _ = update(&mut m, click(4, 41));
+    let effects = update(&mut m, mouse("release", 0, 41));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GridId(5),
+                row: 0,
+                col: 0,
+                ..
+            })]
+        ),
+        "a gesture that ends up on the tabline row is still the grid's to \
+         finish: {effects:?}"
     );
 }
 
@@ -1396,7 +1475,7 @@ fn a_drag_onto_an_overlay_keeps_delivering_to_the_engine_until_release() {
         &update(&mut m, mouse("press", 2, 3))[..],
         [Effect::Rpc(RpcCall::InputMouse { row: 2, col: 3, .. })]
     ));
-    assert_eq!(m.mouse_capture(), Some(MouseCapture::Engine));
+    assert_eq!(m.mouse_capture(), Some(MouseCapture::Engine(GLOBAL_GRID)));
 
     // without capture the engine would be left mid-selection here, with
     // a press it never got to finish
@@ -1451,7 +1530,7 @@ fn the_wheel_routes_by_position_and_leaves_a_gesture_in_flight_alone() {
     let mut m = full_screen_model();
     open_overlay(&mut m);
     let _ = update(&mut m, mouse("press", 2, 3));
-    assert_eq!(m.mouse_capture(), Some(MouseCapture::Engine));
+    assert_eq!(m.mouse_capture(), Some(MouseCapture::Engine(GLOBAL_GRID)));
 
     let wheel = Msg::Mouse(MouseInput {
         button: "wheel".into(),
@@ -1466,7 +1545,7 @@ fn the_wheel_routes_by_position_and_leaves_a_gesture_in_flight_alone() {
     );
     assert_eq!(
         m.mouse_capture(),
-        Some(MouseCapture::Engine),
+        Some(MouseCapture::Engine(GLOBAL_GRID)),
         "a wheel carries no gesture and must not steal one in flight"
     );
 }

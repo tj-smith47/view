@@ -1730,9 +1730,11 @@ pub struct OverlayId(pub u64);
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseCapture {
-    /// The engine grid received the press, so the rest of the gesture is
-    /// forwarded to it wherever the pointer travels.
-    Engine,
+    /// The named grid's pane received the press, so the rest of the gesture
+    /// is forwarded to that grid wherever the pointer travels -- including
+    /// off the pane entirely, which is why the grid is recorded here rather
+    /// than resolved again per event.
+    Engine(crate::grid::registry::GridId),
     /// The named overlay received the press.
     Overlay(OverlayId),
 }

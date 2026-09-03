@@ -930,10 +930,14 @@ fn mouse(session: &mut SpecSession) -> Result<Outcome, OracleError> {
     fold_engine_call(&mut session.model, &call, now);
     let discarded = session.model.speculate.pending().is_empty() && session.speculation_gone();
     session.script("qr")?;
-    session
-        .engine
-        .handle
-        .input_mouse("left", "press", "", 1, 2, 3)?;
+    session.engine.handle.input_mouse(
+        "left",
+        "press",
+        "",
+        view_core::grid::registry::GLOBAL_GRID.0,
+        2,
+        3,
+    )?;
     let _ = session.quiesce()?;
     Ok(Outcome::answered(painted, discarded))
 }

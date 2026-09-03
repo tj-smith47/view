@@ -1,8 +1,7 @@
 //! The pure state transition: `Msg` in, `Model` mutated, `Effect`s out.
 
-use crate::grid::registry;
-use crate::model::{Focus, Model, MouseCapture, OverlayKind, Tier};
-use crate::msg::{DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, RpcCall};
+use crate::model::{Focus, Model, OverlayKind, Tier};
+use crate::msg::{DeleteConfirmOutcome, Effect, EngineRequest, Key, Msg, RpcCall};
 use crate::native::ai_panel::TranscriptScroll;
 use crate::native::diff::BufTextChangedEvent;
 use crate::native::keys::{Action, Resolved};
@@ -24,6 +23,7 @@ const STARTUP_HOLD_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 
 mod ai;
 mod ai_fs;
+mod mouse;
 mod paste;
 pub(super) mod review;
 mod supervision;
@@ -188,7 +188,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
             Focus::Native(_) => paste_into_focused_surface(model, &text),
         },
-        Msg::Mouse(input) => route_mouse(model, input),
+        Msg::Mouse(input) => mouse::route(model, input),
         Msg::Redraw(events) => {
             let mut effects = Vec::new();
             for ev in events {
@@ -1573,94 +1573,6 @@ fn feature_invoke_notice(feature: &str, verb: &str, known: bool) -> String {
     } else {
         crate::native::mappings::render_usage()
     }
-}
-
-/// Routes one mouse event to the surface that owns it: the overlay under
-/// the pointer, or the engine when no overlay covers that cell.
-///
-/// A press claims the gesture, and the `drag`s and the `release` that
-/// follow go wherever the press went, however far the pointer travels.
-/// Routing every event by its own position instead would truncate any drag
-/// crossing an overlay edge: the engine would see a press with no release
-/// and stay stuck mid-selection, or a release for a press it never saw.
-/// `wheel` and `move` carry no gesture, so they always route by position
-/// and leave an in-flight capture alone.
-fn route_mouse(model: &mut Model, input: MouseInput) -> Vec<Effect> {
-    let owner = match input.action.as_str() {
-        "press" => {
-            let owner = position_owner(model, &input);
-            model.capture_mouse(owner);
-            owner
-        }
-        "drag" | "release" => {
-            // a gesture whose press was never seen (input started mid-drag)
-            // has no owner to honor, so it falls back to position
-            let owner = model
-                .mouse_capture()
-                .unwrap_or_else(|| position_owner(model, &input));
-            if input.action == "release" {
-                model.release_mouse();
-            }
-            owner
-        }
-        _ => position_owner(model, &input),
-    };
-    match owner {
-        // no overlay carries a mouse handler, so an overlay claiming the
-        // event is the whole of that routing
-        MouseCapture::Overlay(_) => Vec::new(),
-        MouseCapture::Engine => mouse_effect(model, input),
-    }
-}
-
-/// Which surface the pointer is over: the topmost overlay covering the
-/// cell, else the engine grid.
-fn position_owner(model: &Model, input: &MouseInput) -> MouseCapture {
-    match model.overlay_at(input.row, input.col) {
-        Some(id) => MouseCapture::Overlay(id),
-        None => MouseCapture::Engine,
-    }
-}
-
-/// Maps one terminal mouse event to an `RpcCall::InputMouse` effect,
-/// translating `input.row` from raw terminal cell coordinates into engine
-/// grid coordinates by subtracting [`Model::chrome_rows`]. A row that lands
-/// inside the reserved chrome (the tabline) belongs to that chrome, not the
-/// grid; no native chrome click handling exists yet, so such a click is
-/// dropped rather than forwarded at a wrapped-around row.
-///
-/// The engine coordinates are then a *screen* position, which is what
-/// nvim wants only while one grid covers the screen. Once nvim has placed
-/// windows of its own, the pane under the pointer names the grid and the
-/// position inside it, and a cell no pane covers is view's own separator
-/// chrome rather than an event the engine has any window to receive.
-fn mouse_effect(model: &Model, input: MouseInput) -> Vec<Effect> {
-    let chrome = model.chrome_rows();
-    if input.row < chrome {
-        return Vec::new();
-    }
-    let row = input.row - chrome;
-    let grids = model.engine.grids();
-    // not `hit_test` alone: its no-pane answer bounds the click against the
-    // global grid's last announced size, and a click arriving between a
-    // terminal resize and nvim's own would be swallowed rather than
-    // clamped by nvim as it is today
-    let (grid, col, row) = if grids.has_panes() {
-        match grids.hit_test(input.col, row) {
-            Some(hit) => hit,
-            None => return Vec::new(),
-        }
-    } else {
-        (registry::GLOBAL_GRID, input.col, row)
-    };
-    vec![Effect::Rpc(RpcCall::InputMouse {
-        button: input.button,
-        action: input.action,
-        modifier: input.modifier,
-        grid,
-        row,
-        col,
-    })]
 }
 
 #[cfg(test)]

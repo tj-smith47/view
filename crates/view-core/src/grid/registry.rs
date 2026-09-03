@@ -419,6 +419,13 @@ impl GridRegistry {
     /// at all: under `ext_multigrid` its cells are the chrome *between*
     /// windows, and a click on a separator is view's own to interpret rather
     /// than the engine's to receive.
+    ///
+    /// That answer is deliberately unbounded by the global grid's own size,
+    /// unlike every pane's. Bounding it would make a click depend on
+    /// geometry that arrives on the wire: between a terminal resize and the
+    /// `grid_resize` nvim answers it with, a click in the newly exposed
+    /// region would be swallowed here rather than clamped by nvim, which is
+    /// what happens to it today.
     #[must_use]
     pub fn hit_test(&self, col: u16, row: u16) -> Option<(GridId, u16, u16)> {
         for pane in self.panes_in_z_order().into_iter().rev() {
@@ -429,11 +436,39 @@ impl GridRegistry {
                 return Some(hit);
             }
         }
-        if self.has_panes() {
-            return None;
+        (!self.has_panes()).then_some((GLOBAL_GRID, col, row))
+    }
+
+    /// Where screen `(col, row)` sits inside `grid`, clamped to that grid's
+    /// own box -- column first on both sides, as [`hit_test`] is.
+    ///
+    /// What a gesture already claimed by a grid reports while the pointer
+    /// is outside it. A drag that leaves the window it started in is still
+    /// that window's drag, and nvim extends the selection to the position
+    /// it is handed, so the nearest cell inside the grid is the answer that
+    /// keeps a selection tracking the pointer instead of stopping at the
+    /// window edge.
+    ///
+    /// The global grid is the screen and is never clamped, for the same
+    /// reason [`hit_test`] does not bound its answer.
+    ///
+    /// [`hit_test`]: Self::hit_test
+    #[must_use]
+    pub fn clamp_into(&self, grid: GridId, col: u16, row: u16) -> Option<(u16, u16)> {
+        if grid == GLOBAL_GRID {
+            return Some((col, row));
         }
-        let (width, height) = self.global.size();
-        (col < width && row < height).then_some((GLOBAL_GRID, col, row))
+        let (width, height) = self.grid(grid)?.size();
+        let (top, left) = self
+            .slots
+            .iter()
+            .find(|slot| slot.id == grid)
+            .and_then(|slot| slot.placed.as_ref())
+            .map(|placed| placed.origin)?;
+        Some((
+            col.saturating_sub(left).min(width.saturating_sub(1)),
+            row.saturating_sub(top).min(height.saturating_sub(1)),
+        ))
     }
 
     /// Whether nvim has placed a window of its own anywhere.
@@ -671,7 +706,28 @@ mod tests {
         // the identity translation the mouse path relies on while nvim has
         // placed no window of its own
         assert_eq!(registry.hit_test(3, 1), Some((GLOBAL_GRID, 3, 1)));
-        assert_eq!(registry.hit_test(80, 0), None);
+        // and unbounded: a click that arrives before the grid_resize
+        // answering a terminal that just grew is nvim's to clamp
+        assert_eq!(registry.hit_test(80, 0), Some((GLOBAL_GRID, 80, 0)));
+        assert_eq!(registry.clamp_into(GLOBAL_GRID, 80, 0), Some((80, 0)));
+    }
+
+    #[test]
+    fn a_point_outside_a_pane_clamps_to_that_panes_nearest_cell() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GLOBAL_GRID, 80, 24);
+        resize(&mut registry, GridId(2), 39, 23);
+        registry.apply(GridEvent::Window {
+            grid: GridId(2),
+            startrow: 0,
+            startcol: 41,
+        });
+        // inside the pane, clamping is the translation hit_test already made
+        assert_eq!(registry.clamp_into(GridId(2), 41, 3), Some((0, 3)));
+        // left of it, and below it
+        assert_eq!(registry.clamp_into(GridId(2), 12, 3), Some((0, 3)));
+        assert_eq!(registry.clamp_into(GridId(2), 79, 23), Some((38, 22)));
+        assert_eq!(registry.clamp_into(GridId(9), 0, 0), None);
     }
 
     #[test]
