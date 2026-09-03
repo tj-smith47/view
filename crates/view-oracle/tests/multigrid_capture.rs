@@ -97,9 +97,14 @@ struct Transcript {
     /// The same metadata for `nvim_input_mouse` and the two
     /// `nvim_ui_try_resize` calls the doc has to answer for.
     ui_call_meta: String,
-    /// What the mouse step proved: the window before the click, the click,
-    /// and the window after.
+    /// What the mouse steps proved: for each of the two addressings, the
+    /// window before the click, the click, and the window after.
     mouse_outcome: String,
+    /// The grid and grid-local column the second click was addressed to,
+    /// and the window nvim made current in answer to it.
+    grid_addressed: (u64, u16, String),
+    /// The window the first, `grid=0` click made current.
+    screen_addressed: String,
 }
 
 impl Transcript {
@@ -328,6 +333,34 @@ fn ext_handle(payload: &[u8]) -> String {
     }
 }
 
+/// The grid the right-hand window of the standing `:vsplit` sits on, and
+/// the screen column its first text cell occupies, read from the last
+/// placement the run collected.
+///
+/// The single-grid arm announces no placement at all and so answers the
+/// global grid at column 0 -- which is the addressing that arm exists to
+/// be asked about, since a frontend with one grid still has to name it.
+fn right_window(steps: &[Step]) -> (u64, u16) {
+    let mut right = (1, 0);
+    for step in steps {
+        let placed: Vec<(u64, u16)> = step
+            .events
+            .iter()
+            .filter(|event| event.name == "win_pos")
+            .filter_map(|event| {
+                let fields: Vec<&str> = event.args.trim_matches(['[', ']']).split(", ").collect();
+                let grid = fields.first()?.parse().ok()?;
+                let startcol = fields.get(3)?.parse().ok()?;
+                Some((grid, startcol))
+            })
+            .collect();
+        if let Some(rightmost) = placed.into_iter().max_by_key(|(_, col)| *col) {
+            right = rightmost;
+        }
+    }
+    right
+}
+
 /// Drives the whole script against one attach option set and returns
 /// everything it produced.
 fn run(surfaces: &[&str]) -> Transcript {
@@ -365,17 +398,37 @@ fn run(surfaces: &[&str]) -> Transcript {
     // constant means under multigrid is one of the questions
     let before = ui.handle.eval_str("nvim_get_current_win()").unwrap();
     ui.handle
-        .input_mouse("left", "press", "", CLICK_ROW, CLICK_COL)
+        .input_mouse("left", "press", "", 0, CLICK_ROW, CLICK_COL)
         .unwrap();
     // a notification, so the blocking eval below is what proves nvim has
     // consumed it before the window is read back
     let after = ui.handle.eval_str("nvim_get_current_win()").unwrap();
+    steps.push(step(&mut ui, "mouse press"));
+
+    // the same screen cell addressed the other way: the grid the right-hand
+    // window sits on, and the column inside that grid rather than on the
+    // screen. Focus goes back to the left window first, so the outcome is
+    // the same observable the grid=0 arm above produced.
+    let (right_grid, right_col) = right_window(&steps);
+    let grid_col = CLICK_COL - right_col;
+    ui.handle.command("wincmd h").unwrap();
+    steps.push(step(&mut ui, "wincmd h"));
+    let before_grid = ui.handle.eval_str("nvim_get_current_win()").unwrap();
+    ui.handle
+        .input_mouse("left", "press", "", right_grid, CLICK_ROW, grid_col)
+        .unwrap();
+    let after_grid = ui.handle.eval_str("nvim_get_current_win()").unwrap();
     let mouse_outcome = format!(
         "current window before: {before}\n\
          nvim_input_mouse(\"left\", \"press\", \"\", grid=0, row={CLICK_ROW}, col={CLICK_COL})\n\
-         current window after: {after}"
+         current window after: {after}\n\
+         right-hand window: grid={right_grid} at screen column {right_col}\n\
+         current window before: {before_grid}\n\
+         nvim_input_mouse(\"left\", \"press\", \"\", grid={right_grid}, \
+         row={CLICK_ROW}, col={grid_col})\n\
+         current window after: {after_grid}"
     );
-    steps.push(step(&mut ui, "mouse press"));
+    steps.push(step(&mut ui, "grid-addressed mouse press"));
 
     ui.handle.try_resize(RESIZE_COLS, RESIZE_ROWS).unwrap();
     steps.push(step(&mut ui, "nvim_ui_try_resize"));
@@ -434,6 +487,8 @@ fn run(surfaces: &[&str]) -> Transcript {
         ui_events_meta,
         ui_call_meta,
         mouse_outcome,
+        grid_addressed: (right_grid, grid_col, after_grid),
+        screen_addressed: after,
     }
 }
 
@@ -503,6 +558,8 @@ fn probe_extras() -> Probes {
         ui_events_meta: String::new(),
         ui_call_meta: String::new(),
         mouse_outcome: String::new(),
+        grid_addressed: (0, 0, String::new()),
+        screen_addressed: String::new(),
     };
     Probes {
         without_ext_messages: transcript.names(),
@@ -560,10 +617,12 @@ fn the_multigrid_vocabulary_the_doc_publishes_is_the_one_the_pinned_engine_emits
     std::fs::write(
         dir.join("metadata.txt"),
         format!(
-            "ui_events:\n{}\n\ncalls:\n{}\n\nmouse:\n{}\n\nexternal window:\n{}\n\nundecoded:\n{}\n",
+            "ui_events:\n{}\n\ncalls:\n{}\n\nmouse, multigrid:\n{}\n\n\
+             mouse, single-grid:\n{}\n\nexternal window:\n{}\n\nundecoded:\n{}\n",
             multigrid.ui_events_meta,
             multigrid.ui_call_meta,
             multigrid.mouse_outcome,
+            single.mouse_outcome,
             probes.external,
             multigrid.undecoded.join("\n"),
         ),
@@ -596,6 +655,35 @@ fn the_multigrid_vocabulary_the_doc_publishes_is_the_one_the_pinned_engine_emits
         "every event the multigrid arm emitted already decodes to a typed \
          variant, so this capture describes the vocabulary view already \
          believes in rather than the one multigrid adds"
+    );
+    // the grid-addressed click proves nothing unless it was addressed
+    // somewhere the screen-addressed one could not reach: a window grid of
+    // nvim's own, at a column that is not the screen column
+    let (grid, col, landed) = &multigrid.grid_addressed;
+    assert!(
+        *grid > 1 && *col != CLICK_COL,
+        "the multigrid arm addressed grid {grid} column {col}, which is the \
+         global grid or the screen column; the second click then tested the \
+         same thing the first one did"
+    );
+    assert_eq!(
+        landed, &multigrid.screen_addressed,
+        "a click addressed to grid {grid} at its own column {col} reached a \
+         different window than the same screen cell addressed globally, so \
+         grid-local coordinates are not what nvim reads them as"
+    );
+    let (single_grid, single_col, single_landed) = &single.grid_addressed;
+    assert_eq!(
+        (*single_grid, *single_col),
+        (1, CLICK_COL),
+        "the single-grid arm must address the global grid at the screen \
+         column: it has no window grid to name"
+    );
+    assert_eq!(
+        single_landed, &single.screen_addressed,
+        "naming the global grid explicitly reached a different window than \
+         the grid=0 sentinel did, so a single-grid session cannot send its \
+         own grid id"
     );
     // the only arm that emits `win_external_pos`: its decode is otherwise
     // proven against a hand-built tuple, which cannot catch a field order

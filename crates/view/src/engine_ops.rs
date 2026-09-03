@@ -34,6 +34,7 @@ pub trait EngineOps {
         button: &str,
         action: &str,
         modifier: &str,
+        grid: u64,
         row: u16,
         col: u16,
     ) -> Result<(), EngineError>;
@@ -259,10 +260,11 @@ impl EngineOps for EngineHandle {
         button: &str,
         action: &str,
         modifier: &str,
+        grid: u64,
         row: u16,
         col: u16,
     ) -> Result<(), EngineError> {
-        self.input_mouse(button, action, modifier, row, col)
+        self.input_mouse(button, action, modifier, grid, row, col)
     }
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.set_option(name, value)
@@ -429,10 +431,11 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
         button: &str,
         action: &str,
         modifier: &str,
+        grid: u64,
         row: u16,
         col: u16,
     ) -> Result<(), EngineError> {
-        (**self).input_mouse(button, action, modifier, row, col)
+        (**self).input_mouse(button, action, modifier, grid, row, col)
     }
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).set_option(name, value)
@@ -602,10 +605,11 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
         button: &str,
         action: &str,
         modifier: &str,
+        grid: u64,
         row: u16,
         col: u16,
     ) -> Result<(), EngineError> {
-        (**self).input_mouse(button, action, modifier, row, col)
+        (**self).input_mouse(button, action, modifier, grid, row, col)
     }
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).set_option(name, value)
@@ -798,11 +802,12 @@ impl EngineOps for FakeOps {
         button: &str,
         action: &str,
         modifier: &str,
+        grid: u64,
         row: u16,
         col: u16,
     ) -> Result<(), EngineError> {
         self.record(format!(
-            "input_mouse({button},{action},{modifier},{row},{col})"
+            "input_mouse({button},{action},{modifier},{grid},{row},{col})"
         ))
     }
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
@@ -1033,6 +1038,7 @@ impl EngineOps for SlowOps {
         _button: &str,
         _action: &str,
         _modifier: &str,
+        _grid: u64,
         _row: u16,
         _col: u16,
     ) -> Result<(), EngineError> {

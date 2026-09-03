@@ -1,5 +1,6 @@
 //! The pure state transition: `Msg` in, `Model` mutated, `Effect`s out.
 
+use crate::grid::registry;
 use crate::model::{Focus, Model, MouseCapture, OverlayKind, Tier};
 use crate::msg::{DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, RpcCall};
 use crate::native::ai_panel::TranscriptScroll;
@@ -1627,17 +1628,38 @@ fn position_owner(model: &Model, input: &MouseInput) -> MouseCapture {
 /// inside the reserved chrome (the tabline) belongs to that chrome, not the
 /// grid; no native chrome click handling exists yet, so such a click is
 /// dropped rather than forwarded at a wrapped-around row.
+///
+/// The engine coordinates are then a *screen* position, which is what
+/// nvim wants only while one grid covers the screen. Once nvim has placed
+/// windows of its own, the pane under the pointer names the grid and the
+/// position inside it, and a cell no pane covers is view's own separator
+/// chrome rather than an event the engine has any window to receive.
 fn mouse_effect(model: &Model, input: MouseInput) -> Vec<Effect> {
     let chrome = model.chrome_rows();
     if input.row < chrome {
         return Vec::new();
     }
+    let row = input.row - chrome;
+    let grids = model.engine.grids();
+    // not `hit_test` alone: its no-pane answer bounds the click against the
+    // global grid's last announced size, and a click arriving between a
+    // terminal resize and nvim's own would be swallowed rather than
+    // clamped by nvim as it is today
+    let (grid, col, row) = if grids.has_panes() {
+        match grids.hit_test(input.col, row) {
+            Some(hit) => hit,
+            None => return Vec::new(),
+        }
+    } else {
+        (registry::GLOBAL_GRID, input.col, row)
+    };
     vec![Effect::Rpc(RpcCall::InputMouse {
         button: input.button,
         action: input.action,
         modifier: input.modifier,
-        row: input.row - chrome,
-        col: input.col,
+        grid,
+        row,
+        col,
     })]
 }
 

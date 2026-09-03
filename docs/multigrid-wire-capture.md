@@ -420,9 +420,11 @@ previously hidden grids with bare `win_pos` events.
 Declared
 `[["String","button"],["String","action"],["String","modifier"],["Integer","grid"],["Integer","row"],["Integer","col"]]`.
 
-view's `EngineHandle::input_mouse` sends the constant `0` for `grid`.
-Under multigrid that constant still works, and `row`/`col` remain global
-screen coordinates:
+Both addressings work under multigrid, and each reads `row`/`col` in its
+own coordinate space.
+
+`grid=0` reads them as global screen coordinates and lets nvim resolve the
+window itself:
 
 ```
 current window before: 1003   (the left window of a :vsplit)
@@ -437,9 +439,31 @@ win_viewport     [5, ext(1:1002), 0, 2, 0, 0, 1, 0]
 grid_cursor_goto [5, 0, 0]
 ```
 
-So no per-grid mouse routing is required: view's existing call is correct
-under multigrid as written, and a compositor only needs to keep sending
-screen coordinates.
+A window's own grid id reads them as coordinates *inside* that grid. The
+same screen cell, addressed the other way, reaches the same window --
+column 19 of grid 5, which sits at screen column 41, is screen column 60,
+while column 19 addressed globally would have landed in the left window:
+
+```
+right-hand window: grid=5 at screen column 41
+current window before: 1003
+nvim_input_mouse("left", "press", "", grid=5, row=3, col=19)
+current window after:  1002
+```
+
+The single-grid arm answers the remaining half: a session with no window
+grids can still name the global grid explicitly rather than the sentinel,
+with the same global coordinates and the same outcome.
+
+```
+current window before: 1003
+nvim_input_mouse("left", "press", "", grid=1, row=3, col=60)
+current window after:  1002
+```
+
+So a UI that tracks the layout may address the grid it hit, and a UI that
+does not may keep sending `0`; the grid and the coordinates are one
+choice, never two.
 
 ### `nvim_ui_try_resize` and `nvim_ui_try_resize_grid`
 
@@ -557,6 +581,8 @@ only: win=1002 tab=1 pos=[0,0] size=80x23 relative=
 vsplit again: win=1003 tab=1 pos=[0,0] size=40x23 relative= | win=1002 tab=1 pos=[0,41] size=39x23 relative=
 set mouse=a: win=1003 tab=1 pos=[0,0] size=40x23 relative= | win=1002 tab=1 pos=[0,41] size=39x23 relative=
 mouse press: win=1003 tab=1 pos=[0,0] size=40x23 relative= | win=1002 tab=1 pos=[0,41] size=39x23 relative=
+wincmd h: win=1003 tab=1 pos=[0,0] size=40x23 relative= | win=1002 tab=1 pos=[0,41] size=39x23 relative=
+grid-addressed mouse press: win=1003 tab=1 pos=[0,0] size=40x23 relative= | win=1002 tab=1 pos=[0,41] size=39x23 relative=
 nvim_ui_try_resize: win=1003 tab=1 pos=[0,0] size=40x19 relative= | win=1002 tab=1 pos=[0,41] size=29x19 relative=
 nvim_open_win float: win=1003 tab=1 pos=[0,0] size=40x19 relative= | win=1002 tab=1 pos=[0,41] size=29x19 relative= | win=1004 tab=1 pos=[2,4] size=20x3 relative=editor
 float close: win=1003 tab=1 pos=[0,0] size=40x19 relative= | win=1002 tab=1 pos=[0,41] size=29x19 relative=

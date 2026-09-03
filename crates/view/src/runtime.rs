@@ -1470,11 +1470,12 @@ mod tests {
             button: "left".into(),
             action: "press".into(),
             modifier: "C-".into(),
+            grid: view_core::grid::registry::GridId(5),
             row: 3,
             col: 7,
         }));
         assert!(matches!(flow, Flow::Continue));
-        assert_eq!(ops.calls.borrow()[0], "input_mouse(left,press,C-,3,7)");
+        assert_eq!(ops.calls.borrow()[0], "input_mouse(left,press,C-,5,3,7)");
     }
 
     #[test]

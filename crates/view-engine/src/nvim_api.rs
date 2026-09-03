@@ -2655,10 +2655,10 @@ impl EngineHandle {
     /// `nvim --api-info`'s `nvim_input_mouse(String button, String action,
     /// String modifier, Integer grid, Integer row, Integer col)` signature
     /// (verified with a live capture, not memory: the parameter order and
-    /// names come straight from that decode). `grid` is hardcoded to `0`
-    /// (single-grid semantics per the same doc: "0 to let Nvim decide
-    /// positioning of windows"), since this frontend has no multigrid
-    /// window layout of its own to report.
+    /// names come straight from that decode). `row`/`col` are coordinates
+    /// inside `grid`, which for the global grid is the whole screen; both
+    /// addressings are captured against the pinned engine in
+    /// `docs/multigrid-wire-capture.md`, "The mouse and resize calls".
     ///
     /// Fire-and-forget for the same reason as [`input`](Self::input): a
     /// mouse event arrives inside the paint loop and must not block it.
@@ -2672,6 +2672,7 @@ impl EngineHandle {
         button: &str,
         action: &str,
         modifier: &str,
+        grid: u64,
         row: u16,
         col: u16,
     ) -> Result<(), EngineError> {
@@ -2681,7 +2682,7 @@ impl EngineHandle {
                 Value::from(button),
                 Value::from(action),
                 Value::from(modifier),
-                Value::from(0),
+                Value::from(grid),
                 Value::from(row),
                 Value::from(col),
             ],

@@ -12,6 +12,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::events::UiEvent;
+use crate::grid::registry::{GridId, GLOBAL_GRID};
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, OverlayId, OverlayKind};
 use crate::msg::{BufferHandle, ExitInfo, RegisterType, ReplyToken, ReplyValue};
@@ -483,6 +484,7 @@ fn mouse_in_engine_focus_becomes_rpc_input_mouse_effect() {
             modifier,
             row: 5,
             col: 10,
+            ..
         })] if button == "left" && action == "press" && modifier.is_empty()
     ));
 }
@@ -559,6 +561,169 @@ fn mouse_click_on_a_reserved_chrome_row_is_dropped_not_forwarded() {
     assert!(
         effects.is_empty(),
         "click on the tabline row must not reach the engine grid"
+    );
+}
+
+/// The layout every mouse-under-multigrid test clicks into: an 80x24
+/// screen holding a `:vsplit`, grid 6 on the left, grid 5 to the right of
+/// the one separator column the global grid keeps for itself.
+fn vsplit_model() -> Model {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Resized {
+            width: 80,
+            height: 24,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 1,
+                width: 80,
+                height: 24,
+            },
+            UiEvent::GridResize {
+                grid: 6,
+                width: 40,
+                height: 24,
+            },
+            UiEvent::GridResize {
+                grid: 5,
+                width: 39,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 6,
+                win: crate::events::WinHandle(1003),
+                startrow: 0,
+                startcol: 0,
+                width: 40,
+                height: 24,
+            },
+            UiEvent::WinPos {
+                grid: 5,
+                win: crate::events::WinHandle(1002),
+                startrow: 0,
+                startcol: 41,
+                width: 39,
+                height: 24,
+            },
+        ]),
+    );
+    m
+}
+
+#[test]
+fn a_click_in_the_right_split_names_that_grid() {
+    let mut m = vsplit_model();
+    let effects = update(&mut m, click(3, 41));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GridId(5),
+                ..
+            })]
+        ),
+        "a click one column right of the separator must name the right \
+         window's grid: {effects:?}"
+    );
+}
+
+#[test]
+fn coordinates_are_relative_to_the_grid_not_the_screen() {
+    let mut m = vsplit_model();
+    let effects = update(&mut m, click(3, 41));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse { row: 3, col: 0, .. })]
+        ),
+        "the right window's first text column is column 0 of its own grid, \
+         not column 41 of the screen: {effects:?}"
+    );
+}
+
+#[test]
+fn a_click_on_a_separator_reaches_no_engine_window() {
+    let mut m = vsplit_model();
+    let effects = update(&mut m, click(3, 40));
+    assert!(
+        effects.is_empty(),
+        "the separator column is view's own chrome, and nvim has no window \
+         under it: {effects:?}"
+    );
+}
+
+#[test]
+fn overlay_hit_testing_still_wins() {
+    let mut m = vsplit_model();
+    let id = m.push_overlay(OverlayBox::new(100, 100), some_overlay_kind());
+    assert!(m.overlay_at(3, 41).is_some(), "fixture must cover the cell");
+    let effects = update(&mut m, click(3, 41));
+    assert!(
+        effects.is_empty(),
+        "an open overlay consumes the click before any grid sees it: \
+         {effects:?} (overlay {id:?})"
+    );
+}
+
+#[test]
+fn a_click_on_a_float_names_the_float_grid_not_the_window_beneath() {
+    let mut m = vsplit_model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![
+            UiEvent::GridResize {
+                grid: 9,
+                width: 20,
+                height: 3,
+            },
+            UiEvent::WinFloatPos {
+                grid: 9,
+                win: crate::events::WinHandle(1005),
+                anchor_grid: 1,
+                zindex: 50,
+                compindex: 0,
+                screen_row: 2,
+                screen_col: 4,
+            },
+        ]),
+    );
+    let effects = update(&mut m, click(3, 5));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GridId(9),
+                row: 1,
+                col: 1,
+                ..
+            })]
+        ),
+        "a cell the float covers belongs to the float, not to grid 6 below \
+         it: {effects:?}"
+    );
+}
+
+#[test]
+fn single_grid_mouse_behaviour_is_unchanged() {
+    let mut m = model();
+    let effects = update(&mut m, click(5, 10));
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                grid: GLOBAL_GRID,
+                row: 5,
+                col: 10,
+                ..
+            })]
+        ),
+        "with no window pane placed the translation is the identity and the \
+         global grid is what nvim is told: {effects:?}"
     );
 }
 

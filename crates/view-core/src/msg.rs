@@ -25,6 +25,7 @@
 use std::time::Duration;
 
 use crate::events::UiEvent;
+use crate::grid::registry::GridId;
 use crate::model::MessageId;
 use crate::native::ai_event::{AiCommand, AiEvent};
 use crate::native::mappings::{MappingClaim, MappingSpec};
@@ -913,8 +914,9 @@ pub enum DeleteConfirmOutcome {
 /// a string of single-char modifier prefixes (`"C-"`, `"S-"`, `"M-"`, in
 /// that order, matching `view_tui::keys::encode_key`'s convention).
 /// `row`/`col` are the raw terminal cell position the input reader
-/// observed, zero-based; `update()` is what maps them into engine grid
-/// coordinates, since only it has the chrome-reservation state to do so.
+/// observed, zero-based; `update()` is what maps them into a grid and a
+/// position inside it, since only it has the chrome-reservation state and
+/// the pane layout to do so.
 #[derive(Debug, Clone)]
 pub struct MouseInput {
     pub button: String,
@@ -1602,15 +1604,18 @@ pub enum RpcCall {
     Paste {
         text: String,
     },
-    /// Forwards one mouse event via `nvim_input_mouse`. `grid` is not a
-    /// field here: single-grid semantics hardcode it to `0` at the call
-    /// site in `view-engine`'s `input_mouse`, letting nvim itself resolve
-    /// window positioning rather than this frontend tracking multigrid
-    /// window layout.
+    /// Forwards one mouse event via `nvim_input_mouse`.
+    ///
+    /// `row`/`col` are coordinates inside `grid`, which the mouse routing
+    /// arm resolves from the pane the pointer visually hit. Under
+    /// `ext_multigrid` the two are inseparable: the same `(row, col)` names
+    /// a different cell in every window, and a screen coordinate sent with
+    /// the wrong grid lands in the wrong buffer rather than nowhere.
     InputMouse {
         button: String,
         action: String,
         modifier: String,
+        grid: GridId,
         row: u16,
         col: u16,
     },

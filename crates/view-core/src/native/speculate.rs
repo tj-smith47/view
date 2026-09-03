@@ -1217,6 +1217,7 @@ mod tests {
                 button: "left".to_string(),
                 action: "press".to_string(),
                 modifier: String::new(),
+                grid: crate::grid::registry::GLOBAL_GRID,
                 row: 9,
                 col: 9,
             },

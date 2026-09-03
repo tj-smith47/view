@@ -179,9 +179,10 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
                 button,
                 action,
                 modifier,
+                grid,
                 row,
                 col,
-            } => handle.input_mouse(button, action, modifier, *row, *col),
+            } => handle.input_mouse(button, action, modifier, grid.0, *row, *col),
             RpcCall::GetDefaultHl { generation } => handle.probe_default_hl(*generation),
             // The one call whose outcome is not just ok-or-lost: a buffer
             // that moved past the tick the review named refuses the write,

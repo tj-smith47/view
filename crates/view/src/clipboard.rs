@@ -847,6 +847,7 @@ mod tests {
             _button: &str,
             _action: &str,
             _modifier: &str,
+            _grid: u64,
             _row: u16,
             _col: u16,
         ) -> Result<(), view_engine::handle::EngineError> {

@@ -922,6 +922,7 @@ fn mouse(session: &mut SpecSession) -> Result<Outcome, OracleError> {
         button: "left".to_string(),
         action: "press".to_string(),
         modifier: String::new(),
+        grid: view_core::grid::registry::GLOBAL_GRID,
         row: 2,
         col: 3,
     };
@@ -932,7 +933,7 @@ fn mouse(session: &mut SpecSession) -> Result<Outcome, OracleError> {
     session
         .engine
         .handle
-        .input_mouse("left", "press", "", 2, 3)?;
+        .input_mouse("left", "press", "", 1, 2, 3)?;
     let _ = session.quiesce()?;
     Ok(Outcome::answered(painted, discarded))
 }

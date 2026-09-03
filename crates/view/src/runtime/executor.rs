@@ -306,9 +306,12 @@ impl<E: EngineOps> Executor<E> {
                         button,
                         action,
                         modifier,
+                        grid,
                         row,
                         col,
-                    } => self.ops.input_mouse(&button, &action, &modifier, row, col),
+                    } => self
+                        .ops
+                        .input_mouse(&button, &action, &modifier, grid.0, row, col),
                     RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
                     RpcCall::HoldNotify => self.ops.hold_notify(),
