@@ -906,6 +906,21 @@ mod tests {
         );
     }
 
+    /// The weld between the shipped attach and every stand-in for it: a
+    /// `Model` nothing has told about an attach answers `owns` from its own
+    /// default, and a default narrower than what a config-less session
+    /// actually sends answers for a session view does not ship. Nothing but
+    /// this comparison holds the two together -- `view-core` cannot see
+    /// this function, and the doc claims on either side are prose.
+    #[test]
+    fn the_shipped_attach_is_what_an_unattached_model_answers_for() {
+        assert_eq!(
+            ext_surfaces(&resolved("")),
+            view_core::model::Model::new().attached_surfaces(),
+            "the model's default set and the set a config-less session attaches              must be the same set"
+        );
+    }
+
     /// The flip itself. Stated separately from the set-equality leg above
     /// so a change that reorders or extends the surfaces cannot take this
     /// claim down with it.

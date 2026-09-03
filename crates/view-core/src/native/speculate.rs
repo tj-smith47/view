@@ -395,20 +395,27 @@ impl SpeculateState {
                 UiEvent::ModeChange { .. } => mode_changed = true,
                 UiEvent::WinViewport {
                     win, grid, topline, ..
-                } if self.note_viewport(*win, *topline) => {
-                    shifted_grids.push(GridId(*grid));
-                    // nvim names a per-window grid here even without
-                    // `ext_multigrid`, where that id is never `grid_resize`d
-                    // or `grid_line`d (docs/multigrid-wire-capture.md's
-                    // `win_viewport` section calls this out by name as "the
-                    // trap"), so the shift it reports still lands on grid 1,
-                    // the only canvas single-grid ever paints -- grid 1's own
-                    // predictions must retire on it whatever phantom id this
-                    // event names. Under `ext_multigrid` this is a no-op past
-                    // startup: `fold_keystroke` never tags a prediction with
-                    // the global grid once a real window has claimed the
-                    // cursor.
-                    shifted_grids.push(GLOBAL_GRID);
+                } => {
+                    // recording the viewport is what reading it costs, so it
+                    // happens in the arm rather than in a guard that would
+                    // read as a pure test of the variant
+                    let moved = self.note_viewport(*win, *topline);
+                    if moved {
+                        shifted_grids.push(GridId(*grid));
+                        // nvim names a per-window grid here even without
+                        // `ext_multigrid`, where that id is never
+                        // `grid_resize`d or `grid_line`d
+                        // (docs/multigrid-wire-capture.md's `win_viewport`
+                        // section calls this out by name as "the trap"), so
+                        // the shift it reports still lands on grid 1, the
+                        // only canvas single-grid ever paints -- grid 1's own
+                        // predictions must retire on it whatever phantom id
+                        // this event names. Under `ext_multigrid` this is a
+                        // no-op past startup: `fold_keystroke` never tags a
+                        // prediction with the global grid once a real window
+                        // has claimed the cursor.
+                        shifted_grids.push(GLOBAL_GRID);
+                    }
                 }
                 _ => {}
             }
@@ -642,11 +649,23 @@ fn fold_keystroke(model: &mut Model, notation: &str, now: SpecStamp) {
         fold_invalidation(model);
         return;
     };
-    // never the global grid's own cursor field: under `ext_multigrid`
-    // `grid_cursor_goto` names window grids, not grid 1, so that field is
-    // never touched once a window claims the cursor and reading it would
-    // predict at whatever it was last (never) set to
-    let (grid, row, col) = model.engine.grids().cursor_local();
+    let registry = model.engine.grids();
+    // `cursor_local` falls back to grid 1 when the pane holding the cursor
+    // is hidden or gone, which is the right answer for painting a caret and
+    // the wrong one for placing a glyph: under `ext_multigrid` grid 1's own
+    // cursor field is whatever it was last (never) set to, so a prediction
+    // made there lands at (0, 0) rather than under the character typed.
+    // `PredictedCell`'s contract is to drop rather than misplace, so this
+    // keystroke goes unpredicted and the engine's own redraw shows it.
+    if registry
+        .cursor_grid()
+        .is_some_and(|grid| grid != GLOBAL_GRID && registry.pane_origin(grid).is_none())
+    {
+        return;
+    }
+    // never the global grid's own cursor field otherwise: under
+    // `ext_multigrid` `grid_cursor_goto` names window grids, not grid 1
+    let (grid, row, col) = registry.cursor_local();
     let mode = model.engine.mode.current.as_str();
     let before = model.speculate.pending().len();
     // the refusal path is why the answer is read off the pending list rather
@@ -717,6 +736,26 @@ mod tests {
                     repeat: 1,
                 })
                 .collect(),
+        }
+    }
+
+    /// [`grid_line`], naming `grid` instead of always 1 -- the shape a
+    /// multigrid session sends, where a window's own text arrives addressed
+    /// to that window's grid.
+    fn grid_line_on(grid: u64, row: u64, col_start: u64, text: &str) -> UiEvent {
+        match grid_line(row, col_start, text) {
+            UiEvent::GridLine {
+                row,
+                col_start,
+                cells,
+                ..
+            } => UiEvent::GridLine {
+                grid,
+                row,
+                col_start,
+                cells,
+            },
+            other => other,
         }
     }
 
@@ -1173,6 +1212,73 @@ mod tests {
         );
     }
 
+    /// Grid-scoped retirement's whole purpose, under the addressing view
+    /// ships: two windows typed into, one of them scrolls, and only that
+    /// one's predictions go. Predicting on the global grid instead --
+    /// which every other leg here does, because that is what a single-grid
+    /// session tags with -- cannot see this, since grid 1 retires on any
+    /// window's shift by design.
+    #[test]
+    fn a_window_grids_shift_retires_its_own_predictions_and_no_bystanders() {
+        let mut state = SpeculateState::default();
+        state.reconcile(&[viewport_on(2, 1, 10), viewport_on(3, 2, 40)]);
+        let mover = state
+            .predict("insert", GridId(2), 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+        let bystander = state
+            .predict("insert", GridId(3), 'b', (5, 9), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[viewport_on(2, 1, 13), UiEvent::Flush]);
+
+        assert_eq!(
+            state.pending(),
+            &[bystander],
+            "the shifted window's prediction retires and the other window's stands"
+        );
+
+        state.reconcile(&[viewport_on(3, 2, 44), UiEvent::Flush]);
+
+        assert!(
+            state.pending().is_empty(),
+            "and the same reading applies the other way round: {:?}",
+            state.pending()
+        );
+        assert_ne!(
+            mover, bystander,
+            "the two predictions must be distinguishable for either assertion to mean anything"
+        );
+    }
+
+    /// The other half of the same scoping, one reading later: a `grid_line`
+    /// answers the cell it names on the grid it names, and a coincidence of
+    /// row and column on the window across the split is not an answer.
+    /// Under single-grid every event names grid 1 and the question cannot
+    /// arise, which is why it needs a leg of its own here.
+    #[test]
+    fn a_grid_line_on_one_window_answers_no_cell_on_another() {
+        let mut state = SpeculateState::default();
+        let cell = state
+            .predict("insert", GridId(2), 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[grid_line_on(3, 2, 4, "a"), UiEvent::Flush]);
+
+        assert_eq!(
+            state.pending(),
+            &[cell],
+            "grid 3 writing the same row and column must not retire a grid-2 prediction"
+        );
+
+        state.reconcile(&[grid_line_on(2, 2, 4, "a"), UiEvent::Flush]);
+
+        assert!(
+            state.pending().is_empty(),
+            "and the prediction's own grid writing that cell does retire it: {:?}",
+            state.pending()
+        );
+    }
+
     /// And the reason it cannot simply retire on the event: nvim reports a
     /// viewport for every cursor move inside an unmoved window, which is
     /// every keystroke of the burst the feature exists for.
@@ -1316,6 +1422,68 @@ mod tests {
             model.speculate.pending().len(),
             1,
             "a viewport that never moved retired the burst"
+        );
+    }
+
+    /// The fallback `cursor_local` offers a painter is not one a predictor
+    /// may take: with the cursor's own pane hidden, grid 1's cursor field
+    /// is whatever a multigrid session never set it to, so predicting there
+    /// puts the glyph at (0, 0) instead of under the typing. Dropping the
+    /// prediction costs one unaccelerated character; taking the fallback
+    /// paints a wrong one.
+    #[test]
+    fn a_keystroke_whose_cursor_pane_is_hidden_predicts_nothing() {
+        use crate::grid::registry::{GridEvent, GridId};
+        use crate::grid::GridOp;
+        let mut model = typing_model();
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: GridId(4),
+            op: GridOp::Resize {
+                width: 39,
+                height: 23,
+            },
+        });
+        model.engine.apply_grid_event(GridEvent::Window {
+            grid: GridId(4),
+            startrow: 0,
+            startcol: 41,
+        });
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: GridId(4),
+            op: GridOp::CursorGoto { row: 2, col: 5 },
+        });
+
+        fold_engine_call(&mut model, &input("x"), stamp(0));
+        assert_eq!(
+            model.speculate.pending().len(),
+            1,
+            "a visible cursor pane predicts as it always did"
+        );
+        assert_eq!(
+            model.speculate.pending().first().map(|cell| cell.grid),
+            Some(GridId(4)),
+            "and predicts in the pane's own grid"
+        );
+
+        model
+            .engine
+            .apply_grid_event(GridEvent::Hide { grid: GridId(4) });
+        fold_engine_call(&mut model, &input("y"), stamp(1));
+
+        assert_eq!(
+            model.speculate.pending().len(),
+            1,
+            "the hidden pane's keystroke must add no prediction on the global grid: {:?}",
+            model.speculate.pending()
+        );
+        assert!(
+            model
+                .speculate
+                .pending()
+                .iter()
+                .all(|cell| cell.grid == GridId(4)),
+            "and nothing may be tagged with grid 1: {:?}",
+            model.speculate.pending()
         );
     }
 

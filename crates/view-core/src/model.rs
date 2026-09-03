@@ -109,8 +109,11 @@ pub struct Model {
     /// surface?" is a question a conflict notice, a restart's re-attach and
     /// the `cmdheight` takeover all ask, and each answering it from its own
     /// copy of the `[native]` table is how the answers come to disagree.
-    /// Defaults to the full set, matching the config-absent session that
-    /// attaches everything.
+    /// Defaults to what a config-absent session attaches, which is every
+    /// surface and the multigrid option with them
+    /// ([`ext::ALL_MULTIGRID`](crate::native::ext::ALL_MULTIGRID)) -- a
+    /// default naming a narrower set would answer for a session view does
+    /// not ship.
     ext_surfaces: Vec<crate::native::ext::Ext>,
     /// Whether the `[native]` table [`Model::attach_surfaces`] recorded was
     /// read from a `view.toml` at all.
@@ -301,7 +304,7 @@ impl Model {
             claimed_keys: Vec::new(),
             statusline_enabled: false,
             palette_enabled: false,
-            ext_surfaces: crate::native::ext::ALL.to_vec(),
+            ext_surfaces: crate::native::ext::ALL_MULTIGRID.to_vec(),
             config_was_read: true,
             surface_conflicts: crate::native::surfaces::SurfaceConflicts::default(),
             cwd: PathBuf::new(),
@@ -2020,18 +2023,19 @@ mod tests {
     }
 
     /// A model nothing has told about an attach answers for the session
-    /// that attaches everything, which is what a `Model` built by a test,
-    /// a bench or an oracle run is standing in for.
+    /// view actually ships -- every surface and the multigrid option --
+    /// which is what a `Model` built by a test, a bench or an oracle run is
+    /// standing in for.
     #[test]
-    fn an_unattached_model_owns_every_surface() {
+    fn an_unattached_model_owns_the_shipped_attach_set() {
         let model = Model::new();
-        for &surface in crate::native::ext::ALL {
+        for &surface in crate::native::ext::ALL_MULTIGRID {
             assert!(model.owns(surface), "{surface:?} must default to owned");
         }
         assert_eq!(
-            model.attached_surfaces().len(),
-            crate::native::ext::ALL.len(),
-            "and nothing else"
+            model.attached_surfaces(),
+            crate::native::ext::ALL_MULTIGRID,
+            "the default set is the set a config-less session attaches, whole"
         );
     }
 

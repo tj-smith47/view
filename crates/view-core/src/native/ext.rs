@@ -57,9 +57,13 @@ impl Ext {
     }
 }
 
-/// Every surface this build can externalize, in attach order -- the set a
-/// session with no config to read attaches, and the vocabulary
-/// `view_native::config::ext_surfaces` filters.
+/// Every surface this build can externalize, in attach order: the
+/// vocabulary `view_native::config::ext_surfaces` filters, and the whole
+/// answer to "which surfaces does view draw".
+///
+/// Not what a session with no config to read attaches -- that is
+/// [`ALL_MULTIGRID`], these surfaces plus the one option that externalizes
+/// none of them.
 pub const ALL: &[Ext] = &[
     Ext::LineGrid,
     Ext::Cmdline,

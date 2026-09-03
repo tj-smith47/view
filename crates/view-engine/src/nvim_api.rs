@@ -2216,10 +2216,14 @@ if restore ~= nil then
 end"
 );
 
-/// Every `ext_*` UI capability this build can request: what a session with
-/// no `[native]` table to narrow it attaches, and what a corpus/oracle
-/// runner attaching its own reference connection asks for so nvim sees the
-/// identical set the real paint loop does.
+/// Every `ext_*` UI surface this build can request, as the wire spells
+/// them: the vocabulary a `[native]` table narrows, and what a
+/// corpus/oracle runner attaching its own single-grid reference connection
+/// asks for.
+///
+/// Not what a session with no `[native]` table to narrow it attaches --
+/// that is [`UI_EXT_OPTIONS_MULTIGRID`], this vocabulary plus the option
+/// that externalizes no surface at all.
 ///
 /// Re-exported from `view-core` rather than spelled again here: the set an
 /// attach *actually* sends now follows the `[native]` switches

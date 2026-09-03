@@ -43,8 +43,8 @@ pub enum PaneKind {
     /// nvim's own message/cmdline area (`msg_set_pos`), positioned only
     /// when `ext_messages` is not attached. Its own variant rather than a
     /// `Float`: it has no anchor grid, and unlike an inactive window it is
-    /// never dimmed to `NormalNC` (`pane_theme` in view-tui's compositor)
-    /// -- nvim never treats its own message text as an unfocused window.
+    /// never dimmed to `NormalNC` -- nvim never treats its own message text
+    /// as an unfocused window.
     Message {
         /// nvim's own stacking order, carried the same as a float's.
         zindex: u32,
@@ -763,6 +763,26 @@ mod tests {
             ids(&registry),
             vec![GLOBAL_GRID],
             "grid 0 must record no placement and allocate no slot"
+        );
+
+        // the global grid is the other id the guard refuses: nvim never
+        // positions its message area onto the canvas view already paints
+        // whole, and a placement recorded over grid 1 would make the whole
+        // screen a pane inside itself
+        registry.apply(GridEvent::Message {
+            grid: GLOBAL_GRID,
+            row: 23,
+            zindex: 200,
+            compindex: 0,
+        });
+        assert_eq!(
+            ids(&registry),
+            vec![GLOBAL_GRID],
+            "the global grid must record no placement of its own"
+        );
+        assert!(
+            !registry.has_panes(),
+            "neither sentinel may turn a single-grid session into a composited one"
         );
 
         resize(&mut registry, GridId(3), 80, 1);

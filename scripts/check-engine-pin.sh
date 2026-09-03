@@ -126,7 +126,7 @@ check_multigrid_reevaluation() {
     fail=1
     return
   fi
-  doc_pin="$(printf '%s\n' "$line" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  doc_pin="$(printf '%s\n' "$line" | grep -m1 -oE 'v[0-9]+\.[0-9]+\.[0-9]+')"
   if [ "$doc_pin" != "$pin" ]; then
     echo "PIN FAIL: $doc: single_grid re-evaluated against $doc_pin, current pin is $pin -- re-evaluate the knob and update the line"
     fail=1

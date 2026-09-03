@@ -98,6 +98,22 @@ grep -v 'Last re-evaluated against engine pin v[0-9]' "$REPO_ROOT/docs/multigrid
   > "$CASE/docs/multigrid.md"
 expect 1 fire 'a missing re-evaluation line fails the same way as a stale one'
 
+# the weld must also be satisfiable, not only trippable: a bump carrying its
+# re-evaluation passes, and the header's promise is otherwise a claim that
+# only ever fires one way.
+new_case
+echo 'v99.0.0' > "$CASE/.engine-pin"
+sed 's/engine pin v[0-9][0-9.]*/engine pin v99.0.0/' "$REPO_ROOT/docs/multigrid.md" \
+  > "$CASE/docs/multigrid.md"
+expect 0 silent 'a pin bump whose re-evaluation line was updated with it passes'
+
+# and the comparison is an equality, not a floor: a doc line naming a pin the
+# tree has not reached is as wrong as one left behind.
+new_case
+sed 's/engine pin v[0-9][0-9.]*/engine pin v99.0.0/' "$REPO_ROOT/docs/multigrid.md" \
+  > "$CASE/docs/multigrid.md"
+expect 1 fire 'a re-evaluation line ahead of the pin fails'
+
 [ "$failures" -eq 0 ] || {
   printf '%d/%d cases failed\n' "$failures" "$n"
   exit 1

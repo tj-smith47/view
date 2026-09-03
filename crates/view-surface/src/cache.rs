@@ -422,14 +422,13 @@ mod tests {
         );
     }
 
-    /// The byte range of one top-level `fn NAME` body (the `{`..`}` its
-    /// signature opens), found by depth-counting braces from the first `{`
-    /// after the signature. Good enough for this crate's plain-Rust function
-    /// bodies (none of the allowlisted functions below hold a brace inside a
-    /// string literal); `None` when the crate no longer declares `name`.
-    fn fn_body_range(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
-        let sig = format!("fn {name}(");
-        let sig_at = source.find(&sig)?;
+    /// The byte range of the brace-delimited block `anchor` opens (the
+    /// `{`..`}` that follows it), found by depth-counting from the first `{`
+    /// after the anchor. Good enough for this crate's plain-Rust bodies
+    /// (none of the blocks read below hold a brace inside a string
+    /// literal); `None` when the crate no longer carries `anchor`.
+    fn block_after(source: &str, anchor: &str) -> Option<std::ops::Range<usize>> {
+        let sig_at = source.find(anchor)?;
         let open = sig_at + source[sig_at..].find('{')?;
         let mut depth = 0usize;
         for (offset, ch) in source[open..].char_indices() {
@@ -447,6 +446,18 @@ mod tests {
         None
     }
 
+    /// Everything in `source` ahead of its test module.
+    ///
+    /// The boundary is the module, not the first `#[cfg(test)]`: `lib.rs`
+    /// carries one on an import, and cutting there would hide the two pane
+    /// reads the walk below exists to classify. Test code is out of scope
+    /// either way -- no cached frame is served from it.
+    fn production(source: &str) -> &str {
+        source
+            .split_once("#[cfg(test)]\nmod tests")
+            .map_or(source, |(prod, _)| prod)
+    }
+
     /// The half the classification above cannot carry on its own: `grids`
     /// is classified there as reaching no layer, which is true only while
     /// every painter in this crate draws the global grid alone. The day one
@@ -455,14 +466,19 @@ mod tests {
     /// grid's size, reused after a window moved.
     ///
     /// One population reads pane geometry without `Inputs` capturing it and
-    /// stays correct anyway: `cursor_spec`, `refresh_statusline` and
-    /// `refresh_speculated` (plus `speculated_layer`/`speculated_col`, which
-    /// only those call) re-run from scratch on *every* frame this cache
-    /// returns, cache hit or miss -- there is no stale copy for them to
-    /// serve, so nothing about a moved or hidden pane can outlive one frame.
-    /// A reader anywhere else in the crate sits on the cached-and-reused
-    /// path instead, where the same read would go stale the moment a window
-    /// moves, so it still owes `Inputs` capture.
+    /// stays correct anyway: the functions [`SurfaceCache::render`]'s
+    /// cache-hit branch reaches, which re-run from scratch on *every* frame
+    /// this cache returns, hit or miss -- there is no stale copy for them
+    /// to serve, so nothing about a moved or hidden pane can outlive one
+    /// frame. A reader anywhere else in the crate sits on the
+    /// cached-and-reused path instead, where the same read would go stale
+    /// the moment a window moves, so it still owes `Inputs` capture.
+    ///
+    /// `RESOLVED_EVERY_FRAME` names that population, and the first half of
+    /// this test is what makes the name a check rather than a claim: each
+    /// entry must be reachable by call from the hit branch, so an entry
+    /// that stopped being invoked per frame -- or was added on a hope --
+    /// fails here by name instead of quietly excusing a cached reader.
     #[test]
     fn a_render_that_reads_panes_must_key_the_cache_on_them() {
         const RESOLVED_EVERY_FRAME: &[&str] = &[
@@ -489,7 +505,7 @@ mod tests {
         // a plain read_dir misses module subdirectories (overlay/ already
         // exists), and a render source added there must not escape the walk
         let mut dirs = vec![src.clone()];
-        let mut scanned = 0;
+        let mut sources: Vec<(String, String)> = Vec::new();
         while let Some(dir) = dirs.pop() {
             let listing = std::fs::read_dir(&dir).expect("this crate's own src/ must be readable");
             for entry in listing.flatten() {
@@ -501,43 +517,85 @@ mod tests {
                 if path.extension() != Some("rs".as_ref()) {
                     continue;
                 }
-                // this file is skipped because the assertion below carries both
-                // needles in its own body, so scanning it answers about itself
-                if path.file_name() == Some("cache.rs".as_ref()) {
-                    continue;
-                }
                 let source =
                     std::fs::read_to_string(&path).expect("a listed source must be readable");
-                let name = path.display();
-                scanned += 1;
-                let resolved_every_frame: Vec<std::ops::Range<usize>> = RESOLVED_EVERY_FRAME
-                    .iter()
-                    .filter_map(|f| fn_body_range(&source, f))
-                    .collect();
-                for reader in ["panes_in_z_order", ".grids()"] {
-                    for (offset, _) in source.match_indices(reader) {
-                        let re_resolved = resolved_every_frame.iter().any(|r| r.contains(&offset));
-                        assert!(
-                            re_resolved || holds_panes,
-                            "{name} paints from {reader} at byte {offset} while \
-                             `Inputs` captures no pane geometry and the read sits \
-                             outside {RESOLVED_EVERY_FRAME:?} (the set re-run on \
-                             every frame regardless of cache hit or miss), so a \
-                             cached frame can survive a window moving, resizing, \
-                             hiding or closing. Capture the panes in `Inputs` \
-                             (whole, not a projection), or move the read into \
-                             (or add it to) the re-resolved set if it is safe."
-                        );
-                    }
-                }
+                sources.push((path.display().to_string(), production(&source).to_string()));
             }
         }
         assert!(
-            scanned > 0,
+            !sources.is_empty(),
             "the walk reached no source under {}, so it proves nothing about \
              what this crate paints from",
             src.display()
         );
+
+        // every function the hit branch reaches by call, closed over the
+        // bodies it reaches through -- `speculated_layer` and
+        // `speculated_col` are reached this way, one and two calls deep
+        let hit = block_after(
+            production(cache),
+            ".is_some_and(|f| f.inputs.matches(model))",
+        )
+        .expect("`SurfaceCache::render`'s cache-hit branch is no longer declared");
+        let mut reached: Vec<String> = vec![production(cache)[hit].to_string()];
+        let mut proven: Vec<&&str> = Vec::new();
+        loop {
+            let before = proven.len();
+            for name in RESOLVED_EVERY_FRAME {
+                if proven.contains(&name) {
+                    continue;
+                }
+                let call = format!("{name}(");
+                if !reached.iter().any(|body| body.contains(&call)) {
+                    continue;
+                }
+                proven.push(name);
+                let sig = format!("fn {name}(");
+                for (_, source) in &sources {
+                    if let Some(body) = block_after(source, &sig) {
+                        reached.push(source[body].to_string());
+                    }
+                }
+            }
+            if proven.len() == before {
+                break;
+            }
+        }
+        let unreached: Vec<&&str> = RESOLVED_EVERY_FRAME
+            .iter()
+            .filter(|name| !proven.contains(name))
+            .collect();
+        assert!(
+            unreached.is_empty(),
+            "{unreached:?} are allowlisted as re-resolved on every frame, but \
+             `SurfaceCache::render`'s cache-hit branch reaches no call to them. \
+             An entry the hit branch does not reach is served from the cached \
+             frame like any other reader, so it must either be called from that \
+             branch or leave this list and capture what it reads in `Inputs`."
+        );
+
+        for (name, source) in &sources {
+            let resolved_every_frame: Vec<std::ops::Range<usize>> = RESOLVED_EVERY_FRAME
+                .iter()
+                .filter_map(|f| block_after(source, &format!("fn {f}(")))
+                .collect();
+            for reader in ["panes_in_z_order", ".grids()"] {
+                for (offset, _) in source.match_indices(reader) {
+                    let re_resolved = resolved_every_frame.iter().any(|r| r.contains(&offset));
+                    assert!(
+                        re_resolved || holds_panes,
+                        "{name} paints from {reader} at byte {offset} while \
+                         `Inputs` captures no pane geometry and the read sits \
+                         outside {RESOLVED_EVERY_FRAME:?} (the set re-run on \
+                         every frame regardless of cache hit or miss), so a \
+                         cached frame can survive a window moving, resizing, \
+                         hiding or closing. Capture the panes in `Inputs` \
+                         (whole, not a projection), or move the read into \
+                         (or add it to) the re-resolved set if it is safe."
+                    );
+                }
+            }
+        }
     }
 
     fn model_with_grid(width: u16, height: u16) -> Model {

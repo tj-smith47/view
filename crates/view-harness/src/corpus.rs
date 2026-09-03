@@ -56,12 +56,12 @@ pub const MULTIGRID_EXT_SET: &str = "multigrid";
 ///
 /// Distinct from [`DEFAULT_EXT_SET`] on purpose: that name is a pinned
 /// corpus vocabulary an already-authored entry keeps meaning forever, while
-/// this one is meant to move the day view's shipped default moves again --
-/// a fuzz run's job is to exercise real shipped behavior, and hardcoding
-/// [`DEFAULT_EXT_SET`] into it is exactly the coupling that went stale
-/// silently the day the shipped default changed (fuzzing kept attaching
-/// single-grid while every real session already spoke multigrid). Update
-/// this alias, not its readers, the next time the shipped default changes.
+/// this one moves the day view's shipped default moves again. A consumer
+/// whose job is to exercise real shipped behavior -- fuzzing above all --
+/// reads this name, because one that hardcodes the pinned vocabulary
+/// instead keeps attaching yesterday's default with nothing to say so.
+/// Update this alias, not its readers, the next time the shipped default
+/// changes.
 pub const SHIPPED_EXT_SET: &str = MULTIGRID_EXT_SET;
 
 /// The options [`SHIPPED_EXT_SET`] resolves to. See its own doc for why

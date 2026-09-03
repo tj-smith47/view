@@ -2302,6 +2302,112 @@ fn minus_capital_o_opens_two_vertical_splits() {
     let _ = session.wait();
 }
 
+/// The glyphs a vertical split's separator column is drawn from, read off a
+/// live `view` session whose only instruction is a config file.
+///
+/// `single_grid` is written into that file, so the ext set under test is the
+/// one the real binary derived from its own `ext_surfaces` -- not a
+/// vocabulary handed to an attach the test made itself.
+///
+/// `LC_ALL=C` is what parts the two charsets. Under
+/// [`QueryPolicy::AnswerDa1`] the box-glyph probe goes unanswered and the
+/// locale hint decides it (`view_tui::tiers`), so a non-UTF-8 charset means
+/// view draws its own chrome from `BorderSet::ASCII`, while nvim's
+/// separator glyph follows the locale not at all.
+fn split_separator_screen(single_grid: bool) -> String {
+    let paths = common::ScratchPaths::new("smoke-single-grid");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
+    cmd.env("LC_ALL", "C");
+    if single_grid {
+        let toml = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME")
+            .join("view")
+            .join("view.toml");
+        let mut text = std::fs::read_to_string(&toml).expect("the isolated view.toml must exist");
+        text.push_str("\n[engine]\nsingle_grid = true\n");
+        std::fs::write(&toml, text).expect("the isolated view.toml must be writable");
+    }
+
+    let isolation = shared_isolation();
+    let session = PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap();
+    let mut session = ViewPtySession {
+        session,
+        paths,
+        _isolation: isolation,
+    };
+    assert!(
+        session.wait_for("~", Duration::from_secs(5)),
+        "view never painted the buffer with single_grid = {single_grid}"
+    );
+    // a launch notice is framed in the same ASCII charset this leg reads the
+    // separator in, so it is waited out rather than counted as chrome view
+    // drew between two windows
+    wait_for_quiet_toast_stack(&mut session);
+    session.send(b"\x1b:vsplit\r").unwrap();
+    // waits for a separator run in either charset, never for the glyph the
+    // leg is about to assert: a wait that already knows the answer turns a
+    // failing assertion into a timeout naming nothing
+    let separated = session.wait_for_screen(Duration::from_secs(5), |screen| {
+        let text = screen.contents();
+        text.matches('|').count() >= SEPARATOR_RUN
+            || text.matches(NVIM_SEPARATOR).count() >= SEPARATOR_RUN
+    });
+    let screen = session.screen();
+    session.send(b"\x1b:qa!\r").unwrap();
+    let _ = session.wait();
+    assert!(
+        separated,
+        "`:vsplit` drew no separator at all with single_grid = {single_grid}; \
+         last screen:\n{screen}"
+    );
+    screen
+}
+
+/// nvim's own vertical-split separator glyph, as
+/// `docs/multigrid-wire-capture.md` captures it on the global grid
+/// (`grid_line [1, 0, 40, [["\u{2502}", 12]], false]`, the separator column
+/// belonging to grid 1).
+const NVIM_SEPARATOR: char = '\u{2502}';
+
+/// How many cells of one glyph a separator column has to hold before the
+/// screen counts as showing that charset: a separator is a run down the
+/// split, so a lone cell of the other glyph anywhere on screen cannot pass
+/// for one, and neither can a stray one satisfy the leg that expects it.
+const SEPARATOR_RUN: usize = 10;
+
+/// The flip observed where a user would see it, through the real binary's
+/// own attach.
+///
+/// Under `ext_multigrid` each window's text lives in a grid of its own and
+/// grid 1 holds only chrome, so view composites the panes and overpaints
+/// the column between them with its own charset. Under `single_grid = true`
+/// nvim paints the whole picture into grid 1, separator included, with the
+/// glyph it has always used -- view places no pane and draws no chrome
+/// there. Both directions are asserted on both glyphs, so hardcoding
+/// either mode fails one leg by name.
+#[test]
+fn the_shipped_attach_composites_a_split_and_single_grid_hands_it_back() {
+    let composited = split_separator_screen(false);
+    let ascii = composited.matches('|').count();
+    let boxes = composited.matches(NVIM_SEPARATOR).count();
+    assert!(
+        ascii >= SEPARATOR_RUN && boxes == 0,
+        "the shipped attach must composite the split itself: view's own \
+         separator charset ({ascii} cells) over nvim's ({boxes}); screen:\n{composited}"
+    );
+
+    let handed_back = split_separator_screen(true);
+    let ascii = handed_back.matches('|').count();
+    let boxes = handed_back.matches(NVIM_SEPARATOR).count();
+    assert!(
+        boxes >= SEPARATOR_RUN && ascii == 0,
+        "single_grid = true must leave the split to nvim: nvim's own \
+         separator charset ({boxes} cells) and none of view's ({ascii}); \
+         screen:\n{handed_back}"
+    );
+}
+
 /// A `view` process on a pty this file rolled by hand, and the master end
 /// of that pty.
 ///
