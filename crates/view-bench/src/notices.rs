@@ -22,8 +22,7 @@ use std::time::{Duration, Instant};
 use view_core::native::palette::MESSAGE_HISTORY_TITLE;
 use view_core::native::toast::{DEFAULT_CAPACITY, TRANSIENT_TOAST_TIMEOUT};
 
-use crate::sampling::Side;
-use crate::session::{BenchSession, SettleBound};
+use crate::session::{BenchSession, SettleBound, SpawnSpec};
 use crate::BenchError;
 
 /// The quiet span a screen must hold before a cell may call it clear of
@@ -60,39 +59,63 @@ const HISTORY_VERB: &str = "history";
 /// keystrokes and no other effect.
 const WALK_STEP: &[u8] = b"dj";
 
+/// nvim's own answer to an ex-command it does not know, which is what view's
+/// command is until view has registered it.
+const UNKNOWN_COMMAND: &str = "Not an editor command";
+
+/// The file stem every build of view is spawned under -- the release
+/// binary, the tap and no-speculate variants beside it, and the one a
+/// remote row reaches its engine from.
+const VIEW_PROGRAM: &str = "view";
+
 /// The ex-command that opens the message history.
 #[must_use]
 pub fn history_command() -> String {
     format!(":View {HISTORY_FEATURE} {HISTORY_VERB}\r")
 }
 
-/// Clears view's notice stack off `session`: waits out the toasts that
-/// retire on a timer, then walks the message history taking down the
-/// notices that never do.
+/// Whether `spec` runs view rather than a bare editor.
+///
+/// Read off the program a session was spawned with, not off which side of a
+/// pair it measures: the null-pair calibration the gate opens with drives
+/// the echo scenario with a bare editor in the measured side's place, and a
+/// takedown that keyed on the side would have typed view's own command at
+/// an editor that has never heard of it.
+#[must_use]
+pub fn runs_view(spec: &SpawnSpec) -> bool {
+    spec.program
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(VIEW_PROGRAM))
+}
+
+/// Clears view's notice stack off `session`: waits for view's own bootstrap
+/// to answer, waits out the toasts that retire on a timer, then walks the
+/// message history taking down the notices that never do.
 ///
 /// `repaint_quiet` is the caller's own quiet span for one round trip to
 /// nvim and back, floored at [`REPAINT_QUIET`]; a caller measuring over an
 /// injected-latency transport passes the widened span it already uses for
 /// its startup settle.
 ///
-/// `Side::Nvim` answers immediately: a bare editor draws no notice over its
-/// buffer, and the overlay keys below would be a delete and a motion in its
-/// buffer instead.
+/// A session that is not running view answers immediately: a bare editor
+/// draws no notice over its buffer, and the overlay keys below would be a
+/// delete and a motion in its buffer instead.
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] when the message history never reaches the
-/// screen -- which is also the guard that keeps the walk's keys off the
-/// buffer -- or when the screen never goes quiet. `deadline` bounds the
-/// whole takedown rather than each settle inside it, so a screen that never
-/// holds still costs the caller what it asked for and not a multiple of it.
+/// Returns [`BenchError::Desync`] when view never answers the command that
+/// opens the message history -- which is also the guard that keeps the
+/// walk's keys off the buffer -- or when the screen never goes quiet.
+/// `deadline` bounds the whole takedown rather than each settle inside it,
+/// so a screen that never holds still costs the caller what it asked for
+/// and not a multiple of it.
 pub fn take_down(
     session: &mut BenchSession,
-    side: Side,
+    spec: &SpawnSpec,
     repaint_quiet: Duration,
     deadline: Duration,
 ) -> Result<(), BenchError> {
-    if side == Side::Nvim {
+    if !runs_view(spec) {
         return Ok(());
     }
     let until = Instant::now() + deadline;
@@ -102,9 +125,34 @@ pub fn take_down(
     // ex-command below is typed at the command line rather than into a
     // buffer
     session.send(b"\x1b")?;
-    // the transients go first and they go by waiting: `d` retracts a family
+    // A quiet screen is not a started view. `:View` is created by the
+    // registration view runs at `VimEnter`, and nvim reaches `VimEnter`
+    // only after sourcing a config that can spend seconds in Lua without
+    // painting anything -- so a settle is satisfied by the file nvim
+    // already drew, and the command sent on the strength of it comes back
+    // `E492`. The overlay arriving is the one observable that says the
+    // registration has run; ask for it until it does.
+    while !open_history(session, repaint_quiet, until)? {
+        if Instant::now() >= until {
+            return Err(BenchError::Desync {
+                context: format!(
+                    "view never answered {} within {deadline:?}{}; screen:\n{}",
+                    history_command().trim_end(),
+                    unknown_command_note(&session.screen_text()),
+                    session.screen_text()
+                ),
+            });
+        }
+        // the command line, and any error nvim put on it, go back down
+        // before the next attempt types over them
+        session.send(b"\x1b")?;
+    }
+    session.send(b"\x1b")?;
+    // the transients go next and they go by waiting: `d` retracts a family
     // and a toast on a timer carries none, so a stack still draining is a
-    // stack that will paint a box over the overlay this is about to read
+    // stack that will paint a box over the overlay below. Run after the
+    // wait above rather than before it, since the notices a startup raises
+    // do not exist until the startup that raises them has run.
     if !session.settle(SettleBound {
         quiet: CLEAR_QUIET,
         deadline: remaining(until),
@@ -117,17 +165,12 @@ pub fn take_down(
             ),
         });
     }
-    session.send(history_command().as_bytes())?;
-    let opened = session.settle(SettleBound {
-        quiet: repaint_quiet,
-        deadline: remaining(until),
-    }) && session.screen_text().contains(MESSAGE_HISTORY_TITLE);
-    if !opened {
+    if !open_history(session, repaint_quiet, until)? {
         return Err(BenchError::Desync {
             context: format!(
-                "the message history never reached the screen within {deadline:?}, so the keys \
-                 that take a standing notice down would have edited the buffer instead; \
-                 screen:\n{}",
+                "the message history never reached the screen within {deadline:?} on a session \
+                 that had already answered for it, so the keys that take a standing notice down \
+                 would have edited the buffer instead; screen:\n{}",
                 session.screen_text()
             ),
         });
@@ -150,6 +193,35 @@ pub fn take_down(
         });
     }
     Ok(())
+}
+
+/// Asks for the message history and answers whether it reached the screen.
+///
+/// # Errors
+///
+/// Returns [`BenchError`] only when the write to the pty fails.
+fn open_history(
+    session: &mut BenchSession,
+    quiet: Duration,
+    until: Instant,
+) -> Result<bool, BenchError> {
+    session.send(history_command().as_bytes())?;
+    Ok(session.settle(SettleBound {
+        quiet,
+        deadline: remaining(until),
+    }) && session.screen_text().contains(MESSAGE_HISTORY_TITLE))
+}
+
+/// The half of a refusal that separates a view which never finished starting
+/// from one whose overlay is on screen under something else, since the two
+/// are the same silence to the caller.
+fn unknown_command_note(screen: &str) -> &'static str {
+    if screen.contains(UNKNOWN_COMMAND) {
+        " -- nvim answered that no such command exists, so view's own \
+         registration had not run yet"
+    } else {
+        ""
+    }
 }
 
 /// What is left of the takedown's own deadline, floored at zero so a settle
@@ -178,6 +250,45 @@ mod tests {
             "no mapping row opens the message history as :View {HISTORY_FEATURE} {HISTORY_VERB}"
         );
         assert_eq!(history_command(), ":View notifications history\r");
+    }
+
+    fn spec_running(program: &str) -> SpawnSpec {
+        SpawnSpec {
+            program: std::path::PathBuf::from(program),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    /// The takedown's whole subject is view's own notices, and the gate
+    /// opens with a null-pair calibration that drives the measured side of
+    /// the echo scenario with a bare editor -- so "which side" is not the
+    /// question, "which program" is. Every build of view the matrix spawns
+    /// answers yes; the engine it spawns answers no.
+    #[test]
+    fn only_a_session_running_view_has_a_notice_stack_to_take_down() {
+        for program in [
+            "target/release/view",
+            "target/taps/release/view",
+            "target/nospec/release/view",
+            "/usr/local/bin/view.exe",
+        ] {
+            assert!(runs_view(&spec_running(program)), "{program}");
+        }
+        for program in ["/usr/bin/nvim", "target/engine/bin/nvim", "nvim"] {
+            assert!(!runs_view(&spec_running(program)), "{program}");
+        }
+    }
+
+    /// The two silences a refusal has to tell apart: a view that has not
+    /// registered its command yet, and a session that will never have one.
+    #[test]
+    fn a_refusal_says_when_nvim_called_the_command_unknown() {
+        assert!(
+            unknown_command_note("E492: Not an editor command: View x").contains("registration")
+        );
+        assert!(unknown_command_note("~\n~\nscratch.txt").is_empty());
     }
 
     /// The constant this module exists for, read against the timeout the

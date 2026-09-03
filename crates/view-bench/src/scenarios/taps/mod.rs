@@ -302,7 +302,7 @@ fn prepare(
     }
     crate::notices::take_down(
         &mut session,
-        Side::View,
+        spec,
         crate::notices::REPAINT_QUIET,
         settle_deadline,
     )?;
@@ -1085,7 +1085,6 @@ pub fn run_echo_path(
     let NvimSpec(nvim) = nvim_spec;
     let mut view_state = SideState::prepare(
         view,
-        Side::View,
         settle_deadline,
         protocol.sample_timeout,
         DEFAULT_STARTUP_QUIET,
@@ -1095,7 +1094,6 @@ pub fn run_echo_path(
         characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut nvim_state = SideState::prepare(
         nvim,
-        Side::Nvim,
         settle_deadline,
         protocol.sample_timeout,
         DEFAULT_STARTUP_QUIET,

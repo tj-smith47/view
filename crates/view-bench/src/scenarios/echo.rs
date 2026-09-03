@@ -36,7 +36,10 @@ pub const DEFAULT_STARTUP_QUIET: Duration = Duration::from_millis(500);
 /// One side's typing state: where the next character will land.
 pub(crate) struct SideState {
     session: BenchSession,
-    side: Side,
+    /// Whether this side is the one running view, which decides both
+    /// whether there are notices to take down and whether anything painted
+    /// over the sampled cells is view's doing.
+    runs_view: bool,
     at: crate::boundaries::CellPos,
     origin_col: u16,
     line_len: usize,
@@ -58,7 +61,6 @@ impl SideState {
     /// below for why it cannot share `probe_timeout`'s value.
     pub(crate) fn prepare(
         spec: &SpawnSpec,
-        side: Side,
         settle_deadline: Duration,
         probe_timeout: Duration,
         startup_quiet: Duration,
@@ -87,7 +89,7 @@ impl SideState {
                 ),
             });
         }
-        notices::take_down(&mut session, side, startup_quiet, settle_deadline)?;
+        notices::take_down(&mut session, spec, startup_quiet, settle_deadline)?;
         session.send(b"i")?;
         // entering insert mode is itself a plugin-load trigger under a
         // lazy-loading config (completion engines, noice warning toasts
@@ -104,11 +106,12 @@ impl SideState {
                 ),
             });
         }
+        let runs_view = notices::runs_view(spec);
         let at = probe_origin(&mut session, probe_timeout)?;
-        refuse_if_occluded(&mut session, side, at)?;
+        refuse_if_occluded(&mut session, runs_view, at)?;
         Ok(Self {
             session,
-            side,
+            runs_view,
             at,
             origin_col: at.col,
             line_len: 0,
@@ -204,7 +207,7 @@ impl SideState {
         // the command line the reset just opened is a surface a plugin can
         // draw over, and the notice view raises about a claimant it sights
         // there stands over the cells the next trial types into
-        refuse_if_occluded(&mut self.session, self.side, self.at)?;
+        refuse_if_occluded(&mut self.session, self.runs_view, self.at)?;
         self.origin_col = self.at.col;
         self.line_len = 0;
         Ok(())
@@ -227,15 +230,15 @@ const BOX_GLYPHS: &str =
 /// text is.
 fn refuse_if_occluded(
     session: &mut BenchSession,
-    side: Side,
+    runs_view: bool,
     at: crate::boundaries::CellPos,
 ) -> Result<(), BenchError> {
-    let Some(standing) = standing_over_the_line(session, side, at) else {
+    let Some(standing) = standing_over_the_line(session, runs_view, at) else {
         return Ok(());
     };
     let under = standing_over_the_line(
         session,
-        side,
+        runs_view,
         crate::boundaries::CellPos {
             row: at.row.saturating_add(1),
             col: at.col,
@@ -279,10 +282,10 @@ fn name_occlusion(standing: &str, under: Option<&str>) -> String {
 /// which is the scenario's business and not this guard's.
 fn standing_over_the_line(
     session: &mut BenchSession,
-    side: Side,
+    runs_view: bool,
     at: crate::boundaries::CellPos,
 ) -> Option<String> {
-    if side == Side::Nvim {
+    if !runs_view {
         return None;
     }
     let text = session.with_screen(|screen| {
@@ -447,7 +450,6 @@ pub(crate) fn run_observed(
     let NvimSpec(nvim) = nvim_spec;
     let mut view_state = SideState::prepare(
         view,
-        Side::View,
         settle_deadline,
         protocol.sample_timeout,
         startup_quiet,
@@ -455,7 +457,6 @@ pub(crate) fn run_observed(
     .map_err(|e| label("view", e))?;
     let mut nvim_state = SideState::prepare(
         nvim,
-        Side::Nvim,
         settle_deadline,
         protocol.sample_timeout,
         startup_quiet,

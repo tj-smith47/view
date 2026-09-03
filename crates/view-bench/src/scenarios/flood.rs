@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::sampling::{median_of_trials, Distribution, Side};
+use crate::sampling::{median_of_trials, Distribution};
 use crate::session::{BenchSession, SettleBound, SpawnSpec};
 use crate::BenchError;
 
@@ -116,11 +116,7 @@ fn drained_lines(session: &mut BenchSession) -> Option<u64> {
 /// parameters of the same type, which a caller can transpose silently: a
 /// settle deadline in the window's place measures nothing and a window in
 /// the deadline's place refuses every startup.
-fn flood_once(
-    spec: &SpawnSpec,
-    side: Side,
-    run_spec: &RunSpec<'_>,
-) -> Result<FloodSide, BenchError> {
+fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, BenchError> {
     let window = run_spec.window;
     let mut session = BenchSession::spawn(spec)?;
     if !session.settle(SettleBound {
@@ -139,7 +135,7 @@ fn flood_once(
     // rows is content its line count cannot read
     crate::notices::take_down(
         &mut session,
-        side,
+        spec,
         crate::notices::REPAINT_QUIET,
         run_spec.settle_deadline,
     )?;
@@ -341,9 +337,7 @@ pub struct RunSpec<'a> {
 /// raises.
 pub fn run(run_spec: &RunSpec<'_>) -> Result<FloodOutcome, BenchError> {
     aggregate(run_spec.plan, |trial| {
-        flood_pair(run_spec, trial, |spec, side| {
-            flood_once(spec, side, run_spec)
-        })
+        flood_pair(run_spec, trial, |spec| flood_once(spec, run_spec))
     })
 }
 
@@ -374,15 +368,15 @@ fn flood_pair<F>(
     mut measure: F,
 ) -> Result<TrialPair, BenchError>
 where
-    F: FnMut(&SpawnSpec, Side) -> Result<FloodSide, BenchError>,
+    F: FnMut(&SpawnSpec) -> Result<FloodSide, BenchError>,
 {
     if view_goes_first(trial) {
-        let view = measure(run_spec.view, Side::View).map_err(|e| label("view", e))?;
-        let nvim = measure(run_spec.nvim, Side::Nvim).map_err(|e| label("nvim", e))?;
+        let view = measure(run_spec.view).map_err(|e| label("view", e))?;
+        let nvim = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
         Ok(TrialPair { view, nvim })
     } else {
-        let nvim = measure(run_spec.nvim, Side::Nvim).map_err(|e| label("nvim", e))?;
-        let view = measure(run_spec.view, Side::View).map_err(|e| label("view", e))?;
+        let nvim = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
+        let view = measure(run_spec.view).map_err(|e| label("view", e))?;
         Ok(TrialPair { view, nvim })
     }
 }
@@ -901,21 +895,12 @@ mod tests {
 
         for (trial, expected_order) in [(0, ["view", "nvim"]), (1, ["nvim", "view"])] {
             let mut measured = Vec::new();
-            let measured_pair = flood_pair(&run_spec, trial, |spec, side| {
+            let measured_pair = flood_pair(&run_spec, trial, |spec| {
                 measured.push(if spec.program == view.program {
                     "view"
                 } else {
                     "nvim"
                 });
-                assert_eq!(
-                    side,
-                    if spec.program == view.program {
-                        Side::View
-                    } else {
-                        Side::Nvim
-                    },
-                    "the side handed to the measurement must be the spec's own"
-                );
                 Ok(marked(spec))
             })
             .unwrap();
