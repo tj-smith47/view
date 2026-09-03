@@ -49,9 +49,15 @@ fn comparison_fixtures_root() -> PathBuf {
     workspace_root().join("compat").join("fixtures")
 }
 
-/// Every fixture directory holding a `view/view.toml` under `root`, as
-/// (directory name, that file's path, its parsed `[native]` table).
-fn fixture_configs(root: &Path) -> Vec<(String, PathBuf, NativeConfig)> {
+/// Every fixture directory under `root`, as (directory name, its
+/// `view/view.toml`, that file's parsed `[native]` table).
+///
+/// `view_toml_optional` is for the acceptance roots, where a fixture
+/// deliberately ships nvim alone (`habamax`). Under `compat/fixtures/` a
+/// missing file is the failure it has always been: a comparison fixture
+/// with no `view.toml` runs the shipping defaults it exists to switch off,
+/// and skipping it would let that happen quietly.
+fn fixture_configs(root: &Path, view_toml_optional: bool) -> Vec<(String, PathBuf, NativeConfig)> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(root)
         .unwrap_or_else(|err| panic!("{} must be readable: {err}", root.display()))
@@ -61,7 +67,7 @@ fn fixture_configs(root: &Path) -> Vec<(String, PathBuf, NativeConfig)> {
             continue;
         }
         let path = dir.join("view").join("view.toml");
-        if !path.is_file() {
+        if view_toml_optional && !path.is_file() {
             continue;
         }
         let text = std::fs::read_to_string(&path)
@@ -90,7 +96,7 @@ fn decides_the_attach(id: &str) -> bool {
 
 #[test]
 fn every_comparison_fixture_switches_off_every_feature_that_only_renders() {
-    let fixtures = fixture_configs(&comparison_fixtures_root());
+    let fixtures = fixture_configs(&comparison_fixtures_root(), false);
     for (_, path, cfg) in &fixtures {
         for feature in registry::features() {
             if decides_the_attach(feature.id) {
@@ -116,15 +122,18 @@ fn every_comparison_fixture_switches_off_every_feature_that_only_renders() {
 #[test]
 fn no_fixture_hands_an_ext_surface_back_to_the_engine() {
     let roots = [
-        comparison_fixtures_root(),
-        workspace_root()
-            .join("scripts")
-            .join("acceptance")
-            .join("fixtures"),
+        (comparison_fixtures_root(), false),
+        (
+            workspace_root()
+                .join("scripts")
+                .join("acceptance")
+                .join("fixtures"),
+            true,
+        ),
     ];
     let mut checked = 0;
-    for root in &roots {
-        for (name, path, cfg) in fixture_configs(root) {
+    for (root, view_toml_optional) in &roots {
+        for (name, path, cfg) in fixture_configs(root, *view_toml_optional) {
             if let Some((_, grounds)) = DETACHED_PROTOCOLS
                 .iter()
                 .find(|(fixture, _)| *fixture == name)

@@ -10,6 +10,13 @@ fixture = "heavy"
 
 [[states]]
 name = "present"
+# Every step below the cmdline arming reads a session that handed nvim the
+# command line back: cmp's own menu window left standing, and no palette to
+# absorb it. The fixture no longer commits that -- a `[native]` switch that
+# detaches an `ext_*` surface changes the protocol every row over it is
+# measured against, which is a fixture's business to stay out of -- so the
+# state that means to measure it asks for it here.
+native = { picker = false, tree = false, statusline = false, notifications = false, palette = false }
 steps = [
   # Generous timeout: the first heavy scenario to run on a cold shared
   # cache pays for the full plugin clone before any plugin can load.
@@ -46,9 +53,9 @@ steps = [
   # the assertions above keep passing
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { probe = "luaeval('require(\"cmp\").visible()')", expect = "false" },
-  # The other place this plugin completes, under the configuration this
-  # fixture actually commits: `[native] palette = false` leaves ext_cmdline
-  # and ext_popupmenu with nvim, so the command line is nvim's own row and
+  # The other place this plugin completes, under the override this state
+  # declares: `[native] palette = false` leaves ext_cmdline and
+  # ext_popupmenu with nvim, so the command line is nvim's own row and
   # cmp's cmdline menu is a plain float over the grid view paints. A
   # completion plugin asserted in insert mode alone leaves that path
   # untested in both directions -- that the menu renders at all, and that

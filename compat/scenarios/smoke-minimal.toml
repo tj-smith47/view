@@ -16,7 +16,18 @@ steps = [
   # this scenario: with no real key press sent, mode() stays "i" while
   # every substring assertion below keeps passing against the literal text
   { probe = "mode()", expect = "n" },
-  { wait_for = "hello from compat", timeout_ms = 5000 },
+  # Two needles for one text, because the screen alone cannot say which of
+  # two things went wrong. The buffer is asked first: mode() reading "n"
+  # holds equally for a session that inserted the text and escaped and for
+  # one whose `i` never started, and only the line itself parts them.
+  { wait_for_probe = "getline(1)", expect = "hello from compat", timeout_ms = 5000 },
+  # Then the grid, on a wait that outlasts the startup toast stack rather
+  # than racing it: view's own first-run handover report stands full-width
+  # over the grid's top rows -- buffer row 1 among them -- until it retires
+  # on its own timer, and nothing sweeps it early (typing is not a
+  # dismissal). Same stack, same fixture and same reason as the 30s this
+  # suite's `noice` native-only state waits on its own overlay title.
+  { wait_for = "hello from compat", timeout_ms = 30000 },
   { assert_absent = "E5108" },
   { probe = "1+1", expect = "2" },
 ]

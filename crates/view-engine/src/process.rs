@@ -1571,13 +1571,12 @@ impl Drop for Engine {
 ///   decides when it is over (`view_core::update::supervision`, which redraws
 ///   only where the reading says the recovery went well).
 /// - Without it -- `[native] notifications = false` -- nvim keeps its message
-///   area and writes the report into the grid. Measured on the pinned
-///   engine: the report overflows the last row,
-///   `need_wait_return` is set, and the main loop parks on
-///   `Press ENTER` the moment `VimEnter` returns. Every *deferred* request is
-///   swallowed for as long as that prompt stands, view's own swap probe among
-///   them, so the session comes up on a screen of nvim's report with no
-///   account of the recovery anywhere and no engine answering.
+///   area and writes the report into the grid. Measured on the pinned engine:
+///   the report overflows the last row, `need_wait_return` is set, and the
+///   main loop parks on `Press ENTER` the moment `VimEnter` returns. Every
+///   *deferred* request is swallowed for as long as that prompt stands, view's
+///   own swap probe among them, so the session comes up on a screen of nvim's
+///   report with no account of the recovery anywhere and no engine answering.
 ///
 /// So the `VimEnter` handler issues `:redraw` in exactly the second case,
 /// which repaints the buffer over the report and clears the pending

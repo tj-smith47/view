@@ -1188,7 +1188,7 @@ mod responder_tests {
     #[test]
     fn the_full_tier_answers_every_capability_view_tui_probes_for() {
         let (path, source) = tiers_source();
-        // read from the initializer rather than through `declaration`: the
+        // read from the initializer rather than through `after_const`: the
         // array's own length is written `[CapabilityRow; 4]`, so the first
         // `;` on the line ends the type and not the statement
         let register = source
@@ -1218,8 +1218,12 @@ mod responder_tests {
             let capability = field(body, "capability").trim_matches('"');
             let query = field(body, "query");
             let bytes = query_bytes(&source, query);
+            // the fence is excluded, not merely unmatched: `\x1b[c` is three
+            // bytes a future query could carry inside it, and answering the
+            // fence resolves no capability at all
             let answered = FULL_TIER
                 .iter()
+                .filter(|(asked, _)| *asked != DA1.0)
                 .any(|(asked, _)| bytes.windows(asked.len()).any(|window| window == *asked));
             assert!(
                 answered,
