@@ -437,6 +437,7 @@ fn spawn_settled(spec: &SpawnSpec, settle_deadline: Duration) -> Result<BenchSes
             ),
         });
     }
+    crate::notices::take_down(&mut session, crate::sampling::Side::View, settle_deadline)?;
     Ok(session)
 }
 

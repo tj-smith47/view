@@ -156,6 +156,11 @@ fn title_for(firstc: &str) -> &'static str {
     }
 }
 
+/// The title the message-history overlay is drawn under, and the one thing
+/// on screen that says it is open rather than that a key aimed at it went
+/// somewhere else.
+pub const MESSAGE_HISTORY_TITLE: &str = "Messages";
+
 /// A snapshot of `ToastHistory` at the moment the message-history view was
 /// opened: a `:messages`-style browse of what already happened, not a live
 /// window onto the ring. Taken once, like `PickerState` snapshots its
@@ -210,7 +215,7 @@ impl MessageHistoryState {
             .iter()
             .map(|entry| PaletteRow::new(entry_text(entry)))
             .collect();
-        let view = PaletteView::new("Messages").with_rows(rows);
+        let view = PaletteView::new(MESSAGE_HISTORY_TITLE).with_rows(rows);
         if self.entries.is_empty() {
             return view;
         }

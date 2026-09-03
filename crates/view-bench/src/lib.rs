@@ -4,6 +4,7 @@
 //! to parse TOML); this crate only measures and computes.
 
 pub mod boundaries;
+pub mod notices;
 pub mod pairing;
 pub mod remote_ui;
 pub mod report;

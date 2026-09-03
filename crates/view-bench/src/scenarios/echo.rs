@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::notices;
 use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
 use crate::scenarios::clock::monotonic_nanos;
@@ -35,6 +36,7 @@ pub const DEFAULT_STARTUP_QUIET: Duration = Duration::from_millis(500);
 /// One side's typing state: where the next character will land.
 pub(crate) struct SideState {
     session: BenchSession,
+    side: Side,
     at: crate::boundaries::CellPos,
     origin_col: u16,
     line_len: usize,
@@ -56,6 +58,7 @@ impl SideState {
     /// below for why it cannot share `probe_timeout`'s value.
     pub(crate) fn prepare(
         spec: &SpawnSpec,
+        side: Side,
         settle_deadline: Duration,
         probe_timeout: Duration,
         startup_quiet: Duration,
@@ -84,13 +87,14 @@ impl SideState {
                 ),
             });
         }
+        notices::take_down(&mut session, side, settle_deadline)?;
         session.send(b"i")?;
         // entering insert mode is itself a plugin-load trigger under a
         // lazy-loading config (completion engines, noice warning toasts
         // that float over the text area); a second, stricter settle here
         // absorbs that churn so no toast can occlude the sampled cells
         if !session.settle(SettleBound {
-            quiet: Duration::from_secs(2),
+            quiet: notices::CLEAR_QUIET,
             deadline: settle_deadline,
         }) {
             return Err(BenchError::Desync {
@@ -101,8 +105,10 @@ impl SideState {
             });
         }
         let at = probe_origin(&mut session, probe_timeout)?;
+        refuse_if_occluded(&mut session, side, at)?;
         Ok(Self {
             session,
+            side,
             at,
             origin_col: at.col,
             line_len: 0,
@@ -195,10 +201,72 @@ impl SideState {
         self.session.send(b"i")?;
         std::thread::sleep(Duration::from_millis(100));
         self.at = probe_origin(&mut self.session, probe_timeout)?;
+        // the command line the reset just opened is a surface a plugin can
+        // draw over, and the notice view raises about a claimant it sights
+        // there stands over the cells the next trial types into
+        refuse_if_occluded(&mut self.session, self.side, self.at)?;
         self.origin_col = self.at.col;
         self.line_len = 0;
         Ok(())
     }
+}
+
+/// Refuses a side whose next line is already painted on.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] naming what stands there, so the failure
+/// says which box occupied the cells instead of reporting the sample that
+/// could never land in them.
+fn refuse_if_occluded(
+    session: &mut BenchSession,
+    side: Side,
+    at: crate::boundaries::CellPos,
+) -> Result<(), BenchError> {
+    match standing_over_the_line(session, side, at) {
+        None => Ok(()),
+        Some(standing) => Err(BenchError::Desync {
+            context: format!(
+                "{standing:?} stands on the cells this row types into, so the sample that \
+                 reaches them would time a character no frame can paint; screen:\n{}",
+                session.screen_text()
+            ),
+        }),
+    }
+}
+
+/// Whatever is painted on the [`LINE_LIMIT`] cells this side is about to
+/// type into, or `None` for the blank line a row needs.
+///
+/// The takedown in [`SideState::prepare`] reaches every notice that has a
+/// way down; this reads what is left over it. A raised condition has no way
+/// down -- it asserts that something is true right now and is retracted by
+/// whoever raised it -- and a notice raised after that takedown, on the
+/// command line each trial's reset opens, has not been offered one. Either
+/// would otherwise be found one sample at a time, as a character that never
+/// appears in a cell a box is drawing over.
+///
+/// Only the measured side is read. A bare editor paints nothing over its own
+/// buffer, so a non-blank line there says the fixture put text in the file,
+/// which is the scenario's business and not this guard's.
+fn standing_over_the_line(
+    session: &mut BenchSession,
+    side: Side,
+    at: crate::boundaries::CellPos,
+) -> Option<String> {
+    if side == Side::Nvim {
+        return None;
+    }
+    let text = session.with_screen(|screen| {
+        crate::boundaries::row_text_from(
+            screen,
+            crate::boundaries::RowSpan {
+                start: at,
+                len: u16::try_from(LINE_LIMIT).unwrap_or(u16::MAX),
+            },
+        )
+    });
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Locates the cell the next typed character will occupy by typing one
@@ -351,6 +419,7 @@ pub(crate) fn run_observed(
     let NvimSpec(nvim) = nvim_spec;
     let mut view_state = SideState::prepare(
         view,
+        Side::View,
         settle_deadline,
         protocol.sample_timeout,
         startup_quiet,
@@ -358,6 +427,7 @@ pub(crate) fn run_observed(
     .map_err(|e| label("view", e))?;
     let mut nvim_state = SideState::prepare(
         nvim,
+        Side::Nvim,
         settle_deadline,
         protocol.sample_timeout,
         startup_quiet,

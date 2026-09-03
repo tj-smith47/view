@@ -59,7 +59,11 @@ struct SideState {
 }
 
 impl SideState {
-    fn prepare(spec: &SpawnSpec, settle_deadline: Duration) -> Result<Self, BenchError> {
+    fn prepare(
+        spec: &SpawnSpec,
+        side: Side,
+        settle_deadline: Duration,
+    ) -> Result<Self, BenchError> {
         let mut session = BenchSession::spawn(spec)?;
         // Quiescence alone is not readiness: view's startup splash is a
         // static screen, so one settle pass can succeed before the engine
@@ -78,6 +82,7 @@ impl SideState {
                     ),
                 });
             }
+            crate::notices::take_down(&mut session, side, settle_deadline)?;
             if let Some(origin) = find_label_origin(&mut session) {
                 break origin;
             }
@@ -224,8 +229,10 @@ pub fn run(
         });
     }
 
-    let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
-    let mut nvim_state = SideState::prepare(nvim, settle_deadline).map_err(|e| label("nvim", e))?;
+    let mut view_state =
+        SideState::prepare(view, Side::View, settle_deadline).map_err(|e| label("view", e))?;
+    let mut nvim_state =
+        SideState::prepare(nvim, Side::Nvim, settle_deadline).map_err(|e| label("nvim", e))?;
 
     let mut trials = Vec::with_capacity(protocol.trials);
     for trial in 0..protocol.trials {
