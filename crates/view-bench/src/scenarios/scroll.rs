@@ -82,7 +82,15 @@ impl SideState {
                     ),
                 });
             }
-            crate::notices::take_down(&mut session, side, settle_deadline)?;
+            // inside the loop because the label can be under a notice: the
+            // search below cannot run until the stack is down. A retry
+            // therefore pays the takedown again, its drain settle included.
+            crate::notices::take_down(
+                &mut session,
+                side,
+                crate::notices::REPAINT_QUIET,
+                settle_deadline,
+            )?;
             if let Some(origin) = find_label_origin(&mut session) {
                 break origin;
             }

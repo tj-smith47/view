@@ -1682,6 +1682,21 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    /// The first-paint row's whole claim to being unoccludable, and the
+    /// grounds the bench harness's own notice-stack walk records for it: a
+    /// marker planted on more lines than the grid has rows cannot be hidden
+    /// by a box in a corner. Shrink the marker and that claim stops being
+    /// true with nothing else on either side to say so.
+    #[test]
+    fn the_first_paint_marker_outfills_the_grid_it_is_read_on() {
+        assert!(
+            FIRST_PAINT_MARKER_LINES > usize::from(view_bench::session::GRID_ROWS),
+            "{FIRST_PAINT_MARKER_LINES} marker lines no longer overflow a \
+             {}-row grid",
+            view_bench::session::GRID_ROWS
+        );
+    }
+
     /// Arguments that would leave a measured editor without the fixture
     /// configuration the cell exists to measure it under.
     const CONFIG_STRIPPING_ARGS: &[&str] = &["--clean", "-u", "-U", "--noplugin"];

@@ -137,7 +137,12 @@ fn flood_once(
     // a notice retiring inside the window is a repaint this row would count
     // as a frame the flood produced, and a box standing over the drained
     // rows is content its line count cannot read
-    crate::notices::take_down(&mut session, side, run_spec.settle_deadline)?;
+    crate::notices::take_down(
+        &mut session,
+        side,
+        crate::notices::REPAINT_QUIET,
+        run_spec.settle_deadline,
+    )?;
     session.send(flood_command().as_bytes())?;
 
     // wait for the producer to begin scrolling before starting the window, so

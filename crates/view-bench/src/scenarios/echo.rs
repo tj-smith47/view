@@ -87,7 +87,7 @@ impl SideState {
                 ),
             });
         }
-        notices::take_down(&mut session, side, settle_deadline)?;
+        notices::take_down(&mut session, side, startup_quiet, settle_deadline)?;
         session.send(b"i")?;
         // entering insert mode is itself a plugin-load trigger under a
         // lazy-loading config (completion engines, noice warning toasts
@@ -211,40 +211,68 @@ impl SideState {
     }
 }
 
+/// The glyphs a notice's frame is drawn with. A row holding nothing else
+/// carries no words, so quoting it alone names no notice.
+const BOX_GLYPHS: &str =
+    "\u{2500}\u{2502}\u{256d}\u{256e}\u{2570}\u{256f}\u{250c}\u{2510}\u{2514}\u{2518}";
+
 /// Refuses a side whose next line is already painted on.
 ///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] naming what stands there, so the failure
-/// says which box occupied the cells instead of reporting the sample that
-/// could never land in them.
+/// says which notice occupied the cells instead of reporting the sample
+/// that could never land in them. When the cells hold a frame's top border
+/// the row under it is quoted too, since that is where the notice's own
+/// text is.
 fn refuse_if_occluded(
     session: &mut BenchSession,
     side: Side,
     at: crate::boundaries::CellPos,
 ) -> Result<(), BenchError> {
-    match standing_over_the_line(session, side, at) {
-        None => Ok(()),
-        Some(standing) => Err(BenchError::Desync {
-            context: format!(
-                "{standing:?} stands on the cells this row types into, so the sample that \
-                 reaches them would time a character no frame can paint; screen:\n{}",
-                session.screen_text()
-            ),
-        }),
+    let Some(standing) = standing_over_the_line(session, side, at) else {
+        return Ok(());
+    };
+    let under = standing_over_the_line(
+        session,
+        side,
+        crate::boundaries::CellPos {
+            row: at.row.saturating_add(1),
+            col: at.col,
+        },
+    );
+    Err(BenchError::Desync {
+        context: format!(
+            "{} stands on the cells this row types into, so the sample that \
+             reaches them would time a character no frame can paint; screen:\n{}",
+            name_occlusion(&standing, under.as_deref()),
+            session.screen_text()
+        ),
+    })
+}
+
+/// What to call the thing standing on the sampled cells: the text on them,
+/// and -- when that is a frame's border and carries no words of its own --
+/// the text on the row below it, which is the notice the frame belongs to.
+fn name_occlusion(standing: &str, under: Option<&str>) -> String {
+    let all_frame = standing
+        .chars()
+        .all(|ch| ch.is_whitespace() || BOX_GLYPHS.contains(ch));
+    match (all_frame, under) {
+        (true, Some(text)) => format!("{standing:?} over {text:?}"),
+        _ => format!("{standing:?}"),
     }
 }
 
 /// Whatever is painted on the [`LINE_LIMIT`] cells this side is about to
 /// type into, or `None` for the blank line a row needs.
 ///
-/// The takedown in [`SideState::prepare`] reaches every notice that has a
-/// way down; this reads what is left over it. A raised condition has no way
-/// down -- it asserts that something is true right now and is retracted by
-/// whoever raised it -- and a notice raised after that takedown, on the
-/// command line each trial's reset opens, has not been offered one. Either
-/// would otherwise be found one sample at a time, as a character that never
-/// appears in a cell a box is drawing over.
+/// A takedown reaches every notice that has a way down; this reads what is
+/// left over them. A raised condition has no way down -- it asserts that
+/// something is true right now and is retracted by whoever raised it -- and
+/// a notice raised on the command line each trial's reset opens has not been
+/// offered one. Either would otherwise be found one sample at a time, as a
+/// character that never appears in a cell a box is drawing over.
 ///
 /// Only the measured side is read. A bare editor paints nothing over its own
 /// buffer, so a non-blank line there says the fixture put text in the file,
@@ -494,4 +522,34 @@ pub(crate) fn run_observed(
         gated_view_p99_ms: median_of_trials(&view_p99s)?,
         trials,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// A refusal that quotes only a box's top border names no notice: the
+    /// glyphs are the same whichever notice raised them, and the words are
+    /// one row down.
+    #[test]
+    fn a_refusal_on_a_frames_border_names_the_notice_under_it() {
+        let named = name_occlusion(
+            "\u{256d}\u{2500}\u{2500}\u{256e}",
+            Some("view: noice.nvim is using the command line"),
+        );
+        assert!(
+            named.contains("noice.nvim"),
+            "the refusal names no notice: {named}"
+        );
+    }
+
+    /// A row that carries words is already the answer, and the row below it
+    /// belongs to whatever is under the notice rather than to the notice.
+    #[test]
+    fn a_refusal_on_text_quotes_that_text_alone() {
+        let named = name_occlusion("view: the engine is not answering", Some("~"));
+        assert_eq!(named, "\"view: the engine is not answering\"");
+    }
 }

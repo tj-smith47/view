@@ -95,18 +95,17 @@ Three properties of that arrangement are load-bearing:
   it by walking up from the session's cwd to the repo.
 
 One deviation from the wording this capture was specified with is recorded
-here rather than
-papered over: the heavy fixture pins nvim-cmp with `cmp-buffer` as its only
-source and configures insert mode alone, so no cmdline float exists until
-one is asked for. The chunk calls the pinned cmp's own
-`cmp.setup.cmdline(':' / '/', { mapping = cmp.mapping.preset.cmdline(),
-sources = { { name = 'buffer' } } })` at capture time. Same plugin, same
-version, same view layer (`lua/cmp/view/custom_entries_view.lua`) and the
-same window machinery (`lua/cmp/utils/window.lua`); only the candidate
-source differs from a config that also installs `cmp-cmdline`. Every
-geometry and identity value below is therefore the pinned plugin's, and the
-candidates are words the capture itself typed into the buffer
-(`prefabricated`, `preflight`).
+here rather than papered over: the heavy fixture pins nvim-cmp with
+`cmp-buffer` as its only source and configures insert mode alone, so no
+cmdline float exists until one is asked for. The chunk calls the pinned
+cmp's own `cmp.setup.cmdline(':' / '/', { mapping =
+cmp.mapping.preset.cmdline(), sources = { { name = 'buffer' } } })` at
+capture time. Same plugin, same version, same view layer
+(`lua/cmp/view/custom_entries_view.lua`) and the same window machinery
+(`lua/cmp/utils/window.lua`); only the candidate source differs from a
+config that also installs `cmp-cmdline`. Every geometry and identity value
+below is therefore the pinned plugin's, and the candidates are words the
+capture itself typed into the buffer (`prefabricated`, `preflight`).
 
 ## nvim-cmp: the cmdline completion menu
 

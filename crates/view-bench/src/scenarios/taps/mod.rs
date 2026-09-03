@@ -300,7 +300,12 @@ fn prepare(
             ),
         });
     }
-    crate::notices::take_down(&mut session, Side::View, settle_deadline)?;
+    crate::notices::take_down(
+        &mut session,
+        Side::View,
+        crate::notices::REPAINT_QUIET,
+        settle_deadline,
+    )?;
     session.send(b"i")?;
     if !session.settle(SettleBound {
         quiet: crate::notices::CLEAR_QUIET,
