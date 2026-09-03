@@ -133,6 +133,35 @@ fn read_ready(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {
     }
 }
 
+/// Whether the terminal has hung up: its far end is gone, and every read on
+/// this descriptor from here on answers EOF or `EIO`.
+///
+/// Asked before crossterm is allowed anywhere near the descriptor, because
+/// crossterm cannot answer it. Its unix event source breaks its read loop on
+/// `WouldBlock` alone and treats every other outcome -- a zero-length read
+/// and an `EIO` alike -- as "no event parsed yet, read again", so a hung-up
+/// tty holds it inside `poll` at 100% CPU and it never returns the error
+/// that would end the session (crossterm 0.29,
+/// `event::source::unix::mio::UnixInternalEventSource::try_read`). That is
+/// the whole of this defect: a view whose driver closed the pty master spun
+/// for days over every measurement window on this host.
+///
+/// One zero-timeout `poll(2)` on one descriptor and no read at all:
+/// `POLLHUP` and `POLLERR` are set by the kernel whether or not they were
+/// asked for, so an empty event mask reports a hangup and stays silent for
+/// an ordinary readable terminal.
+#[cfg(unix)]
+fn terminal_hungup(fd: BorrowedFd<'_>) -> bool {
+    use rustix::event::{PollFd, PollFlags};
+
+    let mut fds = [PollFd::from_borrowed_fd(fd, PollFlags::empty())];
+    let ready = matches!(
+        rustix::event::poll(&mut fds, Some(&rustix::event::Timespec::default())),
+        Ok(n) if n > 0
+    );
+    ready && fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR)
+}
+
 /// One non-blocking drain's outcome, telling the caller whether the
 /// terminal side of the poll set is still trustworthy.
 #[cfg(unix)]
@@ -226,6 +255,10 @@ pub struct InputSource {
     tty: TtyFd,
     winch_read: OwnedFd,
     fatal_read: OwnedFd,
+    /// The write end the signal handlers were registered on, kept so a
+    /// hangup can wake the readiness poll through the same pipe a signal
+    /// wakes it through.
+    fatal_write: OwnedFd,
     fatal_signal: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     dead: bool,
     /// Armed only when the startup capability probe handed the terminal
@@ -468,6 +501,7 @@ impl InputSource {
             tty,
             winch_read,
             fatal_read,
+            fatal_write,
             fatal_signal,
             dead: false,
             guard: None,
@@ -648,6 +682,36 @@ impl InputSource {
         self.dead = true;
     }
 
+    /// Records a hung-up terminal and asks the session to end the way a
+    /// `SIGHUP` ends it.
+    ///
+    /// A closed pty master delivers no signal at all unless the process on
+    /// the far side was the session leader, so a driver that never called
+    /// `setsid` takes its editor's terminal away and leaves nothing behind
+    /// but a descriptor that never sleeps again. Routing it into the
+    /// fatal-signal record, byte and all, is what gives that the one
+    /// teardown every other exit takes: raw mode restored, the alternate
+    /// screen taken down, the children stopped, and the `129` a shell reads
+    /// for a hangup as the exit status.
+    fn note_hangup(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        self.dead = true;
+        let Ok(recorded) = usize::try_from(signal_hook::consts::SIGHUP) else {
+            return;
+        };
+        // a real signal already recorded outranks this one: it has its own
+        // byte on the pipe and its own exit status, and the terminal it is
+        // ending has gone away either way
+        if self
+            .fatal_signal
+            .compare_exchange(0, recorded, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let _ = rustix::io::write(&self.fatal_write, &[1_u8]);
+        }
+    }
+
     /// Whether an event is already decodable right now, including one no
     /// readiness poll on [`tty_fd`](Self::tty_fd) can ever see.
     ///
@@ -686,6 +750,10 @@ impl InputSource {
         if self.dead {
             return false;
         }
+        if terminal_hungup(self.tty.as_fd()) {
+            self.note_hangup();
+            return false;
+        }
         self.sweep_late_replies();
         if !self.guard_msgs.is_empty() {
             return true;
@@ -716,7 +784,16 @@ impl InputSource {
     /// [`DrainOutcome::SourceLost`]; input delivery ends for the session
     /// (matching the input thread, which exited on a read error) while the
     /// engine-side channel keeps the session itself alive.
+    ///
+    /// A terminal that has *hung up* is the one case that ends more than
+    /// input: there is nothing left to paint to and nothing left to read, so
+    /// it is reported through [`note_hangup`](Self::note_hangup) and the
+    /// session leaves by the fatal-signal path.
     pub fn drain(&mut self, size: &TermSizeCell, mut sink: impl FnMut(Msg)) -> DrainOutcome {
+        if !self.dead && terminal_hungup(self.tty.as_fd()) {
+            self.note_hangup();
+            return DrainOutcome::SourceLost;
+        }
         let mut scratch = [0_u8; 64];
         let mut resized = false;
         while matches!(rustix::io::read(&self.winch_read, &mut scratch), Ok(n) if n > 0) {
