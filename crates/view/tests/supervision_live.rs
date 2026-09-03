@@ -23,6 +23,10 @@ use view_oracle::hang::detection_deadline;
 /// How long the engine is told to stay busy for. Far longer than any budget
 /// below, so a probe that answers cannot be the busy work finishing on its
 /// own. Never actually waited out: the engine is killed with the session.
+///
+/// A real bound on both loops, not a number in a comment: each one reads a
+/// clock its own iterations advance ([`vimscript_loop`], [`lua_loop`]), so a
+/// child that outlives the run it belongs to still ends on its own.
 const BUSY_SECS: u64 = 60;
 
 /// How long an answer that proves the interrupt landed is waited for on an
@@ -114,10 +118,18 @@ fn vimscript_loop() -> String {
 }
 
 /// A Lua `while`, which pumps nothing.
+///
+/// Timed on `vim.uv.hrtime`, never `vim.uv.now`: the latter reads libuv's
+/// loop-cached time, which only `uv_update_time` moves and which no
+/// iteration of a loop holding the main thread ever runs. Measured against
+/// the pinned engine, `vim.uv.now()` returned the same millisecond across a
+/// 1.5s spin of 44 million iterations, so a bound written against it never
+/// expires and the engine spins until something kills it -- which is how two
+/// of these ended up reparented to init at 100% CPU for days.
 fn lua_loop() -> String {
     format!(
-        ":lua local t=vim.uv.now() while {} - (vim.uv.now()-t) > 0 do end<CR>",
-        BUSY_SECS * 1000
+        ":lua local t=vim.uv.hrtime() while {} - (vim.uv.hrtime()-t) > 0 do end<CR>",
+        BUSY_SECS * 1_000_000_000
     )
 }
 

@@ -1085,6 +1085,9 @@ impl Engine {
     /// [`SpawnAttempt`]).
     fn spawn_once(cfg: &EngineConfig) -> Result<Self, SpawnAttempt> {
         let remote = cfg.remote.is_some();
+        // mutable only for the Windows stdin replacement below; every other
+        // platform hands the command straight on to the spawn
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut command = build_command(cfg)?;
         // read back off the `Command` that is about to be spawned rather than
         // re-derived from `cfg`: a second derivation is free to drift from
@@ -1105,16 +1108,7 @@ impl Engine {
             ours
         };
         let spawned_at = Instant::now();
-        let mut guard = ChildGuard(Some(spawn_past_busy_text(&mut command, || {})?));
-        // the child's own ends are the child's from here on. A `Command`
-        // holds any handle it was configured with until it is dropped, so on
-        // Windows this is what closes the parent's copy of the child's stdin
-        // read end -- without it a child that died during the handshake could
-        // not break its own stdin pipe, and detection would rest on the
-        // stdout EOF and the handshake timeout alone. Unix closes the
-        // child-side ends in the parent as part of the spawn, so there it
-        // costs nothing and reads the same.
-        drop(command);
+        let mut guard = ChildGuard(Some(spawn_engine_child(command)?));
         // unreachable ok_or: nothing clears guard.0 before this point
         let child = guard
             .0
@@ -2319,6 +2313,56 @@ fn shell_quote(token: &[u8]) -> Vec<u8> {
     quoted
 }
 
+/// Arms `SIGKILL` for the moment this child's parent dies, so an engine
+/// cannot outlive the process that owns it.
+///
+/// [`Engine`]'s `Drop` is the ordinary end of a child and covers every exit
+/// view chooses. It cannot cover the ones view does not choose: a `SIGKILL`,
+/// a harness timeout or a restarted session ends the parent with no
+/// destructor run at all, and the child is then an orphan nothing will reap.
+/// A healthy `nvim --embed` still notices its RPC pipe close and exits, but
+/// one wedged in synchronous Lua reads no pipe, answers no `qa!` and ignores
+/// `SIGTERM` -- it runs until something kills it, which on this tree meant
+/// three processes reparented to init at 100% CPU for days.
+///
+/// Runs inside [`std::process::Command::pre_exec`], after `fork` and before
+/// `exec`, where only async-signal-safe calls are sound: `prctl(2)` and
+/// `getppid(2)` are raw syscalls with no allocation behind them, and the
+/// refusal below is built from a static errno rather than a formatted
+/// message for the same reason.
+///
+/// The signal names the forking *thread*, which is why
+/// [`spawn_engine_child`] decides where the fork happens.
+///
+/// The `getppid` re-check closes the race the arming itself opens: the
+/// parent can exit between this child's `fork` and the `prctl` above, and
+/// the death signal it arms is only ever delivered on a *later* death. A
+/// child that reads a different parent than `expected` has already missed
+/// the notification it just asked for, so it refuses to exec at all --
+/// the same outcome the signal would have produced, minus the wait.
+///
+/// Linux only, and the other two platforms are not covered:
+///
+/// - macOS has no parent-death signal. `EVFILT_PROC`/`NOTE_EXIT` needs a
+///   watcher that outlives the death it watches, and every candidate watcher
+///   in this design (view itself, a thread inside it) is removed by the very
+///   `SIGKILL` that creates the orphan. Covering it needs a third process
+///   view does not have.
+/// - Windows can cover it, with a job object carrying
+///   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` that the child is assigned to at
+///   spawn; this spawn creates no job object.
+#[cfg(target_os = "linux")]
+fn arm_parent_death(expected: rustix::process::RawPid) -> std::io::Result<()> {
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
+    let parent = rustix::process::getppid().map(rustix::process::Pid::as_raw_pid);
+    if parent != Some(expected) {
+        return Err(std::io::Error::from_raw_os_error(
+            rustix::io::Errno::SRCH.raw_os_error(),
+        ));
+    }
+    Ok(())
+}
+
 /// Duplicates `source` onto the child's fd
 /// [`crate::nvim_api::STDIN_RELAY_CHILD_FD`], for a caller's own real stdin
 /// to reach nvim over a descriptor `--embed`'s RPC channel does not already
@@ -2410,6 +2454,86 @@ fn relay_stdin_fd(source: std::os::fd::RawFd) -> std::io::Result<()> {
 /// `|| {}`, which monomorphises away; the retry test releases its writer
 /// from here, so the release is ordered by the refusal itself rather than
 /// raced against the backoff by a sleeping thread.
+/// Spawns the engine child and takes ownership of the `Command` for the
+/// length of that call.
+///
+/// By value rather than by reference because the `Command` must be dropped
+/// once the child exists: it holds any handle it was configured with until
+/// then, so on Windows this is what closes the parent's copy of the child's
+/// stdin read end -- without it a child that died during the handshake could
+/// not break its own stdin pipe, and detection would rest on the stdout EOF
+/// and the handshake timeout alone. Unix closes the child-side ends in the
+/// parent as part of the spawn, so there it costs nothing and reads the
+/// same.
+#[cfg(not(target_os = "linux"))]
+fn spawn_engine_child(mut command: Command) -> std::io::Result<Child> {
+    spawn_past_busy_text(&mut command, || {})
+}
+
+/// [`spawn_engine_child`] with the parent-death signal armed, which on Linux
+/// means the fork itself has to happen somewhere specific.
+///
+/// `PR_SET_PDEATHSIG` names the *thread* that forked the child, not the
+/// process: the signal is delivered when that thread exits, whether or not
+/// the process behind it is still running (`prctl(2)`). view spawns its own
+/// engine from a short-lived background thread, and arming the signal on the
+/// forking thread killed every engine the moment its attach finished -- the
+/// session then restarted against the swap file the dead child had left and
+/// painted `E305` instead of a buffer.
+///
+/// So every engine fork is handed to one thread created on the first spawn
+/// and never joined, which makes "when the parent thread exits" mean "when
+/// this process ends". A thread that cannot be created leaves the signal
+/// unarmed rather than armed against the caller's own thread: an engine that
+/// can be orphaned is the defect this closes, and an engine killed the
+/// moment its caller's thread returns is a worse one.
+#[cfg(target_os = "linux")]
+fn spawn_engine_child(mut command: Command) -> std::io::Result<Child> {
+    use std::sync::mpsc::{sync_channel, SyncSender};
+
+    type Fork = (Command, SyncSender<std::io::Result<Child>>);
+    static ANCHOR: std::sync::OnceLock<Option<SyncSender<Fork>>> = std::sync::OnceLock::new();
+
+    let anchor = ANCHOR.get_or_init(|| {
+        let (tx, rx) = sync_channel::<Fork>(0);
+        std::thread::Builder::new()
+            .name(String::from("view-engine-fork"))
+            .spawn(move || {
+                while let Ok((mut command, reply)) = rx.recv() {
+                    let _ = reply.send(spawn_past_busy_text(&mut command, || {}));
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+    let Some(anchor) = anchor else {
+        return spawn_past_busy_text(&mut command, || {});
+    };
+    arm_parent_death_at_spawn(&mut command);
+    let (reply_tx, reply_rx) = sync_channel(1);
+    let gone = || std::io::Error::other("the engine's fork thread is gone");
+    anchor.send((command, reply_tx)).map_err(|_| gone())?;
+    reply_rx.recv().map_err(|_| gone())?
+}
+
+/// Adds the `pre_exec` closure that arms the parent-death signal, reading
+/// the parent pid here rather than in the child so the child has a value to
+/// compare its own `getppid` against.
+#[cfg(target_os = "linux")]
+fn arm_parent_death_at_spawn(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    let parent = rustix::process::getpid().as_raw_pid();
+    // SAFETY: `arm_parent_death` calls only `prctl` and `getppid`, both raw
+    // syscalls with no allocator and no lock behind them -- the constraint
+    // `pre_exec` imposes on code running between `fork` and `exec` in the
+    // child.
+    #[allow(unsafe_code)]
+    unsafe {
+        command.pre_exec(move || arm_parent_death(parent));
+    }
+}
+
 fn spawn_past_busy_text(
     command: &mut Command,
     mut refused: impl FnMut(),

@@ -88,6 +88,9 @@ rustix = { version = "1", default-features = false, features = [
     "fs",
     # PIPE_BUF is the size half of what makes an inline write safe on unix
     "pipe",
+    # prctl(PR_SET_PDEATHSIG) and the getppid that closes its fork/exec
+    # race, both raw syscalls a pre_exec closure may make
+    "process",
 ] }
 
 # Windows-only, and not optional for the same reason rustix is not: the
