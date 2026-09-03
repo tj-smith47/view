@@ -33,6 +33,12 @@ use view_core::msg::{Key, Msg};
 /// is enabled) and key codes with no nvim input equivalent, such as media
 /// keys and bare modifier keys.
 ///
+/// A `Ctrl` chord is named after the character nvim names it after, which
+/// for six of them is not the one the terminal reported
+/// ([`nvim_control_char`]). Events crossterm's own parser produced go
+/// through [`encode_terminal_key`] instead, which repairs one more
+/// disagreement this cannot see from the event alone.
+///
 /// `view-oracle`'s compat harness (`crates/view-oracle/src/compat.rs`'s
 /// `resolve_key_token`) maintains its own independent, hardcoded inverse of
 /// this table to type notation into a pty as real keypress bytes;
@@ -46,8 +52,14 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
         return None;
     }
 
-    let (mut bare, always_bracketed) = key_token(ev.code)?;
-    let is_plain_char = matches!(ev.code, KeyCode::Char(c) if c != '<');
+    let code = match ev.code {
+        KeyCode::Char(c) if ev.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(nvim_control_char(c))
+        }
+        code => code,
+    };
+    let (mut bare, always_bracketed) = key_token(code)?;
+    let is_plain_char = matches!(code, KeyCode::Char(c) if c != '<');
     // BackTab already means Shift+Tab; some terminals additionally set the
     // SHIFT bit on the event, which would otherwise double up the prefix.
     let shift_baked_in = matches!(ev.code, KeyCode::BackTab);
@@ -68,7 +80,7 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
     // must stay a literal space for byte-identical typing, but once wrapped
     // in a modifier prefix the raw space would render as the malformed
     // "<C- >", so swap in the named token only in the wrapped case.
-    if wrap && ev.code == KeyCode::Char(' ') {
+    if wrap && code == KeyCode::Char(' ') {
         bare = "Space".to_string();
     }
 
@@ -441,13 +453,23 @@ fn utf8_char(run: &[u8]) -> Utf8 {
     }
 }
 
-/// One byte outside any sequence, read as the key crossterm reads it as.
+/// One byte outside any sequence, read as the key nvim reads it as.
 ///
 /// The C0 controls are how a terminal spells `Ctrl` with a letter (`0x17`
 /// is `Ctrl`+`w`, the byte being the letter's position in the alphabet),
 /// and dropping them costs the window every `<C-...>` mapping a user has.
 /// Only the four a keyboard has a key of its own for -- `Enter`, `Tab`,
 /// `Esc`, `Backspace` -- keep that name instead.
+///
+/// nvim's own reading, not crossterm's, and the two part at `0x1c..=0x1f`:
+/// crossterm names those `Ctrl`+`4`..`7`, while nvim's input layer names
+/// them `<C-\>`, `<C-]>`, `<C-^>` and `<C-_>` -- the escape out of
+/// terminal mode, the tag jump, the alternate file, and the byte most
+/// terminals send for `Ctrl`+`/`. A user's mapping is written against the
+/// nvim name, so the crossterm name reaches nvim as a key nobody bound.
+/// The whole table is `:help key-notation` of the pinned engine
+/// (`runtime/doc/intro.txt`, v0.12.4) plus that engine's own answer to
+/// each byte typed at its tty: `keytrans(getcharstr())`.
 fn plain_key(byte: u8) -> Option<(KeyCode, KeyModifiers)> {
     let code = match byte {
         // raw mode is what makes this a chord table rather than a line
@@ -463,9 +485,11 @@ fn plain_key(byte: u8) -> Option<(KeyCode, KeyModifiers)> {
             let letter = byte - 1 + b'a';
             return Some((KeyCode::Char(letter as char), KeyModifiers::CONTROL));
         }
+        // the byte is the punctuation character's own code with bits 6-7
+        // cleared, exactly as a letter's is
         0x1c..=0x1f => {
-            let digit = byte - 0x1c + b'4';
-            return Some((KeyCode::Char(digit as char), KeyModifiers::CONTROL));
+            let punctuation = byte + 0x40;
+            return Some((KeyCode::Char(punctuation as char), KeyModifiers::CONTROL));
         }
         b if (0x20..=0x7e).contains(&b) => KeyCode::Char(b as char),
         _ => return None,
@@ -683,6 +707,68 @@ fn key_msg(notation: impl Into<String>) -> Msg {
 ///
 /// Plain characters (other than `<`) return `always_bracketed: false` so
 /// [`encode_key`] can emit them unwrapped when no modifier applies.
+/// The character nvim names a `Ctrl` chord after, which for six of them is
+/// not the character the terminal reported.
+///
+/// nvim's input layer folds a `Ctrl` chord onto the C0 byte the reported
+/// character's code carries, so `Ctrl` and a backtick is `<Nul>` and the
+/// `{|}~` quartet is the `[\]^` one; `Ctrl`+`6` is the separate legacy
+/// alias for `<C-^>`, which is where `^` sits on a US keyboard. Only the
+/// keyboard protocol ever reports these as characters -- a legacy terminal
+/// sends the C0 byte itself, which [`plain_key`] names directly -- so the
+/// fold is what makes a protocol terminal's chord land on the mapping the
+/// same chord fires without it.
+///
+/// Read off the pinned engine (v0.12.4) by typing each `CSI <code>;5u` at
+/// its own tty and asking `keytrans(getcharstr())` for the name it gave.
+fn nvim_control_char(c: char) -> char {
+    match c {
+        '`' => '@',
+        '{' => '[',
+        '|' => '\\',
+        '}' => ']',
+        '~' | '6' => '^',
+        c => c,
+    }
+}
+
+/// The C0 bytes a terminal with no keyboard protocol in force sends for
+/// the four `Ctrl` chords crossterm names after digits, in `0x1c..=0x1f`
+/// order.
+const CROSSTERM_DIGIT_CHORDS: [(char, char); 4] = [('4', '\\'), ('5', ']'), ('6', '^'), ('7', '_')];
+
+/// The nvim name for a key crossterm's own parser read off the terminal.
+///
+/// [`encode_key`] names the key the event says it is; this repairs the one
+/// place crossterm's legacy-byte table disagrees with nvim's before it
+/// does. A terminal with no keyboard protocol in force spells `<C-\>`,
+/// `<C-]>`, `<C-^>` and `<C-_>` as the bare bytes `0x1c..=0x1f`, which
+/// crossterm reads as `Ctrl`+`4`..`7` and nvim reads as those four
+/// punctuation chords -- and the nvim name is the one a user's mapping is
+/// written against (`<C-\><C-n>`, a tag jump, the alternate file).
+///
+/// Under the kitty keyboard protocol those bytes never arrive: the
+/// terminal reports every `Ctrl` chord as `CSI u`, where `Ctrl`+`4` and
+/// `Ctrl`+`\` are separate keys that keep their own names -- which is what
+/// `kitty_kbd` distinguishes. It is the protocol view actually pushed, not
+/// the terminal's advertised capability: a push that never happened leaves
+/// the terminal sending legacy bytes whatever it can speak.
+#[must_use]
+pub fn encode_terminal_key(ev: &KeyEvent, kitty_kbd: bool) -> Option<String> {
+    let mut ev = *ev;
+    if !kitty_kbd && ev.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(typed) = ev.code {
+            if let Some(&(_, chord)) = CROSSTERM_DIGIT_CHORDS
+                .iter()
+                .find(|(digit, _)| *digit == typed)
+            {
+                ev.code = KeyCode::Char(chord);
+            }
+        }
+    }
+    encode_key(&ev)
+}
+
 fn key_token(code: KeyCode) -> Option<(String, bool)> {
     Some(match code {
         KeyCode::Char('<') => ("lt".to_string(), true),
@@ -876,10 +962,153 @@ mod tests {
         // bytes, as crossterm also reports them
         assert_eq!(encode_residue_bytes(b"\x08"), vec!["<C-h>"]);
         assert_eq!(encode_residue_bytes(b"\x00"), vec!["<C-Space>"]);
-        assert_eq!(encode_residue_bytes(b"\x1c"), vec!["<C-4>"]);
-        assert_eq!(encode_residue_bytes(b"\x1f"), vec!["<C-7>"]);
+        // the four nvim names after punctuation and crossterm after
+        // digits: `<C-\><C-n>` is the documented way out of terminal mode
+        // and `<C-4>` is a key no vim user has ever bound
+        assert_eq!(encode_residue_bytes(b"\x1c"), vec!["<C-\\>"]);
+        assert_eq!(encode_residue_bytes(b"\x1f"), vec!["<C-_>"]);
         // and with `ESC` in front, the same chord with Alt held
         assert_eq!(encode_residue_bytes(b"\x1b\x17"), vec!["<C-M-w>"]);
+    }
+
+    /// Every byte a terminal with no keyboard protocol in force can send
+    /// outside a sequence, with the name the pinned engine's own input
+    /// layer gives it: nvim v0.12.4 typed each of these at its tty and
+    /// answered `keytrans(getcharstr())` with the name in the row.
+    ///
+    /// Two rows spell a name nvim writes differently and resolves
+    /// identically: it answers `<NL>` for `0x0a` and an uppercase `<C-A>`
+    /// for each letter, and `nvim_replace_termcodes` maps `<NL>`/`<C-j>`
+    /// both to `0x0a` and `<C-A>`/`<C-a>` both to `0x01`. The lowercase
+    /// spelling is the one view's own `[keys]` notation is written in.
+    const NVIM_CONTROL_BYTE_NAMES: &[(u8, &str)] = &[
+        (0x00, "<C-Space>"),
+        (0x01, "<C-a>"),
+        (0x02, "<C-b>"),
+        (0x03, "<C-c>"),
+        (0x04, "<C-d>"),
+        (0x05, "<C-e>"),
+        (0x06, "<C-f>"),
+        (0x07, "<C-g>"),
+        (0x08, "<C-h>"),
+        (0x09, "<Tab>"),
+        (0x0a, "<C-j>"),
+        (0x0b, "<C-k>"),
+        (0x0c, "<C-l>"),
+        (0x0d, "<CR>"),
+        (0x0e, "<C-n>"),
+        (0x0f, "<C-o>"),
+        (0x10, "<C-p>"),
+        (0x11, "<C-q>"),
+        (0x12, "<C-r>"),
+        (0x13, "<C-s>"),
+        (0x14, "<C-t>"),
+        (0x15, "<C-u>"),
+        (0x16, "<C-v>"),
+        (0x17, "<C-w>"),
+        (0x18, "<C-x>"),
+        (0x19, "<C-y>"),
+        (0x1a, "<C-z>"),
+        (0x1b, "<Esc>"),
+        (0x1c, "<C-\\>"),
+        (0x1d, "<C-]>"),
+        (0x1e, "<C-^>"),
+        (0x1f, "<C-_>"),
+        (0x7f, "<BS>"),
+    ];
+
+    /// The whole legacy byte table walked by value, so a byte that reaches
+    /// nvim under a name nvim never gave it fails naming itself rather
+    /// than waiting for a user to press it.
+    #[test]
+    fn every_legacy_control_byte_carries_the_name_nvim_gives_it() {
+        for byte in (0x00..=0x1f_u8).chain(std::iter::once(0x7f)) {
+            let row = NVIM_CONTROL_BYTE_NAMES.iter().find(|(row, _)| *row == byte);
+            assert!(
+                row.is_some(),
+                "byte 0x{byte:02x} has no row in the table read off the pinned engine"
+            );
+            let name = row.unwrap().1;
+            assert_eq!(
+                encode_residue_bytes(&[byte]),
+                vec![name.to_string()],
+                "byte 0x{byte:02x}"
+            );
+        }
+        assert_eq!(
+            NVIM_CONTROL_BYTE_NAMES.len(),
+            33,
+            "the table is 0x00..=0x1f and 0x7f exactly: a duplicated row hides the byte it \
+             shadows from the walk above"
+        );
+    }
+
+    /// crossterm reads `0x1c..=0x1f` as `Ctrl` with a digit; nvim reads
+    /// the same bytes as the four punctuation chords, and a mapping is
+    /// written against nvim's name.
+    #[test]
+    fn a_legacy_terminals_ctrl_digits_are_the_chords_nvim_names() {
+        for (digit, nvim) in [
+            ('4', "<C-\\>"),
+            ('5', "<C-]>"),
+            ('6', "<C-^>"),
+            ('7', "<C-_>"),
+        ] {
+            let ev = key(KeyCode::Char(digit), KeyModifiers::CONTROL);
+            assert_eq!(encode_terminal_key(&ev, false).unwrap(), nvim);
+        }
+    }
+
+    /// With the protocol pushed those bytes never arrive and the digits a
+    /// terminal reports are the digit keys it says they are -- except
+    /// `Ctrl`+`6`, which nvim's own input layer answers as `<C-^>` in
+    /// either encoding.
+    #[test]
+    fn a_protocol_terminals_ctrl_digits_keep_their_own_name() {
+        for (digit, nvim) in [
+            ('4', "<C-4>"),
+            ('5', "<C-5>"),
+            ('6', "<C-^>"),
+            ('7', "<C-7>"),
+        ] {
+            let ev = key(KeyCode::Char(digit), KeyModifiers::CONTROL);
+            assert_eq!(encode_terminal_key(&ev, true).unwrap(), nvim);
+        }
+    }
+
+    /// The protocol's own decode, which reports the chord's character
+    /// rather than a C0 byte: the four punctuation chords arrive under
+    /// their own names with no repair, and `Ctrl`+`4` is never rewritten
+    /// into one of them.
+    #[test]
+    fn a_protocol_terminals_ctrl_chords_are_decoded_as_the_keys_reported() {
+        for (report, nvim) in [
+            (&b"\x1b[92;5u"[..], "<C-\\>"),
+            (b"\x1b[93;5u", "<C-]>"),
+            (b"\x1b[94;5u", "<C-^>"),
+            (b"\x1b[95;5u", "<C-_>"),
+            (b"\x1b[52;5u", "<C-4>"),
+            (b"\x1b[53;5u", "<C-5>"),
+            (b"\x1b[55;5u", "<C-7>"),
+        ] {
+            assert_eq!(encode_residue_bytes(report), vec![nvim.to_string()]);
+        }
+    }
+
+    /// The chords nvim folds onto another character's C0 byte, which only
+    /// the protocol ever reports as characters at all.
+    #[test]
+    fn a_protocol_terminals_folded_chords_reach_nvim_folded() {
+        for (report, nvim) in [
+            (&b"\x1b[54;5u"[..], "<C-^>"),
+            (b"\x1b[96;5u", "<C-@>"),
+            (b"\x1b[123;5u", "<C-[>"),
+            (b"\x1b[124;5u", "<C-\\>"),
+            (b"\x1b[125;5u", "<C-]>"),
+            (b"\x1b[126;5u", "<C-^>"),
+        ] {
+            assert_eq!(encode_residue_bytes(report), vec![nvim.to_string()]);
+        }
     }
 
     #[test]

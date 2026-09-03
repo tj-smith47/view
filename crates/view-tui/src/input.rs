@@ -12,7 +12,7 @@
 //! serialized deep-idle wakes per keystroke (kernel to input thread, then
 //! input thread to loop); this one pays exactly the first.
 
-use crate::keys::encode_key;
+use crate::keys::encode_terminal_key;
 use crate::mouse::encode_mouse;
 use crate::terminal::TermSizeCell;
 use crossterm::event::Event;
@@ -804,7 +804,8 @@ pub(crate) fn event_to_msg(event: Event, size: &TermSizeCell) -> Option<Msg> {
         Event::Key(k) => {
             #[cfg(all(unix, feature = "bench-taps"))]
             crate::tap::tap(crate::tap::TAG_KEY_READ);
-            encode_key(&k).map(|notation| Msg::Key(Key { notation }))
+            encode_terminal_key(&k, crate::terminal::kitty_keyboard_pushed())
+                .map(|notation| Msg::Key(Key { notation }))
         }
         Event::Resize(width, height) => {
             // published before the message is queued: the message may sit

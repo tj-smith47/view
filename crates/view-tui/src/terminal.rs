@@ -100,7 +100,10 @@ impl TerminalGuard {
         // on every platform: the capability probe only runs on unix, and a
         // `--tier full` override elsewhere asserts a protocol nothing
         // negotiated
-        enter_bytes(&mut std::io::stdout(), cfg!(unix) && kitty_kbd)
+        let pushed = cfg!(unix) && kitty_kbd;
+        enter_bytes(&mut std::io::stdout(), pushed)?;
+        set_kitty_keyboard_pushed(pushed);
+        Ok(())
     }
 
     /// Restores the terminal immediately rather than waiting for [`Drop`].
@@ -139,6 +142,26 @@ const KITTY_KBD_PUSH: &[u8] = b"\x1b[>1u";
 /// Windows, where its `execute!` arm returns an error that would abandon the
 /// rest of [`restore_bytes`] -- including leaving the alternate screen.
 const KITTY_KBD_POP: &[u8] = b"\x1b[<u";
+
+/// Whether [`KITTY_KBD_PUSH`] is currently on the terminal's stack.
+///
+/// Held process-wide, like [`SAVED_STDERR`], because it describes the one
+/// terminal this process owns rather than any value's state, and because
+/// [`restore`] -- the pop -- is a free function the panic hook runs with no
+/// guard in scope. Written only where the push and the pop bytes are, so
+/// the flag cannot claim an encoding the terminal was never put into.
+static KITTY_KBD_PUSHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the terminal is reporting keys in the kitty keyboard protocol,
+/// which decides the name [`crate::keys::encode_terminal_key`] gives four
+/// of the C0 bytes.
+pub(crate) fn kitty_keyboard_pushed() -> bool {
+    KITTY_KBD_PUSHED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn set_kitty_keyboard_pushed(pushed: bool) {
+    KITTY_KBD_PUSHED.store(pushed, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Writes every setup escape to `out`: the alternate screen, bracketed
 /// paste, and the kitty keyboard-protocol push when `kitty_kbd`. Generic
@@ -242,6 +265,7 @@ fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
 fn restore() {
     let mut out = std::io::stdout();
     let _ = restore_bytes(&mut out);
+    set_kitty_keyboard_pushed(false);
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = out.flush();
     // last, and inside `restore` rather than beside its callers: the panic
@@ -582,11 +606,11 @@ impl Term {
         // still owes the terminal the push `finish_entering_alt_screen`
         // skipped, or `keys::encode_key` spends the session unable to tell
         // `<S-CR>` from `<CR>` on a terminal that can
-        push_kitty_keyboard(
-            &mut std::io::stdout(),
-            self.caps.kitty_kbd,
-            cfg!(unix) && caps.kitty_kbd,
-        )?;
+        let pushed = cfg!(unix) && caps.kitty_kbd;
+        push_kitty_keyboard(&mut std::io::stdout(), self.caps.kitty_kbd, pushed)?;
+        if pushed {
+            set_kitty_keyboard_pushed(true);
+        }
         if caps != self.caps {
             // the frame on screen was painted under the old capabilities, in
             // the old border charset and palette; leaving the next frame free

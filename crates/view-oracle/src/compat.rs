@@ -1323,23 +1323,30 @@ fn resolve_key_token(token: &str) -> Result<Option<Vec<u8>>, CompatError> {
     Ok(None)
 }
 
-/// `<C-x>` for a single ASCII letter: a real terminal's Ctrl modifier
-/// clears bits 6-7 of the letter's code point (`Ctrl-A` through `Ctrl-Z`
-/// occupy `0x01`-`0x1A` regardless of the letter's own shift state, which
-/// is why `<C-w>` and `<C-W>` are the identical keypress), matching
-/// `crossterm`'s own inverse decode (`c @ b'\x01'..=b'\x1A'` in its unix
-/// parser, which always produces a lowercase `Char`). Any other body -- a
-/// named key, more than one character -- is notation-shaped but not a case
-/// this translator implements.
+/// `<C-x>` for a single ASCII letter or one of the four punctuation
+/// chords: a real terminal's Ctrl modifier clears bits 6-7 of the
+/// character's code point (`Ctrl-A` through `Ctrl-Z` occupy `0x01`-`0x1A`
+/// regardless of the letter's own shift state, which is why `<C-w>` and
+/// `<C-W>` are the identical keypress, and `` `\` ``, `]`, `^`, `_` occupy
+/// `0x1c`-`0x1f`), matching `crossterm`'s own inverse decode (`c @
+/// b'\x01'..=b'\x1A'` in its unix parser, which always produces a
+/// lowercase `Char`). Any other body -- a named key, more than one
+/// character -- is notation-shaped but not a case this translator
+/// implements.
 fn resolve_ctrl_notation(body: &str, original: &str) -> Result<Option<Vec<u8>>, CompatError> {
     let mut chars = body.chars();
     match (chars.next(), chars.next()) {
         (Some(c), None) if c.is_ascii_alphabetic() => {
             Ok(Some(vec![c.to_ascii_lowercase() as u8 - b'a' + 1]))
         }
+        // the chords nvim names `<C-\>`, `<C-]>`, `<C-^>` and `<C-_>`,
+        // which a scenario cannot type any other way: a terminal sends
+        // them as these bytes and nothing else spells them
+        (Some(c @ ('\\' | ']' | '^' | '_')), None) => Ok(Some(vec![c as u8 - 0x40])),
         _ => Err(CompatError::UnsupportedKeyNotation {
             token: original.to_string(),
-            reason: "<C-...> is only translated for a single ASCII letter (e.g. <C-w>)",
+            reason: "<C-...> is only translated for a single ASCII letter (e.g. <C-w>) \
+                     or one of <C-\\>, <C-]>, <C-^>, <C-_>",
         }),
     }
 }

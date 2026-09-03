@@ -38,6 +38,30 @@ you -- is one press from being yours, not one press from disappearing. Closing
 it, whichever way you get there, leaves the agent session running -- reopen
 and the transcript is where you left it.
 
+## Your own keys reach nvim under nvim's names
+
+Every key view does not own itself is forwarded to nvim by the name nvim
+gives it, which is the name your mapping is written in. That includes the
+four chords a terminal spells as bare control bytes rather than as a key
+report:
+
+| you press | the terminal sends | view forwards | stock vim |
+| --- | --- | --- | --- |
+| `Ctrl`+`\` | `0x1c` | `<C-\>` | `<C-\><C-n>`, the way out of terminal and insert mode |
+| `Ctrl`+`]` | `0x1d` | `<C-]>` | jump to the tag under the cursor |
+| `Ctrl`+`^` | `0x1e` | `<C-^>` | edit the alternate file |
+| `Ctrl`+`/` | `0x1f` | `<C-_>` | what most comment plugins map |
+
+On a terminal that speaks the kitty keyboard protocol the same chords
+arrive as key reports instead, and `Ctrl`+`4` is then the digit key it
+says it is rather than another spelling of `Ctrl`+`\`. Either way the name
+view forwards is the one nvim's own input layer would have produced, so a
+mapping fires in view exactly where it fires in nvim:
+
+```vim
+:nnoremap <C-]> <Cmd>lua vim.lsp.buf.definition()<CR>
+```
+
 ## Turning them off
 
 A default key is registered only for a feature that is on, and only for

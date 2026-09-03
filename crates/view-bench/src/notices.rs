@@ -58,10 +58,10 @@ pub const REPAINT_QUIET: Duration = Duration::from_millis(500);
 /// configured timeout, so no fixture can shorten what it is worth.
 ///
 /// `CTRL-\ CTRL-N` -- the mode change with no `ESC` prefix at all -- is
-/// not available here: the same decoder reads `0x1c` as `Ctrl`+`4`
-/// (`view-tui/src/keys.rs`, `plain_key`), so the pair reaches the engine
-/// as `<C-4><C-n>` and completes a word in insert mode instead of leaving
-/// it.
+/// the sequence with no seam to settle, and both of its bytes now reach
+/// the engine under the names nvim gives them (`view-tui/src/keys.rs`,
+/// `plain_key`). This settle is what the `<Esc>`-led form every scenario
+/// here types still needs.
 const MODE_SETTLE: Duration = Duration::from_millis(150);
 
 /// The `:View` form that opens the message history, in the two words
