@@ -46,12 +46,22 @@ pub const CLEAR_QUIET: Duration =
 /// [`take_down`], which takes whichever is larger.
 pub const REPAINT_QUIET: Duration = Duration::from_millis(500);
 
-/// How long an `<Esc>` needs before the byte after it is a keystroke of
-/// its own rather than the tail of a key sequence: the engine reads a
-/// printable arriving inside its own `ttimeoutlen` as that key modified,
-/// so an ex-command typed inside the window opens no command line and
-/// leaves its text in the buffer instead. Generous against the engine's
-/// 50ms default, since nothing here is timed.
+/// How long an `<Esc>` needs to itself before the keys behind it are sent:
+/// long enough that the terminal delivers it in a read of its own.
+///
+/// The seam is the measured editor's own input decoder, not the engine's:
+/// an `<Esc>` and the byte behind it arriving in ONE read are decoded as
+/// that key Alt-modified (`view-tui/src/keys.rs`, `alt_key`), so the
+/// `<Esc>` never becomes a mode change and the ex-command behind it types
+/// itself into the buffer. Two writes a scheduling quantum apart cannot
+/// land in one read, which is all this has to buy; it is not a wait on any
+/// configured timeout, so no fixture can shorten what it is worth.
+///
+/// `CTRL-\ CTRL-N` -- the mode change with no `ESC` prefix at all -- is
+/// not available here: the same decoder reads `0x1c` as `Ctrl`+`4`
+/// (`view-tui/src/keys.rs`, `plain_key`), so the pair reaches the engine
+/// as `<C-4><C-n>` and completes a word in insert mode instead of leaving
+/// it.
 const MODE_SETTLE: Duration = Duration::from_millis(150);
 
 /// The `:View` form that opens the message history, in the two words
@@ -139,7 +149,7 @@ pub fn take_down(
     let repaint_quiet = repaint_quiet.max(REPAINT_QUIET);
     // with no modal open this is the way out of nvim's own standing wire
     // errors, and it leaves whatever mode the session was in so the
-    // ex-command below is typed at the command line rather than into a
+    // ex-command below is typed at the command line rather than into the
     // buffer
     leave_mode(session)?;
     // A quiet screen is not a started view. `:View` is created by the
@@ -231,8 +241,9 @@ fn backed_off(attempt_quiet: Duration, floor: Duration) -> Duration {
     attempt_quiet.saturating_mul(2).min(CLEAR_QUIET.max(floor))
 }
 
-/// Leaves whatever mode the session is in, waiting out [`MODE_SETTLE`] so
-/// the next keys are read as their own.
+/// Leaves whatever mode the session is in, giving the `<Esc>` the read of
+/// its own that [`MODE_SETTLE`] documents, so the keys behind it are read
+/// as their own.
 ///
 /// # Errors
 ///
@@ -655,15 +666,18 @@ mod tests {
         while let Some(offset) = source[cursor..].find(needle) {
             let at = cursor + offset;
             cursor = at + needle.len();
-            // a return type and the definition itself are written the same
-            // way a literal is, path qualifier included
+            // a return type, the definition and an impl block are written
+            // the same way a literal is, path qualifier included
             let mut head = source[..at].trim_end();
             while let Some(qualified) = head.strip_suffix("::") {
                 head = qualified
                     .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_')
                     .trim_end();
             }
-            if head.ends_with("->") || head.ends_with("struct") {
+            if ["->", "struct", "impl", "for", "let"]
+                .iter()
+                .any(|opener| head.ends_with(opener))
+            {
                 continue;
             }
             let open = cursor - 1;
@@ -724,34 +738,55 @@ mod tests {
             .collect()
     }
 
-    /// Walks the tree's own `SpawnSpec` literals rather than the builders
-    /// anybody remembered: the field is an `Option`, so a literal that
-    /// moves its program into a wrapper's argv and answers `None` compiles,
-    /// passes every builder pin, and leaves the takedown inert on whatever
-    /// rows it serves. A new literal fails here until its author writes the
-    /// answer down.
-    #[test]
-    fn every_spawn_spec_literal_is_listed_against_what_it_measures() {
-        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let mut found: Vec<(String, String)> = Vec::new();
-        for (name, source) in rust_sources(&crates) {
-            for answer in measured_program_answers(&source) {
-                found.push((name.clone(), answer));
-            }
-        }
-        for (name, _, grounds) in SPAWN_SPEC_LITERALS {
+    /// Every reassignment of a spawn's `program` in the tree, against the
+    /// expression it assigns and why that spawn still measures what it
+    /// says it does.
+    ///
+    /// A literal is not the only way to build a spawn whose program is not
+    /// what it measures: a builder can take a finished spec and move its
+    /// program into a wrapper's arguments, which reaches no literal at all.
+    const PROGRAM_ASSIGNMENTS: &[(&str, &str, &str)] = &[
+        (
+            "view-harness/tests/user_fixture.rs",
+            "PathBuf::from(\"nvim\")",
+            "the side helper leaves the program empty; the baseline fills in the engine it \
+             measures",
+        ),
+        (
+            "view-harness/tests/user_fixture.rs",
+            "view_bin",
+            "the same helper, filled in with the binary the measured side runs",
+        ),
+    ];
+
+    /// The expression each `program` reassignment in `source` writes, in
+    /// source order.
+    fn program_assignments(source: &str) -> Vec<String> {
+        source
+            .lines()
+            // spelled in two pieces so the walk does not find itself
+            .filter_map(|line| line.split_once(concat!(".program", " =")))
+            // a comparison reads the field, it does not move a program
+            .filter(|(_, assigned)| !assigned.starts_with('='))
+            .filter_map(|(_, assigned)| assigned.split(';').next())
+            .map(|assigned| assigned.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// Compares one census against what the tree actually builds, per file
+    /// so a mismatch names the file whose author has to write the answer
+    /// down.
+    fn compare_census(found: &[(String, String)], listed: &[(&str, &str, &str)], subject: &str) {
+        for (name, _, grounds) in listed {
             assert!(
                 !grounds.is_empty(),
-                "{name}: a listed literal has no grounds for the answer it writes"
+                "{name}: a listed entry has no grounds for the answer it writes"
             );
         }
         let mut files: Vec<&str> = found
             .iter()
             .map(|(name, _)| name.as_str())
-            .chain(SPAWN_SPEC_LITERALS.iter().map(|(name, _, _)| *name))
+            .chain(listed.iter().map(|(name, _, _)| *name))
             .collect();
         files.sort_unstable();
         files.dedup();
@@ -761,18 +796,48 @@ mod tests {
                 .filter(|(file, _)| file == name)
                 .map(|(_, answer)| answer.as_str())
                 .collect();
-            let listed: Vec<&str> = SPAWN_SPEC_LITERALS
+            let census: Vec<&str> = listed
                 .iter()
                 .filter(|(file, _, _)| *file == name)
                 .map(|(_, answer, _)| *answer)
                 .collect();
             assert_eq!(
-                built, listed,
-                "{name}: the spawn specs this file builds and the answers SPAWN_SPEC_LITERALS \
-                 lists for it disagree -- a spawn that moves its program into a wrapper's \
-                 arguments has to record the binary it measures, or nothing downstream \
-                 recognises the session as view"
+                built, census,
+                "{name}: {subject} here and the census rows for this file \
+                 disagree -- a spawn whose program is not the binary it measures has to record \
+                 that binary, or nothing downstream recognises the session as view"
             );
         }
+    }
+
+    /// Walks what the tree builds rather than the builders anybody
+    /// remembered: `measured_program` is an `Option`, so a spawn that moves
+    /// its program into a wrapper's argv and answers `None` compiles,
+    /// passes every builder pin, and leaves the takedown inert on whatever
+    /// rows it serves. Both ways of building one -- a literal, and a
+    /// finished spec whose program is reassigned -- fail here until their
+    /// author writes the answer down.
+    #[test]
+    fn every_spawn_this_tree_builds_is_listed_against_what_it_measures() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let mut literals: Vec<(String, String)> = Vec::new();
+        let mut assignments: Vec<(String, String)> = Vec::new();
+        for (name, source) in rust_sources(&crates) {
+            for answer in measured_program_answers(&source) {
+                literals.push((name.clone(), answer));
+            }
+            for assigned in program_assignments(&source) {
+                assignments.push((name.clone(), assigned));
+            }
+        }
+        compare_census(&literals, SPAWN_SPEC_LITERALS, "the SpawnSpec literals");
+        compare_census(
+            &assignments,
+            PROGRAM_ASSIGNMENTS,
+            "the reassignments of a spawn's program",
+        );
     }
 }
