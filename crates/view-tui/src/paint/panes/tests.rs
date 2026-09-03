@@ -595,6 +595,11 @@ fn dump(sync: bool, truecolor: bool, kitty: bool, unicode_boxes: bool) -> String
         .map(|row| row_text(&buf, row))
         .collect();
     out.push("--- fg ---".to_string());
+    // Saturating on Z: b'A' + index overflows u8 at index 191, well before the
+    // try_from fallback could fire, so the cap has to come before the add.
+    fn legend_letter(index: usize) -> char {
+        char::from(b'A' + u8::try_from(index.min(25)).unwrap_or(25))
+    }
     let mut legend: Vec<ratatui::style::Color> = Vec::new();
     for row in 0..buf.area.height {
         out.push(
@@ -606,17 +611,14 @@ fn dump(sync: bool, truecolor: bool, kitty: bool, unicode_boxes: bool) -> String
                             legend.push(color);
                             legend.len() - 1
                         });
-                        char::from(b'A' + u8::try_from(seen).unwrap_or(b'Z' - b'A'))
+                        legend_letter(seen)
                     }
                 })
                 .collect(),
         );
     }
     for (index, color) in legend.iter().enumerate() {
-        out.push(format!(
-            "{} = {color:?}",
-            char::from(b'A' + u8::try_from(index).unwrap_or(b'Z' - b'A'))
-        ));
+        out.push(format!("{} = {color:?}", legend_letter(index)));
     }
     out.join("\n")
 }
