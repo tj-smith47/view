@@ -55,6 +55,7 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "win_hide" => decode_win_hide(args).unwrap_or_else(unknown),
         "win_close" => decode_win_close(args).unwrap_or_else(unknown),
         "win_viewport" => decode_win_viewport(args).unwrap_or_else(unknown),
+        "msg_set_pos" => decode_msg_set_pos(args).unwrap_or_else(unknown),
         "hl_attr_define" => decode_hl_attr_define(args).unwrap_or_else(unknown),
         "default_colors_set" => decode_default_colors_set(args).unwrap_or_else(unknown),
         "hl_group_set" => decode_hl_group_set(args).unwrap_or_else(unknown),
@@ -197,6 +198,20 @@ fn decode_win_close(args: &[Value]) -> Option<UiEvent> {
     let [grid, ..] = args else { return None };
     Some(UiEvent::WinClose {
         grid: as_u64(grid)?,
+    })
+}
+
+fn decode_msg_set_pos(args: &[Value]) -> Option<UiEvent> {
+    let [grid, row, scrolled, sep_char, zindex, compindex, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::MsgSetPos {
+        grid: as_u64(grid)?,
+        row: as_u64(row)?,
+        scrolled: scrolled.as_bool()?,
+        sep_char: sep_char.as_str()?.to_string(),
+        zindex: as_u64(zindex)?,
+        compindex: as_u64(compindex)?,
     })
 }
 
@@ -779,6 +794,35 @@ mod tests {
                 UiEvent::WinHide { grid: 6 },
                 UiEvent::WinClose { grid: 4 },
             ]
+        );
+    }
+
+    /// Quoted from `docs/multigrid-wire-capture.md`'s `msg_set_pos`
+    /// section: `msg_set_pos [3, 21, false, " ", 200, 1]`.
+    #[test]
+    fn decodes_msg_set_pos() {
+        let params = vec![arr(vec![
+            Value::from("msg_set_pos"),
+            arr(vec![
+                Value::from(3u64),
+                Value::from(21u64),
+                Value::from(false),
+                Value::from(" "),
+                Value::from(200u64),
+                Value::from(1u64),
+            ]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![UiEvent::MsgSetPos {
+                grid: 3,
+                row: 21,
+                scrolled: false,
+                sep_char: " ".to_string(),
+                zindex: 200,
+                compindex: 1,
+            }]
         );
     }
 

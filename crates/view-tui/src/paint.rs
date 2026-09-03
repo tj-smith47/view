@@ -1673,6 +1673,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use view_core::grid::registry::GLOBAL_GRID;
     use view_core::grid::GridOp;
     use view_core::native::ai_event::{AiEvent, ToolCallStatus};
 
@@ -1787,7 +1788,7 @@ mod tests {
         let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
         assert!(model
             .speculate
-            .predict("insert", 'z', (2, 5), stamp)
+            .predict("insert", GLOBAL_GRID, 'z', (2, 5), stamp)
             .is_some());
         let surface = view_surface::render(&model);
 
@@ -1816,7 +1817,7 @@ mod tests {
         let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
         assert!(model
             .speculate
-            .predict("insert", 'z', (1, 4), stamp)
+            .predict("insert", GLOBAL_GRID, 'z', (1, 4), stamp)
             .is_some());
         let answer = view_core::events::UiEvent::GridLine {
             grid: 1,
@@ -4740,7 +4741,7 @@ mod tests {
                 for row in [0, 8] {
                     assert!(
                         m.speculate
-                            .predict("insert", 'z', (row, 2), stamp)
+                            .predict("insert", GLOBAL_GRID, 'z', (row, 2), stamp)
                             .is_some(),
                         "the fixture must leave a prediction pending"
                     );

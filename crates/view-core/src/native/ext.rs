@@ -32,6 +32,14 @@ pub enum Ext {
     /// The tab line. Unconditional today: no native feature owns it, so
     /// there is no switch for it to follow.
     Tabline,
+    /// Not a surface: the option that makes nvim address each window's grid
+    /// separately (`docs/multigrid.md`). It externalizes nothing, so it is
+    /// absent from [`ALL`] and a session that asked for it still owns
+    /// exactly the surfaces [`ALL`] names -- it is a variant because the
+    /// attach set travels as `Ext` from the resolver to the wire, and a
+    /// second channel for one option is a second thing that can disagree
+    /// with the first.
+    Multigrid,
 }
 
 impl Ext {
@@ -44,6 +52,7 @@ impl Ext {
             Self::Popupmenu => "ext_popupmenu",
             Self::Messages => "ext_messages",
             Self::Tabline => "ext_tabline",
+            Self::Multigrid => MULTIGRID_NAME,
         }
     }
 }
@@ -74,15 +83,27 @@ pub const ALL_NAMES: &[&str] = &[
 ];
 
 /// The `nvim_ui_attach` option that makes nvim address each window's grid
-/// separately (`docs/multigrid-wire-capture.md`).
+/// separately (`docs/multigrid.md`), as the wire spells
+/// [`Ext::Multigrid`].
 ///
-/// Not an [`Ext`] variant and not in [`ALL`]: it externalizes no surface, it
-/// changes how every grid on the wire is addressed, so [`Model::owns`] has
-/// nothing to answer about it and a session that asked for it would still
-/// own exactly the surfaces [`ALL`] names.
+/// Not in [`ALL`]: it externalizes no surface, it changes how every grid on
+/// the wire is addressed, so [`Model::owns`] answers about it only in the
+/// sense of "this session negotiated it".
 ///
 /// [`Model::owns`]: crate::model::Model::owns
 pub const MULTIGRID_NAME: &str = "ext_multigrid";
+
+/// The set a session with nothing to narrow it attaches today: [`ALL`] plus
+/// [`Ext::Multigrid`], which is what `[engine] single_grid = true` takes
+/// back off.
+pub const ALL_MULTIGRID: &[Ext] = &[
+    Ext::LineGrid,
+    Ext::Cmdline,
+    Ext::Popupmenu,
+    Ext::Messages,
+    Ext::Tabline,
+    Ext::Multigrid,
+];
 
 /// [`ALL_NAMES`] plus [`MULTIGRID_NAME`], for the oracle sides that attach
 /// under the multigrid vocabulary. Spelled out rather than concatenated
@@ -100,7 +121,7 @@ pub const ALL_NAMES_MULTIGRID: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{Ext, ALL, ALL_NAMES, ALL_NAMES_MULTIGRID, MULTIGRID_NAME};
+    use super::{Ext, ALL, ALL_MULTIGRID, ALL_NAMES, ALL_NAMES_MULTIGRID, MULTIGRID_NAME};
 
     #[test]
     fn every_name_is_its_own_variants_spelling() {
@@ -128,7 +149,22 @@ mod tests {
         assert_eq!(tail, [MULTIGRID_NAME], "and adds exactly the one option");
         assert!(
             !ALL_NAMES.contains(&MULTIGRID_NAME),
-            "the default set must not negotiate multigrid"
+            "the surface set must not negotiate multigrid"
+        );
+    }
+
+    /// The typed set and the wire set are the same set, and the option that
+    /// is not a surface is in neither surface list.
+    #[test]
+    fn the_shipped_attach_set_is_every_surface_plus_the_multigrid_option() {
+        assert_eq!(ALL_MULTIGRID.len(), ALL_NAMES_MULTIGRID.len());
+        for (ext, name) in ALL_MULTIGRID.iter().zip(ALL_NAMES_MULTIGRID) {
+            assert_eq!(&ext.as_str(), name);
+        }
+        assert_eq!(Ext::Multigrid.as_str(), MULTIGRID_NAME);
+        assert!(
+            !ALL.contains(&Ext::Multigrid),
+            "multigrid externalizes no surface, so it cannot join the surface list"
         );
     }
 }

@@ -36,7 +36,7 @@ looks like, which is this document's whole subject.
 | Arm | `nvim_ui_attach` options |
 | --- | --- |
 | multigrid | `UI_EXT_OPTIONS` + `ext_multigrid` |
-| single-grid | `UI_EXT_OPTIONS` (the set view ships today) |
+| single-grid | `UI_EXT_OPTIONS` (the fallback `[engine] single_grid = true` selects) |
 | no-messages probe | `ext_linegrid` + `ext_multigrid` only |
 
 `UI_EXT_OPTIONS` is `ext_linegrid`, `ext_cmdline`, `ext_popupmenu`,
@@ -46,7 +46,7 @@ The first two arms drive the identical script at 80x24 and differ only in
 that one option, so every delta below is a fact about `ext_multigrid`
 rather than about the script. `mousetime=0` is load-bearing: the three
 presses land on one cell, and with a nonzero mousetime the gap between
-them — two blocking evals long — puts the host's speed into nvim's
+them -- two blocking evals long -- puts the host's speed into nvim's
 multi-click detection, so a loaded runner captures `msg_showcmd` rows an
 idle one does not:
 

@@ -1096,6 +1096,11 @@ where
                     }
                     FailureSignature::Timeout { .. } => summary.timeout_count += 1,
                 }
+                // the shipped vocabulary, not the pinned "default" one: a
+                // fuzz round's job is to exercise what a real session
+                // actually speaks to nvim, and the two parted the day
+                // multigrid became the default (see `SHIPPED_EXT_OPTIONS`'s
+                // own doc)
                 let minimized = minimize_tokens(
                     tokens,
                     target.clone(),
@@ -1103,7 +1108,7 @@ where
                     ROWS,
                     quiesce.silence,
                     quiesce.deadline,
-                    corpus::DEFAULT_EXT_OPTIONS,
+                    corpus::SHIPPED_EXT_OPTIONS,
                 );
                 let path = quarantine_entry(quarantine_dir, seed, round, &minimized, pin)?;
                 println!(
@@ -1169,7 +1174,7 @@ fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
                 quiesce.silence,
                 quiesce.deadline,
                 EngineRoute::Local,
-                corpus::DEFAULT_EXT_OPTIONS,
+                corpus::SHIPPED_EXT_OPTIONS,
             )
         },
     )?;
@@ -1208,7 +1213,7 @@ fn quarantine_entry(
         &name,
         &join_tokens(tokens),
         engine_pin,
-        corpus::DEFAULT_EXT_SET,
+        corpus::SHIPPED_EXT_SET,
         corpus::DEFAULT_QUIESCE_SILENCE_MS,
         corpus::DEFAULT_QUIESCE_DEADLINE_MS,
     )

@@ -85,6 +85,26 @@ pub enum UiEvent {
     /// `grid`'s window closed. `ext_multigrid` only, and always followed by
     /// `grid_destroy` for the same grid in the same cycle.
     WinClose { grid: u64 },
+    /// `msg_set_pos`: nvim's own message/cmdline area occupies `grid` at
+    /// screen row `row` (column 0, spanning the full width), above the
+    /// window layer at `zindex` and, within one zindex, in `compindex`
+    /// order -- the same stacking vocabulary [`UiEvent::WinFloatPos`]
+    /// carries. Only sent when `ext_messages` is not attached
+    /// (`docs/multigrid-wire-capture.md`'s `msg_set_pos` section): with it
+    /// attached, message text arrives as `MsgShow` instead and no grid ever
+    /// carries it. `grid == 0` is nvim's own "no message grid yet" sentinel,
+    /// sent once at startup before any message has claimed a real one.
+    ///
+    /// `scrolled`/`sep_char` are decoded for wire completeness; no painter
+    /// draws the "more" separator they describe yet.
+    MsgSetPos {
+        grid: u64,
+        row: u64,
+        scrolled: bool,
+        sep_char: String,
+        zindex: u64,
+        compindex: u64,
+    },
     /// A window's visible region: `topline` and `botline` are the first and
     /// last buffer lines `win` is showing (`topline` zero-based, `botline`
     /// exclusive, as nvim sends them), and `curline`/`curcol` are the

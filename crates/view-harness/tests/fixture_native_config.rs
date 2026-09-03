@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use view_core::native::{ext, registry};
-use view_native::config::{ext_surfaces, NativeConfig};
+use view_native::config::{ext_surfaces, Overrides, ResolvedConfig, ViewConfig};
 
 /// The fixtures allowed to attach less than every surface, as (the fixture
 /// directory's name on disk, the grounds that make rows taken against a
@@ -50,14 +50,22 @@ fn comparison_fixtures_root() -> PathBuf {
 }
 
 /// Every fixture directory under `root`, as (directory name, its
-/// `view/view.toml`, that file's parsed `[native]` table).
+/// `view/view.toml`, that file resolved).
+///
+/// The whole document rather than its `[native]` table alone, and against
+/// an empty environment: the attach set answers to `[engine]` too, so a
+/// fixture that took the shipped attach mode off would otherwise be
+/// invisible to the walks below.
 ///
 /// `view_toml_optional` is for the acceptance roots, where a fixture
 /// deliberately ships nvim alone (`habamax`). Under `compat/fixtures/` a
 /// missing file is the failure it has always been: a comparison fixture
 /// with no `view.toml` runs the shipping defaults it exists to switch off,
 /// and skipping it would let that happen quietly.
-fn fixture_configs(root: &Path, view_toml_optional: bool) -> Vec<(String, PathBuf, NativeConfig)> {
+fn fixture_configs(
+    root: &Path,
+    view_toml_optional: bool,
+) -> Vec<(String, PathBuf, ResolvedConfig)> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(root)
         .unwrap_or_else(|err| panic!("{} must be readable: {err}", root.display()))
@@ -72,8 +80,9 @@ fn fixture_configs(root: &Path, view_toml_optional: bool) -> Vec<(String, PathBu
         }
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("{} is unreadable: {err}", path.display()));
-        let cfg = NativeConfig::from_toml_str(&text)
+        let file = ViewConfig::from_toml_str(&text)
             .unwrap_or_else(|err| panic!("{} does not parse: {err}", path.display()));
+        let cfg = view_native::config::resolve_with(&file, &Overrides::default(), &|_| None);
         let name = dir
             .file_name()
             .unwrap_or_default()
@@ -89,9 +98,10 @@ fn fixture_configs(root: &Path, view_toml_optional: bool) -> Vec<(String, PathBu
 /// externalizes, asked of `ext_surfaces` itself so no list here can drift
 /// from the one the product filters.
 fn decides_the_attach(id: &str) -> bool {
-    let cfg = NativeConfig::from_toml_str(&format!("[native]\n{id} = false\n"))
+    let file = ViewConfig::from_toml_str(&format!("[native]\n{id} = false\n"))
         .unwrap_or_else(|err| panic!("[native] {id} = false must parse: {err}"));
-    ext_surfaces(&cfg).as_slice() != ext::ALL
+    let cfg = view_native::config::resolve_with(&file, &Overrides::default(), &|_| None);
+    ext_surfaces(&cfg).as_slice() != ext::ALL_MULTIGRID
 }
 
 #[test]
@@ -103,7 +113,7 @@ fn every_comparison_fixture_switches_off_every_feature_that_only_renders() {
                 continue;
             }
             assert!(
-                !cfg.enabled(feature.id),
+                !cfg.tables.native.enabled(feature.id),
                 "{} leaves native.{} on: a comparison run against this fixture would measure \
                  view superseding a surface nvim still draws",
                 path.display(),
@@ -148,7 +158,7 @@ fn no_fixture_hands_an_ext_surface_back_to_the_engine() {
             let attached = ext_surfaces(&cfg);
             assert_eq!(
                 attached.as_slice(),
-                ext::ALL,
+                ext::ALL_MULTIGRID,
                 "{} attaches {attached:?} rather than every surface, so a session running it \
                  hands the rest back to nvim: nvim paints them into the grid, view applies that \
                  damage on top of its own rendering, and every row taken here describes a \

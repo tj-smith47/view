@@ -1077,11 +1077,13 @@ fn main() -> Result<()> {
 
     // the `ext_*` set `nvim_ui_attach` requests follows the `[native]`
     // switches, so a surface a user turned off is never taken from their
-    // plugins in the first place. Resolved once above and handed to
-    // `NativeSession` afterwards rather than read again there -- two reads
-    // of one file can answer differently, and the attach would then have
-    // externalized a surface the rest of the session believes it declined.
-    let surfaces = view_native::config::ext_surfaces(&view_config.native);
+    // plugins in the first place, and `[engine] single_grid` for whether
+    // nvim addresses each window's grid separately. Resolved once above and
+    // handed to `NativeSession` afterwards rather than read again there --
+    // two reads of one file can answer differently, and the attach would
+    // then have externalized a surface the rest of the session believes it
+    // declined.
+    let surfaces = view_native::config::ext_surfaces(&resolved);
     model.attach_surfaces(surfaces.clone());
 
     // released here, at the first point every half exists, rather than
@@ -1624,6 +1626,22 @@ mod tests {
         }
         assert!(resolved.tables.native.enabled("picker"));
         assert!(resolved.tables.supervision.auto_restart);
+    }
+
+    /// `--clean` skips the file, but it must still reproduce the mode view
+    /// ships rather than a second one of its own: a config-blind attach
+    /// that fell back to single-grid would make the triage tool lie about
+    /// which attach mode misbehaved.
+    #[test]
+    fn clean_attaches_the_default_set() {
+        let file = ViewConfig::from_toml_str("[engine]\nsingle_grid = true\n")
+            .expect("the fixture must parse");
+        let resolved = resolve_session_config(&Cli::parse_from(["view", "--clean"]), &file);
+        assert_eq!(
+            view_native::config::ext_surfaces(&resolved),
+            view_core::native::ext::ALL_MULTIGRID.to_vec(),
+            "--clean must attach the shipped set even when the file it ignores asked for the fallback"
+        );
     }
 
     /// `fn main`'s own body, and nothing else in the file: the sequence
@@ -2294,7 +2312,11 @@ mod tests {
 
         let mut model = Model::with_term_size(80, 24);
         let mut notices = Vec::new();
-        let (resolved, err) = load_view_config(Some(&path));
+        let (file, err) = load_view_config(Some(&path));
+        // through the same empty-environment chain `resolved_for` states,
+        // so a host exporting a `VIEW_*` name cannot answer for the layer
+        // this leg is about
+        let resolved = view_native::config::resolve_with(&file, &Overrides::default(), &|_| None);
         note_unread_config(
             &err.expect("a file that is not TOML must be reported"),
             &mut model,
@@ -2302,9 +2324,10 @@ mod tests {
         );
 
         assert_eq!(
-            view_native::config::ext_surfaces(&resolved.native),
-            view_core::native::ext::ALL.to_vec(),
-            "a config that could not be read keeps every surface"
+            view_native::config::ext_surfaces(&resolved),
+            view_core::native::ext::ALL_MULTIGRID.to_vec(),
+            "a config that could not be read keeps every surface, and attaches \
+             the mode view ships"
         );
         assert!(
             !notices.is_empty(),

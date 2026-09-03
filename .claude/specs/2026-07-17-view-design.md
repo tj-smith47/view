@@ -274,13 +274,14 @@ Dependency rules (audit-enforced, cfgd-style):
 - Attach requesting `ext_linegrid` and `ext_tabline` unconditionally, plus
   `ext_cmdline`/`ext_popupmenu` with `palette` and `ext_messages` with
   `notifications` — the set follows the `[native]` switches, read before
-  attach (§5.5). `ext_multigrid` joins the set at P6 (§17)
-  when pane composition lands — until then view runs single-grid by design,
-  so every phase ships against the attach mode it actually uses; both modes
-  are oracle-covered from P3 on. (Multigrid is the protocol's roughest
-  corner; upstream PR #32691 makes multigrid the internal default — each
-  engine-pin bump re-evaluates the `single_grid` knob's lifespan, and
-  `doctor` recognizes multigrid-shaped failures and suggests the knob.)
+  attach (§5.5), plus `ext_multigrid` (P6, §17): view composites nvim's
+  windows itself by default. `[engine] single_grid = true` (or
+  `--single-grid`) drops `ext_multigrid` and falls back to nvim drawing one
+  grid, the escape hatch for a plugin that misbehaves under the protocol;
+  both modes are oracle-covered from P3 on. (Multigrid is the protocol's
+  roughest corner; upstream PR #32691 makes multigrid the internal default
+  — each engine-pin bump re-evaluates the `single_grid` knob's lifespan,
+  and `doctor` recognizes multigrid-shaped failures and suggests the knob.)
 - Supervision: an engine death (any exit nvim never announced — a signal, a
   crash that manages a clean exit status, a reader that stopped for its own
   reason) → view keeps the last Surface painted, offers one-key restart, and
@@ -1102,7 +1103,7 @@ copyable ones (polish).
 
 | Risk | Mitigation |
 |---|---|
-| `ext_multigrid` instability | Single-grid is the shipped mode until P6; multigrid oracle-covered before panes ship; upstream unification (PR #32691) tracked — `single_grid` knob lifespan re-evaluated at each engine-pin bump |
+| `ext_multigrid` instability | Multigrid is the shipped default from P6; `[engine] single_grid` is the escape hatch to nvim drawing one grid; multigrid oracle-covered before panes shipped; upstream unification (PR #32691) tracked — `single_grid` knob lifespan re-evaluated at each engine-pin bump |
 | Agent out-of-band writes (shell tools bypass diff review) | Routed-where-possible + detected-always (§10.1): fs watch, checktime drive, conflict UI; documented honestly |
 | Native-wins supersession surprises a user's muscle memory | Every supersession reported (first-run toast + doctor) with the exact per-feature off switch; §13.3 asserts all four states per UI-owning plugin |
 | Blocked engine (sync Lua) still blocks editing | UI stays live with honest busy state + interrupt; positioning stays honest about it; strangler reduces exposure over time |

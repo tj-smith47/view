@@ -23,12 +23,19 @@ use view_oracle::review::DiffReviewCase;
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
 
-/// The `ext_set` name every entry authored before multigrid carries: the
-/// full `ext_*` set view itself attaches with. A named set (rather than the
-/// set itself living in the entry) is what lets an entry name a vocabulary
-/// without restating five option keys, and what makes a set the runner does
-/// not know a load error instead of an attach that silently asked for
-/// nothing.
+/// The `ext_set` name every entry authored before multigrid became the
+/// shipped default carries: the full `ext_*` set, minus `ext_multigrid`.
+/// Pinned to that vocabulary forever, not to whatever view currently ships
+/// by default -- the corpus's whole design point is that an entry's ext-set
+/// travels with the entry and survives a default changing out from under it
+/// (see the module doc). Those two have now parted: view ships
+/// [`MULTIGRID_EXT_SET`] by default, and this name answers "the single-grid
+/// vocabulary" for whichever entry deliberately still wants it, never
+/// "today's default". [`SHIPPED_EXT_SET`] is the one that tracks the
+/// latter. A named set (rather than the set itself living in the entry) is
+/// what lets an entry name a vocabulary without restating five option keys,
+/// and what makes a set the runner does not know a load error instead of an
+/// attach that silently asked for nothing.
 pub const DEFAULT_EXT_SET: &str = "default";
 
 /// The options [`DEFAULT_EXT_SET`] resolves to, for the generated scripts
@@ -38,8 +45,28 @@ pub const DEFAULT_EXT_OPTIONS: &[&str] = view_oracle::UI_EXT_OPTIONS;
 
 /// The `ext_set` name for the entries that attach with `ext_multigrid` on
 /// top of the default set, where nvim addresses each window's grid
-/// separately (`docs/multigrid-wire-capture.md`).
-const MULTIGRID_EXT_SET: &str = "multigrid";
+/// separately (`docs/multigrid-wire-capture.md`). This is also what view
+/// itself ships by default -- see [`SHIPPED_EXT_SET`], the alias fuzzing
+/// and any other "match today's default" consumer reads instead of this
+/// name, so a future default change moves one alias rather than every call
+/// site that means "shipped" today.
+pub const MULTIGRID_EXT_SET: &str = "multigrid";
+
+/// The `ext_set` name that matches what view ships by default today.
+///
+/// Distinct from [`DEFAULT_EXT_SET`] on purpose: that name is a pinned
+/// corpus vocabulary an already-authored entry keeps meaning forever, while
+/// this one is meant to move the day view's shipped default moves again --
+/// a fuzz run's job is to exercise real shipped behavior, and hardcoding
+/// [`DEFAULT_EXT_SET`] into it is exactly the coupling that went stale
+/// silently the day the shipped default changed (fuzzing kept attaching
+/// single-grid while every real session already spoke multigrid). Update
+/// this alias, not its readers, the next time the shipped default changes.
+pub const SHIPPED_EXT_SET: &str = MULTIGRID_EXT_SET;
+
+/// The options [`SHIPPED_EXT_SET`] resolves to. See its own doc for why
+/// this is not simply [`DEFAULT_EXT_OPTIONS`].
+pub const SHIPPED_EXT_OPTIONS: &[&str] = view_oracle::UI_EXT_OPTIONS_MULTIGRID;
 
 /// The `nvim_ui_attach` options each recognized `ext_set` name stands for.
 /// The one place a name is resolved, so the loader's validation and the

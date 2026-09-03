@@ -12,6 +12,10 @@ pub use cache::SurfaceCache;
 
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
+use view_core::grid::registry::GridId;
+#[cfg(test)]
+use view_core::grid::registry::GLOBAL_GRID;
+use view_core::grid::Grid;
 use view_core::model::{
     CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState, TermCaps,
 };
@@ -390,7 +394,7 @@ pub fn render(model: &Model) -> Surface {
     // content is, and an overlay that opened over it (a prompt, a picker,
     // the cmdline) is authoritative chrome that must never be shown through
     // a stale glyph underneath it
-    if let Some(layer) = speculated_layer(model, (grid_w, grid_h), offset) {
+    if let Some(layer) = speculated_layer(model, offset) {
         layers.insert(SPECULATED_LAYER_INDEX, layer);
     }
 
@@ -838,21 +842,40 @@ pub(crate) const SPECULATED_LAYER_INDEX: usize = 1;
 
 /// The [`LayerKind::Speculated`] layer for whatever `model` currently has
 /// pending, or `None` when nothing is pending, or when every pending
-/// prediction names a cell outside the live `grid`.
+/// prediction names a cell its own pane no longer has.
+///
+/// Each [`PredictedCell`] arrives grid-local (see [`PredictedCell::row`]),
+/// so it is translated to screen space here, once, against the pane that
+/// owns it -- the paint side (`paint_speculated`) only ever sees absolute
+/// coordinates, matching every other layer this module builds. A pane that
+/// has been hidden or destroyed since the prediction was made answers
+/// [`pane_origin`](view_core::grid::registry::GridRegistry::pane_origin)
+/// with `None`, which drops that cell rather than painting it at a stale or
+/// wrong screen position.
 ///
 /// Off-grid predictions are dropped here, one by one, rather than the layer
 /// being clamped as a whole: predictions on a wrapped line are a mix of
 /// cells the grid has and cells it does not, and clamping the rect around
 /// all of them would drag the survivors' glyphs to the grid edge (see
 /// [`PredictedCell`]).
-fn speculated_layer(model: &Model, grid: (u16, u16), offset: u16) -> Option<Layer> {
-    let (grid_w, grid_h) = grid;
+fn speculated_layer(model: &Model, offset: u16) -> Option<Layer> {
+    let registry = model.engine.grids();
     let cells: Vec<PredictedCell> = model
         .speculate
         .pending()
         .iter()
-        .copied()
-        .filter(|cell| cell.row < grid_h && cell.col < grid_w)
+        .filter_map(|cell| {
+            let (orow, ocol) = registry.pane_origin(cell.grid)?;
+            let (grid_w, grid_h) = registry.grid(cell.grid)?.size();
+            if cell.row >= grid_h || cell.col >= grid_w {
+                return None;
+            }
+            Some(PredictedCell {
+                row: cell.row.saturating_add(orow),
+                col: cell.col.saturating_add(ocol),
+                ..*cell
+            })
+        })
         .collect();
     let top = cells.iter().map(|cell| cell.row).min()?;
     let bottom = cells.iter().map(|cell| cell.row).max()?;
@@ -1001,10 +1024,24 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
             (height.saturating_sub(1).saturating_add(offset), col)
         }
     } else {
-        let (row, col) = model.engine.grid().cursor();
+        // the global grid's own cursor field only under single-grid: under
+        // multigrid `grid_cursor_goto` names window grids, never grid 1, so
+        // reading it here would place the caret at whatever it was last set
+        // to (nothing, on a session that never touches grid 1's cursor at
+        // all) instead of tracking the window actually being typed into
+        let registry = model.engine.grids();
+        let (grid, row, col) = registry.cursor_local();
+        // predictions are grid-local (see `PredictedCell::row`), so the
+        // overtake search below must run in the cursor's own grid and
+        // against its own size, never the terminal's -- a pane narrower
+        // than the terminal would otherwise let a prediction past its own
+        // right edge still claim the caret
+        let size = registry.grid(grid).map_or((width, height), Grid::size);
+        let local_col = speculated_col(model, grid, size, row, col);
+        let (orow, ocol) = registry.pane_origin(grid).unwrap_or((0, 0));
         (
-            row.saturating_add(offset),
-            speculated_col(model, (width, height), row, col),
+            row.saturating_add(orow).saturating_add(offset),
+            local_col.saturating_add(ocol),
         )
     };
     Some(CursorSpec { row, col, shape })
@@ -1030,13 +1067,20 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
 /// painted; a caret that would land past the last column stays on it, since
 /// a cursor outside the grid is not a wrong guess a redraw corrects but a
 /// position no terminal has.
-fn speculated_col(model: &Model, grid: (u16, u16), row: u16, col: u16) -> u16 {
-    let (grid_w, grid_h) = grid;
+///
+/// `row`/`col` and every pending [`PredictedCell`] are grid-local, so a
+/// prediction only overtakes the caret when it names the same `grid` the
+/// cursor is actually in -- a burst typed in one window must never move the
+/// caret shown in another.
+fn speculated_col(model: &Model, grid: GridId, size: (u16, u16), row: u16, col: u16) -> u16 {
+    let (grid_w, grid_h) = size;
     model
         .speculate
         .pending()
         .iter()
-        .filter(|cell| cell.row == row && cell.row < grid_h && cell.col < grid_w)
+        .filter(|cell| {
+            cell.grid == grid && cell.row == row && cell.row < grid_h && cell.col < grid_w
+        })
         .map(|cell| cell.col)
         .filter(|predicted| *predicted >= col)
         .max()
@@ -3323,7 +3367,7 @@ mod tests {
         assert!(
             model
                 .speculate
-                .predict("insert", key, cursor, stamp)
+                .predict("insert", GLOBAL_GRID, key, cursor, stamp)
                 .is_some(),
             "{key:?} at {cursor:?} is a plain insert-mode character"
         );
@@ -3505,6 +3549,74 @@ mod tests {
             rect,
             Rect::new(5, 7, 2, 1),
             "the rect is the cells' own box, shifted down by the reserved chrome row"
+        );
+    }
+
+    /// Under `ext_multigrid` a prediction is local to the window grid it was
+    /// typed into, and paint only ever sees screen coordinates -- so a pane
+    /// sitting away from the terminal's own origin must have its predicted
+    /// cell, and the caret riding it, translated by the pane's own origin
+    /// rather than left in the local space `predict` was called with.
+    #[test]
+    fn a_windowed_predictions_cell_and_caret_translate_by_the_panes_origin() {
+        use view_core::events::WinHandle;
+        use view_core::grid::registry::GridId;
+        use view_core::native::speculate::SpecStamp;
+
+        let mut model = model_with_grid(80, 24);
+        apply(
+            &mut model,
+            UiEvent::GridResize {
+                grid: 4,
+                width: 39,
+                height: 23,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::WinPos {
+                grid: 4,
+                win: WinHandle(1),
+                startrow: 0,
+                startcol: 41,
+                width: 39,
+                height: 23,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::GridCursorGoto {
+                grid: 4,
+                row: 2,
+                col: 5,
+            },
+        );
+        assert!(model
+            .speculate
+            .predict(
+                "insert",
+                GridId(4),
+                'x',
+                (2, 5),
+                SpecStamp::new(std::time::Duration::from_millis(0)),
+            )
+            .is_some());
+
+        let surface = render(&model);
+        let (_, cells) = speculated_cells(&surface).expect("one prediction is pending");
+        assert_eq!(
+            cells
+                .iter()
+                .map(|c| (c.row, c.col, c.glyph))
+                .collect::<Vec<_>>(),
+            vec![(2, 46, 'x')],
+            "the pane's own column (41) plus the local prediction column (5)"
+        );
+        let cursor = surface.cursor.expect("a sized grid always has a cursor");
+        assert_eq!(
+            (cursor.row, cursor.col),
+            (2, 47),
+            "the caret sits one past the prediction, translated by the same origin"
         );
     }
 

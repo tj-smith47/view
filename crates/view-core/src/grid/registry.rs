@@ -40,6 +40,15 @@ pub enum PaneKind {
         /// The grid the float was anchored to.
         anchor_grid: GridId,
     },
+    /// nvim's own message/cmdline area (`msg_set_pos`), positioned only
+    /// when `ext_messages` is not attached. Its own variant rather than a
+    /// `Float`: it has no anchor grid, and unlike an inactive window it is
+    /// never dimmed to `NormalNC` (`pane_theme` in view-tui's compositor)
+    /// -- nvim never treats its own message text as an unfocused window.
+    Message {
+        /// nvim's own stacking order, carried the same as a float's.
+        zindex: u32,
+    },
 }
 
 /// A grid that has been sized, placed, or both.
@@ -124,6 +133,19 @@ pub enum GridEvent {
         /// The closed window's grid.
         grid: GridId,
     },
+    /// `msg_set_pos`: nvim's message area sits at screen row `row` (column
+    /// 0, full width), above the window layer at `zindex` and, within one
+    /// zindex, in `compindex` order.
+    Message {
+        /// The message area's grid.
+        grid: GridId,
+        /// Screen row of the message area's first row.
+        row: u16,
+        /// nvim's own stacking order, carried the same as a float's.
+        zindex: u32,
+        /// nvim's own order within one `zindex`.
+        compindex: u32,
+    },
 }
 
 /// A grid nvim has named, with the placement it has been given if any.
@@ -152,14 +174,14 @@ impl Placement {
     fn layer(&self) -> u8 {
         match self.kind {
             PaneKind::Window => 0,
-            PaneKind::Float { .. } => 1,
+            PaneKind::Float { .. } | PaneKind::Message { .. } => 1,
         }
     }
 
     fn zindex(&self) -> u32 {
         match self.kind {
             PaneKind::Window => 0,
-            PaneKind::Float { zindex, .. } => zindex,
+            PaneKind::Float { zindex, .. } | PaneKind::Message { zindex } => zindex,
         }
     }
 }
@@ -354,7 +376,22 @@ impl GridRegistry {
                     slot.placed = None;
                 }
             }
-            GridEvent::Destroy { .. } | GridEvent::Window { .. } | GridEvent::Float { .. } => {}
+            // grid 0 is nvim's own "no message grid yet" sentinel
+            // (`docs/multigrid-wire-capture.md`'s `msg_set_pos` section),
+            // sent once at startup before any message has claimed a real
+            // grid, and carries no placement to record
+            GridEvent::Message {
+                grid,
+                row,
+                zindex,
+                compindex,
+            } if grid != GLOBAL_GRID && grid != GridId(0) => {
+                self.place(grid, (row, 0), PaneKind::Message { zindex }, compindex);
+            }
+            GridEvent::Destroy { .. }
+            | GridEvent::Window { .. }
+            | GridEvent::Float { .. }
+            | GridEvent::Message { .. } => {}
         }
     }
 
@@ -486,6 +523,53 @@ impl GridRegistry {
     #[must_use]
     pub fn cursor_grid(&self) -> Option<GridId> {
         self.cursor
+    }
+
+    /// Where `grid` currently sits on screen: `(0, 0)` for the global grid,
+    /// the placed origin for a visible pane, `None` for a grid nvim has
+    /// never placed or has since hidden -- the same visibility
+    /// [`panes_in_z_order`](Self::panes_in_z_order) filters to.
+    #[must_use]
+    pub fn pane_origin(&self, grid: GridId) -> Option<(u16, u16)> {
+        if grid == GLOBAL_GRID {
+            return Some((0, 0));
+        }
+        self.slots
+            .iter()
+            .find(|slot| slot.id == grid)
+            .and_then(|slot| slot.placed.as_ref())
+            .filter(|placed| !placed.hidden)
+            .map(|placed| placed.origin)
+    }
+
+    /// The grid the cursor is in, and its position local to that grid.
+    ///
+    /// Falls back to the global grid when no visible pane currently owns
+    /// the cursor: every single-grid session, a multigrid one before its
+    /// first window claims the cursor, and one where the window that had it
+    /// has since been hidden.
+    #[must_use]
+    pub fn cursor_local(&self) -> (GridId, u16, u16) {
+        if let Some(id) = self.cursor.filter(|&id| id != GLOBAL_GRID) {
+            if self.pane_origin(id).is_some() {
+                if let Some(grid) = self.grid(id) {
+                    let (row, col) = grid.cursor();
+                    return (id, row, col);
+                }
+            }
+        }
+        let (row, col) = self.global.cursor();
+        (GLOBAL_GRID, row, col)
+    }
+
+    /// The cursor's screen position: the owning pane's origin plus its
+    /// position inside that pane's own grid, so a caller never has to
+    /// special-case which grid currently owns the cursor.
+    #[must_use]
+    pub fn cursor_pos(&self) -> (u16, u16) {
+        let (id, row, col) = self.cursor_local();
+        let (orow, ocol) = self.pane_origin(id).unwrap_or((0, 0));
+        (row.saturating_add(orow), col.saturating_add(ocol))
     }
 
     /// Drops every grid but the global one, and every placement with them,
@@ -666,6 +750,43 @@ mod tests {
     }
 
     #[test]
+    fn a_message_grid_becomes_a_pane_but_grid_zero_names_none() {
+        let mut registry = GridRegistry::new();
+        // nvim's own startup sentinel: no message grid exists yet
+        registry.apply(GridEvent::Message {
+            grid: GridId(0),
+            row: 23,
+            zindex: 0,
+            compindex: 0,
+        });
+        assert_eq!(
+            ids(&registry),
+            vec![GLOBAL_GRID],
+            "grid 0 must record no placement and allocate no slot"
+        );
+
+        resize(&mut registry, GridId(3), 80, 1);
+        registry.apply(GridEvent::Message {
+            grid: GridId(3),
+            row: 23,
+            zindex: 200,
+            compindex: 0,
+        });
+        let panes = registry.panes_in_z_order();
+        let message = panes
+            .iter()
+            .find(|pane| pane.id == GridId(3))
+            .expect("the message grid must become a paintable pane");
+        assert_eq!(message.origin, (23, 0));
+        assert_eq!(message.kind, PaneKind::Message { zindex: 200 });
+        assert!(
+            panes.iter().position(|p| p.id == GridId(3)).unwrap()
+                > panes.iter().position(|p| p.id == GLOBAL_GRID).unwrap(),
+            "the message area paints after the global grid, same as a float"
+        );
+    }
+
+    #[test]
     fn an_op_naming_an_unknown_grid_is_recorded_not_dropped() {
         let mut registry = GridRegistry::new();
         registry.apply(GridEvent::Cells {
@@ -710,6 +831,73 @@ mod tests {
         // answering a terminal that just grew is nvim's to clamp
         assert_eq!(registry.hit_test(80, 0), Some((GLOBAL_GRID, 80, 0)));
         assert_eq!(registry.clamp_into(GLOBAL_GRID, 80, 0), Some((80, 0)));
+    }
+
+    /// The cursor's screen position under multigrid: pane origin plus its
+    /// position inside that pane's own grid, not the global grid's own
+    /// (stale, unset) cursor field -- the bug a session with any window
+    /// placed away from the screen's own origin would otherwise show.
+    #[test]
+    fn a_windows_cursor_resolves_through_its_own_pane_origin() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GLOBAL_GRID, 80, 24);
+        resize(&mut registry, GridId(4), 39, 23);
+        registry.apply(GridEvent::Window {
+            grid: GridId(4),
+            startrow: 0,
+            startcol: 41,
+        });
+        registry.apply(GridEvent::Cells {
+            grid: GridId(4),
+            op: GridOp::CursorGoto { row: 2, col: 5 },
+        });
+        assert_eq!(registry.cursor_grid(), Some(GridId(4)));
+        assert_eq!(registry.pane_origin(GridId(4)), Some((0, 41)));
+        assert_eq!(registry.cursor_local(), (GridId(4), 2, 5));
+        assert_eq!(
+            registry.cursor_pos(),
+            (2, 46),
+            "the pane's own column (41) plus its local cursor column (5)"
+        );
+    }
+
+    /// A window that goes away without a `grid_cursor_goto` naming a new
+    /// one leaves `cursor_grid` pointing at a pane that no longer answers
+    /// `pane_origin`, and the fallback is the global grid rather than a
+    /// stale screen position nobody would repaint.
+    #[test]
+    fn a_hidden_cursor_pane_falls_back_to_the_global_grid() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GLOBAL_GRID, 80, 24);
+        resize(&mut registry, GridId(4), 39, 23);
+        registry.apply(GridEvent::Window {
+            grid: GridId(4),
+            startrow: 0,
+            startcol: 41,
+        });
+        registry.apply(GridEvent::Cells {
+            grid: GridId(4),
+            op: GridOp::CursorGoto { row: 2, col: 5 },
+        });
+        registry.apply(GridEvent::Hide { grid: GridId(4) });
+        assert_eq!(registry.pane_origin(GridId(4)), None);
+        assert_eq!(registry.cursor_local(), (GLOBAL_GRID, 0, 0));
+        assert_eq!(registry.cursor_pos(), (0, 0));
+    }
+
+    /// Before any `grid_cursor_goto` has named a window grid -- the first
+    /// frame of a multigrid session, and every single-grid one -- the
+    /// cursor is the global grid's own, unmodified by any pane origin.
+    #[test]
+    fn no_pane_cursor_yet_reads_the_global_grid_directly() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GLOBAL_GRID, 80, 24);
+        registry.apply(GridEvent::Cells {
+            grid: GLOBAL_GRID,
+            op: GridOp::CursorGoto { row: 3, col: 7 },
+        });
+        assert_eq!(registry.cursor_local(), (GLOBAL_GRID, 3, 7));
+        assert_eq!(registry.cursor_pos(), (3, 7));
     }
 
     #[test]

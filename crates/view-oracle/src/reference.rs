@@ -772,7 +772,8 @@ impl ReferenceSession {
             | UiEvent::WinFloatPos { .. }
             | UiEvent::WinExternalPos { .. }
             | UiEvent::WinHide { .. }
-            | UiEvent::WinClose { .. } => {}
+            | UiEvent::WinClose { .. }
+            | UiEvent::MsgSetPos { .. } => {}
         }
     }
 

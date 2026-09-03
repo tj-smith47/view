@@ -87,10 +87,15 @@ pub(super) fn paint_panes(
 /// Substituting the base rather than restyling each cell is what nvim
 /// itself does with the group, so a cell that carries a highlight of its
 /// own keeps it and only unhighlighted text dims. The global grid is chrome
-/// between windows rather than a window, so it is never dimmed, and a
-/// session that has placed no cursor yet has no inactive pane to name.
+/// between windows rather than a window, so it is never dimmed; nvim's own
+/// message area is exempted the same way, since nvim never treats its own
+/// message text as an unfocused window either; and a session that has
+/// placed no cursor yet has no inactive pane to name.
 fn pane_theme(theme: &Theme, pane: &Pane, cursor: Option<GridId>) -> Theme {
-    if pane.id == GLOBAL_GRID || cursor.is_none_or(|id| id == pane.id) {
+    if pane.id == GLOBAL_GRID
+        || matches!(pane.kind, PaneKind::Message { .. })
+        || cursor.is_none_or(|id| id == pane.id)
+    {
         return *theme;
     }
     let nc = theme.chrome(ChromeGroup::NormalNC);

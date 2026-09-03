@@ -252,6 +252,61 @@ fn the_active_pane_is_distinguishable_from_the_inactive_one() {
     );
 }
 
+/// nvim's own message area (`msg_set_pos`) is never the cursor's grid, but
+/// it is not an inactive window either: its unstyled cells must resolve
+/// through `Normal`, not `NormalNC`, the same exemption the global grid
+/// gets.
+#[test]
+fn the_message_area_is_never_dimmed_like_an_inactive_window() {
+    let mut model = vsplit();
+    const MESSAGE_GRID: u64 = 6;
+    drive(
+        &mut model,
+        vec![
+            UiEvent::HlAttrDefine {
+                id: 7,
+                fg: Some(0x0033_3333),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::HlGroupSet {
+                name: "NormalNC".to_string(),
+                hl_id: 7,
+            },
+            UiEvent::GridResize {
+                grid: MESSAGE_GRID,
+                width: u64::from(WIDTH),
+                height: 1,
+            },
+            UiEvent::MsgSetPos {
+                grid: MESSAGE_GRID,
+                row: 5,
+                scrolled: false,
+                sep_char: " ".to_string(),
+                zindex: 200,
+                compindex: 0,
+            },
+            line(MESSAGE_GRID, 0, "recovered", 0),
+            UiEvent::Flush,
+        ],
+    );
+    let buf = frame(&model);
+    assert!(
+        row_text(&buf, 5).starts_with("recovered"),
+        "the message grid's text never reached the row `msg_set_pos` named: {:?}",
+        row_text(&buf, 5)
+    );
+    assert_ne!(
+        buf[(0, 5)].style().fg,
+        Some(ratatui::style::Color::Rgb(0x33, 0x33, 0x33)),
+        "the message area resolved through NormalNC, as if it were an \
+         inactive window"
+    );
+}
+
 /// A float paints over the windows it overlaps, whatever order nvim named
 /// the grids in.
 #[test]

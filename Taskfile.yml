@@ -91,6 +91,7 @@ tasks:
     cmds:
       - bash scripts/audit-deps.sh
       - bash scripts/check-engine-pin.sh
+      - bash scripts/check-engine-pin-cases.sh
       - bash scripts/check-budget-drift.sh
       - bash scripts/check-portability.sh
       - bash scripts/check-portability-cases.sh

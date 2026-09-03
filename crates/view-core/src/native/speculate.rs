@@ -44,6 +44,7 @@
 use std::time::Duration;
 
 use crate::events::{GridCell, UiEvent, WinHandle};
+use crate::grid::registry::{GridId, GLOBAL_GRID};
 use crate::model::Model;
 use crate::msg::RpcCall;
 
@@ -173,10 +174,20 @@ impl Epoch {
 /// unaccelerated character; clamping shows a wrong one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PredictedCell {
-    /// The grid row the glyph is expected on.
+    /// The grid this prediction was made against -- the cursor's grid at
+    /// the moment of the keystroke. Every event that could answer or
+    /// invalidate the prediction names its own grid on the wire, so this is
+    /// scoped the same way: [`GLOBAL_GRID`](crate::grid::registry::GLOBAL_GRID)
+    /// for a single-grid session and for a multigrid one before any window
+    /// has claimed the cursor, the window's own grid id once one has.
+    pub grid: GridId,
+    /// The grid row the glyph is expected on, local to `grid` -- the same
+    /// space `grid_line`'s own `row` reports for it, not a screen position.
+    /// A consumer that paints this cell (rather than matching it against a
+    /// redraw) translates through the pane's own origin first.
     pub row: u16,
-    /// The grid column the glyph is expected at, which may be past the live
-    /// grid's last column (see this type's own doc).
+    /// The grid column the glyph is expected at, local to `grid` and
+    /// possibly past its live last column (see this type's own doc).
     pub col: u16,
     /// The glyph itself, always a single-width character (see
     /// [`SpeculateState::predict`]).
@@ -216,10 +227,12 @@ impl SpeculateState {
     /// Folds one insert-mode plain-character keystroke into a new predicted
     /// cell, tagged with the current epoch and `now`.
     ///
-    /// `cursor` is the engine's last-known cursor position, in grid
-    /// coordinates. `now` is elapsed time from whatever fixed origin the
-    /// host stamps every call with; only differences between stamps are read
-    /// here, never a stamp's absolute value.
+    /// `grid` is the grid the cursor is in and `cursor` is its position
+    /// local to that grid (`GridRegistry::cursor_local`'s own shape), so a
+    /// redraw naming a different grid can never be read as answering this
+    /// prediction. `now` is elapsed time from whatever fixed origin the
+    /// host stamps every call with; only differences between stamps are
+    /// read here, never a stamp's absolute value.
     ///
     /// Returns `None` for every character that is not a plain character
     /// typed in insert mode. Those advance the epoch and discard what is
@@ -256,6 +269,7 @@ impl SpeculateState {
     pub fn predict(
         &mut self,
         mode: &str,
+        grid: GridId,
         key: char,
         cursor: (u16, u16),
         now: SpecStamp,
@@ -268,11 +282,12 @@ impl SpeculateState {
         let col = self
             .pending
             .iter()
-            .filter(|cell| cell.row == row && cell.col >= col)
+            .filter(|cell| cell.grid == grid && cell.row == row && cell.col >= col)
             .map(|cell| cell.col)
             .max()
             .map_or(col, |taken| taken.saturating_add(1));
         let cell = PredictedCell {
+            grid,
             row,
             col,
             glyph: key,
@@ -319,15 +334,24 @@ impl SpeculateState {
     /// Four readings, in the order they are taken:
     ///
     /// - A batch in which a window's `topline` moved is showing different
-    ///   buffer lines at the same screen rows, so every prediction is now
-    ///   over content it was never made for, and all of them are retired.
-    ///   This is the relocation `grid_scroll` does not cover: nvim repaints
-    ///   a jumped viewport line by line, and those lines need not reach the
+    ///   buffer lines at the same screen rows, so every prediction made
+    ///   against that window's own grid is now over content it was never
+    ///   made for, and all of them are retired -- a bystander *window*
+    ///   grid's predictions survive, under `ext_multigrid`, where
+    ///   `win_viewport` names a real, paintable grid the same way every
+    ///   other redraw event does. The global grid is not a bystander: a
+    ///   `win_viewport` names a per-window id even without `ext_multigrid`,
+    ///   where that id is never `grid_resize`d or `grid_line`d and the shift
+    ///   it reports lands on grid 1 regardless (see [`GLOBAL_GRID`]'s own
+    ///   retirement below), so every global-grid prediction retires on any
+    ///   window's shift whether or not that shift was its own. This is the
+    ///   relocation `grid_scroll` does not cover: nvim repaints a jumped
+    ///   viewport line by line, and those lines need not reach the
     ///   predicted columns, so a per-cell reading sees nothing and a glyph
     ///   would stand over moved text until [`Self::expire_stale`]. Typing
     ///   never triggers it -- a burst that does not scroll the window keeps
-    ///   `topline` exactly where it was, and one that does scroll the window
-    ///   has moved its own predictions and is right to lose them.
+    ///   `topline` exactly where it was, and one that does scroll the
+    ///   window has moved its own predictions and is right to lose them.
     /// - A batch carrying a `mode_change` ends the context every pending
     ///   prediction was made in, so the whole epoch turns over
     ///   ([`Self::reset_epoch`]) and nothing else is read. This is the half
@@ -365,12 +389,26 @@ impl SpeculateState {
     /// before the last time the user scrolled.
     pub fn reconcile(&mut self, redraw: &[UiEvent]) {
         let mut mode_changed = false;
-        let mut shifted = false;
+        let mut shifted_grids: Vec<GridId> = Vec::new();
         for event in redraw {
             match event {
                 UiEvent::ModeChange { .. } => mode_changed = true,
-                UiEvent::WinViewport { win, topline, .. } => {
-                    shifted |= self.note_viewport(*win, *topline);
+                UiEvent::WinViewport {
+                    win, grid, topline, ..
+                } if self.note_viewport(*win, *topline) => {
+                    shifted_grids.push(GridId(*grid));
+                    // nvim names a per-window grid here even without
+                    // `ext_multigrid`, where that id is never `grid_resize`d
+                    // or `grid_line`d (docs/multigrid-wire-capture.md's
+                    // `win_viewport` section calls this out by name as "the
+                    // trap"), so the shift it reports still lands on grid 1,
+                    // the only canvas single-grid ever paints -- grid 1's own
+                    // predictions must retire on it whatever phantom id this
+                    // event names. Under `ext_multigrid` this is a no-op past
+                    // startup: `fold_keystroke` never tags a prediction with
+                    // the global grid once a real window has claimed the
+                    // cursor.
+                    shifted_grids.push(GLOBAL_GRID);
                 }
                 _ => {}
             }
@@ -379,24 +417,19 @@ impl SpeculateState {
             self.reset_epoch();
             return;
         }
-        if shifted {
-            // the epoch is deliberately left alone, exactly as
-            // `expire_stale` leaves it: a shift says the cells these
-            // predictions named are showing something else, not that the
-            // mode ended. Every pending prediction is cleared, not only the
-            // shifted window's, because without ext_multigrid a prediction
-            // carries no window of its own to tell a mover's cells from a
-            // bystander's -- only the grid row and column shared by every
-            // window on screen. Retiring a bystander's prediction over one
-            // unaccelerated character is the safe direction to be wrong in;
-            // painting a bystander's glyph over a mover's relocated content
-            // is not.
-            self.pending.clear();
-            return;
-        }
+        // the epoch is deliberately left alone here, exactly as
+        // `expire_stale` leaves it: a shift says the cells a shifted grid's
+        // predictions named are showing something else, not that the mode
+        // ended. Scoped to the grids that actually shifted -- `win_viewport`
+        // names its own grid, and every `PredictedCell` carries the grid it
+        // was made against, so a bystander window's predictions survive a
+        // mover's scroll under `ext_multigrid` exactly as they always did
+        // under single-grid, where every prediction shares the one grid
+        // that ever shifts.
         let epoch = self.epoch;
-        self.pending
-            .retain(|cell| cell.epoch == epoch && !answered_by(redraw, cell));
+        self.pending.retain(|cell| {
+            cell.epoch == epoch && !shifted_grids.contains(&cell.grid) && !answered_by(redraw, cell)
+        });
     }
 
     /// Records `win`'s current `topline`, reporting whether it moved.
@@ -463,32 +496,38 @@ fn is_plain(key: char) -> bool {
 /// the two wrong answers are a prediction painted over content that moved and
 /// a prediction retired for an event that never touched it.
 fn answered_by(redraw: &[UiEvent], cell: &PredictedCell) -> bool {
+    let same_grid = |grid: &u64| GridId(*grid) == cell.grid;
     redraw.iter().any(|ev| match ev {
-        // every event's `grid` id is deliberately unread: view attaches
-        // `ext_linegrid` without `ext_multigrid`, so nvim sends one grid and
-        // a prediction can only ever be about that one. The day a second
-        // grid arrives, this is what has to read the id first -- until then
-        // reading it would only add a comparison whose answer is fixed
+        // every event names the grid it is about, and a prediction is only
+        // ever about the one it was made against -- a coincidence of row
+        // and column on some other window's grid must never retire it
         UiEvent::GridLine {
+            grid,
             row,
             col_start,
             cells,
-            ..
-        } => *row == u64::from(cell.row) && covers_column(*col_start, cells, cell.col),
+        } => {
+            same_grid(grid)
+                && *row == u64::from(cell.row)
+                && covers_column(*col_start, cells, cell.col)
+        }
         // content relocated, dropped or reshaped without the cells it moved
         // being re-sent: the coordinates a prediction holds no longer name
         // the place its glyph was predicted for, and no later batch is
         // obliged to say so cell by cell
-        UiEvent::GridScroll { .. } | UiEvent::GridClear { .. } | UiEvent::GridResize { .. } => true,
+        UiEvent::GridScroll { grid, .. }
+        | UiEvent::GridClear { grid }
+        | UiEvent::GridResize { grid, .. } => same_grid(grid),
         // the same answer for the same reason, one level up: a window that
         // moved, hid, closed or died carries its grid's cells to a different
         // place on screen (or off it) without resending one of them
-        UiEvent::GridDestroy { .. }
-        | UiEvent::WinPos { .. }
-        | UiEvent::WinFloatPos { .. }
-        | UiEvent::WinExternalPos { .. }
-        | UiEvent::WinHide { .. }
-        | UiEvent::WinClose { .. } => true,
+        UiEvent::GridDestroy { grid }
+        | UiEvent::WinPos { grid, .. }
+        | UiEvent::WinFloatPos { grid, .. }
+        | UiEvent::WinExternalPos { grid, .. }
+        | UiEvent::WinHide { grid }
+        | UiEvent::WinClose { grid }
+        | UiEvent::MsgSetPos { grid, .. } => same_grid(grid),
         // a viewport that moved is read by `reconcile` itself, one reading
         // earlier and against the last one this window reported -- the event
         // on its own says nothing, since nvim sends it for every cursor move
@@ -603,14 +642,18 @@ fn fold_keystroke(model: &mut Model, notation: &str, now: SpecStamp) {
         fold_invalidation(model);
         return;
     };
-    let cursor = model.engine.grid().cursor();
+    // never the global grid's own cursor field: under `ext_multigrid`
+    // `grid_cursor_goto` names window grids, not grid 1, so that field is
+    // never touched once a window claims the cursor and reading it would
+    // predict at whatever it was last (never) set to
+    let (grid, row, col) = model.engine.grids().cursor_local();
     let mode = model.engine.mode.current.as_str();
     let before = model.speculate.pending().len();
     // the refusal path is why the answer is read off the pending list rather
     // than off this `Option`: a character `predict` declines discards
     // everything pending inside `predict` itself, and the caller sees only
     // the `None` it shares with a mode that was never predicting at all
-    let _ = model.speculate.predict(mode, key, cursor, now);
+    let _ = model.speculate.predict(mode, grid, key, (row, col), now);
     mark_retirement(model, before);
 }
 
@@ -680,7 +723,7 @@ mod tests {
     #[test]
     fn an_insert_mode_plain_character_is_predicted_at_the_cursor() {
         let mut state = SpeculateState::default();
-        let predicted = state.predict("insert", 'a', (3, 7), stamp(120));
+        let predicted = state.predict("insert", GLOBAL_GRID, 'a', (3, 7), stamp(120));
         let cell = predicted.expect("a plain character typed in insert mode is predictable");
         assert_eq!(cell.row, 3);
         assert_eq!(cell.col, 7);
@@ -693,9 +736,14 @@ mod tests {
     fn a_control_character_discards_what_is_pending_and_supersedes_the_epoch() {
         let mut state = SpeculateState::default();
         let before = state.epoch();
-        assert!(state.predict("insert", 'a', (0, 0), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (0, 0), stamp(0))
+            .is_some());
 
-        assert_eq!(state.predict("insert", '\u{8}', (0, 1), stamp(10)), None);
+        assert_eq!(
+            state.predict("insert", GLOBAL_GRID, '\u{8}', (0, 1), stamp(10)),
+            None
+        );
         assert!(state.pending().is_empty());
         assert!(state.epoch() > before);
     }
@@ -708,16 +756,21 @@ mod tests {
         let mut state = SpeculateState::default();
         for (offset, key) in "hello".chars().enumerate() {
             let col = u16::try_from(offset).unwrap();
-            assert!(state.predict("insert", key, (2, col), stamp(0)).is_some());
+            assert!(state
+                .predict("insert", GLOBAL_GRID, key, (2, col), stamp(0))
+                .is_some());
         }
         let stale = state.epoch();
         assert_eq!(state.pending().len(), 5);
 
-        assert_eq!(state.predict("normal", 'j', (2, 5), stamp(20)), None);
+        assert_eq!(
+            state.predict("normal", GLOBAL_GRID, 'j', (2, 5), stamp(20)),
+            None
+        );
         assert!(state.pending().is_empty());
 
         let cell = state
-            .predict("insert", 'x', (2, 5), stamp(30))
+            .predict("insert", GLOBAL_GRID, 'x', (2, 5), stamp(30))
             .expect("insert mode resumes predicting after the epoch turns over");
         assert!(cell.epoch > stale);
         assert_eq!(state.pending(), &[cell]);
@@ -727,7 +780,11 @@ mod tests {
     fn a_key_typed_outside_insert_mode_is_never_predicted() {
         let mut state = SpeculateState::default();
         for mode in ["normal", "visual", "replace", "cmdline_normal", "terminal"] {
-            assert_eq!(state.predict(mode, 'a', (0, 0), stamp(0)), None, "{mode}");
+            assert_eq!(
+                state.predict(mode, GLOBAL_GRID, 'a', (0, 0), stamp(0)),
+                None,
+                "{mode}"
+            );
             assert!(state.pending().is_empty(), "{mode}");
         }
     }
@@ -739,7 +796,10 @@ mod tests {
     fn a_character_outside_ascii_is_left_to_the_engine() {
         let mut state = SpeculateState::default();
         for key in ['\u{301}', '\u{4e16}', 'é'] {
-            assert_eq!(state.predict("insert", key, (0, 0), stamp(0)), None);
+            assert_eq!(
+                state.predict("insert", GLOBAL_GRID, key, (0, 0), stamp(0)),
+                None
+            );
             assert!(state.pending().is_empty());
         }
     }
@@ -750,7 +810,9 @@ mod tests {
     fn a_burst_typed_ahead_of_the_engine_cursor_lands_on_consecutive_cells() {
         let mut state = SpeculateState::default();
         for key in ['a', 'b', 'c'] {
-            assert!(state.predict("insert", key, (4, 9), stamp(0)).is_some());
+            assert!(state
+                .predict("insert", GLOBAL_GRID, key, (4, 9), stamp(0))
+                .is_some());
         }
         let cells: Vec<(u16, u16, char)> = state
             .pending()
@@ -767,10 +829,10 @@ mod tests {
     fn a_prediction_no_redraw_ever_reaches_expires_on_age_alone() {
         let mut state = SpeculateState::default();
         let old = state
-            .predict("insert", 'a', (1, 1), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (1, 1), stamp(0))
             .expect("plain insert-mode character");
         let recent = state
-            .predict("insert", 'b', (1, 1), stamp(900))
+            .predict("insert", GLOBAL_GRID, 'b', (1, 1), stamp(900))
             .expect("plain insert-mode character");
         let epoch = state.epoch();
 
@@ -791,7 +853,9 @@ mod tests {
     #[test]
     fn expiry_reads_the_age_bound_as_reached_rather_than_passed() {
         let mut state = SpeculateState::default();
-        assert!(state.predict("insert", 'a', (0, 0), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (0, 0), stamp(0))
+            .is_some());
 
         state.expire_stale(SpecStamp::new(
             SPECULATION_MAX_AGE.saturating_sub(Duration::from_nanos(1)),
@@ -809,7 +873,7 @@ mod tests {
     fn a_stamp_older_than_the_prediction_expires_nothing() {
         let mut state = SpeculateState::default();
         let cell = state
-            .predict("insert", 'a', (0, 0), stamp(5_000))
+            .predict("insert", GLOBAL_GRID, 'a', (0, 0), stamp(5_000))
             .expect("plain insert-mode character");
 
         state.expire_stale(stamp(0));
@@ -824,16 +888,18 @@ mod tests {
     #[test]
     fn placement_after_a_partial_expiry_lands_past_the_survivors() {
         let mut state = SpeculateState::default();
-        assert!(state.predict("insert", 'a', (1, 1), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (1, 1), stamp(0))
+            .is_some());
         let survivor = state
-            .predict("insert", 'b', (1, 1), stamp(900))
+            .predict("insert", GLOBAL_GRID, 'b', (1, 1), stamp(900))
             .expect("plain insert-mode character");
 
         state.expire_stale(stamp(1000));
         assert_eq!(state.pending(), &[survivor]);
 
         let next = state
-            .predict("insert", 'c', (1, 1), stamp(1000))
+            .predict("insert", GLOBAL_GRID, 'c', (1, 1), stamp(1000))
             .expect("plain insert-mode character");
         assert_eq!((next.col, next.glyph), (3, 'c'));
     }
@@ -847,7 +913,9 @@ mod tests {
             epoch: Epoch(u64::MAX),
             ..SpeculateState::default()
         };
-        assert!(state.predict("insert", 'a', (0, 0), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (0, 0), stamp(0))
+            .is_some());
 
         state.reset_epoch();
 
@@ -860,7 +928,9 @@ mod tests {
     #[test]
     fn a_redraw_that_confirms_a_prediction_retires_it() {
         let mut state = SpeculateState::default();
-        assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
+            .is_some());
 
         state.reconcile(&[grid_line(2, 4, "a"), UiEvent::Flush]);
 
@@ -873,7 +943,9 @@ mod tests {
     #[test]
     fn a_redraw_that_contradicts_a_prediction_retires_it_just_the_same() {
         let mut state = SpeculateState::default();
-        assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
+            .is_some());
 
         state.reconcile(&[grid_line(2, 4, "z")]);
 
@@ -888,6 +960,7 @@ mod tests {
     #[test]
     fn a_prediction_from_a_superseded_epoch_is_dropped_whatever_the_redraw_says() {
         let matching = PredictedCell {
+            grid: GLOBAL_GRID,
             row: 2,
             col: 4,
             glyph: 'a',
@@ -921,7 +994,7 @@ mod tests {
     fn a_redraw_that_never_reaches_a_predicted_cell_leaves_it_for_the_age_bound() {
         let mut state = SpeculateState::default();
         let cell = state
-            .predict("insert", 'a', (2, 40), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (2, 40), stamp(0))
             .expect("plain insert-mode character");
 
         state.reconcile(&[grid_line(2, 0, "hello"), grid_line(9, 40, "elsewhere")]);
@@ -941,7 +1014,9 @@ mod tests {
     #[test]
     fn a_run_answers_every_column_its_repeat_counts_cover() {
         let mut state = SpeculateState::default();
-        assert!(state.predict("insert", 'a', (0, 6), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (0, 6), stamp(0))
+            .is_some());
 
         state.reconcile(&[UiEvent::GridLine {
             grid: 1,
@@ -980,7 +1055,9 @@ mod tests {
             },
         ] {
             let mut state = SpeculateState::default();
-            assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+            assert!(state
+                .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
+                .is_some());
 
             state.reconcile(std::slice::from_ref(&event));
 
@@ -994,7 +1071,9 @@ mod tests {
     #[test]
     fn a_mode_change_in_the_batch_supersedes_the_epoch() {
         let mut state = SpeculateState::default();
-        assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+        assert!(state
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
+            .is_some());
         let before = state.epoch();
 
         state.reconcile(&[UiEvent::ModeChange {
@@ -1013,7 +1092,7 @@ mod tests {
     fn a_batch_that_touches_no_grid_content_retires_nothing() {
         let mut state = SpeculateState::default();
         let cell = state
-            .predict("insert", 'a', (2, 4), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
             .expect("plain insert-mode character");
 
         state.reconcile(&[
@@ -1030,8 +1109,18 @@ mod tests {
 
     /// One window's viewport report.
     fn viewport(win: u64, topline: u64) -> UiEvent {
+        viewport_on(1, win, topline)
+    }
+
+    /// [`viewport`], naming `grid` instead of always 1 -- the shape a real
+    /// single-grid nvim actually sends, per
+    /// `docs/multigrid-wire-capture.md`'s `win_viewport` section: even
+    /// without `ext_multigrid`, this event names a per-window grid id that
+    /// is never `grid_resize`d or `grid_line`d, not the global grid every
+    /// other redraw event in that mode addresses.
+    fn viewport_on(grid: u64, win: u64, topline: u64) -> UiEvent {
         UiEvent::WinViewport {
-            grid: 1,
+            grid,
             win: WinHandle(win),
             topline,
             botline: topline + 12,
@@ -1049,12 +1138,39 @@ mod tests {
         let mut state = SpeculateState::default();
         state.reconcile(&[viewport(1, 10)]);
         let _ = state
-            .predict("insert", 'a', (2, 4), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
             .expect("plain insert-mode character");
 
         state.reconcile(&[viewport(1, 13), UiEvent::Flush]);
 
         assert!(state.pending().is_empty());
+    }
+
+    /// The single-grid trap `docs/multigrid-wire-capture.md` names: without
+    /// `ext_multigrid`, `win_viewport` still names a per-window grid (here
+    /// 2) that is never `grid_resize`d or `grid_line`d, while the content it
+    /// reports moving is repainted on grid 1, the only canvas that exists.
+    /// A global-grid prediction must retire on this shift the same as it
+    /// would on one that (correctly, under single-grid) named grid 1 --
+    /// scoping retirement to the literal grid id `win_viewport` carries
+    /// would leave it stranded over relocated text forever, since that id
+    /// never appears in a `grid_line` for [`SpeculateState::reconcile`]'s
+    /// answered-by check to retire it another way.
+    #[test]
+    fn a_phantom_window_grid_id_still_retires_the_global_grids_own_predictions() {
+        let mut state = SpeculateState::default();
+        state.reconcile(&[viewport_on(2, 1, 10)]);
+        let _ = state
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[viewport_on(2, 1, 13), UiEvent::Flush]);
+
+        assert!(
+            state.pending().is_empty(),
+            "a global-grid prediction must retire on a viewport shift \
+             whatever phantom grid id win_viewport names it with"
+        );
     }
 
     /// And the reason it cannot simply retire on the event: nvim reports a
@@ -1065,7 +1181,7 @@ mod tests {
         let mut state = SpeculateState::default();
         state.reconcile(&[viewport(1, 10)]);
         let cell = state
-            .predict("insert", 'a', (2, 4), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
             .expect("plain insert-mode character");
 
         state.reconcile(&[viewport(1, 10), UiEvent::Flush]);
@@ -1081,7 +1197,7 @@ mod tests {
         let mut state = SpeculateState::default();
         state.reconcile(&[viewport(1, 10), viewport(2, 80)]);
         let cell = state
-            .predict("insert", 'a', (2, 4), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
             .expect("plain insert-mode character");
 
         state.reconcile(&[viewport(2, 80)]);
@@ -1097,7 +1213,7 @@ mod tests {
     fn a_window_seen_for_the_first_time_is_not_a_window_that_moved() {
         let mut state = SpeculateState::default();
         let cell = state
-            .predict("insert", 'a', (2, 4), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
             .expect("plain insert-mode character");
 
         state.reconcile(&[viewport(7, 42)]);
@@ -1117,7 +1233,7 @@ mod tests {
         let mut state = SpeculateState::default();
         state.reconcile(&[viewport(1, 10)]);
         let _ = state
-            .predict("insert", 'a', (2, 4), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (2, 4), stamp(0))
             .expect("plain insert-mode character");
 
         for handle in 0..u64::try_from(MAX_TRACKED_VIEWPORTS * 4).unwrap() {
@@ -1145,10 +1261,10 @@ mod tests {
     fn the_predicted_column_saturates_at_the_last_representable_cell() {
         let mut state = SpeculateState::default();
         let first = state
-            .predict("insert", 'a', (0, u16::MAX), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'a', (0, u16::MAX), stamp(0))
             .expect("plain insert-mode character");
         let second = state
-            .predict("insert", 'b', (0, u16::MAX), stamp(0))
+            .predict("insert", GLOBAL_GRID, 'b', (0, u16::MAX), stamp(0))
             .expect("plain insert-mode character");
 
         assert_eq!(first.col, u16::MAX);

@@ -99,10 +99,11 @@ nvim_bin = "bundled"       # default: "bundled" -- the pinned engine beside
                            # that means inherit -- leaving the key out is
                            # how you say it, which is why this line ships
                            # commented rather than empty
-# single_grid = false      # NOT READ YET: this build always attaches with
-                           # ext_multigrid, and uncommenting this is refused
-                           # rather than quietly ignored. It goes live in
-                           # the change that gives the attach its flip
+single_grid = false        # default: false -- view composites nvim's windows
+                           # itself. Set true (or pass --single-grid) to let
+                           # nvim draw one grid, which is the fallback when a
+                           # plugin misbehaves under the multigrid protocol.
+                           # See docs/multigrid.md.
 
 # [ui] is what view paints with: how much of the terminal's own capability
 # it uses, and which colorscheme the session runs. Both keys derive when the

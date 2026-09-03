@@ -203,12 +203,7 @@ impl SurfaceCache {
                 if frame.inputs.statusline_rows > 0 {
                     refresh_statusline(&mut frame.surface, model, frame.inputs.grid.0);
                 }
-                refresh_speculated(
-                    &mut frame.surface,
-                    model,
-                    frame.inputs.grid,
-                    frame.inputs.offset,
-                );
+                refresh_speculated(&mut frame.surface, model, frame.inputs.offset);
             }
         } else {
             self.frame = None;
@@ -246,8 +241,8 @@ fn refresh_statusline(surface: &mut Surface, model: &Model, grid_w: u16) {
 /// frames speculation exists to make faster. Reconciling in place keeps that
 /// frame at reuse cost, and the equivalence guard below is what proves the
 /// reconciled frame is the frame [`render`] would have built.
-fn refresh_speculated(surface: &mut Surface, model: &Model, grid: (u16, u16), offset: u16) {
-    let fresh = speculated_layer(model, grid, offset);
+fn refresh_speculated(surface: &mut Surface, model: &Model, offset: u16) {
+    let fresh = speculated_layer(model, offset);
     let at = surface
         .layers
         .iter()
@@ -427,14 +422,57 @@ mod tests {
         );
     }
 
+    /// The byte range of one top-level `fn NAME` body (the `{`..`}` its
+    /// signature opens), found by depth-counting braces from the first `{`
+    /// after the signature. Good enough for this crate's plain-Rust function
+    /// bodies (none of the allowlisted functions below hold a brace inside a
+    /// string literal); `None` when the crate no longer declares `name`.
+    fn fn_body_range(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
+        let sig = format!("fn {name}(");
+        let sig_at = source.find(&sig)?;
+        let open = sig_at + source[sig_at..].find('{')?;
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open..open + offset + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// The half the classification above cannot carry on its own: `grids`
     /// is classified there as reaching no layer, which is true only while
     /// every painter in this crate draws the global grid alone. The day one
     /// reads the pane list, that sentence becomes the projection this
     /// cache's whole class of misses is made of -- a frame keyed on one
     /// grid's size, reused after a window moved.
+    ///
+    /// One population reads pane geometry without `Inputs` capturing it and
+    /// stays correct anyway: `cursor_spec`, `refresh_statusline` and
+    /// `refresh_speculated` (plus `speculated_layer`/`speculated_col`, which
+    /// only those call) re-run from scratch on *every* frame this cache
+    /// returns, cache hit or miss -- there is no stale copy for them to
+    /// serve, so nothing about a moved or hidden pane can outlive one frame.
+    /// A reader anywhere else in the crate sits on the cached-and-reused
+    /// path instead, where the same read would go stale the moment a window
+    /// moves, so it still owes `Inputs` capture.
     #[test]
     fn a_render_that_reads_panes_must_key_the_cache_on_them() {
+        const RESOLVED_EVERY_FRAME: &[&str] = &[
+            "cursor_spec",
+            "refresh_statusline",
+            "refresh_speculated",
+            "speculated_layer",
+            "speculated_col",
+        ];
+
         let cache = include_str!("cache.rs");
         let keyed = cache
             .split_once("struct Inputs {")
@@ -472,15 +510,25 @@ mod tests {
                     std::fs::read_to_string(&path).expect("a listed source must be readable");
                 let name = path.display();
                 scanned += 1;
+                let resolved_every_frame: Vec<std::ops::Range<usize>> = RESOLVED_EVERY_FRAME
+                    .iter()
+                    .filter_map(|f| fn_body_range(&source, f))
+                    .collect();
                 for reader in ["panes_in_z_order", ".grids()"] {
-                    assert!(
-                        !source.contains(reader) || holds_panes,
-                        "{name} paints from {reader} while `Inputs` captures no \
-                         pane geometry, so a frame survives a window moving, \
-                         resizing, hiding or closing. Capture the panes in \
-                         `Inputs` (whole, not a projection) and say so in its \
-                         classification"
-                    );
+                    for (offset, _) in source.match_indices(reader) {
+                        let re_resolved = resolved_every_frame.iter().any(|r| r.contains(&offset));
+                        assert!(
+                            re_resolved || holds_panes,
+                            "{name} paints from {reader} at byte {offset} while \
+                             `Inputs` captures no pane geometry and the read sits \
+                             outside {RESOLVED_EVERY_FRAME:?} (the set re-run on \
+                             every frame regardless of cache hit or miss), so a \
+                             cached frame can survive a window moving, resizing, \
+                             hiding or closing. Capture the panes in `Inputs` \
+                             (whole, not a projection), or move the read into \
+                             (or add it to) the re-resolved set if it is safe."
+                        );
+                    }
                 }
             }
         }

@@ -248,7 +248,7 @@ pub fn resolve_with(
                 parse_bool,
                 &mut notices,
             ),
-            None,
+            file.engine.single_grid,
             false,
         ),
     };

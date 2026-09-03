@@ -177,20 +177,17 @@ fn resolve_ui(table: &UiTable) -> UiFile {
     }
 }
 
-/// The `[engine]` table's wire shape: which editor a session spawns and
-/// which profile it runs under. Unknown keys are refused rather than
-/// ignored, for the reason `[supervision]`'s own check states.
+/// The `[engine]` table's wire shape: which editor a session spawns, which
+/// profile it runs under, and whether it attaches without `ext_multigrid`.
+/// Unknown keys are refused rather than ignored, for the reason
+/// `[supervision]`'s own check states.
 ///
-/// `single_grid` is deliberately absent, and its absence is the refusal:
-/// the attach flip that reads it has not landed, and a key that parses into
-/// a value nothing acts on is a setting that lies. The shipped example
-/// documents it commented, with that stated beside it.
-///
-/// Both fields stay `String`-typed here rather than parsed by serde. The
-/// vocabulary each accepts includes a word that means *no choice*
-/// (`"bundled"`, and the empty profile), which is a resolution answer
-/// rather than a type, and the same word has to read the same way when it
-/// arrives through the environment instead.
+/// The first two fields stay `String`-typed here rather than parsed by
+/// serde. The vocabulary each accepts includes a word that means *no
+/// choice* (`"bundled"`, and the empty profile), which is a resolution
+/// answer rather than a type, and the same word has to read the same way
+/// when it arrives through the environment instead. `single_grid` has no
+/// such word: it is the boolean it looks like.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct EngineTable {
@@ -198,20 +195,24 @@ struct EngineTable {
     nvim_bin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     appname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    single_grid: Option<bool>,
 }
 
 /// The `[engine]` table's resolved answers, as the file gave them.
 ///
-/// `None` is the absence of a choice on both keys, and which absence
+/// `None` is the absence of a choice on every key, and which absence
 /// differs per key: an unnamed `nvim_bin` is the bundled layout beside this
 /// executable, which only a caller that can look beside its own executable
-/// resolves to a path, and an unnamed `appname` is whatever profile the
-/// process already carries. Whether the file said so at all is
+/// resolves to a path, an unnamed `appname` is whatever profile the
+/// process already carries, and an unnamed `single_grid` is the shipped
+/// multigrid attach. Whether the file said so at all is
 /// [`ViewConfig::spells`]'s answer rather than a third state here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EngineFile {
     nvim_bin: Option<PathBuf>,
     appname: Option<String>,
+    single_grid: Option<bool>,
 }
 
 /// The word that names the engine shipped beside this executable, and
@@ -587,6 +588,7 @@ impl ViewConfig {
             engine: EngineFile {
                 nvim_bin: file.engine.nvim_bin.as_deref().and_then(parse_nvim_bin),
                 appname: file.engine.appname.as_deref().and_then(parse_appname),
+                single_grid: file.engine.single_grid,
             },
             ui: resolve_ui(&file.ui),
             spelled: spelled_keys(&file),
@@ -733,30 +735,43 @@ impl NativeConfig {
     }
 }
 
-/// The `ext_*` surfaces a session running `cfg` externalizes at
-/// `nvim_ui_attach`, in attach order.
+/// The `ext_*` options a session running `cfg` requests at
+/// `nvim_ui_attach`, in attach order: the surfaces `[native]` leaves
+/// externalized, then [`Ext::Multigrid`] unless `[engine] single_grid`
+/// asked for the fallback.
 ///
-/// This is what makes "turning a native feature off returns that surface to
-/// your plugins" literally true rather than merely true of view's own
-/// rendering: a plugin that inspects the attached UI's `ext_*` flags and
-/// stands down (or refuses to run) sees a UI it supports.
+/// The surface half is what makes "turning a native feature off returns
+/// that surface to your plugins" literally true rather than merely true of
+/// view's own rendering: a plugin that inspects the attached UI's `ext_*`
+/// flags and stands down (or refuses to run) sees a UI it supports.
 ///
 /// Written as a filter over [`ext::ALL`] rather than as a list built up
 /// switch by switch, so a surface this build learns to externalize is
 /// attached unconditionally until someone gives it a row here -- the same
 /// direction `[native]` resolution itself walks, where an absent answer is
 /// the full experience.
+///
+/// Takes the whole resolved document rather than one table's slice of it
+/// because the set answers to two tables: `[native]` decides the surfaces
+/// and `[engine]` decides the addressing.
 #[must_use]
-pub fn ext_surfaces(cfg: &NativeConfig) -> Vec<Ext> {
-    ext::ALL
+pub fn ext_surfaces(cfg: &ResolvedConfig) -> Vec<Ext> {
+    let native = &cfg.tables.native;
+    let mut set: Vec<Ext> = ext::ALL
         .iter()
         .copied()
         .filter(|surface| match surface {
-            Ext::Cmdline | Ext::Popupmenu => cfg.enabled("palette"),
-            Ext::Messages => cfg.enabled("notifications"),
+            Ext::Cmdline | Ext::Popupmenu => native.enabled("palette"),
+            Ext::Messages => native.enabled("notifications"),
             _ => true,
         })
-        .collect()
+        .collect();
+    // multigrid is the shipped mode; the knob exists because this is the
+    // protocol's roughest corner and a user needs one line to get out
+    if !cfg.engine.single_grid.value {
+        set.push(Ext::Multigrid);
+    }
+    set
 }
 
 /// Which `table.key` pairs a parsed document actually spelled.
@@ -798,6 +813,9 @@ fn spelled_keys(file: &ViewFile) -> Vec<(&'static str, &'static str)> {
     }
     if file.engine.appname.is_some() {
         spelled.push(("engine", "appname"));
+    }
+    if file.engine.single_grid.is_some() {
+        spelled.push(("engine", "single_grid"));
     }
     if file.ui.tier.is_some() {
         spelled.push(("ui", "tier"));
@@ -869,19 +887,53 @@ mod tests {
     use super::*;
     use view_core::native::keys::Resolved;
 
+    /// One document resolved against an empty environment and no flags,
+    /// which is the shape the ext set now answers to. The environment is
+    /// suppressed rather than read: a host exporting `VIEW_ENGINE_*` must
+    /// not be able to answer for the layer these legs are about.
+    fn resolved(toml: &str) -> ResolvedConfig {
+        let file = ViewConfig::from_toml_str(toml).unwrap();
+        resolve_with(&file, &Overrides::default(), &|_| None)
+    }
+
     #[test]
     fn an_absent_config_attaches_every_ext() {
         assert_eq!(
-            ext_surfaces(&NativeConfig::all_enabled()),
-            ext::ALL.to_vec(),
-            "the full experience externalizes every surface this build knows"
+            ext_surfaces(&resolved("")),
+            ext::ALL_MULTIGRID.to_vec(),
+            "the full experience externalizes every surface this build knows, \
+             under the addressing it ships"
+        );
+    }
+
+    /// The flip itself. Stated separately from the set-equality leg above
+    /// so a change that reorders or extends the surfaces cannot take this
+    /// claim down with it.
+    #[test]
+    fn the_default_attaches_multigrid() {
+        assert!(
+            ext_surfaces(&resolved("")).contains(&Ext::Multigrid),
+            "view composites nvim's windows itself unless asked not to"
+        );
+    }
+
+    #[test]
+    fn single_grid_true_attaches_no_multigrid_ext() {
+        let surfaces = ext_surfaces(&resolved("[engine]\nsingle_grid = true\n"));
+        assert!(
+            !surfaces.contains(&Ext::Multigrid),
+            "the escape hatch must reach the attach: {surfaces:?}"
+        );
+        assert_eq!(
+            surfaces.as_slice(),
+            ext::ALL,
+            "and must cost the session no surface: {surfaces:?}"
         );
     }
 
     #[test]
     fn palette_off_attaches_no_cmdline_ext() {
-        let cfg = NativeConfig::from_toml_str("[native]\npalette = false\n").unwrap();
-        let surfaces = ext_surfaces(&cfg);
+        let surfaces = ext_surfaces(&resolved("[native]\npalette = false\n"));
         assert!(
             !surfaces.contains(&Ext::Cmdline) && !surfaces.contains(&Ext::Popupmenu),
             "the cmdline and its completion popup go back to nvim together: {surfaces:?}"
@@ -894,8 +946,7 @@ mod tests {
 
     #[test]
     fn notifications_off_attaches_no_messages_ext() {
-        let cfg = NativeConfig::from_toml_str("[native]\nnotifications = false\n").unwrap();
-        let surfaces = ext_surfaces(&cfg);
+        let surfaces = ext_surfaces(&resolved("[native]\nnotifications = false\n"));
         assert!(
             !surfaces.contains(&Ext::Messages),
             "messages go back to nvim: {surfaces:?}"
@@ -913,9 +964,7 @@ mod tests {
     #[test]
     fn no_native_switch_detaches_the_grid_protocol_or_the_tabline() {
         for feature in registry::features() {
-            let cfg = NativeConfig::from_toml_str(&format!("[native]\n{} = false\n", feature.id))
-                .unwrap();
-            let surfaces = ext_surfaces(&cfg);
+            let surfaces = ext_surfaces(&resolved(&format!("[native]\n{} = false\n", feature.id)));
             assert!(
                 surfaces.contains(&Ext::LineGrid) && surfaces.contains(&Ext::Tabline),
                 "{} = false detached a surface no feature owns: {surfaces:?}",
@@ -1089,14 +1138,13 @@ mod tests {
     /// in the same edit, and its keys must reach `spelled_keys` before the
     /// suite is green again.
     ///
-    /// A table this crate reads may still refuse one of its own keys --
-    /// `[engine] single_grid` is documented for a user and read by nothing
-    /// until the attach flip lands -- which is a granularity `loaded_tables`
-    /// cannot express, since a table renders its name and none of its keys.
-    /// The loader's own refusal is what states it instead: a key it will not
-    /// parse is a key it owes no recording, and a key it accepts owes one.
-    /// The refusal has to name the key, so a fixture broken for some other
-    /// reason cannot quietly leave the walk.
+    /// A table this crate reads may still refuse one of its own keys, which
+    /// is a granularity `loaded_tables` cannot express, since a table
+    /// renders its name and none of its keys. The loader's own refusal is
+    /// what states it instead: a key it will not parse is a key it owes no
+    /// recording, and a key it accepts owes one. The refusal has to name
+    /// the key, so a fixture broken for some other reason cannot quietly
+    /// leave the walk.
     #[test]
     fn every_key_this_crate_parses_records_whether_the_file_spelled_it() {
         let loaded = loaded_tables();
@@ -1348,16 +1396,39 @@ mod tests {
         );
     }
 
+    /// The precedence chain at this key's own call site: the flag outranks
+    /// the file, and the file outranks view's own answer, all the way to
+    /// the set that reaches `nvim_ui_attach`.
     #[test]
-    fn single_grid_is_refused_until_the_attach_flip_gives_it_a_reader() {
-        // a key that resolved to a value nothing acts on is a setting that
-        // lies; refusing it is what keeps the example's own comment honest
-        let err = ViewConfig::from_toml_str("[engine]\nsingle_grid = true\n")
-            .expect_err("a key with no reader must be refused rather than read");
-        assert!(
-            err.to_string().contains("single_grid"),
-            "the refusal must name the key, got: {err}"
+    fn the_flag_overrides_the_file() {
+        for (file_says, flag_says, multigrid) in [
+            // the direction `--single-grid` itself can produce
+            (false, true, false),
+            // and the other one, so a flag layer that only ever agreed
+            // with the file would still fail this
+            (true, false, true),
+        ] {
+            let file = ViewConfig::from_toml_str(&format!("[engine]\nsingle_grid = {file_says}\n"))
+                .unwrap();
+            let flags = Overrides {
+                single_grid: Some(flag_says),
+                ..Overrides::default()
+            };
+            let resolved = resolve_with(&file, &flags, &|_| None);
+            assert_eq!(resolved.engine.single_grid.source, Source::Flag);
+            assert_eq!(
+                ext_surfaces(&resolved).contains(&Ext::Multigrid),
+                multigrid,
+                "the flag layer must reach the attach, not merely the report"
+            );
+        }
+        let from_file = resolve_with(
+            &ViewConfig::from_toml_str("[engine]\nsingle_grid = true\n").unwrap(),
+            &Overrides::default(),
+            &|_| None,
         );
+        assert_eq!(from_file.engine.single_grid.source, Source::File);
+        assert!(!ext_surfaces(&from_file).contains(&Ext::Multigrid));
     }
 
     #[test]

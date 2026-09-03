@@ -119,6 +119,21 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         }
         UiEvent::WinHide { grid } => place(model, GridEvent::Hide { grid: GridId(grid) }),
         UiEvent::WinClose { grid } => place(model, GridEvent::Close { grid: GridId(grid) }),
+        UiEvent::MsgSetPos {
+            grid,
+            row,
+            zindex,
+            compindex,
+            ..
+        } => place(
+            model,
+            GridEvent::Message {
+                grid: GridId(grid),
+                row: saturate_u16(row),
+                zindex: saturate_u32(zindex),
+                compindex: saturate_u32(compindex),
+            },
+        ),
         UiEvent::HlAttrDefine {
             id,
             fg,

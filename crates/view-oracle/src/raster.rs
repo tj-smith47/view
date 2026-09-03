@@ -388,6 +388,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use view_core::events::UiEvent;
+    use view_core::grid::registry::GLOBAL_GRID;
     use view_core::grid::GridOp;
     use view_core::model::Model;
     use view_core::msg::Msg;
@@ -431,7 +432,7 @@ mod tests {
         let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
         assert!(model
             .speculate
-            .predict("insert", 'z', (1, 3), stamp)
+            .predict("insert", GLOBAL_GRID, 'z', (1, 3), stamp)
             .is_some());
         let surface = view_surface::render(&model);
 

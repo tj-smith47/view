@@ -114,6 +114,25 @@ for workflow in .github/workflows/ci.yml .github/workflows/bench.yml \
     *) echo "PIN FAIL: $workflow not found, or it no longer installs nvim"; fail=1 ;;
   esac
 done
+# The charter welds the single_grid knob's lifespan to the pin: a promise
+# to re-evaluate it on every bump is only kept if bumping the pin without
+# touching the doc's re-evaluation line fails the same gate.
+check_multigrid_reevaluation() {
+  local doc="docs/multigrid.md" line doc_pin
+  [ -f "$doc" ] || { echo "PIN FAIL: $doc not found"; fail=1; return; }
+  line="$(grep -E 'Last re-evaluated against engine pin v[0-9]+\.[0-9]+\.[0-9]+' "$doc" || true)"
+  if [ -z "$line" ]; then
+    echo "PIN FAIL: $doc: no 'Last re-evaluated against engine pin vX.Y.Z' line"
+    fail=1
+    return
+  fi
+  doc_pin="$(printf '%s\n' "$line" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  if [ "$doc_pin" != "$pin" ]; then
+    echo "PIN FAIL: $doc: single_grid re-evaluated against $doc_pin, current pin is $pin -- re-evaluate the knob and update the line"
+    fail=1
+  fi
+}
+check_multigrid_reevaluation
 check_pin_free .anodizer.yaml
 check_pin_free scripts/package-bundle.sh performs-the-install
 exit $fail
