@@ -761,9 +761,27 @@ mod tests {
 
     /// The expression each `program` reassignment in `source` writes, in
     /// source order.
+    ///
+    /// Statements, not physical lines: rustfmt breaks a long assignment
+    /// after the `=`, or inside the call on its right, and a line-at-a-time
+    /// scan then reads only the fragment that shares the needle's own line
+    /// -- an empty expression for the first shape, a truncated one for the
+    /// second, neither of which an author can write a census row against.
     fn program_assignments(source: &str) -> Vec<String> {
-        source
-            .lines()
+        let mut statements: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for line in source.lines().map(str::trim) {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(line);
+            if current.contains(';') {
+                statements.push(std::mem::take(&mut current));
+            }
+        }
+        statements.push(current);
+        statements
+            .iter()
             // spelled in two pieces so the walk does not find itself
             .filter_map(|line| line.split_once(concat!(".program", " =")))
             // a comparison reads the field, it does not move a program
