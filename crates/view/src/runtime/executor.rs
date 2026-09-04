@@ -336,6 +336,7 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::SetFloatHidden { win, hide } => self.ops.set_float_hidden(win, hide),
                     RpcCall::ReadFloatRows { win } => self.ops.read_float_rows(win),
                     RpcCall::CloseFloat { win } => self.ops.close_float(win),
+                    RpcCall::ScanFloats => self.ops.scan_floats(),
                     RpcCall::OpenFile { path } => self.ops.open_file(&path),
                     RpcCall::RenameFile {
                         old_path,

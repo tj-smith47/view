@@ -353,6 +353,10 @@ pub(crate) fn restart_engine(
     // command line of its own to correct one left behind
     // ([`EngineModel::forget_overlays`])
     model.engine.forget_overlays();
+    // window handles restart from 1000 in the replacement, so a handle held
+    // past the death names one of its windows
+    // ([`SurfaceConflicts::forget_engine`])
+    model.forget_engine_conflicts();
     let mut engine = crate::startup::restart_and_attach(
         engine,
         respawn(),

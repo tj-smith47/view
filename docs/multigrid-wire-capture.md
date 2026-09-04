@@ -36,7 +36,7 @@ looks like, which is this document's whole subject.
 | Arm | `nvim_ui_attach` options |
 | --- | --- |
 | multigrid | `UI_EXT_OPTIONS` + `ext_multigrid` |
-| single-grid | `UI_EXT_OPTIONS` (the fallback `[engine] single_grid = true` selects) |
+| single-grid | `UI_EXT_OPTIONS` (the vocabulary the capture used; the knob today selects `ui_ext_options_shipped()`) |
 | no-messages probe | `ext_linegrid` + `ext_multigrid` only |
 
 `UI_EXT_OPTIONS` is `ext_linegrid`, `ext_cmdline`, `ext_popupmenu`,

@@ -376,6 +376,15 @@ impl Model {
         &self.ext_surfaces
     }
 
+    /// Drops the surface-conflict state a replacement engine invalidates,
+    /// the counterpart to [`EngineModel::forget_overlays`] for the floats
+    /// view has already acted on
+    /// ([`SurfaceConflicts::forget_engine`](crate::native::surfaces::SurfaceConflicts::forget_engine)
+    /// carries the per-field reasoning).
+    pub fn forget_engine_conflicts(&mut self) {
+        self.surface_conflicts.forget_engine();
+    }
+
     /// The next `request_id` for a `RpcCall::Checktime` this crate issues,
     /// from its own counter rather than [`Model::next_hidden_generation`]:
     /// `Msg::CheckTimeReply` is a reply type nothing else answers into, so
@@ -2539,6 +2548,14 @@ mod tests {
         for field in declared_fields(statusline, "pub struct StatuslineState {") {
             if !classified(&segments, &field) {
                 unclassified.push(format!("StatuslineState::{field} (forget_engine_segments)"));
+            }
+        }
+
+        let surfaces = include_str!("native/surfaces.rs");
+        let conflicts = doc_above(surfaces, "pub fn forget_engine(&mut self)");
+        for field in declared_fields(surfaces, "pub struct SurfaceConflicts {") {
+            if !classified(&conflicts, &field) {
+                unclassified.push(format!("SurfaceConflicts::{field} (forget_engine)"));
             }
         }
 

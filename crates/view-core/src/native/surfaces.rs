@@ -533,9 +533,11 @@ pub struct SurfaceConflicts {
     covers: Vec<Cover>,
     /// The floating windows whose text has already been claimed for the
     /// notification history, so a scan that sights one again before its
-    /// close lands does not record it twice. Never emptied: the handles
+    /// close lands does not record it twice. Emptied only by
+    /// [`SurfaceConflicts::forget_engine`]: within one engine the handles
     /// stay valid names for windows that are gone, and the set is bounded
-    /// by the floats one startup opens.
+    /// by the floats one startup opens, but a replacement process issues
+    /// handles from 1000 again.
     complaints: Vec<u64>,
     /// Whether a key has been typed yet, which is where spec 5.5 ends the
     /// startup conflict window.
@@ -710,10 +712,25 @@ impl SurfaceConflicts {
         self.complaints.contains(&win)
     }
 
-    /// Notes that the session has been typed at, closing the startup
-    /// conflict window for good.
+    /// Notes that the user has acted -- a key, a click or a paste --
+    /// closing the startup conflict window for good.
     pub fn note_keypress(&mut self) {
         self.typed = true;
+    }
+
+    /// Drops what a replacement engine invalidates, called beside
+    /// [`EngineModel::forget_overlays`](crate::model::EngineModel::forget_overlays)
+    /// from the restart.
+    ///
+    /// | field | why |
+    /// | --- | --- |
+    /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
+    /// | `typed` | the replacement sources the config again, so its own claimants raise their complaints again, and a session that had been typed at would leave them stacked beside the re-raised notice |
+    /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config loads the same plugins -- forgetting it would raise a second notice per plugin for one conflict |
+    /// | `covers` | kept: the surfaces a standing notice accounts for, which the replacement's notice accounts for identically |
+    pub fn forget_engine(&mut self) {
+        self.complaints.clear();
+        self.typed = false;
     }
 
     /// Whether the startup conflict window is still open, which is spec

@@ -12,8 +12,9 @@
 //! over an environment variable over that parse over view's own answer, and
 //! carries the layer each answer came from.
 //!
-//! An absent or empty file is the full experience, so every resolution path
-//! that finds nothing to read answers `all_enabled()` rather than failing.
+//! An absent or empty file is every feature at its registry default, so
+//! every resolution path that finds nothing to read answers
+//! [`NativeConfig::defaults`] rather than failing.
 //! The key set of `[native]` is the feature registry itself, never a second
 //! list written out here, so a feature can never exist in the table and be
 //! unspellable in config.
@@ -710,9 +711,10 @@ impl NativeConfig {
         })
     }
 
-    /// Reads `view.toml` from `config_path`, or `all_enabled()` when there
-    /// is no path to read or no file at it. An absent file is the full
-    /// experience; an unparseable one is an error the CLI reports.
+    /// Reads `view.toml` from `config_path`, or [`NativeConfig::defaults`]
+    /// when there is no path to read or no file at it. An absent file is
+    /// every feature at its registry default; an unparseable one is an
+    /// error the CLI reports.
     ///
     /// # Errors
     ///

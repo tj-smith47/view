@@ -217,10 +217,13 @@ impl NativeSession {
             return Vec::new();
         }
         self.handed_over = true;
+        // a plan entry with no call is a surface the attach already took
+        // (`Supersession::rpc`); it is in the plan to be reported, not to be
+        // performed
         let mut effects: Vec<Effect> = self
             .plan
             .iter()
-            .map(|entry| Effect::Rpc(entry.rpc.clone()))
+            .filter_map(|entry| entry.rpc.clone().map(Effect::Rpc))
             .collect();
         let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
         // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
@@ -402,7 +405,7 @@ mod tests {
         // right one, and the plan carries two kinds of hold now
         let planned: Vec<RpcCall> = plan(&NativeConfig::all_enabled(), registry::features())
             .iter()
-            .map(|entry| entry.rpc.clone())
+            .filter_map(|entry| entry.rpc.clone())
             .collect();
         let holds: Vec<RpcCall> = effects
             .iter()

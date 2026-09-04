@@ -377,7 +377,13 @@ return claimed";
 ///   non-nested autocmd swallows), but the plugins that close a float the
 ///   ordinary way do fire it, and without it a float that goes away while
 ///   the user is not typing leaves the last scan's answer standing -- view
-///   saying a plugin covers a surface that is clear again.
+///   saying a plugin covers a surface that is clear again. `WinNew` joins
+///   them on the same reasoning as `WinClosed`: it carries no watcher of
+///   its own (every plugin measured opens `noautocmd`), and it costs one
+///   arming for the plugins that do not. The `User ViewScanFloats` pattern
+///   is the same door opened from view's side ([`SCAN_FLOATS_CHUNK`]), for
+///   the floats that are already on screen when a probe reply names their
+///   plugin.
 /// - **The throttle bounds the traffic, not the latency.** The first
 ///   arming event schedules one scan 150 ms out and every event inside
 ///   that window is absorbed by it (`float_armed`), so a float storm
@@ -494,18 +500,24 @@ local function scan_floats()
     vim.defer_fn(scan_floats, 150)
   end
 end
+local function arm_float_scan()
+  if float_armed then
+    float_pending = true
+    return
+  end
+  float_armed = true
+  vim.defer_fn(scan_floats, 150)
+end
 vim.api.nvim_create_autocmd({ 'CmdlineEnter', 'CmdlineChanged',
   'ModeChanged', 'CursorHold', 'CursorHoldI', 'WinEnter',
-  'WinClosed' }, {
+  'WinClosed', 'WinNew' }, {
   group = group,
-  callback = function()
-    if float_armed then
-      float_pending = true
-      return
-    end
-    float_armed = true
-    vim.defer_fn(scan_floats, 150)
-  end,
+  callback = arm_float_scan,
+})
+vim.api.nvim_create_autocmd('User', {
+  group = group,
+  pattern = 'ViewScanFloats',
+  callback = arm_float_scan,
 })
 vim.api.nvim_create_autocmd('VimLeavePre', {
   group = group,
@@ -783,6 +795,25 @@ return {
 const CLOSE_FLOAT_CHUNK: &str = "\
 local win = ...
 pcall(vim.api.nvim_win_close, win, true)";
+
+/// Arms one throttled float scan from view's side, by firing the `User`
+/// event [`REGISTER_BRIDGE_CHUNK`]'s float trigger also listens on.
+///
+/// The event rather than a second entry point: the arming, the throttle and
+/// the trailing scan are one piece of state inside that chunk
+/// (`float_armed`/`float_pending`), and a call that walked the windows
+/// itself would be a second scanner with its own idea of when one is
+/// already running.
+///
+/// What it is for is the one moment no autocmd covers: view learns a
+/// claiming plugin loaded from a probe *reply*, which is not an editor
+/// transition at all, and the floats that plugin raised about view's own
+/// defaults are already on screen. Without this the first sighting waits
+/// for `CursorHold` (~4 s) or a keystroke -- and a keystroke closes the
+/// startup conflict window, so the complaint is never filed at all.
+const SCAN_FLOATS_CHUNK: &str = "\
+pcall(vim.api.nvim_exec_autocmds, 'User',
+  { pattern = 'ViewScanFloats', modeline = false })";
 
 /// Resolves the picker preview pane's text for a candidate path, verified
 /// live against the pinned engine -- see
@@ -3534,6 +3565,22 @@ impl EngineHandle {
         )
     }
 
+    /// Arms one float scan via [`SCAN_FLOATS_CHUNK`], for the moment view
+    /// learns from a probe reply that a claiming plugin is loaded.
+    /// Fire-and-forget: the scan reports through the bridge like every
+    /// other one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn scan_floats(&self) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![Value::from(SCAN_FLOATS_CHUNK), Value::Array(Vec::new())],
+        )
+    }
+
     /// Issues [`RENAME_CHUNK`] as an async request tagged with `generation`,
     /// renaming `old_path` to `new_path` and retargeting any open buffer
     /// along with it. Async by construction, like
@@ -4442,6 +4489,9 @@ mod tests {
             "'CursorHold'",
             "'CursorHoldI'",
             "'WinEnter'",
+            "'WinClosed'",
+            "'WinNew'",
+            "'ViewScanFloats'",
         ] {
             assert!(
                 REGISTER_BRIDGE_CHUNK.contains(event),

@@ -89,6 +89,10 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
         model.dirty = true;
     }
     let outcome = if named {
+        // the plugin's own complaints about view's defaults are on screen
+        // already, and the next thing that would arm a scan is CursorHold
+        // seconds away or the keystroke that ends the startup window
+        effects.push(Effect::Rpc(crate::msg::RpcCall::ScanFloats));
         HoldOutcome::Collapse
     } else {
         HoldOutcome::Release
@@ -1719,6 +1723,67 @@ mod tests {
         assert!(
             update(&mut model, Msg::FloatObserved(float)).is_empty(),
             "one read per window"
+        );
+    }
+
+    /// The reply that names a claimant is not an editor transition, so
+    /// nothing in the bridge would arm a scan for seconds -- and the floats
+    /// the take-down exists for are on screen at that moment.
+    #[test]
+    fn naming_a_claimant_arms_one_float_scan() {
+        let mut model = captured_session();
+        let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::Rpc(RpcCall::ScanFloats)))
+                .count(),
+            1,
+            "{effects:?}"
+        );
+
+        let mut quiet = captured_session();
+        let none = update(&mut quiet, Msg::ClaimantsProbed(Vec::new()));
+        assert!(
+            !none
+                .iter()
+                .any(|effect| matches!(effect, Effect::Rpc(RpcCall::ScanFloats))),
+            "a reading that names nobody has no complaint to look for: {none:?}"
+        );
+    }
+
+    /// A replacement engine issues window handles from 1000 again, so
+    /// everything the take-down learned about the dead process's windows is
+    /// a wrong answer about the new one's: a handle still marked a
+    /// complaint would file a live window's rows into the history and close
+    /// it, and a session still marked typed-at would let the replacement's
+    /// own complaints stack beside the re-raised notice.
+    #[test]
+    fn a_replacement_engine_inherits_no_window_handle_and_no_keypress() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = update(&mut model, Msg::StartupHoldExpired);
+        let float = toast("markdown");
+        let _ = update(&mut model, Msg::FloatObserved(float.clone()));
+        let _ = update(
+            &mut model,
+            Msg::Key(crate::msg::Key {
+                notation: "j".to_string(),
+            }),
+        );
+        assert!(model.surface_conflicts.is_complaint(float.win));
+        assert!(!model.surface_conflicts.startup_window_open());
+
+        model.forget_engine_conflicts();
+
+        assert!(
+            !model.surface_conflicts.is_complaint(float.win),
+            "the replacement's window {} would be read as the dead engine's complaint",
+            float.win
+        );
+        assert!(
+            model.surface_conflicts.startup_window_open(),
+            "the replacement gets its own startup, and its own claimants complain again"
         );
     }
 

@@ -765,6 +765,19 @@ impl EngineSession {
             .collect()
     }
 
+    /// How many tab pages this session has been told about, or `None`
+    /// until a `tabline_update` has arrived -- the event `ext_tabline`
+    /// exists to send, and the only evidence that a tab row detached from
+    /// the grid reached view at all rather than going nowhere.
+    #[must_use]
+    pub fn tabline_tabs(&self) -> Option<usize> {
+        self.model
+            .engine
+            .tabline
+            .as_ref()
+            .map(|tabline| tabline.tabs.len())
+    }
+
     /// Evaluates `expr` against the real engine and returns its result as
     /// text (leg (d): engine state-parity probes -- buffer text, cursor,
     /// mode, registers -- compared against this session's decoded

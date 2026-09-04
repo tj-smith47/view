@@ -945,6 +945,9 @@ mod tests {
         fn close_float(&self, _win: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn scan_floats(&self) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn open_file(&self, _path: &str) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }

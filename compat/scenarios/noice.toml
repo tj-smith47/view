@@ -106,19 +106,29 @@ steps = [
   { send = "\\fm" },
   { wait_for = "Messages", timeout_ms = 30000 },
   # And what put it there for this launch: the claimant's own startup
-  # complaint, in its own words. It never crossed view's `vim.notify`
-  # takeover and it produced no `msg_show`, so the only way this text
+  # complaints, in its own words. They never crossed view's `vim.notify`
+  # takeover and they produced no `msg_show`, so the only way this text
   # reaches view's history is the take-down -- view reads a claimant's
-  # startup float over a surface its notice already names, files the lines,
-  # and closes the window. It is nvim-notify's line rather than one of
-  # noice's three health errors because that is the float still standing
-  # when view's scan first runs: the scan is armed by editor transitions
-  # (`REGISTER_BRIDGE_CHUNK`), the first of which lands ~7.6 s into this
-  # launch, and by then the health errors have retired on nvim-notify's own
-  # timer. What view has no window for it cannot read, which spec 5.5 says
-  # in its own words: everything raised before view could detect it has
-  # already been shown.
-  { wait_for = "has been overwritten by another plugin", timeout_ms = 15000 },
+  # startup floats over a surface its notice already names, files the lines,
+  # and closes the windows.
+  #
+  # All three health errors, rather than whichever one outlived the others,
+  # because the scan that sights them is armed by the claimant probe's own
+  # reply (`SCAN_FLOATS_CHUNK`): the reply is what names noice, it lands
+  # while nvim-notify is still holding all three floats (~0.26 s into this
+  # launch, measured), and view files them there. Arming on editor
+  # transitions alone reaches the screen at ~4 s, by which time nvim-notify
+  # has retired them on its own timer -- what view has no window for it
+  # cannot read, which spec 5.5 says in its own words.
+  #
+  # noice's fourth error, about view holding `vim.notify`, is not among them
+  # and is not a defect: its health checker re-runs on a 1 s interval and
+  # raises that one at ~4.8 s, after the `<leader>fm` above -- and the first
+  # keystroke is the end of the startup conflict window, after which view
+  # never closes a window the user could be reading.
+  { wait_for = "uses ext_cmdline", timeout_ms = 15000 },
+  { wait_for = "uses ext_popupmenu", timeout_ms = 5000 },
+  { wait_for = "uses ext_messages", timeout_ms = 5000 },
   { send = "<Esc>" },
 ]
 

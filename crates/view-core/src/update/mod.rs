@@ -72,6 +72,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         if let Some(motion) = model.toast_motion.as_mut() {
             model.dirty |= motion.complete();
         }
+        // one definition of "the user has acted": the same three messages
+        // that finish a motion close the startup conflict window, so a
+        // click before any key cannot leave view holding a licence to take
+        // a window down
+        model.surface_conflicts.note_keypress();
     }
     // both taken ahead of the message: the count is what tells a notice
     // that left the stack from one nvim replaced in place, and the slot is
@@ -1159,13 +1164,11 @@ fn ai_panel_size(model: &Model) -> (usize, usize) {
 /// caller has to carry in because the bookkeeping above may already have
 /// closed it.
 fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<Effect> {
-    // the first keypress is the end of the startup window
     let cmdline_open = model.engine.cmdline.is_some();
     model.dirty |= model
         .engine
         .messages
         .resolve_startup_hold(HoldOutcome::Release);
-    model.surface_conflicts.note_keypress();
     // the fallback, not the rule: a prompt view itself answered retires on
     // the `cmdline_hide` that key causes (see `UiEvent::CmdlineHide`), and
     // this catches only the prompt nothing view sent resolved -- nvim's own

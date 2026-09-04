@@ -1547,9 +1547,14 @@ mod tests {
         );
         assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
         for entry in &plan {
+            // an entry the attach performed carries no call to reach an op
+            // with, and the plan carries it to be reported, not applied
+            let Some(call) = entry.rpc.clone() else {
+                continue;
+            };
             let ops = FakeOps::default();
             let executor = Executor::new(&ops);
-            let flow = executor.run(Effect::Rpc(entry.rpc.clone()));
+            let flow = executor.run(Effect::Rpc(call));
             assert!(matches!(flow, Flow::Continue));
             assert_eq!(
                 ops.calls.borrow().len(),

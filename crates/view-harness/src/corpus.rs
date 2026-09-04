@@ -46,11 +46,12 @@ pub const DEFAULT_EXT_OPTIONS: &[&str] = view_oracle::UI_EXT_OPTIONS;
 
 /// The `ext_set` name for the entries that attach with `ext_multigrid` on
 /// top of the default set, where nvim addresses each window's grid
-/// separately (`docs/multigrid-wire-capture.md`). This is also what view
-/// itself ships by default -- see [`SHIPPED_EXT_SET`], the alias fuzzing
-/// and any other "match today's default" consumer reads instead of this
-/// name, so a future default change moves one alias rather than every call
-/// site that means "shipped" today.
+/// separately (`docs/multigrid-wire-capture.md`). Wider than what view
+/// ships by default since `[native] tabline` shipped off, so
+/// [`SHIPPED_EXT_SET`] is the alias fuzzing and any other "match today's
+/// default" consumer reads instead of this name, and a future default
+/// change moves one alias rather than every call site that means "shipped"
+/// today.
 pub const MULTIGRID_EXT_SET: &str = "multigrid";
 
 /// The `ext_set` name that matches what view ships by default today:

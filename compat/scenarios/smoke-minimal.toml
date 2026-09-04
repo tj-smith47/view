@@ -31,3 +31,16 @@ steps = [
   { assert_absent = "E5108" },
   { probe = "1+1", expect = "2" },
 ]
+
+# The one state in the suite that runs `[native] tabline = true`. The switch
+# ships off, so every other state reads `ext_tabline` detached and proves the
+# line that hands the row back; without this one nothing proves the other
+# direction -- that the config a user writes reaches `nvim_ui_attach` at all
+# for a surface view does not attach by default. The minimal fixture is the
+# point: no plugin is in play, so what moved the attach is the switch.
+[[states]]
+name = "native-only"
+native = { tabline = true }
+steps = [
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_tabline == true)')", expect = "true" },
+]

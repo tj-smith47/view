@@ -243,8 +243,10 @@ fn witnessed_frames(handle: &EngineHandle) -> Vec<String> {
 fn apply(handle: &EngineHandle, plan: &[Supersession]) {
     for entry in plan {
         match &entry.rpc {
-            RpcCall::HoldOption { name, value } => handle.hold_option(name, value).unwrap(),
-            RpcCall::HoldNotify => handle.hold_notify().unwrap(),
+            Some(RpcCall::HoldOption { name, value }) => handle.hold_option(name, value).unwrap(),
+            Some(RpcCall::HoldNotify) => handle.hold_notify().unwrap(),
+            // the attach performed it, so there is nothing to apply here
+            None => {}
             other => panic!("a plan entry must ride a durable takeover call, got {other:?}"),
         }
     }
@@ -525,7 +527,7 @@ fn a_disabled_notifications_leaves_vim_notify_with_the_plugin() {
     let cfg = NativeConfig::from_toml_str("[native]\nnotifications = false\n").unwrap();
     let plan = plan(&cfg, registry::features());
     assert!(
-        !plan.iter().any(|s| s.rpc == RpcCall::HoldNotify),
+        !plan.iter().any(|s| s.rpc == Some(RpcCall::HoldNotify)),
         "a disabled notifications must contribute no takeover"
     );
     apply(&engine.handle, &plan);

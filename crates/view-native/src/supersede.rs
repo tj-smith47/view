@@ -32,9 +32,14 @@ pub struct Supersession {
     /// one call rather than in a second field a caller could forget (see
     /// [`takeover_call`]).
     ///
+    /// `None` for a surface the attach itself took
+    /// ([`TakeoverKind::Attach`]): the entry still exists, because what a
+    /// user is told about a taken surface is read off this plan, and only
+    /// the call is absent.
+    ///
     /// Always an API call, never `RpcCall::Input`: see that variant's own
     /// note on mode dependence.
-    pub rpc: RpcCall,
+    pub rpc: Option<RpcCall>,
     /// The exact line a user writes to reverse this, verbatim from the
     /// registry's `off_switch` so the reversal a notice prints and the
     /// reversal doctor prints can never disagree.
@@ -117,6 +122,18 @@ enum TakeoverKind {
     /// message a plugin raises through it crosses as `ext_messages` traffic
     /// and is drawn as one of view's toasts.
     Notify,
+    /// A surface that changes hands at `nvim_ui_attach` instead of through
+    /// a call: nvim stops drawing it the moment the session asks for its
+    /// `ext_*` option, so there is nothing to hold and nothing to re-assert.
+    ///
+    /// A row all the same, because the plan is what every consumer-facing
+    /// listing of "what did view take over" reads: without one, a feature
+    /// whose registry row names the plugin it supersedes has that sentence
+    /// rendered nowhere.
+    Attach {
+        /// The `nvim_ui_attach` option key that performs it.
+        ext: &'static str,
+    },
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -146,6 +163,9 @@ impl TakeoverKind {
         match self {
             Self::Option { option, .. } => format!("view-hold-{option}"),
             Self::Notify => "view-hold-notify".to_string(),
+            // an attach installs no guard, so this names the surface rather
+            // than an augroup; an `ext_*` key can equal no `view-hold-` name
+            Self::Attach { ext } => ext.to_string(),
         }
     }
 }
@@ -159,7 +179,11 @@ impl TakeoverKind {
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn takeover_augroups() -> Vec<String> {
-    TAKEOVERS.iter().map(|row| row.kind.claims()).collect()
+    TAKEOVERS
+        .iter()
+        .map(|row| row.kind.claims())
+        .filter(|claim| claim.starts_with("view-hold-"))
+        .collect()
 }
 
 /// One row of the takeover table: the feature that owns it, and what its
@@ -194,13 +218,16 @@ struct Takeover {
 /// therefore has to be the kind that holds, and expressing it as one call
 /// rather than as a set plus a separate guard entry means no consumer can
 /// apply half of it.
-fn takeover_call(row: &Takeover) -> RpcCall {
+fn takeover_call(row: &Takeover) -> Option<RpcCall> {
     match row.kind {
-        TakeoverKind::Option { option, value } => RpcCall::HoldOption {
+        TakeoverKind::Option { option, value } => Some(RpcCall::HoldOption {
             name: option.to_string(),
             value: value.value(),
-        },
-        TakeoverKind::Notify => RpcCall::HoldNotify,
+        }),
+        TakeoverKind::Notify => Some(RpcCall::HoldNotify),
+        // the attach already performed it; a call here would be a second
+        // way to take a surface that is only ever taken one way
+        TakeoverKind::Attach { .. } => None,
     }
 }
 
@@ -216,7 +243,7 @@ fn takeover_call(row: &Takeover) -> RpcCall {
 /// `statusline` for whenever the user turns the native one off; `vim.notify`
 /// back at the engine default leaves nvim-notify loaded and its own
 /// `require('notify')` entry point working for anyone who calls it directly.
-static TAKEOVERS: [Takeover; 2] = [
+static TAKEOVERS: [Takeover; 3] = [
     Takeover {
         feature: "statusline",
         kind: TakeoverKind::Option {
@@ -227,6 +254,10 @@ static TAKEOVERS: [Takeover; 2] = [
     Takeover {
         feature: "notifications",
         kind: TakeoverKind::Notify,
+    },
+    Takeover {
+        feature: "tabline",
+        kind: TakeoverKind::Attach { ext: "ext_tabline" },
     },
 ];
 
@@ -311,10 +342,10 @@ mod tests {
         assert_eq!(entries[0].reverses_with, desc.off_switch);
         assert_eq!(
             entries[0].rpc,
-            RpcCall::HoldOption {
+            Some(RpcCall::HoldOption {
                 name: "laststatus".to_string(),
                 value: OptionValue::Int(0),
-            }
+            })
         );
     }
 
@@ -334,7 +365,7 @@ mod tests {
             1,
             "an enabled notifications must take vim.notify exactly once, got {entries:?}"
         );
-        assert_eq!(entries[0].rpc, RpcCall::HoldNotify);
+        assert_eq!(entries[0].rpc, Some(RpcCall::HoldNotify));
         assert_eq!(entries[0].reverses_with, desc.off_switch);
     }
 
@@ -344,7 +375,7 @@ mod tests {
             .expect("a known key must parse");
         let plan = plan(&cfg, registry::features());
         assert!(
-            !plan.iter().any(|s| s.rpc == RpcCall::HoldNotify),
+            !plan.iter().any(|s| s.rpc == Some(RpcCall::HoldNotify)),
             "a disabled notifications must leave vim.notify alone, got {plan:?}"
         );
     }
@@ -497,11 +528,23 @@ mod tests {
         // uniqueness rule that collapsed both kinds onto one name would
         // reject it
         assert_eq!(colliding_claim(&TAKEOVERS), None);
-        assert_eq!(
-            TAKEOVERS.len(),
-            2,
-            "both kinds must be in the shipped table"
-        );
+        // the kinds themselves rather than a row count: the exhaustive
+        // match is what makes a kind added later fail here until the
+        // shipped table either carries one or says it does not
+        let kinds: Vec<&str> = TAKEOVERS
+            .iter()
+            .map(|row| match row.kind {
+                TakeoverKind::Option { .. } => "option",
+                TakeoverKind::Notify => "notify",
+                TakeoverKind::Attach { .. } => "attach",
+            })
+            .collect();
+        for kind in ["option", "notify", "attach"] {
+            assert!(
+                kinds.contains(&kind),
+                "the shipped table carries no {kind} row: {kinds:?}"
+            );
+        }
     }
 
     #[test]
@@ -533,7 +576,7 @@ mod tests {
         let options: Vec<&str> = entries
             .iter()
             .filter_map(|entry| match &entry.rpc {
-                RpcCall::HoldOption { name, .. } => Some(name.as_str()),
+                Some(RpcCall::HoldOption { name, .. }) => Some(name.as_str()),
                 _ => None,
             })
             .collect();
@@ -567,18 +610,18 @@ mod tests {
             },
         ];
         let entries = plan_from(&NativeConfig::all_enabled(), registry::features(), &table);
-        let calls: Vec<&RpcCall> = entries.iter().map(|entry| &entry.rpc).collect();
+        let calls: Vec<&Option<RpcCall>> = entries.iter().map(|entry| &entry.rpc).collect();
         assert_eq!(
             calls,
             vec![
-                &RpcCall::HoldOption {
+                &Some(RpcCall::HoldOption {
                     name: "statusline".to_string(),
                     value: OptionValue::Str("%f".to_string()),
-                },
-                &RpcCall::HoldOption {
+                }),
+                &Some(RpcCall::HoldOption {
                     name: "ruler".to_string(),
                     value: OptionValue::Bool(false),
-                },
+                }),
             ],
             "every option type must survive the table-to-wire conversion intact"
         );
@@ -677,11 +720,14 @@ mod tests {
         let before = snapshot_dir(&dir);
 
         let plan = plan(&NativeConfig::all_enabled(), registry::features());
-        let effects: Vec<Effect> = plan.iter().map(|s| Effect::Rpc(s.rpc.clone())).collect();
+        let effects: Vec<Effect> = plan
+            .iter()
+            .filter_map(|s| s.rpc.clone().map(Effect::Rpc))
+            .collect();
         assert_eq!(
             effects.len(),
-            plan.len(),
-            "every plan entry must become exactly one effect"
+            plan.iter().filter(|s| s.rpc.is_some()).count(),
+            "every plan entry that carries a call must become exactly one effect"
         );
 
         let after = snapshot_dir(&dir);
@@ -713,11 +759,43 @@ mod tests {
         assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
         for entry in &plan {
             assert!(
-                matches!(entry.rpc, RpcCall::HoldOption { .. } | RpcCall::HoldNotify),
+                matches!(
+                    entry.rpc,
+                    None | Some(RpcCall::HoldOption { .. } | RpcCall::HoldNotify)
+                ),
                 "{} must supersede through a durable API call, got {:?}",
                 entry.feature,
                 entry.rpc
             );
         }
+    }
+
+    /// A surface the attach took still reaches the plan, because the
+    /// sentence a user reads about it is rendered from there.
+    #[test]
+    fn the_tab_line_is_planned_with_no_call_to_make() {
+        let entries: Vec<Supersession> = plan(&NativeConfig::all_enabled(), registry::features())
+            .into_iter()
+            .filter(|s| s.feature == "tabline")
+            .collect();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            entries[0].rpc, None,
+            "nvim stops drawing the tab row at the attach; a call would be a second way to take it"
+        );
+        assert!(
+            entries[0].supersedes.is_some(),
+            "the row exists so the plugin it supersedes is named to the user"
+        );
+        assert!(
+            plan(
+                &NativeConfig::from_toml_str("[native]\ntabline = false\n")
+                    .expect("a known key must parse"),
+                registry::features()
+            )
+            .iter()
+            .all(|s| s.feature != "tabline"),
+            "a feature switched off supersedes nothing"
+        );
     }
 }

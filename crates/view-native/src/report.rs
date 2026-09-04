@@ -22,12 +22,13 @@ use crate::supersede::Supersession;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Surface {
-    /// A session-lifetime hold from the supersession plan: an nvim option
-    /// view keeps at its own value, or `vim.notify` re-pointed at the engine
-    /// default. One variant for both, because they are the same news to a
-    /// user -- a surface their plugin was drawing is view's for this session,
-    /// and one config line gives it back -- and the notice below reads the
-    /// same for either.
+    /// A surface the supersession plan took for the session: an nvim option
+    /// view keeps at its own value, `vim.notify` re-pointed at the engine
+    /// default, or a surface the attach itself took by asking for its
+    /// `ext_*` option. One variant for all three, because they are the same
+    /// news to a user -- a surface their plugin was drawing is view's for
+    /// this session, and one config line gives it back -- and the notice
+    /// below reads the same for any of them.
     SessionHold,
     /// A default key view registered over a mapping the user's config had
     /// already made.

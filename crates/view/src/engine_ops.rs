@@ -105,6 +105,9 @@ pub trait EngineOps {
     /// complaint already recorded to the notification history;
     /// fire-and-forget, no reply (see `RpcCall::CloseFloat`).
     fn close_float(&self, win: u64) -> Result<(), EngineError>;
+    /// Arms one float scan, for the moment a probe reply names a claiming
+    /// plugin; fire-and-forget, no reply (see `RpcCall::ScanFloats`).
+    fn scan_floats(&self) -> Result<(), EngineError>;
     /// Opens `path` as `:edit` would, reusing an already-loaded buffer
     /// rather than duplicating it; fire-and-forget, no reply (see
     /// `RpcCall::OpenFile`).
@@ -325,6 +328,10 @@ impl EngineOps for EngineHandle {
     fn close_float(&self, win: u64) -> Result<(), EngineError> {
         self.close_float(win)
     }
+
+    fn scan_floats(&self) -> Result<(), EngineError> {
+        self.scan_floats()
+    }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.open_file(path)
     }
@@ -499,6 +506,10 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
 
     fn close_float(&self, win: u64) -> Result<(), EngineError> {
         (**self).close_float(win)
+    }
+
+    fn scan_floats(&self) -> Result<(), EngineError> {
+        (**self).scan_floats()
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -677,6 +688,10 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
 
     fn close_float(&self, win: u64) -> Result<(), EngineError> {
         (**self).close_float(win)
+    }
+
+    fn scan_floats(&self) -> Result<(), EngineError> {
+        (**self).scan_floats()
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -884,6 +899,9 @@ impl EngineOps for FakeOps {
 
     fn close_float(&self, win: u64) -> Result<(), EngineError> {
         self.record(format!("close_float({win})"))
+    }
+    fn scan_floats(&self) -> Result<(), EngineError> {
+        self.record("scan_floats()".to_string())
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.record(format!("open_file({path})"))
@@ -1120,6 +1138,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn close_float(&self, _win: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn scan_floats(&self) -> Result<(), EngineError> {
         Ok(())
     }
     fn open_file(&self, _path: &str) -> Result<(), EngineError> {

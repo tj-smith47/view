@@ -1883,13 +1883,28 @@ pub enum RpcCall {
     ReadFloatRows {
         win: u64,
     },
+    /// Arms one float scan, for the moment view learns from a probe reply
+    /// that a claiming plugin is loaded.
+    ///
+    /// The float scan is armed by editor transitions, and a probe reply is
+    /// not one: the complaints a claiming plugin raised about view's own
+    /// defaults are already on screen when the reply lands, and the next
+    /// transition is `CursorHold` seconds later or the keystroke that
+    /// closes the startup conflict window for good. This is what makes the
+    /// take-down as prompt as the notice it belongs to.
+    ///
+    /// Fire-and-forget: the sightings arrive as `Msg::FloatObserved` like
+    /// every other scan's.
+    ScanFloats,
     /// Closes `win`, for a claiming plugin's own startup complaint whose
     /// text view has already taken into the notification history
     /// (`update::surface_conflict`, spec 5.5).
     ///
     /// The one call here that destroys a window rather than reconfiguring
     /// one, and it is bounded to that case by construction: it is issued
-    /// only while the startup hold still holds, only for a float drawing on
+    /// only while the startup conflict window is open (no key typed yet,
+    /// [`SurfaceConflicts::startup_window_open`](crate::native::surfaces::SurfaceConflicts::startup_window_open)),
+    /// only for a float drawing on
     /// a surface a named claimant's notice already accounts for, and only
     /// after that float's lines have crossed back as `Msg::FloatRows` and
     /// been recorded. Nothing is discarded -- the text is in the history

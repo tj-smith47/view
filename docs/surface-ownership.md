@@ -45,7 +45,7 @@ the tables view actually runs disagree.
 | the command line | `ext_cmdline` | `Own` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the completion menu | `ext_popupmenu` | `Absorb` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred` |
 | the message area | `ext_messages` | `Own` | `[native] notifications = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
-| the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | -- none -- | `noice`/`deferred` |
+| the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | -- none -- | `noice`/`deferred`, `smoke-minimal`/`native-only` |
 | the buffer grid | -- none -- | `Yield` | -- none -- | -- none -- | -- none -- |
 
 A float whose rows land in the command line's band is taken into the palette instead of being reported, but only when it presents a completion menu's own filetype (`cmp_menu`). That is the completion menu's `Absorb` read at the moment of the claim; the command line's own policy stays `Own`.

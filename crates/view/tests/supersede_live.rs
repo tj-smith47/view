@@ -84,8 +84,10 @@ fn session(dir: &Path) -> Engine {
 fn apply(handle: &EngineHandle, plan: &[Supersession]) {
     for entry in plan {
         match &entry.rpc {
-            RpcCall::HoldOption { name, value } => handle.hold_option(name, value).unwrap(),
-            RpcCall::HoldNotify => handle.hold_notify().unwrap(),
+            Some(RpcCall::HoldOption { name, value }) => handle.hold_option(name, value).unwrap(),
+            Some(RpcCall::HoldNotify) => handle.hold_notify().unwrap(),
+            // the attach performed it, so there is nothing to apply here
+            None => {}
             other => panic!("a plan entry must ride a durable takeover call, got {other:?}"),
         }
     }
@@ -156,7 +158,7 @@ fn every_held_option_is_global_scoped() {
     // that stopped holding any option at all cannot leave this walk vacuous
     let mut asked = 0;
     for entry in &plan {
-        let RpcCall::HoldOption { name, .. } = &entry.rpc else {
+        let Some(RpcCall::HoldOption { name, .. }) = &entry.rpc else {
             continue;
         };
         asked += 1;
