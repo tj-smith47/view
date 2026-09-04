@@ -11,7 +11,9 @@
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use view_ai::{AgentLaunch, AiSession};
 use view_core::msg::Msg;
@@ -35,6 +37,7 @@ const WAIT: Duration = Duration::from_secs(10);
 
 /// How long the orphan is given to leave the process table once its owner
 /// is gone.
+#[cfg(target_os = "linux")]
 const REAPED: Duration = Duration::from_secs(3);
 
 /// The owner half of the pin, run in a re-executed copy of this binary so
@@ -140,7 +143,15 @@ fn a_deaf_adapter_dies_with_an_owner_that_was_killed_outright() {
                 line.strip_prefix(PID_MARKER)
                     .and_then(|pid| pid.trim().parse::<u32>().ok())
             })
-            .expect("the intermediate owner must report the pid of the adapter it stalled");
+            .unwrap_or_else(|| {
+                // the intermediate parks on a pipe this process holds, so it
+                // would leave once the panic drops it; killed here anyway, so a
+                // case failing before its own kill does not depend on the drop
+                // order for that
+                let _ = owner.kill();
+                let _ = owner.wait();
+                panic!("the intermediate owner must report the pid of the adapter it stalled")
+            });
         assert!(
             live(agent),
             "the adapter was already gone before its owner was killed, so nothing below is \
@@ -171,6 +182,119 @@ fn a_deaf_adapter_dies_with_an_owner_that_was_killed_outright() {
                 );
             }
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// A session on the committed stub agent, ready to take a prompt, with the
+/// channel its events arrive on.
+#[cfg(target_os = "linux")]
+fn stub_session(dir: &view_test_support::ScratchDir) -> (AiSession, Receiver<Msg>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx = Mutex::new(tx);
+    let cfg = AgentLaunch::new(
+        env!("CARGO_BIN_EXE_view-ai-stub-agent"),
+        dir.path().to_path_buf(),
+    );
+    let session = AiSession::spawn(
+        cfg,
+        Box::new(move |msg| {
+            if let Ok(tx) = tx.lock() {
+                let _ = tx.send(msg);
+            }
+        }),
+    )
+    .expect("the stub agent starts");
+    assert!(matches!(
+        next_event(&rx, "SessionReady"),
+        AiEvent::SessionReady { .. }
+    ));
+    (session, rx)
+}
+
+/// Waits for `pid` to leave the process table entirely, reporting what it
+/// was doing when the wait ran out.
+///
+/// A signalled child that nobody waits on stays in the table as a zombie for
+/// the life of the process that spawned it, which is what this distinguishes:
+/// the entry is gone once someone has collected it.
+#[cfg(target_os = "linux")]
+fn await_collection(pid: u32) -> Result<(), String> {
+    let deadline = Instant::now() + view_test_support::host_deadline(REAPED);
+    while live(pid) {
+        if Instant::now() >= deadline {
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().next().map(String::from))
+                })
+                .unwrap_or_else(|| String::from("unreadable"));
+            return Err(state);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+/// An adapter that exits on its own is collected, not left a zombie.
+///
+/// Linux only: the process state this reads is `/proc`'s.
+#[test]
+fn a_crashed_adapter_is_collected_rather_than_left_behind() {
+    #[cfg(not(target_os = "linux"))]
+    {
+        view_test_support::announce_skip(
+            "a_crashed_adapter_is_collected_rather_than_left_behind",
+            "the process state this reads is /proc's",
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let dir = view_test_support::ScratchDir::new("ai-crash-reaping").unwrap();
+        let (session, rx) = stub_session(&dir);
+        let agent = session.pid().expect("the session must hold its adapter");
+        session.send(AiCommand::Prompt {
+            text: "die".to_string(),
+            context: Vec::new(),
+        });
+        assert!(matches!(
+            next_event(&rx, "SessionCrashed"),
+            AiEvent::SessionCrashed { .. }
+        ));
+        if let Err(state) = await_collection(agent) {
+            panic!(
+                "the adapter {agent} that exited was never waited on (process state {state}), so \
+                 an editor that restarts agents accumulates one entry per crash"
+            );
+        }
+    }
+}
+
+/// Dropping a session collects the adapter it signals, without the editor's
+/// own thread waiting for it.
+///
+/// Linux only, as above.
+#[test]
+fn a_dropped_session_collects_the_adapter_it_signalled() {
+    #[cfg(not(target_os = "linux"))]
+    {
+        view_test_support::announce_skip(
+            "a_dropped_session_collects_the_adapter_it_signalled",
+            "the process state this reads is /proc's",
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let dir = view_test_support::ScratchDir::new("ai-drop-reaping").unwrap();
+        let (session, _rx) = stub_session(&dir);
+        let agent = session.pid().expect("the session must hold its adapter");
+        drop(session);
+        if let Err(state) = await_collection(agent) {
+            panic!(
+                "the adapter {agent} was signalled and never waited on (process state {state}), \
+                 so every panel close leaves an entry behind"
+            );
         }
     }
 }

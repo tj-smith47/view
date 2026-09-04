@@ -60,6 +60,33 @@ pub(crate) fn signal_stop(child: &mut AgentChild) {
     let _ = child.start_kill();
 }
 
+/// Signals the child and collects it without blocking the caller.
+///
+/// The dropping thread is the editor's own loop thread, so the `waitpid`
+/// that turns a signalled child into a collected one cannot happen there;
+/// the session runtime cannot be asked either, since the drop shuts it down
+/// without waiting for a task to run. A thread that outlives both does the
+/// wait, and a `SIGKILL`ed child makes it a short one.
+///
+/// Unix only: a `std::process::Child` is collected by whoever waits on it,
+/// while Windows keeps `tokio::process`, whose `kill_on_drop` orphan queue
+/// already does this job.
+#[cfg(unix)]
+pub(crate) fn signal_and_collect(mut child: AgentChild) {
+    signal_stop(&mut child);
+    let _ = std::thread::Builder::new()
+        .name(String::from("view-ai-reap"))
+        .spawn(move || {
+            let _ = child.wait();
+        });
+}
+
+/// [`signal_and_collect`] where the runtime's own orphan queue collects.
+#[cfg(not(unix))]
+pub(crate) fn signal_and_collect(mut child: AgentChild) {
+    signal_stop(&mut child);
+}
+
 /// Reaps a signalled agent, off the runtime's own worker.
 ///
 /// The unix wait blocks, and the session runtime has a single worker driving
@@ -149,8 +176,8 @@ impl Drop for AiSession {
         // A poisoned lock is stepped over rather than propagated: a panicked
         // task must not be the reason a child process survives.
         let mut slot = self.child.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(child) = slot.as_mut() {
-            signal_stop(child);
+        if let Some(child) = slot.take() {
+            signal_and_collect(child);
         }
         drop(slot);
 
@@ -163,9 +190,9 @@ impl Drop for AiSession {
         // and lets the runtime's own threads wind themselves down.
         //
         // What is guaranteed after this returns: the child has been
-        // signalled. What is not: that it has been reaped. Collection is
-        // left to the runtime's reaper if its threads outlive the drop, and
-        // to the operating system otherwise.
+        // signalled, and something is waiting on it -- the reaper this drop
+        // started on unix, the runtime's orphan queue on Windows. Neither
+        // waits on the dropping thread.
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }

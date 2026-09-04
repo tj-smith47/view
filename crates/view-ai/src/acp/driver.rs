@@ -84,11 +84,7 @@ pub(crate) async fn run_session(
     cwd: std::path::PathBuf,
     requires_auth: bool,
 ) {
-    let Some(ending) = drive(codec, commands, Arc::clone(&shared), cwd, requires_auth).await else {
-        // the handle was dropped: the session is being torn down on purpose,
-        // and the handle's own `Drop` has already signalled the child
-        return;
-    };
+    let ending = drive(codec, commands, Arc::clone(&shared), cwd, requires_auth).await;
 
     // The signal is sent while the lock is still held, and the child leaves
     // the slot only afterwards. That ordering is what makes the state where
@@ -99,20 +95,32 @@ pub(crate) async fn run_session(
     // inside it sees an empty slot and a live child. Signalling on the way out
     // matters even for a reader that saw end-of-file, because an agent may
     // close its stdout and keep running.
-    let mut child = {
+    let taken = {
         let mut slot = child.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(child) = slot.as_mut() {
             signal_stop(child);
         }
         slot.take()
     };
+    // every ending, not only the one that reports the status: a signal
+    // without a wait leaves a zombie for the life of the editor, and the
+    // endings that skipped it -- a stream that failed, a handle dropped on
+    // purpose -- are the ones an agent that crashes takes
+    let exit = match taken {
+        Some(child) => Some(reap(child).await),
+        None => None,
+    };
+
+    let Some(ending) = ending else {
+        // the handle was dropped: the session is being torn down on purpose,
+        // and the handle's own `Drop` has already signalled the child
+        return;
+    };
 
     let detail = match ending {
-        SessionEnd::ReaderEof => match child.take() {
-            Some(child) => match reap(child).await {
-                Ok(status) => format!("the agent exited ({status})"),
-                Err(err) => format!("the agent exited and could not be reaped: {err}"),
-            },
+        SessionEnd::ReaderEof => match exit {
+            Some(Ok(status)) => format!("the agent exited ({status})"),
+            Some(Err(err)) => format!("the agent exited and could not be reaped: {err}"),
             None => "the agent exited".to_string(),
         },
         SessionEnd::ReaderFailed(reason) => reason,
