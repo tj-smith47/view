@@ -37,9 +37,24 @@ What a tiling desktop actually is, and what view takes from it:
 | **Theme cohesion** comes from a switcher rewriting each tool's config. | `theme = "auto"` derives from the live colourscheme (C3 is the evidence task). |
 | **Menu**: one key opens a launcher listing everything the desktop can do. | the command palette, centred pill, same key convention as omarchy's (`Super+Alt+Space` → `<leader><leader>` default, configurable). |
 
-Two look modes, both first-class and configurable, so an nvim switcher loses
-nothing: `[ui] panes = "tiles"` (the above) and `[ui] panes = "nvim"`
-(nvim's `│` separators and its statusline, what T9 ships today). The
+Two look modes, both first-class, behind a knob that must always exist
+(user ruling 2026-09-04: tiles inside an already-tiled desktop look awkward,
+so the look is toggleable and defaults by detection):
+
+```toml
+[ui]
+panes = "auto"   # "auto" | "tiles" | "nvim"
+```
+
+| `panes` | look |
+|---|---|
+| `"tiles"` | frames + gaps + accent, status in the frame edge, top pill |
+| `"nvim"` | nvim's `│` separators and statusline, what T9 ships today |
+| `"auto"` (default) | `"nvim"` when a graphical desktop owns the tiling (any of `HYPRLAND_INSTANCE_SIGNATURE`, `SWAYSOCK`, `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP` set in view's own environment — on Omarchy the terminal window is already a tile); `"tiles"` otherwise (a bare tty, an ssh session from a tablet, a server — the §15.1 "minimal desktop from one terminal" case). `doctor` reports which it chose and why. |
+
+`:View panes tiles|nvim` flips it live (a resize-class full repaint), so a
+user on Omarchy who wants tiles anyway is one command or one config line
+away. The
 compositor built for tiles is the §15.1 pane compositor: a tile's content is
 an nvim grid today and an image / media / browser / remote-tree surface in
 S6, so the workspace arc is not a second compositor, it is more tile kinds.
