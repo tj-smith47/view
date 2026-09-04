@@ -49,6 +49,14 @@ fn engine_child_of(pid: u32) -> Option<u32> {
         })
 }
 
+/// [`engine_child_of`] where no `/proc` states the relationship: the reap
+/// assertion below is Linux-only for the same reason, so its subject is
+/// simply absent.
+#[cfg(not(target_os = "linux"))]
+fn engine_child_of(_pid: u32) -> Option<u32> {
+    None
+}
+
 /// Whether the OS still holds a process-table entry for `pid`.
 #[cfg(target_os = "linux")]
 fn still_running(pid: u32) -> bool {

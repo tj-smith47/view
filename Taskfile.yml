@@ -50,6 +50,22 @@ tasks:
       # binary that ships
       - cargo clippy --workspace --bins -- -D warnings
 
+  lint:cross:
+    desc: Clippy for a unix target that is not Linux, so an item only a Linux fence uses fails here rather than on a remote leg
+    # x86_64-unknown-freebsd stands in for the macOS leg: it selects the same
+    # source for every `cfg(unix)` / `cfg(target_os = "linux")` fence in the
+    # tree, and unlike darwin and windows-msvc it cross-compiles from any
+    # host with no foreign C toolchain -- criterion's alloca and ureq's ring
+    # both build for it, and both refuse the other two.
+    #
+    # Linux only, because that is the host the fences are written on and the
+    # only one for which this is a *cross* check at all; the macOS and
+    # Windows legs compile their own source directly.
+    platforms: [linux]
+    cmds:
+      - rustup target add x86_64-unknown-freebsd
+      - cargo clippy --workspace --all-targets --all-features --target x86_64-unknown-freebsd -- -D warnings
+
   test:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)
     # `bash scripts/hold-awake.sh` here and on every other target that runs
@@ -122,6 +138,7 @@ tasks:
     cmds:
       - task: fmt-check
       - task: lint
+      - task: lint:cross
       - task: audit
       - task: style
       - task: loc
