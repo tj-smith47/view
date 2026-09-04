@@ -357,6 +357,11 @@ pub(crate) fn restart_engine(
     // past the death names one of its windows
     // ([`SurfaceConflicts::forget_engine`])
     model.forget_engine_conflicts();
+    // the forgets change what is painted whether or not the attach below
+    // succeeds: a failed attempt goes back to a loop that only repaints on
+    // its own account, and would keep the dropped overlays and the released
+    // startup lines off screen until something else dirtied the model
+    model.dirty = true;
     let mut engine = crate::startup::restart_and_attach(
         engine,
         respawn(),
@@ -1007,6 +1012,7 @@ mod tests {
         let respawn =
             || view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim");
         let mut model = Model::with_term_size(80, 24);
+        model.dirty = false;
 
         let failed = restart_engine(
             &mut engine,
@@ -1019,6 +1025,11 @@ mod tests {
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
             "a restart that could not spawn must report it"
+        );
+        assert!(
+            model.dirty,
+            "the forgets ahead of the failed spawn changed what is painted, \
+             and the loop this returns to repaints only what is marked"
         );
     }
 

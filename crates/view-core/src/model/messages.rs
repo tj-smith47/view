@@ -620,9 +620,8 @@ impl Messages {
     /// | `held` | drained or discarded as the dead engine's deadline would have, never carried into a hold whose outcome a different engine's probe decides |
     /// | `entries`, `next_message_id`, `armed_slot`, `armed_lines`, `paused` | kept: the toast stack and the scrollback outlive the connection, and an id stamped once is never reissued |
     pub(crate) fn forget_engine(&mut self) {
-        // the repaint is the attach's own: nothing paints between here and
-        // the replacement's first redraw batch, and `update()` arms the top
-        // slot on that batch
+        // the restart marks the model dirty on either outcome of the attach
+        // that follows, and `update()` arms the top slot on the next fold
         let _ = self.resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
         self.startup_hold = crate::native::toast::StartupHold::Pending;
     }
