@@ -108,9 +108,10 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// remaining C0 controls to the `<C-...>` chord they spell -- `\n`
 /// included, because the terminal is in raw mode and `Enter` sends `\r`
 /// there ([`plain_key`]). A run of continuous non-ASCII bytes (`0x80..`) is
-/// decoded as one UTF-8 str and forwarded char-by-char if valid, dropped if not (a
-/// mid-codepoint chunk boundary can produce invalid UTF-8 here, and
-/// guessing at a replacement is worse than dropping a still-rare case).
+/// decoded as one UTF-8 str and forwarded char-by-char if valid, dropped
+/// if not (a mid-codepoint chunk boundary can produce invalid UTF-8 here,
+/// and guessing at a replacement is worse than dropping a still-rare
+/// case).
 ///
 /// `ESC` immediately followed by `[` or `O` opens a CSI or SS3 sequence --
 /// an arrow, a function key, a keypad key, a keyboard-protocol report (SS3
@@ -717,11 +718,10 @@ fn key_msg(notation: impl Into<String>) -> Msg {
 /// the name nvim also spells `<Nul>`, both of them the same `\x80\xffX` on
 /// the wire -- and the `{|}~` quartet becomes the `[\]^` one; `Ctrl`+`6` is
 /// the separate legacy alias for `<C-^>`, which is where `^` sits on a US
-/// keyboard. Only the
-/// keyboard protocol ever reports these as characters -- a legacy terminal
-/// sends the C0 byte itself, which [`plain_key`] names directly -- so the
-/// fold is what makes a protocol terminal's chord land on the mapping the
-/// same chord fires without it.
+/// keyboard. Only the keyboard protocol ever reports these as characters --
+/// a legacy terminal sends the C0 byte itself, which [`plain_key`] names
+/// directly -- so the fold is what makes a protocol terminal's chord land
+/// on the mapping the same chord fires without it.
 ///
 /// Read off the pinned engine (v0.12.4) by typing each `CSI <code>;5u` at
 /// its own tty and asking `keytrans(getcharstr())` for the name it gave.
