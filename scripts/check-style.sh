@@ -409,6 +409,73 @@ crates/view-engine/src/process.rs 3 the ETXTBSY pin itself, where the write is t
 crates/view-engine/tests/checktime_live.rs 1 a --nvim-bin wrapper, spawned through that same retry
 crates/view-oracle/tests/smoke.rs 2 a --nvim-bin wrapper spawned through that retry, plus a directory mode this walk cannot tell apart from a file mode
 '
+# A long-lived child goes out through `view_proc::spawn_tied_to_this_process`
+# (or a re-export of it), so a parent killed outright cannot leave it
+# running: `Drop` covers the exits a process chooses and none of the ones it
+# does not, and a child wedged past noticing its closed pipes never leaves on
+# its own. Three of them were found reparented to init at 100% CPU for days.
+#
+# Not every spawn owes that. A child waited on to completion inside the call
+# that made it, or bounded by its own deadline and killed on it, cannot
+# outlive anything; a pty child spawned as a session leader is ended by the
+# kernel when the master closes. What a row buys is that the answer was
+# written down once, by whoever added the spawn, rather than rediscovered by
+# whoever finds the stray.
+#
+# Keyed on `Command::new`/`CommandBuilder::new` per file, over production
+# lines only (the god-file scanner's own classifier, which drops
+# `#[cfg(test)]` regions) and with comment lines dropped: a count moves when
+# a spawn is added and does not move when a line above it does. Precision
+# over recall, as elsewhere in this file -- a spawn built by some other
+# spelling would pass unseen.
+#
+# Each row is a path, its pinned number of sites, and how those sites cannot
+# leave a stray.
+TIED_SPAWN_SITES='
+crates/view-ai/src/acp/session.rs 2 the agent adapter, tied on unix; the windows arm keeps tokio own spawn, which no parent-death signal covers there
+crates/view-ai/src/provision.rs 1 an npm install, bounded by its own deadline and killed on it
+crates/view-ai/src/watch.rs 1 a git ls-files, waited on with a deadline and killed on it
+crates/view-bench/src/remote_ui.rs 1 the headless control server, tied: it has no pty to hang up and no controlling terminal
+crates/view-bench/src/scenarios/echo_speculated_rtt.rs 2 an interpreter probe that runs to completion, and the relay fixture the row waits out and kills
+crates/view-bench/src/session.rs 1 a pty session leader, ended by the kernel when the master closes
+crates/view-engine/src/process.rs 2 the engine and the remote leg ssh client, both tied through spawn_engine_child
+crates/view-harness/src/bin/bench.rs 1 a sysctl read, waited on to completion
+crates/view-harness/src/bin/bench/replicates.rs 1 a git read, waited on to completion
+crates/view-harness/src/bin/oracle/compat.rs 3 a cargo build and a reference nvim, both waited on to completion, and a pty-hosted view ended by its master closing
+crates/view-harness/src/fixture.rs 1 an nvim --version probe, waited on to completion
+crates/view-native/src/tree/git.rs 1 a git status, bounded by its own deadline and killed on it
+crates/view-oracle/src/compat.rs 1 a probe subprocess, bounded by wait_with_timeout and killed on it
+crates/view-oracle/src/hang.rs 1 a taskkill, waited on to completion
+crates/view-oracle/src/pty.rs 1 the pty funnel: setsid and TIOCSCTTY make the child a session leader, so the master closing delivers SIGHUP
+crates/view-oracle/src/remote.rs 1 a stub ssh client, waited on to completion
+crates/view-test-support/src/lib.rs 1 a sysctl read, waited on to completion
+crates/view/src/remote_guard.rs 1 an ssh probe, bounded by its own deadline and killed on it
+'
+check_tied_spawns() {
+  local expected actual prod_lines scanner
+  # resolved beside this script rather than under the walked root: the case
+  # matrix grades this walk against scratch roots that hold crates/ alone
+  scanner="$(cd "$(dirname "$0")" && pwd)/audit-god-files.sh"
+  prod_lines=$(bash "$scanner" --prod-lines .) || prod_lines=""
+  if [ -z "$prod_lines" ]; then
+    echo "STYLE FAIL: could not read production lines to check tied spawns"
+    return 1
+  fi
+  expected=$(printf '%s\n' "$TIED_SPAWN_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
+  actual=$(printf '%s\n' "$prod_lines" \
+    | grep -E '[^A-Za-z0-9_]Command(Builder)?::new' \
+    | sed 's/:.*//' | LC_ALL=C sort | uniq -c | awk '{ print $2, $1 }' | LC_ALL=C sort) || actual=""
+  if [ "$expected" = "$actual" ]; then
+    return 0
+  fi
+  printf 'pinned:\n%s\nfound:\n%s\n' "$expected" "$actual"
+  echo "STYLE FAIL: a production spawn site outside the pinned set"
+  echo "  A child that outlives the process that spawned it is a stray nothing"
+  echo "  reaps: spawn it through view_proc::spawn_tied_to_this_process, or add"
+  echo "  a row to this file saying how this one cannot outlive its parent."
+  return 1
+}
+
 check_written_programs() {
   local expected actual
   expected=$(printf '%s\n' "$WRITTEN_PROGRAM_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
@@ -468,6 +535,18 @@ if [ "${1:-}" = "--written-programs" ]; then
   check_written_programs
   exit $?
 fi
+# The tied-spawn pin alone, graded the same way: a walk that stops matching
+# the spelling a spawn uses reads exactly like a tree with no new spawns.
+if [ "${1:-}" = "--tied-spawns" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --tied-spawns ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_tied_spawns
+  exit $?
+fi
 
 fail=0
 if [ -d crates ]; then
@@ -475,6 +554,7 @@ if [ -d crates ]; then
   check_lua_chunk_width || fail=1
   check_string_literal_width || fail=1
   check_written_programs || fail=1
+  check_tied_spawns || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi

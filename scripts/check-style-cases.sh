@@ -378,5 +378,107 @@ crates/view-engine/src/process.rs=3 crates/view-oracle/tests/smoke.rs=2 \
 written-programs" \
   'a pinned site that no longer exists, which the pin would otherwise vouch for'
 
+# ---------------------------------------------------------------------------
+# the tied-spawn pin: a long-lived child goes out through view-proc's spawn,
+# and every other spawn says in a row of its own how it cannot outlive its
+# parent. Its blind spot is the same as the walk above's -- a spelling the
+# pattern stops matching reads exactly like a tree with no new spawns -- so
+# each population below is planted in both spellings the tree uses,
+# `Command::new` and portable-pty's `CommandBuilder::new`, with a doc comment
+# quoting the same call to prove the classifier drops it.
+#
+# The rows mirror the checker's own TIED_SPAWN_SITES.
+# ---------------------------------------------------------------------------
+plant_spawns() {
+  mkdir -p "$(dirname "$CASE/$1")"
+  : > "$CASE/$1"
+  printf '/// A doc comment naming Command::new, which is not a spawn.\n' >> "$CASE/$1"
+  i=0
+  while [ "$i" -lt "$2" ]; do
+    if [ $((i % 2)) -eq 0 ]; then
+      printf 'let mut cmd = Command::new(program);\n' >> "$CASE/$1"
+    else
+      printf 'let mut cmd = CommandBuilder::new(program);\n' >> "$CASE/$1"
+    fi
+    i=$((i + 1))
+  done
+}
+
+new_tied_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/crates"
+  # the walk asks the god-file scanner which lines are production, and that
+  # scanner reads tracked files: a scratch root has to be a repository for
+  # the classifier to see anything at all
+  git -C "$CASE" init -q
+  plant_spawns 'crates/view-ai/src/acp/session.rs' 2
+  plant_spawns 'crates/view-ai/src/provision.rs' 1
+  plant_spawns 'crates/view-ai/src/watch.rs' 1
+  plant_spawns 'crates/view-bench/src/remote_ui.rs' 1
+  plant_spawns 'crates/view-bench/src/scenarios/echo_speculated_rtt.rs' 2
+  plant_spawns 'crates/view-bench/src/session.rs' 1
+  plant_spawns 'crates/view-engine/src/process.rs' 2
+  plant_spawns 'crates/view-harness/src/bin/bench.rs' 1
+  plant_spawns 'crates/view-harness/src/bin/bench/replicates.rs' 1
+  plant_spawns 'crates/view-harness/src/bin/oracle/compat.rs' 3
+  plant_spawns 'crates/view-harness/src/fixture.rs' 1
+  plant_spawns 'crates/view-native/src/tree/git.rs' 1
+  plant_spawns 'crates/view-oracle/src/compat.rs' 1
+  plant_spawns 'crates/view-oracle/src/hang.rs' 1
+  plant_spawns 'crates/view-oracle/src/pty.rs' 1
+  plant_spawns 'crates/view-oracle/src/remote.rs' 1
+  plant_spawns 'crates/view-test-support/src/lib.rs' 1
+  plant_spawns 'crates/view/src/remote_guard.rs' 1
+}
+
+# The pinned population is long, so a failing case is graded on the rows that
+# differ from it rather than on the whole listing: what a case proves is that
+# the walk saw the planted change, and the header collapses to a guard name
+# the same way the walk above's does.
+expect_tied() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  git -C "$CASE" add -A
+  out=$(bash "$CHECKER" --tied-spawns "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^pinned:$/ { inpinned = 1; next }
+    /^found:$/ { inpinned = 0; infound = 1; next }
+    /^STYLE FAIL: a production spawn site outside the pinned set$/ {
+      infound = 0; print "tied-spawns"; next
+    }
+    inpinned && NF == 2 { pinned[$1 "=" $2] = 1; next }
+    infound && NF == 2 { if (!($1 "=" $2 in pinned)) print $1 "=" $2 }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want rc=%s findings [%s]\n  got  rc=%s findings [%s]\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+}
+
+new_tied_case
+expect_tied 0 '' 'the pinned population, in both spellings, with a doc comment quoting the call'
+
+new_tied_case
+plant_spawns 'crates/view/src/startup.rs' 1
+expect_tied 1 'crates/view/src/startup.rs=1 tied-spawns' \
+  'a production file outside the pinned set spawning a child of its own'
+
+new_tied_case
+plant_spawns 'crates/view-bench/src/remote_ui.rs' 2
+expect_tied 1 'crates/view-bench/src/remote_ui.rs=2 tied-spawns' \
+  'a second spawn inside a file the pin already lists'
+
+new_tied_case
+rm -f "$CASE/crates/view-oracle/src/hang.rs"
+expect_tied 1 'tied-spawns' \
+  'a pinned site that no longer exists, which the pin would otherwise vouch for'
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
