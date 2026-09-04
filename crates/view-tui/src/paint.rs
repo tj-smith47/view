@@ -266,7 +266,7 @@ struct StagedRun {
 ///
 /// Staging is only reachable through this guard, so the lift can never be
 /// left half-done: the rows return on the error path, on an early return, and
-/// on an unwinding panic out of the backend alike. The shadow is the only
+/// on an unwinding panic out of the emission alike. The shadow is the only
 /// record of what the terminal shows, so a lift that failed to reverse would
 /// make every later frame diff against scratch cells and emit the wrong
 /// updates for the rest of the session.
@@ -455,7 +455,7 @@ impl Shadow {
     }
 
     /// The whole-frame diff: every cell of what the terminal shows against
-    /// every cell of the frame just composed, plus the right neighbour of
+    /// every cell of the frame just composed, plus the run to the right of
     /// every changed cell a terminal may draw two columns wide.
     fn updates(&self) -> impl Iterator<Item = (u16, u16, &Cell)> {
         emit::with_widened_neighbours(&self.front, &self.back, self.front.diff_iter(&self.back))
@@ -3974,7 +3974,15 @@ mod tests {
     /// diff of the same two buffers, on both the forced-clip path and the
     /// path [`Shadow::emit_updates`] picks for itself. Leaves `shadow`
     /// untouched, so a caller can go on to `commit` and drive another frame.
-    fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) {
+    ///
+    /// Returns whether the frame reached the `CrosstermBackend::draw`
+    /// comparison over a diff that carried cells -- it reaches it only when
+    /// nothing in the diff widens, and an empty diff compares two empty byte
+    /// streams. Callers hold that count to a floor: the leg is silent when it
+    /// skips, so a fixture that grew an icon or a `…` would stop exercising
+    /// it and nothing else would say so.
+    #[must_use]
+    fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) -> bool {
         let expected = drawn_bytes(|w| emit::draw_resynced(w, shadow.updates()));
 
         // a frame carrying no glyph a terminal may widen has to reach the
@@ -3982,13 +3990,16 @@ mod tests {
         // that holds real composed frames -- theme styles, overlays, borders,
         // whatever a fixture paints -- against that, which the synthetic
         // style sweep cannot do
-        let widens = shadow.front.diff_iter(&shadow.back).any(|(x, y, cell)| {
-            emit::terminal_may_widen(cell.symbol())
+        let mut changed = 0_usize;
+        let mut widens = false;
+        for (x, y, cell) in shadow.front.diff_iter(&shadow.back) {
+            changed += 1;
+            widens |= emit::terminal_may_widen(cell.symbol())
                 || shadow
                     .front
                     .cell((x, y))
-                    .is_some_and(|old| emit::terminal_may_widen(old.symbol()))
-        });
+                    .is_some_and(|old| emit::terminal_may_widen(old.symbol()));
+        }
         if !widens {
             assert_eq!(
                 expected,
@@ -4000,17 +4011,18 @@ mod tests {
 
         let mut runs = Vec::new();
         shadow.painted.row_runs(shadow.front.area, &mut runs);
-        let clipped = drawn_bytes(|backend| shadow.emit_clipped(backend, &runs));
+        let clipped = drawn_bytes(|writer| shadow.emit_clipped(writer, &runs));
         assert_eq!(
             clipped, expected,
             "row-clipped emission diverged from the whole-buffer diff after: {label}"
         );
 
-        let chosen = drawn_bytes(|backend| shadow.emit_updates(backend));
+        let chosen = drawn_bytes(|writer| shadow.emit_updates(writer));
         assert_eq!(
             chosen, expected,
             "emit_updates diverged from the whole-buffer diff after: {label}"
         );
+        !widens && changed > 0
     }
 
     /// The compose-time equivalence guard must be seen to catch: a damage
@@ -4129,7 +4141,7 @@ mod tests {
             ),
             (
                 "a VS16 emoji landing mid-row",
-                Box::new(|m: &mut Model| put(m, 6, 4, &["\u{2764}\u{FE0F}", " "])),
+                Box::new(|m: &mut Model| put(m, 2, 0, &["\u{2764}\u{FE0F}", " "])),
             ),
             (
                 "a wide glyph written into the final column",
@@ -4187,6 +4199,7 @@ mod tests {
         ];
 
         let mut first = true;
+        let mut compared = 0_usize;
         for (label, mutate) in steps {
             mutate(&mut model);
             let grid_damage = model.take_paint_damage();
@@ -4196,7 +4209,10 @@ mod tests {
                 Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
             shadow.compose(&model, &surface, &damage);
-            assert_clipped_emission_matches_unclipped(&mut shadow, label);
+            compared += usize::from(assert_clipped_emission_matches_unclipped(
+                &mut shadow,
+                label,
+            ));
             shadow.commit();
             // the byte comparison above reads both paths out of the same two
             // buffers, so a clip that lifted rows out of them and failed to
@@ -4208,6 +4224,66 @@ mod tests {
                 "emitting updates left the shadow holding something other than \
                  the frame it composed, after: {label}"
             );
+        }
+        assert!(
+            compared >= 7,
+            "only {compared} of this fixture's frames reached the \
+             CrosstermBackend::draw comparison; a step that grew a widening \
+             glyph stopped exercising it"
+        );
+    }
+
+    /// The crossterm-equality leg fires only on a frame carrying nothing to
+    /// re-sync after, and every overlay view draws with the box-drawing
+    /// border charset carries one on its own frame. A terminal whose
+    /// box-glyph probe came back negative gets the ASCII charset instead,
+    /// and its list markers are ASCII too, so an overlay stack drawn for it
+    /// is the one chrome shape that can be held against `ratatui`'s own
+    /// backend byte for byte -- which is what the grid fixture above cannot
+    /// reach, its frames being grid text.
+    #[test]
+    fn ascii_bordered_chrome_emits_exactly_what_crossterm_emits() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 12);
+        let mut model = caps_model(true, true, true, NO_BOX_GLYPHS);
+        set_term_size(&mut model, area.width, area.height);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+
+        let picker = || Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps);
+        let toast = || {
+            Layer::new(
+                Rect::new(8, 20, 18, 3),
+                toast_kind(vec![vec![Span::plain("saved 3 buffers")]]),
+                model.caps,
+            )
+        };
+        let frames: Vec<(&str, Surface)> = vec![
+            (
+                "an ASCII-bordered picker",
+                Surface::from_layers(vec![picker()]),
+            ),
+            (
+                "a toast beside that picker",
+                Surface::from_layers(vec![picker(), toast()]),
+            ),
+            ("the toast dismissed", Surface::from_layers(vec![picker()])),
+        ];
+
+        let mut first = true;
+        for (label, surface) in frames {
+            let grid_damage = model.take_paint_damage();
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
+            first = false;
+            shadow.compose(&model, &surface, &damage);
+            assert!(
+                assert_clipped_emission_matches_unclipped(&mut shadow, label),
+                "the chrome frame {label:?} changed nothing, or carried a glyph a \
+                 terminal may widen, so it skipped the CrosstermBackend::draw \
+                 comparison it exists for"
+            );
+            shadow.commit();
         }
     }
 
@@ -4280,7 +4356,7 @@ mod tests {
     /// `terminal_may_widen` is false for every cell and the only difference
     /// left to measure is the style encoding.
     #[test]
-    fn emission_matches_crossterms_on_ambiguity_free_frames() {
+    fn emission_matches_crossterms_where_no_glyph_widens() {
         let area = ratatui::layout::Rect::new(0, 0, 16, 7);
         let mut front = Buffer::empty(area);
         let mut back = Buffer::empty(area);
@@ -4294,8 +4370,8 @@ mod tests {
         assert_eq!(
             resynced_bytes(&front, &back),
             expected,
-            "view's emission loop diverged from CrosstermBackend::draw on an \
-             ambiguity-free frame"
+            "view's emission loop diverged from CrosstermBackend::draw on a \
+             frame with nothing to re-sync after"
         );
     }
 
@@ -4329,12 +4405,12 @@ mod tests {
         runs
     }
 
-    /// nvim's TUI re-addresses the cursor after printing an ambiguous-width
-    /// glyph rather than trusting the terminal's own advance, and view owes
-    /// the same: without it every later cell of the run lands one column
+    /// nvim's TUI re-addresses the cursor after printing a glyph a terminal
+    /// may widen rather than trusting the terminal's own advance, and view
+    /// owes the same: without it every later cell of the run lands one column
     /// right on a terminal that draws the glyph two wide.
     #[test]
-    fn the_cursor_is_re_addressed_after_every_ambiguous_glyph() {
+    fn the_cursor_is_re_addressed_after_every_widening_glyph() {
         let area = ratatui::layout::Rect::new(0, 0, 12, 2);
         let front = Buffer::empty(area);
         let mut back = Buffer::empty(area);
@@ -4360,23 +4436,26 @@ mod tests {
         }
 
         let runs = printed_runs(&resynced_bytes(&front, &back));
-        let mut ambiguous_seen = 0_usize;
+        let mut widening_seen = 0_usize;
         let mut carried = false;
         for (run, addressed) in &runs {
             assert!(
                 !carried || *addressed,
-                "no cursor address between an ambiguous glyph and the next \
+                "no cursor address between a widening glyph and the next \
                  printed run {run:?}; runs were {runs:?}"
             );
             carried = false;
             let mut chars = run.chars().peekable();
             while let Some(c) = chars.next() {
                 let last = chars.peek().is_none();
-                if emit::terminal_may_widen(&c.to_string()) {
-                    ambiguous_seen += 1;
+                // classified by the fixture's own model of the terminal, not
+                // by the predicate under test: asking that predicate would
+                // apply the assertion only to glyphs it already claims widen
+                if widens_on_this_terminal(&c.to_string()) {
+                    widening_seen += 1;
                     assert!(
                         last,
-                        "an ambiguous glyph rode inside a longer printed run \
+                        "a widening glyph rode inside a longer printed run \
                          {run:?}, so nothing re-addressed the cursor after it"
                     );
                     carried = true;
@@ -4384,7 +4463,7 @@ mod tests {
             }
         }
         assert_eq!(
-            ambiguous_seen,
+            widening_seen,
             4 + usize::from(area.width),
             "the fixture's widening glyphs were not all emitted"
         );
@@ -4400,9 +4479,11 @@ mod tests {
     /// A terminal that drew the old or the new glyph two columns wide shows
     /// the glyph's second half in the cell to its right, so that cell is
     /// stale whenever the glyph changes -- even though the model never
-    /// touched it and the diff therefore never names it.
+    /// touched it and the diff therefore never names it. Where that
+    /// neighbour is itself such a glyph the staleness moves one column
+    /// further right, so the repaint has to follow the run to its end.
     #[test]
-    fn a_changed_ambiguous_glyph_repaints_its_right_neighbour() {
+    fn a_changed_widening_glyph_repaints_the_run_to_its_right() {
         let area = ratatui::layout::Rect::new(0, 0, 6, 1);
         let base = {
             let mut buf = Buffer::empty(area);
@@ -4442,6 +4523,30 @@ mod tests {
             emitted_positions(&base, &icon_at_edge),
             vec![(5, 0)],
             "an icon in the final column emitted a cell past the area"
+        );
+
+        let box_run = {
+            let mut buf = Buffer::empty(area);
+            for x in 0..area.width {
+                buf[(x, 0)].set_symbol("\u{2500}");
+            }
+            buf
+        };
+        let mut run_head_changes = box_run.clone();
+        run_head_changes[(1, 0)].set_symbol("\u{2502}");
+        assert_eq!(
+            emitted_positions(&box_run, &run_head_changes),
+            vec![(1, 0), (2, 0), (3, 0), (4, 0), (5, 0)],
+            "the leftmost cell of a box-drawing run changed and the rest of \
+             the run was left holding the shifted halves of the run before it"
+        );
+
+        let mut run_head_narrows = box_run.clone();
+        run_head_narrows[(1, 0)].set_symbol("x");
+        assert_eq!(
+            emitted_positions(&box_run, &run_head_narrows),
+            vec![(1, 0), (2, 0), (3, 0), (4, 0), (5, 0)],
+            "a box-drawing run whose head became narrow left the run stale"
         );
     }
 
@@ -4664,6 +4769,14 @@ mod tests {
                 "the first regional indicator of the pair alone changes",
                 Box::new(|m: &mut Model| put(m, 3, 3, &["\u{1f1ff}"])),
             ),
+            // the leftmost cell of a run of glyphs that all widen: repainting
+            // it pushes the shifted half one column right, and so on to the
+            // end of the run, so a repaint that stopped at the immediate
+            // neighbour would strand every column after it
+            (
+                "the leftmost cell of a box-drawing run alone changes",
+                Box::new(|m: &mut Model| put(m, 1, 1, &["\u{2502}"])),
+            ),
         ];
 
         let mut first = true;
@@ -4684,15 +4797,17 @@ mod tests {
                 for x in 0..area.width {
                     let shown = &term.grid[usize::from(y)][usize::from(x)];
                     let want = shadow.front()[(x, y)].symbol();
-                    if shown == WIDE_HALF {
-                        let left = x.checked_sub(1).map(|lx| shadow.front()[(lx, y)].symbol());
-                        assert!(
-                            left.is_some_and(widens_on_this_terminal),
-                            "cell ({x},{y}) holds a widened glyph's second half but \
-                             nothing to its left widens, after: {label}"
-                        );
-                        continue;
-                    }
+                    // an emission that follows the run repaints every column a
+                    // widened glyph covered, so no second half survives a
+                    // frame; one that stops short leaves the tail of the run
+                    // holding halves the shadow says are content
+                    assert_ne!(
+                        shown.as_str(),
+                        WIDE_HALF,
+                        "cell ({x},{y}) still holds the second half of the glyph \
+                         to its left, where the shadow says {want:?}: the \
+                         widened run's tail was never repainted, after: {label}"
+                    );
                     assert_eq!(
                         shown, want,
                         "cell ({x},{y}) shows {shown:?} where the shadow says \
@@ -4812,7 +4927,7 @@ mod tests {
     /// A shadow whose rows are staged is mid-surgery: its buffers hold the
     /// scratch's cells, so a frame that abandoned the stage would leave every
     /// later diff comparing against those. The rows must come back however
-    /// the staged scope ends, including by unwinding out of the backend.
+    /// the staged scope ends, including by unwinding out of the emission.
     ///
     /// Disconfirm: emptying `StagedRuns`'s `Drop` body leaves the shadow
     /// holding blank scratch rows and fails the comparison below.
@@ -4833,9 +4948,9 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {}));
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _staged = StagedRuns::stage(&mut shadow, &runs);
-            // stands in for an unwinding panic anywhere inside the backend's
-            // write, which is the whole window in which the rows are lifted
-            panic!("backend write");
+            // stands in for an unwinding panic anywhere inside the writer's
+            // own write, which is the whole window in which the rows are lifted
+            panic!("writer write");
         }));
         std::panic::set_hook(hook);
 

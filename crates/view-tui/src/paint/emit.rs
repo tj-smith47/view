@@ -52,16 +52,21 @@ pub(crate) fn terminal_may_widen(symbol: &str) -> bool {
     })
 }
 
-/// The cell diff, plus the cell to the right of every changed cell whose old
-/// or new symbol a terminal may draw two wide: on such a terminal that
-/// neighbour is the glyph's second half, so it is stale whenever the glyph
-/// changes even though the model never touched it.
+/// The cell diff, plus the run of cells to the right of every changed cell
+/// whose old or new symbol a terminal may draw two wide: on such a terminal
+/// that neighbour is the glyph's second half, so it is stale whenever the
+/// glyph changes even though the model never touched it.
+///
+/// The walk continues while the cell it just yielded may itself widen, since
+/// repainting a two-column glyph pushes the same staleness one column further
+/// right, and stops at the first cell that does not -- a run of box drawing
+/// whose leftmost cell changes is repainted to its end. It also stops at a
+/// cell `ratatui` itself calls multi-column (its continuation column belongs
+/// to the glyph, not to stale content) and at the right edge of the area.
 ///
 /// Row-major left-to-right order is preserved, so [`draw_resynced`]'s
-/// adjacency logic is unchanged. A neighbour is skipped where the diff
-/// already carries it, where the new cell is itself multi-column (its own
-/// continuation column belongs to the glyph, not to stale content), and at
-/// the right edge of the area.
+/// adjacency logic is unchanged, and a column the diff already carries is
+/// left to the diff rather than yielded twice.
 pub(crate) fn with_widened_neighbours<'p, 'n>(
     front: &'p Buffer,
     back: &'n Buffer,
@@ -69,21 +74,21 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 ) -> impl Iterator<Item = (u16, u16, &'n Cell)> + use<'p, 'n> {
     let right = back.area.right();
     let mut diff = diff.peekable();
-    let mut pending: Option<(u16, u16, &'n Cell)> = None;
+    let mut pending: Option<(u16, u16)> = None;
     std::iter::from_fn(move || {
-        if let Some(item) = pending.take() {
-            return Some(item);
-        }
-        let (x, y, cell) = diff.next()?;
+        let (x, y, cell) = match pending.take() {
+            Some((x, y)) => (x, y, back.cell((x, y))?),
+            None => diff.next()?,
+        };
         let widened = terminal_may_widen(cell.symbol())
             || front
                 .cell((x, y))
                 .is_some_and(|old| terminal_may_widen(old.symbol()));
         if widened && cell.cell_width() <= 1 {
             if let Some(nx) = x.checked_add(1).filter(|nx| *nx < right) {
-                let already = matches!(diff.peek(), Some(&(px, py, _)) if px == nx && py == y);
-                if !already {
-                    pending = back.cell((nx, y)).map(|neighbour| (nx, y, neighbour));
+                let carried = matches!(diff.peek(), Some(&(px, py, _)) if px == nx && py == y);
+                if !carried && back.cell((nx, y)).is_some() {
+                    pending = Some((nx, y));
                 }
             }
         }
