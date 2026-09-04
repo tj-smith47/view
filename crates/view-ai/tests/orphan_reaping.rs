@@ -271,7 +271,52 @@ fn a_crashed_adapter_is_collected_rather_than_left_behind() {
     }
 }
 
+/// A session that ends because the agent's output stopped being frames
+/// still collects the adapter it signalled.
+///
+/// The ending an agent reaches by crashing halfway through a write, rather
+/// than by exiting: the child is alive when the session gives up on it, so
+/// the signal and the wait are both this side's to perform.
+///
+/// Linux only: the process state this reads is `/proc`'s.
+#[test]
+fn a_session_that_ends_on_a_broken_frame_still_collects_its_adapter() {
+    #[cfg(not(target_os = "linux"))]
+    {
+        view_test_support::announce_skip(
+            "a_session_that_ends_on_a_broken_frame_still_collects_its_adapter",
+            "the process state this reads is /proc's",
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let dir = view_test_support::ScratchDir::new("ai-broken-frame-reaping").unwrap();
+        let (session, rx) = stub_session(&dir);
+        let agent = session.pid().expect("the session must hold its adapter");
+        session.send(AiCommand::Prompt {
+            text: "garble".to_string(),
+            context: Vec::new(),
+        });
+        let AiEvent::SessionCrashed { message } = next_event(&rx, "SessionCrashed") else {
+            panic!("a broken frame must end the session");
+        };
+        assert!(
+            !message.starts_with("the agent exited"),
+            "the session ended on the agent's exit rather than on the frame it could not read, \
+             so this case would say nothing about the ending it exists for; message: {message}"
+        );
+        if let Err(state) = await_collection(agent) {
+            panic!(
+                "the adapter {agent} was signalled on a broken frame and never waited on \
+                 (process state {state}), so the endings an agent reaches by crashing are the \
+                 ones that accumulate"
+            );
+        }
+    }
+}
+
 /// Dropping a session collects the adapter it signals, without the editor's
+/// own thread waiting for it./// Dropping a session collects the adapter it signals, without the editor's
 /// own thread waiting for it.
 ///
 /// Linux only, as above.

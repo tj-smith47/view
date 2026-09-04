@@ -344,6 +344,15 @@ fn main() {
                         stall();
                     }
                     "die" => std::process::exit(9),
+                    "garble" => {
+                        // a line the reader cannot parse, from a process that
+                        // then stays alive: the one ending a well-formed agent
+                        // never produces, and the only way to reach it from
+                        // outside the crate
+                        let _ = writeln!(stdout, "{{not a frame");
+                        let _ = stdout.flush();
+                        stall();
+                    }
                     "stream-forever" => stream_sustained(&mut stdout),
                     "stream" => {
                         stream_chunks(&mut stdout);
