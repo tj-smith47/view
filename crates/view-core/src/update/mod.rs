@@ -21,16 +21,47 @@ use crate::native::views::Span;
 /// install -- so the hold cannot silently swallow a message.
 const STARTUP_HOLD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// When the last of a claimant's startup complaints was sighted, measured
+/// from launch on the heavy compat fixture (`noice`/`unaccommodated`,
+/// `VIEW_COMPAT_LOG`): noice re-runs its health check on a one-second
+/// interval and raises the one about view holding `vim.notify` on the
+/// fifth cycle, past any realistic first keystroke. The probe reply that
+/// arms the grace landed at 0.39 s of that same launch, so 4.57 s of the
+/// grace was spent by the time the complaint arrived.
+const COMPLAINT_RAISE_MEASURED: std::time::Duration = std::time::Duration::from_millis(4960);
+
+/// The plugin's own checker interval (`noice/health.lua`, `Util.interval(1000, ..)`):
+/// the unit a raise moves in when the launch it rides on stretches.
+const CLAIMANT_CHECKER_CYCLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How much later than measured a raise is allowed to land and still be
+/// taken down. The two ends run on different clocks -- the grace is
+/// anchored to view's own probe reply, the raise to how long the plugin
+/// took to load and tick -- and plugin loading is what a slow runner
+/// stretches, so the margin is a multiple of the raise rather than a
+/// cycle or two added to it.
+const COMPLAINT_RAISE_SLACK: u32 = 2;
+
 /// How long after a claimant is named view still takes that claimant's
 /// complaints down, once the user has acted.
 ///
-/// Keyed to the plugin's own cadence rather than to a launch: noice re-runs
-/// its health check on a one-second interval and raises the complaint about
-/// view holding `vim.notify` at about 4.8 s into a heavy launch, which is
-/// past any realistic first keystroke. Six seconds covers that raise with a
-/// cycle of the plugin's own timer to spare, and is short enough that a
-/// window the user opens later is outside it.
-const COMPLAINT_GRACE: std::time::Duration = std::time::Duration::from_secs(6);
+/// Derived from the measured raise rather than written down, so the margin
+/// is on the record: twice [`COMPLAINT_RAISE_MEASURED`], which leaves about
+/// five of the plugin's own checker cycles past the raise on the host it
+/// was measured on. Long enough for a stretched launch, short enough that
+/// a window the user opens minutes later is outside it; what bounds the
+/// take-down inside it is the complaint signature, not the clock.
+const COMPLAINT_GRACE: std::time::Duration =
+    COMPLAINT_RAISE_MEASURED.saturating_mul(COMPLAINT_RAISE_SLACK);
+
+// tied at compile time rather than by comment: a grace shrunk below the
+// measured raise plus one checker cycle would leave the complaint standing
+// on the host it was measured on, and fail as a remote-leg flake
+const _: () = assert!(
+    COMPLAINT_GRACE.as_millis()
+        >= COMPLAINT_RAISE_MEASURED.as_millis() + CLAIMANT_CHECKER_CYCLE.as_millis(),
+    "COMPLAINT_GRACE must outlast the measured raise by a checker cycle"
+);
 
 mod ai;
 mod ai_fs;
@@ -238,6 +269,7 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // and a config that parks nvim on an error never reaches one
             Effect::ScheduleStartupHold {
                 after: STARTUP_HOLD_DEADLINE,
+                generation: model.surface_conflicts.engine_generation(),
             },
         ],
         Msg::EngineDown(exit) => {
@@ -540,11 +572,19 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             selected,
         } => surface_conflict::on_float_rows(model, win, hidden, lines, selected),
         Msg::ClaimantsProbed(probed) => surface_conflict::on_claimants_probed(model, &probed),
-        Msg::ComplaintGraceExpired => {
-            model.surface_conflicts.end_complaint_grace();
+        Msg::ComplaintGraceExpired { generation } => {
+            model.surface_conflicts.end_complaint_grace(generation);
             Vec::new()
         }
-        Msg::StartupHoldExpired => {
+        // a deadline the dead engine's attach armed, still ticking in its
+        // own thread past the restart: the replacement re-arms on its own
+        // attach, and answers to that one alone
+        Msg::StartupHoldExpired { generation }
+            if generation != model.surface_conflicts.engine_generation() =>
+        {
+            Vec::new()
+        }
+        Msg::StartupHoldExpired { .. } => {
             model.dirty |= model
                 .engine
                 .messages

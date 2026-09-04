@@ -386,12 +386,27 @@ pub enum Msg {
     /// hold, which is what makes an engine that never answers degrade to
     /// the behaviour view had before the hold existed rather than to
     /// silence.
-    StartupHoldExpired,
+    ///
+    /// `generation` is the arming effect's own, echoed back: the timer
+    /// thread a dead engine's attach armed still wakes, and a replacement
+    /// that re-armed the hold on its own attach ignores an expiry that does
+    /// not carry its generation
+    /// (`SurfaceConflicts::engine_generation`), or the dead engine's clock
+    /// would release the replacement's hold early.
+    StartupHoldExpired {
+        generation: u64,
+    },
     /// The claimant-complaint grace elapsed
     /// ([`Effect::ScheduleComplaintGrace`]). After this a complaint a named
     /// claimant raises over the message area is left standing like any
     /// other window the session is holding.
-    ComplaintGraceExpired,
+    ///
+    /// `generation` is gated on the same terms as
+    /// [`Msg::StartupHoldExpired`]: a grace the dead engine's probe reply
+    /// armed must not close the one the replacement's reply armed.
+    ComplaintGraceExpired {
+        generation: u64,
+    },
     /// One `nvim_buf_lines_event` notification forwarded from a buffer
     /// attached via `RpcCall::BufAttach`. Carries nvim's own change shape
     /// verbatim -- distinct from [`Msg::BufferChanged`] (the statusline's
@@ -1276,8 +1291,12 @@ pub enum Effect {
     /// remaining release, so an engine that dies before the probe answers,
     /// in a session where nobody types, keeps its startup messages in the
     /// history and paints none of them.
+    ///
+    /// `generation` names the engine the deadline is armed for, and the
+    /// expiry carries it back unchanged ([`Msg::StartupHoldExpired`]).
     ScheduleStartupHold {
         after: Duration,
+        generation: u64,
     },
     /// Arms the claimant-complaint grace's deadline: after `after` elapses
     /// the timer worker sends [`Msg::ComplaintGraceExpired`] into the loop.
@@ -1290,8 +1309,12 @@ pub enum Effect {
     /// claimant draws over the message area is taken down for the rest of
     /// that engine's life whenever its rows read as a complaint about the
     /// surfaces view took.
+    ///
+    /// `generation` is carried and echoed on the same terms as
+    /// [`Effect::ScheduleStartupHold`]'s.
     ScheduleComplaintGrace {
         after: Duration,
+        generation: u64,
     },
     /// Re-nominates `path` after a grace period, so an answer of
     /// [`CheckTimeOutcome::FileGone`] is confirmed before anything is said

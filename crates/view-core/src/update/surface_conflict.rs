@@ -101,6 +101,7 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
         if model.surface_conflicts.arm_complaint_grace() {
             effects.push(Effect::ScheduleComplaintGrace {
                 after: super::COMPLAINT_GRACE,
+                generation: model.surface_conflicts.engine_generation(),
             });
         }
         HoldOutcome::Collapse
@@ -236,7 +237,8 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 /// taking a window out from under the person reading it. The grace exists
 /// because a claimant's own complaints are not all raised by the time
 /// anyone can type, and inside it the rows have to read as a complaint
-/// before anything is closed ([`on_float_rows`]).
+/// before anything is closed ([`on_float_rows`]) -- which bar applies is
+/// fixed here, at the sighting, not when the reply lands.
 fn take_complaint(model: &mut Model, float: &FloatSighting, surface: Surface) -> Vec<Effect> {
     if surface != Surface::Messages {
         return Vec::new();
@@ -338,11 +340,11 @@ pub(super) fn on_float_rows(
     selected: Option<usize>,
 ) -> Vec<Effect> {
     if model.surface_conflicts.is_complaint(win) {
-        // the grace's own bar, read here because the rows are what it is
-        // about: before anyone has acted, a float over a covered surface is
-        // a complaint by construction, and after that only its text can say
-        // so -- a window the user opened there is theirs to close
-        if !model.surface_conflicts.startup_window_open()
+        // the grace's own bar, applied here because the rows are what it is
+        // about, but decided at the sighting: a float sighted before anyone
+        // had acted is a complaint by construction, and a key landing inside
+        // this round trip does not turn it into a window the user opened
+        if !model.surface_conflicts.claimed_unconditionally(win)
             && !surfaces::SurfaceConflicts::reads_as_complaint(&lines)
         {
             return Vec::new();
@@ -1391,6 +1393,50 @@ mod tests {
         );
     }
 
+    /// The startup hold's deadline, as the timer thread the running
+    /// engine's attach armed would deliver it.
+    fn expire_hold(model: &mut Model) {
+        let expired = Msg::StartupHoldExpired {
+            generation: model.surface_conflicts.engine_generation(),
+        };
+        let _ = update(model, expired);
+    }
+
+    /// The complaint grace's deadline, as the timer thread the running
+    /// engine's probe reply armed would deliver it.
+    fn expire_grace(model: &mut Model) {
+        let expired = Msg::ComplaintGraceExpired {
+            generation: model.surface_conflicts.engine_generation(),
+        };
+        let _ = update(model, expired);
+    }
+
+    fn key(model: &mut Model) {
+        let _ = update(
+            model,
+            Msg::Key(crate::msg::Key {
+                notation: "j".to_string(),
+            }),
+        );
+    }
+
+    /// The generation the one grace `effects` arms carries.
+    fn armed_grace(effects: &[Effect]) -> u64 {
+        let generations: Vec<u64> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::ScheduleComplaintGrace { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            generations.len(),
+            1,
+            "one grace per naming reply: {effects:?}"
+        );
+        generations[0]
+    }
+
     /// The wording `compat/scenarios/noice.toml` reads back off a real
     /// screen, asserted here so a reworded notice fails in a unit test
     /// rather than in a 15-second pty wait.
@@ -1676,7 +1722,7 @@ mod tests {
     fn a_claimants_own_startup_complaint_goes_to_the_history_and_the_window_goes() {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
-        let _ = update(&mut model, Msg::StartupHoldExpired);
+        expire_hold(&mut model);
         let claimant = notices(&model);
         assert_eq!(claimant.len(), 1, "{claimant:?}");
 
@@ -1791,7 +1837,7 @@ mod tests {
     fn a_replacement_engine_inherits_no_window_handle_and_no_keypress() {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
-        let _ = update(&mut model, Msg::StartupHoldExpired);
+        expire_hold(&mut model);
         let float = toast("markdown");
         let _ = update(&mut model, Msg::FloatObserved(float.clone()));
         let _ = update(
@@ -1803,6 +1849,8 @@ mod tests {
         assert!(model.surface_conflicts.is_complaint(float.win));
         assert!(!model.surface_conflicts.startup_window_open());
 
+        assert!(model.surface_conflicts.within_complaint_grace());
+
         model.forget_engine_conflicts();
 
         assert!(
@@ -1813,6 +1861,100 @@ mod tests {
         assert!(
             model.surface_conflicts.startup_window_open(),
             "the replacement gets its own startup, and its own claimants complain again"
+        );
+        assert!(
+            !model.surface_conflicts.within_complaint_grace(),
+            "the grace was the dead engine's probe reply's; the replacement's reply arms its own"
+        );
+    }
+
+    /// The dead engine's grace timer is still sleeping in its thread when
+    /// the replacement's probe reply arms a grace of its own, and it wakes
+    /// first. Its expiry carries the generation it was armed under, and the
+    /// replacement's grace stays open until the expiry that carries its
+    /// own -- or the late complaint the grace exists for is left standing
+    /// beside the re-raised notice, seconds early.
+    #[test]
+    fn a_dead_engines_grace_expiry_does_not_close_the_replacements() {
+        let mut model = captured_session();
+        let dead = armed_grace(&update(
+            &mut model,
+            Msg::ClaimantsProbed(vec!["noice".to_string()]),
+        ));
+
+        model.forget_engine_conflicts();
+        let live = armed_grace(&update(
+            &mut model,
+            Msg::ClaimantsProbed(vec!["noice".to_string()]),
+        ));
+        assert_ne!(
+            dead, live,
+            "two engines, one generation: nothing tells the expiries apart"
+        );
+
+        let _ = update(&mut model, Msg::ComplaintGraceExpired { generation: dead });
+        assert!(
+            model.surface_conflicts.within_complaint_grace(),
+            "the dead engine's deadline closed the replacement's grace"
+        );
+        let _ = update(&mut model, Msg::ComplaintGraceExpired { generation: live });
+        assert!(!model.surface_conflicts.within_complaint_grace());
+    }
+
+    /// The bar is fixed where the take-down is decided. A float sighted
+    /// inside the startup window is a complaint by construction, and a key
+    /// landing between the read and its reply does not re-open the question:
+    /// rows quoting neither `vim.notify` nor a surface name -- a plugin that
+    /// names the conflict in prose -- are still filed and the window still
+    /// goes, rather than left standing with its handle marked as read so
+    /// no later scan looks again.
+    #[test]
+    fn a_key_inside_the_read_round_trip_does_not_drop_a_complaint_the_sighting_qualified() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        assert!(model.surface_conflicts.startup_window_open());
+        let float = toast("markdown");
+        let read = update(&mut model, Msg::FloatObserved(float.clone()));
+        assert!(
+            matches!(
+                read.as_slice(),
+                [Effect::Rpc(RpcCall::ReadFloatRows { win })] if *win == float.win
+            ),
+            "{read:?}"
+        );
+
+        key(&mut model);
+        assert!(!model.surface_conflicts.startup_window_open());
+
+        let prose = "noice.nvim: this GUI is unsupported";
+        assert!(
+            !crate::native::surfaces::SurfaceConflicts::reads_as_complaint(&[prose.to_string()]),
+            "the row has to carry no signature, or the reply-time bar would pass it anyway"
+        );
+        let closed = update(
+            &mut model,
+            Msg::FloatRows {
+                win: float.win,
+                hidden: false,
+                lines: vec![prose.to_string()],
+                selected: None,
+            },
+        );
+        assert!(
+            closed.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::CloseFloat { win }) if *win == float.win
+            )),
+            "the sighting qualified it; the keystroke inside the round trip dropped it: {closed:?}"
+        );
+        assert!(
+            model
+                .engine
+                .toast_history
+                .entries()
+                .flat_map(|entry| entry.lines())
+                .any(|line| line == prose),
+            "filed in the plugin's own words"
         );
     }
 
@@ -1848,7 +1990,7 @@ mod tests {
             "the running deadline is the grace; a second arming ends it early: {again:?}"
         );
 
-        let _ = update(&mut model, Msg::ComplaintGraceExpired);
+        expire_grace(&mut model);
         assert!(!model.surface_conflicts.within_complaint_grace());
     }
 
@@ -1860,7 +2002,7 @@ mod tests {
     fn a_complaint_raised_after_the_first_key_is_taken_inside_the_grace() {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
-        let _ = update(&mut model, Msg::StartupHoldExpired);
+        expire_hold(&mut model);
         let _ = update(
             &mut model,
             Msg::Key(crate::msg::Key {
@@ -1914,7 +2056,7 @@ mod tests {
     fn a_window_the_user_opened_inside_the_grace_stays_open() {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
-        let _ = update(&mut model, Msg::StartupHoldExpired);
+        expire_hold(&mut model);
         let _ = update(
             &mut model,
             Msg::Key(crate::msg::Key {
@@ -1945,6 +2087,53 @@ mod tests {
                 .flat_map(|entry| entry.lines())
                 .all(|line| !line.contains("Ctrl-D to dismiss")),
             "nothing the user is reading is filed as a complaint"
+        );
+    }
+
+    /// The residual the grace accepts, recorded so it is falsifiable: a
+    /// window the user opened over the message area inside the grace whose
+    /// rows quote one of view's surface names -- a `:Noice` log listing
+    /// the health error -- reads as a complaint, and is filed and closed.
+    /// The cost is a reopenable window whose text is in the history; the
+    /// alternative, a second required token in the plugin's own English,
+    /// fails toward two boxes when the plugin rewords. A later attempt to
+    /// narrow the signature fails here by name.
+    #[test]
+    fn a_log_the_user_opened_inside_the_grace_that_quotes_a_surface_name_is_taken() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        expire_hold(&mut model);
+        key(&mut model);
+        assert!(!model.surface_conflicts.startup_window_open());
+        assert!(model.surface_conflicts.within_complaint_grace());
+
+        let float = toast("noice");
+        let _ = update(&mut model, Msg::FloatObserved(float.clone()));
+        let log = "12:00:01 ERROR  Noice can't work when the GUI has `ext_cmdline` enabled";
+        let answered = update(
+            &mut model,
+            Msg::FloatRows {
+                win: float.win,
+                hidden: false,
+                lines: vec![log.to_string()],
+                selected: None,
+            },
+        );
+        assert!(
+            answered.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::CloseFloat { win }) if *win == float.win
+            )),
+            "the accepted cost of the signature, no longer accepted: {answered:?}"
+        );
+        assert!(
+            model
+                .engine
+                .toast_history
+                .entries()
+                .flat_map(|entry| entry.lines())
+                .any(|line| line == log),
+            "what was closed under the user's hand is at least in the history"
         );
     }
 
@@ -1987,7 +2176,7 @@ mod tests {
                 notation: "j".to_string(),
             }),
         );
-        let _ = update(&mut model, Msg::ComplaintGraceExpired);
+        expire_grace(&mut model);
         assert!(
             update(&mut model, Msg::FloatObserved(toast("markdown"))).is_empty(),
             "a window the user opened is not view's to close"

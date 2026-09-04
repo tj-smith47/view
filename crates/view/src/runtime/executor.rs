@@ -575,12 +575,12 @@ impl<E: EngineOps> Executor<E> {
             // channel leaves the hold to be resolved by the probe's answer
             // or the first keypress, both of which arrive on paths that do
             // not need a clock
-            Effect::ScheduleStartupHold { after } => {
+            Effect::ScheduleStartupHold { after, generation } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
                     spawn_or_log("startup-hold", move || {
                         std::thread::sleep(after);
-                        let _ = tx.send(Msg::StartupHoldExpired);
+                        let _ = tx.send(Msg::StartupHoldExpired { generation });
                     });
                 }
                 Flow::Continue
@@ -588,12 +588,12 @@ impl<E: EngineOps> Executor<E> {
             // the same one-shot thread again, and the degrade `msg.rs`
             // states: an unwired channel leaves the grace open, which is a
             // take-down bounded by the complaint signature alone
-            Effect::ScheduleComplaintGrace { after } => {
+            Effect::ScheduleComplaintGrace { after, generation } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
                     spawn_or_log("complaint-grace", move || {
                         std::thread::sleep(after);
-                        let _ = tx.send(Msg::ComplaintGraceExpired);
+                        let _ = tx.send(Msg::ComplaintGraceExpired { generation });
                     });
                 }
                 Flow::Continue

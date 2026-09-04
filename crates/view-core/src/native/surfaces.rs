@@ -531,14 +531,15 @@ pub struct SurfaceConflicts {
     /// same `[native]` line -- and a second box saying so is the
     /// two-notices-for-one-plugin case the spec forbids.
     covers: Vec<Cover>,
-    /// The floating windows whose text has already been claimed for the
-    /// notification history, so a scan that sights one again before its
-    /// close lands does not record it twice. Emptied only by
+    /// The floating windows the take-down has already asked rows of,
+    /// whether or not the answer was filed, so a scan that sights one again
+    /// before its close lands does not record it twice. Each carries the
+    /// bar its reply is held to, decided at the sighting. Emptied only by
     /// [`SurfaceConflicts::forget_engine`]: within one engine the handles
     /// stay valid names for windows that are gone, and the set is bounded
     /// by the floats one startup opens, but a replacement process issues
     /// handles from 1000 again.
-    complaints: Vec<u64>,
+    complaints: Vec<Complaint>,
     /// Whether the user has acted -- a key, a click or a paste -- which is
     /// where spec 5.5 ends the startup conflict window.
     typed: bool,
@@ -556,6 +557,25 @@ pub struct SurfaceConflicts {
     /// opened over the message area -- `:Noice` output being the realistic
     /// case -- is left standing.
     complaint_grace: bool,
+    /// Which engine the deadlines armed this session belong to. A timer
+    /// thread sleeping on a dead engine's behalf still wakes, and the
+    /// expiry it sends names this value as it was when the deadline was
+    /// armed: bumped by [`SurfaceConflicts::forget_engine`], so the
+    /// replacement answers to no deadline but its own.
+    generation: u64,
+}
+
+/// One float the take-down has claimed, and the bar its rows are held to.
+#[derive(Debug)]
+struct Complaint {
+    win: u64,
+    /// Whether the sighting alone qualified it: inside the startup window a
+    /// float over a covered surface is a complaint by construction, and the
+    /// rows are filed unread. Decided when the read is asked for, never
+    /// when it is answered -- the user can act inside that round trip, and
+    /// a bar re-read at the reply would drop a complaint the sighting had
+    /// already qualified.
+    unconditional: bool,
 }
 
 /// One named claimant's accounted-for surfaces, with the identities its own
@@ -710,11 +730,18 @@ impl SurfaceConflicts {
     /// the close that follows the read is a notification with no reply, so
     /// a plugin whose complaint outlives one scan would otherwise have its
     /// lines recorded once per scan until the window went.
+    ///
+    /// The bar the reply is held to is fixed here, from whether the startup
+    /// window is still open at the sighting
+    /// ([`Self::claimed_unconditionally`]).
     pub fn claim_complaint(&mut self, win: u64) -> bool {
-        if self.complaints.contains(&win) {
+        if self.is_complaint(win) {
             return false;
         }
-        self.complaints.push(win);
+        self.complaints.push(Complaint {
+            win,
+            unconditional: self.startup_window_open(),
+        });
         true
     }
 
@@ -723,7 +750,24 @@ impl SurfaceConflicts {
     /// from the other.
     #[must_use]
     pub fn is_complaint(&self, win: u64) -> bool {
-        self.complaints.contains(&win)
+        self.complaints.iter().any(|complaint| complaint.win == win)
+    }
+
+    /// Whether `win` was sighted inside the startup window, where its rows
+    /// are filed without being read for a signature. `false` for a window
+    /// never claimed, which is a reply nothing is waiting on.
+    #[must_use]
+    pub fn claimed_unconditionally(&self, win: u64) -> bool {
+        self.complaints
+            .iter()
+            .any(|complaint| complaint.win == win && complaint.unconditional)
+    }
+
+    /// The engine every deadline armed from now on belongs to, carried in
+    /// the arming effect and echoed back in its expiry.
+    #[must_use]
+    pub fn engine_generation(&self) -> u64 {
+        self.generation
     }
 
     /// Notes that the user has acted -- a key, a click or a paste --
@@ -754,9 +798,14 @@ impl SurfaceConflicts {
         self.complaint_grace
     }
 
-    /// Closes the grace, on the deadline the arming scheduled.
-    pub fn end_complaint_grace(&mut self) {
-        self.complaint_grace = false;
+    /// Closes the grace, on the deadline the arming scheduled -- and only
+    /// that one: an expiry carrying another engine's `generation` was armed
+    /// against a probe reply this engine never gave, and closing on it
+    /// would end the replacement's grace early.
+    pub fn end_complaint_grace(&mut self, generation: u64) {
+        if generation == self.generation {
+            self.complaint_grace = false;
+        }
     }
 
     /// Whether the lines a float was drawing read as a plugin complaining
@@ -771,10 +820,15 @@ impl SurfaceConflicts {
     /// rather than written down, so a surface added later is matched
     /// without a second list to remember.
     ///
-    /// Only consulted once the user has acted: inside the startup window
-    /// every complaint over a surface a named claimant covers is taken,
-    /// text unread. This is the narrower bar the grace runs under, and the
-    /// cost of getting it wrong is a window closed under someone's hand.
+    /// Only consulted for a float sighted after the user has acted: inside
+    /// the startup window every complaint over a surface a named claimant
+    /// covers is taken, text unread, and which bar applies is fixed at the
+    /// sighting ([`Self::claim_complaint`]). This is the narrower bar the
+    /// grace runs under, and the cost of getting it wrong is a window
+    /// closed under someone's hand. The cost the other way is accepted and
+    /// pinned: a window the user opened that quotes one of these names --
+    /// a `:Noice` log listing the health error -- reads as a complaint
+    /// inside the grace and is filed and closed.
     #[must_use]
     pub fn reads_as_complaint(lines: &[String]) -> bool {
         lines.iter().any(|line| {
@@ -794,12 +848,14 @@ impl SurfaceConflicts {
     /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
     /// | `typed` | the replacement sources the config again, so its own claimants raise their complaints again, and a session that had been typed at would leave them stacked beside the re-raised notice |
     /// | `complaint_grace` | a deadline armed against the dead engine's probe reply, and the replacement's own reply arms its own |
+    /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config loads the same plugins -- forgetting it would raise a second notice per plugin for one conflict |
     /// | `covers` | kept: the surfaces a standing notice accounts for, which the replacement's notice accounts for identically |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();
         self.typed = false;
         self.complaint_grace = false;
+        self.generation += 1;
     }
 
     /// Whether the startup conflict window is still open, which is spec
@@ -1686,6 +1742,34 @@ mod tests {
         assert!(
             matrix.contains(NONE_CELL),
             "the none marker never renders, so a coverage gap could not be seen"
+        );
+    }
+
+    /// The half of the signature the enum derivation is for: every surface
+    /// name a GUI can take reads as a complaint when a plugin quotes it,
+    /// and a row naming none of them, nor `vim.notify`, reads as the user's.
+    /// Walked over `ALL_MULTIGRID` rather than a copied list, so a surface
+    /// added later joins the pin by existing -- and narrowing the
+    /// derivation to the shipped set fails here by the name it dropped.
+    #[test]
+    fn every_surface_name_a_plugin_can_quote_reads_as_a_complaint() {
+        for ext in crate::native::ext::ALL_MULTIGRID {
+            let line = format!("You're using a GUI that uses `{}`", ext.as_str());
+            assert!(
+                SurfaceConflicts::reads_as_complaint(std::slice::from_ref(&line)),
+                "{line:?} is a plugin saying it cannot work under view, and reads as nothing"
+            );
+        }
+        assert!(SurfaceConflicts::reads_as_complaint(&[
+            "`vim.notify` has been overwritten by another plugin?".to_string()
+        ]));
+        assert!(
+            !SurfaceConflicts::reads_as_complaint(&[
+                String::new(),
+                "2 messages  Ctrl-D to dismiss".to_string(),
+                "written 12 lines".to_string(),
+            ]),
+            "a window quoting no surface and no function is the user's to close"
         );
     }
 

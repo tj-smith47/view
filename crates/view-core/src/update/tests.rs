@@ -9508,7 +9508,10 @@ fn the_hold_deadline_releases_what_the_probe_never_answered_for() {
         }]),
     );
     assert!(m.engine.messages.entries.is_empty());
-    let effects = update(&mut m, Msg::StartupHoldExpired);
+    let expired = Msg::StartupHoldExpired {
+        generation: m.surface_conflicts.engine_generation(),
+    };
+    let effects = update(&mut m, expired);
     assert_eq!(m.engine.messages.entries.len(), 1);
     assert_eq!(
         armed_slots(&effects),
@@ -9517,6 +9520,65 @@ fn the_hold_deadline_releases_what_the_probe_never_answered_for() {
          at the top of the stack, never while it was still parked: {effects:?}"
     );
     assert!(m.dirty, "a line arriving on screen is a repaint");
+}
+
+/// The deadline a dead engine's attach armed is still sleeping in its
+/// thread when the replacement attaches and arms its own; it wakes first.
+/// Its expiry carries the generation it was armed under, and the hold the
+/// replacement is still parking messages under stays until the expiry
+/// carrying the replacement's own -- or the dead engine's clock releases
+/// the replacement's startup messages onto the stack early.
+#[test]
+fn a_dead_engines_hold_expiry_does_not_release_the_replacements() {
+    fn armed_generation(effects: &[Effect]) -> u64 {
+        let generations: Vec<u64> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::ScheduleStartupHold { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            generations.len(),
+            1,
+            "one hold deadline per attach: {effects:?}"
+        );
+        generations[0]
+    }
+    let mut m = model();
+    let dead = armed_generation(&update(&mut m, Msg::EngineAttached));
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "echomsg".into(),
+            content: vec![(0, "a plugin said something".into())],
+            replace_last: false,
+        }]),
+    );
+    assert!(
+        m.engine.messages.entries.is_empty(),
+        "parked under the hold"
+    );
+
+    m.forget_engine_conflicts();
+    let live = armed_generation(&update(&mut m, Msg::EngineAttached));
+    assert_ne!(
+        dead, live,
+        "two engines, one generation: nothing tells the expiries apart"
+    );
+
+    let _ = update(&mut m, Msg::StartupHoldExpired { generation: dead });
+    assert!(
+        m.engine.messages.entries.is_empty(),
+        "the dead engine's deadline released the replacement's hold: {:?}",
+        m.engine.messages.entries
+    );
+    let _ = update(&mut m, Msg::StartupHoldExpired { generation: live });
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
+        "the replacement's own deadline releases it"
+    );
 }
 
 #[test]
