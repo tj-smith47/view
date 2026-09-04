@@ -29,9 +29,6 @@ const QUIET: Duration = Duration::from_millis(500);
 /// intermediate harness the reaping case kills.
 const INTERMEDIATE: &str = "VIEW_BENCH_REMOTE_UI_INTERMEDIATE";
 
-/// How long the intermediate harness is given to have a server of its own.
-const SERVER_APPEARS: Duration = Duration::from_secs(30);
-
 /// How long the server is given to leave once its harness has been killed.
 ///
 /// The discriminator, not slack: an unreaped server does not leave at all.
@@ -87,18 +84,10 @@ fn bare_spec(nvim: PathBuf, dir: &ScratchDir) -> SpawnSpec {
 #[test]
 fn a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing() {
     let Some(nvim) = nvim_bin() else {
-        // `cargo test` swallows stdout/stderr for a passing test, so a
-        // plain eprintln here is indistinguishable from an actual pass in
-        // the default run's output -- add the same `::warning::` workflow
-        // command `view-harness`'s bench binary uses for platform-skipped
-        // cells (see `skip_announcements` in `view-harness/src/bin/bench.rs`)
-        // so a skip on CI still surfaces on the checks page instead of
-        // silently reading as a verified mechanism proof.
-        let reason = "no nvim on PATH or at $VIEW_NVIM_BIN";
-        println!("skipping a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing: {reason}");
-        if std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true") {
-            println!("::warning::remote_ui mechanism test skipped: {reason}");
-        }
+        view_test_support::announce_skip(
+            "a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing",
+            "no nvim on PATH or at $VIEW_NVIM_BIN",
+        );
         return;
     };
     let dir = scratch("echo");
@@ -145,6 +134,9 @@ fn a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The line the intermediate writes to stderr once its server is listening.
+const PID_MARKER: &str = "remote-ui control server pid ";
+
 /// Turns this binary into a harness that owns a live control server and then
 /// stops, so the case below has something to kill outright.
 ///
@@ -153,8 +145,14 @@ fn a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing() {
 /// that call would be proving its own copy of it. Inert unless the case
 /// below re-execs this binary with `INTERMEDIATE` set, which is what keeps
 /// an ordinary `cargo test` run from parking here.
+///
+/// Reports the server's own pid rather than leaving the case to recognise it:
+/// every capability probe this file runs is also called `nvim`, so a search
+/// by name adopts whichever one the process table happens to hold.
 #[test]
 fn the_intermediate_parent() {
+    use std::io::Write;
+
     if std::env::var_os(INTERMEDIATE).is_none() {
         return;
     }
@@ -163,9 +161,12 @@ fn the_intermediate_parent() {
     };
     let dir = scratch("orphan-intermediate");
     let bare = bare_spec(nvim, &dir);
-    let _server = RemoteUiServer::start(&bare, dir.join("ui.sock")).expect("headless server");
-    // parks here holding the server: the case below reads the child off
-    // procfs and kills this process without ever writing a byte
+    let server = RemoteUiServer::start(&bare, dir.join("ui.sock")).expect("headless server");
+    let mut stderr = std::io::stderr();
+    writeln!(stderr, "{PID_MARKER}{}", server.pid()).unwrap();
+    stderr.flush().unwrap();
+    // parks here holding the server: the case below kills this process
+    // without ever writing a byte
     let mut byte = [0_u8; 1];
     let _ = std::io::Read::read(&mut std::io::stdin(), &mut byte);
 }
@@ -176,62 +177,74 @@ fn the_intermediate_parent() {
 /// The server has no pty to hang up and no controlling terminal, so nothing
 /// about a dead harness reaches it on its own: a headless nvim left holding
 /// its socket is a stray that lives until the host is rebooted.
-#[cfg(target_os = "linux")]
+///
+/// Linux only: `PR_SET_PDEATHSIG` is what covers this, and the other two
+/// platforms have nothing armed for it (see `view_proc::spawn_tied_to_this_process`).
 #[test]
 fn a_control_server_dies_with_a_harness_that_was_killed_outright() {
-    if nvim_bin().is_none() {
-        let reason = "no nvim on PATH or at $VIEW_NVIM_BIN";
-        println!(
-            "skipping a_control_server_dies_with_a_harness_that_was_killed_outright: {reason}"
+    use std::io::BufRead;
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        view_test_support::announce_skip(
+            "a_control_server_dies_with_a_harness_that_was_killed_outright",
+            "no parent-death signal is armed off Linux",
         );
-        if std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true") {
-            println!("::warning::remote_ui reaping test skipped: {reason}");
-        }
         return;
     }
-    let mut harness = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["the_intermediate_parent", "--exact", "--nocapture"])
-        .env(INTERMEDIATE, "1")
-        // the park above reads this, so it stays open rather than answering
-        // EOF the moment the case starts
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("re-exec this test binary as the intermediate harness");
-
-    let deadline = std::time::Instant::now() + view_test_support::host_deadline(SERVER_APPEARS);
-    let mut server = None;
-    while std::time::Instant::now() < deadline {
-        server = view_test_support::child_pids(harness.id())
-            .into_iter()
-            .find(|pid| {
-                std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                    .is_ok_and(|comm| comm.trim() == "nvim")
-            });
-        if server.is_some() {
-            break;
+    #[cfg(target_os = "linux")]
+    {
+        if nvim_bin().is_none() {
+            view_test_support::announce_skip(
+                "a_control_server_dies_with_a_harness_that_was_killed_outright",
+                "no nvim on PATH or at $VIEW_NVIM_BIN",
+            );
+            return;
         }
-        std::thread::sleep(POLL);
-    }
-    let Some(server) = server else {
-        let _ = harness.kill();
-        let _ = harness.wait();
-        panic!("the intermediate harness never started a server to orphan");
-    };
-
-    harness
-        .kill()
-        .expect("kill the intermediate harness outright");
-    harness.wait().expect("reap the intermediate harness");
-
-    let gone = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
-    while std::path::Path::new(&format!("/proc/{server}")).exists() {
+        let mut harness = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["the_intermediate_parent", "--exact", "--nocapture"])
+            .env(INTERMEDIATE, "1")
+            // the park above reads this, so it stays open rather than
+            // answering EOF the moment the case starts
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("re-exec this test binary as the intermediate harness");
+        let reader = std::io::BufReader::new(harness.stderr.take().unwrap());
+        let server = reader
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|line| {
+                line.strip_prefix(PID_MARKER)
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            })
+            .expect("the intermediate harness must report the pid of the server it started");
         assert!(
-            std::time::Instant::now() < gone,
-            "the control server {server} outlived the harness that started it, with no terminal \
-             and no socket peer left to end it"
+            live(server),
+            "the server was already gone before its harness was killed, so nothing below is \
+             evidence about the kill"
         );
-        std::thread::sleep(POLL);
+
+        harness
+            .kill()
+            .expect("kill the intermediate harness outright");
+        harness.wait().expect("reap the intermediate harness");
+
+        let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
+        while live(server) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the control server {server} outlived the harness that started it, with no \
+                 terminal and no socket peer left to end it"
+            );
+            std::thread::sleep(POLL);
+        }
     }
+}
+
+/// Whether the operating system still holds a process-table entry for `pid`.
+#[cfg(target_os = "linux")]
+fn live(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
 }

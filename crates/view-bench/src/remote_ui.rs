@@ -142,6 +142,13 @@ impl RemoteUiServer {
         Ok(server)
     }
 
+    /// The server process's pid, for an observer outside this process that
+    /// has to watch the server itself rather than guess at it from a name.
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// The spawn spec for the pty-hosted client, sharing the server's
     /// environment and working directory so the two halves agree on
     /// every path the fixture resolves.

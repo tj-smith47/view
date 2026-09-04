@@ -589,6 +589,20 @@ pub fn child_pids(pid: u32) -> Vec<u32> {
     pids
 }
 
+/// Says on stdout, and on a workflow run's checks page, that a case did not
+/// run and why.
+///
+/// `cargo test` swallows a passing test's output, so a case that returns
+/// early on a platform it cannot cover reads exactly like a verified pass.
+/// The `::warning::` line is the workflow command that puts the same
+/// sentence on the run's checks page.
+pub fn announce_skip(case: &str, reason: &str) {
+    println!("skipping {case}: {reason}");
+    if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+        println!("::warning::{case} skipped: {reason}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
