@@ -3982,9 +3982,9 @@ mod tests {
     ///
     /// Returns whether the frame reached the `CrosstermBackend::draw`
     /// comparison -- it reaches it only when nothing in the diff widens.
-    /// Callers hold that count to a floor: the leg is silent when it skips,
-    /// so a fixture that grew an icon or a `…` would stop exercising it and
-    /// nothing else would say so.
+    /// Each caller pins the returned count per frame: the leg is silent
+    /// when it skips, so nothing else would say a frame stopped exercising
+    /// it.
     #[must_use]
     fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) -> bool {
         let expected = drawn_bytes(|w| emit::draw_resynced(w, shadow.updates()));
@@ -4139,9 +4139,10 @@ mod tests {
         // for skips that leg by design, and everything else must reach it.
         // Pinning this per step rather than as a floor on the aggregate
         // count is what makes a step added later bind: a floor stays green
-        // while the count it was tight against drifts past it unnoticed,
-        // which is exactly how two added reaching steps went unremarked
-        // against a floor left at the old total.
+        // while the count it was tight against drifts past it unnoticed.
+        // A wide glyph or multi-column cluster landing where it cannot
+        // fully fit is composed to a blank by `fitted_symbol` before it
+        // reaches the diff, so those steps still reach the comparison.
         type Step = (&'static str, bool, Box<dyn Fn(&mut Model)>);
         let steps: Vec<Step> = vec![
             ("first paint", false, Box::new(|_: &mut Model| {})),
@@ -4165,9 +4166,6 @@ mod tests {
                 false,
                 Box::new(|m: &mut Model| put(m, 2, 0, &["\u{2764}\u{FE0F}", " "])),
             ),
-            // the seeded row already ends in a wide glyph, which the final
-            // column paints blank; the glyph has to displace narrow text
-            // for the frame to carry that blank
             (
                 "narrow text in the final column",
                 true,
