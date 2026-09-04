@@ -104,4 +104,7 @@ pub enum AiError {
     /// The agent started without the pipes the stdio transport needs.
     #[error("the agent started without the stdin and stdout the transport needs")]
     ChildPipeMissing,
+    /// The agent's pipes could not be handed to the session's own reactor.
+    #[error("the agent's pipes could not be watched for readiness: {source}")]
+    ChildPipeAdoption { source: std::io::Error },
 }

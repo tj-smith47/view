@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use tokio::process::Child;
 use tokio::sync::mpsc;
 use view_core::msg::Msg;
 use view_core::native::ai_event::{AiCommand, AiEvent};
@@ -23,7 +22,63 @@ use crate::{AgentLaunch, AiError};
 /// session has ended: the task takes the child out before reaping it, so the
 /// handle can never signal a process identifier the operating system has
 /// already recycled.
-pub(crate) type ChildSlot = Arc<Mutex<Option<Child>>>;
+/// The agent child itself.
+///
+/// A std child on unix, spawned through [`view_proc`] so an editor killed
+/// outright does not leave the agent running with nothing to answer to; the
+/// parent-death signal is armed on a thread of that crate's own, which a
+/// `tokio::process` spawn (forking inline on whichever thread called
+/// `AiSession::spawn`) cannot be. Windows keeps the tokio child and stays on
+/// the uncovered list, having no such signal either way.
+#[cfg(unix)]
+pub(crate) type AgentChild = std::process::Child;
+#[cfg(not(unix))]
+pub(crate) type AgentChild = tokio::process::Child;
+
+/// The child's standard output, as the session's reader reads it.
+#[cfg(unix)]
+pub(crate) type AgentStdout = tokio::net::unix::pipe::Receiver;
+#[cfg(not(unix))]
+pub(crate) type AgentStdout = tokio::process::ChildStdout;
+
+/// The child's standard input, as the session's writer writes it.
+#[cfg(unix)]
+pub(crate) type AgentStdin = tokio::net::unix::pipe::Sender;
+#[cfg(not(unix))]
+pub(crate) type AgentStdin = tokio::process::ChildStdin;
+
+pub(crate) type ChildSlot = Arc<Mutex<Option<AgentChild>>>;
+
+/// Signals the agent to stop and returns without waiting on it.
+///
+/// One syscall on both platforms: this runs on the dropping thread, which at
+/// editor teardown is the loop thread.
+pub(crate) fn signal_stop(child: &mut AgentChild) {
+    #[cfg(unix)]
+    let _ = child.kill();
+    #[cfg(not(unix))]
+    let _ = child.start_kill();
+}
+
+/// Reaps a signalled agent, off the runtime's own worker.
+///
+/// The unix wait blocks, and the session runtime has a single worker driving
+/// the agent's stdio; blocking it would stall the reader and the writer with
+/// it.
+pub(crate) async fn reap(child: AgentChild) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(unix)]
+    {
+        let mut child = child;
+        tokio::task::spawn_blocking(move || child.wait())
+            .await
+            .map_err(std::io::Error::other)?
+    }
+    #[cfg(not(unix))]
+    {
+        let mut child = child;
+        child.wait().await
+    }
+}
 
 /// The state the session task and the handle both reach: emitting an event
 /// into the caller's loop, and the correlation map for agent-initiated
@@ -95,7 +150,7 @@ impl Drop for AiSession {
         // task must not be the reason a child process survives.
         let mut slot = self.child.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(child) = slot.as_mut() {
-            let _ = child.start_kill();
+            signal_stop(child);
         }
         drop(slot);
 
@@ -159,30 +214,13 @@ impl AiSession {
             .build()
             .map_err(AiError::Runtime)?;
 
-        let mut child = {
-            // spawning registers the child with the reactor, which only
-            // exists inside the runtime context
+        let mut child = spawn_agent(&cfg)?;
+        // adopting a descriptor registers it with the reactor, which only
+        // exists inside the runtime context
+        let (stdout, stdin) = {
             let _guard = runtime.enter();
-            tokio::process::Command::new(&cfg.command)
-                .args(&cfg.args)
-                .current_dir(&cfg.cwd)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                // the transport says an agent MAY log to stderr and a client
-                // MAY ignore it; inheriting it would paint agent logs over
-                // the alternate screen, so it is discarded until there is a
-                // panel to route it into
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|source| AiError::Spawn {
-                    command: cfg.command.clone(),
-                    source,
-                })?
+            agent_pipes(&mut child)?
         };
-
-        let stdout = child.stdout.take().ok_or(AiError::ChildPipeMissing)?;
-        let stdin = child.stdin.take().ok_or(AiError::ChildPipeMissing)?;
 
         let shared = Arc::new(SessionShared {
             emit,
@@ -256,7 +294,79 @@ impl AiSession {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
-            .and_then(Child::id)
+            .and_then(agent_pid)
+    }
+}
+
+/// Starts the agent with its stdio piped and its stderr discarded.
+///
+/// The transport says an agent MAY log to stderr and a client MAY ignore it;
+/// inheriting it would paint agent logs over the alternate screen, so it is
+/// discarded until there is a panel to route it into.
+fn spawn_agent(cfg: &AgentLaunch) -> Result<AgentChild, AiError> {
+    let failed = |source| AiError::Spawn {
+        command: cfg.command.clone(),
+        source,
+    };
+    #[cfg(unix)]
+    {
+        let mut command = std::process::Command::new(&cfg.command);
+        command
+            .args(&cfg.args)
+            .current_dir(&cfg.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        view_proc::spawn_tied_to_this_process(command).map_err(failed)
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::process::Command::new(&cfg.command)
+            .args(&cfg.args)
+            .current_dir(&cfg.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(failed)
+    }
+}
+
+/// Takes the child's two pipes in the form the session's codec reads and
+/// writes them.
+///
+/// Must be called inside the session runtime's context: adopting a
+/// descriptor registers it with that runtime's reactor.
+fn agent_pipes(child: &mut AgentChild) -> Result<(AgentStdout, AgentStdin), AiError> {
+    let stdout = child.stdout.take().ok_or(AiError::ChildPipeMissing)?;
+    let stdin = child.stdin.take().ok_or(AiError::ChildPipeMissing)?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::OwnedFd;
+
+        let adopt = |source| AiError::ChildPipeAdoption { source };
+        Ok((
+            AgentStdout::from_owned_fd(OwnedFd::from(stdout)).map_err(adopt)?,
+            AgentStdin::from_owned_fd(OwnedFd::from(stdin)).map_err(adopt)?,
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok((stdout, stdin))
+    }
+}
+
+/// The child's process id, which only the unix child answers unconditionally
+/// -- a tokio child that has already been reaped has none to give.
+fn agent_pid(child: &AgentChild) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(child.id())
+    }
+    #[cfg(not(unix))]
+    {
+        child.id()
     }
 }
 

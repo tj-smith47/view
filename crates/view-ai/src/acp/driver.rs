@@ -42,7 +42,7 @@ use view_core::native::ai_event::{
 
 use crate::acp::fs::PendingReply;
 use crate::acp::permission::{permission_option, permission_outcome};
-use crate::acp::session::{ChildSlot, SessionShared};
+use crate::acp::session::{reap, signal_stop, AgentStdin, AgentStdout, ChildSlot, SessionShared};
 use crate::acp::wire::{
     Incoming, JsonRpcCodec, JsonRpcError, JsonRpcMessage, RequestId, AUTH_REQUIRED, INTERNAL_ERROR,
     INVALID_PARAMS, METHOD_NOT_FOUND, REQUEST_CANCELLED, RESOURCE_NOT_FOUND,
@@ -78,7 +78,7 @@ pub(crate) enum SessionEnd {
 /// Runs one session to completion, reporting why it ended.
 pub(crate) async fn run_session(
     child: ChildSlot,
-    codec: JsonRpcCodec<tokio::process::ChildStdout, tokio::process::ChildStdin>,
+    codec: JsonRpcCodec<AgentStdout, AgentStdin>,
     commands: mpsc::UnboundedReceiver<AiCommand>,
     shared: Arc<SessionShared>,
     cwd: std::path::PathBuf,
@@ -102,14 +102,14 @@ pub(crate) async fn run_session(
     let mut child = {
         let mut slot = child.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(child) = slot.as_mut() {
-            let _ = child.start_kill();
+            signal_stop(child);
         }
         slot.take()
     };
 
     let detail = match ending {
-        SessionEnd::ReaderEof => match child.as_mut() {
-            Some(child) => match child.wait().await {
+        SessionEnd::ReaderEof => match child.take() {
+            Some(child) => match reap(child).await {
                 Ok(status) => format!("the agent exited ({status})"),
                 Err(err) => format!("the agent exited and could not be reaped: {err}"),
             },

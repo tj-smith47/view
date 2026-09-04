@@ -33,6 +33,9 @@ thiserror = "2.0.18"
 # `process` feature above enables the io driver as a side effect, on windows
 # it does not, so a build without it compiles here and fails there
 tokio = { version = "1", features = ["rt-multi-thread", "process", "net", "io-util", "sync", "macros"] }
+# The agent child is spawned through this crate so it cannot outlive an
+# editor killed outright (see acp::session::spawn_agent).
+view-proc = { version = "0.0.1", path = "../view-proc" }
 # The [ai] table's own parser (crates/view-ai/src/config.rs), this crate's
 # first use of it. Confined the same way `serde` above is.
 toml = "0.8"
