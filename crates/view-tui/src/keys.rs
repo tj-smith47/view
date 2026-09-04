@@ -107,8 +107,8 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// `\r` maps to `<CR>`, `\t` to `<Tab>`, `0x7f` to `<BS>`, and the
 /// remaining C0 controls to the `<C-...>` chord they spell -- `\n`
 /// included, because the terminal is in raw mode and `Enter` sends `\r`
-/// there ([`plain_key`]). A run of continuous non-ASCII bytes (`0x80..`) is decoded as one
-/// UTF-8 str and forwarded char-by-char if valid, dropped if not (a
+/// there ([`plain_key`]). A run of continuous non-ASCII bytes (`0x80..`) is
+/// decoded as one UTF-8 str and forwarded char-by-char if valid, dropped if not (a
 /// mid-codepoint chunk boundary can produce invalid UTF-8 here, and
 /// guessing at a replacement is worse than dropping a still-rare case).
 ///
@@ -714,9 +714,10 @@ fn key_msg(notation: impl Into<String>) -> Msg {
 ///
 /// nvim's input layer folds a `Ctrl` chord onto the C0 byte the reported
 /// character's code carries, so `Ctrl` and a backtick becomes `<C-@>` --
-/// the name nvim also spells `<Nul>`, both of them the same `\x80\xffX`
-/// on the wire -- and the `{|}~` quartet becomes the `[\]^` one; `Ctrl`+`6` is the separate legacy
-/// alias for `<C-^>`, which is where `^` sits on a US keyboard. Only the
+/// the name nvim also spells `<Nul>`, both of them the same `\x80\xffX` on
+/// the wire -- and the `{|}~` quartet becomes the `[\]^` one; `Ctrl`+`6` is
+/// the separate legacy alias for `<C-^>`, which is where `^` sits on a US
+/// keyboard. Only the
 /// keyboard protocol ever reports these as characters -- a legacy terminal
 /// sends the C0 byte itself, which [`plain_key`] names directly -- so the
 /// fold is what makes a protocol terminal's chord land on the mapping the
@@ -1463,15 +1464,11 @@ mod tests {
         ];
         // every character a terminal can report rather than a sample of
         // them, so a spelling the Ctrl fold maps onto -- or away from --
-        // cannot be missed the way `\`, `]`, `^` and `_` were, and the
-        // legacy bytes are read through the table that names them rather
-        // than restated
+        // cannot be missed the way `\`, `]`, `^` and `_` were. It subsumes
+        // the legacy bytes too: every code `plain_key` gives one is either
+        // a named key above or a character in this range
         let printable = (0x20..=0x7e_u8).map(|byte| KeyCode::Char(byte as char));
-        let from_bytes = (0x00..=0x1f_u8)
-            .chain(std::iter::once(0x7f))
-            .filter_map(plain_key)
-            .map(|(code, _)| code);
-        let codes = named.into_iter().chain(printable).chain(from_bytes);
+        let codes = named.into_iter().chain(printable);
         let mods = [
             KeyModifiers::NONE,
             KeyModifiers::SHIFT,

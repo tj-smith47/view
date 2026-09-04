@@ -1222,6 +1222,17 @@ fn main() -> Result<()> {
     #[cfg(unix)]
     let mut input_source = view_tui::input::InputSource::open_after_probe(&probe)
         .context("failed to open the pollable terminal input handle")?;
+    // after the handle exists rather than beside the line above, because the
+    // guard's own deadline is computed inside the constructor: a reader that
+    // sees this line knows the window it names has already started
+    #[cfg(unix)]
+    vlog::log_with("startup", || {
+        format!(
+            "input guard listening={} cap_ms={}",
+            input_source.still_listening(),
+            view_tui::tiers::PROBE_HARD_CAP.as_millis()
+        )
+    });
     #[cfg(not(unix))]
     let mut input_source = ();
 

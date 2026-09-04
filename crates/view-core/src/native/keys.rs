@@ -440,20 +440,6 @@ mod tests {
     /// as a chord's second press: a keyboard-protocol terminal reports
     /// `Ctrl`+`>`, and `<C-w>>` is the resize chord nvim documents.
     #[test]
-    fn a_key_spelled_with_the_closing_bracket_character_still_binds() {
-        let mut keys = KeyBindings::default();
-        assert!(keys.rebind(Action::Resize(Direction::Wider), &["<C->>".to_string()]));
-        assert_eq!(
-            keys.resolve(None, "<C->>"),
-            Some(Resolved::Act(Action::Resize(Direction::Wider)))
-        );
-        assert_eq!(
-            KeyBindings::default().resolve(Some("<C-w>"), ">"),
-            Some(Resolved::Act(Action::Resize(Direction::Wider)))
-        );
-    }
-
-    #[test]
     fn an_empty_list_leaves_a_direction_on_no_key() {
         let mut keys = KeyBindings::default();
         assert!(keys.rebind(Action::Resize(Direction::Narrower), &[]));

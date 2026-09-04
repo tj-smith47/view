@@ -52,10 +52,11 @@ const CHORDS: [(u8, &str, &str); 4] = [
 
 /// A `view` session with every native feature off, so the screen it paints
 /// is nvim's own content and the two sides are comparable row for row.
-fn view_session(paths: &common::ScratchPaths) -> PtySession {
+fn view_session(paths: &common::ScratchPaths, view_log: &std::path::Path) -> PtySession {
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.arg(&paths.scratch);
     common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
+    cmd.env("VIEW_LOG", view_log);
     let mut session = PtySession::spawn_configured(cmd, COLS, ROWS)
         .expect("PtySession::spawn_configured against target/debug/view");
     assert!(
@@ -152,6 +153,31 @@ fn each_chord_agrees(under_test: &mut PtySession, reference: &mut PtySession, pa
     }
 }
 
+/// Blocks until the session's `VIEW_LOG` carries `needle`, and returns the
+/// instant it was seen.
+///
+/// The file is the only place this event surfaces: the guard makes no
+/// difference to the screen, and asking crossterm to demonstrate one would
+/// mean handing it the sequence the guard exists to keep away from it.
+fn wait_for_log_line(path: &std::path::Path, needle: &str) -> std::time::Instant {
+    // the sequence being waited on is a `view` startup whose own constant is
+    // the guard's cap; everything else in it is a process spawn the host
+    // takes as long over as its load says
+    let budget = common::startup_budget(common::PROBE_HARD_CAP);
+    let deadline = std::time::Instant::now() + budget.total();
+    loop {
+        if std::fs::read_to_string(path).is_ok_and(|log| log.contains(needle)) {
+            return std::time::Instant::now();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "view never logged {needle:?} within {budget}; log:\n{}",
+            std::fs::read_to_string(path).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// The whole point: the same byte, the same mapping, the same screen.
 ///
 /// Both sides are asserted against the marker as well as against each
@@ -162,20 +188,24 @@ fn each_chord_agrees(under_test: &mut PtySession, reference: &mut PtySession, pa
 /// two decoders depending on when it lands: the startup guard's own
 /// `plain_key` while it still owns the terminal, and crossterm's parser
 /// plus `encode_terminal_key` afterwards. The first pass takes whichever
-/// window it happens to land in; the second waits out
-/// [`common::PROBE_HARD_CAP`] from a screen that only a session past its
-/// handover can paint, so it reaches the second decoder by construction.
+/// window it happens to land in; the second is ordered against the guard by
+/// the session's own `VIEW_LOG` line, which `view` writes only once the
+/// handle whose constructor computed that window's deadline exists. Waiting
+/// [`common::PROBE_HARD_CAP`] from a line that can only have been written
+/// after the deadline was set puts the second pass past it, with no
+/// inference about which of two processes reached a statement first.
 #[test]
 fn the_control_bytes_fire_the_mappings_their_nvim_names_are_written_against() {
     let view_paths = common::ScratchPaths::new("control-byte-view");
     let nvim_paths = common::ScratchPaths::new("control-byte-nvim");
-    let mut under_test = view_session(&view_paths);
-    let painted = std::time::Instant::now();
+    let view_log = view_paths.isolated_home.join("view.log");
+    let mut under_test = view_session(&view_paths, &view_log);
     let mut reference = nvim_session(&nvim_paths);
 
     each_chord_agrees(&mut under_test, &mut reference, "guard window");
 
-    std::thread::sleep(common::PROBE_HARD_CAP.saturating_sub(painted.elapsed()));
+    let armed = wait_for_log_line(&view_log, "input guard");
+    std::thread::sleep(common::PROBE_HARD_CAP.saturating_sub(armed.elapsed()));
     each_chord_agrees(&mut under_test, &mut reference, "past the guard");
 
     for session in [&mut under_test, &mut reference] {
