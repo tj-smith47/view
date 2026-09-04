@@ -1731,14 +1731,7 @@ fn plant_swap_truncated_to(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    for var in [
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-    ] {
-        command.env(var, common::xdg_home(home, var));
-    }
+    common::isolate_xdg_first_launch_process(&mut command, home);
     let mut child = command
         .spawn()
         .expect("failed to spawn the swap-planting engine");
@@ -2445,6 +2438,14 @@ fn spawn_view_on_hand_rolled_pty(
         ws_ypixel: 0,
     };
     let pty = nix::pty::openpty(Some(&winsize), None).expect("openpty for a hand-rolled session");
+    // `openpty(3)` clears `FD_CLOEXEC` on the master, so every child spawned
+    // while this session runs inherits it and holds the pty open against
+    // this test's own close
+    nix::fcntl::fcntl(
+        &pty.master,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+    )
+    .expect("keep the pty master out of the session's own descriptors");
     let stdout_fd = nix::unistd::dup(&pty.slave).expect("dup pty slave for stdout");
     let stdin = stdin.unwrap_or_else(|| {
         Stdio::from(nix::unistd::dup(&pty.slave).expect("dup pty slave for stdin"))
@@ -2455,14 +2456,7 @@ fn spawn_view_on_hand_rolled_pty(
 
     let mut cmd = std::process::Command::new(common::view_bin_path());
     view_oracle::make_hermetic(&mut cmd).expect("hermetic env for the hand-rolled child");
-    for var in [
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-    ] {
-        cmd.env(var, common::xdg_home(&paths.isolated_home, var));
-    }
+    common::isolate_xdg_first_launch_process(&mut cmd, &paths.isolated_home);
     common::disable_native_features(&paths.isolated_home);
     configure(&mut cmd);
 

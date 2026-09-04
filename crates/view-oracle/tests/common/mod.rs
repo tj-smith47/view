@@ -133,14 +133,34 @@ pub fn isolate_xdg_native_off_except(
 /// the superseded surfaces over, claiming the feature keys and introducing
 /// all of it once.
 pub fn isolate_xdg_first_launch(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
-    for var in [
+    for (var, dir) in xdg_first_launch_env(home) {
+        cmd.env(var, dir);
+    }
+}
+
+/// [`isolate_xdg_first_launch`] for a test that hand-rolls its own pty and
+/// so spawns through [`std::process::Command`] rather than the pty
+/// funnel's builder.
+pub fn isolate_xdg_first_launch_process(cmd: &mut std::process::Command, home: &Path) {
+    for (var, dir) in xdg_first_launch_env(home) {
+        cmd.env(var, dir);
+    }
+}
+
+/// The `XDG_*_HOME` variables an isolated child's `stdpath()` roots resolve
+/// from, each paired with its directory under `home`.
+///
+/// One list behind both spawn shapes: a root named in only one of them is a
+/// child reading the operator's own configuration on whichever path spawned
+/// it.
+pub fn xdg_first_launch_env(home: &Path) -> [(&'static str, PathBuf); 4] {
+    [
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
         "XDG_CACHE_HOME",
-    ] {
-        cmd.env(var, xdg_home(home, var));
-    }
+    ]
+    .map(|var| (var, xdg_home(home, var)))
 }
 
 /// `home`'s subdirectory for the `XDG_*_HOME` variable named `var`. One

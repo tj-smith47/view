@@ -84,14 +84,7 @@ fn a_session_whose_pty_master_closed_ends_instead_of_spinning() {
     .expect("keep the pty master out of the session's own descriptors");
     let mut cmd = std::process::Command::new(common::view_bin_path());
     view_oracle::make_hermetic(&mut cmd).expect("hermetic env for the hangup session");
-    for var in [
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-    ] {
-        cmd.env(var, common::xdg_home(&paths.isolated_home, var));
-    }
+    common::isolate_xdg_first_launch_process(&mut cmd, &paths.isolated_home);
     common::disable_native_features(&paths.isolated_home);
     let slave_dup = |slot: &str| {
         std::process::Stdio::from(
