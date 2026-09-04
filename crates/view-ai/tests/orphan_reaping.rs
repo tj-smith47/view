@@ -316,7 +316,6 @@ fn a_session_that_ends_on_a_broken_frame_still_collects_its_adapter() {
 }
 
 /// Dropping a session collects the adapter it signals, without the editor's
-/// own thread waiting for it./// Dropping a session collects the adapter it signals, without the editor's
 /// own thread waiting for it.
 ///
 /// Linux only, as above.

@@ -161,7 +161,7 @@ impl ReconnectSchedule {
     /// Whether an attempt is due now, taking it: a caller that is told
     /// `true` owes the attempt, and the sequence has already counted it.
     pub(crate) fn take_due(&mut self, now: std::time::Instant) -> bool {
-        if !self.due.is_some_and(|due| now >= due) {
+        if self.due.is_none_or(|due| now < due) {
             return false;
         }
         self.due = None;
