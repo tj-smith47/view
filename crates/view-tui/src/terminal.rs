@@ -773,9 +773,9 @@ impl Term {
         self.shadow.compose(model, surface, &damage);
         #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_COMPOSED);
-        // disjoint field borrows: `shadow` supplies the cells while `inner`'s
-        // backend encodes them into the shared frame buffer
-        self.shadow.emit_updates(&mut self.inner)?;
+        // the frame's escapes join everything else already queued into the
+        // shared frame buffer, so the whole frame still leaves in one write
+        self.shadow.emit_updates(&mut sink)?;
         self.shadow.commit();
         self.last_offset = Some(offset);
         match surface.cursor {

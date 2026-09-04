@@ -3,7 +3,6 @@
 //! *where*; this module is the only place that turns those decisions into
 //! `ratatui::Buffer` writes.
 
-use ratatui::backend::Backend;
 use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -15,6 +14,7 @@ use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::{overlay::BorderSet, Layer, LayerKind, Rect, Surface};
 
+mod emit;
 mod panes;
 mod toast;
 
@@ -307,7 +307,9 @@ impl<'a> StagedRuns<'a> {
             .staged
             .iter()
             .take(self.runs.len())
-            .flat_map(|run| run.front.diff_iter(&run.back))
+            .flat_map(|run| {
+                emit::with_widened_neighbours(&run.front, &run.back, run.front.diff_iter(&run.back))
+            })
     }
 }
 
@@ -440,22 +442,23 @@ impl Shadow {
     /// # Errors
     ///
     /// Returns the backend's own write error.
-    pub fn emit_updates<B: Backend>(&mut self, backend: &mut B) -> Result<(), B::Error> {
+    pub fn emit_updates<W: std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
         let mut runs = std::mem::take(&mut self.runs);
         self.painted.row_runs(self.front.area, &mut runs);
         let result = if clipping_pays(&runs, self.front.area.height) {
-            self.emit_clipped(backend, &runs)
+            self.emit_clipped(writer, &runs)
         } else {
-            backend.draw(self.updates())
+            emit::draw_resynced(writer, self.updates())
         };
         self.runs = runs;
         result
     }
 
     /// The whole-frame diff: every cell of what the terminal shows against
-    /// every cell of the frame just composed.
-    fn updates(&self) -> ratatui::buffer::BufferDiff<'_, '_> {
-        self.front.diff_iter(&self.back)
+    /// every cell of the frame just composed, plus the right neighbour of
+    /// every changed cell a terminal may draw two columns wide.
+    fn updates(&self) -> impl Iterator<Item = (u16, u16, &Cell)> {
+        emit::with_widened_neighbours(&self.front, &self.back, self.front.diff_iter(&self.back))
     }
 
     /// The same emission clipped to `runs`, one chained `draw` over the
@@ -467,13 +470,13 @@ impl Shadow {
     /// cannot reach the shadow. Its `Drop` puts the rows back before the
     /// backend's result reaches the caller, so neither a failed write nor an
     /// unwinding panic can leave the shadow holding scratch cells.
-    fn emit_clipped<B: Backend>(
+    fn emit_clipped<W: std::io::Write>(
         &mut self,
-        backend: &mut B,
+        writer: &mut W,
         runs: &[(u16, u16)],
-    ) -> Result<(), B::Error> {
+    ) -> std::io::Result<()> {
         let staged = StagedRuns::stage(self, runs);
-        backend.draw(staged.diffs())
+        emit::draw_resynced(writer, staged.diffs())
     }
 
     /// Exchanges each run's rows between the shadow's buffers and its staged
@@ -1661,7 +1664,7 @@ fn rgb(c: u32) -> Color {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
     use ratatui::Terminal;
     use view_core::grid::registry::GLOBAL_GRID;
     use view_core::grid::GridOp;
@@ -3929,9 +3932,8 @@ mod tests {
     // duplicated an update, or emitted a wide glyph's trailing column, would
     // pass all three and corrupt a real terminal.
 
-    /// A `CrosstermBackend` writer whose bytes stay readable after the
-    /// backend has moved it, since `CrosstermBackend`'s own writer accessor
-    /// is behind an unstable feature gate.
+    /// A writer whose bytes stay readable after the emission loop has taken
+    /// it, so a test can compare what reached the terminal.
     #[derive(Clone, Default)]
     struct ByteSink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
 
@@ -3946,16 +3948,13 @@ mod tests {
         }
     }
 
-    /// The bytes `draw` puts on the wire through a real `CrosstermBackend`,
-    /// which is what a terminal ultimately receives: cursor moves included,
-    /// so an update stream that visits the same cells in a different order is
-    /// a mismatch here, not a pass.
-    fn drawn_bytes(
-        draw: impl FnOnce(&mut ratatui::backend::CrosstermBackend<ByteSink>) -> std::io::Result<()>,
-    ) -> Vec<u8> {
+    /// The bytes `draw` puts on the wire, which is what a terminal ultimately
+    /// receives: cursor moves included, so an update stream that visits the
+    /// same cells in a different order is a mismatch here, not a pass.
+    fn drawn_bytes(draw: impl FnOnce(&mut ByteSink) -> std::io::Result<()>) -> Vec<u8> {
         let sink = ByteSink::default();
-        let mut backend = ratatui::backend::CrosstermBackend::new(sink.clone());
-        draw(&mut backend).unwrap();
+        let mut writer = sink.clone();
+        draw(&mut writer).unwrap();
         let bytes = sink.0.borrow().clone();
         bytes
     }
@@ -3965,7 +3964,7 @@ mod tests {
     /// path [`Shadow::emit_updates`] picks for itself. Leaves `shadow`
     /// untouched, so a caller can go on to `commit` and drive another frame.
     fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) {
-        let expected = drawn_bytes(|backend| backend.draw(shadow.updates()));
+        let expected = drawn_bytes(|w| emit::draw_resynced(w, shadow.updates()));
 
         let mut runs = Vec::new();
         shadow.painted.row_runs(shadow.front.area, &mut runs);
@@ -4130,6 +4129,22 @@ mod tests {
                 "the first cell of the row under that overflow",
                 Box::new(|m: &mut Model| put(m, 5, 0, &["V"])),
             ),
+            (
+                "an ambiguous-width nerd-font icon",
+                Box::new(|m: &mut Model| put(m, 3, 4, &[NERD_ICON])),
+            ),
+            (
+                "a box-drawing run beside it",
+                Box::new(|m: &mut Model| put(m, 3, 5, &["\u{2500}", "\u{2500}", "\u{2500}"])),
+            ),
+            (
+                "that icon replaced by plain text",
+                Box::new(|m: &mut Model| put(m, 3, 4, &["p"])),
+            ),
+            (
+                "an ambiguous glyph in the row's final column",
+                Box::new(|m: &mut Model| put(m, 6, 11, &[NERD_ICON])),
+            ),
         ];
 
         let mut first = true;
@@ -4154,6 +4169,424 @@ mod tests {
                 "emitting updates left the shadow holding something other than \
                  the frame it composed, after: {label}"
             );
+        }
+    }
+
+    /// One of the supplementary-private-use nerd-font icons the alpha
+    /// dashboard draws: East_Asian_Width = Ambiguous, so `unicode-width`
+    /// calls it one column and a terminal is free to draw it two.
+    const NERD_ICON: &str = "\u{f0c7c}";
+
+    /// The bytes a whole-frame diff of `front` against `back` puts on the
+    /// wire through view's own emission loop.
+    fn resynced_bytes(front: &Buffer, back: &Buffer) -> Vec<u8> {
+        drawn_bytes(|w| {
+            emit::draw_resynced(
+                w,
+                emit::with_widened_neighbours(front, back, front.diff_iter(back)),
+            )
+        })
+    }
+
+    /// Fills `back` with a deterministic sweep of every style transition the
+    /// emission loop encodes -- each modifier alone, the bold/dim intensity
+    /// pair, colour changes and underline-colour changes -- over ASCII
+    /// symbols only, and leaves a quarter of the cells equal to `front` so
+    /// the diff is non-contiguous.
+    fn seed_style_sweep(front: &mut Buffer, back: &mut Buffer) {
+        let modifiers = [
+            Modifier::empty(),
+            Modifier::BOLD,
+            Modifier::DIM,
+            Modifier::BOLD | Modifier::DIM,
+            Modifier::ITALIC,
+            Modifier::UNDERLINED,
+            Modifier::REVERSED,
+            Modifier::CROSSED_OUT,
+            Modifier::HIDDEN,
+            Modifier::SLOW_BLINK,
+            Modifier::RAPID_BLINK,
+            Modifier::BOLD | Modifier::ITALIC | Modifier::UNDERLINED,
+            Modifier::REVERSED | Modifier::CROSSED_OUT | Modifier::HIDDEN,
+        ];
+        let colors = [
+            Color::Reset,
+            Color::Red,
+            Color::LightGreen,
+            Color::Indexed(37),
+            Color::Rgb(9, 90, 200),
+        ];
+        let area = back.area;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let i = usize::from(y) * usize::from(area.width) + usize::from(x);
+                let symbol = char::from(b'!' + u8::try_from(i % 90).unwrap()).to_string();
+                let style = Style::default()
+                    .fg(colors[i % colors.len()])
+                    .bg(colors[(i / 3) % colors.len()])
+                    .underline_color(colors[(i / 7) % colors.len()])
+                    .add_modifier(modifiers[i % modifiers.len()]);
+                back[(x, y)].set_symbol(&symbol).set_style(style);
+                if i % 4 == 0 {
+                    front[(x, y)].set_symbol(&symbol).set_style(style);
+                }
+            }
+        }
+    }
+
+    /// The copied emission loop has to stay byte-identical to the one it was
+    /// copied from wherever the re-sync does not fire, or every escape view
+    /// writes drifts from what `ratatui` would have written and nothing else
+    /// in the tree compares the two. The sweep is ASCII by construction, so
+    /// `terminal_may_widen` is false for every cell and the only difference
+    /// left to measure is the style encoding.
+    #[test]
+    fn emission_matches_crossterms_on_ambiguity_free_frames() {
+        let area = ratatui::layout::Rect::new(0, 0, 16, 7);
+        let mut front = Buffer::empty(area);
+        let mut back = Buffer::empty(area);
+        seed_style_sweep(&mut front, &mut back);
+
+        let expected = {
+            let sink = ByteSink::default();
+            let mut backend = ratatui::backend::CrosstermBackend::new(sink.clone());
+            backend.draw(front.diff_iter(&back)).unwrap();
+            let bytes = sink.0.borrow().clone();
+            bytes
+        };
+        assert!(
+            !expected.is_empty(),
+            "the sweep produced no diff at all, so this pin asserts nothing"
+        );
+        assert_eq!(
+            resynced_bytes(&front, &back),
+            expected,
+            "view's emission loop diverged from CrosstermBackend::draw on an \
+             ambiguity-free frame"
+        );
+    }
+
+    /// Every printable run in `bytes`, each paired with whether a CSI `H`
+    /// (absolute cursor address) was written since the previous one.
+    fn printed_runs(bytes: &[u8]) -> Vec<(String, bool)> {
+        let text = std::str::from_utf8(bytes).unwrap();
+        let mut runs = Vec::new();
+        let mut addressed = false;
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for p in chars.by_ref() {
+                        if ('@'..='~').contains(&p) {
+                            addressed |= p == 'H';
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            let mut run = String::from(c);
+            while matches!(chars.peek(), Some(&n) if n != '\u{1b}') {
+                run.push(chars.next().unwrap());
+            }
+            runs.push((run, addressed));
+            addressed = false;
+        }
+        runs
+    }
+
+    /// nvim's TUI re-addresses the cursor after printing an ambiguous-width
+    /// glyph rather than trusting the terminal's own advance, and view owes
+    /// the same: without it every later cell of the run lands one column
+    /// right on a terminal that draws the glyph two wide.
+    #[test]
+    fn the_cursor_is_re_addressed_after_every_ambiguous_glyph() {
+        let area = ratatui::layout::Rect::new(0, 0, 12, 2);
+        let front = Buffer::empty(area);
+        let mut back = Buffer::empty(area);
+        let icon_row: Vec<String> = format!("{NERD_ICON} Find Word")
+            .chars()
+            .map(|c| c.to_string())
+            .collect();
+        for (x, symbol) in icon_row.iter().enumerate() {
+            back[(u16::try_from(x).unwrap(), 0)].set_symbol(symbol);
+        }
+        for x in 0..area.width {
+            back[(x, 1)].set_symbol("\u{2500}");
+        }
+
+        let runs = printed_runs(&resynced_bytes(&front, &back));
+        let mut ambiguous_seen = 0_usize;
+        let mut carried = false;
+        for (run, addressed) in &runs {
+            assert!(
+                !carried || *addressed,
+                "no cursor address between an ambiguous glyph and the next \
+                 printed run {run:?}; runs were {runs:?}"
+            );
+            carried = false;
+            let mut chars = run.chars().peekable();
+            while let Some(c) = chars.next() {
+                let last = chars.peek().is_none();
+                if emit::terminal_may_widen(&c.to_string()) {
+                    ambiguous_seen += 1;
+                    assert!(
+                        last,
+                        "an ambiguous glyph rode inside a longer printed run \
+                         {run:?}, so nothing re-addressed the cursor after it"
+                    );
+                    carried = true;
+                }
+            }
+        }
+        assert_eq!(
+            ambiguous_seen,
+            1 + usize::from(area.width),
+            "the fixture's ambiguous glyphs were not all emitted"
+        );
+    }
+
+    /// The coordinates a diff of `front` against `back` emits, in order.
+    fn emitted_positions(front: &Buffer, back: &Buffer) -> Vec<(u16, u16)> {
+        emit::with_widened_neighbours(front, back, front.diff_iter(back))
+            .map(|(x, y, _)| (x, y))
+            .collect()
+    }
+
+    /// A terminal that drew the old or the new glyph two columns wide shows
+    /// the glyph's second half in the cell to its right, so that cell is
+    /// stale whenever the glyph changes -- even though the model never
+    /// touched it and the diff therefore never names it.
+    #[test]
+    fn a_changed_ambiguous_glyph_repaints_its_right_neighbour() {
+        let area = ratatui::layout::Rect::new(0, 0, 6, 1);
+        let base = {
+            let mut buf = Buffer::empty(area);
+            for x in 0..area.width {
+                buf[(x, 0)].set_symbol("n");
+            }
+            buf
+        };
+
+        let mut icon_appears = base.clone();
+        icon_appears[(2, 0)].set_symbol(NERD_ICON);
+        assert_eq!(
+            emitted_positions(&base, &icon_appears),
+            vec![(2, 0), (3, 0)],
+            "an icon written over plain text left its right neighbour stale"
+        );
+
+        let mut icon_leaves = icon_appears.clone();
+        icon_leaves[(2, 0)].set_symbol("a");
+        assert_eq!(
+            emitted_positions(&icon_appears, &icon_leaves),
+            vec![(2, 0), (3, 0)],
+            "an icon replaced by plain text left its right neighbour stale"
+        );
+
+        let mut plain_change = base.clone();
+        plain_change[(2, 0)].set_symbol("z");
+        assert_eq!(
+            emitted_positions(&base, &plain_change),
+            vec![(2, 0)],
+            "a plain cell change paid for a neighbour it cannot have widened"
+        );
+
+        let mut icon_at_edge = base.clone();
+        icon_at_edge[(5, 0)].set_symbol(NERD_ICON);
+        assert_eq!(
+            emitted_positions(&base, &icon_at_edge),
+            vec![(5, 0)],
+            "an icon in the final column emitted a cell past the area"
+        );
+    }
+
+    /// The second half of a glyph [`WideTerm`] drew two columns wide.
+    const WIDE_HALF: &str = "\u{0}";
+
+    /// A terminal that draws every `terminal_may_widen` glyph two columns
+    /// wide, which is what the user's Termius does with nerd-font
+    /// private-use icons and box drawing. Interprets exactly what the
+    /// emission loop writes: CUP, carriage return, line feed, SGR (ignored)
+    /// and printable text.
+    struct WideTerm {
+        grid: Vec<Vec<String>>,
+        x: usize,
+        y: usize,
+    }
+
+    impl WideTerm {
+        fn new(area: ratatui::layout::Rect) -> Self {
+            Self {
+                grid: vec![
+                    vec![" ".to_string(); usize::from(area.width)];
+                    usize::from(area.height)
+                ],
+                x: 0,
+                y: 0,
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            let text = std::str::from_utf8(bytes).unwrap();
+            let mut chars = text.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\u{1b}' => {
+                        if chars.peek() != Some(&'[') {
+                            continue;
+                        }
+                        chars.next();
+                        let mut params = String::new();
+                        let mut final_byte = '\0';
+                        for p in chars.by_ref() {
+                            if ('@'..='~').contains(&p) {
+                                final_byte = p;
+                                break;
+                            }
+                            params.push(p);
+                        }
+                        if final_byte == 'H' {
+                            let mut fields = params.split(';');
+                            let row = fields
+                                .next()
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(1_usize);
+                            let col = fields
+                                .next()
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(1_usize);
+                            self.y = row.saturating_sub(1);
+                            self.x = col.saturating_sub(1);
+                        }
+                    }
+                    '\r' => self.x = 0,
+                    '\n' => self.y += 1,
+                    _ => self.print(c, &mut chars),
+                }
+            }
+        }
+
+        fn print(&mut self, c: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+            let mut symbol = String::from(c);
+            loop {
+                match chars.peek() {
+                    Some(&'\u{fe0f}' | &'\u{ff9e}') => symbol.push(chars.next().unwrap()),
+                    Some(&'\u{200d}') => {
+                        symbol.push(chars.next().unwrap());
+                        if let Some(joined) = chars.next() {
+                            symbol.push(joined);
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            let columns = if emit::terminal_may_widen(&symbol) {
+                2
+            } else {
+                UnicodeWidthStr::width(symbol.as_str()).max(1)
+            };
+            if let Some(row) = self.grid.get_mut(self.y) {
+                if let Some(cell) = row.get_mut(self.x) {
+                    *cell = symbol;
+                }
+                for covered in 1..columns {
+                    if let Some(cell) = row.get_mut(self.x + covered) {
+                        *cell = WIDE_HALF.to_string();
+                    }
+                }
+            }
+            self.x += columns;
+        }
+    }
+
+    /// A frame emitted to a terminal that widens ambiguous glyphs has to
+    /// leave every cell holding what the shadow says it holds. Without the
+    /// re-sync the rest of an icon's row lands one column right and the next
+    /// frame -- which repaints only model-changed cells -- covers neither the
+    /// shifted cells nor the icon's second half, which is the residue the
+    /// user photographed.
+    #[test]
+    fn a_widening_terminal_ends_every_frame_cell_exact() {
+        let area = ratatui::layout::Rect::new(0, 0, 14, 4);
+        let mut model = Model::new();
+        set_term_size(&mut model, area.width, area.height);
+        model.engine.apply_grid(GridOp::Resize {
+            width: area.width,
+            height: area.height,
+        });
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+        let mut term = WideTerm::new(area);
+
+        type Frame = (&'static str, Box<dyn Fn(&mut Model)>);
+        let frames: Vec<Frame> = vec![
+            (
+                "the icon row painted",
+                Box::new(|m: &mut Model| {
+                    put(m, 0, 0, &[NERD_ICON, " ", "F", "i", "n", "d"]);
+                    put(m, 1, 0, &["\u{2500}"; 12]);
+                    put(m, 2, 0, &["p", "l", "a", "i", "n"]);
+                }),
+            ),
+            (
+                "the window shifts one column right",
+                Box::new(|m: &mut Model| {
+                    put(m, 0, 0, &[" ", NERD_ICON, " ", "F", "i", "n", "d"]);
+                    put(m, 1, 0, &[" "]);
+                    put(m, 1, 1, &["\u{2500}"; 12]);
+                    put(m, 2, 0, &[" ", "p", "l", "a", "i", "n"]);
+                }),
+            ),
+            (
+                "the text under the icon changes",
+                Box::new(|m: &mut Model| put(m, 2, 1, &["s", "h", "o", "w", "n"])),
+            ),
+            (
+                "the icon alone changes, its right neighbour untouched",
+                Box::new(|m: &mut Model| put(m, 0, 1, &["\u{f1323}"])),
+            ),
+            (
+                "that icon becomes a narrow character",
+                Box::new(|m: &mut Model| put(m, 0, 1, &["a"])),
+            ),
+        ];
+
+        let mut first = true;
+        for (label, mutate) in frames {
+            mutate(&mut model);
+            let grid_damage = model.take_paint_damage();
+            let surface = view_surface::render(&model);
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
+            first = false;
+            shadow.compose(&model, &surface, &damage);
+            let bytes = drawn_bytes(|w| shadow.emit_updates(w));
+            term.feed(&bytes);
+            shadow.commit();
+
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    let shown = &term.grid[usize::from(y)][usize::from(x)];
+                    let want = shadow.front()[(x, y)].symbol();
+                    if shown == WIDE_HALF {
+                        let left = x.checked_sub(1).map(|lx| shadow.front()[(lx, y)].symbol());
+                        assert!(
+                            left.is_some_and(emit::terminal_may_widen),
+                            "cell ({x},{y}) holds a widened glyph's second half but \
+                             nothing to its left widens, after: {label}"
+                        );
+                        continue;
+                    }
+                    assert_eq!(
+                        shown, want,
+                        "cell ({x},{y}) shows {shown:?} where the shadow says \
+                         {want:?}, after: {label}"
+                    );
+                }
+            }
         }
     }
 

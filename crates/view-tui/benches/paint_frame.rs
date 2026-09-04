@@ -22,8 +22,11 @@
 //! - `paint_frame_steady_state` mutates one cell per iteration (the echo
 //!   scenario's per-keystroke damage shape) and composites only the damaged
 //!   row, the "after" number for a single typed character.
-//! - `paint_frame_steady_state_crossterm` runs the clipped path over a real
-//!   `CrosstermBackend` so its escape-encoding cost is included.
+//! - `paint_frame_steady_state_crossterm` runs the clipped path over a
+//!   growing in-memory buffer rather than a discarding one, so the
+//!   difference against `paint_frame_steady_state` is what retaining the
+//!   frame's bytes costs. Escape encoding itself is charged to both: the
+//!   emission loop is view's own and every row pays it.
 //! - `paint_frame_cold/steady_state_crossterm_cold` is that same frame with
 //!   a keystroke interval of idle before each one, which is the state the
 //!   editor actually meets.
@@ -39,16 +42,16 @@
 //!   iteration, `KEYSTROKE_GAP`-paced): a prompt opening is a rare, one-shot
 //!   event, never a steady per-frame path, so there is no hot variant.
 //!
-//! All seven absorb terminal write syscalls into their backend.
+//! All seven absorb terminal write syscalls into their writer.
 
 #![allow(clippy::expect_used)]
 
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use ratatui::backend::{Backend, TestBackend};
 use ratatui::layout::Rect;
 use std::hint::black_box;
+use std::io::Write;
 use view_core::events::UiEvent;
 use view_core::grid::GridOp;
 use view_core::model::Model;
@@ -139,8 +142,8 @@ fn wide_model() -> Model {
 /// One production-shaped frame: composite `damage` into the shadow, emit the
 /// cells that changed against what the terminal shows, then promote the
 /// composed frame -- exactly the sequence `Term::draw_surface` runs.
-fn emit_frame<B: Backend>(
-    backend: &mut B,
+fn emit_frame<W: Write>(
+    backend: &mut W,
     shadow: &mut Shadow,
     model: &Model,
     surface: &view_surface::Surface,
@@ -154,7 +157,7 @@ fn emit_frame<B: Backend>(
 /// A shadow sized for the bench grid with one full frame already painted, so
 /// every measured iteration starts from a populated terminal rather than a
 /// blank one.
-fn primed_shadow<B: Backend>(backend: &mut B, model: &mut Model) -> Shadow {
+fn primed_shadow<W: Write>(backend: &mut W, model: &mut Model) -> Shadow {
     let mut shadow = Shadow::new();
     shadow.resize(Rect::new(0, 0, WIDTH, HEIGHT));
     let _ = model.take_paint_damage();
@@ -168,7 +171,7 @@ fn primed_shadow<B: Backend>(backend: &mut B, model: &mut Model) -> Shadow {
 /// whole-grid cost the clipping lever removes.
 fn bench_paint_frame_full(c: &mut Criterion) {
     let mut model = populated_model();
-    let mut backend = TestBackend::new(WIDTH, HEIGHT);
+    let mut backend = std::io::sink();
     let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
@@ -198,7 +201,7 @@ fn bench_paint_frame_full(c: &mut Criterion) {
 /// width-dependent costs stay measured.
 fn bench_paint_frame_full_wide(c: &mut Criterion) {
     let mut model = wide_model();
-    let mut backend = TestBackend::new(WIDTH, HEIGHT);
+    let mut backend = std::io::sink();
     let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
@@ -230,7 +233,7 @@ fn bench_paint_frame_full_wide(c: &mut Criterion) {
 /// through the same row-clipped `Damage` the runtime builds.
 fn bench_paint_frame(c: &mut Criterion) {
     let mut model = populated_model();
-    let mut backend = TestBackend::new(WIDTH, HEIGHT);
+    let mut backend = std::io::sink();
     let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
@@ -260,14 +263,13 @@ fn bench_paint_frame(c: &mut Criterion) {
     });
 }
 
-/// Same clipped steady-state frame, but through `CrosstermBackend` over an
-/// in-memory writer: includes the real escape-sequence generation the
-/// production path pays, still minus terminal write syscalls, so the
-/// difference against `paint_frame_steady_state` isolates crossterm's
-/// per-frame encoding cost.
+/// Same clipped steady-state frame, but writing into a growing in-memory
+/// buffer instead of discarding the bytes, still minus terminal write
+/// syscalls, so the difference against `paint_frame_steady_state` isolates
+/// what retaining the frame's escapes costs.
 fn bench_paint_frame_crossterm(c: &mut Criterion) {
     let mut model = populated_model();
-    let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+    let mut backend = Vec::<u8>::new();
     let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
@@ -309,7 +311,7 @@ fn bench_paint_frame_crossterm(c: &mut Criterion) {
 /// does not, the explanation is wrong and the difference is elsewhere.
 fn bench_paint_frame_cold(c: &mut Criterion) {
     let mut model = populated_model();
-    let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+    let mut backend = Vec::<u8>::new();
     let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
@@ -392,7 +394,7 @@ fn agent_panel_model() -> Model {
 /// path, and the panel's own layout is the largest thing in it.
 fn bench_paint_frame_agent_composer(c: &mut Criterion) {
     let mut model = agent_panel_model();
-    let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+    let mut backend = Vec::<u8>::new();
     let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut typed = 0_u32;
@@ -494,7 +496,7 @@ fn bench_paint_frame_prompt_overlay_open(c: &mut Criterion) {
             for _ in 0..iters {
                 std::thread::sleep(KEYSTROKE_GAP);
                 let mut model = populated_model();
-                let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+                let mut backend = Vec::<u8>::new();
                 let mut shadow = primed_shadow(&mut backend, &mut model);
                 open_prompt_overlay(&mut model);
 
