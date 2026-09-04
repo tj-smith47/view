@@ -3975,12 +3975,16 @@ mod tests {
     /// path [`Shadow::emit_updates`] picks for itself. Leaves `shadow`
     /// untouched, so a caller can go on to `commit` and drive another frame.
     ///
+    /// Panics when the diff is empty: two empty byte streams agree about
+    /// nothing, so a step that mutated a cell to the value it already held
+    /// would pass every comparison here while covering none of what its
+    /// label names.
+    ///
     /// Returns whether the frame reached the `CrosstermBackend::draw`
-    /// comparison over a diff that carried cells -- it reaches it only when
-    /// nothing in the diff widens, and an empty diff compares two empty byte
-    /// streams. Callers hold that count to a floor: the leg is silent when it
-    /// skips, so a fixture that grew an icon or a `…` would stop exercising
-    /// it and nothing else would say so.
+    /// comparison -- it reaches it only when nothing in the diff widens.
+    /// Callers hold that count to a floor: the leg is silent when it skips,
+    /// so a fixture that grew an icon or a `…` would stop exercising it and
+    /// nothing else would say so.
     #[must_use]
     fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) -> bool {
         let expected = drawn_bytes(|w| emit::draw_resynced(w, shadow.updates()));
@@ -4000,6 +4004,11 @@ mod tests {
                     .cell((x, y))
                     .is_some_and(|old| emit::terminal_may_widen(old.symbol()));
         }
+        assert!(
+            changed > 0,
+            "the frame after {label:?} changed no cell, so its emission \
+             comparisons hold nothing to the wire"
+        );
         if !widens {
             assert_eq!(
                 expected,
@@ -4022,7 +4031,7 @@ mod tests {
             chosen, expected,
             "emit_updates diverged from the whole-buffer diff after: {label}"
         );
-        !widens && changed > 0
+        !widens
     }
 
     /// The compose-time equivalence guard must be seen to catch: a damage
@@ -4143,9 +4152,16 @@ mod tests {
                 "a VS16 emoji landing mid-row",
                 Box::new(|m: &mut Model| put(m, 2, 0, &["\u{2764}\u{FE0F}", " "])),
             ),
+            // the seeded row already ends in a wide glyph, which the final
+            // column paints blank; the glyph has to displace narrow text
+            // for the frame to carry that blank
+            (
+                "narrow text in the final column",
+                Box::new(|m: &mut Model| put(m, 2, 11, &["x"])),
+            ),
             (
                 "a wide glyph written into the final column",
-                Box::new(|m: &mut Model| put(m, 2, 11, &["界"])),
+                Box::new(|m: &mut Model| put(m, 2, 11, &["漢"])),
             ),
             (
                 "the first cell of the row under a wide row end",
@@ -4279,11 +4295,21 @@ mod tests {
             shadow.compose(&model, &surface, &damage);
             assert!(
                 assert_clipped_emission_matches_unclipped(&mut shadow, label),
-                "the chrome frame {label:?} changed nothing, or carried a glyph a \
-                 terminal may widen, so it skipped the CrosstermBackend::draw \
-                 comparison it exists for"
+                "the chrome frame {label:?} carried a glyph a terminal may widen, \
+                 so it skipped the CrosstermBackend::draw comparison it exists for"
             );
             shadow.commit();
+            // the byte comparisons read both paths out of the same two
+            // buffers; only a recomposite from the model catches a clip over
+            // overlay row runs that lifted rows out and never put them back
+            let mut want = ratatui::buffer::Buffer::empty(area);
+            composite_into(&mut want, &model, &surface, &Damage::full());
+            assert_eq!(
+                shadow.front(),
+                &want,
+                "emitting updates left the shadow holding something other than \
+                 the frame it composed, after: {label}"
+            );
         }
     }
 
@@ -4674,8 +4700,9 @@ mod tests {
         }
     }
 
-    /// A frame emitted to a terminal that widens ambiguous glyphs has to
-    /// leave every cell holding what the shadow says it holds. Without the
+    /// A frame emitted to a terminal that widens every glyph
+    /// `terminal_may_widen` answers for has to leave every cell holding
+    /// what the shadow says it holds. Without the
     /// re-sync the rest of an icon's row lands one column right and the next
     /// frame -- which repaints only model-changed cells -- covers neither the
     /// shifted cells nor the icon's second half, which is the residue the
@@ -4700,7 +4727,7 @@ mod tests {
                 Box::new(|m: &mut Model| {
                     put(m, 0, 0, &[NERD_ICON, " ", "F", "i", "n", "d"]);
                     put(m, 1, 0, &["\u{2500}"; 12]);
-                    put(m, 2, 0, &["p", "l", "a", "i", "n"]);
+                    put(m, 2, 0, &["p", "l", "a", "i", "n", " ", "界", " "]);
                     put(
                         m,
                         3,
@@ -4725,7 +4752,7 @@ mod tests {
                     put(m, 0, 0, &[" ", NERD_ICON, " ", "F", "i", "n", "d"]);
                     put(m, 1, 0, &[" "]);
                     put(m, 1, 1, &["\u{2500}"; 12]);
-                    put(m, 2, 0, &[" ", "p", "l", "a", "i", "n"]);
+                    put(m, 2, 0, &[" ", "p", "l", "a", "i", "n", " ", "界", " "]);
                     put(
                         m,
                         3,
@@ -4797,6 +4824,22 @@ mod tests {
                 for x in 0..area.width {
                     let shown = &term.grid[usize::from(y)][usize::from(x)];
                     let want = shadow.front()[(x, y)].symbol();
+                    // the one second half that is content is the continuation
+                    // of a glyph the shadow itself holds as multi-column, which
+                    // a terminal-widened glyph never is
+                    let real_wide = x
+                        .checked_sub(1)
+                        .and_then(|lx| shadow.front().cell((lx, y)))
+                        .is_some_and(|left| left.cell_width() > 1);
+                    if real_wide {
+                        assert_eq!(
+                            shown.as_str(),
+                            WIDE_HALF,
+                            "cell ({x},{y}) shows {shown:?} where the glyph to its \
+                             left covers it, after: {label}"
+                        );
+                        continue;
+                    }
                     // an emission that follows the run repaints every column a
                     // widened glyph covered, so no second half survives a
                     // frame; one that stops short leaves the tail of the run
