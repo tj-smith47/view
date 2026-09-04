@@ -576,19 +576,8 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.surface_conflicts.end_complaint_grace(generation);
             Vec::new()
         }
-        // a deadline the dead engine's attach armed, still ticking in its
-        // own thread past the restart: the replacement re-arms on its own
-        // attach, and answers to that one alone
-        Msg::StartupHoldExpired { generation }
-            if generation != model.surface_conflicts.engine_generation() =>
-        {
-            Vec::new()
-        }
-        Msg::StartupHoldExpired { .. } => {
-            model.dirty |= model
-                .engine
-                .messages
-                .resolve_startup_hold(HoldOutcome::Release);
+        Msg::StartupHoldExpired { generation } => {
+            model.dirty |= model.expire_startup_hold(generation);
             Vec::new()
         }
         // The key-dispatch-path arm: one event per keystroke in an attached

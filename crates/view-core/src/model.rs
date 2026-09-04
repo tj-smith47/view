@@ -385,6 +385,22 @@ impl Model {
         self.surface_conflicts.forget_engine();
     }
 
+    /// Releases the startup hold on the deadline its attach armed -- and
+    /// only that one. An expiry carrying another engine's generation was
+    /// armed by a connection this session has since replaced, and its timer
+    /// thread wakes regardless; the hold it finds is the replacement's, and
+    /// releasing it would put the replacement's startup messages on the
+    /// stack early. Answers whether anything the user can see changed.
+    #[must_use]
+    pub fn expire_startup_hold(&mut self, generation: u64) -> bool {
+        if generation != self.surface_conflicts.engine_generation() {
+            return false;
+        }
+        self.engine
+            .messages
+            .resolve_startup_hold(crate::native::toast::HoldOutcome::Release)
+    }
+
     /// The next `request_id` for a `RpcCall::Checktime` this crate issues,
     /// from its own counter rather than [`Model::next_hidden_generation`]:
     /// `Msg::CheckTimeReply` is a reply type nothing else answers into, so
@@ -1260,7 +1276,8 @@ impl EngineModel {
     /// | `grids`' window grids and every pane | grid ids are per-connection, so both the panes and the cells behind them belong to a session that ended | yes |
     /// | `hl` | the replacement's own table replaces it | no |
     /// | `mode` | the replacement announces its modes on attach | no |
-    /// | `messages`, `toast_history` | scrollback, not a point-in-time state | no |
+    /// | `messages`' `entries`, `toast_history` | scrollback, not a point-in-time state | no |
+    /// | `messages`' `startup_hold` and `held` | the replacement is a launch, and its first redraw batch is what the hold exists to catch | yes, via [`Messages::forget_engine`] |
     ///
     /// `mouse_on` is in the list because nvim only emits `mouse_on`/
     /// `mouse_off` when its own view of the mouse state changes, and that
@@ -1278,6 +1295,7 @@ impl EngineModel {
         self.tabline = None;
         self.mouse_on = false;
         self.statusline.forget_engine_segments();
+        self.messages.forget_engine();
     }
 
     /// The one place a [`MessageEntry`] is created that also classifies it
@@ -2044,6 +2062,45 @@ mod tests {
         assert_eq!(history(&model).len(), 2, "both are still readable");
     }
 
+    /// A replacement engine is a launch, whichever state the dead engine
+    /// left the hold in, and what the dead engine parked ends exactly as
+    /// its own deadline would have ended it: released from a pending hold,
+    /// discarded from a collapsed one.
+    #[test]
+    fn a_replacement_engine_opens_a_fresh_hold_and_settles_the_dead_ones() {
+        use crate::native::toast::{HoldOutcome, StartupHold};
+        for (outcome, on_stack) in [
+            (None, vec!["parked".to_string()]),
+            (Some(HoldOutcome::Collapse), Vec::new()),
+            (Some(HoldOutcome::Release), vec!["parked".to_string()]),
+        ] {
+            let mut model = Model::new();
+            showed(&mut model, "echomsg", "parked");
+            if let Some(outcome) = outcome {
+                let _ = model.engine.messages.resolve_startup_hold(outcome);
+            }
+            model.engine.forget_overlays();
+            assert_eq!(stack(&model), on_stack, "after {outcome:?}");
+            assert!(
+                model.engine.messages.held().is_empty(),
+                "after {outcome:?}: {:?}",
+                model.engine.messages.held()
+            );
+            assert_eq!(
+                model.engine.messages.startup_hold(),
+                StartupHold::Pending,
+                "after {outcome:?}"
+            );
+            assert_eq!(history(&model).len(), 1, "after {outcome:?}");
+            showed(&mut model, "echomsg", "the replacement's");
+            assert_eq!(
+                model.engine.messages.held().len(),
+                1,
+                "after {outcome:?}: the replacement's startup line toasted"
+            );
+        }
+    }
+
     /// Three triggers race by design; only the first is the decision.
     #[test]
     fn a_resolved_hold_never_resolves_again() {
@@ -2557,6 +2614,14 @@ mod tests {
         for field in declared_fields(surfaces, "pub struct SurfaceConflicts {") {
             if !classified(&conflicts, &field) {
                 unclassified.push(format!("SurfaceConflicts::{field} (forget_engine)"));
+            }
+        }
+
+        let messages = include_str!("model/messages.rs");
+        let hold = doc_above(messages, "pub(crate) fn forget_engine(&mut self)");
+        for field in declared_fields(messages, "pub struct Messages {") {
+            if !classified(&hold, &field) {
+                unclassified.push(format!("Messages::{field} (forget_engine)"));
             }
         }
 

@@ -598,6 +598,35 @@ impl Messages {
         true
     }
 
+    /// Ends the hold the connection being replaced was parking under and
+    /// opens a fresh one for its replacement, called from
+    /// [`EngineModel::forget_overlays`] on the restart.
+    ///
+    /// A replacement is a launch: it sources the same config, and its
+    /// plugins raise the same setup-time complaints in its first redraw
+    /// batch, ahead of anything view could decide with -- so the hold has
+    /// to be `Pending` again before that batch can arrive, and the restart
+    /// is the one moment that is certain, with the dead engine torn down
+    /// and the fresh one not yet spawned. The dead engine's hold ends the
+    /// way its own deadline would have, since that deadline's expiry now
+    /// carries a generation nothing answers to: what it parked under
+    /// `Pending` is the last thing that connection said and drains onto
+    /// the stack, and what it parked under `Collapsed` was already decided
+    /// to stay in the history.
+    ///
+    /// | field | why |
+    /// | --- | --- |
+    /// | `startup_hold` | back to `Pending`: the replacement's first redraw batch is the one the hold exists to catch |
+    /// | `held` | drained or discarded as the dead engine's deadline would have, never carried into a hold whose outcome a different engine's probe decides |
+    /// | `entries`, `next_message_id`, `armed_slot`, `armed_lines`, `paused` | kept: the toast stack and the scrollback outlive the connection, and an id stamped once is never reissued |
+    pub(crate) fn forget_engine(&mut self) {
+        // the repaint is the attach's own: nothing paints between here and
+        // the replacement's first redraw batch, and `update()` arms the top
+        // slot on that batch
+        let _ = self.resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
+        self.startup_hold = crate::native::toast::StartupHold::Pending;
+    }
+
     /// Drops every message nvim showed, per `msg_clear`, and keeps every
     /// locally-synthesized one.
     ///

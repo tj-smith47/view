@@ -1840,12 +1840,7 @@ mod tests {
         expire_hold(&mut model);
         let float = toast("markdown");
         let _ = update(&mut model, Msg::FloatObserved(float.clone()));
-        let _ = update(
-            &mut model,
-            Msg::Key(crate::msg::Key {
-                notation: "j".to_string(),
-            }),
-        );
+        key(&mut model);
         assert!(model.surface_conflicts.is_complaint(float.win));
         assert!(!model.surface_conflicts.startup_window_open());
 
@@ -2003,12 +1998,7 @@ mod tests {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
         expire_hold(&mut model);
-        let _ = update(
-            &mut model,
-            Msg::Key(crate::msg::Key {
-                notation: "j".to_string(),
-            }),
-        );
+        key(&mut model);
         assert!(!model.surface_conflicts.startup_window_open());
 
         let float = toast("markdown");
@@ -2057,12 +2047,7 @@ mod tests {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
         expire_hold(&mut model);
-        let _ = update(
-            &mut model,
-            Msg::Key(crate::msg::Key {
-                notation: "j".to_string(),
-            }),
-        );
+        key(&mut model);
 
         let float = toast("markdown");
         let _ = update(&mut model, Msg::FloatObserved(float.clone()));
@@ -2170,12 +2155,7 @@ mod tests {
     fn a_float_that_opens_after_the_grace_is_left_unread() {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
-        let _ = update(
-            &mut model,
-            Msg::Key(crate::msg::Key {
-                notation: "j".to_string(),
-            }),
-        );
+        key(&mut model);
         expire_grace(&mut model);
         assert!(
             update(&mut model, Msg::FloatObserved(toast("markdown"))).is_empty(),

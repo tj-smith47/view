@@ -9522,6 +9522,31 @@ fn the_hold_deadline_releases_what_the_probe_never_answered_for() {
     assert!(m.dirty, "a line arriving on screen is a repaint");
 }
 
+/// The generation the one hold deadline `effects` arms carries.
+fn armed_hold_generation(effects: &[Effect]) -> u64 {
+    let generations: Vec<u64> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::ScheduleStartupHold { generation, .. } => Some(*generation),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        generations.len(),
+        1,
+        "one hold deadline per attach: {effects:?}"
+    );
+    generations[0]
+}
+
+/// The restart the product performs: the dead engine's overlays and its
+/// conflict state are dropped together, before the replacement is spawned
+/// (`restart_engine`).
+fn restart(m: &mut Model) {
+    m.engine.forget_overlays();
+    m.forget_engine_conflicts();
+}
+
 /// The deadline a dead engine's attach armed is still sleeping in its
 /// thread when the replacement attaches and arms its own; it wakes first.
 /// Its expiry carries the generation it was armed under, and the hold the
@@ -9530,54 +9555,126 @@ fn the_hold_deadline_releases_what_the_probe_never_answered_for() {
 /// the replacement's startup messages onto the stack early.
 #[test]
 fn a_dead_engines_hold_expiry_does_not_release_the_replacements() {
-    fn armed_generation(effects: &[Effect]) -> u64 {
-        let generations: Vec<u64> = effects
-            .iter()
-            .filter_map(|effect| match effect {
-                Effect::ScheduleStartupHold { generation, .. } => Some(*generation),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            generations.len(),
-            1,
-            "one hold deadline per attach: {effects:?}"
-        );
-        generations[0]
-    }
     let mut m = model();
-    let dead = armed_generation(&update(&mut m, Msg::EngineAttached));
+    let dead = armed_hold_generation(&update(&mut m, Msg::EngineAttached));
     let _ = update(
         &mut m,
-        Msg::Redraw(vec![UiEvent::MsgShow {
-            kind: "echomsg".into(),
-            content: vec![(0, "a plugin said something".into())],
-            replace_last: false,
-        }]),
+        Msg::Redraw(vec![echomsg("the dead engine said this")]),
     );
     assert!(
         m.engine.messages.entries.is_empty(),
         "parked under the hold"
     );
 
-    m.forget_engine_conflicts();
-    let live = armed_generation(&update(&mut m, Msg::EngineAttached));
+    restart(&mut m);
+    assert_eq!(
+        m.engine.messages.startup_hold(),
+        crate::native::toast::StartupHold::Pending,
+        "a replacement is a launch, and its hold opens before it can say anything"
+    );
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
+        "what the dead engine parked ends as its deadline would have: released"
+    );
+    let live = armed_hold_generation(&update(&mut m, Msg::EngineAttached));
     assert_ne!(
         dead, live,
         "two engines, one generation: nothing tells the expiries apart"
     );
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("the replacement said this")]),
+    );
+    assert_eq!(
+        m.engine.messages.held().len(),
+        1,
+        "the replacement's startup message parks like a launch's"
+    );
 
     let _ = update(&mut m, Msg::StartupHoldExpired { generation: dead });
-    assert!(
-        m.engine.messages.entries.is_empty(),
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
         "the dead engine's deadline released the replacement's hold: {:?}",
         m.engine.messages.entries
     );
     let _ = update(&mut m, Msg::StartupHoldExpired { generation: live });
     assert_eq!(
         m.engine.messages.entries.len(),
-        1,
+        2,
         "the replacement's own deadline releases it"
+    );
+}
+
+/// The common restart: a session long past its hold loses its engine, and
+/// the replacement sources the same config, whose plugins raise the same
+/// wall of setup-time complaints. Every one of them parks, the way the
+/// first launch's did, rather than toasting over the notice that explains
+/// them.
+#[test]
+fn a_replacement_engines_startup_messages_park_the_way_a_launchs_do() {
+    let mut m = started_model();
+    let _ = update(&mut m, Msg::Redraw(vec![echomsg("mid-session")]));
+    assert_eq!(m.engine.messages.entries.len(), 1, "the hold is over");
+
+    restart(&mut m);
+    let live = armed_hold_generation(&update(&mut m, Msg::EngineAttached));
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("noice.nvim: Noice needs ext_messages")]),
+    );
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
+        "the replacement's setup-time complaint toasted: {:?}",
+        m.engine.messages.entries
+    );
+    assert_eq!(m.engine.messages.held().len(), 1);
+
+    let _ = update(&mut m, Msg::StartupHoldExpired { generation: live });
+    assert_eq!(m.engine.messages.entries.len(), 2);
+}
+
+/// A restart whose attach fails arms no deadline for anyone: the dead
+/// engine's expiry names a generation nothing answers to, and no attach
+/// follows to arm a fresh one. What the dead engine parked cannot wait on
+/// either -- it is released at the restart itself, ahead of the attach
+/// that may fail.
+#[test]
+fn a_failed_attach_strands_nothing_the_dead_engine_parked() {
+    let mut m = model();
+    let dead = armed_hold_generation(&update(&mut m, Msg::EngineAttached));
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![echomsg("the dead engine said this")]),
+    );
+    assert_eq!(m.engine.messages.held().len(), 1, "parked under the hold");
+
+    restart(&mut m);
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
+        "released at the restart, not left to a deadline nobody will arm"
+    );
+    assert!(m.engine.messages.held().is_empty());
+
+    let effects = update(&mut m, Msg::StartupHoldExpired { generation: dead });
+    assert_eq!(
+        armed_slots(&effects),
+        vec![m.engine.messages.entries[0].id()],
+        "the released line's dismissal timer starts on the first fold after \
+         the restart, whatever that fold carries: {effects:?}"
+    );
+    assert_eq!(
+        m.engine.messages.entries.len(),
+        1,
+        "the stale expiry neither doubles the release nor ends the fresh hold"
+    );
+    assert_eq!(
+        m.engine.messages.startup_hold(),
+        crate::native::toast::StartupHold::Pending,
+        "the hold waits for the attempt that succeeds"
     );
 }
 

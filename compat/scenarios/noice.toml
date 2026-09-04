@@ -128,9 +128,10 @@ steps = [
   # which its health checker raises on a 1 s interval of its own at ~4.8 s,
   # after the `<leader>fm` above. The first keystroke ends the startup
   # conflict window, so what files this one is the claimant-complaint grace
-  # the probe reply armed (`COMPLAINT_GRACE`, twice the measured raise): a claimant's complaints
-  # are not all raised by the time anyone can type, and one box per conflict
-  # is the rule whichever side of the keystroke the second box arrives on.
+  # the probe reply armed (`COMPLAINT_GRACE`, twice the measured raise): a
+  # claimant's complaints are not all raised by the time anyone can type,
+  # and one box per conflict is the rule whichever side of the keystroke the
+  # second box arrives on.
   # A window the user opened in that same span is not taken -- inside the
   # grace the rows have to read as a complaint first
   # (`SurfaceConflicts::reads_as_complaint`).

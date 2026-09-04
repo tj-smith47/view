@@ -561,7 +561,11 @@ pub struct SurfaceConflicts {
     /// thread sleeping on a dead engine's behalf still wakes, and the
     /// expiry it sends names this value as it was when the deadline was
     /// armed: bumped by [`SurfaceConflicts::forget_engine`], so the
-    /// replacement answers to no deadline but its own.
+    /// replacement answers to no deadline but its own. An expiry effect's
+    /// generation is checked by the method that consumes it
+    /// ([`SurfaceConflicts::end_complaint_grace`],
+    /// [`Model::expire_startup_hold`](crate::model::Model::expire_startup_hold)),
+    /// never at the dispatch site.
     generation: u64,
 }
 
