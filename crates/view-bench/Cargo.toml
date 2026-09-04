@@ -16,6 +16,7 @@ thiserror = "2.0.18"
 # reworded banner fails the row rather than silently timing nothing.
 view-core = { version = "0.0.1", path = "../view-core" }
 view-oracle = { version = "0.0.1", path = "../view-oracle" }
+view-proc = { version = "0.0.1", path = "../view-proc" }
 vt100 = "0.16.2"
 
 [dev-dependencies]

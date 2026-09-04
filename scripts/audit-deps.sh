@@ -152,14 +152,6 @@ done
 # would also reject the legitimate dev-dependency edges view-native and
 # view already declare -- so this reads cargo metadata's per-dependency
 # `kind` field directly (null for a normal edge, "dev"/"build" otherwise)
-# view-proc is the leaf every crate that spawns a long-lived child depends
-# on (crates/view-proc/src/lib.rs: the parent-death signal). It must reach
-# nothing else in this workspace, or the direction the rows above enforce
-# would simply run through it.
-for dep in view view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness view-test-support; do
-  check_absent view-proc "$dep"
-done
-
 # instead.
 check_dev_only() { # usage: check_dev_only <crate>
   if jq -e --arg d "$1" \
@@ -169,6 +161,20 @@ check_dev_only() { # usage: check_dev_only <crate>
   fi
 }
 check_dev_only view-test-support
+
+# view-proc is the leaf every crate that spawns a long-lived child depends
+# on (crates/view-proc/src/lib.rs: the parent-death signal). It must reach
+# nothing else in this workspace, or the direction the rows above enforce
+# would simply run through it.
+for dep in view view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness view-test-support; do
+  check_absent view-proc "$dep"
+done
+# and the crates that spawn no process must not reach it either: view-core
+# is pure by spec, and a paint or model crate taking a spawn primitive is
+# the purity claim breaking silently rather than at this line.
+for crate in view-core view-surface view-native view-tui; do
+  check_absent "$crate" view-proc
+done
 
 # view -> view-oracle exists so the bin crate's live supervision test
 # (crates/view/tests/supervision_live.rs) asserts against the oracle's own

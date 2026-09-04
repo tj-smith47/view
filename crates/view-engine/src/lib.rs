@@ -41,4 +41,3 @@ pub use process::{
 };
 pub use rpc::{RpcError, RpcMessage};
 pub use stall::{OutboxStallWatch, WRITER_STALL_THRESHOLD};
-pub use view_proc::spawn_tied_to_this_process;

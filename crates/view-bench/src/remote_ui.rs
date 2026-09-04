@@ -127,7 +127,7 @@ impl RemoteUiServer {
         // no controlling terminal, so a harness killed outright leaves it
         // listening on its socket forever
         let child =
-            view_oracle::spawn_tied_to_this_process(command).map_err(|err| BenchError::Desync {
+            view_proc::spawn_tied_to_this_process(command).map_err(|err| BenchError::Desync {
                 context: format!(
                     "spawning the headless control server {}: {err}",
                     nvim.program.display()
