@@ -1787,6 +1787,32 @@ mod tests {
         );
     }
 
+    /// The three messages that mean the user has acted all end the startup
+    /// conflict window, not the keyed one alone: a click or a paste is a
+    /// session someone is driving, and view holding a licence to close
+    /// windows there would take one down under a hand already on the mouse.
+    #[test]
+    fn a_click_and_a_paste_close_the_startup_window_the_way_a_key_does() {
+        for msg in [
+            Msg::Mouse(crate::msg::MouseInput {
+                button: "left".to_string(),
+                action: "press".to_string(),
+                modifier: String::new(),
+                row: 0,
+                col: 0,
+            }),
+            Msg::Paste("hello".to_string()),
+        ] {
+            let mut model = captured_session();
+            assert!(model.surface_conflicts.startup_window_open());
+            let _ = update(&mut model, msg.clone());
+            assert!(
+                !model.surface_conflicts.startup_window_open(),
+                "{msg:?} left the take-down armed"
+            );
+        }
+    }
+
     /// The bound on the take-down: once the startup window has closed, a
     /// float over a covered surface is something the session asked for, and
     /// view neither reads it nor closes it.
