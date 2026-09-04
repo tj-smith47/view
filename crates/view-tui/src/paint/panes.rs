@@ -56,7 +56,19 @@ pub(super) fn paint_panes(
     }
     let cursor = registry.cursor_grid();
     let mut windows: Vec<TermRect> = Vec::new();
+    let mut separated = false;
     for pane in registry.panes_in_z_order() {
+        // a separator is a cell of the global grid, so it belongs to the
+        // window layer and nothing above it: the pane list puts every
+        // window ahead of every float and message grid, and the boundary
+        // between the two is where the separators go in. Painted after the
+        // windows because their boxes are what say where the column is, and
+        // before anything floating because a float's rect owns every cell
+        // under it.
+        if !separated && !matches!(pane.kind, PaneKind::Window) {
+            paint_separators(&windows, theme, borders, damage, buf);
+            separated = true;
+        }
         let Some(grid) = registry.grid(pane.id) else {
             continue;
         };
@@ -78,7 +90,9 @@ pub(super) fn paint_panes(
             windows.push(pane_area);
         }
     }
-    paint_separators(&windows, theme, borders, damage, buf);
+    if !separated {
+        paint_separators(&windows, theme, borders, damage, buf);
+    }
 }
 
 /// The theme one pane's cells resolve through: the caller's, or one whose
@@ -116,8 +130,10 @@ fn pane_theme(theme: &Theme, pane: &Pane, cursor: Option<GridId>) -> Theme {
 /// neighbour is hidden, and the rows of a split where the window across is
 /// only as tall as its own half.
 ///
-/// Runs after every pane so the global grid's own cells are underneath it;
-/// what lands is view's glyph and view's style, over nvim's.
+/// Runs after the window panes so the global grid's own cells are
+/// underneath it -- what lands is view's glyph and view's style, over
+/// nvim's -- and before the floating ones, which own every cell their rect
+/// covers.
 fn paint_separators(
     windows: &[TermRect],
     theme: &Theme,

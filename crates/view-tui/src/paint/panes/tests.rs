@@ -341,6 +341,47 @@ fn a_float_paints_above_the_windows_it_overlaps() {
     );
 }
 
+/// The separator column is a cell of the global grid, so a float over it
+/// wins the same way a float over a window's text does. The overpaint that
+/// draws view's own glyph there used to run after every pane, which put
+/// nvim's chrome column back on top of the float's text.
+///
+/// Disconfirm: painting the separators after the float layer again leaves
+/// the separator glyph mid-word here.
+#[test]
+fn a_float_paints_above_the_separator_column() {
+    let mut model = vsplit();
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridResize {
+                grid: 7,
+                width: 10,
+                height: 1,
+            },
+            UiEvent::WinFloatPos {
+                grid: 7,
+                win: WinHandle(1004),
+                anchor_grid: 1,
+                zindex: 50,
+                compindex: 1,
+                screen_row: 1,
+                screen_col: u64::from(SEPARATOR_COL) - 4,
+            },
+            line(7, 0, "overlapped", 0),
+            UiEvent::Flush,
+        ],
+    );
+    let buf = frame(&model);
+    let row = row_text(&buf, 1);
+    let start = usize::from(SEPARATOR_COL) - 4;
+    assert_eq!(
+        &row[start..start + 10],
+        "overlapped",
+        "the separator column overpainted the float that covers it: {row:?}"
+    );
+}
+
 /// `win_hide` takes a pane off screen without destroying its grid, so the
 /// cells it still holds must not reach the frame -- and with nothing across
 /// the column any more, view stops overpainting it and grid 1's own cell
