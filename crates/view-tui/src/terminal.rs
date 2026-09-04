@@ -150,6 +150,10 @@ const KITTY_KBD_POP: &[u8] = b"\x1b[<u";
 /// [`restore`] -- the pop -- is a free function the panic hook runs with no
 /// guard in scope. Written only where the push and the pop bytes are, so
 /// the flag cannot claim an encoding the terminal was never put into.
+///
+/// `Relaxed` on both sides: the input thread reads it while the main thread
+/// writes it, and the flag is the entire message -- no other write is being
+/// published behind it, so nothing is owed a happens-before.
 static KITTY_KBD_PUSHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the terminal is reporting keys in the kitty keyboard protocol,
@@ -608,6 +612,9 @@ impl Term {
         // `<S-CR>` from `<CR>` on a terminal that can
         let pushed = cfg!(unix) && caps.kitty_kbd;
         push_kitty_keyboard(&mut std::io::stdout(), self.caps.kitty_kbd, pushed)?;
+        // set true and never false, mirroring the push this guards: a
+        // capability only ever upgrades here, so a false would claim a pop
+        // nothing wrote
         if pushed {
             set_kitty_keyboard_pushed(true);
         }

@@ -1325,13 +1325,18 @@ fn resolve_key_token(token: &str) -> Result<Option<Vec<u8>>, CompatError> {
 
 /// `<C-x>` for a single ASCII letter or one of the four punctuation
 /// chords: a real terminal's Ctrl modifier clears bits 6-7 of the
-/// character's code point (`Ctrl-A` through `Ctrl-Z` occupy `0x01`-`0x1A`
-/// regardless of the letter's own shift state, which is why `<C-w>` and
-/// `<C-W>` are the identical keypress, and `` `\` ``, `]`, `^`, `_` occupy
-/// `0x1c`-`0x1f`), matching `crossterm`'s own inverse decode (`c @
+/// character's code point, so `Ctrl-A` through `Ctrl-Z` occupy
+/// `0x01`-`0x1A` regardless of the letter's own shift state (which is why
+/// `<C-w>` and `<C-W>` are the identical keypress) and `` `\` ``, `]`,
+/// `^`, `_` occupy `0x1c`-`0x1f`.
+///
+/// The letter rows match `crossterm`'s own inverse decode (`c @
 /// b'\x01'..=b'\x1A'` in its unix parser, which always produces a
-/// lowercase `Char`). Any other body -- a named key, more than one
-/// character -- is notation-shaped but not a case this translator
+/// lowercase `Char`). The four punctuation rows do not: that parser reads
+/// `0x1c`-`0x1f` as Ctrl with a digit, and the names below are nvim's own
+/// for those bytes, which `view-tui`'s `encode_terminal_key` restores
+/// before anything is forwarded. Any other body -- a named key, more than
+/// one character -- is notation-shaped but not a case this translator
 /// implements.
 fn resolve_ctrl_notation(body: &str, original: &str) -> Result<Option<Vec<u8>>, CompatError> {
     let mut chars = body.chars();
@@ -1953,6 +1958,13 @@ mod tests {
             ("<End>", b"\x1b[F"),
             ("<Del>", b"\x1b[3~"),
             ("<C-w>", &[0x17]),
+            // the four chords crossterm's unix parser decodes as Ctrl with
+            // a digit and view-tui's encode_terminal_key restores to the
+            // names nvim gives the same bytes
+            ("<C-\\>", &[0x1c]),
+            ("<C-]>", &[0x1d]),
+            ("<C-^>", &[0x1e]),
+            ("<C-_>", &[0x1f]),
             ("<S-Tab>", b"\x1b[Z"),
             ("<F5>", b"\x1b[15~"),
         ];

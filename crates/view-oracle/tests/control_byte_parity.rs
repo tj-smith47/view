@@ -102,33 +102,23 @@ fn markers_shown(session: &mut PtySession) -> Vec<&'static str> {
         .collect()
 }
 
-/// Installs one normal-mode mapping and waits for the command line it was
-/// typed on to clear, so the byte sent next cannot land on a cmdline.
+/// Installs one normal-mode mapping.
+///
+/// No wait follows it: the pty carries one ordered byte stream, so the
+/// `<CR>` that ends this command line is consumed before whatever is
+/// written next, and the mapping is in place by the time the chord byte is
+/// read.
 fn install_mapping(session: &mut PtySession, notation: &str, marker: &str) {
     let command = format!(":nnoremap {notation} :call setline(1,'{marker}')<CR>\r");
     session.send(command.as_bytes()).unwrap();
-    assert!(
-        session.wait_for_screen(BUDGET, |screen| !screen.contents().contains("nnoremap")),
-        "the mapping command never left the command line; screen:\n{}",
-        session.screen()
-    );
 }
 
-/// The whole point: the same byte, the same mapping, the same screen.
-///
-/// Both sides are asserted against the marker as well as against each
-/// other. Two sessions agreeing on a line that says nothing would be a
-/// pass for a `view` that forwarded the byte as a key nvim ignores.
-#[test]
-fn the_control_bytes_fire_the_mappings_their_nvim_names_are_written_against() {
-    let view_paths = common::ScratchPaths::new("control-byte-view");
-    let nvim_paths = common::ScratchPaths::new("control-byte-nvim");
-    let mut under_test = view_session(&view_paths);
-    let mut reference = nvim_session(&nvim_paths);
-
+/// Types every chord at both sessions and holds the two screens to each
+/// other, naming which pass failed.
+fn each_chord_agrees(under_test: &mut PtySession, reference: &mut PtySession, pass: &str) {
     for (byte, notation, marker) in CHORDS {
-        install_mapping(&mut under_test, notation, marker);
-        install_mapping(&mut reference, notation, marker);
+        install_mapping(under_test, notation, marker);
+        install_mapping(reference, notation, marker);
 
         under_test.send(&[byte]).unwrap();
         reference.send(&[byte]).unwrap();
@@ -136,30 +126,57 @@ fn the_control_bytes_fire_the_mappings_their_nvim_names_are_written_against() {
         let reached = |screen: &vt100::Screen| screen.contents().contains(marker);
         let seen_by_nvim = reference.wait_for_screen(BUDGET, reached);
         let seen_by_view = under_test.wait_for_screen(BUDGET, reached);
-        let by_nvim = markers_shown(&mut reference);
-        let by_view = markers_shown(&mut under_test);
+        let by_nvim = markers_shown(reference);
+        let by_view = markers_shown(under_test);
 
         assert!(
             seen_by_nvim,
-            "the pinned engine did not run its own {notation} mapping for byte \
+            "{pass}: the pinned engine did not run its own {notation} mapping for byte \
              {byte:#04x}, so this leg proves nothing about view; screen:\n{}",
             reference.screen()
         );
         assert_eq!(
             by_view,
             by_nvim,
-            "byte {byte:#04x}: nvim ran the mapping a user wrote as {notation} and view \
-             forwarded the byte under some other name (view saw the marker: \
+            "{pass}, byte {byte:#04x}: nvim ran the mapping a user wrote as {notation} and \
+             view forwarded the byte under some other name (view saw the marker: \
              {seen_by_view}); view's screen:\n{}",
             under_test.screen()
         );
         assert_eq!(
             by_nvim,
             vec![marker],
-            "byte {byte:#04x}: both sides agree on a screen that is not the mapping's own \
-             marker, so neither ran it"
+            "{pass}, byte {byte:#04x}: both sides agree on a screen that is not the \
+             mapping's own marker, so neither ran it"
         );
     }
+}
+
+/// The whole point: the same byte, the same mapping, the same screen.
+///
+/// Both sides are asserted against the marker as well as against each
+/// other. Two sessions agreeing on a line that says nothing would be a
+/// pass for a `view` that forwarded the byte as a key nvim ignores.
+///
+/// The chords are typed twice because `view` reads a byte through one of
+/// two decoders depending on when it lands: the startup guard's own
+/// `plain_key` while it still owns the terminal, and crossterm's parser
+/// plus `encode_terminal_key` afterwards. The first pass takes whichever
+/// window it happens to land in; the second waits out
+/// [`common::PROBE_HARD_CAP`] from a screen that only a session past its
+/// handover can paint, so it reaches the second decoder by construction.
+#[test]
+fn the_control_bytes_fire_the_mappings_their_nvim_names_are_written_against() {
+    let view_paths = common::ScratchPaths::new("control-byte-view");
+    let nvim_paths = common::ScratchPaths::new("control-byte-nvim");
+    let mut under_test = view_session(&view_paths);
+    let painted = std::time::Instant::now();
+    let mut reference = nvim_session(&nvim_paths);
+
+    each_chord_agrees(&mut under_test, &mut reference, "guard window");
+
+    std::thread::sleep(common::PROBE_HARD_CAP.saturating_sub(painted.elapsed()));
+    each_chord_agrees(&mut under_test, &mut reference, "past the guard");
 
     for session in [&mut under_test, &mut reference] {
         session.send(b"\x1b:qa!\r").unwrap();

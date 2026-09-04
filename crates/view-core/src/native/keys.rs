@@ -253,6 +253,17 @@ fn split_keys(spelling: &str) -> Option<Binding> {
         }
         match (head == '<').then(|| rest.find('>')).flatten() {
             Some(end) => {
+                // `>` is a key as much as it is a closer, and the first one
+                // in `<C->>` is the character the chord names. Reading it
+                // as the closer splits the chord into a modifier with no
+                // key and a stray `>`, which is how `Ctrl`+`>` -- a chord
+                // a keyboard-protocol terminal really does report -- came
+                // to be refused as malformed
+                let end = if !well_formed(&rest[..=end]) && rest[end + 1..].starts_with('>') {
+                    end + 1
+                } else {
+                    end
+                };
                 // inside a `<...>` key, `A-` can only ever be the modifier:
                 // what follows the prefixes is one character or a named key,
                 // and no name holds a `-`
@@ -422,6 +433,23 @@ mod tests {
         assert_eq!(
             keys.resolve(None, "<S-Left>"),
             Some(Resolved::Act(Action::Resize(Direction::Narrower)))
+        );
+    }
+
+    /// The one character that is also the bracket's closer, on its own and
+    /// as a chord's second press: a keyboard-protocol terminal reports
+    /// `Ctrl`+`>`, and `<C-w>>` is the resize chord nvim documents.
+    #[test]
+    fn a_key_spelled_with_the_closing_bracket_character_still_binds() {
+        let mut keys = KeyBindings::default();
+        assert!(keys.rebind(Action::Resize(Direction::Wider), &["<C->>".to_string()]));
+        assert_eq!(
+            keys.resolve(None, "<C->>"),
+            Some(Resolved::Act(Action::Resize(Direction::Wider)))
+        );
+        assert_eq!(
+            KeyBindings::default().resolve(Some("<C-w>"), ">"),
+            Some(Resolved::Act(Action::Resize(Direction::Wider)))
         );
     }
 

@@ -47,7 +47,7 @@ use view_core::msg::{Key, Msg};
 /// desync what a compat scenario types from what this encoder actually
 /// forwards, undetected by either crate's own tests.
 #[must_use]
-pub fn encode_key(ev: &KeyEvent) -> Option<String> {
+pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
     if ev.kind == KeyEventKind::Release {
         return None;
     }
@@ -467,9 +467,11 @@ fn utf8_char(run: &[u8]) -> Utf8 {
 /// terminal mode, the tag jump, the alternate file, and the byte most
 /// terminals send for `Ctrl`+`/`. A user's mapping is written against the
 /// nvim name, so the crossterm name reaches nvim as a key nobody bound.
-/// The whole table is `:help key-notation` of the pinned engine
-/// (`runtime/doc/intro.txt`, v0.12.4) plus that engine's own answer to
-/// each byte typed at its tty: `keytrans(getcharstr())`.
+/// The letter and named-key rows are `:help key-notation` of the pinned
+/// engine (`runtime/doc/intro.txt` lines 128-143, v0.12.4); that table has
+/// no row for `0x1c..=0x1f` at all, so those four come from the same
+/// engine's own answer to each byte typed at its tty:
+/// `keytrans(getcharstr())`.
 fn plain_key(byte: u8) -> Option<(KeyCode, KeyModifiers)> {
     let code = match byte {
         // raw mode is what makes this a chord table rather than a line
@@ -711,8 +713,9 @@ fn key_msg(notation: impl Into<String>) -> Msg {
 /// not the character the terminal reported.
 ///
 /// nvim's input layer folds a `Ctrl` chord onto the C0 byte the reported
-/// character's code carries, so `Ctrl` and a backtick is `<Nul>` and the
-/// `{|}~` quartet is the `[\]^` one; `Ctrl`+`6` is the separate legacy
+/// character's code carries, so `Ctrl` and a backtick becomes `<C-@>` --
+/// the name nvim also spells `<Nul>`, both of them the same `\x80\xffX`
+/// on the wire -- and the `{|}~` quartet becomes the `[\]^` one; `Ctrl`+`6` is the separate legacy
 /// alias for `<C-^>`, which is where `^` sits on a US keyboard. Only the
 /// keyboard protocol ever reports these as characters -- a legacy terminal
 /// sends the C0 byte itself, which [`plain_key`] names directly -- so the
@@ -1439,11 +1442,7 @@ mod tests {
     fn every_notation_this_encoder_emits_is_a_key_view_core_accepts() {
         use view_core::native::keys::{Action, Direction, KeyBindings};
 
-        let codes = [
-            KeyCode::Char('a'),
-            KeyCode::Char('<'),
-            KeyCode::Char(' '),
-            KeyCode::Char('.'),
+        let named = [
             KeyCode::Backspace,
             KeyCode::Enter,
             KeyCode::Esc,
@@ -1462,6 +1461,17 @@ mod tests {
             KeyCode::F(1),
             KeyCode::F(12),
         ];
+        // every character a terminal can report rather than a sample of
+        // them, so a spelling the Ctrl fold maps onto -- or away from --
+        // cannot be missed the way `\`, `]`, `^` and `_` were, and the
+        // legacy bytes are read through the table that names them rather
+        // than restated
+        let printable = (0x20..=0x7e_u8).map(|byte| KeyCode::Char(byte as char));
+        let from_bytes = (0x00..=0x1f_u8)
+            .chain(std::iter::once(0x7f))
+            .filter_map(plain_key)
+            .map(|(code, _)| code);
+        let codes = named.into_iter().chain(printable).chain(from_bytes);
         let mods = [
             KeyModifiers::NONE,
             KeyModifiers::SHIFT,

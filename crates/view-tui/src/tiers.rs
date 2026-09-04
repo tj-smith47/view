@@ -202,6 +202,11 @@ const TRUECOLOR: CapabilityRow = CapabilityRow {
 /// The kitty keyboard protocol, from the progressive-enhancement answer to
 /// [`QUERY_KITTY`]. Captured in `docs/terminal-probe-wire-capture.md`,
 /// "A. kitty 0.45.0, dev-linux".
+///
+/// Two consumers: the keyboard-protocol push, and -- through the flag that
+/// push sets -- the name [`crate::keys::encode_terminal_key`] gives the C0
+/// bytes a legacy terminal sends for `<C-\>`, `<C-]>`, `<C-^>` and
+/// `<C-_>`.
 const KITTY_KBD: CapabilityRow = CapabilityRow {
     capability: "kitty_kbd",
     query: QUERY_KITTY,
@@ -370,7 +375,8 @@ pub struct ProbeOutcome {
 /// Split in two because the two halves belong at different points in
 /// startup. The first window has to complete before the alternate screen
 /// goes up -- `caps.kitty_kbd` decides whether the keyboard protocol is
-/// pushed, and the startup shell frame paints at the tier this resolves --
+/// pushed, and with it how a C0 byte is named, and the startup shell frame
+/// paints at the tier this resolves --
 /// while the rest is pure waiting, which the caller overlaps with the
 /// engine attach so a slow terminal costs the process nothing it was not
 /// already spending on spawning nvim.
