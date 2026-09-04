@@ -1669,6 +1669,7 @@ mod tests {
     use view_core::grid::registry::GLOBAL_GRID;
     use view_core::grid::GridOp;
     use view_core::native::ai_event::{AiEvent, ToolCallStatus};
+    use view_test_support::{WideTerm, Widening, WIDE_HALF};
 
     /// A whole-frame composite into a fresh `ratatui::Frame`. Lives here
     /// rather than beside [`composite_into`] because nothing in production
@@ -4498,7 +4499,7 @@ mod tests {
                 // classified by the fixture's own model of the terminal, not
                 // by the predicate under test: asking that predicate would
                 // apply the assertion only to glyphs it already claims widen
-                if widens_on_this_terminal(&c.to_string()) {
+                if WideTerm::widens(&c.to_string()) {
                     widening_seen += 1;
                     assert!(
                         last,
@@ -4597,135 +4598,6 @@ mod tests {
         );
     }
 
-    /// The second half of a glyph [`WideTerm`] drew two columns wide.
-    const WIDE_HALF: &str = "\u{0}";
-
-    /// Whether [`WideTerm`] draws `symbol` two columns wide, read off the
-    /// code point rather than off [`emit::terminal_may_widen`]: a model that
-    /// asked the predicate under test what to do would agree with it however
-    /// the predicate changed, and a class dropped from it would leave every
-    /// assertion here passing.
-    fn widens_on_this_terminal(symbol: &str) -> bool {
-        symbol.chars().any(|c| {
-            matches!(c as u32,
-                0x2500..=0x257f      // box drawing
-                | 0x2580..=0x259f    // block elements
-                | 0x25a0..=0x25ff    // geometric shapes
-                | 0x270f | 0x2712    // pictographs with text presentation
-                | 0x1f1e6..=0x1f1ff  // regional indicators
-                | 0xe000..=0xf8ff    // private use
-                | 0xf0000..=0xffffd) // supplementary private use
-        })
-    }
-
-    /// A terminal that draws every `terminal_may_widen` glyph two columns
-    /// wide, which is what the user's Termius does with nerd-font
-    /// private-use icons and box drawing. Interprets exactly what the
-    /// emission loop writes: CUP, carriage return, line feed, SGR (ignored)
-    /// and printable text.
-    ///
-    /// Assumes a terminal that leaves the left glyph standing when something
-    /// narrow is written into its second half; an xterm-family terminal
-    /// erases both halves instead. Nothing in this tree proves which Termius
-    /// does -- the grounds for the assumption are that nvim writes the same
-    /// sequence and is clean on that device, so a device capture that
-    /// disagrees would show a vanished icon rather than a shifted row.
-    struct WideTerm {
-        grid: Vec<Vec<String>>,
-        x: usize,
-        y: usize,
-    }
-
-    impl WideTerm {
-        fn new(area: ratatui::layout::Rect) -> Self {
-            Self {
-                grid: vec![
-                    vec![" ".to_string(); usize::from(area.width)];
-                    usize::from(area.height)
-                ],
-                x: 0,
-                y: 0,
-            }
-        }
-
-        fn feed(&mut self, bytes: &[u8]) {
-            let text = std::str::from_utf8(bytes).unwrap();
-            let mut chars = text.chars().peekable();
-            while let Some(c) = chars.next() {
-                match c {
-                    '\u{1b}' => {
-                        if chars.peek() != Some(&'[') {
-                            continue;
-                        }
-                        chars.next();
-                        let mut params = String::new();
-                        let mut final_byte = '\0';
-                        for p in chars.by_ref() {
-                            if ('@'..='~').contains(&p) {
-                                final_byte = p;
-                                break;
-                            }
-                            params.push(p);
-                        }
-                        if final_byte == 'H' {
-                            let mut fields = params.split(';');
-                            let row = fields
-                                .next()
-                                .and_then(|v| v.parse().ok())
-                                .unwrap_or(1_usize);
-                            let col = fields
-                                .next()
-                                .and_then(|v| v.parse().ok())
-                                .unwrap_or(1_usize);
-                            self.y = row.saturating_sub(1);
-                            self.x = col.saturating_sub(1);
-                        }
-                    }
-                    '\r' => self.x = 0,
-                    '\n' => self.y += 1,
-                    _ => self.print(c, &mut chars),
-                }
-            }
-        }
-
-        fn print(&mut self, c: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-            let mut symbol = String::from(c);
-            loop {
-                match chars.peek() {
-                    Some(&'\u{fe0f}' | &'\u{ff9e}') => symbol.push(chars.next().unwrap()),
-                    Some(&'\u{200d}') => {
-                        symbol.push(chars.next().unwrap());
-                        if let Some(joined) = chars.next() {
-                            symbol.push(joined);
-                        }
-                    }
-                    _ => break,
-                }
-            }
-            // sized by the same ruler the shadow uses, not `unicode-width`'s
-            // raw one: `cell_width` adds the extra column `ratatui` charges
-            // a halfwidth dakuten for, which a fake terminal that measured
-            // narrower than the shadow would then feed too few `WIDE_HALF`
-            // cells to cover
-            let columns = if widens_on_this_terminal(&symbol) {
-                2
-            } else {
-                usize::from(symbol.as_str().cell_width()).max(1)
-            };
-            if let Some(row) = self.grid.get_mut(self.y) {
-                if let Some(cell) = row.get_mut(self.x) {
-                    *cell = symbol;
-                }
-                for covered in 1..columns {
-                    if let Some(cell) = row.get_mut(self.x + covered) {
-                        *cell = WIDE_HALF.to_string();
-                    }
-                }
-            }
-            self.x += columns;
-        }
-    }
-
     /// A frame emitted to a terminal that widens every glyph
     /// `terminal_may_widen` answers for has to leave every cell holding
     /// what the shadow says it holds. Without the
@@ -4744,7 +4616,7 @@ mod tests {
         });
         let mut shadow = Shadow::new();
         assert!(shadow.resize(area), "a fresh shadow must size itself");
-        let mut term = WideTerm::new(area);
+        let mut term = WideTerm::new(area.width, area.height, Widening::Ambiguous);
 
         type Frame = (&'static str, Box<dyn Fn(&mut Model)>);
         let frames: Vec<Frame> = vec![
@@ -4866,7 +4738,7 @@ mod tests {
 
             for y in 0..area.height {
                 for x in 0..area.width {
-                    let shown = &term.grid[usize::from(y)][usize::from(x)];
+                    let shown = term.cell(x, y);
                     let want = shadow.front()[(x, y)].symbol();
                     // the one second half that is content is the continuation
                     // of a glyph the shadow itself holds as multi-column, which
@@ -4882,8 +4754,7 @@ mod tests {
                     });
                     if real_wide {
                         assert_eq!(
-                            shown.as_str(),
-                            WIDE_HALF,
+                            shown, WIDE_HALF,
                             "cell ({x},{y}) shows {shown:?} where the glyph to its \
                              left covers it, after: {label}"
                         );
@@ -4894,8 +4765,7 @@ mod tests {
                     // frame; one that stops short leaves the tail of the run
                     // holding halves the shadow says are content
                     assert_ne!(
-                        shown.as_str(),
-                        WIDE_HALF,
+                        shown, WIDE_HALF,
                         "cell ({x},{y}) still holds the second half of the glyph \
                          to its left, where the shadow says {want:?}: the \
                          widened run's tail was never repainted, after: {label}"

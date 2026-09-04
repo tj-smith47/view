@@ -8,11 +8,18 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# A leaf crate on purpose: zero dependencies of its own, so pulling it in as
-# a [dev-dependencies] entry never widens what any consumer's *production*
-# build links (see scripts/audit-deps.sh, which enumerates the workspace's
-# real dependency direction and knows nothing about this crate at all,
-# because it introduces no edge into that graph either way). It exists only
-# to be depended on, by any crate whose own tests need it -- see
-# src/lib.rs's module doc for why that reach is otherwise blocked.
+# A leaf crate on purpose: no workspace member among its dependencies, so
+# pulling it in as a [dev-dependencies] entry never widens what any
+# consumer's *production* build links (see scripts/audit-deps.sh, which
+# enumerates the workspace's real dependency direction and knows nothing
+# about this crate at all, because it introduces no edge into that graph
+# either way). It exists only to be depended on, by any crate whose own
+# tests need it -- see src/lib.rs's module doc for why that reach is
+# otherwise blocked.
 [dependencies]
+# Display-cell width for the terminal model in src/wide_term.rs, which has
+# to place a glyph in the same columns the painter under test placed it in.
+# Already resolved in this workspace (view-tui and ratatui both read it),
+# and an external table crate introduces no edge into the direction the
+# audit enforces.
+unicode-width = "0.2.2"

@@ -3,9 +3,11 @@
 //! needs to land on an mtime the first one is distinguishable from;
 //! `CountingAllocator`, for an allocation-count budget; [`HostBudget`],
 //! the wall clock a test may give a live process without gating on what
-//! else the host is doing; and [`ScanGate`], the latch that holds a
+//! else the host is doing; [`ScanGate`], the latch that holds a
 //! background walker mid-walk so a cancellation test observes what the
-//! walker does next instead of racing it.
+//! walker does next instead of racing it; and [`WideTerm`], the
+//! terminal model that draws a glyph class two columns wide so a painter's
+//! output can be replayed on the terminal a user actually has.
 //!
 //! Before this crate existed, `view-native::config`, `view::native`, and
 //! the `cli_live`/`supersede_live` integration tests each hand-rolled the
@@ -25,6 +27,10 @@
 //! and `ScratchDir` depends on nothing in it -- so pulling it in as a
 //! `[dev-dependencies]` entry adds no edge to the direction
 //! `scripts/audit-deps.sh` enforces.
+
+pub mod wide_term;
+
+pub use wide_term::{widening_residue, WideTerm, Widening, WIDE_HALF};
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

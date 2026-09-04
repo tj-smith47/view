@@ -2808,6 +2808,9 @@ dependencies = [
 [[package]]
 name = "view-test-support"
 version = "0.0.1"
+dependencies = [
+ "unicode-width",
+]
 
 [[package]]
 name = "view-tui"
