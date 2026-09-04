@@ -4133,23 +4133,36 @@ mod tests {
         let mut shadow = Shadow::new();
         assert!(shadow.resize(area), "a fresh shadow must size itself");
 
-        type Step = (&'static str, Box<dyn Fn(&mut Model)>);
+        // the third field pins, per step, whether that step's diff is
+        // expected to reach the `CrosstermBackend::draw` comparison -- a
+        // step whose mutation touches a glyph `terminal_may_widen` answers
+        // for skips that leg by design, and everything else must reach it.
+        // Pinning this per step rather than as a floor on the aggregate
+        // count is what makes a step added later bind: a floor stays green
+        // while the count it was tight against drifts past it unnoticed,
+        // which is exactly how two added reaching steps went unremarked
+        // against a floor left at the old total.
+        type Step = (&'static str, bool, Box<dyn Fn(&mut Model)>);
         let steps: Vec<Step> = vec![
-            ("first paint", Box::new(|_: &mut Model| {})),
+            ("first paint", false, Box::new(|_: &mut Model| {})),
             (
                 "narrow edit on the row under one ending in a wide glyph",
+                true,
                 Box::new(|m: &mut Model| put(m, 3, 0, &["Z"])),
             ),
             (
                 "a wide glyph replaced by narrow text",
+                false,
                 Box::new(|m: &mut Model| put(m, 4, 2, &["q", "r"])),
             ),
             (
                 "narrow text replaced by a wide glyph",
+                true,
                 Box::new(|m: &mut Model| put(m, 5, 10, &["界", " "])),
             ),
             (
                 "a VS16 emoji landing mid-row",
+                false,
                 Box::new(|m: &mut Model| put(m, 2, 0, &["\u{2764}\u{FE0F}", " "])),
             ),
             // the seeded row already ends in a wide glyph, which the final
@@ -4157,18 +4170,22 @@ mod tests {
             // for the frame to carry that blank
             (
                 "narrow text in the final column",
+                true,
                 Box::new(|m: &mut Model| put(m, 2, 11, &["x"])),
             ),
             (
                 "a wide glyph written into the final column",
+                true,
                 Box::new(|m: &mut Model| put(m, 2, 11, &["漢"])),
             ),
             (
                 "the first cell of the row under a wide row end",
+                true,
                 Box::new(|m: &mut Model| put(m, 7, 0, &["W"])),
             ),
             (
                 "two non-adjacent rows in one frame",
+                true,
                 Box::new(|m: &mut Model| {
                     put(m, 1, 0, &["1"]);
                     put(m, 6, 0, &["6"]);
@@ -4176,6 +4193,7 @@ mod tests {
             ),
             (
                 "a three-column cluster overflowing a row's last two columns",
+                true,
                 Box::new(|m: &mut Model| put(m, 4, 10, &["\u{3042}\u{FF9E}", " "])),
             ),
             // an unrelated frame in between, so the overflowing row is not
@@ -4183,10 +4201,12 @@ mod tests {
             // starts at a row boundary the overflow reaches across
             (
                 "an unrelated row",
+                true,
                 Box::new(|m: &mut Model| put(m, 0, 0, &["F"])),
             ),
             (
                 "the first cell of the row under that overflow",
+                true,
                 Box::new(|m: &mut Model| put(m, 5, 0, &["V"])),
             ),
             // columns 0, 10 and 11 open a cell of their own in the seeded
@@ -4194,29 +4214,33 @@ mod tests {
             // changes nothing and the step would assert over an empty diff
             (
                 "an ambiguous-width nerd-font icon",
+                false,
                 Box::new(|m: &mut Model| put(m, 3, 0, &[NERD_ICON])),
             ),
             (
                 "a box-drawing run beside it",
+                false,
                 Box::new(|m: &mut Model| put(m, 3, 10, &["\u{2500}", "\u{2500}"])),
             ),
             (
                 "a text-presentation pictograph",
+                false,
                 Box::new(|m: &mut Model| put(m, 3, 10, &["\u{270f}", "\u{1f1e6}"])),
             ),
             (
                 "that icon replaced by plain text",
+                false,
                 Box::new(|m: &mut Model| put(m, 3, 0, &["p"])),
             ),
             (
                 "an ambiguous glyph in the row's final column",
+                false,
                 Box::new(|m: &mut Model| put(m, 6, 11, &[NERD_ICON])),
             ),
         ];
 
         let mut first = true;
-        let mut compared = 0_usize;
-        for (label, mutate) in steps {
+        for (label, reaches_leg, mutate) in steps {
             mutate(&mut model);
             let grid_damage = model.take_paint_damage();
             let surface = view_surface::render(&model);
@@ -4225,10 +4249,15 @@ mod tests {
                 Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
             shadow.compose(&model, &surface, &damage);
-            compared += usize::from(assert_clipped_emission_matches_unclipped(
-                &mut shadow,
-                label,
-            ));
+            let reached = assert_clipped_emission_matches_unclipped(&mut shadow, label);
+            assert_eq!(
+                reached,
+                reaches_leg,
+                "step {label:?} was pinned to {} the CrosstermBackend::draw \
+                 comparison but {}",
+                if reaches_leg { "reach" } else { "skip" },
+                if reached { "reached it" } else { "skipped it" }
+            );
             shadow.commit();
             // the byte comparison above reads both paths out of the same two
             // buffers, so a clip that lifted rows out of them and failed to
@@ -4241,12 +4270,6 @@ mod tests {
                  the frame it composed, after: {label}"
             );
         }
-        assert!(
-            compared >= 7,
-            "only {compared} of this fixture's frames reached the \
-             CrosstermBackend::draw comparison; a step that grew a widening \
-             glyph stopped exercising it"
-        );
     }
 
     /// The crossterm-equality leg fires only on a frame carrying nothing to
@@ -4681,10 +4704,15 @@ mod tests {
                     _ => break,
                 }
             }
+            // sized by the same ruler the shadow uses, not `unicode-width`'s
+            // raw one: `cell_width` adds the extra column `ratatui` charges
+            // a halfwidth dakuten for, which a fake terminal that measured
+            // narrower than the shadow would then feed too few `WIDE_HALF`
+            // cells to cover
             let columns = if widens_on_this_terminal(&symbol) {
                 2
             } else {
-                UnicodeWidthStr::width(symbol.as_str()).max(1)
+                usize::from(symbol.as_str().cell_width()).max(1)
             };
             if let Some(row) = self.grid.get_mut(self.y) {
                 if let Some(cell) = row.get_mut(self.x) {
@@ -4804,6 +4832,16 @@ mod tests {
                 "the leftmost cell of a box-drawing run alone changes",
                 Box::new(|m: &mut Model| put(m, 1, 1, &["\u{2502}"])),
             ),
+            // three columns wide by `ratatui`'s own `cell_width`, not by
+            // `terminal_may_widen`, so the fake terminal draws it from its
+            // natural width rather than the 2-column widen path -- the
+            // second of its two covered columns sits two past the glyph,
+            // which only a `real_wide` walk deeper than the immediate
+            // neighbour can attribute to it
+            (
+                "a three-column cluster alone changes",
+                Box::new(|m: &mut Model| put(m, 2, 9, &["\u{3042}\u{FF9E}", " ", " "])),
+            ),
         ];
 
         let mut first = true;
@@ -4816,6 +4854,14 @@ mod tests {
                 Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
             shadow.compose(&model, &surface, &damage);
+            // a step whose mutation left every cell holding what it already
+            // held would pass the grid comparison below by asserting nothing,
+            // the same trap the clipped-emission helper guards against
+            assert!(
+                shadow.front.diff_iter(&shadow.back).count() > 0,
+                "the frame after {label:?} changed no cell, so this frame's \
+                 grid comparisons hold nothing to the wire"
+            );
             let bytes = drawn_bytes(|w| shadow.emit_updates(w));
             term.feed(&bytes);
             shadow.commit();
@@ -4826,11 +4872,16 @@ mod tests {
                     let want = shadow.front()[(x, y)].symbol();
                     // the one second half that is content is the continuation
                     // of a glyph the shadow itself holds as multi-column, which
-                    // a terminal-widened glyph never is
-                    let real_wide = x
-                        .checked_sub(1)
-                        .and_then(|lx| shadow.front().cell((lx, y)))
-                        .is_some_and(|left| left.cell_width() > 1);
+                    // a terminal-widened glyph never is; a cluster wider than
+                    // two columns covers more than its immediate neighbour, so
+                    // every cell the shadow's own `cell_width` reaches is
+                    // walked rather than just `x - 1`
+                    let real_wide = (0..x).rev().any(|lx| {
+                        shadow.front().cell((lx, y)).is_some_and(|left| {
+                            let width = left.cell_width();
+                            width > 1 && lx + width > x
+                        })
+                    });
                     if real_wide {
                         assert_eq!(
                             shown.as_str(),
