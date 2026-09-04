@@ -216,8 +216,10 @@ fn push_kitty_keyboard<W: Write>(
 }
 
 /// Writes every teardown escape to `out`: the synchronized-update close
-/// first, then the keyboard-protocol pop, mouse capture, bracketed paste,
-/// and the alternate screen.
+/// first, then the keyboard-protocol pop, the clear of the frame the
+/// alternate screen is still showing, mouse capture, bracketed paste, the
+/// alternate screen, and last the caret parked at column 0 of the screen
+/// the host shell resumes on.
 /// Generic over `Write` (mirrors [`write_cursor_shape`]) so the byte
 /// sequence and ordering are unit-testable against a `Vec<u8>` instead of
 /// only provable via a live terminal.
@@ -253,6 +255,13 @@ fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
     // who quit from insert mode would otherwise keep a bar caret at their
     // shell prompt for the rest of that terminal's life.
     out.write_all(b"\x1b[0 q")?;
+    // the last frame erased while it is still the visible screen: a
+    // terminal is not obliged to restore what the alternate screen covered
+    // when `CSI ? 1049 l` switches back, and the ones that do not leave
+    // view's final frame -- a split's separator, a float -- printed over
+    // the host shell's scrollback. nvim's own teardown writes the same
+    // clear before `exit_ca_mode` for the same reason.
+    out.write_all(b"\x1b[H\x1b[2J")?;
     // mouse capture disabled unconditionally, even though it is only ever
     // turned on dynamically (see Term::draw_surface): leaving it enabled
     // across process exit would swallow the host shell's own mouse
@@ -263,7 +272,12 @@ fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
         DisableMouseCapture,
         crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen
-    )
+    )?;
+    // after the switch back, not before it: the column the shell resumes
+    // at is a property of the screen it resumes on, and a `Show` issued on
+    // the screen being left says nothing about the caret on this one.
+    out.write_all(b"\r\x1b[?25h")?;
+    out.flush()
 }
 
 fn restore() {
@@ -1030,6 +1044,23 @@ mod tests {
         assert!(
             show < leave_alt && shape_reset < leave_alt,
             "the caret must be restored on the screen view drew on, before switching back"
+        );
+
+        let clear = find_subslice(&buf, b"\x1b[H\x1b[2J").expect(
+            "restore must clear the alternate screen it is about to leave: a terminal that \
+             does not restore the covered screen on CSI ? 1049 l otherwise keeps view's last \
+             frame over the host shell",
+        );
+        assert!(
+            clear < leave_alt,
+            "the clear must land while the alternate screen is still the visible one"
+        );
+        let park = find_subslice(&buf, b"\r\x1b[?25h")
+            .expect("restore must park the caret at column 0 after the switch back");
+        assert!(
+            leave_alt < park,
+            "the caret is parked on the screen the host shell resumes on, so the park follows \
+             the leave"
         );
     }
 
