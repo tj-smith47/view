@@ -186,6 +186,10 @@ fn read_tree_memory_mb(pid: u32) -> Result<f64, BenchError> {
 /// against processes exiting mid-scan and reads every process on the host
 /// to find one relationship this file states directly.
 ///
+/// Kept here rather than taken from the test-support reader of the same
+/// files: a measurement has to report *why* a read failed, where a test
+/// helper degrades an unreadable `/proc` entry to no children at all.
+///
 /// The children file is per-thread, not per-process: a fork/exec attributes
 /// the child to the specific thread that called it, so
 /// `/proc/<pid>/task/<pid>/children` alone only sees children forked from

@@ -768,6 +768,9 @@ mod tests {
     /// -- an empty expression for the first shape, a truncated one for the
     /// second, neither of which an author can write a census row against.
     fn program_assignments(source: &str) -> Vec<String> {
+        // a statement ends at the first `;` the accumulation holds, which a
+        // `;` inside a string literal would end early: adequate for the
+        // sources this walks, where no program expression carries one
         let mut statements: Vec<String> = Vec::new();
         let mut current = String::new();
         for line in source.lines().map(str::trim) {
@@ -789,6 +792,32 @@ mod tests {
             .filter_map(|(_, assigned)| assigned.split(';').next())
             .map(|assigned| assigned.split_whitespace().collect::<Vec<_>>().join(" "))
             .collect()
+    }
+
+    /// rustfmt breaks a long assignment in two places, and the census read
+    /// neither: after the `=` it recorded an empty expression, and inside the
+    /// call on its right a truncated one.
+    ///
+    /// The needle is spelled in pieces for the same reason the walk spells
+    /// its own that way -- a contiguous copy in this file would make the
+    /// fixture a census row of its own.
+    #[test]
+    fn the_census_reads_an_assignment_rustfmt_wrapped() {
+        let needle = concat!("spec.", "program", " =");
+        let after_the_equals = format!("{needle}\n    PathBuf::from(\"wrapped\");\n");
+        let inside_the_call = format!("{needle} PathBuf::from(\n    \"wrapped\",\n);\n");
+        assert_eq!(
+            program_assignments(&after_the_equals),
+            vec![String::from("PathBuf::from(\"wrapped\")")],
+            "a wrap after the `=` leaves the expression on a line of its own, and a per-line \
+             scan reads an empty assignment nobody can write a census row against"
+        );
+        assert_eq!(
+            program_assignments(&inside_the_call),
+            vec![String::from("PathBuf::from( \"wrapped\", )")],
+            "a wrap inside the call leaves the expression split across lines, and a per-line \
+             scan reads only the opening of it"
+        );
     }
 
     /// Compares one census against what the tree actually builds, per file
