@@ -138,9 +138,11 @@ enum TakeoverKind {
 
 #[cfg(any(test, feature = "test-support"))]
 impl TakeoverKind {
-    /// The augroup name the hold this row issues creates inside nvim:
-    /// `view-hold-<option>` for an option, `view-hold-notify` for the
-    /// function.
+    /// What this row claims, unique across the whole table: the augroup
+    /// name the hold it issues creates inside nvim -- `view-hold-<option>`
+    /// for an option, `view-hold-notify` for the function -- and, for a
+    /// kind that installs no hold, the surface name itself
+    /// ([`TakeoverKind::Attach`]'s `ext_*` key).
     ///
     /// This spelling is a copy of one that lives in `view-engine`'s two hold
     /// chunks, which this crate cannot read: `view-native` has no dependency
@@ -170,19 +172,26 @@ impl TakeoverKind {
     }
 }
 
-/// Every augroup the shipped takeover table's holds create inside nvim, one
-/// per row, in table order.
+/// Every augroup the shipped takeover table's holds create inside nvim, in
+/// table order: one per row whose kind installs a hold, and none for a kind
+/// that does not.
 ///
-/// The whole population rather than a sample: a row added later joins by
-/// existing, so the pin that reads this cannot go stale against a table it
-/// no longer covers.
+/// The kind decides, through a match with no wildcard arm, rather than the
+/// shape of the string it produced. A later kind that does install a guard
+/// under a name the hold chunks do not build would be dropped by a
+/// `view-hold-` prefix filter and never reach the cross-crate pin
+/// (`view-harness`'s `every_takeover_augroup_is_the_one_its_chunk_builds`),
+/// which is the drift that pin exists to catch; a new variant is a compile
+/// error here instead.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn takeover_augroups() -> Vec<String> {
     TAKEOVERS
         .iter()
-        .map(|row| row.kind.claims())
-        .filter(|claim| claim.starts_with("view-hold-"))
+        .filter_map(|row| match row.kind {
+            TakeoverKind::Option { .. } | TakeoverKind::Notify => Some(row.kind.claims()),
+            TakeoverKind::Attach { .. } => None,
+        })
         .collect()
 }
 

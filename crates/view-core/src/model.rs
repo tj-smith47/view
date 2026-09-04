@@ -1316,7 +1316,8 @@ impl EngineModel {
     /// deadline three seconds after attach -- while a heavy configuration's
     /// plugins are still loading, and so before the complaints this records
     /// have been raised at all. A window sighted after that is still inside
-    /// the startup conflict window (which ends at the first keystroke), and
+    /// the startup conflict window (which ends at the first key, click or
+    /// paste) or inside the claimant-complaint grace that outlives it, and
     /// its text still owes the history rather than the stack.
     pub fn record_history_only(&mut self, content: Vec<(u64, String)>) -> Vec<crate::msg::Effect> {
         self.record_message_in_family(

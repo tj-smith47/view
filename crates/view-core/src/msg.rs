@@ -387,6 +387,11 @@ pub enum Msg {
     /// the behaviour view had before the hold existed rather than to
     /// silence.
     StartupHoldExpired,
+    /// The claimant-complaint grace elapsed
+    /// ([`Effect::ScheduleComplaintGrace`]). After this a complaint a named
+    /// claimant raises over the message area is left standing like any
+    /// other window the session is holding.
+    ComplaintGraceExpired,
     /// One `nvim_buf_lines_event` notification forwarded from a buffer
     /// attached via `RpcCall::BufAttach`. Carries nvim's own change shape
     /// verbatim -- distinct from [`Msg::BufferChanged`] (the statusline's
@@ -1272,6 +1277,20 @@ pub enum Effect {
     /// in a session where nobody types, keeps its startup messages in the
     /// history and paints none of them.
     ScheduleStartupHold {
+        after: Duration,
+    },
+    /// Arms the claimant-complaint grace's deadline: after `after` elapses
+    /// the timer worker sends [`Msg::ComplaintGraceExpired`] into the loop.
+    /// The same one-shot thread and the same shape as
+    /// [`Effect::ScheduleStartupHold`], for the same reason -- `update()`
+    /// has no clock.
+    ///
+    /// The degrade when a runtime or harness drops this effect is stated
+    /// rather than hidden: the grace never closes, so a float a named
+    /// claimant draws over the message area is taken down for the rest of
+    /// that engine's life whenever its rows read as a complaint about the
+    /// surfaces view took.
+    ScheduleComplaintGrace {
         after: Duration,
     },
     /// Re-nominates `path` after a grace period, so an answer of

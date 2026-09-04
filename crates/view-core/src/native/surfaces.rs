@@ -539,9 +539,23 @@ pub struct SurfaceConflicts {
     /// by the floats one startup opens, but a replacement process issues
     /// handles from 1000 again.
     complaints: Vec<u64>,
-    /// Whether a key has been typed yet, which is where spec 5.5 ends the
-    /// startup conflict window.
+    /// Whether the user has acted -- a key, a click or a paste -- which is
+    /// where spec 5.5 ends the startup conflict window.
     typed: bool,
+    /// Whether a claimant named this session is still inside the grace its
+    /// probe reply armed, during which a complaint it raises is taken down
+    /// even though the user has acted.
+    ///
+    /// The window a keystroke closes is the wrong bound for a plugin that
+    /// raises its complaint on a timer of its own: noice re-runs its health
+    /// check every second and raises the one about view holding
+    /// `vim.notify` at about 4.8 s, which is past any realistic first
+    /// keystroke. What the grace does not relax is what may be taken: a
+    /// float inside it is closed only when its rows read as a complaint
+    /// ([`SurfaceConflicts::reads_as_complaint`]), so a window the user
+    /// opened over the message area -- `:Noice` output being the realistic
+    /// case -- is left standing.
+    complaint_grace: bool,
 }
 
 /// One named claimant's accounted-for surfaces, with the identities its own
@@ -714,8 +728,61 @@ impl SurfaceConflicts {
 
     /// Notes that the user has acted -- a key, a click or a paste --
     /// closing the startup conflict window for good.
-    pub fn note_keypress(&mut self) {
+    pub fn note_user_acted(&mut self) {
         self.typed = true;
+    }
+
+    /// Opens the claimant-complaint grace, and answers whether this call is
+    /// what opened it.
+    ///
+    /// Answered rather than assumed, because the probe reports every
+    /// reading it takes: a second claimant named later must not re-arm a
+    /// deadline that is already running, or the first deadline's expiry
+    /// ends a grace the second reading had just extended. The grace runs
+    /// from the first reply that names anyone.
+    pub fn arm_complaint_grace(&mut self) -> bool {
+        if self.complaint_grace {
+            return false;
+        }
+        self.complaint_grace = true;
+        true
+    }
+
+    /// Whether a complaint raised now is still inside the grace.
+    #[must_use]
+    pub fn within_complaint_grace(&self) -> bool {
+        self.complaint_grace
+    }
+
+    /// Closes the grace, on the deadline the arming scheduled.
+    pub fn end_complaint_grace(&mut self) {
+        self.complaint_grace = false;
+    }
+
+    /// Whether the lines a float was drawing read as a plugin complaining
+    /// about the UI view took over, rather than as something the user
+    /// opened.
+    ///
+    /// The discriminator is view's own vocabulary appearing in a plugin's
+    /// text: the `ext_*` capability names ([`Ext::as_str`]) are what a GUI
+    /// takes and what a plugin names when it says it cannot work, and
+    /// `vim.notify` is the one function a takeover re-points, which is the
+    /// other thing a claimant reports as broken. Derived from the enum
+    /// rather than written down, so a surface added later is matched
+    /// without a second list to remember.
+    ///
+    /// Only consulted once the user has acted: inside the startup window
+    /// every complaint over a surface a named claimant covers is taken,
+    /// text unread. This is the narrower bar the grace runs under, and the
+    /// cost of getting it wrong is a window closed under someone's hand.
+    #[must_use]
+    pub fn reads_as_complaint(lines: &[String]) -> bool {
+        lines.iter().any(|line| {
+            line.contains("vim.notify")
+                || crate::native::ext::ALL_MULTIGRID
+                    .iter()
+                    .any(|ext| line.contains(ext.as_str()))
+        })
     }
 
     /// Drops what a replacement engine invalidates, called beside
@@ -726,19 +793,21 @@ impl SurfaceConflicts {
     /// | --- | --- |
     /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
     /// | `typed` | the replacement sources the config again, so its own claimants raise their complaints again, and a session that had been typed at would leave them stacked beside the re-raised notice |
+    /// | `complaint_grace` | a deadline armed against the dead engine's probe reply, and the replacement's own reply arms its own |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config loads the same plugins -- forgetting it would raise a second notice per plugin for one conflict |
     /// | `covers` | kept: the surfaces a standing notice accounts for, which the replacement's notice accounts for identically |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();
         self.typed = false;
+        self.complaint_grace = false;
     }
 
     /// Whether the startup conflict window is still open, which is spec
-    /// 5.5's own bound: everything before the first keystroke.
+    /// 5.5's own bound: everything before the first key, click or paste.
     ///
     /// Deliberately not the startup *hold*
     /// ([`StartupHold`](crate::native::toast::StartupHold)), which shares
-    /// the first-keystroke end but also ends on a three-second deadline of
+    /// the first-act end but also ends on a three-second deadline of
     /// its own -- a bound on how long a message may be parked, not on how
     /// long a launch lasts. A heavy configuration is still loading plugins
     /// at that point, and the complaints this window exists for have not

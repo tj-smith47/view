@@ -1546,12 +1546,14 @@ mod tests {
             view_core::native::registry::features(),
         );
         assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
+        let mut ran = 0;
         for entry in &plan {
             // an entry the attach performed carries no call to reach an op
             // with, and the plan carries it to be reported, not applied
             let Some(call) = entry.rpc.clone() else {
                 continue;
             };
+            ran += 1;
             let ops = FakeOps::default();
             let executor = Executor::new(&ops);
             let flow = executor.run(Effect::Rpc(call));
@@ -1564,6 +1566,14 @@ mod tests {
                 entry.rpc
             );
         }
+        // the count, because the skip above makes the walk vacuous-able: a
+        // table of nothing but attach rows would run no executor at all and
+        // pass a test whose whole subject is that an unrecognized effect
+        // degrades silently
+        assert!(
+            ran > 0,
+            "no planned takeover carried a call to the executor"
+        );
     }
 
     /// The entry-point plan reaches the engine, on the same terms as a

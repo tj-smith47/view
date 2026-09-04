@@ -93,6 +93,16 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
         // already, and the next thing that would arm a scan is CursorHold
         // seconds away or the keystroke that ends the startup window
         effects.push(Effect::Rpc(crate::msg::RpcCall::ScanFloats));
+        // and the bound on how long that plugin's complaints are still
+        // view's to take down: its own are not all raised by the time
+        // anyone can type (noice re-checks its health every second), so
+        // the keystroke alone would leave the late ones standing beside
+        // the notice they duplicate
+        if model.surface_conflicts.arm_complaint_grace() {
+            effects.push(Effect::ScheduleComplaintGrace {
+                after: super::COMPLAINT_GRACE,
+            });
+        }
         HoldOutcome::Collapse
     } else {
         HoldOutcome::Release
@@ -215,15 +225,25 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 /// *command line* is a menu the user is typing at, and view's answer to one
 /// of those is the absorption above or a notice, never a close.
 ///
-/// And the startup window, which ends at the first keypress
-/// ([`SurfaceConflicts::startup_window_open`](surfaces::SurfaceConflicts::startup_window_open)).
-/// What that bound buys is that view never closes a window a user opened: a
-/// plugin's complaint about view's own defaults is raised before anyone has
-/// typed, while a float standing after that is something the session asked
-/// for -- noice's own `:Noice` log among them -- and closing that would be
-/// view taking a window out from under the person reading it.
+/// And the time bound, which is the startup window -- ending at the first
+/// key, click or paste
+/// ([`SurfaceConflicts::startup_window_open`](surfaces::SurfaceConflicts::startup_window_open))
+/// -- or the claimant-complaint grace that outlives it
+/// ([`SurfaceConflicts::within_complaint_grace`](surfaces::SurfaceConflicts::within_complaint_grace)).
+/// What that bound buys is that view never closes a window a user opened:
+/// a float standing outside it is something the session asked for --
+/// noice's own `:Noice` log among them -- and closing that would be view
+/// taking a window out from under the person reading it. The grace exists
+/// because a claimant's own complaints are not all raised by the time
+/// anyone can type, and inside it the rows have to read as a complaint
+/// before anything is closed ([`on_float_rows`]).
 fn take_complaint(model: &mut Model, float: &FloatSighting, surface: Surface) -> Vec<Effect> {
-    if surface != Surface::Messages || !model.surface_conflicts.startup_window_open() {
+    if surface != Surface::Messages {
+        return Vec::new();
+    }
+    if !model.surface_conflicts.startup_window_open()
+        && !model.surface_conflicts.within_complaint_grace()
+    {
         return Vec::new();
     }
     if !model.surface_conflicts.claim_complaint(float.win) {
@@ -318,6 +338,15 @@ pub(super) fn on_float_rows(
     selected: Option<usize>,
 ) -> Vec<Effect> {
     if model.surface_conflicts.is_complaint(win) {
+        // the grace's own bar, read here because the rows are what it is
+        // about: before anyone has acted, a float over a covered surface is
+        // a complaint by construction, and after that only its text can say
+        // so -- a window the user opened there is theirs to close
+        if !model.surface_conflicts.startup_window_open()
+            && !surfaces::SurfaceConflicts::reads_as_complaint(&lines)
+        {
+            return Vec::new();
+        }
         return complaint_recorded(model, win, &lines);
     }
     let rows = crate::native::palette::AbsorbedRows { lines, selected };
@@ -1787,6 +1816,138 @@ mod tests {
         );
     }
 
+    /// The bound the startup window alone cannot carry: a claimant that
+    /// re-checks its own health on a timer raises complaints past any
+    /// realistic first keystroke (noice's `vim.notify` line lands ~4.8 s
+    /// into a heavy launch, on a one-second interval), so the grace its
+    /// probe reply arms is what takes those down. One grace per session,
+    /// armed by the first reply that names anyone -- a second reply must
+    /// not restart a deadline whose expiry would then close it early.
+    #[test]
+    fn the_first_reply_that_names_a_claimant_arms_one_grace() {
+        let mut model = captured_session();
+        let first = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+        assert_eq!(
+            first
+                .iter()
+                .filter(|effect| matches!(effect, Effect::ScheduleComplaintGrace { .. }))
+                .count(),
+            1,
+            "{first:?}"
+        );
+        assert!(model.surface_conflicts.within_complaint_grace());
+
+        let again = update(
+            &mut model,
+            Msg::ClaimantsProbed(vec!["noice".to_string(), "notify".to_string()]),
+        );
+        assert!(
+            !again
+                .iter()
+                .any(|effect| matches!(effect, Effect::ScheduleComplaintGrace { .. })),
+            "the running deadline is the grace; a second arming ends it early: {again:?}"
+        );
+
+        let _ = update(&mut model, Msg::ComplaintGraceExpired);
+        assert!(!model.surface_conflicts.within_complaint_grace());
+    }
+
+    /// The complaint the fix round 1 timeline left standing: raised after
+    /// the user has typed, inside the grace, and still view's to take down
+    /// -- one box for one conflict is the spec's rule whether the second
+    /// box arrives before the keystroke or four seconds after it.
+    #[test]
+    fn a_complaint_raised_after_the_first_key_is_taken_inside_the_grace() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = update(&mut model, Msg::StartupHoldExpired);
+        let _ = update(
+            &mut model,
+            Msg::Key(crate::msg::Key {
+                notation: "j".to_string(),
+            }),
+        );
+        assert!(!model.surface_conflicts.startup_window_open());
+
+        let float = toast("markdown");
+        let read = update(&mut model, Msg::FloatObserved(float.clone()));
+        assert!(
+            matches!(
+                read.as_slice(),
+                [Effect::Rpc(RpcCall::ReadFloatRows { win })] if *win == float.win
+            ),
+            "{read:?}"
+        );
+        let closed = update(
+            &mut model,
+            Msg::FloatRows {
+                win: float.win,
+                hidden: false,
+                lines: vec!["`vim.notify` has been overwritten by another plugin?".to_string()],
+                selected: None,
+            },
+        );
+        assert!(
+            closed.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::CloseFloat { win }) if *win == float.win
+            )),
+            "{closed:?}"
+        );
+        assert!(
+            model
+                .engine
+                .toast_history
+                .entries()
+                .flat_map(|entry| entry.lines())
+                .any(|line| line.contains("overwritten by another plugin")),
+            "the plugin's own account of the conflict is what the history keeps"
+        );
+    }
+
+    /// And the price of that grace, bounded: once the user has acted, only
+    /// the text says whether a float over the message area is a plugin
+    /// complaining or a window someone opened. `:Noice` output at five
+    /// seconds is the realistic case, and view neither files it nor closes
+    /// it.
+    #[test]
+    fn a_window_the_user_opened_inside_the_grace_stays_open() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = update(&mut model, Msg::StartupHoldExpired);
+        let _ = update(
+            &mut model,
+            Msg::Key(crate::msg::Key {
+                notation: "j".to_string(),
+            }),
+        );
+
+        let float = toast("markdown");
+        let _ = update(&mut model, Msg::FloatObserved(float.clone()));
+        let answered = update(
+            &mut model,
+            Msg::FloatRows {
+                win: float.win,
+                hidden: false,
+                lines: vec!["2 messages  Ctrl-D to dismiss".to_string()],
+                selected: None,
+            },
+        );
+        assert!(
+            answered.is_empty(),
+            "a window the user opened is theirs to close: {answered:?}"
+        );
+        assert!(
+            model
+                .engine
+                .toast_history
+                .entries()
+                .flat_map(|entry| entry.lines())
+                .all(|line| !line.contains("Ctrl-D to dismiss")),
+            "nothing the user is reading is filed as a complaint"
+        );
+    }
+
     /// The three messages that mean the user has acted all end the startup
     /// conflict window, not the keyed one alone: a click or a paste is a
     /// session someone is driving, and view holding a licence to close
@@ -1813,11 +1974,11 @@ mod tests {
         }
     }
 
-    /// The bound on the take-down: once the startup window has closed, a
-    /// float over a covered surface is something the session asked for, and
-    /// view neither reads it nor closes it.
+    /// The outer bound on the take-down: once the user has acted *and* the
+    /// claimant's grace has run out, a float over a covered surface is
+    /// something the session asked for, and view does not even read it.
     #[test]
-    fn a_float_that_opens_after_the_startup_window_is_left_alone() {
+    fn a_float_that_opens_after_the_grace_is_left_unread() {
         let mut model = captured_session();
         probe(&mut model, &["noice"]);
         let _ = update(
@@ -1826,6 +1987,7 @@ mod tests {
                 notation: "j".to_string(),
             }),
         );
+        let _ = update(&mut model, Msg::ComplaintGraceExpired);
         assert!(
             update(&mut model, Msg::FloatObserved(toast("markdown"))).is_empty(),
             "a window the user opened is not view's to close"

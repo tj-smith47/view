@@ -21,6 +21,17 @@ use crate::native::views::Span;
 /// install -- so the hold cannot silently swallow a message.
 const STARTUP_HOLD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How long after a claimant is named view still takes that claimant's
+/// complaints down, once the user has acted.
+///
+/// Keyed to the plugin's own cadence rather than to a launch: noice re-runs
+/// its health check on a one-second interval and raises the complaint about
+/// view holding `vim.notify` at about 4.8 s into a heavy launch, which is
+/// past any realistic first keystroke. Six seconds covers that raise with a
+/// cycle of the plugin's own timer to spare, and is short enough that a
+/// window the user opens later is outside it.
+const COMPLAINT_GRACE: std::time::Duration = std::time::Duration::from_secs(6);
+
 mod ai;
 mod ai_fs;
 mod mouse;
@@ -76,7 +87,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // that finish a motion close the startup conflict window, so a
         // click before any key cannot leave view holding a licence to take
         // a window down
-        model.surface_conflicts.note_keypress();
+        model.surface_conflicts.note_user_acted();
     }
     // both taken ahead of the message: the count is what tells a notice
     // that left the stack from one nvim replaced in place, and the slot is
@@ -529,6 +540,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             selected,
         } => surface_conflict::on_float_rows(model, win, hidden, lines, selected),
         Msg::ClaimantsProbed(probed) => surface_conflict::on_claimants_probed(model, &probed),
+        Msg::ComplaintGraceExpired => {
+            model.surface_conflicts.end_complaint_grace();
+            Vec::new()
+        }
         Msg::StartupHoldExpired => {
             model.dirty |= model
                 .engine

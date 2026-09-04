@@ -585,6 +585,19 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // the same one-shot thread again, and the degrade `msg.rs`
+            // states: an unwired channel leaves the grace open, which is a
+            // take-down bounded by the complaint signature alone
+            Effect::ScheduleComplaintGrace { after } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("complaint-grace", move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::ComplaintGraceExpired);
+                    });
+                }
+                Flow::Continue
+            }
             // the same one-shot thread `ScheduleToastExpiry` uses, and the
             // same reason for it: `update()` has no clock, and a reply that
             // said a path could not be read has to be re-asked later rather
