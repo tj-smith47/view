@@ -1,16 +1,20 @@
 //! What a composed frame puts on the wire: view's own copy of ratatui's
 //! crossterm emission loop, with the cursor re-sync a terminal that draws
-//! ambiguous-width glyphs two columns wide needs.
+//! some glyphs two columns wide needs.
 //!
 //! `ratatui::backend::CrosstermBackend::draw` moves the cursor only when the
 //! next cell is not the immediate successor of the last one, letting adjacent
 //! cells ride on the terminal's own advance. That advance is one column per
 //! cell only while view and the terminal agree on how wide a glyph is, and
-//! they do not agree on East_Asian_Width = Ambiguous: `unicode-width` says
-//! one column, several terminals draw two. After such a glyph every later
-//! cell of the run lands one column right of where the shadow believes it
-//! is, and the next frame -- which repaints only model-changed cells --
-//! covers neither the shifted cells nor the glyph's second half.
+//! they do not agree on every class [`terminal_may_widen`] answers for --
+//! East_Asian_Width = Ambiguous, text-presentation pictographs, regional
+//! indicators, VS16 emoji: `unicode-width` says one column, several
+//! terminals draw two. After such a glyph every later cell of the run lands
+//! one column right of where the shadow believes it is, and when the
+//! glyph changes its second half goes stale without the model touching the
+//! cell that holds it -- and so does every following cell that widens too,
+//! each one's half pushed a column further along the run. The next frame,
+//! which repaints only model-changed cells, covers none of that.
 
 use std::io::Write;
 
