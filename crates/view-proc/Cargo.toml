@@ -1,0 +1,21 @@
+[package]
+name = "view-proc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Only the parent-death signal needs a syscall, and only Linux has one.
+# Every other platform's half of this crate is std alone, so rustix is
+# scoped to the target that actually calls it rather than carried by every
+# build of a crate three others depend on.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    # prctl(PR_SET_PDEATHSIG) and the getppid that closes its fork/exec
+    # race, both raw syscalls a pre_exec closure may make
+    "process",
+] }

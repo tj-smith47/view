@@ -2690,6 +2690,7 @@ dependencies = [
  "ureq",
  "view-ai",
  "view-core",
+ "view-proc",
  "view-test-support",
 ]
 
@@ -2727,6 +2728,7 @@ dependencies = [
  "thiserror 2.0.18",
  "view-core",
  "view-engine",
+ "view-proc",
  "view-test-support",
  "windows-sys 0.61.2",
 ]
@@ -2778,6 +2780,13 @@ dependencies = [
  "view-surface",
  "view-test-support",
  "vt100",
+]
+
+[[package]]
+name = "view-proc"
+version = "0.0.1"
+dependencies = [
+ "rustix",
 ]
 
 [[package]]

@@ -41,12 +41,12 @@ done
 # and stays
 check_absent view-native view-ai
 check_absent view-ai view-native
-for crate in view-core view-engine view-surface view-native view-ai view-oracle view-bench view view-harness; do
+for crate in view-core view-engine view-surface view-native view-ai view-oracle view-bench view view-harness view-proc; do
   for dep in crossterm ratatui; do
     check_absent "$crate" "$dep"
   done
 done
-for crate in view-core view-surface view-native view-ai view-tui view-oracle view-bench view view-harness; do
+for crate in view-core view-surface view-native view-ai view-tui view-oracle view-bench view view-harness view-proc; do
   check_absent "$crate" rmpv
 done
 # arboard is the clipboard worker's local-backend dependency, confined to
@@ -58,7 +58,7 @@ done
 # check_dev_only row below): the point of this loop is that arboard has no
 # business anywhere outside the bin crate, and a workspace member being
 # dev-only elsewhere does not exempt it from that.
-for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness view-test-support; do
+for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness view-test-support view-proc; do
   check_absent "$crate" arboard
 done
 # ureq (the checksummed adapter download), sha2 (its checksum
@@ -67,7 +67,7 @@ done
 # arboard is confined to the bin above: nothing else in the workspace
 # fetches, verifies, or unpacks a downloaded adapter, so none of the four
 # has any business appearing anywhere else.
-for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness view-test-support; do
+for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness view-test-support view-proc; do
   check_absent "$crate" ureq
   check_absent "$crate" sha2
   check_absent "$crate" tar
@@ -79,7 +79,7 @@ done
 # business depending on a watcher backend. No check_transitive_reach row:
 # same reasoning as similar's own row below -- every crate depends on
 # view-core, not on view-ai, so there is no shared-graph reach to assert.
-for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness view-test-support; do
+for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness view-test-support view-proc; do
   check_absent "$crate" notify
 done
 
@@ -152,6 +152,14 @@ done
 # would also reject the legitimate dev-dependency edges view-native and
 # view already declare -- so this reads cargo metadata's per-dependency
 # `kind` field directly (null for a normal edge, "dev"/"build" otherwise)
+# view-proc is the leaf every crate that spawns a long-lived child depends
+# on (crates/view-proc/src/lib.rs: the parent-death signal). It must reach
+# nothing else in this workspace, or the direction the rows above enforce
+# would simply run through it.
+for dep in view view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness view-test-support; do
+  check_absent view-proc "$dep"
+done
+
 # instead.
 check_dev_only() { # usage: check_dev_only <crate>
   if jq -e --arg d "$1" \

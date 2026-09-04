@@ -8,6 +8,7 @@ members = [
     "crates/view-native",
     "crates/view-ai",
     "crates/view-tui",
+    "crates/view-proc",
     "crates/view-oracle",
     "crates/view-bench",
     "crates/view-harness",

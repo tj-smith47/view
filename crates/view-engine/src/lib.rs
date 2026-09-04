@@ -36,9 +36,9 @@ pub use heartbeat::{
 pub use handle::EngineNotification;
 pub use nvim_api::{MULTIGRID_NAME, UI_EXT_OPTIONS, UI_EXT_OPTIONS_MULTIGRID};
 pub use process::{
-    remote_reconnect_backoff, spawn_tied_to_this_process, ApiInfo, Engine, EngineConfig,
-    RemoteSpec, ShutdownOutcome, ShutdownPath, REMOTE_RECONNECT_BACKOFF_BASE,
-    REMOTE_RECONNECT_MAX_ATTEMPTS,
+    remote_reconnect_backoff, ApiInfo, Engine, EngineConfig, RemoteSpec, ShutdownOutcome,
+    ShutdownPath, REMOTE_RECONNECT_BACKOFF_BASE, REMOTE_RECONNECT_MAX_ATTEMPTS,
 };
 pub use rpc::{RpcError, RpcMessage};
 pub use stall::{OutboxStallWatch, WRITER_STALL_THRESHOLD};
+pub use view_proc::spawn_tied_to_this_process;

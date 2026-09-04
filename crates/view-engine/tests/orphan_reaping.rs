@@ -83,47 +83,90 @@ fn the_intermediate_parent() {
 ///
 /// Linux only: `PR_SET_PDEATHSIG` is what covers this, and no equivalent is
 /// armed on the other two platforms (see `arm_parent_death`).
-#[cfg(target_os = "linux")]
 #[test]
 fn a_wedged_engine_dies_with_a_parent_that_was_killed_outright() {
-    use std::io::BufRead;
-
-    let mut parent = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["the_intermediate_parent", "--exact", "--nocapture"])
-        .env(INTERMEDIATE, "1")
-        // held open for the whole test: the intermediate parks on a read of
-        // this pipe, so the only thing that ends it is the kill below
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let reader = std::io::BufReader::new(parent.stderr.take().unwrap());
-    let engine_pid = reader
-        .lines()
-        .map_while(Result::ok)
-        .find_map(|line| {
-            line.strip_prefix(PID_MARKER)
-                .and_then(|pid| pid.trim().parse::<u32>().ok())
-        })
-        .expect("the intermediate must report the pid of the engine it wedged");
-    assert!(
-        common::pid_in_process_table(engine_pid),
-        "the engine was already gone before its parent was killed, so nothing \
-         below is evidence about the kill"
-    );
-
-    parent.kill().unwrap();
-    parent.wait().unwrap();
-
-    let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
-    while common::pid_in_process_table(engine_pid) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the engine outlived the parent that owned it: a child wedged in \
-             synchronous Lua reads no closed pipe and ignores SIGTERM, so \
-             without a parent-death signal it spins until something kills it"
+    #[cfg(not(target_os = "linux"))]
+    {
+        view_test_support::announce_skip(
+            "a_wedged_engine_dies_with_a_parent_that_was_killed_outright",
+            "no parent-death signal is armed off Linux",
         );
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::BufRead;
+
+        let mut parent = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["the_intermediate_parent", "--exact", "--nocapture"])
+            .env(INTERMEDIATE, "1")
+            // held open for the whole test: the intermediate parks on a read of
+            // this pipe, so the only thing that ends it is the kill below
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let reader = std::io::BufReader::new(parent.stderr.take().unwrap());
+        let engine_pid = reader
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|line| {
+                line.strip_prefix(PID_MARKER)
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            })
+            .expect("the intermediate must report the pid of the engine it wedged");
+        assert!(
+            common::pid_in_process_table(engine_pid),
+            "the engine was already gone before its parent was \
+         killed, so nothing below is evidence about the kill"
+        );
+
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+
+        let deadline = std::time::Instant::now() + view_test_support::host_deadline(REAPED);
+        while common::pid_in_process_table(engine_pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the engine outlived the parent that owned it: a child \
+             wedged in synchronous Lua reads no closed pipe and ignores \
+             SIGTERM, so without a parent-death signal it spins until \
+             something kills it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+/// An engine spawned from a thread that then exits keeps running.
+///
+/// The parent-death signal names the *thread* that forked the child, not the
+/// process, so arming it on whichever thread happened to call `spawn` kills
+/// the engine the moment that thread returns -- which is what view's own
+/// background attach thread does. That regression surfaced as a live session
+/// painting `E305` from the dead child's swap file, a failure whose name
+/// says nothing about parent-death signals; this one says it.
+#[test]
+fn an_engine_spawned_from_a_thread_outlives_that_thread() {
+    #[cfg(not(target_os = "linux"))]
+    {
+        view_test_support::announce_skip(
+            "an_engine_spawned_from_a_thread_outlives_that_thread",
+            "no parent-death signal is armed off Linux, so no thread owns one",
+        );
+        return;
+    }
+    let engine = std::thread::spawn(|| {
+        view_engine::process::Engine::spawn(view_engine::process::EngineConfig::isolated())
+    })
+    .join()
+    .expect("the spawning thread must not panic")
+    .expect("the engine starts");
+
+    assert!(
+        engine.handle.get_mode().is_ok(),
+        "the engine stopped answering once the thread that spawned it \
+         exited, so its parent-death signal was armed against that thread \
+         rather than the process"
+    );
 }
