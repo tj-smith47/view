@@ -433,7 +433,7 @@ impl Shadow {
     }
 
     /// Writes the cells that differ between what the terminal shows and the
-    /// frame just composed to `backend`, in the order they should appear on
+    /// frame just composed to `writer`, in the order they should appear on
     /// the wire.
     ///
     /// One `draw` call per frame either way, so the byte stream a run-clipped
@@ -441,7 +441,7 @@ impl Shadow {
     ///
     /// # Errors
     ///
-    /// Returns the backend's own write error.
+    /// Returns the writer's own error.
     pub fn emit_updates<W: std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
         let mut runs = std::mem::take(&mut self.runs);
         self.painted.row_runs(self.front.area, &mut runs);
@@ -464,12 +464,12 @@ impl Shadow {
     /// The same emission clipped to `runs`, one chained `draw` over the
     /// staged sub-buffers.
     ///
-    /// [`StagedRuns`] brackets exactly the backend call: while it lives the
+    /// [`StagedRuns`] brackets exactly the emission: while it lives the
     /// shadow's own buffers hold the scratch's stale cells in those rows, and
-    /// nothing outside this function can observe that, because `backend`
+    /// nothing outside this function can observe that, because `writer`
     /// cannot reach the shadow. Its `Drop` puts the rows back before the
-    /// backend's result reaches the caller, so neither a failed write nor an
-    /// unwinding panic can leave the shadow holding scratch cells.
+    /// result reaches the caller, so neither a failed write nor an unwinding
+    /// panic can leave the shadow holding scratch cells.
     fn emit_clipped<W: std::io::Write>(
         &mut self,
         writer: &mut W,
@@ -3959,12 +3959,44 @@ mod tests {
         bytes
     }
 
+    /// The bytes `ratatui`'s own crossterm backend puts on the wire for the
+    /// whole-frame diff of `front` against `back` -- the reference view's
+    /// emission loop was copied from.
+    fn crossterm_bytes(front: &Buffer, back: &Buffer) -> Vec<u8> {
+        let sink = ByteSink::default();
+        let mut backend = ratatui::backend::CrosstermBackend::new(sink.clone());
+        backend.draw(front.diff_iter(back)).unwrap();
+        let bytes = sink.0.borrow().clone();
+        bytes
+    }
+
     /// Asserts the row-clipped emission is byte-identical to the whole-buffer
     /// diff of the same two buffers, on both the forced-clip path and the
     /// path [`Shadow::emit_updates`] picks for itself. Leaves `shadow`
     /// untouched, so a caller can go on to `commit` and drive another frame.
     fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) {
         let expected = drawn_bytes(|w| emit::draw_resynced(w, shadow.updates()));
+
+        // a frame carrying no glyph a terminal may widen has to reach the
+        // wire exactly as `ratatui` would have written it. This is the leg
+        // that holds real composed frames -- theme styles, overlays, borders,
+        // whatever a fixture paints -- against that, which the synthetic
+        // style sweep cannot do
+        let widens = shadow.front.diff_iter(&shadow.back).any(|(x, y, cell)| {
+            emit::terminal_may_widen(cell.symbol())
+                || shadow
+                    .front
+                    .cell((x, y))
+                    .is_some_and(|old| emit::terminal_may_widen(old.symbol()))
+        });
+        if !widens {
+            assert_eq!(
+                expected,
+                crossterm_bytes(&shadow.front, &shadow.back),
+                "view's emission loop diverged from CrosstermBackend::draw on a \
+                 frame with nothing to re-sync after, in: {label}"
+            );
+        }
 
         let mut runs = Vec::new();
         shadow.painted.row_runs(shadow.front.area, &mut runs);
@@ -4093,7 +4125,7 @@ mod tests {
             ),
             (
                 "narrow text replaced by a wide glyph",
-                Box::new(|m: &mut Model| put(m, 5, 6, &["界", " "])),
+                Box::new(|m: &mut Model| put(m, 5, 10, &["界", " "])),
             ),
             (
                 "a VS16 emoji landing mid-row",
@@ -4129,17 +4161,24 @@ mod tests {
                 "the first cell of the row under that overflow",
                 Box::new(|m: &mut Model| put(m, 5, 0, &["V"])),
             ),
+            // columns 0, 10 and 11 open a cell of their own in the seeded
+            // row; the others are a wide glyph's continuation, where a put
+            // changes nothing and the step would assert over an empty diff
             (
                 "an ambiguous-width nerd-font icon",
-                Box::new(|m: &mut Model| put(m, 3, 4, &[NERD_ICON])),
+                Box::new(|m: &mut Model| put(m, 3, 0, &[NERD_ICON])),
             ),
             (
                 "a box-drawing run beside it",
-                Box::new(|m: &mut Model| put(m, 3, 5, &["\u{2500}", "\u{2500}", "\u{2500}"])),
+                Box::new(|m: &mut Model| put(m, 3, 10, &["\u{2500}", "\u{2500}"])),
+            ),
+            (
+                "a text-presentation pictograph",
+                Box::new(|m: &mut Model| put(m, 3, 10, &["\u{270f}", "\u{1f1e6}"])),
             ),
             (
                 "that icon replaced by plain text",
-                Box::new(|m: &mut Model| put(m, 3, 4, &["p"])),
+                Box::new(|m: &mut Model| put(m, 3, 0, &["p"])),
             ),
             (
                 "an ambiguous glyph in the row's final column",
@@ -4247,13 +4286,7 @@ mod tests {
         let mut back = Buffer::empty(area);
         seed_style_sweep(&mut front, &mut back);
 
-        let expected = {
-            let sink = ByteSink::default();
-            let mut backend = ratatui::backend::CrosstermBackend::new(sink.clone());
-            backend.draw(front.diff_iter(&back)).unwrap();
-            let bytes = sink.0.borrow().clone();
-            bytes
-        };
+        let expected = crossterm_bytes(&front, &back);
         assert!(
             !expected.is_empty(),
             "the sweep produced no diff at all, so this pin asserts nothing"
@@ -4305,10 +4338,20 @@ mod tests {
         let area = ratatui::layout::Rect::new(0, 0, 12, 2);
         let front = Buffer::empty(area);
         let mut back = Buffer::empty(area);
-        let icon_row: Vec<String> = format!("{NERD_ICON} Find Word")
-            .chars()
-            .map(|c| c.to_string())
-            .collect();
+        // one member of each class nvim's `utf_ambiguous_width` names:
+        // East_Asian_Width = Ambiguous, a pictograph whose default
+        // presentation is text, and a regional-indicator pair
+        let icon_row = [
+            NERD_ICON,
+            "\u{270f}",
+            "\u{1f1e6}",
+            "\u{1f1e8}",
+            " ",
+            "F",
+            "i",
+            "n",
+            "d",
+        ];
         for (x, symbol) in icon_row.iter().enumerate() {
             back[(u16::try_from(x).unwrap(), 0)].set_symbol(symbol);
         }
@@ -4342,8 +4385,8 @@ mod tests {
         }
         assert_eq!(
             ambiguous_seen,
-            1 + usize::from(area.width),
-            "the fixture's ambiguous glyphs were not all emitted"
+            4 + usize::from(area.width),
+            "the fixture's widening glyphs were not all emitted"
         );
     }
 
@@ -4405,11 +4448,36 @@ mod tests {
     /// The second half of a glyph [`WideTerm`] drew two columns wide.
     const WIDE_HALF: &str = "\u{0}";
 
+    /// Whether [`WideTerm`] draws `symbol` two columns wide, read off the
+    /// code point rather than off [`emit::terminal_may_widen`]: a model that
+    /// asked the predicate under test what to do would agree with it however
+    /// the predicate changed, and a class dropped from it would leave every
+    /// assertion here passing.
+    fn widens_on_this_terminal(symbol: &str) -> bool {
+        symbol.chars().any(|c| {
+            matches!(c as u32,
+                0x2500..=0x257f      // box drawing
+                | 0x2580..=0x259f    // block elements
+                | 0x25a0..=0x25ff    // geometric shapes
+                | 0x270f | 0x2712    // pictographs with text presentation
+                | 0x1f1e6..=0x1f1ff  // regional indicators
+                | 0xe000..=0xf8ff    // private use
+                | 0xf0000..=0xffffd) // supplementary private use
+        })
+    }
+
     /// A terminal that draws every `terminal_may_widen` glyph two columns
     /// wide, which is what the user's Termius does with nerd-font
     /// private-use icons and box drawing. Interprets exactly what the
     /// emission loop writes: CUP, carriage return, line feed, SGR (ignored)
     /// and printable text.
+    ///
+    /// Assumes a terminal that leaves the left glyph standing when something
+    /// narrow is written into its second half; an xterm-family terminal
+    /// erases both halves instead. Nothing in this tree proves which Termius
+    /// does -- the grounds for the assumption are that nvim writes the same
+    /// sequence and is clean on that device, so a device capture that
+    /// disagrees would show a vanished icon rather than a shifted row.
     struct WideTerm {
         grid: Vec<Vec<String>>,
         x: usize,
@@ -4482,7 +4550,7 @@ mod tests {
                     _ => break,
                 }
             }
-            let columns = if emit::terminal_may_widen(&symbol) {
+            let columns = if widens_on_this_terminal(&symbol) {
                 2
             } else {
                 UnicodeWidthStr::width(symbol.as_str()).max(1)
@@ -4528,6 +4596,22 @@ mod tests {
                     put(m, 0, 0, &[NERD_ICON, " ", "F", "i", "n", "d"]);
                     put(m, 1, 0, &["\u{2500}"; 12]);
                     put(m, 2, 0, &["p", "l", "a", "i", "n"]);
+                    put(
+                        m,
+                        3,
+                        0,
+                        &[
+                            "\u{270f}",
+                            " ",
+                            "\u{1f1e6}",
+                            "\u{1f1e8}",
+                            " ",
+                            "e",
+                            "d",
+                            "i",
+                            "t",
+                        ],
+                    );
                 }),
             ),
             (
@@ -4537,6 +4621,23 @@ mod tests {
                     put(m, 1, 0, &[" "]);
                     put(m, 1, 1, &["\u{2500}"; 12]);
                     put(m, 2, 0, &[" ", "p", "l", "a", "i", "n"]);
+                    put(
+                        m,
+                        3,
+                        0,
+                        &[
+                            " ",
+                            "\u{270f}",
+                            " ",
+                            "\u{1f1e6}",
+                            "\u{1f1e8}",
+                            " ",
+                            "e",
+                            "d",
+                            "i",
+                            "t",
+                        ],
+                    );
                 }),
             ),
             (
@@ -4550,6 +4651,18 @@ mod tests {
             (
                 "that icon becomes a narrow character",
                 Box::new(|m: &mut Model| put(m, 0, 1, &["a"])),
+            ),
+            (
+                "a text-presentation pictograph alone changes",
+                Box::new(|m: &mut Model| put(m, 3, 1, &["\u{2712}"])),
+            ),
+            (
+                "that pictograph becomes a narrow character",
+                Box::new(|m: &mut Model| put(m, 3, 1, &["e"])),
+            ),
+            (
+                "the first regional indicator of the pair alone changes",
+                Box::new(|m: &mut Model| put(m, 3, 3, &["\u{1f1ff}"])),
             ),
         ];
 
@@ -4574,7 +4687,7 @@ mod tests {
                     if shown == WIDE_HALF {
                         let left = x.checked_sub(1).map(|lx| shadow.front()[(lx, y)].symbol());
                         assert!(
-                            left.is_some_and(emit::terminal_may_widen),
+                            left.is_some_and(widens_on_this_terminal),
                             "cell ({x},{y}) holds a widened glyph's second half but \
                              nothing to its left widens, after: {label}"
                         );

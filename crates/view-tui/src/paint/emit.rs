@@ -23,25 +23,33 @@ use crossterm::style::{
 use ratatui::backend::IntoCrossterm;
 use ratatui::buffer::{Buffer, BufferDiff, Cell, CellWidth};
 use ratatui::style::{Color, Modifier};
+use unicode_properties::emoji::is_regional_indicator;
+use unicode_properties::UnicodeEmoji;
 use unicode_width::UnicodeWidthChar;
 
 /// Whether a terminal may draw `symbol` wider than `unicode_width` says.
 ///
-/// Terminals disagree on East_Asian_Width = Ambiguous glyphs (nerd-font
-/// private-use icons, box drawing) and on emoji presentation selected by
-/// VS16; nvim's TUI re-syncs its cursor after exactly these.
+/// Answers nvim's `utf_ambiguous_width` in full: East_Asian_Width =
+/// Ambiguous (nerd-font private-use icons, box drawing), pictographic
+/// characters whose default presentation is text (U+270F PENCIL), regional
+/// indicators, and emoji presentation selected by a following VS16. nvim's
+/// TUI re-syncs its cursor after exactly these, and there is no class of
+/// glyph it re-syncs after that this leaves out.
 ///
-/// nvim's third class -- Extended_Pictographic with text presentation and
-/// Regional_Indicator -- is not covered: no crate in this tree's dependency
-/// set carries those tables, so a pictographic character that is neither
-/// Ambiguous nor VS16-marked still rides on the terminal's advance here.
+/// The pictographic half reads `unicode-properties`' Emoji property, the
+/// table that crate carries. Every Extended_Pictographic code point it does
+/// not carry is one Unicode has not assigned -- the reserved ranges the
+/// property holds open for future emoji -- so no character a terminal can
+/// draw falls between the two.
 pub(crate) fn terminal_may_widen(symbol: &str) -> bool {
     if symbol.is_ascii() {
         return false;
     }
-    symbol
-        .chars()
-        .any(|c| c == '\u{fe0f}' || (c as u32 >= 0x80 && c.width() != c.width_cjk()))
+    symbol.chars().any(|c| {
+        c == '\u{fe0f}'
+            || (c as u32 >= 0x80
+                && (c.width() != c.width_cjk() || c.is_emoji_char() || is_regional_indicator(c)))
+    })
 }
 
 /// The cell diff, plus the cell to the right of every changed cell whose old

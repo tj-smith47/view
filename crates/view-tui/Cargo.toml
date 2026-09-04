@@ -30,6 +30,15 @@ view-surface = { version = "0.0.1", path = "../view-surface" }
 # resolved transitively via ratatui's own use of it, but a transitive
 # dependency cannot be `use`d without also declaring it directly.
 unicode-width = "0.2.2"
+# The pictographic and regional-indicator halves of nvim's
+# `utf_ambiguous_width`, which decides whether the painter re-syncs the
+# cursor after a glyph (src/paint/emit.rs). `unicode-width` answers only the
+# East_Asian_Width half, and no other crate already in the graph carries an
+# emoji-property table. Default features off: `general-category` duplicates
+# tables `unicode-width` already ships and nothing here reads it.
+unicode-properties = { version = "0.1.4", default-features = false, features = [
+    "emoji",
+] }
 
 # Capability probing needs a bounded, non-blocking-style stdin read (VMIN=0/
 # VTIME=0 termios) so a terminal that never replies can't leave a dangling

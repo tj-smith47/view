@@ -42,7 +42,14 @@
 //!   iteration, `KEYSTROKE_GAP`-paced): a prompt opening is a rare, one-shot
 //!   event, never a steady per-frame path, so there is no hot variant.
 //!
-//! All seven absorb terminal write syscalls into their writer.
+//! All seven absorb terminal write syscalls into their writer, and all
+//! seven charge escape encoding: from the commit that gave view its own
+//! emission loop (`crates/view-tui/src/paint/emit.rs`) every row pays it,
+//! where before only the two `_crossterm` rows did. Numbers for
+//! `paint_frame_full_recomposite`, `_wide` and `paint_frame_steady_state`
+//! taken before that commit -- including those in
+//! `.claude/measurements/2026-07-27-the-paint-path-is-cold-cache-not-instructions.md`
+//! -- are not comparable to numbers taken after it.
 
 #![allow(clippy::expect_used)]
 
