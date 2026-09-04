@@ -422,34 +422,41 @@ crates/view-oracle/tests/smoke.rs 2 a --nvim-bin wrapper spawned through that re
 # written down once, by whoever added the spawn, rather than rediscovered by
 # whoever finds the stray.
 #
-# Keyed on `Command::new`/`CommandBuilder::new` per file, over production
-# lines only (the god-file scanner's own classifier, which drops
-# `#[cfg(test)]` regions) and with comment lines dropped: a count moves when
-# a spawn is added and does not move when a line above it does. Precision
-# over recall, as elsewhere in this file -- a spawn built by some other
-# spelling would pass unseen.
+# Keyed per file on the two constructors (`Command::new`,
+# `CommandBuilder::new`) and on the calls that start something
+# (`.spawn(`, `.spawn_command(`), over production lines only (the god-file
+# scanner's own classifier, which drops `#[cfg(test)]` regions) and with
+# comment lines dropped: a count moves when a spawn is added and does not
+# move when a line above it does. The call spellings are what close the
+# constructors' blind spot, where a helper is handed an already-built
+# `Command` -- at the price of pinning thread and task spawns too, which
+# say so in their own rows.
 #
 # Each row is a path, its pinned number of sites, and how those sites cannot
 # leave a stray.
 TIED_SPAWN_SITES='
-crates/view-ai/src/acp/session.rs 2 the agent adapter, tied on unix; the windows arm keeps tokio own spawn, which no parent-death signal covers there
-crates/view-ai/src/provision.rs 1 an npm install, bounded by its own deadline and killed on it
-crates/view-ai/src/watch.rs 1 a git ls-files, waited on with a deadline and killed on it
+crates/view-ai/src/acp/session.rs 5 the agent adapter, tied on unix; the windows arm keeps tokio own spawn, which no parent-death signal covers there; plus the thread that waits out a signalled adapter and the task that drives one
+crates/view-ai/src/provision.rs 3 an npm install, bounded by its own deadline and killed on it, and the thread that reads it out
+crates/view-ai/src/watch.rs 5 a git ls-files, waited on with a deadline and killed on it, and the watcher threads around it
 crates/view-bench/src/remote_ui.rs 1 the headless control server, tied: it has no pty to hang up and no controlling terminal
-crates/view-bench/src/scenarios/echo_speculated_rtt.rs 2 an interpreter probe that runs to completion, and the relay fixture the row waits out and kills
+crates/view-bench/src/scenarios/echo_speculated_rtt.rs 3 an interpreter probe that runs to completion, and the relay fixture the row waits out and kills
 crates/view-bench/src/session.rs 1 a pty session leader, ended by the kernel when the master closes
-crates/view-engine/src/process.rs 2 the engine and the remote leg ssh client, both tied through spawn_engine_child
+crates/view-engine/src/process.rs 4 the engine and the remote leg ssh client, both tied through spawn_engine_child, each started again by the ETXTBSY retry
 crates/view-harness/src/bin/bench.rs 1 a sysctl read, waited on to completion
 crates/view-harness/src/bin/bench/replicates.rs 1 a git read, waited on to completion
 crates/view-harness/src/bin/oracle/compat.rs 3 a cargo build and a reference nvim, both waited on to completion, and a pty-hosted view ended by its master closing
 crates/view-harness/src/fixture.rs 1 an nvim --version probe, waited on to completion
-crates/view-native/src/tree/git.rs 1 a git status, bounded by its own deadline and killed on it
-crates/view-oracle/src/compat.rs 1 a probe subprocess, bounded by wait_with_timeout and killed on it
+crates/view-native/src/tree/git.rs 2 a git status, bounded by its own deadline and killed on it
+crates/view-oracle/src/compat.rs 3 probe subprocesses, each bounded by wait_with_timeout and killed on it
 crates/view-oracle/src/hang.rs 1 a taskkill, waited on to completion
-crates/view-oracle/src/pty.rs 1 the pty funnel: setsid and TIOCSCTTY make the child a session leader, so the master closing delivers SIGHUP
+crates/view-oracle/src/pty.rs 2 the pty funnel: setsid and TIOCSCTTY make the child a session leader, so the master closing delivers SIGHUP
 crates/view-oracle/src/remote.rs 1 a stub ssh client, waited on to completion
+crates/view-proc/src/lib.rs 1 the anchor thread every tied spawn forks from, which lives as long as the process does
 crates/view-test-support/src/lib.rs 1 a sysctl read, waited on to completion
-crates/view/src/remote_guard.rs 1 an ssh probe, bounded by its own deadline and killed on it
+crates/view/src/ai_context_worker.rs 1 a worker thread, not a process
+crates/view/src/clipboard.rs 2 worker threads, not processes
+crates/view/src/remote_guard.rs 2 an ssh probe, bounded by its own deadline and killed on it
+crates/view/src/runtime.rs 1 a worker thread, not a process
 '
 check_tied_spawns() {
   local expected actual prod_lines scanner
@@ -463,7 +470,7 @@ check_tied_spawns() {
   fi
   expected=$(printf '%s\n' "$TIED_SPAWN_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
   actual=$(printf '%s\n' "$prod_lines" \
-    | grep -E '[^A-Za-z0-9_]Command(Builder)?::new' \
+    | grep -E '([^A-Za-z0-9_]Command(Builder)?::new|\.spawn\(|\.spawn_command\()' \
     | sed 's/:.*//' | LC_ALL=C sort | uniq -c | awk '{ print $2, $1 }' | LC_ALL=C sort) || actual=""
   if [ "$expected" = "$actual" ]; then
     return 0
@@ -471,8 +478,10 @@ check_tied_spawns() {
   printf 'pinned:\n%s\nfound:\n%s\n' "$expected" "$actual"
   echo "STYLE FAIL: a production spawn site outside the pinned set"
   echo "  A child that outlives the process that spawned it is a stray nothing"
-  echo "  reaps: spawn it through view_proc::spawn_tied_to_this_process, or add"
-  echo "  a row to this file saying how this one cannot outlive its parent."
+  echo "  reaps: spawn it through view_proc::spawn_tied_to_this_process (the"
+  echo "  crate declares view-proc to reach it), or add a row to this file"
+  echo "  saying how this one cannot outlive its parent. A thread or a task"
+  echo "  earns a row that says so."
   return 1
 }
 

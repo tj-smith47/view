@@ -383,23 +383,24 @@ written-programs" \
 # and every other spawn says in a row of its own how it cannot outlive its
 # parent. Its blind spot is the same as the walk above's -- a spelling the
 # pattern stops matching reads exactly like a tree with no new spawns -- so
-# each population below is planted in both spellings the tree uses,
-# `Command::new` and portable-pty's `CommandBuilder::new`, with a doc comment
-# quoting the same call to prove the classifier drops it.
+# each population below is planted in all three spellings the tree uses --
+# `Command::new`, portable-pty's `CommandBuilder::new`, and the `.spawn(`
+# that starts one -- with a doc comment quoting the same call to prove the
+# classifier drops it.
 #
 # The rows mirror the checker's own TIED_SPAWN_SITES.
 # ---------------------------------------------------------------------------
 plant_spawns() {
   mkdir -p "$(dirname "$CASE/$1")"
   : > "$CASE/$1"
-  printf '/// A doc comment naming Command::new, which is not a spawn.\n' >> "$CASE/$1"
+  printf '/// A doc comment naming Command::new and .spawn(), neither a spawn.\n' >> "$CASE/$1"
   i=0
   while [ "$i" -lt "$2" ]; do
-    if [ $((i % 2)) -eq 0 ]; then
-      printf 'let mut cmd = Command::new(program);\n' >> "$CASE/$1"
-    else
-      printf 'let mut cmd = CommandBuilder::new(program);\n' >> "$CASE/$1"
-    fi
+    case $((i % 3)) in
+      0) printf 'let mut cmd = Command::new(program);\n' >> "$CASE/$1" ;;
+      1) printf 'let mut cmd = CommandBuilder::new(program);\n' >> "$CASE/$1" ;;
+      *) printf 'let worker = builder.spawn(move || run());\n' >> "$CASE/$1" ;;
+    esac
     i=$((i + 1))
   done
 }
@@ -412,24 +413,28 @@ new_tied_case() {
   # scanner reads tracked files: a scratch root has to be a repository for
   # the classifier to see anything at all
   git -C "$CASE" init -q
-  plant_spawns 'crates/view-ai/src/acp/session.rs' 2
-  plant_spawns 'crates/view-ai/src/provision.rs' 1
-  plant_spawns 'crates/view-ai/src/watch.rs' 1
+  plant_spawns 'crates/view-ai/src/acp/session.rs' 5
+  plant_spawns 'crates/view-ai/src/provision.rs' 3
+  plant_spawns 'crates/view-ai/src/watch.rs' 5
   plant_spawns 'crates/view-bench/src/remote_ui.rs' 1
-  plant_spawns 'crates/view-bench/src/scenarios/echo_speculated_rtt.rs' 2
+  plant_spawns 'crates/view-bench/src/scenarios/echo_speculated_rtt.rs' 3
   plant_spawns 'crates/view-bench/src/session.rs' 1
-  plant_spawns 'crates/view-engine/src/process.rs' 2
+  plant_spawns 'crates/view-engine/src/process.rs' 4
   plant_spawns 'crates/view-harness/src/bin/bench.rs' 1
   plant_spawns 'crates/view-harness/src/bin/bench/replicates.rs' 1
   plant_spawns 'crates/view-harness/src/bin/oracle/compat.rs' 3
   plant_spawns 'crates/view-harness/src/fixture.rs' 1
-  plant_spawns 'crates/view-native/src/tree/git.rs' 1
-  plant_spawns 'crates/view-oracle/src/compat.rs' 1
+  plant_spawns 'crates/view-native/src/tree/git.rs' 2
+  plant_spawns 'crates/view-oracle/src/compat.rs' 3
   plant_spawns 'crates/view-oracle/src/hang.rs' 1
-  plant_spawns 'crates/view-oracle/src/pty.rs' 1
+  plant_spawns 'crates/view-oracle/src/pty.rs' 2
   plant_spawns 'crates/view-oracle/src/remote.rs' 1
+  plant_spawns 'crates/view-proc/src/lib.rs' 1
   plant_spawns 'crates/view-test-support/src/lib.rs' 1
-  plant_spawns 'crates/view/src/remote_guard.rs' 1
+  plant_spawns 'crates/view/src/ai_context_worker.rs' 1
+  plant_spawns 'crates/view/src/clipboard.rs' 2
+  plant_spawns 'crates/view/src/remote_guard.rs' 2
+  plant_spawns 'crates/view/src/runtime.rs' 1
 }
 
 # The pinned population is long, so a failing case is graded on the rows that
@@ -463,7 +468,7 @@ expect_tied() {
 }
 
 new_tied_case
-expect_tied 0 '' 'the pinned population, in both spellings, with a doc comment quoting the call'
+expect_tied 0 '' 'the pinned population, in all three spellings, with a doc comment quoting the call'
 
 new_tied_case
 plant_spawns 'crates/view/src/startup.rs' 1
@@ -474,6 +479,12 @@ new_tied_case
 plant_spawns 'crates/view-bench/src/remote_ui.rs' 2
 expect_tied 1 'crates/view-bench/src/remote_ui.rs=2 tied-spawns' \
   'a second spawn inside a file the pin already lists'
+
+new_tied_case
+printf 'let worker = std::thread::Builder::new().spawn(move || run());\n' \
+  > "$CASE/crates/view/src/startup.rs"
+expect_tied 1 'crates/view/src/startup.rs=1 tied-spawns' \
+  'a file whose only spawn is the call, with no constructor beside it'
 
 new_tied_case
 rm -f "$CASE/crates/view-oracle/src/hang.rs"
