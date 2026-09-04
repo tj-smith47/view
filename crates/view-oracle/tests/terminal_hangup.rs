@@ -148,12 +148,14 @@ fn a_session_whose_pty_master_closed_ends_instead_of_spinning() {
             Err(err) => panic!("reading the pty master failed: {err}"),
         }
         // the engine's existence alone is too early to close anything on:
-        // view spawns nvim and then paints "waiting for nvim..." until the
-        // handshake lands, and a terminal taken away inside that window is
-        // a startup failure rather than the hangup under test
+        // view paints its own pre-attach shell until the handshake lands,
+        // and a terminal taken away inside that window is a startup failure
+        // rather than the hangup under test. `~` is nvim's own
+        // empty-buffer-line marker, so only the engine's grid content
+        // reaching the screen satisfies this.
         let up = written > 0
             && quiet_since.elapsed() >= settled
-            && !screen.screen().contents().contains("waiting for nvim");
+            && screen.screen().contents().contains('~');
         if up {
             break engine_child_of(child.id());
         }

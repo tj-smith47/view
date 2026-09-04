@@ -8,11 +8,11 @@
 //! Two boundaries are timed, and they are different events the spec
 //! states separate budgets for:
 //!
-//! - **shell visible** -- view's own pre-attach chrome
-//!   (`view_surface::SHELL_PLACEHOLDER`) reaching the terminal. view
-//!   paints it before it has even spawned the nvim child, so bare nvim
-//!   has no counterpart and this is a view-side absolute bar, never a
-//!   ratio.
+//! - **shell visible** -- view's own pre-attach frame reaching the
+//!   terminal, recognized by [`view_oracle::startup_shell_visible`] rather
+//!   than by any text, because the shell frame carries none. view paints
+//!   it before it has even spawned the nvim child, so bare nvim has no
+//!   counterpart and this is a view-side absolute bar, never a ratio.
 //! - **marker cold** -- the opened fixture's own content reaching the
 //!   terminal. Both sides reach this one, so it is what the paired ratio
 //!   is taken over.
@@ -51,11 +51,12 @@ struct SampleTimes {
 
 /// One cold spawn: process start until `marker` -- content only the
 /// opened fixture buffer can supply -- is on screen, recording on the way
-/// past when `shell` (if watched) first appeared, then a bounded
-/// kill+reap so sample teardown can never leak processes across the run.
+/// past when the startup shell (if `watch_shell`) first appeared, then a
+/// bounded kill+reap so sample teardown can never leak processes across the
+/// run.
 fn sample_once(
     spec: &SpawnSpec,
-    shell: Option<&str>,
+    watch_shell: bool,
     marker: &str,
 ) -> Result<SampleTimes, BenchError> {
     let start = Instant::now();
@@ -68,10 +69,11 @@ fn sample_once(
         // the shell frame stays on screen for the whole attach window
         // (nothing repaints until the engine's first flush), so a poll
         // this tight cannot step over it into the content frame
-        if let Some(shell) = shell.filter(|_| shell_ms.is_none()) {
-            if session.with_screen(|screen| screen_holds(screen, shell)) {
-                shell_ms = Some(elapsed_ms(start));
-            }
+        if watch_shell
+            && shell_ms.is_none()
+            && session.with_screen(view_oracle::startup_shell_visible)
+        {
+            shell_ms = Some(elapsed_ms(start));
         }
         if session.with_screen(|screen| screen_holds(screen, marker)) {
             break;
@@ -91,7 +93,7 @@ fn sample_once(
     // content without a shell frame means view stopped painting its
     // pre-attach chrome at all -- the regression the shell bar exists to
     // catch -- so it fails the run rather than silently shortening the series
-    if shell.is_some() && shell_ms.is_none() {
+    if watch_shell && shell_ms.is_none() {
         return Err(BenchError::Desync {
             context: format!(
                 "buffer content painted at {marker_ms:.3}ms without the startup shell ever \
@@ -139,19 +141,18 @@ pub struct FirstPaintOutcome {
 /// strictly alternating view/nvim (per-sample interleaving: each sample
 /// is one whole trial, so pair members sit adjacent in time).
 ///
-/// `shell` is the view side's startup-chrome text and `marker` the fixture
-/// content both sides open; the nvim side is timed to `marker` alone.
+/// `marker` is the fixture content both sides open; the nvim side is timed
+/// to it alone, the view side to it and to its own startup shell.
 ///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if any spawn never paints `marker`, if a
-/// view spawn reaches `marker` without ever showing `shell`, or any
-/// underlying session error.
+/// view spawn reaches `marker` without ever showing its startup shell, or
+/// any underlying session error.
 pub fn run(
     view_spec: ViewSpec<'_>,
     nvim_spec: NvimSpec<'_>,
     protocol: &Protocol,
-    shell: &str,
     marker: &str,
 ) -> Result<FirstPaintOutcome, BenchError> {
     let ViewSpec(view) = view_spec;
@@ -170,8 +171,8 @@ pub fn run(
         };
         for side in [first, first.other()] {
             let (spec, watch_shell, name) = match side {
-                Side::View => (view, Some(shell), "view"),
-                Side::Nvim => (nvim, None, "nvim"),
+                Side::View => (view, true, "view"),
+                Side::Nvim => (nvim, false, "nvim"),
             };
             let times = sample_once(spec, watch_shell, marker).map_err(|e| label(name, e))?;
             match side {

@@ -46,6 +46,17 @@ const KEY_RING_CAPACITY: usize = 64;
 /// carries.
 const KEY_OVERFLOW_FAMILY: &str = "view: startup key buffer full";
 
+/// The line the pre-attach window raises once the engine has taken longer
+/// than [`SLOW_ATTACH_AFTER`] to attach, and the family the cutover
+/// withdraws by.
+const SLOW_ATTACH_FAMILY: &str = "view: starting nvim";
+
+/// How long the engine may take to attach before the wait is worth saying
+/// out loud. Under it nothing is said at all: an attach that lands inside
+/// this window is not a wait a user is aware of, and a line about it makes
+/// the start read as slower than it was.
+const SLOW_ATTACH_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// `main.rs`'s `msg_tx`/`msg_rx` channel capacity. Deliberately tied to
 /// [`KEY_RING_CAPACITY`] rather than stated as its own literal: a
 /// maximally-full pre-attach key ring replays exactly `KEY_RING_CAPACITY`
@@ -633,6 +644,8 @@ fn drain_pre_attach_polled(
         return drain_pre_attach_with(msg_rx, model, repaint);
     };
     let mut state = PreAttach::new();
+    let opened = Instant::now();
+    let mut said_slow = false;
     'window: loop {
         loop {
             match msg_rx.try_recv() {
@@ -658,7 +671,11 @@ fn drain_pre_attach_polled(
             Err(TryRecvError::Disconnected) => break 'window,
             Err(TryRecvError::Empty) => {}
         }
-        match crate::wake::poll_readiness(input, waker, None) {
+        // the deadline rides the poll this wait already sleeps in rather
+        // than arming a clock of its own, and is dropped once the line has
+        // been said so a long wait sleeps uninterrupted as before
+        let until_slow = (!said_slow).then(|| SLOW_ATTACH_AFTER.saturating_sub(opened.elapsed()));
+        match crate::wake::poll_readiness(input, waker, until_slow) {
             Ok(ready) => {
                 if ready.input {
                     let mut events = Vec::new();
@@ -668,6 +685,10 @@ fn drain_pre_attach_polled(
                             break 'window;
                         }
                     }
+                }
+                if slow_attach_due(opened, said_slow) {
+                    said_slow = true;
+                    state.note_slow_attach(model, &mut repaint);
                 }
             }
             Err(_) => loop {
@@ -683,6 +704,18 @@ fn drain_pre_attach_polled(
         }
     }
     state.finish()
+}
+
+/// Whether the slow-attach line is due: the window has been open for
+/// [`SLOW_ATTACH_AFTER`] and has not said so yet.
+///
+/// A predicate rather than an inline condition so both halves of the rule
+/// -- silence under the threshold, exactly one line over it -- are provable
+/// without a live terminal, which the poll-driven wait it guards needs and
+/// `cargo test` cannot construct.
+#[cfg(unix)]
+fn slow_attach_due(opened: Instant, said: bool) -> bool {
+    !said && opened.elapsed() >= SLOW_ATTACH_AFTER
 }
 
 /// The accumulation logic behind [`drain_pre_attach`], generic over the
@@ -722,6 +755,18 @@ impl PreAttach {
             dropped: 0,
             toast_effects: Vec::new(),
         }
+    }
+
+    /// Raises the one notice a slow attach is owed, through the same
+    /// family choke point every other locally-synthesized line goes
+    /// through, and repaints so it is on screen while the wait continues.
+    fn note_slow_attach(&mut self, model: &mut Model, mut repaint: impl FnMut(&mut Model)) {
+        self.toast_effects.extend(
+            model
+                .engine
+                .record_native_notice_once(SLOW_ATTACH_FAMILY, format!("{SLOW_ATTACH_FAMILY}...")),
+        );
+        repaint(model);
     }
 
     /// Folds one message into the window's state, returning `true` when
@@ -778,7 +823,13 @@ impl PreAttach {
                 model.caps = caps;
                 false
             }
-            Msg::EngineReady => true,
+            Msg::EngineReady => {
+                // the wait it describes is over, and a line about a wait
+                // that has ended would sit on top of the first real frame
+                // for the rest of its transient lifetime
+                let _ = model.engine.withdraw_native_notice(SLOW_ATTACH_FAMILY);
+                true
+            }
             // structurally unreachable before EngineReady (see
             // attach_in_background's doc comment); kept for the same
             // defensive-totality reason update()'s own no-op arms are
@@ -1369,6 +1420,62 @@ mod tests {
             model.engine.toast_history.entries().next().map(|e| e.id()),
             Some(entry.id()),
             "the overflow notice must land in scrollback history too, not just on screen"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_that_lands_inside_the_first_second_is_never_announced() {
+        // the whole point of the threshold: a start the user never waited
+        // on gains no line, and a line would make it read as slower than it
+        // was
+        assert!(
+            !slow_attach_due(Instant::now(), false),
+            "a window that just opened is not owed a notice"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_attach_is_announced_exactly_once() {
+        let stalled = Instant::now()
+            .checked_sub(SLOW_ATTACH_AFTER * 2)
+            .expect("a monotonic clock two seconds past its own epoch");
+        assert!(
+            slow_attach_due(stalled, false),
+            "a window open twice the threshold is owed the notice"
+        );
+        assert!(
+            !slow_attach_due(stalled, true),
+            "a window that has already spoken stays quiet however long it waits"
+        );
+
+        // and the raising itself is one line and one expiry, whatever the
+        // caller does: the family choke point is what makes a repeat a no-op
+        let mut model = Model::with_term_size(80, 24);
+        let mut state = PreAttach::new();
+        state.note_slow_attach(&mut model, |_| {});
+        state.note_slow_attach(&mut model, |_| {});
+        let lines: Vec<String> = model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(view_core::model::MessageEntry::lines)
+            .collect();
+        assert_eq!(lines, vec![format!("{SLOW_ATTACH_FAMILY}...")]);
+        assert_eq!(
+            state.toast_effects.len(),
+            1,
+            "one notice owes one expiry: {:?}",
+            state.toast_effects
+        );
+
+        // and the line leaves with the wait it describes
+        assert!(state.absorb(Msg::EngineReady, &mut model, |_| {}));
+        assert!(
+            !model.engine.has_native_notice(SLOW_ATTACH_FAMILY),
+            "attach ending must take the notice about waiting for it down"
         );
     }
 

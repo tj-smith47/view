@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use view_oracle::{PtySession, QueryPolicy};
-use view_surface::SHELL_PLACEHOLDER;
 
 // The pty-isolation lock. A timing-bound test measures a sequence whose
 // budget only has a host share for the host's OWN other work: a sibling
@@ -136,12 +135,11 @@ fn spawn_view_pty() -> ViewPtySession {
     let mut session = spawn_view_pty_raw();
     // waits specifically for a `~` (nvim's own empty-buffer-line marker,
     // painted the moment a fresh unnamed buffer's grid content actually
-    // streams in), not merely "the screen is non-blank": since startup's
-    // placeholder shell (`view_surface::LayerKind::Shell`, a themed
-    // statusline bar plus a static "waiting for nvim" indicator) now paints
-    // real, non-blank text of its own well before the engine attaches, a
-    // bare blank-vs-non-blank check would return as soon as that
-    // placeholder appears rather than once nvim is actually ready
+    // streams in) rather than for any painted cell: startup's shell frame
+    // (`view_surface::LayerKind::Shell`, a themed statusline bar over an
+    // empty grid) styles the bottom row well before the engine attaches, so
+    // a check keyed on output rather than on grid content would return
+    // while nvim is still starting
     let _ = session.wait_for("~", Duration::from_secs(5));
     session
 }
@@ -2944,51 +2942,61 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> WrapperScript {
 
 /// nvim's own empty-buffer line marker, the first thing a fresh buffer's
 /// grid content puts on screen. The startup shell paints no `~` of its own
-/// (only a blank statusline bar and the placeholder label) and no scratch
-/// path this file uses contains one, so its presence on screen means the
-/// engine attached and its grid reached the terminal.
+/// (a themed statusline bar and nothing else) and no scratch path this file
+/// uses contains one, so its presence on screen means the engine attached
+/// and its grid reached the terminal.
 #[cfg(unix)]
 const ENGINE_CONTENT_MARKER: char = '~';
 
-/// Asserts the ordering the startup shell exists for: the placeholder frame
-/// reaches the terminal while the engine's own content is not yet on
-/// screen. Both halves are read from a single screen state, so what is
-/// proven is the order of the two frames in the pty stream, not the wall
-/// time either took to get there.
+/// Asserts the window the startup shell exists for is still open: view owns
+/// the terminal and the engine's own content has not reached it yet, so
+/// keys the caller is about to type are genuinely pre-attach ones.
 ///
-/// Deliberately not a latency bar. Measured shell-frame paint spans roughly
+/// Deliberately not a latency bar. Measured pre-attach windows span roughly
 /// 50ms on Linux to 450ms on macOS on developer hardware, so any fixed
 /// millisecond bar tight enough to be meaningful on one platform sits
 /// inside the other's ordinary distribution; absolute first-paint budgets
 /// are gated in the bench matrix, on a release build under a controlled
 /// protocol, rather than by a debug binary on whatever host runs the tests.
-/// The caller's delayed-engine wrapper is what makes the two frames
-/// separately observable, by holding nvim back far longer than a pty read
-/// takes to deliver the frame already written.
+/// The caller's delayed-engine wrapper is what holds the window open long
+/// enough to be read at all.
+///
+/// The frame view paints into that window is not what is read here, and
+/// cannot be: it is a statusline bar in the colorscheme's own colors, and
+/// these sessions run against an isolated first-launch home with no theme
+/// cache to take colors from, which leaves the bar's cells styled exactly
+/// like the empty screen under them. The bar's content is pinned where it
+/// is decidable -- `view_tui`'s painter, the oracle's reference raster, and
+/// `view_oracle::shell_bar_visible` -- and the ordering is what this
+/// session-level assertion is for.
 ///
 /// Proves only the first half of the ordering: the caller must go on to
 /// establish that the engine really did attach afterwards (otherwise a
 /// `view` that never starts an engine at all would satisfy this vacuously).
 #[cfg(unix)]
-fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession) {
-    let ordered = session.wait_for_screen(Duration::from_secs(15), |screen| {
-        let text = screen.contents();
-        text.contains(SHELL_PLACEHOLDER) && !text.contains(ENGINE_CONTENT_MARKER)
+fn assert_pre_attach_window_is_open(session: &mut ViewPtySession) {
+    // view's own frame rather than any painted cell: `Term::init` takes
+    // raw mode and the alternate screen together, and a key sent before
+    // that is taken by the tty's own canonical line discipline -- echoed
+    // and held for a newline that never comes -- rather than reaching the
+    // pre-attach window at all. The frame view paints into that window
+    // carries no text of its own to wait on.
+    let open = session.wait_for_screen(Duration::from_secs(15), |screen| {
+        view_oracle::startup_shell_visible(screen)
+            && !screen.contents().contains(ENGINE_CONTENT_MARKER)
     });
     assert!(
-        ordered,
-        "never observed the startup shell frame ({SHELL_PLACEHOLDER:?}) on screen ahead of the \
-         engine's own content ({ENGINE_CONTENT_MARKER:?}): either the placeholder never painted, \
-         or engine content was already on screen by the time it did; last screen:\n{}",
+        open,
+        "view's own startup frame never reached the terminal ahead of the engine's content \
+         ({ENGINE_CONTENT_MARKER:?}): either it never painted, or the engine's grid was already \
+         on screen by the time it did; last screen:\n{}",
         session.screen()
     );
 }
 
-/// The startup sequence's shell frame -- a themed statusline placeholder
-/// plus a static "waiting for nvim" indicator, painted before the engine
-/// even spawns -- must be visible well before a deliberately slow (500ms)
-/// embedded engine ever attaches, and keys typed during that gap must
-/// reach the real buffer, in order, once attach completes.
+/// Keys typed into the pre-attach window -- held open here by a
+/// deliberately slow (500ms) embedded engine -- must reach the real buffer,
+/// in order, once attach completes.
 ///
 /// This is also the seam's liveness proof end to end: `view_vim_enter`'s
 /// blocking `rpcrequest` only ever resolves if `update()`'s
@@ -2999,7 +3007,7 @@ fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession) {
 /// fail an assertion.
 #[cfg(unix)]
 #[test]
-fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order() {
+fn pre_attach_keys_typed_before_a_slow_engine_replay_into_the_buffer_in_order() {
     let wrapper = write_delayed_nvim_wrapper(500);
 
     // This test's ordering proof and its 15s replay wait both depend on
@@ -3026,7 +3034,7 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
         QueryPolicy::AnswerDa1,
     );
 
-    assert_shell_frame_precedes_attach(&mut session);
+    assert_pre_attach_window_is_open(&mut session);
 
     // typed immediately, well before the delayed engine has attached: this
     // is exactly the pre-attach window startup::drain_pre_attach buffers
@@ -3113,7 +3121,7 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
         wrapper.path().as_os_str(),
     ]);
 
-    assert_shell_frame_precedes_attach(&mut session);
+    assert_pre_attach_window_is_open(&mut session);
 
     // 150 keystrokes, one at a time, over ~450ms: comfortably past
     // KEY_RING_CAPACITY (64), and comfortably past the wrapper's 300ms
@@ -3163,7 +3171,7 @@ fn a_pre_attach_key_overflow_notice_expires_after_attach_the_same_idle_wait_a_wi
         wrapper.path().as_os_str(),
     ]);
 
-    assert_shell_frame_precedes_attach(&mut session);
+    assert_pre_attach_window_is_open(&mut session);
 
     // over KEY_RING_CAPACITY (64), sent with no throttling, comfortably
     // inside the wrapper's 800ms delay: every one of these lands before

@@ -506,6 +506,24 @@ pub fn kill_process_group(pid: u32) {
     let _ = pid;
 }
 
+/// Whether view's own pre-attach startup shell frame has reached the
+/// terminal.
+///
+/// The shell paints a themed statusline bar over an empty grid and nothing
+/// else, so there is no text to match on -- and no styled cell either in a
+/// session with no cached colorscheme to draw the bar in, which is every
+/// first launch. What the frame always carries is its own flush: it is the
+/// one frame whose surface holds no cursor, so it ends with the caret
+/// hidden, inside the alternate screen view took to paint it.
+///
+/// Both halves are needed. The alternate screen alone is terminal setup
+/// rather than a frame, and a hidden caret alone is any program's business
+/// on the screen the shell was launched from.
+#[must_use]
+pub fn startup_shell_visible(screen: &vt100::Screen) -> bool {
+    screen.alternate_screen() && screen.hide_cursor()
+}
+
 /// How much of a child's raw output a recording session keeps.
 ///
 /// Bounded rather than open-ended because the escape traffic worth asserting
@@ -1247,6 +1265,44 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::testenv;
+
+    /// The bytes view's startup shell actually writes, taken from a live
+    /// pty capture of both the themed and the cold-cache case: the frame's
+    /// only invariant across them is the flush itself.
+    #[test]
+    fn the_startup_shells_flush_is_recognized_and_terminal_setup_alone_is_not() {
+        let themed = b"\x1b[?1049h\x1b[2J\x1b[24;1H\x1b[48;2;33;34;44m\x1b[0m\x1b[?25l";
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(themed);
+        assert!(
+            startup_shell_visible(parser.screen()),
+            "the shell frame ends with the caret hidden inside the alternate screen"
+        );
+
+        // the same session with no cached colorscheme: the bar's cells are
+        // styled exactly like the empty screen under them, and the flush is
+        // all that is left to see
+        let mut cold = vt100::Parser::new(24, 80, 0);
+        cold.process(b"\x1b[?1049h\x1b[2J\x1b[0m\x1b[?25l");
+        assert!(
+            startup_shell_visible(cold.screen()),
+            "a shell frame that paints no visible cell has still reached the terminal"
+        );
+
+        let mut setup_only = vt100::Parser::new(24, 80, 0);
+        setup_only.process(b"\x1b[?1049h");
+        assert!(
+            !startup_shell_visible(setup_only.screen()),
+            "taking the alternate screen is not yet a frame"
+        );
+
+        let mut host_screen = vt100::Parser::new(24, 80, 0);
+        host_screen.process(b"\x1b[?25l");
+        assert!(
+            !startup_shell_visible(host_screen.screen()),
+            "a hidden caret on the screen view was launched from is not view's frame"
+        );
+    }
 
     #[test]
     fn spawn_and_send_shows_typed_output_on_screen() {

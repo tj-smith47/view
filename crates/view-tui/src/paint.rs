@@ -1433,18 +1433,17 @@ fn paint_frame_cells(
     }
 }
 
-/// Renders the pre-content startup shell: a themed statusline placeholder
-/// bar on the terminal's bottom row, plus a static "waiting for nvim"
-/// indicator centered in the remaining rows. Present only while
+/// Renders the pre-content startup shell: a themed statusline bar on the
+/// terminal's bottom row over an otherwise empty grid. Present only while
 /// `view_core::model::Model::content_painted` is `false` (see
 /// `view_surface::render`); `render()` stops including the
 /// [`LayerKind::Shell`] layer at all once real grid content has arrived, so
 /// this function has nothing left to overwrite it with.
 ///
-/// No animation: the runtime loop is timer-free (no clock anywhere in its
-/// steady-state body), so this glyph is fixed rather than advancing frames
-/// on its own -- a real spinner would need a tick this architecture
-/// deliberately does not have.
+/// No text of its own: a line announcing the wait makes a start that is
+/// usually over inside a frame read as slower than it is, and a start that
+/// really is slow is worth a message the notification path carries like
+/// every other one (see `view::startup`'s slow-attach notice).
 fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, damage: &Damage, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -1454,15 +1453,6 @@ fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, damage: &Damage, buf:
         let fill = " ".repeat(usize::from(area.width));
         let style = ratatui_style(theme.chrome(ChromeGroup::StatusLine));
         paint_text_row(&fill, style, area, bottom_row, buf);
-    }
-
-    let mid_row = area.height / 2;
-    if damage.covers_row_of(area, mid_row) {
-        let text: String = view_surface::SHELL_PLACEHOLDER
-            .chars()
-            .take(usize::from(area.width))
-            .collect();
-        paint_text_row(&text, ratatui_style(theme.normal()), area, mid_row, buf);
     }
 }
 
@@ -3451,9 +3441,25 @@ mod tests {
         );
     }
 
+    /// The shell frame is a statusline row and nothing else: a line
+    /// announcing the wait made a start that is usually over inside a frame
+    /// read as slower than it was, and the wait that is worth mentioning is
+    /// announced through the notification path instead
+    /// (`view::startup`'s slow-attach notice).
+    ///
+    /// Disconfirm: putting any text back on the grid fails the empty-row
+    /// assertions below.
     #[test]
-    fn shell_paints_a_themed_statusline_row_and_a_waiting_indicator() {
+    fn shell_paints_a_themed_statusline_row_and_no_text_at_all() {
         let mut model = Model::with_term_size(20, 4);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0x21222C),
+                sp: None,
+            },
+        );
         model.content_painted = false;
 
         let surface = view_surface::render(&model);
@@ -3462,12 +3468,25 @@ mod tests {
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
 
-        // bottom row (3): the statusline placeholder fill, present even
-        // though nothing has painted real content there yet
-        assert_eq!(&buf[(0, 3)].symbol(), &" ");
-        // middle row (height/2 == 2): the waiting indicator's text
-        assert_eq!(&buf[(0, 2)].symbol(), &"v");
-        assert_eq!(&buf[(1, 2)].symbol(), &"i");
+        let bar = ratatui_style(Theme::from_hl(model.engine.hl()).chrome(ChromeGroup::StatusLine));
+        assert_eq!(bar.bg, Some(Color::Rgb(0x21, 0x22, 0x2C)));
+        for col in 0..20 {
+            assert_eq!(&buf[(col, 3)].symbol(), &" ");
+            assert_eq!(
+                (buf[(col, 3)].style().fg, buf[(col, 3)].style().bg),
+                (bar.fg, bar.bg),
+                "the bottom row is the statusline bar, themed across its whole width"
+            );
+        }
+        for row in 0..3 {
+            for col in 0..20 {
+                assert_eq!(
+                    &buf[(col, row)].symbol(),
+                    &" ",
+                    "the grid above the bar carries nothing"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3476,15 +3495,17 @@ mod tests {
         assert!(model.content_painted, "default must be the steady state");
 
         let surface = view_surface::render(&model);
-        let backend = TestBackend::new(20, 4);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
-        let buf = terminal.backend().buffer().clone();
 
-        assert_eq!(
-            &buf[(0, 2)].symbol(),
-            &" ",
-            "no waiting indicator once content_painted is true"
+        // read off the surface rather than off painted cells: the shell's
+        // whole output is a themed row of blanks, which an empty grid's own
+        // blanks are indistinguishable from once a colorscheme gives the
+        // two the same background
+        assert!(
+            !surface
+                .layers
+                .iter()
+                .any(|layer| matches!(layer.kind, view_surface::LayerKind::Shell)),
+            "render() must drop the Shell layer once content_painted is true"
         );
     }
 

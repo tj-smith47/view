@@ -1030,10 +1030,9 @@ fn main() -> Result<()> {
     // that window revises this upward through `Msg::CapsUpgraded`, on
     // whatever frame its answer reaches the input path
     model.caps = term.caps();
-    // opts into startup's placeholder shell (statusline bar plus a static
-    // "waiting for nvim" indicator) instead of Model's ordinary
-    // already-running default; update() flips this back to true for good
-    // on the first grid Flush
+    // opts into startup's shell frame (a themed statusline bar over an
+    // empty grid) instead of Model's ordinary already-running default;
+    // update() flips this back to true for good on the first grid Flush
     model.content_painted = false;
 
     // ahead of the trust and theme reads below rather than after them, for

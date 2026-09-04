@@ -112,7 +112,6 @@ fn the_first_paint_row_reaches_the_opened_file_through_the_generated_login() {
         ViewSpec(&view_spec),
         NvimSpec(&nvim_spec),
         &protocol,
-        view_surface::SHELL_PLACEHOLDER,
         MARKER,
     )
     .unwrap_or_else(|err| {

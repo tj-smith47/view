@@ -223,7 +223,6 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 ViewSpec(&pair.view),
                 NvimSpec(&pair.nvim),
                 protocol,
-                view_surface::SHELL_PLACEHOLDER,
                 FIRST_PAINT_MARKER,
             )
             .with_context(|| format!("first_paint/{fixture} run failed"))?;

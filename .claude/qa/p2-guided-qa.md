@@ -10,7 +10,7 @@ Build first: `task build` (or `cargo build -p view`), then use
 
 | # | Do | Expect |
 |---|---|---|
-| 1 | `target/debug/view ~/qa-scratch.txt` in a fresh terminal | Themed shell frame appears instantly (statusline bar + "waiting for nvim" indicator), then the real buffer within a blink. No unthemed flash. |
+| 1 | `target/debug/view ~/qa-scratch.txt` in a fresh terminal | Themed shell frame appears instantly (statusline bar, no text), then the real buffer within a blink. No unthemed flash. An engine that takes over a second raises one `view: starting nvim...` toast and nothing sooner. |
 | 2 | Immediately after launch (fast fingers): type `ihello` | Every keystroke lands once attach completes: buffer shows `hello`, none eaten, none doubled. |
 | 3 | `<Esc>` then `:` | Cmdline renders as a native bottom-row overlay (not nvim's grid cmdline). Cursor sits after the `:`. |
 | 4 | `:echo "toast check"` `<CR>` | Message appears as a native toast (top-right), not on a grid message row. No "Press ENTER" prompt. |

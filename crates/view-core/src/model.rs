@@ -60,12 +60,12 @@ pub struct Model {
     /// than startup itself constructs and expects to render normally);
     /// startup is the one caller that deliberately flips this to `false`
     /// right after building its very first `Model`, to opt into painting
-    /// the placeholder shell (statusline bar plus a static "waiting"
-    /// indicator, see `view_surface::LayerKind::Shell`) instead of an
-    /// empty grid while the engine attaches. `update()` flips it back to
-    /// `true` on the first `Flush`, at which point `render()` drops the
-    /// `Shell` layer for good; never reset afterward, since a mid-session
-    /// redraw storm is not a second "waiting for nvim" state.
+    /// the shell frame (a themed statusline bar, see
+    /// `view_surface::LayerKind::Shell`) instead of an unthemed empty grid
+    /// while the engine attaches. `update()` flips it back to `true` on the
+    /// first `Flush`, at which point `render()` drops the `Shell` layer for
+    /// good; never reset afterward, since a mid-session redraw storm is not
+    /// a second pre-attach state.
     pub content_painted: bool,
     /// Set from `Msg::EngineStopped`'s payload when the engine's RPC reader
     /// thread stopped reading for a reason other than an ordinary process

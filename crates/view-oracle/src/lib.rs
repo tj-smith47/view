@@ -90,8 +90,8 @@ pub use parity::{
     ReferenceGrids, ReferenceSide, Screen, StateSnapshot, ViewGrids, ViewSide,
 };
 pub use pty::{
-    kill_process_group, make_hermetic, PtySession, QueryPolicy, QueryResponder, SpawnEnv,
-    BARELY_LATE_ANSWER_DELAY, LATE_ANSWER_DELAY,
+    kill_process_group, make_hermetic, startup_shell_visible, PtySession, QueryPolicy,
+    QueryResponder, SpawnEnv, BARELY_LATE_ANSWER_DELAY, LATE_ANSWER_DELAY,
 };
 pub use reference::ReferenceSession;
 /// The `nvim_ui_attach` option sets a driver attaches with, re-exported from
