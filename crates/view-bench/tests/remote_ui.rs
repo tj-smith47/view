@@ -32,9 +32,11 @@ const INTERMEDIATE: &str = "VIEW_BENCH_REMOTE_UI_INTERMEDIATE";
 /// How long the server is given to leave once its harness has been killed.
 ///
 /// The discriminator, not slack: an unreaped server does not leave at all.
+#[cfg(target_os = "linux")]
 const REAPED: Duration = Duration::from_secs(3);
 
 /// The step between two looks at the process table.
+#[cfg(target_os = "linux")]
 const POLL: Duration = Duration::from_millis(10);
 
 /// How long a keystroke is given to come back on the client's screen,
@@ -182,18 +184,17 @@ fn the_intermediate_parent() {
 /// platforms have nothing armed for it (see `view_proc::spawn_tied_to_this_process`).
 #[test]
 fn a_control_server_dies_with_a_harness_that_was_killed_outright() {
-    use std::io::BufRead;
-
     #[cfg(not(target_os = "linux"))]
     {
         view_test_support::announce_skip(
             "a_control_server_dies_with_a_harness_that_was_killed_outright",
             "no parent-death signal is armed off Linux",
         );
-        return;
     }
     #[cfg(target_os = "linux")]
     {
+        use std::io::BufRead;
+
         if nvim_bin().is_none() {
             view_test_support::announce_skip(
                 "a_control_server_dies_with_a_harness_that_was_killed_outright",
@@ -219,7 +220,15 @@ fn a_control_server_dies_with_a_harness_that_was_killed_outright() {
                 line.strip_prefix(PID_MARKER)
                     .and_then(|pid| pid.trim().parse::<u32>().ok())
             })
-            .expect("the intermediate harness must report the pid of the server it started");
+            .unwrap_or_else(|| {
+                // the intermediate parked on a pipe this process holds, so it
+                // would leave on its own once the panic drops it; killed here
+                // anyway, because a case that failed before the kill it exists
+                // to perform should not also be the one leaving a live server
+                let _ = harness.kill();
+                let _ = harness.wait();
+                panic!("the intermediate harness must report the pid of the server it started")
+            });
         assert!(
             live(server),
             "the server was already gone before its harness was killed, so nothing below is \

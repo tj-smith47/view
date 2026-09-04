@@ -311,6 +311,7 @@ mod tests {
         assert_eq!(history_command(), ":View notifications history\r");
     }
 
+    #[cfg(unix)]
     fn spec_running(program: &str) -> SpawnSpec {
         SpawnSpec {
             program: std::path::PathBuf::from(program),

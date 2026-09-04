@@ -30,6 +30,7 @@ const BUSY_NANOS: u64 = 30_000_000_000;
 
 /// How long the orphan is given to leave the process table once its parent
 /// is gone.
+#[cfg(target_os = "linux")]
 const REAPED: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The parent half of the pin, run in a re-executed copy of this binary so
@@ -154,19 +155,21 @@ fn an_engine_spawned_from_a_thread_outlives_that_thread() {
             "an_engine_spawned_from_a_thread_outlives_that_thread",
             "no parent-death signal is armed off Linux, so no thread owns one",
         );
-        return;
     }
-    let engine = std::thread::spawn(|| {
-        view_engine::process::Engine::spawn(view_engine::process::EngineConfig::isolated())
-    })
-    .join()
-    .expect("the spawning thread must not panic")
-    .expect("the engine starts");
+    #[cfg(target_os = "linux")]
+    {
+        let engine = std::thread::spawn(|| {
+            view_engine::process::Engine::spawn(view_engine::process::EngineConfig::isolated())
+        })
+        .join()
+        .expect("the spawning thread must not panic")
+        .expect("the engine starts");
 
-    assert!(
-        engine.handle.get_mode().is_ok(),
-        "the engine stopped answering once the thread that spawned it \
-         exited, so its parent-death signal was armed against that thread \
-         rather than the process"
-    );
+        assert!(
+            engine.handle.get_mode().is_ok(),
+            "the engine stopped answering once the thread that spawned it \
+             exited, so its parent-death signal was armed against that \
+             thread rather than the process"
+        );
+    }
 }
