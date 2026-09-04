@@ -359,8 +359,8 @@ pub(crate) fn restart_engine(
     model.forget_engine_conflicts();
     // the forgets change what is painted whether or not the attach below
     // succeeds: a failed attempt goes back to a loop that only repaints on
-    // its own account, and would keep the dropped overlays and the released
-    // startup lines off screen until something else dirtied the model
+    // its own account, and would leave the dropped overlays painted and the
+    // released startup lines unpainted until something else dirtied the model
     model.dirty = true;
     let mut engine = crate::startup::restart_and_attach(
         engine,

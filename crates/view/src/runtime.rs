@@ -918,7 +918,6 @@ pub fn run(
                     // answered, not reported: a session that came back has
                     // no fatal reason left to print at exit
                     model.fatal_reason = None;
-                    model.dirty = true;
                     if let crate::startup::CutoverOutcome::Quit(code) = crate::startup::run_cutover(
                         &mut model,
                         &executor,
