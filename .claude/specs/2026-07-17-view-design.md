@@ -246,11 +246,16 @@ view/
 │   │                          input, tier detection, panic-safe terminal guard. §7
 │   ├── view-oracle/           differential harness vs headless nvim (dev-dep). §13
 │   ├── view-bench/            criterion + pty end-to-end latency suite. §13.4
+│   ├── view-proc/             leaf: the spawn that ties a long-lived child to
+│   │                          this process's life (PR_SET_PDEATHSIG on Linux)
 │   └── view/                  bin: clap CLI, config, wiring, doctor
 ```
 
 Dependency rules (audit-enforced, cfgd-style):
 - `view-core` depends on nothing in-workspace; std + small pure crates only.
+- `view-proc` depends on nothing in-workspace either, and only the crates
+  that spawn a process may depend on it: it sits below every rule here, so a
+  crate reaching another through it would launder the direction.
 - `view-surface` depends only on `view-core`.
 - `view-native` and `view-ai` depend on core (+surface for overlay types);
   never on engine or tui — effects are data, the runtime executes them.
