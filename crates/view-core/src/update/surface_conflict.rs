@@ -192,9 +192,75 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
         // second box -- one that cannot even say who, or one spelling a
         // filetype that claimant's own windows present -- is the same
         // conflict counted twice
-        return Vec::new();
+        return take_complaint(model, float, surface);
     }
     raise_notice(model, identity.as_deref(), surface)
+}
+
+/// Starts the take-down of one float a named claimant's notice already
+/// accounts for: its text goes to the notification history, and the window
+/// goes, once [`complaint_recorded`] has the lines.
+///
+/// The read first and the close second, never the close alone: spec 5.5
+/// discards nothing, and a window closed before its buffer was read takes
+/// the plugin's own account of the conflict with it.
+///
+/// Two bounds, and the take-down needs both.
+///
+/// The message area, because that is what a complaint is: a float over the
+/// *command line* is a menu the user is typing at, and view's answer to one
+/// of those is the absorption above or a notice, never a close.
+///
+/// And the startup window, which ends at the first keypress
+/// ([`SurfaceConflicts::startup_window_open`](surfaces::SurfaceConflicts::startup_window_open)).
+/// What that bound buys is that view never closes a window a user opened: a
+/// plugin's complaint about view's own defaults is raised before anyone has
+/// typed, while a float standing after that is something the session asked
+/// for -- noice's own `:Noice` log among them -- and closing that would be
+/// view taking a window out from under the person reading it.
+fn take_complaint(model: &mut Model, float: &FloatSighting, surface: Surface) -> Vec<Effect> {
+    if surface != Surface::Messages || !model.surface_conflicts.startup_window_open() {
+        return Vec::new();
+    }
+    if !model.surface_conflicts.claim_complaint(float.win) {
+        return Vec::new();
+    }
+    vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows {
+        win: float.win,
+    })]
+}
+
+/// Finishes one take-down: the lines a claimant's startup float was drawing
+/// become one notification-history entry in that plugin's own voice, and
+/// the window is closed.
+///
+/// Recorded through
+/// [`record_history_only`](crate::model::EngineModel::record_history_only)
+/// rather than as a native notice: the text is written to the history ring
+/// and never reaches the toast stack, whatever the startup hold has already
+/// resolved to. The one notice already standing is what tells the user the
+/// history is where the rest of the launch went.
+///
+/// The blank rows a notify-style float pads its text with are dropped. They
+/// are geometry -- the window's own top and bottom margin -- and a history
+/// entry that opens with two empty lines reads as a message with nothing
+/// in it.
+fn complaint_recorded(model: &mut Model, win: u64, lines: &[String]) -> Vec<Effect> {
+    let text = lines
+        .iter()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = text.trim_matches('\n').to_string();
+    let mut effects = if text.is_empty() {
+        Vec::new()
+    } else {
+        model.engine.record_history_only(vec![(0, text)])
+    };
+    effects.push(Effect::Rpc(crate::msg::RpcCall::CloseFloat { win }));
+    // the float was drawing over view's own cells until this call lands
+    model.dirty = true;
+    effects
 }
 
 /// Answers one sighting of a float view absorbs rather than reports: the
@@ -247,6 +313,9 @@ pub(super) fn on_float_rows(
     lines: Vec<String>,
     selected: Option<usize>,
 ) -> Vec<Effect> {
+    if model.surface_conflicts.is_complaint(win) {
+        return complaint_recorded(model, win, &lines);
+    }
     let rows = crate::native::palette::AbsorbedRows { lines, selected };
     match model.engine.float_absorption.rows_read(win, hidden, rows) {
         surfaces::RowsOutcome::Absorbed { changed } => {
@@ -1557,6 +1626,118 @@ mod tests {
         assert!(
             standing[0].starts_with("view: a plugin is drawing over the message area,"),
             "{standing:?}"
+        );
+    }
+
+    /// noice's own startup complaint, over the message area its claimant
+    /// notice already names: view reads it, files it in the notification
+    /// history, closes the window, and leaves exactly one box on screen.
+    ///
+    /// The startup hold is resolved before the float is ever sighted, which
+    /// is the live order and not a stricter setup than the product gets:
+    /// the hold ends three seconds after attach, and the heavy fixture's
+    /// noice raises this complaint at ~7.6 s (`VIEW_COMPAT_LOG`, the
+    /// unaccommodated state). A take-down keyed on the hold fires for
+    /// neither the real launch nor this test.
+    #[test]
+    fn a_claimants_own_startup_complaint_goes_to_the_history_and_the_window_goes() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = update(&mut model, Msg::StartupHoldExpired);
+        let claimant = notices(&model);
+        assert_eq!(claimant.len(), 1, "{claimant:?}");
+
+        // the capture's own health float: `markdown`, so it names nobody,
+        // padded with the blank rows nvim-notify's window draws
+        let float = toast("markdown");
+        let read = update(&mut model, Msg::FloatObserved(float.clone()));
+        assert!(
+            matches!(
+                read.as_slice(),
+                [Effect::Rpc(RpcCall::ReadFloatRows { win })] if *win == float.win
+            ),
+            "a covered claimant float is read before it is closed, or its \
+             account of the conflict is what the close discards; {read:?}"
+        );
+        let closed = update(
+            &mut model,
+            Msg::FloatRows {
+                win: float.win,
+                hidden: false,
+                lines: vec![
+                    String::new(),
+                    String::new(),
+                    "`vim.notify` has been overwritten by another plugin?".to_string(),
+                ],
+                selected: None,
+            },
+        );
+        assert!(
+            closed.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::CloseFloat { win }) if *win == float.win
+            )),
+            "{closed:?}"
+        );
+
+        assert_eq!(
+            notices(&model),
+            claimant,
+            "the plugin's complaint never joins view's notice on screen"
+        );
+        assert!(
+            !model
+                .engine
+                .messages
+                .entries
+                .iter()
+                .flat_map(|entry| entry.lines())
+                .any(|line| line.contains("overwritten by another plugin")),
+            "recorded, not stacked: the complaint is off the toast stack whatever \
+             the startup hold resolved to; {:?}",
+            model.engine.messages.entries
+        );
+        let filed: Vec<String> = model
+            .engine
+            .toast_history
+            .entries()
+            .flat_map(|entry| entry.lines())
+            .collect();
+        assert!(
+            filed
+                .iter()
+                .any(|line| line == "`vim.notify` has been overwritten by another plugin?"),
+            "nothing is discarded: the plugin's own words are in the history; {filed:?}"
+        );
+        assert!(
+            !filed.iter().any(String::is_empty),
+            "the blank rows are the window's margin, not the message; {filed:?}"
+        );
+
+        // the scan re-sights a standing float until the close lands, and a
+        // second read would file the same complaint twice
+        assert!(
+            update(&mut model, Msg::FloatObserved(float)).is_empty(),
+            "one read per window"
+        );
+    }
+
+    /// The bound on the take-down: once the startup window has closed, a
+    /// float over a covered surface is something the session asked for, and
+    /// view neither reads it nor closes it.
+    #[test]
+    fn a_float_that_opens_after_the_startup_window_is_left_alone() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = update(
+            &mut model,
+            Msg::Key(crate::msg::Key {
+                notation: "j".to_string(),
+            }),
+        );
+        assert!(
+            update(&mut model, Msg::FloatObserved(toast("markdown"))).is_empty(),
+            "a window the user opened is not view's to close"
         );
     }
 

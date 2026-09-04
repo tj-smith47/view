@@ -768,6 +768,22 @@ return {
   selected = selected,
 }";
 
+/// Closes one floating window, for a claiming plugin's startup complaint
+/// view has already recorded to the notification history
+/// (`RpcCall::CloseFloat`).
+///
+/// `pcall`, on the same terms as [`HIDE_FLOAT_CHUNK`]: the plugin's own
+/// timer can retire the float between the read that took its text and this
+/// call landing, and nvim reports a notification's error to the user as a
+/// message about a window they never knew existed. Force, because the
+/// buffer behind these windows is an unwritten `nofile` scratch buffer and
+/// a plain close on the last window showing a modified buffer fails.
+/// Constant, like every other chunk here -- the window handle travels as
+/// `nvim_exec_lua`'s positional vararg.
+const CLOSE_FLOAT_CHUNK: &str = "\
+local win = ...
+pcall(vim.api.nvim_win_close, win, true)";
+
 /// Resolves the picker preview pane's text for a candidate path, verified
 /// live against the pinned engine -- see
 /// `docs/picker-preview-wire-capture.md` for the captured reply shapes
@@ -3470,6 +3486,25 @@ impl EngineHandle {
                 Value::Array(vec![Value::from(win)]),
             ],
             win,
+        )
+    }
+
+    /// Closes `win` via [`CLOSE_FLOAT_CHUNK`], for a claiming plugin's own
+    /// startup complaint whose text view has already taken into the
+    /// notification history. Fire-and-forget, and issued at most once per
+    /// window.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn close_float(&self, win: u64) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(CLOSE_FLOAT_CHUNK),
+                Value::Array(vec![Value::from(win)]),
+            ],
         )
     }
 

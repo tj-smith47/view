@@ -101,6 +101,10 @@ pub trait EngineOps {
     /// never itself returns the answer (see `RpcCall::ReadFloatRows`,
     /// `Msg::FloatRows`).
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError>;
+    /// Closes one floating window, for a claiming plugin's startup
+    /// complaint already recorded to the notification history;
+    /// fire-and-forget, no reply (see `RpcCall::CloseFloat`).
+    fn close_float(&self, win: u64) -> Result<(), EngineError>;
     /// Opens `path` as `:edit` would, reusing an already-loaded buffer
     /// rather than duplicating it; fire-and-forget, no reply (see
     /// `RpcCall::OpenFile`).
@@ -317,6 +321,10 @@ impl EngineOps for EngineHandle {
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.read_float_rows(win)
     }
+
+    fn close_float(&self, win: u64) -> Result<(), EngineError> {
+        self.close_float(win)
+    }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.open_file(path)
     }
@@ -487,6 +495,10 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
+    }
+
+    fn close_float(&self, win: u64) -> Result<(), EngineError> {
+        (**self).close_float(win)
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -661,6 +673,10 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         (**self).read_float_rows(win)
+    }
+
+    fn close_float(&self, win: u64) -> Result<(), EngineError> {
+        (**self).close_float(win)
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         (**self).open_file(path)
@@ -864,6 +880,10 @@ impl EngineOps for FakeOps {
     }
     fn read_float_rows(&self, win: u64) -> Result<(), EngineError> {
         self.record(format!("read_float_rows({win})"))
+    }
+
+    fn close_float(&self, win: u64) -> Result<(), EngineError> {
+        self.record(format!("close_float({win})"))
     }
     fn open_file(&self, path: &str) -> Result<(), EngineError> {
         self.record(format!("open_file({path})"))
@@ -1097,6 +1117,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn read_float_rows(&self, _win: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn close_float(&self, _win: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn open_file(&self, _path: &str) -> Result<(), EngineError> {

@@ -531,6 +531,15 @@ pub struct SurfaceConflicts {
     /// same `[native]` line -- and a second box saying so is the
     /// two-notices-for-one-plugin case the spec forbids.
     covers: Vec<Cover>,
+    /// The floating windows whose text has already been claimed for the
+    /// notification history, so a scan that sights one again before its
+    /// close lands does not record it twice. Never emptied: the handles
+    /// stay valid names for windows that are gone, and the set is bounded
+    /// by the floats one startup opens.
+    complaints: Vec<u64>,
+    /// Whether a key has been typed yet, which is where spec 5.5 ends the
+    /// startup conflict window.
+    typed: bool,
 }
 
 /// One named claimant's accounted-for surfaces, with the identities its own
@@ -676,6 +685,50 @@ impl SurfaceConflicts {
             return Some(&[]);
         }
         Some(&self.claimants.get(index)?.surfaces)
+    }
+
+    /// Claims `win`'s text for the notification history, and answers
+    /// whether this is the first claim on it.
+    ///
+    /// The float scan re-sights a standing window at its own cadence, and
+    /// the close that follows the read is a notification with no reply, so
+    /// a plugin whose complaint outlives one scan would otherwise have its
+    /// lines recorded once per scan until the window went.
+    pub fn claim_complaint(&mut self, win: u64) -> bool {
+        if self.complaints.contains(&win) {
+            return false;
+        }
+        self.complaints.push(win);
+        true
+    }
+
+    /// Whether `win`'s rows were read for the notification history rather
+    /// than for the palette, which is what parts one `Msg::FloatRows` reply
+    /// from the other.
+    #[must_use]
+    pub fn is_complaint(&self, win: u64) -> bool {
+        self.complaints.contains(&win)
+    }
+
+    /// Notes that the session has been typed at, closing the startup
+    /// conflict window for good.
+    pub fn note_keypress(&mut self) {
+        self.typed = true;
+    }
+
+    /// Whether the startup conflict window is still open, which is spec
+    /// 5.5's own bound: everything before the first keystroke.
+    ///
+    /// Deliberately not the startup *hold*
+    /// ([`StartupHold`](crate::native::toast::StartupHold)), which shares
+    /// the first-keystroke end but also ends on a three-second deadline of
+    /// its own -- a bound on how long a message may be parked, not on how
+    /// long a launch lasts. A heavy configuration is still loading plugins
+    /// at that point, and the complaints this window exists for have not
+    /// been raised yet.
+    #[must_use]
+    pub fn startup_window_open(&self) -> bool {
+        !self.typed
     }
 
     /// Closes one scan: drops every claimant not sighted during it and

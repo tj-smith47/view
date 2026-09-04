@@ -1292,21 +1292,52 @@ impl EngineModel {
         content: Vec<(u64, String)>,
         replace_last: bool,
     ) -> Vec<crate::msg::Effect> {
-        self.record_message_in_family(kind, content, replace_last, None)
+        self.record_message_in_family(kind, content, replace_last, None, None)
+    }
+
+    /// [`Self::record_message`] for text that belongs in the notification
+    /// history and never on the toast stack, whatever the startup hold has
+    /// resolved to: a claiming plugin's own startup complaint, which spec
+    /// 5.5 records in the plugin's voice beside view's one notice rather
+    /// than stacking it on top.
+    ///
+    /// The route is decided here rather than left to
+    /// [`route_under_hold`](crate::native::toast::route_under_hold) because
+    /// that function answers about the hold, and the hold ends on its own
+    /// deadline three seconds after attach -- while a heavy configuration's
+    /// plugins are still loading, and so before the complaints this records
+    /// have been raised at all. A window sighted after that is still inside
+    /// the startup conflict window (which ends at the first keystroke), and
+    /// its text still owes the history rather than the stack.
+    pub fn record_history_only(&mut self, content: Vec<(u64, String)>) -> Vec<crate::msg::Effect> {
+        self.record_message_in_family(
+            String::new(),
+            content,
+            false,
+            None,
+            Some(crate::native::toast::Route::HistoryOnly),
+        )
     }
 
     /// [`Self::record_message`], stamping `family` onto the entry before it
     /// reaches scrollback so the history's own copy carries it (see
     /// [`MessageEntry::family`]). Private because a family is only ever
     /// decided by [`Self::record_native_notice_once_as`], the one caller.
+    ///
+    /// `route` overrides the kind-and-hold classification for the one
+    /// caller whose routing is a property of what the text *is* rather than
+    /// of the kind it arrived under ([`Self::record_history_only`]).
     fn record_message_in_family(
         &mut self,
         kind: String,
         content: Vec<(u64, String)>,
         replace_last: bool,
         family: Option<&str>,
+        route: Option<crate::native::toast::Route>,
     ) -> Vec<crate::msg::Effect> {
-        let route = crate::native::toast::route_under_hold(&kind, self.messages.startup_hold());
+        let route = route.unwrap_or_else(|| {
+            crate::native::toast::route_under_hold(&kind, self.messages.startup_hold())
+        });
         if route == crate::native::toast::Route::Statusline {
             // only `search_count` reaches here as a `kind`
             // (`msg_showmode`/`msg_showcmd`/`msg_ruler` arrive as their own
@@ -1450,7 +1481,7 @@ impl EngineModel {
         self.messages
             .entries
             .retain(|e| !is_standing_native_notice(e, family));
-        self.record_message_in_family(kind.to_string(), content, false, Some(family))
+        self.record_message_in_family(kind.to_string(), content, false, Some(family), None)
     }
 
     /// Retracts every standing one-shot native notice whose line starts

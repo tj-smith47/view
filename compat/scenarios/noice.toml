@@ -76,6 +76,12 @@ steps = [
   # the screen while the box the user is left reading is view's notice alone.
   { wait_for_probe = "luaeval('(function() local n = 0 for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.api.nvim_win_get_config(w).relative ~= \"\" then n = n + 1 end end return tostring(n) end)()')", expect = "0", timeout_ms = 30000 },
   { assert_absent = "Noice can't work when the GUI has" },
+  # The half of spec 5.5 that says where a claimant's complaint goes: the
+  # text view took off that float is off the screen too, so what the user is
+  # left reading is one notice and not somebody else's error beside it. The
+  # history step below is the other half -- nothing was discarded to get
+  # here.
+  { assert_absent = "has been overwritten by another plugin" },
   { wait_for = "noice.nvim is using the command line and the message area", timeout_ms = 5000 },
   # The composition, on the other thing that whole launch produces: the
   # error float itself. view's float detector sights it over the message
@@ -99,6 +105,20 @@ steps = [
   # racing it.
   { send = "\\fm" },
   { wait_for = "Messages", timeout_ms = 30000 },
+  # And what put it there for this launch: the claimant's own startup
+  # complaint, in its own words. It never crossed view's `vim.notify`
+  # takeover and it produced no `msg_show`, so the only way this text
+  # reaches view's history is the take-down -- view reads a claimant's
+  # startup float over a surface its notice already names, files the lines,
+  # and closes the window. It is nvim-notify's line rather than one of
+  # noice's three health errors because that is the float still standing
+  # when view's scan first runs: the scan is armed by editor transitions
+  # (`REGISTER_BRIDGE_CHUNK`), the first of which lands ~7.6 s into this
+  # launch, and by then the health errors have retired on nvim-notify's own
+  # timer. What view has no window for it cannot read, which spec 5.5 says
+  # in its own words: everything raised before view could detect it has
+  # already been shown.
+  { wait_for = "has been overwritten by another plugin", timeout_ms = 15000 },
   { send = "<Esc>" },
 ]
 

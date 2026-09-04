@@ -1883,6 +1883,31 @@ pub enum RpcCall {
     ReadFloatRows {
         win: u64,
     },
+    /// Closes `win`, for a claiming plugin's own startup complaint whose
+    /// text view has already taken into the notification history
+    /// (`update::surface_conflict`, spec 5.5).
+    ///
+    /// The one call here that destroys a window rather than reconfiguring
+    /// one, and it is bounded to that case by construction: it is issued
+    /// only while the startup hold still holds, only for a float drawing on
+    /// a surface a named claimant's notice already accounts for, and only
+    /// after that float's lines have crossed back as `Msg::FloatRows` and
+    /// been recorded. Nothing is discarded -- the text is in the history
+    /// ring before the close goes out, and the notice on screen says which
+    /// key opens it.
+    ///
+    /// Not [`SetFloatHidden`](Self::SetFloatHidden): a hidden window is one
+    /// view then owes a show, and these windows are their plugin's to
+    /// manage -- nvim-notify's own timer closes them, so a flag view set
+    /// would outlive the session's interest in it with nothing to clear it.
+    ///
+    /// Fire-and-forget, at most once per window, and the chunk `pcall`s the
+    /// close: a plugin's own timer can retire the float between the read
+    /// and this call, and a bare notification's error would reach the user
+    /// as a message about a window they never knew existed.
+    CloseFloat {
+        win: u64,
+    },
     /// Opens `path` as nvim would for `:edit`: an existing buffer for it is
     /// reused rather than duplicated, and a path with no buffer yet gets
     /// one, either way leaving nvim as the sole owner of the resulting

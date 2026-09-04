@@ -1165,6 +1165,7 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
         .engine
         .messages
         .resolve_startup_hold(HoldOutcome::Release);
+    model.surface_conflicts.note_keypress();
     // the fallback, not the rule: a prompt view itself answered retires on
     // the `cmdline_hide` that key causes (see `UiEvent::CmdlineHide`), and
     // this catches only the prompt nothing view sent resolved -- nvim's own
