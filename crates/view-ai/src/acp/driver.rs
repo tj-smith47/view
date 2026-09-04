@@ -42,7 +42,9 @@ use view_core::native::ai_event::{
 
 use crate::acp::fs::PendingReply;
 use crate::acp::permission::{permission_option, permission_outcome};
-use crate::acp::session::{reap, signal_stop, AgentStdin, AgentStdout, ChildSlot, SessionShared};
+use crate::acp::session::{
+    reap, signal_and_collect, signal_stop, AgentStdin, AgentStdout, ChildSlot, SessionShared,
+};
 use crate::acp::wire::{
     Incoming, JsonRpcCodec, JsonRpcError, JsonRpcMessage, RequestId, AUTH_REQUIRED, INTERNAL_ERROR,
     INVALID_PARAMS, METHOD_NOT_FOUND, REQUEST_CANCELLED, RESOURCE_NOT_FOUND,
@@ -106,15 +108,18 @@ pub(crate) async fn run_session(
     // without a wait leaves a zombie for the life of the editor, and the
     // endings that skipped it -- a stream that failed, a handle dropped on
     // purpose -- are the ones an agent that crashes takes
+    let Some(ending) = ending else {
+        // the handle was dropped, and the same drop shuts down the runtime
+        // this code runs on: a wait scheduled here can be dropped before it
+        // ever runs, so the collection goes to a thread that outlives both
+        if let Some(child) = taken {
+            signal_and_collect(child);
+        }
+        return;
+    };
     let exit = match taken {
         Some(child) => Some(reap(child).await),
         None => None,
-    };
-
-    let Some(ending) = ending else {
-        // the handle was dropped: the session is being torn down on purpose,
-        // and the handle's own `Drop` has already signalled the child
-        return;
     };
 
     let detail = match ending {

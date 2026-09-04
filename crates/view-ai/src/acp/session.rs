@@ -14,14 +14,6 @@ use crate::acp::fs::PendingFsReplies;
 use crate::acp::wire::JsonRpcCodec;
 use crate::{AgentLaunch, AiError};
 
-/// The agent child, reachable from both the handle and the session task.
-///
-/// Shared rather than owned by the task because the handle's `Drop` must be
-/// able to signal the child itself, on the dropping thread, without waiting
-/// for a task to be scheduled. The `Option` is what makes that safe once the
-/// session has ended: the task takes the child out before reaping it, so the
-/// handle can never signal a process identifier the operating system has
-/// already recycled.
 /// The agent child itself.
 ///
 /// A std child on unix, spawned through [`view_proc`] so an editor killed
@@ -47,6 +39,15 @@ pub(crate) type AgentStdin = tokio::net::unix::pipe::Sender;
 #[cfg(not(unix))]
 pub(crate) type AgentStdin = tokio::process::ChildStdin;
 
+/// The agent child, reachable from both the handle and the session task.
+///
+/// Shared rather than owned by the task because the handle's `Drop` must be
+/// able to signal the child itself, on the dropping thread, without waiting
+/// for a task to be scheduled. The `Option` is what makes that safe once the
+/// session has ended: whichever side takes the child out owns both the
+/// signal and the wait that follows it, so the other can never signal a
+/// process identifier the operating system has already recycled, and no
+/// child is ever waited on twice.
 pub(crate) type ChildSlot = Arc<Mutex<Option<AgentChild>>>;
 
 /// Signals the agent to stop and returns without waiting on it.
@@ -68,9 +69,10 @@ pub(crate) fn signal_stop(child: &mut AgentChild) {
 /// without waiting for a task to run. A thread that outlives both does the
 /// wait, and a `SIGKILL`ed child makes it a short one.
 ///
-/// Unix only: a `std::process::Child` is collected by whoever waits on it,
-/// while Windows keeps `tokio::process`, whose `kill_on_drop` orphan queue
-/// already does this job.
+/// Unix only, because collection is: a `std::process::Child` stays in the
+/// process table until someone waits on it. Windows has no zombie state --
+/// killing the process and closing its handle is what releases the object,
+/// which is what dropping the tokio child there already does.
 #[cfg(unix)]
 pub(crate) fn signal_and_collect(mut child: AgentChild) {
     signal_stop(&mut child);
@@ -81,7 +83,8 @@ pub(crate) fn signal_and_collect(mut child: AgentChild) {
         });
 }
 
-/// [`signal_and_collect`] where the runtime's own orphan queue collects.
+/// [`signal_and_collect`] where dropping the child's own handle is the
+/// collection.
 #[cfg(not(unix))]
 pub(crate) fn signal_and_collect(mut child: AgentChild) {
     signal_stop(&mut child);
@@ -190,9 +193,9 @@ impl Drop for AiSession {
         // and lets the runtime's own threads wind themselves down.
         //
         // What is guaranteed after this returns: the child has been
-        // signalled, and something is waiting on it -- the reaper this drop
-        // started on unix, the runtime's orphan queue on Windows. Neither
-        // waits on the dropping thread.
+        // signalled, and nothing is left holding it -- the reaper this drop
+        // started does the unix wait, and on Windows dropping the child's
+        // handle is the whole of the collection. Neither waits here.
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
