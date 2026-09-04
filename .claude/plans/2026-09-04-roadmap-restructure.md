@@ -50,7 +50,7 @@ panes = "auto"   # "auto" | "tiles" | "nvim"
 |---|---|
 | `"tiles"` | frames + gaps + accent, status in the frame edge, top pill |
 | `"nvim"` | nvim's `│` separators and statusline, what T9 ships today |
-| `"auto"` (default) | `"nvim"` when a graphical desktop owns the tiling (any of `HYPRLAND_INSTANCE_SIGNATURE`, `SWAYSOCK`, `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP` set in view's own environment — on Omarchy the terminal window is already a tile); `"tiles"` otherwise (a bare tty, an ssh session from a tablet, a server — the §15.1 "minimal desktop from one terminal" case). `doctor` reports which it chose and why. |
+| `"auto"` (default) | `"nvim"` only when a **tiling** window manager owns the layout (user ruling 2026-09-04: a floating/stacking desktop like GNOME, KDE, macOS or Windows still gets tiles). Detection from view's own environment: `HYPRLAND_INSTANCE_SIGNATURE`, `SWAYSOCK`, `I3SOCK`, `XDG_CURRENT_DESKTOP` ∈ {Hyprland, sway, i3, river, niri, bspwm, dwm, awesome, qtile, xmonad, herbstluftwm, leftwm}, or `_NET_WM_NAME`-class hints where a desktop name is absent; `"tiles"` everywhere else, including every non-tiling GUI desktop, a bare tty, and any ssh session (the client's environment never reaches the server). `doctor` reports the mode and the marker that chose it. |
 
 `:View panes tiles|nvim` flips it live (a resize-class full repaint), so a
 user on Omarchy who wants tiles anyway is one command or one config line
