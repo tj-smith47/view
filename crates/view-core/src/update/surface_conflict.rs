@@ -452,7 +452,7 @@ fn notice(
         // written it already and been overruled by the fail-open that an
         // unreadable config takes (see `Model::config_was_read`)
         "\nview.toml could not be read this session, so every native feature \
-         stayed on; fix that file and restart."
+         stayed at its default; fix that file and restart."
             .to_string()
     } else if remedies.is_empty() {
         String::new()

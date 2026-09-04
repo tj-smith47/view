@@ -545,7 +545,7 @@ impl ViewConfig {
     #[must_use]
     pub fn defaults() -> Self {
         Self {
-            native: NativeConfig::all_enabled(),
+            native: NativeConfig::defaults(),
             supervision: SupervisionConfig::default(),
             keys: KeysConfig::default(),
             engine: EngineFile::default(),
@@ -628,11 +628,31 @@ impl ViewConfig {
 }
 
 impl NativeConfig {
-    /// Every feature on: the config-absent default, and what `--clean`
-    /// resolves to.
+    /// Every feature on, whatever its registry default: the shape a caller
+    /// that means "every takeover live" asks for.
+    ///
+    /// Not the config-absent answer -- that is [`Self::defaults`], which
+    /// resolves each feature to its own `default_on`. The two differ from
+    /// the moment the registry carries one default-off row, and a caller
+    /// that wants the answer a user with no `view.toml` gets wants the
+    /// other one.
     pub fn all_enabled() -> Self {
         Self {
             disabled: Vec::new(),
+            tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
+            tree_width_notice: None,
+        }
+    }
+
+    /// Every feature at its registry default: the config-absent answer, and
+    /// what `--clean` resolves to.
+    pub fn defaults() -> Self {
+        Self {
+            disabled: registry::features()
+                .iter()
+                .filter(|f| !f.default_on)
+                .map(|f| f.id)
+                .collect(),
             tree_width: geometry::DEFAULT_PANEL_WIDTH_PCT,
             tree_width_notice: None,
         }
@@ -664,11 +684,18 @@ impl NativeConfig {
                 });
             }
         }
-        // resolution walks the registry, not the file, so an absent key is
-        // an enabled feature by construction
+        // resolution walks the registry, not the file, so an absent key
+        // resolves to that feature's own default by construction
         let disabled = registry::features()
             .iter()
-            .filter(|f| !file.native.features.get(f.id).copied().unwrap_or(true))
+            .filter(|f| {
+                !file
+                    .native
+                    .features
+                    .get(f.id)
+                    .copied()
+                    .unwrap_or(f.default_on)
+            })
             .map(|f| f.id)
             .collect();
         Ok(Self {
@@ -746,10 +773,11 @@ impl NativeConfig {
 /// flags and stands down (or refuses to run) sees a UI it supports.
 ///
 /// Written as a filter over [`ext::ALL`] rather than as a list built up
-/// switch by switch, so a surface this build learns to externalize is
-/// attached unconditionally until someone gives it a row here -- the same
-/// direction `[native]` resolution itself walks, where an absent answer is
-/// the full experience.
+/// switch by switch, and the gate is each surface's own
+/// [`Ext::feature`], so a surface this build learns to externalize is
+/// attached unconditionally until it names the switch that decides it --
+/// the same direction `[native]` resolution itself walks, where an absent
+/// answer is the feature's own default.
 ///
 /// Takes the whole resolved document rather than one table's slice of it
 /// because the set answers to two tables: `[native]` decides the surfaces
@@ -760,11 +788,7 @@ pub fn ext_surfaces(cfg: &ResolvedConfig) -> Vec<Ext> {
     let mut set: Vec<Ext> = ext::ALL
         .iter()
         .copied()
-        .filter(|surface| match surface {
-            Ext::Cmdline | Ext::Popupmenu => native.enabled("palette"),
-            Ext::Messages => native.enabled("notifications"),
-            _ => true,
-        })
+        .filter(|surface| surface.feature().is_none_or(|id| native.enabled(id)))
         .collect();
     // multigrid is the shipped mode; the knob exists because this is the
     // protocol's roughest corner and a user needs one line to get out
@@ -897,12 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_config_attaches_every_ext() {
+    fn an_absent_config_attaches_the_shipped_set() {
         assert_eq!(
             ext_surfaces(&resolved("")),
-            ext::ALL_MULTIGRID.to_vec(),
-            "the full experience externalizes every surface this build knows, \
-             under the addressing it ships"
+            ext::shipped_multigrid(),
+            "a session with nothing to narrow it externalizes every surface whose \
+             feature ships on, under the addressing it ships"
         );
     }
 
@@ -941,8 +965,8 @@ mod tests {
             "the escape hatch must reach the attach: {surfaces:?}"
         );
         assert_eq!(
-            surfaces.as_slice(),
-            ext::ALL,
+            surfaces,
+            ext::shipped(),
             "and must cost the session no surface: {surfaces:?}"
         );
     }
@@ -973,17 +997,41 @@ mod tests {
         );
     }
 
-    /// `ext_linegrid` is the grid protocol and `ext_tabline` has no native
-    /// feature to follow, so no `[native]` answer may drop either. Walks
-    /// every switch rather than the two that own a surface today: a feature
-    /// wired to a surface it does not own would otherwise ship silently.
+    /// `ext_linegrid` is the grid protocol rather than a surface, so no
+    /// `[native]` answer may drop it. Walks every switch rather than the
+    /// ones that own a surface today: a feature wired to a surface it does
+    /// not own would otherwise ship silently.
     #[test]
-    fn no_native_switch_detaches_the_grid_protocol_or_the_tabline() {
+    fn no_native_switch_detaches_the_grid_protocol() {
         for feature in registry::features() {
             let surfaces = ext_surfaces(&resolved(&format!("[native]\n{} = false\n", feature.id)));
             assert!(
-                surfaces.contains(&Ext::LineGrid) && surfaces.contains(&Ext::Tabline),
-                "{} = false detached a surface no feature owns: {surfaces:?}",
+                surfaces.contains(&Ext::LineGrid),
+                "{} = false detached the grid protocol itself: {surfaces:?}",
+                feature.id
+            );
+        }
+    }
+
+    /// The tab row follows `[native] tabline` and nothing else, in both
+    /// directions: default-off means nvim keeps drawing the user's own
+    /// tabline into grid 1, and no sibling switch may take the row with it.
+    #[test]
+    fn the_tabline_surface_follows_its_own_switch() {
+        assert!(
+            !ext_surfaces(&resolved("")).contains(&Ext::Tabline),
+            "a session with no config leaves the tab row to nvim"
+        );
+        assert!(!ext_surfaces(&resolved("[native]\ntabline = false\n")).contains(&Ext::Tabline));
+        assert!(ext_surfaces(&resolved("[native]\ntabline = true\n")).contains(&Ext::Tabline));
+        for feature in registry::features().iter().filter(|f| f.id != "tabline") {
+            let surfaces = ext_surfaces(&resolved(&format!(
+                "[native]\ntabline = true\n{} = false\n",
+                feature.id
+            )));
+            assert!(
+                surfaces.contains(&Ext::Tabline),
+                "{} = false took the tab row with it: {surfaces:?}",
                 feature.id
             );
         }
@@ -1207,7 +1255,12 @@ mod tests {
         let cfg = NativeConfig::from_toml_str(&edited).expect("the edited example must parse");
         assert!(!cfg.enabled("picker"));
         for f in registry::features().iter().filter(|f| f.id != "picker") {
-            assert!(cfg.enabled(f.id), "{} must stay on", f.id);
+            assert_eq!(
+                cfg.enabled(f.id),
+                f.default_on,
+                "{} must stay at the value the example ships",
+                f.id
+            );
         }
     }
 
@@ -1468,12 +1521,17 @@ mod tests {
     }
 
     #[test]
-    fn disabling_one_feature_leaves_the_others_on() {
+    fn disabling_one_feature_leaves_the_others_at_their_defaults() {
         let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
             .expect("a known key must parse");
         assert!(!cfg.enabled("statusline"));
         for f in registry::features().iter().filter(|f| f.id != "statusline") {
-            assert!(cfg.enabled(f.id), "{} must stay on", f.id);
+            assert_eq!(
+                cfg.enabled(f.id),
+                f.default_on,
+                "{} must stay at its registry default",
+                f.id
+            );
         }
     }
 
@@ -1594,9 +1652,25 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_table_is_every_feature_on() {
+    fn an_empty_table_is_every_feature_at_its_default() {
         let cfg = NativeConfig::from_toml_str("[native]\n").expect("an empty table must parse");
-        assert_eq!(cfg, NativeConfig::all_enabled());
+        assert_eq!(cfg, NativeConfig::defaults());
+    }
+
+    /// The registry's own defaults, resolved: a row added default-off is
+    /// off for a user with no `view.toml`, and a row added default-on is
+    /// on, with no second list anywhere saying which is which.
+    #[test]
+    fn every_feature_resolves_to_its_own_registry_default() {
+        let cfg = NativeConfig::defaults();
+        for f in registry::features() {
+            assert_eq!(cfg.enabled(f.id), f.default_on, "{}", f.id);
+        }
+        assert!(
+            registry::features().iter().any(|f| !f.default_on),
+            "with every row default-on this test cannot tell `defaults` from `all_enabled`"
+        );
+        assert_ne!(NativeConfig::defaults(), NativeConfig::all_enabled());
     }
 
     #[test]
@@ -1613,12 +1687,12 @@ mod tests {
     fn no_path_and_no_file_are_both_the_full_experience() {
         assert_eq!(
             NativeConfig::load(None).expect("no config path must resolve"),
-            NativeConfig::all_enabled()
+            NativeConfig::defaults()
         );
         let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("no-such-view.toml");
         assert_eq!(
             NativeConfig::load(Some(&missing)).expect("an absent file must resolve"),
-            NativeConfig::all_enabled()
+            NativeConfig::defaults()
         );
     }
 
@@ -1634,7 +1708,7 @@ mod tests {
         let loaded = NativeConfig::load(Some(&path));
         assert_eq!(
             loaded.expect("the example must load"),
-            NativeConfig::all_enabled()
+            NativeConfig::defaults()
         );
     }
 
@@ -1849,7 +1923,7 @@ mod tests {
         assert!(!cfg.supervision.auto_restart);
         assert_eq!(
             cfg.native,
-            NativeConfig::all_enabled(),
+            NativeConfig::defaults(),
             "turning off automatic recovery must not touch any native feature"
         );
     }

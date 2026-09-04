@@ -193,7 +193,8 @@ struct Cli {
     #[arg(long)]
     print_caps: bool,
     /// Spawns the bundled engine with no user config at all: `view.toml`
-    /// and `init.lua` are both skipped, and every native feature stays on.
+    /// and `init.lua` are both skipped, and every native feature resolves
+    /// to its own shipped default.
     /// This is view's own triage tool, and asks for something different from
     /// `nvim --clean`.
     #[arg(long)]
@@ -783,7 +784,7 @@ fn note_unread_config(
     // `Model::config_was_read`
     model.note_config_unread();
     notices.extend(model.engine.record_native_notice(
-        format!("view: {err}; every native feature stays on this session"),
+        format!("view: {err}; every native feature stays at its default this session"),
         false,
     ));
 }
@@ -1649,7 +1650,7 @@ mod tests {
         let resolved = resolve_session_config(&Cli::parse_from(["view", "--clean"]), &file);
         assert_eq!(
             view_native::config::ext_surfaces(&resolved),
-            view_core::native::ext::ALL_MULTIGRID.to_vec(),
+            view_core::native::ext::shipped_multigrid(),
             "--clean must attach the shipped set even when the file it ignores asked for the fallback"
         );
     }
@@ -2335,7 +2336,7 @@ mod tests {
 
         assert_eq!(
             view_native::config::ext_surfaces(&resolved),
-            view_core::native::ext::ALL_MULTIGRID.to_vec(),
+            view_core::native::ext::shipped_multigrid(),
             "a config that could not be read keeps every surface, and attaches \
              the mode view ships"
         );
@@ -2345,7 +2346,7 @@ mod tests {
         );
         let shown = format!("{:?}", model.engine.messages.entries);
         assert!(
-            shown.contains("every native feature stays on this session"),
+            shown.contains("every native feature stays at its default this session"),
             "and told what that cost them: {shown}"
         );
         assert!(

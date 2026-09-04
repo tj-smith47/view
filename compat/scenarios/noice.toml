@@ -180,10 +180,12 @@ steps = [
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_cmdline == true)')", expect = "false" },
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_popupmenu == true)')", expect = "false" },
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_messages == true)')", expect = "false" },
-  # And the two that follow no switch: the grid protocol, and a tabline no
-  # native feature owns.
+  # The grid protocol follows no switch and is always attached. The tab
+  # line follows `[native] tabline`, which ships off, so it is detached
+  # here without this state asking for anything: nvim draws the user's own
+  # tabline into grid 1 and view paints that row like any other.
   { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_linegrid == true)')", expect = "true" },
-  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_tabline == true)')", expect = "true" },
+  { probe = "luaeval('tostring(vim.api.nvim_list_uis()[1].ext_tabline == true)')", expect = "false" },
   # The handoff completing, read from the option itself: view withheld
   # `cmdheight = 0` (it zeroes it only when it took both the cmdline and
   # the messages), and it is 0 anyway because noice's own `vim.ui_attach`

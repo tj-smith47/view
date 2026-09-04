@@ -98,7 +98,10 @@ pub use reference::ReferenceSession;
 /// the crate that owns every attach: a runner that picks a set for one side
 /// of a comparison names the same list the other side's attach takes, and
 /// reads it from the owner rather than restating the option keys.
-pub use view_engine::{MULTIGRID_NAME, UI_EXT_OPTIONS, UI_EXT_OPTIONS_MULTIGRID};
+pub use view_engine::{
+    ui_ext_options_shipped, ui_ext_options_shipped_multigrid, MULTIGRID_NAME, UI_EXT_OPTIONS,
+    UI_EXT_OPTIONS_MULTIGRID,
+};
 
 /// The workspace root this crate was built from, resolved from its own
 /// manifest rather than from a caller's working directory.

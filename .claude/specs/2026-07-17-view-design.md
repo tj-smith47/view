@@ -276,10 +276,10 @@ Dependency rules (audit-enforced, cfgd-style):
   early blocking prompts (swapfile ATTENTION, `:confirm` during init) behave
   exactly as in bare nvim. view attaches immediately; config sources with the
   UI already live.
-- Attach requesting `ext_linegrid` and `ext_tabline` unconditionally, plus
-  `ext_cmdline`/`ext_popupmenu` with `palette` and `ext_messages` with
-  `notifications` — the set follows the `[native]` switches, read before
-  attach (§5.5), plus `ext_multigrid` (P6, §17): view composites nvim's
+- Attach requesting `ext_linegrid` unconditionally, plus
+  `ext_cmdline`/`ext_popupmenu` with `palette`, `ext_messages` with
+  `notifications` and `ext_tabline` with `tabline` (off by default) — the
+  set follows the `[native]` switches, read before attach (§5.5), plus `ext_multigrid` (P6, §17): view composites nvim's
   windows itself by default. `[engine] single_grid = true` (or
   `--single-grid`) drops `ext_multigrid` and falls back to nvim drawing one
   grid, the escape hatch for a plugin that misbehaves under the protocol;
@@ -345,13 +345,16 @@ Compat has three classes; only the first is "by construction":
   native features to win.** Superseded plugins keep loading; their cost
   is memory, not conflict.
 - **Externalization follows the `[native]` switches (amended 2026-08-21,
-  C2).** The `ext_*` set view requests at `nvim_ui_attach` is not a
-  constant: `ext_cmdline`/`ext_popupmenu` are attached only with
-  `palette` enabled, `ext_messages` only with `notifications` enabled.
-  `ext_linegrid` is unconditional (it is the grid protocol, not a
-  surface) and `ext_tabline` is attached unconditionally today, with no
-  native feature of its own to switch it — recorded in the surface
-  matrix rather than left implicit. This is what makes "disabling
+  C2; tab line amended 2026-09-04).** The `ext_*` set view requests at
+  `nvim_ui_attach` is not a constant: `ext_cmdline`/`ext_popupmenu` are
+  attached only with `palette` enabled, `ext_messages` only with
+  `notifications` enabled, and `ext_tabline` only with `tabline`
+  enabled — a feature that ships **off**, so nvim draws the user's own
+  `tabline` (and whatever bufferline plugin sets it) into grid 1 and the
+  compositor paints that row like any other. `ext_linegrid` is
+  unconditional (it is the grid protocol, not a surface). Each surface
+  names the switch its attach is gated on in the surface matrix rather
+  than leaving it implicit. This is what makes "disabling
   returns that surface to the user's plugins" (§9) literally true: a
   plugin that inspects the attached UI's `ext_*` flags and refuses to run
   sees a UI it supports, and the user's config runs unchanged. Reading

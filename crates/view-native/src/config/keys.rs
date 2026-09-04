@@ -93,7 +93,7 @@ pub fn keys() -> &'static [ConfigKey] {
             table: "native",
             key: feature.id,
             flag: None,
-            derived: Some("true"),
+            derived: Some(if feature.default_on { "true" } else { "false" }),
         }));
         rows.extend([
             ConfigKey {

@@ -118,7 +118,7 @@ pub const SURFACES: &[OwnedSurface] = &[
         ext: Some(Ext::Tabline),
         policy: Policy::Own,
         label: "the tab line",
-        remedy: None,
+        remedy: Some("[native] tabline = false"),
     },
     OwnedSurface {
         surface: Surface::Grid,
@@ -1569,22 +1569,24 @@ mod tests {
         );
     }
 
-    /// A surface view draws either names the `view.toml` line that hands it
-    /// back or says it has none, and the page says which. The tab line is
-    /// the honest none: view owns it unconditionally and no `[native]`
-    /// switch reaches it, so a notice about it says what happened and stops
-    /// rather than naming a setting that does not exist.
+    /// A surface view draws names the `view.toml` line that hands it back,
+    /// and that line is the switch its own `ext_*` capability is gated on
+    /// ([`Ext::feature`]) rather than a string typed twice: a surface no
+    /// switch reaches says so, and a notice about it then says what
+    /// happened and stops rather than naming a setting that does not exist.
     #[test]
-    fn every_owned_surface_names_its_off_switch_or_says_it_has_none() {
+    fn every_owned_surface_names_the_switch_its_attach_is_gated_on() {
         let matrix = render_matrix();
         for table_row in SURFACES.iter().filter(|row| row.policy != Policy::Yield) {
-            assert!(
-                table_row
-                    .remedy
-                    .is_none_or(|line| line.starts_with("[native] ") && line.ends_with(" = false")),
-                "{}'s switch is not a [native] line a user can paste: {:?}",
-                table_row.label,
-                table_row.remedy
+            let gate = table_row
+                .ext
+                .and_then(Ext::feature)
+                .map(|id| format!("[native] {id} = false"));
+            assert_eq!(
+                table_row.remedy.map(str::to_string),
+                gate,
+                "{}'s off switch is not the one its attach answers to",
+                table_row.label
             );
             let cell = table_row
                 .remedy
@@ -1595,13 +1597,6 @@ mod tests {
                 table_row.label
             );
         }
-        assert_eq!(
-            row(Surface::Tabline)
-                .expect("the tab line has a row")
-                .remedy,
-            None,
-            "the tab line is the matrix's honest none row"
-        );
         assert!(
             matrix.contains(NONE_CELL),
             "the none marker never renders, so a coverage gap could not be seen"

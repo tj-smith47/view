@@ -32,41 +32,64 @@ pub struct FeatureDesc {
     /// `false` for a passive surface a user never invokes (a statusline is
     /// drawn, not opened).
     pub entry_keys: bool,
+    /// What a session with no `view.toml` resolves this feature to, and so
+    /// what the shipped example writes beside the key.
+    ///
+    /// `true` for a feature whose surface view is better at than the
+    /// ecosystem's plugins, which is most of them and the reason `[native]`
+    /// reads as an opt-out table. `false` where the plugin ecosystem's own
+    /// answer is the one a migrating user already has and already likes: a
+    /// default that took a working tabline away and drew a plainer one in
+    /// its place would be view failing the painless-migration contract on
+    /// row 0 of the first launch.
+    pub default_on: bool,
 }
 
 // `supersedes` carries the design spec's own "replaces for the 90% case"
 // wording verbatim, because it is rendered as prose to the user ("lualine
 // still loads") rather than matched against a plugin name.
-static FEATURES: [FeatureDesc; 5] = [
+static FEATURES: [FeatureDesc; 6] = [
     FeatureDesc {
         id: "picker",
         supersedes: Some("telescope"),
         off_switch: "native.picker = false",
         entry_keys: true,
+        default_on: true,
     },
     FeatureDesc {
         id: "tree",
         supersedes: Some("neo-tree / netrw"),
         off_switch: "native.tree = false",
         entry_keys: true,
+        default_on: true,
     },
     FeatureDesc {
         id: "statusline",
         supersedes: Some("lualine"),
         off_switch: "native.statusline = false",
         entry_keys: false,
+        default_on: true,
     },
     FeatureDesc {
         id: "notifications",
         supersedes: Some("nvim-notify / noice messages"),
         off_switch: "native.notifications = false",
         entry_keys: true,
+        default_on: true,
     },
     FeatureDesc {
         id: "palette",
         supersedes: Some("noice cmdline"),
         off_switch: "native.palette = false",
         entry_keys: false,
+        default_on: true,
+    },
+    FeatureDesc {
+        id: "tabline",
+        supersedes: Some("bufferline / your own tabline"),
+        off_switch: "native.tabline = false",
+        entry_keys: false,
+        default_on: false,
     },
 ];
 

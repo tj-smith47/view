@@ -22,9 +22,11 @@ the tables view actually runs disagree.
   `Absorb` means view takes what the claimant drew into its own chrome
   rather than letting two renderers stack.
 - **`[native]` switch** is the `view.toml` line that hands the surface back
-  to your plugins. `-- none --` is honest rather than missing: no switch
-  reaches that surface today, and a notice about it says what happened and
-  stops rather than naming a setting that does not exist.
+  to your plugins, and it is the switch that surface's `ext_*` attach is
+  gated on rather than a second setting that means the same thing.
+  `-- none --` is honest rather than missing: no switch reaches that
+  surface, and a notice about it says what happened and stops rather than
+  naming a setting that does not exist.
 - **claiming plugin classes** are the plugins whose whole purpose is to
   render a surface view also renders, with the buffer `filetype` their own
   floating windows present. A plugin nobody enumerated is not missing from
@@ -43,16 +45,23 @@ the tables view actually runs disagree.
 | the command line | `ext_cmdline` | `Own` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
 | the completion menu | `ext_popupmenu` | `Absorb` | `[native] palette = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred` |
 | the message area | `ext_messages` | `Own` | `[native] notifications = false` | `noice.nvim` (`noice`) | `noice`/`superseded`, `noice`/`deferred`, `nvim-notify`/`deferred` |
-| the tab line | `ext_tabline` | `Own` | -- none -- | -- none -- | `noice`/`deferred` |
+| the tab line | `ext_tabline` | `Own` | `[native] tabline = false` | -- none -- | `noice`/`deferred` |
 | the buffer grid | -- none -- | `Yield` | -- none -- | -- none -- | -- none -- |
 
 A float whose rows land in the command line's band is taken into the palette instead of being reported, but only when it presents a completion menu's own filetype (`cmp_menu`). That is the completion menu's `Absorb` read at the moment of the claim; the command line's own policy stays `Own`.
 
-## Two switches, five surfaces
+## Three switches, five surfaces
 
 `[native] palette = false` detaches `ext_cmdline` and `ext_popupmenu`
 together, which is why both rows name the same line: a session that handed
 the command line back absorbs nothing and hides nobody's window.
+
+`[native] tabline` is the one switch that ships off, so the tab line's row
+describes what a session running `tabline = true` does: nvim draws your own
+`tabline` (and whatever bufferline plugin sets it) into grid 1 by default,
+and the compositor paints that row like any other. Turning it on detaches
+the row from nvim and hands it to view's own tab renderer, at which point a
+bufferline has nothing left to draw into.
 
 The buffer grid is the one surface view never draws over. nvim owns it, and
 so does anything that wants to float above it, so a picker taking the screen

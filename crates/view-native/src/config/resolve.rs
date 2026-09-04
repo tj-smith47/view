@@ -267,7 +267,7 @@ pub fn resolve_with(
             ),
             file.spells("native", feature.id)
                 .then(|| !file.native.disabled.contains(&feature.id)),
-            true,
+            feature.default_on,
         );
         if !switch.value {
             disabled.push(feature.id);

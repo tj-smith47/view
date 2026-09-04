@@ -94,14 +94,19 @@ fn fixture_configs(
     found
 }
 
-/// Whether switching `id` off changes which surfaces a session
-/// externalizes, asked of `ext_surfaces` itself so no list here can drift
-/// from the one the product filters.
-fn decides_the_attach(id: &str) -> bool {
-    let file = ViewConfig::from_toml_str(&format!("[native]\n{id} = false\n"))
-        .unwrap_or_else(|err| panic!("[native] {id} = false must parse: {err}"));
+/// Whether moving `feature` off its registry default changes which surfaces
+/// a session externalizes, asked of `ext_surfaces` itself so no list here
+/// can drift from the one the product filters.
+///
+/// Off its own default rather than off outright: a feature that ships off
+/// still decides the attach, and asking it the question the other way round
+/// would read it as a renderer every fixture then owes a line for.
+fn decides_the_attach(feature: &registry::FeatureDesc) -> bool {
+    let (id, flipped) = (feature.id, !feature.default_on);
+    let file = ViewConfig::from_toml_str(&format!("[native]\n{id} = {flipped}\n"))
+        .unwrap_or_else(|err| panic!("[native] {id} = {flipped} must parse: {err}"));
     let cfg = view_native::config::resolve_with(&file, &Overrides::default(), &|_| None);
-    ext_surfaces(&cfg).as_slice() != ext::ALL_MULTIGRID
+    ext_surfaces(&cfg) != ext::shipped_multigrid()
 }
 
 #[test]
@@ -109,7 +114,7 @@ fn every_comparison_fixture_switches_off_every_feature_that_only_renders() {
     let fixtures = fixture_configs(&comparison_fixtures_root(), false);
     for (_, path, cfg) in &fixtures {
         for feature in registry::features() {
-            if decides_the_attach(feature.id) {
+            if decides_the_attach(feature) {
                 continue;
             }
             assert!(
@@ -157,9 +162,9 @@ fn no_fixture_hands_an_ext_surface_back_to_the_engine() {
             }
             let attached = ext_surfaces(&cfg);
             assert_eq!(
-                attached.as_slice(),
-                ext::ALL_MULTIGRID,
-                "{} attaches {attached:?} rather than every surface, so a session running it \
+                attached,
+                ext::shipped_multigrid(),
+                "{} attaches {attached:?} rather than the shipped set, so a session running it \
                  hands the rest back to nvim: nvim paints them into the grid, view applies that \
                  damage on top of its own rendering, and every row taken here describes a \
                  protocol no shipped default runs. Take the switch back out of the fixture, or \

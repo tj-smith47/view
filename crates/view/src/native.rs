@@ -792,7 +792,7 @@ auto_restart = false
         );
         assert!(
             off.palette_enabled,
-            "a supervision-only config must leave every native feature on"
+            "a supervision-only config must leave every native feature at its default"
         );
     }
 

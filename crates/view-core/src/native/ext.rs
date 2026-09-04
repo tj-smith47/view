@@ -29,8 +29,10 @@ pub enum Ext {
     Popupmenu,
     /// Messages, rendered by view as toasts and the message history.
     Messages,
-    /// The tab line. Unconditional today: no native feature owns it, so
-    /// there is no switch for it to follow.
+    /// The tab line, rendered by view as its own tab row. Attached only
+    /// when `[native] tabline` is on, which it is not by default: nvim
+    /// draws the user's own `tabline` into grid 1 otherwise, and the
+    /// compositor paints it like any other row of that grid.
     Tabline,
     /// Not a surface: the option that makes nvim address each window's grid
     /// separately (`docs/multigrid.md`). It externalizes nothing, so it is
@@ -43,6 +45,22 @@ pub enum Ext {
 }
 
 impl Ext {
+    /// The `[native]` feature whose switch decides whether this capability
+    /// is attached, where one decides it.
+    ///
+    /// The mapping lives here rather than in the resolver that reads it so
+    /// that a surface added to [`ALL`] states its own gate once, and both
+    /// the resolver and [`shipped`] read the same answer.
+    #[must_use]
+    pub const fn feature(self) -> Option<&'static str> {
+        match self {
+            Self::Cmdline | Self::Popupmenu => Some("palette"),
+            Self::Messages => Some("notifications"),
+            Self::Tabline => Some("tabline"),
+            Self::LineGrid | Self::Multigrid => None,
+        }
+    }
+
     /// The `nvim_ui_attach` option key for this capability.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -97,9 +115,12 @@ pub const ALL_NAMES: &[&str] = &[
 /// [`Model::owns`]: crate::model::Model::owns
 pub const MULTIGRID_NAME: &str = "ext_multigrid";
 
-/// The set a session with nothing to narrow it attaches today: [`ALL`] plus
-/// [`Ext::Multigrid`], which is what `[engine] single_grid = true` takes
-/// back off.
+/// Every surface this build can externalize plus [`Ext::Multigrid`]: the
+/// widest attach the protocol has, which the oracle and corpus runners ask
+/// for so both sides of a differential speak the same vocabulary.
+///
+/// Not what a session with no config attaches -- that is [`shipped_multigrid`],
+/// which is narrower by every feature the registry defaults off.
 pub const ALL_MULTIGRID: &[Ext] = &[
     Ext::LineGrid,
     Ext::Cmdline,
@@ -123,9 +144,94 @@ pub const ALL_NAMES_MULTIGRID: &[&str] = &[
     MULTIGRID_NAME,
 ];
 
+/// The surfaces a session with nothing to narrow it attaches: every member
+/// of [`ALL`] whose `[native]` feature is on by its registry default.
+///
+/// Narrower than [`ALL`] from the moment a feature ships off, which
+/// `tabline` is: nvim draws the user's own tab line into grid 1 unless the
+/// switch asks view for it.
+#[must_use]
+pub fn shipped() -> Vec<Ext> {
+    ALL.iter()
+        .copied()
+        .filter(|surface| {
+            surface.feature().is_none_or(|id| {
+                crate::native::registry::features()
+                    .iter()
+                    .any(|feature| feature.id == id && feature.default_on)
+            })
+        })
+        .collect()
+}
+
+/// [`shipped`] plus [`Ext::Multigrid`], which `[engine] single_grid = true`
+/// takes back off: the whole attach a config-less session sends.
+#[must_use]
+pub fn shipped_multigrid() -> Vec<Ext> {
+    let mut set = shipped();
+    set.push(Ext::Multigrid);
+    set
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Ext, ALL, ALL_MULTIGRID, ALL_NAMES, ALL_NAMES_MULTIGRID, MULTIGRID_NAME};
+    #![allow(clippy::expect_used)]
+
+    use super::{
+        shipped, shipped_multigrid, Ext, ALL, ALL_MULTIGRID, ALL_NAMES, ALL_NAMES_MULTIGRID,
+        MULTIGRID_NAME,
+    };
+
+    /// Every surface's gate is a feature the registry actually carries, so
+    /// a mapping that outlives its switch fails here rather than silently
+    /// attaching a surface nothing can turn off.
+    #[test]
+    fn every_surfaces_gate_is_a_feature_the_registry_carries() {
+        for surface in ALL_MULTIGRID {
+            let Some(id) = surface.feature() else {
+                continue;
+            };
+            assert!(
+                crate::native::registry::features()
+                    .iter()
+                    .any(|feature| feature.id == id),
+                "{surface:?} is gated on [native] {id}, which no feature declares"
+            );
+        }
+    }
+
+    /// The shipped attach is the widest one minus exactly the surfaces
+    /// whose feature the registry defaults off -- asked of the registry, so
+    /// no count or list here has to be maintained.
+    #[test]
+    fn the_shipped_attach_is_the_widest_one_minus_the_features_that_ship_off() {
+        let off: Vec<Ext> = ALL
+            .iter()
+            .copied()
+            .filter(|surface| !shipped().contains(surface))
+            .collect();
+        for surface in &off {
+            let id = surface.feature().expect("an ungated surface always ships");
+            assert!(
+                crate::native::registry::features()
+                    .iter()
+                    .any(|feature| feature.id == id && !feature.default_on),
+                "{surface:?} is absent from the shipped attach with its feature on"
+            );
+        }
+        assert_eq!(
+            shipped().len() + off.len(),
+            ALL.len(),
+            "the shipped attach and the surfaces held back must partition the vocabulary"
+        );
+        assert_eq!(
+            shipped_multigrid()
+                .split_last()
+                .map(|(last, head)| (*last, head.to_vec())),
+            Some((Ext::Multigrid, shipped())),
+            "the multigrid attach is the shipped one plus exactly that option"
+        );
+    }
 
     #[test]
     fn every_name_is_its_own_variants_spelling() {

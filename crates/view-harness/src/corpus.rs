@@ -15,6 +15,7 @@
 //! never actually overriding anything, and nobody finding out).
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -52,21 +53,33 @@ pub const DEFAULT_EXT_OPTIONS: &[&str] = view_oracle::UI_EXT_OPTIONS;
 /// site that means "shipped" today.
 pub const MULTIGRID_EXT_SET: &str = "multigrid";
 
-/// The `ext_set` name that matches what view ships by default today.
+/// The `ext_set` name that matches what view ships by default today:
+/// multigrid addressing, and every surface whose `[native]` feature ships
+/// on -- which is [`MULTIGRID_EXT_SET`] less `ext_tabline`, since the tab
+/// row is nvim's unless `[native] tabline` asks for it.
 ///
-/// Distinct from [`DEFAULT_EXT_SET`] on purpose: that name is a pinned
-/// corpus vocabulary an already-authored entry keeps meaning forever, while
-/// this one moves the day view's shipped default moves again. A consumer
-/// whose job is to exercise real shipped behavior -- fuzzing above all --
-/// reads this name, because one that hardcodes the pinned vocabulary
-/// instead keeps attaching yesterday's default with nothing to say so.
-/// Update this alias, not its readers, the next time the shipped default
-/// changes.
-pub const SHIPPED_EXT_SET: &str = MULTIGRID_EXT_SET;
+/// Distinct from [`DEFAULT_EXT_SET`] and from [`MULTIGRID_EXT_SET`] on
+/// purpose: those name pinned corpus vocabularies an already-authored entry
+/// keeps meaning forever, while this one moves the day view's shipped
+/// default moves again. A consumer whose job is to exercise real shipped
+/// behavior -- fuzzing above all -- reads this name, because one that
+/// hardcodes a pinned vocabulary instead keeps attaching yesterday's
+/// default with nothing to say so. Update this alias, not its readers, the
+/// next time the shipped default changes.
+pub const SHIPPED_EXT_SET: &str = "shipped";
 
-/// The options [`SHIPPED_EXT_SET`] resolves to. See its own doc for why
-/// this is not simply [`DEFAULT_EXT_OPTIONS`].
-pub const SHIPPED_EXT_OPTIONS: &[&str] = view_oracle::UI_EXT_OPTIONS_MULTIGRID;
+/// The options [`SHIPPED_EXT_SET`] resolves to, taken from the feature
+/// registry rather than listed: a feature that changes its default moves
+/// this set with it. See [`SHIPPED_EXT_SET`] for why this is not simply
+/// [`DEFAULT_EXT_OPTIONS`].
+static SHIPPED_OPTIONS: LazyLock<Vec<&'static str>> =
+    LazyLock::new(view_oracle::ui_ext_options_shipped_multigrid);
+
+/// [`SHIPPED_OPTIONS`] as the runners take it.
+#[must_use]
+pub fn shipped_ext_options() -> &'static [&'static str] {
+    &SHIPPED_OPTIONS
+}
 
 /// The `nvim_ui_attach` options each recognized `ext_set` name stands for.
 /// The one place a name is resolved, so the loader's validation and the
@@ -75,6 +88,7 @@ fn ext_options(name: &str) -> Option<&'static [&'static str]> {
     match name {
         DEFAULT_EXT_SET => Some(DEFAULT_EXT_OPTIONS),
         MULTIGRID_EXT_SET => Some(view_oracle::UI_EXT_OPTIONS_MULTIGRID),
+        SHIPPED_EXT_SET => Some(shipped_ext_options()),
         _ => None,
     }
 }
@@ -155,7 +169,9 @@ pub enum CorpusError {
     #[error("unsupported corpus schema {0} (only schema = 1 is recognized)")]
     UnsupportedSchema(u32),
     /// `ext_set` named a set this loader does not recognize.
-    #[error("unknown ext_set {0:?} (only \"default\" and \"multigrid\" are recognized)")]
+    #[error(
+        "unknown ext_set {0:?} (only \"default\", \"multigrid\" and \"shipped\" are recognized)"
+    )]
     UnknownExtSet(String),
     /// `diff_review` named a case no [`DiffReviewCase`] answers to. A hard
     /// load error rather than a skipped entry: an entry naming a case that

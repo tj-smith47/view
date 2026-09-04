@@ -2254,6 +2254,32 @@ pub const UI_EXT_OPTIONS: &[&str] = view_core::native::ext::ALL_NAMES;
 /// this crate.
 pub const UI_EXT_OPTIONS_MULTIGRID: &[&str] = view_core::native::ext::ALL_NAMES_MULTIGRID;
 
+/// The options a config-less view session actually attaches with, in
+/// single-grid addressing: every surface whose `[native]` feature ships on.
+///
+/// Narrower than [`UI_EXT_OPTIONS`], which is the whole vocabulary this
+/// build can externalize and is what a differential attaches with when it
+/// means "every surface". A function rather than a const because the answer
+/// is the feature registry's, and a registry row is not const-evaluable.
+#[must_use]
+pub fn ui_ext_options_shipped() -> Vec<&'static str> {
+    view_core::native::ext::shipped()
+        .iter()
+        .map(|surface| surface.as_str())
+        .collect()
+}
+
+/// [`ui_ext_options_shipped`] plus `ext_multigrid`: the whole attach a
+/// config-less session sends, which is the one a screen taken against
+/// view's defaults is showing.
+#[must_use]
+pub fn ui_ext_options_shipped_multigrid() -> Vec<&'static str> {
+    view_core::native::ext::shipped_multigrid()
+        .iter()
+        .map(|surface| surface.as_str())
+        .collect()
+}
+
 pub use view_core::native::ext::MULTIGRID_NAME;
 
 /// The non-`ext_` option [`EngineHandle::claim_stdout_tty`] sets, declaring
