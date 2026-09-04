@@ -147,9 +147,17 @@ fn read_ready(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {
 /// for days over every measurement window on this host.
 ///
 /// One zero-timeout `poll(2)` on one descriptor and no read at all:
-/// `POLLHUP` and `POLLERR` are set by the kernel whether or not they were
-/// asked for, so an empty event mask reports a hangup and stays silent for
-/// an ordinary readable terminal.
+/// `POLLHUP`, `POLLERR` and `POLLNVAL` are set by the kernel whether or not
+/// they were asked for, so an empty event mask reports a hangup and stays
+/// silent for an ordinary readable terminal. `POLLNVAL` counts as a hangup
+/// too: it is the answer a macOS `/dev/tty` fallback descriptor gives (see
+/// [`adopt_terminal_stdin`]), and a descriptor no readiness mechanism can
+/// watch has exactly the same consequence as one whose far end is gone.
+///
+/// Unix only, as the whole descriptor loop around it is. The Windows
+/// session reads through crossterm's console backend, which has no
+/// descriptor to poll and no `EIO` read to spin on: a closed console ends
+/// the process itself.
 #[cfg(unix)]
 fn terminal_hungup(fd: BorrowedFd<'_>) -> bool {
     use rustix::event::{PollFd, PollFlags};
@@ -159,7 +167,10 @@ fn terminal_hungup(fd: BorrowedFd<'_>) -> bool {
         rustix::event::poll(&mut fds, Some(&rustix::event::Timespec::default())),
         Ok(n) if n > 0
     );
-    ready && fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR)
+    ready
+        && fds[0]
+            .revents()
+            .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
 }
 
 /// One non-blocking drain's outcome, telling the caller whether the
