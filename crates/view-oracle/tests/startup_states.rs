@@ -161,11 +161,20 @@ fn the_buffer_before_vim_enter_reaches_neither_editors_terminal() {
 /// or a startup error appears -- and never whether the pre-`VimEnter`
 /// screen is shown.
 ///
+/// Every leg is a session the fixture really does flush a half-built screen
+/// to: the config's mid-source flush is gated on `ext_multigrid`, which
+/// every permutation attaches, so no leg can pass by drawing nothing. The
+/// legs run to completion and report together, because "which permutations
+/// regress" is the question and a walk that stops at the first answers it
+/// for one.
+///
 /// Disconfirm: keying `Model::withholds_grid` on the cmdline and the
-/// message surfaces again puts `PREVIMENTERBUFFER` into the stream of all
-/// three of these while the defaults leg above stays clean.
+/// message surfaces again -- or forcing it to `false` -- puts
+/// `PREVIMENTERBUFFER` into all three streams while the defaults leg above
+/// stays clean.
 #[test]
 fn the_hold_covers_every_native_permutation() {
+    let mut regressed = Vec::new();
     for off in [
         &["notifications"][..],
         &["palette"][..],
@@ -178,11 +187,15 @@ fn the_hold_covers_every_native_permutation() {
         let mut under_test = view_session(&paths.isolated_home);
         let stream = until_the_split(&mut under_test, "view");
 
-        assert!(
-            !wrote(&stream, PRE_VIM_ENTER),
-            "view wrote the pre-VimEnter screen with {off:?} off"
-        );
+        if wrote(&stream, PRE_VIM_ENTER) {
+            regressed.push(format!("{off:?}"));
+        }
     }
+    assert!(
+        regressed.is_empty(),
+        "view wrote the pre-VimEnter screen with these [native] switches off: {}",
+        regressed.join("; ")
+    );
 }
 
 /// A replacement engine runs the same startup, so it owes the same hold:
@@ -208,16 +221,46 @@ fn a_restarted_engine_holds_its_own_pre_vim_enter_screen() {
     let session_pid = under_test.pid().expect("the session under test has a pid");
     let engine = engine_child_of(session_pid).expect("view spawned an nvim child");
 
-    // the buffer the replacement's own startup holds is the same text, so
-    // the whole stream is the subject again: what is asserted is that the
-    // restart added no occurrence of it
+    // from the kill onward, never the whole stream: the layout the first
+    // start left is still on the screen, so a screen-side wait for it would
+    // be answered by the dead engine's frame and this would assert against
+    // a restart that never happened
+    let mark = first.len();
     kill(engine);
-    let after = until_the_split(&mut under_test, "view after the restart");
+    // whichever lands first, so a replacement that paints the held screen
+    // fails on that rather than on the wait: without the re-arm it writes
+    // `PREVIMENTERBUFFER` and never gets as far as rewriting the layout
+    let after = until_either(&mut under_test, mark, [PRE_VIM_ENTER, SPLIT]);
     assert!(
         !wrote(&after, PRE_VIM_ENTER),
         "the replacement engine painted the screen its VimEnter had not \
          reached yet"
     );
+    assert!(
+        wrote(&after, SPLIT),
+        "no replacement engine drew its own screen, so this asserted nothing \
+         about a restart"
+    );
+}
+
+/// Waits until any of `needles` is written past `mark` in the recorded
+/// stream, and answers everything written from `mark` on.
+#[cfg(target_os = "linux")]
+fn until_either(session: &mut PtySession, mark: usize, needles: [&str; 2]) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
+    loop {
+        let written = session.raw_output()[mark..].to_vec();
+        if needles.iter().any(|needle| wrote(&written, needle)) {
+            return written;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nothing the restart could have written arrived; screen:\n{}",
+            session.screen()
+        );
+        // drains for the interval; the predicate is never the answer here
+        let _ = session.wait_for_screen(Duration::from_millis(50), |_| false);
+    }
 }
 
 /// The pid of the `nvim` the session under test spawned.
