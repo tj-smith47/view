@@ -592,12 +592,15 @@ fn string_sequence_len(run: &[u8]) -> Option<usize> {
     Some(2 + [st, bel].into_iter().flatten().min()?)
 }
 
-/// `ESC` and one key in the same run: crossterm reads that as the key with
-/// Alt held (its parser recurses on the bytes after the `ESC` and ors the
-/// modifier in), so a `<M-...>` mapping resolves the same inside this
-/// window as outside it. The recursion is what makes a multi-byte
-/// character an Alt chord there as much as an ASCII one, and the same
-/// decode is what makes it one here.
+/// `ESC` and one key in the same run: the key with Alt held, which is the
+/// engine's own reading. termkey decodes the bytes after the `ESC` as a
+/// key in their own right and ors `ALT` into whatever that turns out to be
+/// (`peekkey_simple`), so the fold applies to a multi-byte character and
+/// to a whole sequence exactly as it does to one ASCII byte -- `ESC ESC` is
+/// `<M-Esc>` and `ESC ESC [ A` is `<M-Up>`. Where the chord that produces
+/// is bound to nothing, nvim degrades it back to `<Esc>` and the key
+/// (`getchar.c`), so a session that maps neither sees the same two
+/// keystrokes either way.
 ///
 /// Three runs are not that chord. A second `ESC` ends the first one and
 /// nothing more: the `ESC` is Alt held over whatever the bytes behind it

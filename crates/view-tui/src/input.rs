@@ -296,7 +296,7 @@ struct LateReplyGuard {
     /// Whether the DA1 fence is still owed. False means the probe already
     /// had it, so the only thing keeping this guard armed is `buf`: once
     /// that resolves there is nothing left to recognize and the terminal
-    /// goes back to crossterm rather than idling out the cap.
+    /// goes back to the steady-state drain rather than idling out the cap.
     fence_owed: bool,
     /// Everything the probe's own window settled on, plus every later
     /// answer folded into it. Held so a sweep can tell a reply that
