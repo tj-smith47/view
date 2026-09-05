@@ -4480,6 +4480,39 @@ mod tests {
         );
     }
 
+    /// A regional-indicator pair is one `ratatui` cell two columns wide, and
+    /// a terminal draws its two code points as two glyphs of its own. The
+    /// column under the second one is a space in the model both before and
+    /// after the pair is cleared, so no diff ever names it; a space printed
+    /// over the first column clears the first glyph alone and the second is
+    /// left on the screen.
+    ///
+    /// The shape the close battery's `panel-close` step found: a window
+    /// whose text moves left leaves the tail of its old row untouched
+    /// wherever the two frames agree, and this is the one column they agree
+    /// about while the terminal does not.
+    ///
+    /// Disconfirm: starting the reach past the wider of the old and new
+    /// widths -- what it did before -- emits `ESC[1;1H` + two spaces +
+    /// `ESC[1;4H` + two spaces, addressing column 3 and never column 2.
+    #[test]
+    fn clearing_a_pair_of_regional_indicators_repaints_the_column_it_covered() {
+        let area = ratatui::layout::Rect::new(0, 0, 5, 1);
+        let mut front = Buffer::empty(area);
+        let mut back = Buffer::empty(area);
+        front[(0, 0)].set_symbol("a");
+        front[(1, 0)].set_symbol("\u{1f1ef}\u{1f1f5}");
+        back[(0, 0)].set_symbol(" ");
+        back[(1, 0)].set_symbol(" ");
+
+        assert_eq!(
+            resynced_bytes(&front, &back),
+            b"\x1b[1;1H     \x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+            "the row is repainted with a gap where the pair's second \
+             indicator was drawn, so that glyph stays on the screen"
+        );
+    }
+
     /// Every printable run in `bytes`, each paired with whether a CSI `H`
     /// (absolute cursor address) was written since the previous one.
     fn printed_runs(bytes: &[u8]) -> Vec<(String, bool)> {

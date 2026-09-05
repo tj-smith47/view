@@ -91,10 +91,15 @@ fn widening_excess(symbol: &str) -> u16 {
 /// stale whenever the glyph changes even though the model never touched
 /// them.
 ///
-/// The reach past a changed cell starts at the first column past the wider
-/// of its old and new [`CellWidth`] -- the columns inside that width belong
-/// to the glyph, not to stale content -- and runs for the glyph's
-/// [`widening_excess`], at least one column. It extends again from every
+/// The reach past a changed cell starts at the first column past the new
+/// symbol's own [`CellWidth`] -- the columns inside that width are the ones
+/// this print covers -- and runs out past the wider of the old and new
+/// widths by the glyph's [`widening_excess`], at least one column. Starting
+/// at the new width rather than the wider of the two is what reaches a
+/// symbol `ratatui` sized at two columns whose code points a terminal draws
+/// as separate glyphs: a narrower symbol printed over the first column
+/// clears that column alone, and the second still holds the glyph the old
+/// symbol's second code point put there. The reach extends again from every
 /// cell it yields that itself widens, since repainting a widened glyph
 /// pushes the same staleness further right, so a run of box drawing whose
 /// leftmost cell changes is repainted to its end, and it stops at the right
@@ -147,8 +152,8 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
             let excess = widening_excess(cell.symbol())
                 .max(old.map_or(0, |old| widening_excess(old.symbol())))
                 .max(1);
-            let start = x.saturating_add(span);
-            let end = start.saturating_add(excess).min(right);
+            let start = x.saturating_add(cell.cell_width().max(1));
+            let end = x.saturating_add(span).saturating_add(excess).min(right);
             reach = match reach {
                 Some((next, reached, row)) if row == y => {
                     Some((next.max(start), reached.max(end), row))
