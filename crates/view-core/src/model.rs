@@ -2216,9 +2216,8 @@ mod tests {
 
     /// `cmdheight` is not on the wire, so the last row is not where a
     /// single-grid prompt is looked for: with `cmdheight` at 2 the prompt
-    /// sits on the row above it with the cursor there and the last row
-    /// blank. The cursor's own row is the message area's top, and a prompt
-    /// is the row that has nothing drawn beneath it.
+    /// sits on the row above it with the cursor parked after it and the
+    /// last row blank.
     #[test]
     fn a_prompt_above_a_blank_last_row_releases_the_hold_with_no_message_grid() {
         let mut model = single_grid_model();
@@ -2231,12 +2230,48 @@ mod tests {
         );
     }
 
+    /// A buffer that fills nothing below its first line -- `cmdheight` and
+    /// `laststatus` at 0, blank end-of-buffer fill -- is text on the
+    /// cursor's row with nothing under it, which is also a prompt's shape.
+    /// What is not a prompt's shape is the cursor: nvim leaves a buffer's
+    /// at the top-left corner while sourcing, on the first character, and
+    /// parks a prompt's on the blank cell after the text.
+    #[test]
+    fn a_one_line_buffer_over_blank_rows_is_not_a_release_signal() {
+        let mut model = single_grid_model();
+        write_row_at(&mut model, GLOBAL, 0, "ONLYLINE");
+        cursor_goto(&mut model, GLOBAL, 0, 0);
+        flush(&mut model);
+        assert!(
+            model.withholds_grid(),
+            "a buffer line under the cursor is not a prompt"
+        );
+        assert!(model.withheld_flush, "and the flush behind it is held");
+    }
+
+    /// The same buffer whose first line opens with whitespace puts the
+    /// cursor on a blank cell, as a prompt does -- but with nothing to its
+    /// left, where a prompt has the text it just drew.
+    #[test]
+    fn a_leading_blank_under_the_cursor_is_not_a_release_signal() {
+        let mut model = single_grid_model();
+        write_row_at(&mut model, GLOBAL, 0, "    INDENTED");
+        cursor_goto(&mut model, GLOBAL, 0, 0);
+        flush(&mut model);
+        assert!(
+            model.withholds_grid(),
+            "a blank with no text before it is not a prompt"
+        );
+        assert!(model.withheld_flush, "and the flush behind it is held");
+    }
+
     /// One screen, one answer: what a fixture config draws before `UIEnter`
     /// gets the same hold-or-release whether nvim placed a message grid for
     /// it or composited the message area into grid 1. Each row is a screen
     /// taken off the wire (`vim.fn.input()` with `cmdheight` 0, 1 and 2, a
-    /// buffer reaching the last row, a ruler with `laststatus` 0), drawn
-    /// here the way each attach delivers it.
+    /// buffer reaching the last row, a ruler with `laststatus` 0, a one-line
+    /// buffer over blank end-of-buffer rows), drawn here the way each attach
+    /// delivers it.
     #[test]
     fn every_startup_screen_gets_the_same_answer_with_and_without_a_message_grid() {
         struct Screen {
@@ -2318,6 +2353,30 @@ mod tests {
                     cursor_goto(m, message, 0, 12);
                 },
                 releases: true,
+            },
+            Screen {
+                name: "cmdheight=0, laststatus=0, blank end-of-buffer rows under a one-line buffer",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, 0, "ONLYLINE");
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                multigrid: |m| {
+                    let _ = message_area(m);
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                releases: false,
+            },
+            Screen {
+                name: "the same, with a first line that opens with whitespace",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, 0, "    INDENTED");
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                multigrid: |m| {
+                    let _ = message_area(m);
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                releases: false,
             },
         ];
         let mut disagreed = Vec::new();

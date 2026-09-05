@@ -445,8 +445,7 @@ impl GridRegistry {
     }
 
     /// Whether nvim is prompting out of its own message area: the cursor is
-    /// parked there and the row it sits on carries text, with nothing drawn
-    /// below it.
+    /// parked there, one cell past the text it just drew.
     ///
     /// A message area exists only where `ext_messages` is not attached, and
     /// nvim announces it (`msg_set_pos`) at every such startup whether or
@@ -454,22 +453,25 @@ impl GridRegistry {
     /// the cells are what answers. Text alone is not enough either: with
     /// `laststatus` at 0 the ruler lives in that same area, and a startup
     /// that forces its own redraws puts it there at every flush. What tells
-    /// a prompt from a ruler is the cursor, which nvim parks in every
-    /// prompt it draws and leaves in the buffer otherwise. A
-    /// `vim.fn.input()` on a session that externalized neither the cmdline
-    /// nor the messages arrives this way and no other.
+    /// a prompt from anything else is where the cursor sits relative to the
+    /// text: nvim parks a prompt's cursor on the blank cell after the
+    /// prompt, and leaves the buffer's at the top-left corner while sourcing
+    /// -- on the first character, or on a leading blank with nothing to its
+    /// left. A `vim.fn.input()` on a session that externalized neither the
+    /// cmdline nor the messages arrives this way and no other.
     ///
     /// Without `ext_multigrid` there is no message grid to place. nvim
     /// composites its message area into the bottom of the global grid and
     /// names neither that area nor `cmdheight` on the wire (`option_set`
-    /// carries no such option), so the cursor's own row stands in for it,
-    /// and the rows beneath must be blank: a prompt sits at the top of the
-    /// cmdline area with nothing under it, while a buffer line under the
-    /// cursor (which nvim leaves at the top while sourcing) has more of the
-    /// buffer below.
+    /// carries no such option), so the same reading is taken off the global
+    /// grid's cursor: no row of that grid is the message area, but the
+    /// cursor sitting just past text is a prompt wherever it is, and a
+    /// buffer -- the last row reached with `cmdheight` 0, blank end-of-
+    /// buffer rows under a one-line file, a first line that opens with
+    /// whitespace -- never puts it there.
     ///
-    /// Read once per withheld flush; scans the cursor's row and stops at
-    /// the first non-blank row below it.
+    /// Read once per withheld flush; costs the cells of the cursor's row up
+    /// to the cursor.
     #[must_use]
     pub fn message_area_has_text(&self) -> bool {
         let grid = if self.slots.is_empty() {
@@ -493,10 +495,12 @@ impl GridRegistry {
             };
             grid
         };
-        let row = grid.cursor().0;
-        !grid.row_text(row).trim().is_empty()
-            && (row.saturating_add(1)..grid.size().1)
-                .all(|below| grid.row_text(below).trim().is_empty())
+        let (row, col) = grid.cursor();
+        let blank = |c: u16| {
+            grid.cell(row, c)
+                .is_none_or(|cell| cell.text.trim().is_empty())
+        };
+        blank(col) && (0..col).any(|c| !blank(c))
     }
 
     /// The grid the global screen coordinates fall inside, topmost pane

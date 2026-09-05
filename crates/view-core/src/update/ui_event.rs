@@ -173,12 +173,12 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::Flush => {
             model.dirty = true;
             // a startup that has parked the cursor in nvim's own message
-            // area with text under it is prompting the user out of the grid
+            // area just past the text it drew is prompting the user out of the grid
             // -- the one place a prompt lands on a session that externalized
             // neither the cmdline nor the messages -- so the hold ends here
             // rather than hiding it. Costs the two bools `withholds_grid`
-            // reads on every flush after the hold is over, and the row scan
-            // only under it.
+            // reads on every flush after the hold is over, and the cursor
+            // row's cells only under it.
             if model.withholds_grid() && model.engine.grids().message_area_has_text() {
                 model.note_startup_needs_screen();
             }
