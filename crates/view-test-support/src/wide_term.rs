@@ -25,6 +25,8 @@
 //! than East Asian ambiguity stay written out, because no table answers
 //! them.
 
+use unicode_properties::emoji::is_regional_indicator;
+use unicode_properties::UnicodeEmoji;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// The second half of a glyph the model drew two columns wide.
@@ -115,9 +117,10 @@ impl WideTerm {
     /// East_Asian_Width = Ambiguous -- box drawing, block elements,
     /// geometric shapes, the private-use planes a nerd font fills, and
     /// every ambiguous letter and sign besides -- read off `unicode-width`'s
-    /// two rulers rather than a hand-written range, plus the two classes
-    /// ambiguity does not answer for: pictographs whose default
-    /// presentation is text, and regional indicators.
+    /// two rulers rather than a hand-written range, plus the classes
+    /// ambiguity does not answer for, read off the properties that do:
+    /// Emoji, whose text-presentation members are Neutral to both rulers,
+    /// and Regional_Indicator.
     #[must_use]
     pub fn widens(symbol: &str) -> bool {
         symbol
@@ -327,12 +330,20 @@ fn cell_width(symbol: &str) -> usize {
 /// Whether a terminal may draw `c` two columns wide for a reason East Asian
 /// ambiguity does not carry.
 ///
-/// Both members are `Neutral`, so neither ruler in [`WideTerm::widens`]
-/// reaches them; a terminal draws them wide because it draws the emoji
-/// presentation of a pictograph, and because a regional-indicator pair is
-/// one flag.
+/// Read off the Emoji and Regional_Indicator properties. Dozens of
+/// pictographs whose default presentation is text -- U+2328 KEYBOARD,
+/// U+23F8 PAUSE, U+1F5A5 DESKTOP COMPUTER -- are `Neutral`, so neither
+/// ruler in [`WideTerm::widens`] reaches them, and a terminal that draws
+/// their emoji presentation gives them two columns; a regional-indicator
+/// pair is one flag for the same reason and by the same means. A range
+/// written out by hand instead named two of them and left the rest of the
+/// property unmodelled.
+///
+/// Above ASCII, because `#`, `*` and the ten digits are `Emoji=Yes` -- they
+/// are the bases of the keycap sequences -- and no terminal draws a digit
+/// two columns wide for standing next to U+20E3.
 fn widens_unambiguously(c: char) -> bool {
-    matches!(c as u32, 0x270f | 0x2712 | 0x1f1e6..=0x1f1ff)
+    c as u32 >= 0x80 && (c.is_emoji_char() || is_regional_indicator(c))
 }
 
 /// Cells where a widening terminal shows something other than what a narrow
@@ -485,34 +496,33 @@ mod tests {
         assert_eq!(into_half.cell(1, 0), "x");
     }
 
-    /// The two classes written out are written out because no ruler answers
-    /// them; one that ambiguity already reaches would be a range widening
-    /// on its own terms, which is how a hand-written table comes to widen a
-    /// code point Unicode calls Neutral.
+    /// A terminal draws a glyph two columns wide because Unicode says the
+    /// width is ambiguous or because it draws the glyph as emoji; no other
+    /// answer belongs in the model, and a range written out by hand instead
+    /// of a property is how it came to widen a code point Unicode calls
+    /// Neutral.
     #[test]
-    fn every_glyph_written_out_by_hand_is_one_no_ruler_reaches() {
-        for cp in (0x270f..=0x2712).chain(0x1f1e6..=0x1f1ff) {
+    fn the_model_widens_exactly_what_the_properties_say_it_may() {
+        for cp in 0x80..=0x1_faff_u32 {
             let Some(c) = char::from_u32(cp) else {
                 continue;
             };
-            if widens_unambiguously(c) {
-                assert_eq!(
-                    c.width(),
-                    c.width_cjk(),
-                    "U+{cp:04X} is East Asian Ambiguous, so the rulers \
-                     already widen it"
-                );
-            }
             assert_eq!(
                 WideTerm::widens(&c.to_string()),
-                widens_unambiguously(c) || c.width() != c.width_cjk(),
+                c.width() != c.width_cjk() || c.is_emoji_char() || is_regional_indicator(c),
                 "U+{cp:04X}"
             );
         }
 
-        // the block the hand-written range got wrong: two Neutral code
-        // points inside a run of ambiguous ones, which no terminal draws
-        // two columns wide
+        // the keycap bases, which carry the Emoji property and none of the
+        // width a terminal gives a glyph drawn as emoji
+        for c in "#*0123456789".chars() {
+            assert!(!WideTerm::widens(&c.to_string()), "{c:?}");
+        }
+
+        // the two the hand-written block-elements range got wrong: Neutral
+        // code points inside a run of ambiguous ones, which no terminal
+        // draws two columns wide
         for cp in [0x2590_u32, 0x2591] {
             let c = char::from_u32(cp).unwrap();
             assert!(
@@ -520,6 +530,13 @@ mod tests {
                 "U+{cp:04X} is Neutral and the model widened it, which \
                  invents a second half no painter can repaint"
             );
+        }
+        // and the class a hand-written pair reached two of: every one of
+        // these is Neutral to both rulers and drawn wide as emoji
+        for cp in [0x2328_u32, 0x23f8, 0x261d, 0x270f, 0x1f321, 0x1f5a5] {
+            let c = char::from_u32(cp).unwrap();
+            assert_eq!(c.width(), c.width_cjk(), "U+{cp:04X}");
+            assert!(WideTerm::widens(&c.to_string()), "U+{cp:04X}");
         }
         for cp in [0x2500_u32, 0x2502, 0x2588, 0x2592, 0x25a0, 0xe0b0, 0xf0219] {
             let c = char::from_u32(cp).unwrap();

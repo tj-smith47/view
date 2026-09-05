@@ -2809,6 +2809,7 @@ dependencies = [
 name = "view-test-support"
 version = "0.0.1"
 dependencies = [
+ "unicode-properties",
  "unicode-width",
 ]
 

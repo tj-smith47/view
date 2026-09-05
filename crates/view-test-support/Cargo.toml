@@ -23,3 +23,14 @@ workspace = true
 # and an external table crate introduces no edge into the direction the
 # audit enforces.
 unicode-width = "0.2.2"
+
+# The Emoji property the same terminal model reads for the class East Asian
+# ambiguity does not answer: a pictograph whose default presentation is text
+# is Neutral, so both width rulers call it one column and only this table
+# says a terminal may draw it as emoji. Already resolved in this workspace
+# (view-tui reads the same table for the same question), external, so it
+# introduces no edge into the direction the audit enforces. Default features
+# off: `general-category` duplicates tables `unicode-width` already ships.
+unicode-properties = { version = "0.1.4", default-features = false, features = [
+    "emoji",
+] }
