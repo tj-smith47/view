@@ -179,6 +179,25 @@ pub fn xdg_home(home: &Path, var: &str) -> PathBuf {
     home.join(var.to_lowercase())
 }
 
+/// Copies the committed nvim configuration `fixture` names into `home`'s
+/// isolated config directory, so the session started against that home
+/// sources it and nothing of the operator's own.
+///
+/// A committed fixture rather than a config written here: what a test
+/// spawns has to be readable beside the assertion it exists for, and a
+/// startup config is the whole subject of the tests that plant one.
+pub fn plant_nvim_config(home: &Path, fixture: &str) {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(fixture)
+        .join("nvim")
+        .join("init.lua");
+    let dir = xdg_home(home, "XDG_CONFIG_HOME").join("nvim");
+    std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
+    std::fs::copy(&source, dir.join("init.lua")).expect("the committed fixture must be readable");
+}
+
 /// Writes a `view.toml` under `home` that switches every native feature
 /// off.
 ///
