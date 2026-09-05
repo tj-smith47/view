@@ -109,6 +109,7 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
         HoldOutcome::Release
     };
     model.dirty |= model.engine.messages.resolve_startup_hold(outcome);
+    effects.extend(classify_probe_holds(model));
     effects
 }
 
@@ -235,6 +236,11 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 /// anything outside that window -- is classified in the same arithmetic
 /// and paints on the frame it arrived for.
 ///
+/// A claimant is suspected as well as known: while the probe armed at the
+/// attach is unanswered the middle term cannot be evaluated at all, so the
+/// float is held on the same terms and [`classify_probe_holds`] runs the
+/// judgment over it when the reply lands.
+///
 /// The cost, stated: one round trip of delay for a benign float that lands
 /// in the message area's corner while a claimant of that surface is known,
 /// and nothing at all for every other float. The paint loop waits on none
@@ -269,12 +275,20 @@ pub(super) fn on_float_placed(
     if surface != Surface::Messages || !surfaces::view_draws(surface, model) {
         return Vec::new();
     }
-    if !model.surface_conflicts.covers(surface, None) {
-        return Vec::new();
-    }
     if !model.surface_conflicts.startup_window_open()
         && !model.surface_conflicts.within_complaint_grace()
     {
+        return Vec::new();
+    }
+    if !model.surface_conflicts.covers(surface, None) {
+        // the suspected half: until the probe answers, "no claimant is
+        // known" and "no claimant is loaded" are the same answer, and a
+        // plugin whose timer fires at a fixed offset from `VimEnter` can
+        // beat the probe's round trip over a slow link. Held on the same
+        // terms and classified by the reply
+        if model.surface_conflicts.hold_for_probe(win, grid) {
+            model.dirty |= model.engine.withhold_float(grid, true);
+        }
         return Vec::new();
     }
     if !model.surface_conflicts.claim_complaint(win, Some(grid)) {
@@ -282,6 +296,32 @@ pub(super) fn on_float_placed(
     }
     model.dirty |= model.engine.withhold_float(grid, true);
     vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win })]
+}
+
+/// Puts every float the unanswered probe held off the screen through the
+/// classification a known claimant's float takes at its placement, now
+/// that the reply has named who is loaded: over a surface a named claimant
+/// took, the rows are asked for and the window is taken; otherwise it goes
+/// back to the screen on the next frame.
+///
+/// The cost, stated: a benign float opened inside the probe's own round
+/// trip waits for the reply before it paints. Nothing else changes -- a
+/// float placed after the reply is judged by the cover alone, as before.
+fn classify_probe_holds(model: &mut Model) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for (win, grid) in model.surface_conflicts.answer_probe() {
+        let taken = surfaces::view_draws(Surface::Messages, model)
+            && model.surface_conflicts.covers(Surface::Messages, None)
+            && (model.surface_conflicts.startup_window_open()
+                || model.surface_conflicts.within_complaint_grace())
+            && model.surface_conflicts.claim_complaint(win, Some(grid));
+        if taken {
+            effects.push(Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win }));
+        } else {
+            model.dirty |= model.engine.withhold_float(grid, false);
+        }
+    }
+    effects
 }
 
 /// Starts the take-down of one float a named claimant's notice already
@@ -2633,6 +2673,82 @@ mod tests {
         }
     }
 
+    /// The suspected half of the ruling: before the probe answers, "no
+    /// claimant is known" and "no claimant is loaded" are the same answer,
+    /// and a plugin whose timer fires at a fixed offset from `VimEnter` can
+    /// beat the probe's round trip. So the float waits, off the screen.
+    #[test]
+    fn a_float_placed_before_the_probe_answers_is_withheld() {
+        let mut model = captured_session();
+        let placed = place_float(&mut model, 7, 1008, 50);
+        assert!(
+            placed.is_empty(),
+            "nothing is asked of a window nobody has been named for yet: {placed:?}"
+        );
+        assert!(
+            !painted(&model, 7),
+            "and it is off the screen for the frame the placement arrived for"
+        );
+    }
+
+    /// And the reply is what judges it, on the terms a placement after the
+    /// reply is judged on: taken when a claimant of the surface loaded,
+    /// handed back when none did.
+    #[test]
+    fn the_probe_reply_takes_a_held_float_or_gives_it_back() {
+        let mut claimed = captured_session();
+        let _ = place_float(&mut claimed, 7, 1008, 50);
+        let answered = update(
+            &mut claimed,
+            Msg::ClaimantsProbed(vec!["noice".to_string()]),
+        );
+        assert!(
+            answered.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::ReadFloatRows { win }) if *win == 1008
+            )),
+            "the reply asks the held float for its rows: {answered:?}"
+        );
+        assert!(!painted(&claimed, 7), "and goes on holding it");
+
+        let mut benign = captured_session();
+        let _ = place_float(&mut benign, 7, 1008, 50);
+        let answered = update(&mut benign, Msg::ClaimantsProbed(Vec::new()));
+        assert!(
+            !answered
+                .iter()
+                .any(|effect| matches!(effect, Effect::Rpc(RpcCall::ReadFloatRows { .. }))),
+            "a reply naming nobody takes nothing: {answered:?}"
+        );
+        assert!(
+            painted(&benign, 7),
+            "and the window paints from the next frame"
+        );
+    }
+
+    /// The restart arms a probe of its own, so the replacement is back
+    /// inside the window where a float over a native surface waits: the
+    /// same placement that painted under the answered probe is held again.
+    #[test]
+    fn a_restart_restores_the_hold_until_the_new_probe_answers() {
+        let mut model = captured_session();
+        probe(&mut model, &[]);
+        let _ = place_float(&mut model, 7, 1008, 50);
+        assert!(
+            painted(&model, 7),
+            "an answered probe naming nobody holds nothing back"
+        );
+
+        model.forget_engine_conflicts();
+        let _ = place_float(&mut model, 9, 1010, 50);
+        assert!(
+            !painted(&model, 9),
+            "and the replacement's own probe is unanswered again"
+        );
+        probe(&mut model, &[]);
+        assert!(painted(&model, 9), "until it answers");
+    }
+
     /// The close and the plugin's own next animation step race by
     /// construction -- view cannot hold a window against its owner -- so a
     /// step landing after the take is answered the way a vanished window
@@ -2705,6 +2821,14 @@ mod tests {
             !stacked.first().is_some_and(String::is_empty),
             "and without the blank rows the window padded it with: {stacked:?}"
         );
+        assert!(
+            on_screen(&model)
+                .iter()
+                .any(|line| line.contains("Plugin Updates")),
+            "and on the toast stack, which is where the window it replaces \
+             was: {:?}",
+            on_screen(&model)
+        );
 
         let _ = place_float(&mut model, 8, 1009, 50);
         let _ = update(
@@ -2735,6 +2859,27 @@ mod tests {
                 .any(|line| line.contains("Noice can't work")),
             "nothing is discarded: it is in the history"
         );
+        assert!(
+            !on_screen(&model)
+                .iter()
+                .any(|line| line.contains("Noice can't work")),
+            "and takes no toast slot: the notice standing above it already \
+             says what it says: {:?}",
+            on_screen(&model)
+        );
+    }
+
+    /// The toast stack as a user reads it, which is what parts a
+    /// notification from a complaint: one takes a slot on the screen, the
+    /// other only a line in the history.
+    fn on_screen(model: &Model) -> Vec<String> {
+        model
+            .engine
+            .messages
+            .visible_lines(40)
+            .into_iter()
+            .map(|spans| spans.into_iter().map(|span| span.text).collect())
+            .collect()
     }
 
     #[test]

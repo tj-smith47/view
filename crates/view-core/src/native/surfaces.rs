@@ -591,6 +591,22 @@ pub struct SurfaceConflicts {
     /// opened over the message area -- `:Noice` output being the realistic
     /// case -- is left standing.
     complaint_grace: bool,
+    /// Whether the claimant probe armed at the attach has answered yet.
+    ///
+    /// Before it does, view knows nothing about which plugins are loaded,
+    /// so a float landing on a surface view draws cannot be told from a
+    /// superseded claimant's -- and the probe's own round trip is short
+    /// enough that the answer is worth waiting for and long enough that a
+    /// plugin timer firing at a fixed offset from `VimEnter` can beat it
+    /// (69 ms of margin measured over a remote link). A float placed while
+    /// this is false is held in `probe_holds` and classified by the reply.
+    probe_answered: bool,
+    /// The floats held off the screen only because the probe had not
+    /// answered when they were placed, and the grid each draws into.
+    /// Drained by [`SurfaceConflicts::answer_probe`], which is what puts
+    /// them through the classification a known claimant's float takes at
+    /// its placement.
+    probe_holds: Vec<(u64, crate::grid::registry::GridId)>,
     /// Which engine the deadlines armed this session belong to. A timer
     /// thread sleeping on a dead engine's behalf still wakes, and the
     /// expiry it sends names this value as it was when the deadline was
@@ -826,6 +842,31 @@ impl SurfaceConflicts {
         complaint.grid
     }
 
+    /// Holds `win`'s float off the screen because the claimant probe has
+    /// not answered, and answers whether it is now held.
+    ///
+    /// `false` once the probe has answered: from then on the cover the
+    /// reply recorded is the whole test, and a float this says `false`
+    /// about paints on the frame it arrived for.
+    pub fn hold_for_probe(&mut self, win: u64, grid: crate::grid::registry::GridId) -> bool {
+        if self.probe_answered {
+            return false;
+        }
+        match self.probe_holds.iter_mut().find(|held| held.0 == win) {
+            // a plugin animating its window sends a placement per step
+            Some(held) => held.1 = grid,
+            None => self.probe_holds.push((win, grid)),
+        }
+        true
+    }
+
+    /// Marks the probe answered and hands back every float held for it, for
+    /// the caller to classify now that the claimants are named.
+    pub fn answer_probe(&mut self) -> Vec<(u64, crate::grid::registry::GridId)> {
+        self.probe_answered = true;
+        std::mem::take(&mut self.probe_holds)
+    }
+
     /// Whether `win`'s rows were read for the notification history rather
     /// than for the palette, which is what parts one `Msg::FloatRows` reply
     /// from the other.
@@ -929,6 +970,7 @@ impl SurfaceConflicts {
     /// | `complaints` | window handles, and a fresh process issues them from 1000 again: a handle held past the death names one of the replacement's own windows, and the reply to a read of it would file a live window's rows into the history and close it |
     /// | `typed` | the replacement sources the config again, so its own claimants raise their complaints again, and a session that had been typed at would leave them stacked beside the re-raised notice |
     /// | `complaint_grace` | a deadline armed against the dead engine's probe reply, and the replacement's own reply arms its own |
+    /// | `probe_answered`, `probe_holds` | the attach arms a claimant probe per engine, so the replacement is back inside the window where a float over a native surface is held until its own reply names who is loaded; the held handles belong to the dead process |
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config loads the same plugins -- forgetting it would raise a second notice per plugin for one conflict |
     /// | `covers` | kept: the surfaces a standing notice accounts for, which the replacement's notice accounts for identically |
@@ -936,6 +978,8 @@ impl SurfaceConflicts {
         self.complaints.clear();
         self.typed = false;
         self.complaint_grace = false;
+        self.probe_answered = false;
+        self.probe_holds.clear();
         self.generation += 1;
     }
 
