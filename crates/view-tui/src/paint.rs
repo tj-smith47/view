@@ -4427,6 +4427,44 @@ mod tests {
         );
     }
 
+    /// The shape the reach walk exists for: a box-drawing glyph a terminal
+    /// may draw two columns wide replaced by a space, with an unchanged
+    /// ASCII neighbour behind it. The neighbour is not in the diff and is
+    /// repainted anyway, because a terminal that widened the old glyph
+    /// covered it -- and a frame whose emission is partly reach still owes
+    /// the terminal the address of its first cell and the trailing reset.
+    ///
+    /// Disconfirm: forcing `widened` false in `with_widened_neighbours`
+    /// leaves the first frame `ESC[1;3H` + space + trailer -- the neighbour
+    /// unrepainted, which is the byte-for-byte second frame.
+    #[test]
+    fn a_reach_repaint_carries_the_address_and_the_trailer() {
+        let area = ratatui::layout::Rect::new(0, 0, 6, 1);
+        let mut front = Buffer::empty(area);
+        let mut back = Buffer::empty(area);
+        front[(2, 0)].set_symbol("\u{2502}");
+        front[(3, 0)].set_symbol("b");
+        back[(2, 0)].set_symbol(" ");
+        back[(3, 0)].set_symbol("b");
+
+        assert_eq!(
+            resynced_bytes(&front, &back),
+            b"\x1b[1;3H b\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+            "the reached neighbour is repainted after the changed cell, and \
+             the frame is addressed once and reset once"
+        );
+
+        // the same frame with an ASCII bar in place of the box-drawing one:
+        // nothing widens, so the neighbour is left alone
+        front[(2, 0)].set_symbol("|");
+        assert_eq!(
+            resynced_bytes(&front, &back),
+            b"\x1b[1;3H \x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+            "a frame with no widening glyph repaints only what changed, and \
+             still owes its address and its reset"
+        );
+    }
+
     /// Every printable run in `bytes`, each paired with whether a CSI `H`
     /// (absolute cursor address) was written since the previous one.
     fn printed_runs(bytes: &[u8]) -> Vec<(String, bool)> {
