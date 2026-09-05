@@ -10,15 +10,22 @@
 //! nerd font. Replaying one recording through both and comparing the two
 //! screens ([`widening_residue`]) is the residue a user photographs.
 //!
-//! The code-point table here is written out rather than read from
-//! `view_tui::paint::emit::terminal_may_widen`: a model that asked the
-//! predicate under test what to do would agree with it however the
-//! predicate changed, and a class dropped from it would leave every
-//! assertion passing. The independence is also what keeps this crate a
-//! leaf -- a fixture crate that depended on `view-tui` could not be a
-//! dev-dependency of `view-tui`.
+//! What widens is read from the painter's own question -- never from the
+//! painter: a model that asked `view_tui::paint::emit::terminal_may_widen`
+//! what to do would agree with it however that predicate changed, and a
+//! class dropped from it would leave every assertion passing, quite apart
+//! from a fixture crate that depended on `view-tui` being unable to be a
+//! dev-dependency of `view-tui`. The East Asian half comes from
+//! `unicode-width`'s own tables instead, because a range written out by
+//! hand is a claim about Unicode that goes wrong silently: the block
+//! elements written as `2580..=259f` widened U+2590 and U+2591, which
+//! Unicode calls Neutral and no terminal draws two columns wide, and the
+//! second half the model invented for one of them read as residue no
+//! painter could have repainted. The classes that widen for a reason other
+//! than East Asian ambiguity stay written out, because no table answers
+//! them.
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// The second half of a glyph the model drew two columns wide.
 ///
@@ -45,12 +52,17 @@ pub enum Widening {
 /// designators -- is consumed without touching a cell, which is what a
 /// screen comparison needs it to do.
 ///
-/// Assumes a terminal that leaves the left glyph standing when something
-/// narrow is written into its second half; an xterm-family terminal erases
-/// both halves instead. Nothing in this tree proves which Termius does --
-/// the grounds for the assumption are that nvim writes the same sequence
-/// and is clean on that device, so a device capture that disagreed would
-/// show a vanished icon rather than a shifted row.
+/// A glyph written over one the model drew two columns wide takes the
+/// second half with it: a terminal owns the cell pair, so the half of a
+/// glyph whose owner is gone cannot still be shown. The other direction --
+/// a write into the second half while the glyph itself stands -- leaves the
+/// glyph, which is charitable next to an xterm-family terminal that erases
+/// both halves, and is the only assumption under which a residue-free frame
+/// is reachable at all: an editor that believes a glyph one column wide
+/// writes the next cell into the second half of every such glyph it draws,
+/// so a model erasing the left half reports the pinned nvim's own recording
+/// of a window split as 120 residue cells and holds a painter to a bar its
+/// reference does not meet.
 pub struct WideTerm {
     grid: Vec<Vec<String>>,
     cols: u16,
@@ -100,20 +112,17 @@ impl WideTerm {
 
     /// Whether a widening terminal draws `symbol` two columns wide.
     ///
-    /// Read off the code point, so the answer is independent of whatever a
-    /// painter believes about the same glyph.
+    /// East_Asian_Width = Ambiguous -- box drawing, block elements,
+    /// geometric shapes, the private-use planes a nerd font fills, and
+    /// every ambiguous letter and sign besides -- read off `unicode-width`'s
+    /// two rulers rather than a hand-written range, plus the two classes
+    /// ambiguity does not answer for: pictographs whose default
+    /// presentation is text, and regional indicators.
     #[must_use]
     pub fn widens(symbol: &str) -> bool {
-        symbol.chars().any(|c| {
-            matches!(c as u32,
-                0x2500..=0x257f      // box drawing
-                | 0x2580..=0x259f    // block elements
-                | 0x25a0..=0x25ff    // geometric shapes
-                | 0x270f | 0x2712    // pictographs with text presentation
-                | 0x1f1e6..=0x1f1ff  // regional indicators
-                | 0xe000..=0xf8ff    // private use
-                | 0xf0000..=0xffffd) // supplementary private use
-        })
+        symbol
+            .chars()
+            .any(|c| c.width() != c.width_cjk() || widens_unambiguously(c))
     }
 
     /// Feeds `bytes` -- a recording of what a child wrote to its terminal
@@ -230,6 +239,7 @@ impl WideTerm {
             2 => (0, usize::from(self.cols)),
             _ => (self.x, usize::from(self.cols)),
         };
+        self.blank_orphaned_half(to);
         if let Some(row) = self.grid.get_mut(self.y) {
             for cell in row.iter_mut().take(to).skip(from) {
                 " ".clone_into(cell);
@@ -264,6 +274,8 @@ impl WideTerm {
         } else {
             cell_width(&symbol).max(1)
         };
+        let past = self.x.saturating_add(columns);
+        self.blank_orphaned_half(past);
         if let Some(row) = self.grid.get_mut(self.y) {
             if let Some(cell) = row.get_mut(self.x) {
                 *cell = symbol;
@@ -274,7 +286,26 @@ impl WideTerm {
                 }
             }
         }
-        self.x = self.x.saturating_add(columns);
+        self.x = past;
+    }
+
+    /// Blanks the trailing halves a write ending at `past` orphaned: the
+    /// glyph that owned them sat inside the write and is gone.
+    ///
+    /// Only the column at `past` can hold such a half -- one inside the
+    /// write is overwritten by the write itself, and one before it still
+    /// has its owner.
+    fn blank_orphaned_half(&mut self, past: usize) {
+        let Some(row) = self.grid.get_mut(self.y) else {
+            return;
+        };
+        let mut at = past;
+        while row.get(at).is_some_and(|cell| cell == WIDE_HALF) {
+            if let Some(cell) = row.get_mut(at) {
+                " ".clone_into(cell);
+            }
+            at = at.saturating_add(1);
+        }
     }
 }
 
@@ -291,6 +322,17 @@ fn cell_width(symbol: &str) -> usize {
         .filter(|c| matches!(c, '\u{ff9e}' | '\u{ff9f}'))
         .count();
     symbol.width().saturating_add(marks)
+}
+
+/// Whether a terminal may draw `c` two columns wide for a reason East Asian
+/// ambiguity does not carry.
+///
+/// Both members are `Neutral`, so neither ruler in [`WideTerm::widens`]
+/// reaches them; a terminal draws them wide because it draws the emoji
+/// presentation of a pictograph, and because a regional-indicator pair is
+/// one flag.
+fn widens_unambiguously(c: char) -> bool {
+    matches!(c as u32, 0x270f | 0x2712 | 0x1f1e6..=0x1f1ff)
 }
 
 /// Cells where a widening terminal shows something other than what a narrow
@@ -389,11 +431,11 @@ mod tests {
         assert_eq!(
             residue,
             vec![
-                (1, 0, "\u{2502}".to_string(), WIDE_HALF.to_string()),
+                (1, 0, "\u{2502}".to_string(), " ".to_string()),
                 (4, 0, " ".to_string(), "\u{2502}".to_string()),
             ],
-            "the residue must name the half the repaint left standing and \
-             the run's tail that never moved back"
+            "the residue must name the column the overwritten glyph left \
+             blank and the run's tail that never moved back"
         );
 
         // the same run addressed cell by cell, which is what a painter that
@@ -407,6 +449,82 @@ mod tests {
             .is_empty(),
             "the second half under each widened glyph is not residue"
         );
+    }
+
+    #[test]
+    fn a_glyph_written_over_a_widened_one_takes_its_second_half_with_it() {
+        let over_ambiguous = fed(Widening::Ambiguous, "\u{1b}[1;1H\u{2502}\u{1b}[1;1Hx");
+        assert_eq!(over_ambiguous.cell(0, 0), "x");
+        assert_eq!(
+            over_ambiguous.cell(1, 0),
+            " ",
+            "the half of a glyph that is gone was left standing"
+        );
+
+        // the same for a glyph wide by its own unicode width, which every
+        // model draws two columns wide
+        let over_cjk = fed(Widening::Narrow, "\u{1b}[1;1H\u{6f22}\u{1b}[1;1Hx");
+        assert_eq!(over_cjk.cell(0, 0), "x");
+        assert_eq!(over_cjk.cell(1, 0), " ");
+
+        // an erase is a write like any other, so it orphans a half the same
+        // way: erasing up to and including the column a widened glyph sits
+        // in leaves nothing of it behind
+        let erased = fed(
+            Widening::Ambiguous,
+            "\u{1b}[1;3H\u{2502}\u{1b}[1;3H\u{1b}[1K",
+        );
+        assert_eq!(erased.cell(2, 0), " ");
+        assert_eq!(erased.cell(3, 0), " ");
+
+        // and the direction this model does not take: a write into the
+        // second half leaves the glyph standing, because an editor that
+        // sizes the glyph at one column writes there in every clean frame
+        let into_half = fed(Widening::Ambiguous, "\u{1b}[1;1H\u{2502}\u{1b}[1;2Hx");
+        assert_eq!(into_half.cell(0, 0), "\u{2502}");
+        assert_eq!(into_half.cell(1, 0), "x");
+    }
+
+    /// The two classes written out are written out because no ruler answers
+    /// them; one that ambiguity already reaches would be a range widening
+    /// on its own terms, which is how a hand-written table comes to widen a
+    /// code point Unicode calls Neutral.
+    #[test]
+    fn every_glyph_written_out_by_hand_is_one_no_ruler_reaches() {
+        for cp in (0x270f..=0x2712).chain(0x1f1e6..=0x1f1ff) {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            if widens_unambiguously(c) {
+                assert_eq!(
+                    c.width(),
+                    c.width_cjk(),
+                    "U+{cp:04X} is East Asian Ambiguous, so the rulers \
+                     already widen it"
+                );
+            }
+            assert_eq!(
+                WideTerm::widens(&c.to_string()),
+                widens_unambiguously(c) || c.width() != c.width_cjk(),
+                "U+{cp:04X}"
+            );
+        }
+
+        // the block the hand-written range got wrong: two Neutral code
+        // points inside a run of ambiguous ones, which no terminal draws
+        // two columns wide
+        for cp in [0x2590_u32, 0x2591] {
+            let c = char::from_u32(cp).unwrap();
+            assert!(
+                !WideTerm::widens(&c.to_string()),
+                "U+{cp:04X} is Neutral and the model widened it, which \
+                 invents a second half no painter can repaint"
+            );
+        }
+        for cp in [0x2500_u32, 0x2502, 0x2588, 0x2592, 0x25a0, 0xe0b0, 0xf0219] {
+            let c = char::from_u32(cp).unwrap();
+            assert!(WideTerm::widens(&c.to_string()), "U+{cp:04X}");
+        }
     }
 
     #[test]
