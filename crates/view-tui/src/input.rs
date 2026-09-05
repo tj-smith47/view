@@ -893,6 +893,15 @@ impl InputSource {
 /// input-path interval closes on the RPC the key turns into, so a tap for a
 /// byte run that decodes to no key at all would pair with the next
 /// keystroke's RPC and report an interval spanning two keys.
+#[cfg(unix)]
+fn emit(msg: Msg, sink: &mut impl FnMut(Msg)) {
+    #[cfg(all(unix, feature = "bench-taps"))]
+    if matches!(msg, Msg::Key(_)) {
+        crate::tap::tap(crate::tap::TAG_KEY_READ);
+    }
+    sink(msg);
+}
+
 /// When the bytes held from an unfinished read must be given up on, given
 /// the wait in force: [`InputSource::next_deadline`]'s whole decision, as a
 /// function of the two values it reads, because the source itself can only
@@ -905,15 +914,6 @@ fn escape_deadline(
     let within = within?;
     let (bytes, since) = pending?;
     crate::keys::forceable(bytes).then(|| *since + within)
-}
-
-#[cfg(unix)]
-fn emit(msg: Msg, sink: &mut impl FnMut(Msg)) {
-    #[cfg(all(unix, feature = "bench-taps"))]
-    if matches!(msg, Msg::Key(_)) {
-        crate::tap::tap(crate::tap::TAG_KEY_READ);
-    }
-    sink(msg);
 }
 
 /// Translates one crossterm event into the core [`Msg`] the runtime loop

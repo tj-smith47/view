@@ -110,7 +110,12 @@ fn markers_shown(session: &mut PtySession) -> Vec<&'static str> {
 /// written next, and the mapping is in place by the time the chord byte is
 /// read.
 fn install_mapping(session: &mut PtySession, notation: &str, marker: &str) {
-    let command = format!(":nnoremap {notation} :call setline(1,'{marker}')<CR>\r");
+    // the marker is written as two concatenated halves so the command line
+    // itself never spells it: nvim leaves the typed command on screen, and a
+    // screen carrying the marker has to be the buffer rather than the echo
+    // of the mapping that would write it
+    let (head, tail) = marker.split_at(marker.len() / 2);
+    let command = format!(":nnoremap {notation} :call setline(1,'{head}'.'{tail}')<CR>\r");
     session.send(command.as_bytes()).unwrap();
 }
 
