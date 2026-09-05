@@ -292,6 +292,89 @@ fn a_startup_prompt_reaches_the_terminal_before_the_holds_cap() {
     );
 }
 
+/// The buffer shape nearest to a prompt's, held: one line of text with
+/// nothing drawn beneath it (`cmdheight` and `laststatus` at 0, blank
+/// end-of-buffer fill) under the single-grid attach, where nvim composites
+/// its message area into the same grid the buffer is on. The row reads as
+/// a prompt would -- text on the cursor's row, blank rows below -- and only
+/// the cursor's own cell says otherwise: a buffer's sits on its first
+/// character while sourcing, a prompt's on the blank cell after the text.
+///
+/// The home is warmed by a first session before the one measured: a cold
+/// state directory makes view box its theme-cache notice over the top rows
+/// at this width, and the one row the fixture draws is the first, so a
+/// frame let through would be covered on the terminal and never reach the
+/// stream. The warmed session paints no notice and the row is bare.
+///
+/// Disconfirm: reading the cursor's row and the rows below it instead of
+/// the cursor's cell puts `ONLYLINE` into view's stream before the layout
+/// while nvim's stays clean.
+#[test]
+fn a_one_line_buffer_over_blank_rows_reaches_neither_editors_terminal() {
+    let view_paths = common::ScratchPaths::new("startup-eob-view");
+    let nvim_paths = common::ScratchPaths::new("startup-eob-nvim");
+    common::plant_nvim_config(&view_paths.isolated_home, "startup-eob");
+    common::plant_nvim_config(&nvim_paths.isolated_home, "startup-eob");
+    plant_native_off(
+        &view_paths.isolated_home,
+        &["notifications", "palette"],
+        true,
+    );
+    warm_the_home(&view_paths.isolated_home);
+
+    let mut under_test = view_session(&view_paths.isolated_home);
+    let mut reference = nvim_session(&nvim_paths.isolated_home);
+
+    let view_stream = until_the_split(&mut under_test, "view");
+    let nvim_stream = until_the_split(&mut reference, "nvim");
+
+    assert!(
+        !wrote(&nvim_stream, ONLY_LINE),
+        "nvim drew the one-line buffer before VimEnter, so it is not the \
+         reference this pin claims"
+    );
+    assert!(
+        !wrote(&view_stream, ONLY_LINE),
+        "view wrote the one-line buffer nvim never showed: a screen with the \
+         cursor on its first character was read as a prompt"
+    );
+}
+
+/// Runs one session under `home` to completion of its startup and out
+/// again, so the theme cache and the first-run record exist for the next.
+///
+/// The cache is written when the highlight probe confirms, which is
+/// ordered after the layout and not before it, so the session waits on the
+/// file rather than on the screen.
+fn warm_the_home(home: &std::path::Path) {
+    let mut session = view_session(home);
+    let _ = until_the_split(&mut session, "view (warming)");
+    let cache = common::xdg_home(home, "XDG_STATE_HOME").join("view");
+    let written = || {
+        std::fs::read_dir(&cache).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("theme-"))
+        })
+    };
+    let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
+    while !written() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        written(),
+        "the warming session never wrote a theme cache under {}",
+        cache.display()
+    );
+    session
+        .send(b"\x1b:qa!\r")
+        .expect("the warming pty accepts the quit");
+    let _ = session.wait_for_exit(view_test_support::host_deadline(BUDGET));
+}
+
+/// The one line the startup-eob fixture's buffer holds.
+const ONLY_LINE: &str = "ONLYLINE";
+
 /// The prompt the startup-prompt fixture draws.
 const PROMPT: &str = "PROMPTHERE:";
 
