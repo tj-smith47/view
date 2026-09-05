@@ -123,12 +123,12 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// name decodes into the key it is, through the same [`encode_key`] every
 /// keystroke after startup goes through.
 ///
-/// One they do not is consumed whole and typed as nothing, which is what
-/// crossterm's parser does with a sequence it cannot name: it drops the
-/// bytes it had accumulated and reads on from the one after them. Typing
-/// `<lt>0;24;10M` out of an SGR mouse report is nine keystrokes nobody
-/// pressed, and `h` out of `ESC [ h` is a `dd` waiting to happen; the keys
-/// behind the run are the user's in both readings and survive in both.
+/// One they do not is consumed whole and typed as nothing: the bytes it
+/// had accumulated are dropped and the read goes on from the one after
+/// them. Typing `<lt>0;24;10M` out of an SGR mouse report is nine
+/// keystrokes nobody pressed, and `h` out of `ESC [ h` is a `dd` waiting
+/// to happen; the keys behind the run are the user's either way and
+/// survive either way.
 ///
 /// A string sequence (`ESC P`, `ESC ]`, `ESC ^`, `ESC _`, `ESC X`) is a
 /// report too and is consumed through its terminator -- but only once the
@@ -140,14 +140,17 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// unknown, and the difference is a whole keystroke: dropped now, its tail
 /// arrives alone in the next read and types an arrow's `A` into the buffer.
 /// [`decode_residue`] reports the length of such a tail so a caller that
-/// can wait for the rest does; this entry point cannot and drops it.
+/// can wait for the rest does; this one has no read left to wait for and
+/// so reads it as the chord its bytes spell -- `<M-[>` for a run that
+/// stopped after its introducer, the same reading the engine's own timer
+/// arrives at. A bracketed paste is the exception, dropped rather than
+/// forced, because its payload would otherwise be typed as commands.
 ///
 /// `ESC` and one key in the same run are Alt and that key -- for a
 /// multi-byte character as much as for a printable ASCII one, and for a
 /// whole sequence as much as for a single byte, so `ESC ESC` is `<M-Esc>`
 /// and `ESC ESC [ A` is `<M-Up>`. A lone trailing `ESC` is the Escape key,
-/// forced here because the caller has already drained the fd to `EAGAIN`
-/// and no later read can turn it into a chord.
+/// which is what it becomes once nothing can arrive behind it.
 #[must_use]
 pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
     decode_residue_forced(residue)
