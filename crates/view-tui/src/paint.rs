@@ -439,10 +439,14 @@ impl Shadow {
     /// One `draw` call per frame either way, so the byte stream a run-clipped
     /// frame produces is the stream the unclipped diff would have produced.
     ///
+    /// Returns whether any cell reached the writer, which the caller needs to
+    /// decide what the rest of its frame owes the terminal (see
+    /// [`emit::draw_resynced`]).
+    ///
     /// # Errors
     ///
     /// Returns the writer's own error.
-    pub fn emit_updates<W: std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+    pub fn emit_updates<W: std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<bool> {
         let mut runs = std::mem::take(&mut self.runs);
         self.painted.row_runs(self.front.area, &mut runs);
         let result = if clipping_pays(&runs, self.front.area.height) {
@@ -474,7 +478,7 @@ impl Shadow {
         &mut self,
         writer: &mut W,
         runs: &[(u16, u16)],
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<bool> {
         let staged = StagedRuns::stage(self, runs);
         emit::draw_resynced(writer, staged.diffs())
     }
@@ -3952,7 +3956,7 @@ mod tests {
     /// The bytes `draw` puts on the wire, which is what a terminal ultimately
     /// receives: cursor moves included, so an update stream that visits the
     /// same cells in a different order is a mismatch here, not a pass.
-    fn drawn_bytes(draw: impl FnOnce(&mut ByteSink) -> std::io::Result<()>) -> Vec<u8> {
+    fn drawn_bytes<T>(draw: impl FnOnce(&mut ByteSink) -> std::io::Result<T>) -> Vec<u8> {
         let sink = ByteSink::default();
         let mut writer = sink.clone();
         draw(&mut writer).unwrap();

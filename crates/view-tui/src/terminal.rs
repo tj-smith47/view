@@ -483,6 +483,16 @@ pub struct Term {
     /// `view_core::model::Model::mouse_capture`, which names the surface
     /// that owns the gesture in flight once an event has arrived.
     last_mouse_reporting: Option<bool>,
+    /// Where the last frame left the real terminal's cursor, so a frame that
+    /// repainted no cell and wants it in the same place writes no CUP.
+    /// `None` before the first frame, matching `last_cursor_shape`'s
+    /// convention.
+    last_cursor: Option<(u16, u16)>,
+    /// Whether the terminal's cursor is currently shown, so the show and the
+    /// hide are each written once per change rather than once per frame.
+    /// `None` before the first frame: the terminal's own state is unknown
+    /// then, so the first frame states it either way.
+    cursor_shown: Option<bool>,
     /// The persistent double-buffered shadow of the terminal's cells. Each
     /// frame composites only its damaged rows into it, leaving every other
     /// cell as earlier frames painted it. This is what clips per-frame
@@ -539,6 +549,8 @@ impl Term {
             frame_buf,
             last_cursor_shape: None,
             last_mouse_reporting: None,
+            last_cursor: None,
+            cursor_shown: None,
             shadow: Shadow::new(),
             last_offset: None,
             caps,
@@ -675,24 +687,61 @@ impl Term {
     /// set (conservative by construction: `TermCaps::default()` keeps it
     /// false until capability detection lands).
     ///
-    /// The cursor's position is set every frame the cursor is visible
-    /// (cheap, and correctness-critical: a stale position is wrong the
-    /// instant the grid cursor moves), but its DECSCUSR shape escape is
-    /// only written when [`CursorShape`] actually changed since the last
-    /// frame, since re-emitting it unconditionally would be a needless
-    /// terminal write on every single paint.
-    ///
-    /// Terminal mouse capture (`EnableMouseCapture`/`DisableMouseCapture`)
-    /// tracks `model.engine.mouse_on` the same way: written once when it
-    /// changes, never unconditionally. Capture is off by default and only
-    /// turns on once nvim's own `redraw` stream reports `mouse_on`, so a
-    /// buffer with `'mouse'` unset never steals the host terminal's
+    /// Every escape here is written only when it says something the
+    /// terminal does not already show. The cursor's position is re-stated
+    /// when a cell was repainted (the emission left the terminal's own
+    /// cursor somewhere else) or when the position itself moved; its show
+    /// and its hide are each written on the change alone; its DECSCUSR
+    /// shape likewise; and terminal mouse capture
+    /// (`EnableMouseCapture`/`DisableMouseCapture`) tracks
+    /// `model.engine.mouse_on` the same way. Capture is off by default and
+    /// only turns on once nvim's own `redraw` stream reports `mouse_on`, so
+    /// a buffer with `'mouse'` unset never steals the host terminal's
     /// selection/scrollback gestures.
+    ///
+    /// A frame left with nothing to say writes nothing at all -- no
+    /// synchronization bracket, no syscall, no flush. nvim flushes a redraw
+    /// batch for input it did not act on (a wheel report at a buffer's end),
+    /// and each such batch was a packet the far terminal of an ssh session
+    /// had to parse and paint for a screen that did not change.
     ///
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
     pub fn draw_surface(
+        &mut self,
+        model: &Model,
+        surface: &Surface,
+        grid_damage: &GridDamage,
+    ) -> std::io::Result<()> {
+        self.queue_frame(model, surface, grid_damage)?;
+        // the frame's single real write: everything queued above -- mouse
+        // toggles, the sync bracket, the content diff, cursor escapes --
+        // reaches the terminal in one syscall, atomically from the pty
+        // reader's point of view. The tap here brackets exactly that write
+        // and flush against TAG_TERM_WRITTEN, isolating the pty write cost.
+        #[cfg(all(unix, feature = "bench-taps"))]
+        crate::tap::tap(crate::tap::TAG_FLUSH_START);
+        let mut frame = self.frame_buf.borrow_mut();
+        if !frame.is_empty() {
+            let mut out = std::io::stdout().lock();
+            out.write_all(&frame)?;
+            frame.clear();
+            out.flush()?;
+        }
+        drop(frame);
+        #[cfg(all(unix, feature = "bench-taps"))]
+        crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
+        Ok(())
+    }
+
+    /// Queues one frame's whole byte stream into `frame_buf`, leaving the
+    /// write to [`draw_surface`](Self::draw_surface).
+    ///
+    /// Split from it so the bytes a frame produces are provable against the
+    /// buffer rather than only against a live terminal, the same reason
+    /// [`restore_bytes`] and [`enter_bytes`] are generic over `Write`.
+    fn queue_frame(
         &mut self,
         model: &Model,
         surface: &Surface,
@@ -722,9 +771,15 @@ impl Term {
             }
             self.last_mouse_reporting = Some(model.engine.mouse_on);
         }
+        // the bracket is written ahead of the content it wraps and taken
+        // back below when the content turned out to be empty: the alternative
+        // -- inserting the opener afterwards -- would memmove the whole frame
+        // on every paint that does have something to say
+        let bracket_at = self.frame_buf.borrow().len();
         if model.caps.sync {
             sink.write_all(b"\x1b[?2026h")?;
         }
+        let content_at = self.frame_buf.borrow().len();
         // Translate this frame's grid damage into terminal-space rows,
         // unioned with the rows this frame's overlay stack draws
         // differently than the one on screen -- which covers the grid a
@@ -775,39 +830,43 @@ impl Term {
         crate::tap::tap(crate::tap::TAG_COMPOSED);
         // the frame's escapes join everything else already queued into the
         // shared frame buffer, so the whole frame still leaves in one write
-        self.shadow.emit_updates(&mut sink)?;
+        let painted_cells = self.shadow.emit_updates(&mut sink)?;
         self.shadow.commit();
         self.last_offset = Some(offset);
         match surface.cursor {
             Some(spec) => {
-                self.inner.set_cursor_position((spec.col, spec.row))?;
-                self.inner.show_cursor()?;
+                let at = (spec.col, spec.row);
+                // a repainted cell left the terminal's own cursor wherever
+                // the last printed glyph put it, so the position is owed
+                // again even when the model's cursor never moved
+                if painted_cells || self.last_cursor != Some(at) {
+                    self.inner.set_cursor_position(at)?;
+                    self.last_cursor = Some(at);
+                }
+                if self.cursor_shown != Some(true) {
+                    self.inner.show_cursor()?;
+                    self.cursor_shown = Some(true);
+                }
                 if self.last_cursor_shape != Some(spec.shape) {
                     write_cursor_shape(&mut sink, spec.shape)?;
                     self.last_cursor_shape = Some(spec.shape);
                 }
             }
-            None => self.inner.hide_cursor()?,
+            None => {
+                if self.cursor_shown != Some(false) {
+                    self.inner.hide_cursor()?;
+                    self.cursor_shown = Some(false);
+                }
+            }
         }
-        if model.caps.sync {
-            sink.write_all(b"\x1b[?2026l")?;
+        let mut frame = self.frame_buf.borrow_mut();
+        if frame.len() > content_at {
+            if model.caps.sync {
+                frame.extend_from_slice(b"\x1b[?2026l");
+            }
+        } else {
+            frame.truncate(bracket_at);
         }
-        // the frame's single real write: everything queued above -- mouse
-        // toggles, the sync bracket, the content diff, cursor escapes --
-        // reaches the terminal in one syscall, atomically from the pty
-        // reader's point of view. The tap here brackets exactly that write
-        // and flush against TAG_TERM_WRITTEN, isolating the pty write cost.
-        #[cfg(all(unix, feature = "bench-taps"))]
-        crate::tap::tap(crate::tap::TAG_FLUSH_START);
-        let mut out = std::io::stdout().lock();
-        {
-            let mut frame = self.frame_buf.borrow_mut();
-            out.write_all(&frame)?;
-            frame.clear();
-        }
-        out.flush()?;
-        #[cfg(all(unix, feature = "bench-taps"))]
-        crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         Ok(())
     }
 
@@ -865,6 +924,33 @@ impl Term {
     /// independent teardown path alongside the guard's own.
     pub fn restore_now(&mut self) {
         self.guard.restore_now();
+    }
+
+    /// A terminal whose frames stop at [`FrameBuf`], for the byte-level pins
+    /// on [`queue_frame`](Self::queue_frame).
+    ///
+    /// `ManuallyDrop` because the contained [`TerminalGuard`] restores
+    /// unconditionally, and this value entered no terminal to restore: a
+    /// drop here would write a teardown sequence to whatever the test
+    /// harness's stdout is and disable raw mode process-wide.
+    #[cfg(test)]
+    fn frame_probe(caps: TermCaps) -> std::mem::ManuallyDrop<Self> {
+        let frame_buf = Rc::new(RefCell::new(Vec::new()));
+        let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
+        std::mem::ManuallyDrop::new(Self {
+            guard: TerminalGuard,
+            inner,
+            frame_buf,
+            last_cursor_shape: None,
+            last_mouse_reporting: None,
+            last_cursor: None,
+            cursor_shown: None,
+            shadow: Shadow::new(),
+            last_offset: None,
+            caps,
+            caps_source: tiers::CapsSource::Assumed,
+            probe: None,
+        })
     }
 }
 
@@ -1164,8 +1250,6 @@ mod tests {
         assert_eq!(occurrences(&wire, KITTY_KBD_PUSH), 0);
     }
 
-    // Serves only the unix-gated enter/restore byte tests above.
-    #[cfg(unix)]
     fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
         haystack
             .windows(needle.len())
@@ -1194,6 +1278,205 @@ mod tests {
         buf.clear();
         write_cursor_shape(&mut buf, CursorShape::Vertical(25)).unwrap();
         assert_eq!(buf, b"\x1b[6 q", "vertical/bar is DECSCUSR 6");
+    }
+
+    /// The escapes a frame's own bytes are searched for. Each is what
+    /// crossterm emits for the command named beside it, restated here so a
+    /// pin reads as the wire rather than as a call.
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SGR_TRAILER: &[u8] = b"\x1b[39m\x1b[49m\x1b[59m\x1b[0m";
+    const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+    const SYNC_END: &[u8] = b"\x1b[?2026l";
+
+    /// The CUP a cursor at `(col, row)` is addressed with, one-based the way
+    /// `CSI H` counts.
+    fn cup(col: u16, row: u16) -> Vec<u8> {
+        format!("\x1b[{};{}H", row + 1, col + 1).into_bytes()
+    }
+
+    /// A model whose grid is painted and sized to the terminal, so a frame
+    /// composes real cells rather than the startup shell.
+    fn probe_model(caps: TermCaps) -> Model {
+        let mut model = Model::with_term_size(20, 4);
+        model.caps = caps;
+        model.engine.apply_grid(view_core::grid::GridOp::Resize {
+            width: 20,
+            height: 4,
+        });
+        model
+    }
+
+    /// The caret `render` places for `model`, moved to `(col, row)`.
+    ///
+    /// Taken from a rendered surface rather than built here: `CursorSpec` is
+    /// `#[non_exhaustive]`, so this crate cannot name its fields into
+    /// existence, and the shape a real frame carries is the one to move.
+    fn caret_at(model: &Model, col: u16, row: u16) -> Option<view_surface::CursorSpec> {
+        let mut spec = view_surface::render(model)
+            .cursor
+            .expect("a painted grid places a caret");
+        spec.col = col;
+        spec.row = row;
+        Some(spec)
+    }
+
+    /// The bytes `queue_frame` produced, taken out of the buffer the way
+    /// `draw_surface`'s own write does.
+    fn frame_bytes(
+        term: &mut Term,
+        model: &Model,
+        surface: &Surface,
+        damage: &GridDamage,
+    ) -> Vec<u8> {
+        term.queue_frame(model, surface, damage).unwrap();
+        std::mem::take(&mut *term.frame_buf.borrow_mut())
+    }
+
+    /// The whole point of the change: nvim flushes a redraw batch for input
+    /// it did not act on -- a wheel report at a buffer's end -- and a frame
+    /// composing the same cells at the same cursor must cost the terminal
+    /// nothing at all.
+    ///
+    /// Disconfirm: writing the SGR trailer unconditionally, or re-stating the
+    /// cursor position every frame, makes the second frame non-empty here.
+    #[test]
+    fn a_frame_that_repaints_nothing_and_moves_nothing_writes_no_bytes() {
+        let model = probe_model(TermCaps::default());
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+
+        let first = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        assert!(
+            !first.is_empty(),
+            "the first frame paints the whole grid, so it must reach the terminal"
+        );
+        let second = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert!(
+            second.is_empty(),
+            "an unchanged frame wrote {second:?} instead of nothing"
+        );
+    }
+
+    /// A cursor that moved with no cell repainted is one CUP and nothing
+    /// else: no trailer (no style was set), no show (it was already shown).
+    #[test]
+    fn a_cursor_only_move_writes_exactly_one_cursor_position() {
+        let model = probe_model(TermCaps::default());
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        surface.cursor = caret_at(&model, 5, 2);
+        let moved = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert_eq!(
+            moved,
+            cup(5, 2),
+            "a frame whose only news is where the caret sits owes the terminal \
+             one CUP and nothing else"
+        );
+    }
+
+    /// A frame that did repaint a cell owes the trailer once and the cursor
+    /// position again -- the emission left the terminal's own caret after the
+    /// last glyph it printed -- and still owes no show.
+    #[test]
+    fn a_repainted_cell_carries_one_trailer_and_restates_the_cursor() {
+        let mut model = probe_model(TermCaps::default());
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 7, 3);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        model.engine.apply_grid(view_core::grid::GridOp::PutLine {
+            row: 1,
+            col_start: 3,
+            cells: vec![("X".to_string(), 0, 1)],
+        });
+        let painted = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        assert_eq!(
+            occurrences(&painted, SGR_TRAILER),
+            1,
+            "the trailer resets what this frame's own styles set, so it is \
+             written once after the cells; frame: {painted:?}"
+        );
+        let caret = cup(7, 3);
+        assert_eq!(
+            occurrences(&painted, &caret),
+            1,
+            "the caret is re-addressed once, after the glyph the emission left \
+             the terminal's cursor behind; frame: {painted:?}"
+        );
+        assert!(
+            painted.ends_with(&caret),
+            "the caret's CUP is the frame's last word; frame: {painted:?}"
+        );
+        assert_eq!(
+            occurrences(&painted, SHOW_CURSOR),
+            0,
+            "the caret was already shown, so this frame states nothing about it"
+        );
+    }
+
+    /// Show and hide are each a change, not a per-frame restatement.
+    #[test]
+    fn the_caret_is_shown_once_when_it_comes_back() {
+        let model = probe_model(TermCaps::default());
+        let mut surface = view_surface::render(&model);
+        surface.cursor = None;
+        let mut term = Term::frame_probe(model.caps);
+
+        let hidden = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        assert_eq!(
+            occurrences(&hidden, HIDE_CURSOR),
+            1,
+            "a surface carrying no caret hides the terminal's"
+        );
+
+        surface.cursor = caret_at(&model, 1, 1);
+        let shown = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert_eq!(
+            occurrences(&shown, SHOW_CURSOR),
+            1,
+            "the caret coming back is one show; frame: {shown:?}"
+        );
+
+        let again = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert_eq!(
+            occurrences(&again, SHOW_CURSOR),
+            0,
+            "a caret that never left is shown no second time; frame: {again:?}"
+        );
+    }
+
+    /// The bracket wraps a frame's contents, so a frame with no contents
+    /// opens none: an empty synchronized update is two escapes the terminal
+    /// parses for nothing.
+    #[test]
+    fn an_empty_frame_opens_no_synchronization_bracket() {
+        let model = probe_model(TermCaps::from_probe(true, true, true));
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+
+        let first = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        assert_eq!(
+            (
+                occurrences(&first, SYNC_BEGIN),
+                occurrences(&first, SYNC_END)
+            ),
+            (1, 1),
+            "a frame with content is bracketed exactly once"
+        );
+
+        let second = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert!(
+            second.is_empty(),
+            "an unchanged frame at a synchronizing terminal wrote {second:?}"
+        );
     }
 
     #[test]

@@ -173,19 +173,26 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 /// first, so the column the terminal declines to cover is left blank rather
 /// than stale.
 ///
+/// Returns whether any cell reached the writer, which is also what decides
+/// the trailing reset: the reset undoes styles this call itself set, so a
+/// pass that printed nothing owes the terminal nothing -- and a frame whose
+/// every cell already matched what the terminal shows would otherwise cost
+/// a write of pure trailer.
+///
 /// # Errors
 ///
 /// Returns the writer's own error.
 pub(crate) fn draw_resynced<'a, W: Write>(
     writer: &mut W,
     content: impl Iterator<Item = (u16, u16, &'a Cell)>,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let mut fg = Color::Reset;
     let mut bg = Color::Reset;
     let mut underline_color = Color::Reset;
     let mut modifier = Modifier::empty();
     let mut last_pos: Option<(u16, u16)> = None;
     let mut covered_until: Option<(u16, u16)> = None;
+    let mut emitted = false;
     for (x, y, cell) in content {
         // `ratatui` yields the trailing column of a VS16 emoji as a clear,
         // on the assumption a backend prints it straight after the glyph and
@@ -228,6 +235,7 @@ pub(crate) fn draw_resynced<'a, W: Write>(
             queue!(writer, Print("  \u{8}\u{8}"))?;
         }
         queue!(writer, Print(cell.symbol()))?;
+        emitted = true;
         covered_until = x.checked_add(cell.cell_width()).map(|next| (next, y));
         if terminal_may_widen(cell.symbol()) {
             // the terminal's own cursor is now somewhere this loop cannot
@@ -235,13 +243,16 @@ pub(crate) fn draw_resynced<'a, W: Write>(
             last_pos = None;
         }
     }
-    queue!(
-        writer,
-        SetForegroundColor(CtColor::Reset),
-        SetBackgroundColor(CtColor::Reset),
-        SetUnderlineColor(CtColor::Reset),
-        SetAttribute(CtAttribute::Reset),
-    )
+    if emitted {
+        queue!(
+            writer,
+            SetForegroundColor(CtColor::Reset),
+            SetBackgroundColor(CtColor::Reset),
+            SetUnderlineColor(CtColor::Reset),
+            SetAttribute(CtAttribute::Reset),
+        )?;
+    }
+    Ok(emitted)
 }
 
 /// Queues the attribute escapes that turn `from` into `to`, in the order
