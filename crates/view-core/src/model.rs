@@ -2066,6 +2066,16 @@ mod tests {
             crate::native::ext::Ext::Messages,
         ]);
         model.content_painted = false;
+        // nvim sizes the global grid before anything else at every attach,
+        // and a cursor reported on it lands where that size allows
+        let _ = crate::update::update(
+            &mut model,
+            crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
+                grid: GLOBAL,
+                width: 80,
+                height: 24,
+            }]),
+        );
         model
     }
 
@@ -2265,13 +2275,47 @@ mod tests {
         assert!(model.withheld_flush, "and the flush behind it is held");
     }
 
+    /// A `getchar()` wait after a message is a prompt nvim draws into the
+    /// message grid while reporting the cursor on the global grid at the
+    /// message area's row -- the one shape where the cursor's grid and the
+    /// text's grid differ, and the reading follows the placement.
+    #[test]
+    fn a_getchar_wait_with_its_cursor_reported_on_the_global_grid_releases_the_hold() {
+        let mut model = holding_model();
+        let message = message_area(&mut model);
+        write_row_at(&mut model, message, 0, "Press a key");
+        cursor_goto(&mut model, GLOBAL, LAST_ROW, 11);
+        flush(&mut model);
+        assert!(
+            !model.withholds_grid(),
+            "a wait nvim drew into its message area must reach the user"
+        );
+    }
+
+    /// A prompt exactly as wide as the grid wraps the cursor to column 0 of
+    /// the next row, with nothing to its left; the full-width row above it
+    /// is what says it is a prompt, and nvim leaving the wire cursor at the
+    /// top-left corner while sourcing is what keeps a buffer from ever
+    /// reading the same way.
+    #[test]
+    fn a_prompt_as_wide_as_the_screen_wraps_its_cursor_and_still_releases_the_hold() {
+        let mut model = single_grid_model();
+        write_row_at(&mut model, GLOBAL, LAST_ROW - 1, &"P".repeat(80));
+        cursor_goto(&mut model, GLOBAL, LAST_ROW, 0);
+        flush(&mut model);
+        assert!(
+            !model.withholds_grid(),
+            "a prompt wrapped onto the next row must reach the user"
+        );
+    }
+
     /// One screen, one answer: what a fixture config draws before `UIEnter`
     /// gets the same hold-or-release whether nvim placed a message grid for
     /// it or composited the message area into grid 1. Each row is a screen
     /// taken off the wire (`vim.fn.input()` with `cmdheight` 0, 1 and 2, a
     /// buffer reaching the last row, a ruler with `laststatus` 0, a one-line
-    /// buffer over blank end-of-buffer rows), drawn here the way each attach
-    /// delivers it.
+    /// buffer over blank end-of-buffer rows, a `getchar()` wait, a prompt as
+    /// wide as the screen), drawn here the way each attach delivers it.
     #[test]
     fn every_startup_screen_gets_the_same_answer_with_and_without_a_message_grid() {
         struct Screen {
@@ -2365,6 +2409,32 @@ mod tests {
                     cursor_goto(m, GLOBAL, 0, 0);
                 },
                 releases: false,
+            },
+            Screen {
+                name: "print(), then getchar(): the cursor reported on grid 1 at the message row",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, LAST_ROW, "Press a key");
+                    cursor_goto(m, GLOBAL, LAST_ROW, 11);
+                },
+                multigrid: |m| {
+                    let message = message_area(m);
+                    write_row_at(m, message, 0, "Press a key");
+                    cursor_goto(m, GLOBAL, LAST_ROW, 11);
+                },
+                releases: true,
+            },
+            Screen {
+                name: "vim.fn.input() with a prompt exactly as wide as the screen",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, LAST_ROW - 1, &"P".repeat(80));
+                    cursor_goto(m, GLOBAL, LAST_ROW, 0);
+                },
+                multigrid: |m| {
+                    let message = message_area_of_height(m, 2);
+                    write_row_at(m, message, 0, &"P".repeat(80));
+                    cursor_goto(m, message, 1, 0);
+                },
+                releases: true,
             },
             Screen {
                 name: "the same, with a first line that opens with whitespace",
@@ -2468,7 +2538,7 @@ mod tests {
             model,
             crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
                 grid: MESSAGE_GRID,
-                width: 20,
+                width: 80,
                 height,
             }]),
         );

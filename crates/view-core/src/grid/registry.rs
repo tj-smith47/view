@@ -460,6 +460,16 @@ impl GridRegistry {
     /// left. A `vim.fn.input()` on a session that externalized neither the
     /// cmdline nor the messages arrives this way and no other.
     ///
+    /// Two shapes of that reading, both off the wire. A prompt exactly as
+    /// wide as the grid wraps the cursor to column 0 of the row below its
+    /// text, so a cursor at column 0 under a full-width row counts too; the
+    /// invariant that makes this safe is that nvim leaves the wire cursor at
+    /// `(0, 0)` while sourcing, so no buffer puts it on a row below the
+    /// first before `UIEnter`. And a `getchar()` wait after a message draws
+    /// the text into the message grid but reports the cursor on the global
+    /// grid at the message area's row, so a global-grid cursor whose row
+    /// falls inside a placed `Message` pane reads as that pane's row.
+    ///
     /// Without `ext_multigrid` there is no message grid to place. nvim
     /// composites its message area into the bottom of the global grid and
     /// names neither that area nor `cmdheight` on the wire (`option_set`
@@ -471,36 +481,53 @@ impl GridRegistry {
     /// whitespace -- never puts it there.
     ///
     /// Read once per withheld flush; costs the cells of the cursor's row up
-    /// to the cursor.
+    /// to the cursor, or the row above it for a cursor at column 0.
     #[must_use]
     pub fn message_area_has_text(&self) -> bool {
-        let grid = if self.slots.is_empty() {
-            &self.global
-        } else {
-            let Some(id) = self.cursor else {
-                return false;
-            };
-            let in_message_pane = self.slots.iter().any(|slot| {
-                slot.id == id
-                    && slot
-                        .placed
-                        .as_ref()
-                        .is_some_and(|p| matches!(p.kind, PaneKind::Message { .. }))
-            });
-            if !in_message_pane {
-                return false;
-            }
-            let Some(grid) = self.grid(id) else {
-                return false;
-            };
-            grid
+        let Some((grid, row, col)) = self.message_area_cursor() else {
+            return false;
         };
-        let (row, col) = grid.cursor();
-        let blank = |c: u16| {
-            grid.cell(row, c)
+        let blank = |r: u16, c: u16| {
+            grid.cell(r, c)
                 .is_none_or(|cell| cell.text.trim().is_empty())
         };
-        blank(col) && (0..col).any(|c| !blank(c))
+        if !blank(row, col) {
+            return false;
+        }
+        if col > 0 {
+            return (0..col).any(|c| !blank(row, c));
+        }
+        let Some(above) = row.checked_sub(1) else {
+            return false;
+        };
+        (0..grid.size().0).all(|c| !blank(above, c))
+    }
+
+    /// The grid the cursor's message-area reading is taken from, with the
+    /// cursor local to it, or `None` when the cursor is nowhere near a
+    /// message area.
+    fn message_area_cursor(&self) -> Option<(&Grid, u16, u16)> {
+        if self.slots.is_empty() {
+            let (row, col) = self.global.cursor();
+            return Some((&self.global, row, col));
+        }
+        let id = self.cursor?;
+        let mut message_panes = self.slots.iter().filter_map(|slot| {
+            slot.placed
+                .as_ref()
+                .filter(|p| matches!(p.kind, PaneKind::Message { .. }))
+                .map(|p| (slot, p))
+        });
+        if id == GLOBAL_GRID {
+            let (row, col) = self.global.cursor();
+            return message_panes.find_map(|(slot, placed)| {
+                let local = row.checked_sub(placed.origin.0)?;
+                (local < slot.grid.size().1).then_some((&slot.grid, local, col))
+            });
+        }
+        let (slot, _) = message_panes.find(|(slot, _)| slot.id == id)?;
+        let (row, col) = slot.grid.cursor();
+        Some((&slot.grid, row, col))
     }
 
     /// The grid the global screen coordinates fall inside, topmost pane
