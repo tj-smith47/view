@@ -212,6 +212,78 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
     raise_notice(model, identity.as_deref(), surface)
 }
 
+/// Answers one `win_float_pos`: a float a superseded claimant of a native
+/// surface just opened is held off the screen before the frame that would
+/// paint it, and its rows are asked for.
+///
+/// The sighting the float scan takes is the same judgment one round trip
+/// later, which is a round trip after the plugin's first frame is already
+/// on the terminal: the scan is armed by autocmd transitions and throttled
+/// 150 ms, nvim-notify opens its windows `noautocmd` so `WinNew` never
+/// fires for one, and its slide animation moves the window with
+/// `nvim_win_set_config`, which arms nothing either. So a complaint drawn
+/// during a startup nobody has typed into waits for the next unrelated
+/// arming event -- measured at 4.8 s on this machine's own configuration,
+/// and 2.1 s on the user's. The placement event is the zero-latency
+/// sighting, and this is the whole reason it is read here.
+///
+/// The bar is [`take_complaint`]'s, with the identity half left out
+/// because a placement carries none: the rect claims a surface view draws
+/// ([`surfaces::claims_at`]), a named claimant's notice already accounts
+/// for that surface, and the startup window or the complaint grace is
+/// still open. Every other float -- a picker, a hover, a completion menu,
+/// anything outside that window -- is classified in the same arithmetic
+/// and paints on the frame it arrived for.
+///
+/// The cost, stated: one round trip of delay for a benign float that lands
+/// in the message area's corner while a claimant of that surface is known,
+/// and nothing at all for every other float. The paint loop waits on none
+/// of it -- the flag is model state, and the rows lift it.
+pub(super) fn on_float_placed(
+    model: &mut Model,
+    grid: crate::grid::registry::GridId,
+    win: u64,
+    row: i64,
+    col: i64,
+) -> Vec<Effect> {
+    if model.surface_conflicts.is_complaint(win) {
+        // a plugin animating its window sends a placement per step, and the
+        // window is the same window at every one of them
+        let withheld = model.surface_conflicts.withholds_float(win, grid);
+        model.dirty |= model.engine.withhold_float(grid, withheld);
+        return Vec::new();
+    }
+    let Some((width, height)) = model.engine.grids().grid(grid).map(crate::grid::Grid::size) else {
+        return Vec::new();
+    };
+    let Some(surface) = surfaces::claims_at(
+        row,
+        col,
+        width,
+        height,
+        surfaces::FloatAnchor::NorthWest,
+        model,
+    ) else {
+        return Vec::new();
+    };
+    if surface != Surface::Messages || !surfaces::view_draws(surface, model) {
+        return Vec::new();
+    }
+    if !model.surface_conflicts.covers(surface, None) {
+        return Vec::new();
+    }
+    if !model.surface_conflicts.startup_window_open()
+        && !model.surface_conflicts.within_complaint_grace()
+    {
+        return Vec::new();
+    }
+    if !model.surface_conflicts.claim_complaint(win, Some(grid)) {
+        return Vec::new();
+    }
+    model.dirty |= model.engine.withhold_float(grid, true);
+    vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows { win })]
+}
+
 /// Starts the take-down of one float a named claimant's notice already
 /// accounts for: its text goes to the notification history, and the window
 /// goes, once [`complaint_recorded`] has the lines.
@@ -248,7 +320,7 @@ fn take_complaint(model: &mut Model, float: &FloatSighting, surface: Surface) ->
     {
         return Vec::new();
     }
-    if !model.surface_conflicts.claim_complaint(float.win) {
+    if !model.surface_conflicts.claim_complaint(float.win, None) {
         return Vec::new();
     }
     vec![Effect::Rpc(crate::msg::RpcCall::ReadFloatRows {
@@ -256,16 +328,20 @@ fn take_complaint(model: &mut Model, float: &FloatSighting, surface: Surface) ->
     })]
 }
 
-/// Finishes one take-down: the lines a claimant's startup float was drawing
-/// become one notification-history entry in that plugin's own voice, and
-/// the window is closed.
+/// Finishes one take-down: the lines a claimant's float was drawing are
+/// recorded in that plugin's own voice, and the window is closed.
 ///
-/// Recorded through
-/// [`record_history_only`](crate::model::EngineModel::record_history_only)
-/// rather than as a native notice: the text is written to the history ring
-/// and never reaches the toast stack, whatever the startup hold has already
-/// resolved to. The one notice already standing is what tells the user the
-/// history is where the rest of the launch went.
+/// Two destinations, parted by what the text is rather than by when it
+/// arrived. A complaint about the surfaces view took
+/// ([`SurfaceConflicts::reads_as_complaint`](surfaces::SurfaceConflicts::reads_as_complaint))
+/// goes to the notification history and never to the toast stack: view's
+/// own notice already says which surface went and which `view.toml` line
+/// hands it back, and the plugin's second box would be that conflict
+/// counted twice. Anything else is a notification the plugin was showing
+/// the user -- a plugin manager's update summary is the case of record --
+/// and it reaches the toast stack in view's chrome
+/// ([`record_seen_notification`](crate::model::EngineModel::record_seen_notification)),
+/// because view withheld the window it was drawn in.
 ///
 /// The blank rows a notify-style float pads its text with are dropped. They
 /// are geometry -- the window's own top and bottom margin -- and a history
@@ -280,8 +356,10 @@ fn complaint_recorded(model: &mut Model, win: u64, lines: &[String]) -> Vec<Effe
     let text = text.trim_matches('\n').to_string();
     let mut effects = if text.is_empty() {
         Vec::new()
-    } else {
+    } else if surfaces::SurfaceConflicts::reads_as_complaint(lines) {
         model.engine.record_history_only(vec![(0, text)])
+    } else {
+        model.engine.record_seen_notification(vec![(0, text)])
     };
     effects.push(Effect::Rpc(crate::msg::RpcCall::CloseFloat { win }));
     // the float was drawing over view's own cells until this call lands
@@ -347,7 +425,7 @@ pub(super) fn on_float_rows(
         if !model.surface_conflicts.claimed_unconditionally(win)
             && !surfaces::SurfaceConflicts::reads_as_complaint(&lines)
         {
-            return Vec::new();
+            return release_float(model, win);
         }
         return complaint_recorded(model, win, &lines);
     }
@@ -362,6 +440,20 @@ pub(super) fn on_float_rows(
         }
         surfaces::RowsOutcome::Stale => Vec::new(),
     }
+}
+
+/// Gives a withheld float back to the screen: the rows say a user opened
+/// it, so it paints from the next frame exactly as an unclassified one
+/// would have.
+///
+/// The claim on the window stays, which is what stops the scan's next
+/// sighting from asking for the same rows again at its own cadence -- the
+/// answer has been read, and it was "not view's to take".
+fn release_float(model: &mut Model, win: u64) -> Vec<Effect> {
+    if let Some(grid) = model.surface_conflicts.release_complaint(win) {
+        model.dirty |= model.engine.withhold_float(grid, false);
+    }
+    Vec::new()
 }
 
 /// The one notice a float claimant owes the user, raised once per identity
@@ -2400,6 +2492,249 @@ mod tests {
                  one: {family:?}"
             );
         }
+    }
+
+    /// One `win_float_pos` for a float anchored in the message area's
+    /// corner: the float's own grid sized, then the resolved corner nvim
+    /// carries in the placement event.
+    fn place_float(model: &mut Model, grid: u64, win: u64, screen_col: u64) -> Vec<Effect> {
+        let mut effects = update(
+            model,
+            Msg::Redraw(vec![UiEvent::GridResize {
+                grid,
+                width: 100 - screen_col,
+                height: 3,
+            }]),
+        );
+        effects.extend(step_float(model, grid, win, 0, screen_col));
+        effects
+    }
+
+    /// One step of the slide a notify-style float animates with: the same
+    /// window at a new position, and nothing else.
+    fn step_float(
+        model: &mut Model,
+        grid: u64,
+        win: u64,
+        screen_row: u64,
+        screen_col: u64,
+    ) -> Vec<Effect> {
+        update(
+            model,
+            Msg::Redraw(vec![UiEvent::WinFloatPos {
+                grid,
+                win: crate::events::WinHandle(win),
+                anchor_grid: 1,
+                zindex: 50,
+                compindex: 1,
+                screen_row,
+                screen_col,
+            }]),
+        )
+    }
+
+    /// Whether the compositor would paint `grid`'s pane on the next frame.
+    fn painted(model: &Model, grid: u64) -> bool {
+        model
+            .engine
+            .grids()
+            .panes_in_z_order()
+            .iter()
+            .any(|pane| pane.id == crate::grid::registry::GridId(grid))
+    }
+
+    /// The whole point of the placement path: the plugin's window is off
+    /// the screen on the frame the placement itself arrived for, not one
+    /// float scan later.
+    #[test]
+    fn a_claimants_float_is_withheld_before_the_first_frame_that_would_paint_it() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let read = place_float(&mut model, 7, 1008, 50);
+        assert!(
+            read.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::ReadFloatRows { win }) if *win == 1008
+            )),
+            "the rows are asked for at the placement: {read:?}"
+        );
+        assert!(
+            !painted(&model, 7),
+            "a claimant's float paints no frame at all, not even the first"
+        );
+
+        // the negative control, which is also the cost statement: a float
+        // that lands anywhere else is classified by the same arithmetic and
+        // paints on the frame it arrived for
+        let elsewhere = update(
+            &mut model,
+            Msg::Redraw(vec![UiEvent::GridResize {
+                grid: 8,
+                width: 40,
+                height: 10,
+            }]),
+        );
+        assert!(elsewhere.is_empty(), "{elsewhere:?}");
+        let elsewhere = step_float(&mut model, 8, 1009, 5, 10);
+        assert!(
+            elsewhere.is_empty(),
+            "nothing is asked of it: {elsewhere:?}"
+        );
+        assert!(painted(&model, 8), "and nothing is held back from it");
+    }
+
+    /// And the classification is what lifts it: rows that read as a window
+    /// someone opened hand the window straight back, one round trip after
+    /// it was withheld.
+    #[test]
+    fn the_classification_gives_a_window_the_user_opened_back_to_the_screen() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        expire_hold(&mut model);
+        key(&mut model);
+        let _ = place_float(&mut model, 7, 1008, 50);
+        assert!(!painted(&model, 7));
+
+        let answered = update(
+            &mut model,
+            Msg::FloatRows {
+                win: 1008,
+                hidden: false,
+                lines: vec!["2 messages  Ctrl-D to dismiss".to_string()],
+                selected: None,
+            },
+        );
+        assert!(
+            answered.is_empty(),
+            "nothing is taken from a window the user opened: {answered:?}"
+        );
+        assert!(painted(&model, 7), "and it draws again from the next frame");
+        let step = step_float(&mut model, 7, 1008, 1, 50);
+        assert!(
+            step.is_empty() && painted(&model, 7),
+            "a released float is a float like any other: {step:?}"
+        );
+    }
+
+    /// nvim-notify moves its window every 16 ms while a box slides in, so
+    /// the flag follows the window rather than the position it was set at.
+    #[test]
+    fn the_withheld_flag_survives_a_slide_animations_position_steps() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = place_float(&mut model, 7, 1008, 50);
+        for row in 1..4 {
+            let step = step_float(&mut model, 7, 1008, row, 50);
+            assert!(
+                step.is_empty(),
+                "one read per window, whatever the animation does: {step:?}"
+            );
+            assert!(!painted(&model, 7), "and not one step of it is painted");
+        }
+    }
+
+    /// The close and the plugin's own next animation step race by
+    /// construction -- view cannot hold a window against its owner -- so a
+    /// step landing after the take is answered the way a vanished window
+    /// is: nothing asked of it, nothing painted.
+    #[test]
+    fn a_taken_floats_later_position_step_asks_for_nothing_and_paints_nothing() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = place_float(&mut model, 7, 1008, 50);
+        let closed = update(
+            &mut model,
+            Msg::FloatRows {
+                win: 1008,
+                hidden: false,
+                lines: vec!["`vim.notify` has been overwritten by another plugin?".to_string()],
+                selected: None,
+            },
+        );
+        assert!(
+            closed.iter().any(|effect| matches!(
+                effect,
+                Effect::Rpc(RpcCall::CloseFloat { win }) if *win == 1008
+            )),
+            "{closed:?}"
+        );
+        let step = step_float(&mut model, 7, 1008, 1, 50);
+        assert!(step.is_empty(), "{step:?}");
+        assert!(
+            !painted(&model, 7),
+            "the window is gone as far as the screen is concerned, whatever \
+             its plugin's timer still does to it"
+        );
+    }
+
+    /// What the two destinations are for: a plugin's complaint about the
+    /// surfaces view took is the conflict view's own notice already
+    /// explains, and goes to the history; a plugin's notification is
+    /// something the user was being told, and reaches view's chrome
+    /// because view withheld the window it was drawn in.
+    #[test]
+    fn a_withheld_notification_is_toasted_while_a_complaint_only_files() {
+        let mut model = captured_session();
+        probe(&mut model, &["noice"]);
+        let _ = place_float(&mut model, 7, 1008, 50);
+        let _ = update(
+            &mut model,
+            Msg::FloatRows {
+                win: 1008,
+                hidden: false,
+                lines: vec![
+                    String::new(),
+                    "# Plugin Updates".to_string(),
+                    "- **nvim-lspconfig**".to_string(),
+                ],
+                selected: None,
+            },
+        );
+        let stacked: Vec<String> = model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(|entry| entry.lines())
+            .collect();
+        assert!(
+            stacked.iter().any(|line| line.contains("Plugin Updates")),
+            "the plugin's own notification is on view's stack: {stacked:?}"
+        );
+        assert!(
+            !stacked.first().is_some_and(String::is_empty),
+            "and without the blank rows the window padded it with: {stacked:?}"
+        );
+
+        let _ = place_float(&mut model, 8, 1009, 50);
+        let _ = update(
+            &mut model,
+            Msg::FloatRows {
+                win: 1009,
+                hidden: false,
+                lines: vec!["Noice can't work when `ext_messages` is enabled".to_string()],
+                selected: None,
+            },
+        );
+        assert!(
+            !model
+                .engine
+                .messages
+                .entries
+                .iter()
+                .flat_map(|entry| entry.lines())
+                .any(|line| line.contains("Noice can't work")),
+            "a complaint never joins the notice that already explains it"
+        );
+        assert!(
+            model
+                .engine
+                .toast_history
+                .entries()
+                .flat_map(|entry| entry.lines())
+                .any(|line| line.contains("Noice can't work")),
+            "nothing is discarded: it is in the history"
+        );
     }
 
     #[test]

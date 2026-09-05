@@ -1318,6 +1318,17 @@ impl EngineModel {
         self.grids.apply(ev);
     }
 
+    /// Holds one float's grid off the screen, or gives it back, and
+    /// answers whether the frame changed.
+    ///
+    /// The one mutation of a pane view makes on its own account: nvim's own
+    /// placement events say where a float is, and this says whether view is
+    /// painting it while it classifies what opened it
+    /// (`update::surface_conflict`).
+    pub fn withhold_float(&mut self, grid: GridId, withheld: bool) -> bool {
+        self.grids.withhold_float(grid, withheld)
+    }
+
     /// The highlight table, for reading: default colors, per-id attributes,
     /// builtin group mappings, and the probe generation.
     #[must_use]
@@ -1473,14 +1484,40 @@ impl EngineModel {
         )
     }
 
+    /// [`Self::record_message`] for a plugin's own notification that view
+    /// took off the screen before it was painted: it reaches the toast
+    /// stack whatever the startup hold has resolved to, and the history
+    /// keeps it like any other.
+    ///
+    /// The other half of [`Self::record_history_only`], and the hold is
+    /// what parts them. A message the hold parks is one nobody has seen --
+    /// that is what the collapse buys, and view's notice says where it
+    /// went. This text was already drawn on a screen the user was looking
+    /// at, in a window view is withholding, so parking it would take a
+    /// notification away rather than tidy one up. What the plugin was
+    /// telling the user, view tells them.
+    pub fn record_seen_notification(
+        &mut self,
+        content: Vec<(u64, String)>,
+    ) -> Vec<crate::msg::Effect> {
+        self.record_message_in_family(
+            String::new(),
+            content,
+            false,
+            None,
+            Some(crate::native::toast::Route::Transient),
+        )
+    }
+
     /// [`Self::record_message`], stamping `family` onto the entry before it
     /// reaches scrollback so the history's own copy carries it (see
     /// [`MessageEntry::family`]). Private because a family is only ever
     /// decided by [`Self::record_native_notice_once_as`], the one caller.
     ///
-    /// `route` overrides the kind-and-hold classification for the one
-    /// caller whose routing is a property of what the text *is* rather than
-    /// of the kind it arrived under ([`Self::record_history_only`]).
+    /// `route` overrides the kind-and-hold classification for the two
+    /// callers whose routing is a property of what the text *is* rather
+    /// than of the kind it arrived under ([`Self::record_history_only`],
+    /// [`Self::record_seen_notification`]).
     fn record_message_in_family(
         &mut self,
         kind: String,

@@ -97,23 +97,38 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         ),
         UiEvent::WinFloatPos {
             grid,
+            win,
             anchor_grid,
             zindex,
             compindex,
             screen_row,
             screen_col,
-            ..
-        } => place(
-            model,
-            GridEvent::Float {
-                grid: GridId(grid),
-                anchor_grid: GridId(anchor_grid),
-                screen_row: saturate_u16(screen_row),
-                screen_col: saturate_u16(screen_col),
-                zindex: saturate_u32(zindex),
-                compindex: saturate_u32(compindex),
-            },
-        ),
+        } => {
+            let screen_row = saturate_u16(screen_row);
+            let screen_col = saturate_u16(screen_col);
+            let mut effects = place(
+                model,
+                GridEvent::Float {
+                    grid: GridId(grid),
+                    anchor_grid: GridId(anchor_grid),
+                    screen_row,
+                    screen_col,
+                    zindex: saturate_u32(zindex),
+                    compindex: saturate_u32(compindex),
+                },
+            );
+            // classified where the geometry lands rather than one float
+            // scan later, which is a round trip after the plugin's own
+            // first frame would already be on the terminal
+            effects.extend(super::surface_conflict::on_float_placed(
+                model,
+                GridId(grid),
+                win.0,
+                i64::from(screen_row),
+                i64::from(screen_col),
+            ));
+            effects
+        }
         UiEvent::WinExternalPos { grid, .. } => {
             place(model, GridEvent::External { grid: GridId(grid) })
         }

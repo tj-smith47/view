@@ -4,6 +4,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 use view_core::events::{GridCell, UiEvent, WinHandle};
+use view_core::grid::registry::GridId;
 use view_core::hl::HlAttr;
 use view_core::model::Model;
 use view_core::msg::Msg;
@@ -338,6 +339,54 @@ fn a_float_paints_above_the_windows_it_overlaps() {
         row_text(&buf, 0).starts_with("flt!"),
         "the float did not paint over the window under it: {:?}",
         row_text(&buf, 0)
+    );
+}
+
+/// A float view is holding off the screen while it classifies what opened
+/// it paints no cell: the window under it is what the user sees, exactly as
+/// if the plugin had never opened one.
+///
+/// Disconfirm: dropping the withheld filter from the pane walk puts the
+/// float's own text back on row 0 here.
+#[test]
+fn a_withheld_float_paints_nothing() {
+    let mut model = vsplit();
+    drive(
+        &mut model,
+        vec![
+            UiEvent::GridResize {
+                grid: 7,
+                width: 4,
+                height: 1,
+            },
+            UiEvent::WinFloatPos {
+                grid: 7,
+                win: WinHandle(1004),
+                anchor_grid: 1,
+                zindex: 50,
+                compindex: 1,
+                screen_row: 0,
+                screen_col: 0,
+            },
+            line(7, 0, "flt!", 0),
+            UiEvent::Flush,
+        ],
+    );
+    assert!(
+        row_text(&frame(&model), 0).starts_with("flt!"),
+        "the fixture's float has to reach the frame for the withholding to \
+         be what takes it off"
+    );
+    assert!(model.engine.withhold_float(GridId(7), true));
+    let row = row_text(&frame(&model), 0);
+    assert!(
+        !row.contains("flt!"),
+        "a withheld float painted its cells: {row:?}"
+    );
+    assert!(model.engine.withhold_float(GridId(7), false));
+    assert!(
+        row_text(&frame(&model), 0).starts_with("flt!"),
+        "and the release puts it back"
     );
 }
 

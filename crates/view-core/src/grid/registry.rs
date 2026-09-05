@@ -163,6 +163,12 @@ struct Placement {
     origin: (u16, u16),
     kind: PaneKind,
     hidden: bool,
+    /// Whether view is holding this float off the screen until it has
+    /// classified what opened it. Distinct from `hidden`, which is nvim's
+    /// own answer about the window and is rewritten by every placement
+    /// event: this one is view's, and survives the position steps a plugin
+    /// animating its window sends.
+    withheld: bool,
     /// nvim's own tiebreak within one zindex; 0 for a window, which has no
     /// stacking order of its own because windows never overlap.
     compindex: u32,
@@ -260,7 +266,7 @@ impl GridRegistry {
             let Some(placed) = slot.placed.as_ref() else {
                 continue;
             };
-            if placed.hidden {
+            if placed.hidden || placed.withheld {
                 continue;
             }
             full |= damage.full;
@@ -430,7 +436,7 @@ impl GridRegistry {
             .slots
             .iter()
             .filter_map(|slot| slot.placed.as_ref().map(|p| (slot, p)))
-            .filter(|(_, p)| !p.hidden)
+            .filter(|(_, p)| !p.hidden && !p.withheld)
             .collect();
         // the id is the last key so the order is total: nvim reuses no id
         // after a destroy, so two panes never tie on all four
@@ -685,13 +691,38 @@ impl GridRegistry {
     /// bare `win_pos` with no paired "show" event of its own.
     fn place(&mut self, grid: GridId, origin: (u16, u16), kind: PaneKind, compindex: u32) {
         if let Some(slot) = self.slot_mut(grid) {
+            let withheld = slot.placed.as_ref().is_some_and(|placed| placed.withheld);
             slot.placed = Some(Placement {
                 origin,
                 kind,
                 hidden: false,
+                withheld,
                 compindex,
             });
         }
+    }
+
+    /// Holds `grid`'s float off the screen, or gives it back, and answers
+    /// whether this call changed anything.
+    ///
+    /// A withheld pane paints no cell and contributes no damage rows, the
+    /// same two exclusions a hidden one gets -- so the cells underneath it
+    /// belong to whatever was there, and the frame that lifts or applies
+    /// the flag repaints them (`placement_dirty`, since the box appearing
+    /// or vanishing names no rows of its own).
+    pub fn withhold_float(&mut self, grid: GridId, withheld: bool) -> bool {
+        let Some(slot) = self.slot_mut(grid) else {
+            return false;
+        };
+        let Some(placed) = slot.placed.as_mut() else {
+            return false;
+        };
+        if placed.withheld == withheld {
+            return false;
+        }
+        placed.withheld = withheld;
+        self.placement_dirty = true;
+        true
     }
 
     /// The slot for `id`, created empty if nvim has not named it before.

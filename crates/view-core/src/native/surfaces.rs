@@ -342,38 +342,45 @@ impl FloatSighting {
         }
         Some(filetype)
     }
+}
 
-    /// The inclusive `(top, left, bottom, right)` cell span this float
-    /// covers, with its anchor resolved and every edge clamped into a
-    /// `grid_w` by `grid_h` grid.
-    ///
-    /// `None` for a float covering no cells at all -- a zero width or
-    /// height, or a rect entirely off the grid -- which claims nothing by
-    /// definition.
-    fn span(&self, grid_w: u16, grid_h: u16) -> Option<(i64, i64, i64, i64)> {
-        if self.width == 0 || self.height == 0 || grid_w == 0 || grid_h == 0 {
-            return None;
-        }
-        let width = i64::from(self.width);
-        let height = i64::from(self.height);
-        let (top, left) = match self.anchor {
-            FloatAnchor::NorthWest => (self.row, self.col),
-            FloatAnchor::NorthEast => (self.row, self.col - width),
-            FloatAnchor::SouthWest => (self.row - height + 1, self.col),
-            FloatAnchor::SouthEast => (self.row - height + 1, self.col - width),
-        };
-        let (bottom, right) = (top + height - 1, left + width - 1);
-        let (last_row, last_col) = (i64::from(grid_h) - 1, i64::from(grid_w) - 1);
-        if bottom < 0 || right < 0 || top > last_row || left > last_col {
-            return None;
-        }
-        Some((
-            top.max(0),
-            left.max(0),
-            bottom.min(last_row),
-            right.min(last_col),
-        ))
+/// The inclusive `(top, left, bottom, right)` cell span a float covers,
+/// with its anchor resolved and every edge clamped into a `grid_w` by
+/// `grid_h` grid.
+///
+/// `None` for a float covering no cells at all -- a zero width or height,
+/// or a rect entirely off the grid -- which claims nothing by definition.
+fn span(
+    row: i64,
+    col: i64,
+    width: u16,
+    height: u16,
+    anchor: FloatAnchor,
+    grid_w: u16,
+    grid_h: u16,
+) -> Option<(i64, i64, i64, i64)> {
+    if width == 0 || height == 0 || grid_w == 0 || grid_h == 0 {
+        return None;
     }
+    let width = i64::from(width);
+    let height = i64::from(height);
+    let (top, left) = match anchor {
+        FloatAnchor::NorthWest => (row, col),
+        FloatAnchor::NorthEast => (row, col - width),
+        FloatAnchor::SouthWest => (row - height + 1, col),
+        FloatAnchor::SouthEast => (row - height + 1, col - width),
+    };
+    let (bottom, right) = (top + height - 1, left + width - 1);
+    let (last_row, last_col) = (i64::from(grid_h) - 1, i64::from(grid_w) - 1);
+    if bottom < 0 || right < 0 || top > last_row || left > last_col {
+        return None;
+    }
+    Some((
+        top.max(0),
+        left.max(0),
+        bottom.min(last_row),
+        right.min(last_col),
+    ))
 }
 
 /// How many rows at the bottom of the grid belong to the command line: the
@@ -406,8 +413,35 @@ const CMDLINE_ROWS: i64 = 2;
 ///   distinction the negative control turns on.
 #[must_use]
 pub fn claims(float: &FloatSighting, model: &Model) -> Option<Surface> {
+    claims_at(
+        float.row,
+        float.col,
+        float.width,
+        float.height,
+        float.anchor,
+        model,
+    )
+}
+
+/// [`claims`] for a float known only by the box it occupies: the rect a
+/// `win_float_pos` resolved and the size of the grid behind it, which is
+/// everything the placement event carries and everything the rules below
+/// read.
+///
+/// The identity half of a sighting has no bearing here -- [`claims`] never
+/// consulted it -- so the placement answers the same surface the scan's own
+/// sighting of the same window will, one round trip earlier.
+#[must_use]
+pub fn claims_at(
+    row: i64,
+    col: i64,
+    width: u16,
+    height: u16,
+    anchor: FloatAnchor,
+    model: &Model,
+) -> Option<Surface> {
     let (grid_w, grid_h) = model.engine.grid().size();
-    let (top, _left, bottom, right) = float.span(grid_w, grid_h)?;
+    let (top, _left, bottom, right) = span(row, col, width, height, anchor, grid_w, grid_h)?;
     let last_row = i64::from(grid_h) - 1;
     // half the grid: the bound between a piece of chrome pinned in a corner
     // and a window that has taken the screen over, which is a different
@@ -580,6 +614,16 @@ struct Complaint {
     /// a bar re-read at the reply would drop a complaint the sighting had
     /// already qualified.
     unconditional: bool,
+    /// The grid this float draws into, once a placement event has named
+    /// one. `None` for a float the scan sighted without view having seen
+    /// its `win_float_pos` -- one already on screen when the probe reply
+    /// named its plugin -- which is a window nothing is holding back.
+    grid: Option<crate::grid::registry::GridId>,
+    /// Whether the rows came back reading as something the user opened, so
+    /// the window is theirs again. The claim itself stays: it is what keeps
+    /// the scan's next sighting of the same window from asking for the rows
+    /// a second time.
+    released: bool,
 }
 
 /// One named claimant's accounted-for surfaces, with the identities its own
@@ -738,15 +782,48 @@ impl SurfaceConflicts {
     /// The bar the reply is held to is fixed here, from whether the startup
     /// window is still open at the sighting
     /// ([`Self::claimed_unconditionally`]).
-    pub fn claim_complaint(&mut self, win: u64) -> bool {
+    pub fn claim_complaint(
+        &mut self,
+        win: u64,
+        grid: Option<crate::grid::registry::GridId>,
+    ) -> bool {
         if self.is_complaint(win) {
             return false;
         }
         self.complaints.push(Complaint {
             win,
             unconditional: self.startup_window_open(),
+            grid,
+            released: false,
         });
         true
+    }
+
+    /// Notes the grid `win`'s float draws into and answers whether view is
+    /// still holding that float off the screen.
+    ///
+    /// The grid is re-noted on every call because a plugin animating its
+    /// window sends a placement per step, and the flag has to follow the
+    /// window rather than the position it was withheld at.
+    pub fn withholds_float(&mut self, win: u64, grid: crate::grid::registry::GridId) -> bool {
+        let Some(complaint) = self.complaints.iter_mut().find(|c| c.win == win) else {
+            return false;
+        };
+        complaint.grid = Some(grid);
+        !complaint.released
+    }
+
+    /// Gives `win`'s float back to the screen, and answers which grid to
+    /// paint again.
+    ///
+    /// `None` when nothing was being held: a float the scan sighted before
+    /// any placement named its grid, or one already released.
+    pub fn release_complaint(&mut self, win: u64) -> Option<crate::grid::registry::GridId> {
+        let complaint = self.complaints.iter_mut().find(|c| c.win == win)?;
+        if std::mem::replace(&mut complaint.released, true) {
+            return None;
+        }
+        complaint.grid
     }
 
     /// Whether `win`'s rows were read for the notification history rather
