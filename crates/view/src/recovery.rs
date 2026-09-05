@@ -357,6 +357,10 @@ pub(crate) fn restart_engine(
     // past the death names one of its windows
     // ([`SurfaceConflicts::forget_engine`])
     model.forget_engine_conflicts();
+    // the replacement runs its own startup, so its first flush carries the
+    // same pre-`VimEnter` screen the first engine's did: hold it until the
+    // replacement's own `UIEnter` ([`Model::rearm_startup_hold`])
+    model.rearm_startup_hold();
     // the forgets change what is painted whether or not the attach below
     // succeeds: a failed attempt goes back to a loop that only repaints on
     // its own account, and would leave the dropped overlays painted and the

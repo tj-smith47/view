@@ -1662,9 +1662,8 @@ mod tests {
             (
                 outcome,
                 // what a dispatched `Flush` leaves on a session holding the
-                // grid, which every `[native]` default is (see
-                // `Model::withholds_grid`); `content_painted` is the same
-                // reading on a session that holds nothing
+                // grid, which every session is before `UIEnter` (see
+                // `Model::withholds_grid`)
                 model.withheld_flush,
                 executor.into_ops().calls.into_inner(),
             )

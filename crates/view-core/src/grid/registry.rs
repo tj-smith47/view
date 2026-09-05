@@ -444,6 +444,28 @@ impl GridRegistry {
         panes
     }
 
+    /// Whether nvim's own message area is showing text.
+    ///
+    /// A message area exists only where `ext_messages` is not attached, and
+    /// nvim announces it (`msg_set_pos`) at every such startup whether or
+    /// not it has drawn into it -- so the placement alone says nothing and
+    /// the cells are what answers. Text there before nvim has reached
+    /// `UIEnter` is a startup talking to the user out of the grid: a
+    /// `vim.fn.input()` prompt on a session that externalized neither the
+    /// cmdline nor the messages arrives this way and no other.
+    #[must_use]
+    pub fn message_area_has_text(&self) -> bool {
+        self.slots
+            .iter()
+            .filter(|slot| {
+                slot.placed
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.kind, PaneKind::Message { .. }))
+            })
+            .filter_map(|slot| self.grid(slot.id))
+            .any(|grid| (0..grid.size().1).any(|row| !grid.row_text(row).trim().is_empty()))
+    }
+
     /// The grid the global screen coordinates fall inside, topmost pane
     /// first.
     ///

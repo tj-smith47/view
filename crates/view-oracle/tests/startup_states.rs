@@ -54,6 +54,23 @@ fn recording(cmd: portable_pty::CommandBuilder) -> PtySession {
     session
 }
 
+/// Writes a `view.toml` under `home` with each named `[native]` feature
+/// switched off and every other one left at its default.
+///
+/// The permutations this pin walks are the ones a noice / nvim-notify user
+/// reaches: the surfaces view externalizes decide where a startup prompt or
+/// error is *drawn*, and the hold has to cover all four ways that lands.
+fn plant_native_off(home: &std::path::Path, off: &[&str]) {
+    let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
+    std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
+    let mut text = String::from("[native]\n");
+    for feature in off {
+        text.push_str(feature);
+        text.push_str(" = false\n");
+    }
+    std::fs::write(dir.join("view.toml"), text).expect("the isolated view.toml must be writable");
+}
+
 /// The `view` under test, on its `[native]` defaults -- the surfaces the
 /// externalized attach takes are the whole reason this startup differs from
 /// a TUI's.
@@ -136,5 +153,90 @@ fn the_buffer_before_vim_enter_reaches_neither_editors_terminal() {
         !wrote(&view_stream, PRE_VIM_ENTER),
         "view wrote a screen nvim never showed -- the buffer its config \
          replaced on VimEnter"
+    );
+}
+
+/// The same pin across the `[native]` permutations, which decide which
+/// surfaces nvim keeps drawing into the grid and so where a startup prompt
+/// or a startup error appears -- and never whether the pre-`VimEnter`
+/// screen is shown.
+///
+/// Disconfirm: keying `Model::withholds_grid` on the cmdline and the
+/// message surfaces again puts `PREVIMENTERBUFFER` into the stream of all
+/// three of these while the defaults leg above stays clean.
+#[test]
+fn the_hold_covers_every_native_permutation() {
+    for off in [
+        &["notifications"][..],
+        &["palette"][..],
+        &["notifications", "palette"][..],
+    ] {
+        let paths = common::ScratchPaths::new("startup-states-permutation");
+        common::plant_nvim_config(&paths.isolated_home, "startup-states");
+        plant_native_off(&paths.isolated_home, off);
+
+        let mut under_test = view_session(&paths.isolated_home);
+        let stream = until_the_split(&mut under_test, "view");
+
+        assert!(
+            !wrote(&stream, PRE_VIM_ENTER),
+            "view wrote the pre-VimEnter screen with {off:?} off"
+        );
+    }
+}
+
+/// A replacement engine runs the same startup, so it owes the same hold:
+/// with `[supervision] auto_restart` on, an engine killed mid-session is
+/// respawned, sources the same config, and must not paint the buffer it
+/// holds before its own `VimEnter`.
+///
+/// Disconfirm: dropping `Model::rearm_startup_hold` from
+/// `recovery::restart_engine` puts `PREVIMENTERBUFFER` into the stream on
+/// the restart while the first start stays clean.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_restarted_engine_holds_its_own_pre_vim_enter_screen() {
+    let paths = common::ScratchPaths::new("startup-states-restart");
+    common::plant_nvim_config(&paths.isolated_home, "startup-states");
+
+    let mut under_test = view_session(&paths.isolated_home);
+    let first = until_the_split(&mut under_test, "view");
+    assert!(
+        !wrote(&first, PRE_VIM_ENTER),
+        "the first start already failed the pin this restart extends"
+    );
+    let session_pid = under_test.pid().expect("the session under test has a pid");
+    let engine = engine_child_of(session_pid).expect("view spawned an nvim child");
+
+    // the buffer the replacement's own startup holds is the same text, so
+    // the whole stream is the subject again: what is asserted is that the
+    // restart added no occurrence of it
+    kill(engine);
+    let after = until_the_split(&mut under_test, "view after the restart");
+    assert!(
+        !wrote(&after, PRE_VIM_ENTER),
+        "the replacement engine painted the screen its VimEnter had not \
+         reached yet"
+    );
+}
+
+/// The pid of the `nvim` the session under test spawned.
+#[cfg(target_os = "linux")]
+fn engine_child_of(pid: u32) -> Option<u32> {
+    view_test_support::child_pids(pid)
+        .into_iter()
+        .find(|child| {
+            std::fs::read_to_string(format!("/proc/{child}/comm"))
+                .is_ok_and(|comm| comm.trim() == "nvim")
+        })
+}
+
+/// Ends `pid` the way a wedged engine ends: only a pid this test read off
+/// the session it spawned, never a name.
+#[cfg(target_os = "linux")]
+fn kill(pid: u32) {
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(pid).expect("a pid read from /proc fits an i32")),
+        nix::sys::signal::Signal::SIGKILL,
     );
 }

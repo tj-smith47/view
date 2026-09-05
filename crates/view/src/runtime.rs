@@ -727,8 +727,14 @@ struct StartupMilestones {
     content: bool,
 }
 
-/// How long the startup grid hold ([`Model::withholds_grid`]) may outlast
-/// the attach before the loop lifts it and paints whatever nvim has drawn.
+/// How long the startup grid hold ([`Model::withholds_grid`]) may last
+/// before the loop lifts it and paints whatever nvim has drawn.
+///
+/// Timed from the pass that finds the hold armed rather than from the
+/// attach: the loop's first pass for the engine view starts with, the pass
+/// after [`Model::rearm_startup_hold`] for a replacement. Each hold gets
+/// the whole cap, so a restart late in a session is bounded the same way
+/// the start was.
 ///
 /// The hold's release signal is `UIEnter`, which a healthy session reaches
 /// in about a fifth of this on the configs measured; the cap is what a
@@ -908,10 +914,10 @@ pub fn run(
     let mut reconnect = ReconnectSchedule::default();
     let mut spinner_due: Option<Instant> = None;
     let mut milestones = StartupMilestones::default();
-    // from the loop's own start rather than the process's: the hold covers
-    // the window between the attach and `UIEnter`, and the loop begins at
-    // the near end of it
-    let hold_started = Instant::now();
+    // re-armed below on every transition into the hold, so a restart's
+    // hold is bounded from its own arming rather than from the first one
+    let mut hold_started = Instant::now();
+    let mut was_holding = model.withholds_grid();
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -1014,6 +1020,11 @@ pub fn run(
         crate::spinner::expire(&mut model, &mut spinner_due, Instant::now());
         // the clock the pure core cannot hold: `Model` decides *whether* a
         // flush is withheld, and this decides how long that may last
+        let holding = model.withholds_grid();
+        if holding && !was_holding {
+            hold_started = Instant::now();
+        }
+        was_holding = holding;
         if startup_hold_left(&model, hold_started, Instant::now())
             .is_some_and(|left| left.is_zero())
         {

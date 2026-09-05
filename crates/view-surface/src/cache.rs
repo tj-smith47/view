@@ -76,9 +76,9 @@ impl Frame {
 /// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
 ///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
 ///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
-///   `mouse_capture`, `mouse_on`, `next_overlay_id`, `ui_entered` and
-///   `withheld_flush` (both decide only which `Flush` flips
-///   `content_painted`, which is here)
+///   `mouse_capture`, `mouse_on`, `next_overlay_id`, `ui_entered`,
+///   `withheld_flush` and `startup_needs_screen` (all three decide only
+///   which `Flush` flips `content_painted`, which is here)
 /// - read through a field already here: `engine` (this destructures it),
 ///   `grids` (via `grid`, which is the global grid's size -- the panes it
 ///   also holds reach no layer while the compositor paints that grid

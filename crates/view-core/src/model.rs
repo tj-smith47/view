@@ -65,8 +65,11 @@ pub struct Model {
     /// while the engine attaches. `update()` flips it back to `true` on the
     /// first `Flush` it does not withhold (see `Self::withholds_grid`), at
     /// which point `render()` drops the `Shell` layer for good and starts
-    /// painting the grid; never reset afterward, since a mid-session redraw
-    /// storm is not a second pre-attach state.
+    /// painting the grid. A mid-session redraw storm never resets it -- it
+    /// is not a second pre-attach state -- but a respawned engine is one,
+    /// and [`Self::rearm_startup_hold`] clears this along with the rest of
+    /// the hold so the replacement's own pre-`VimEnter` screen is withheld
+    /// the way the first engine's was.
     pub content_painted: bool,
     /// Whether nvim has reached `UIEnter` -- the event it fires once every
     /// `VimEnter` autocommand has run, so the windows the user's config
@@ -90,6 +93,19 @@ pub struct Model {
     /// `UIEnter`'s own path deliberately ignores it -- see
     /// [`Self::note_ui_entered`].
     pub withheld_flush: bool,
+    /// Whether the startup has asked for the screen before `UIEnter`, so
+    /// the grid it drew is one the user is waiting on rather than one nvim
+    /// would not be showing.
+    ///
+    /// Set from the one base-protocol reading that says so: nvim's own
+    /// message area carrying text at a flush
+    /// (`GridRegistry::message_area_has_text`). That area exists only on a
+    /// session that left the messages with nvim, and text in it before
+    /// `UIEnter` is a startup addressing the user through the grid -- where
+    /// a `vim.fn.input()` prompt lands when neither the cmdline nor the
+    /// messages were externalized, which is the one permutation whose
+    /// prompt no layer above the grid can carry.
+    pub startup_needs_screen: bool,
     /// Set from `Msg::EngineStopped`'s payload when the engine's RPC reader
     /// thread stopped reading for a reason other than an ordinary process
     /// exit (see that variant's doc comment). The bin crate reports this to
@@ -325,6 +341,7 @@ impl Model {
             content_painted: true,
             ui_entered: false,
             withheld_flush: false,
+            startup_needs_screen: false,
             fatal_reason: None,
             claimed_keys: Vec::new(),
             statusline_enabled: false,
@@ -370,21 +387,47 @@ impl Model {
     /// has taken these" and answer during startup -- noice's notification
     /// about exactly that is what draws a float, pumps nvim's event loop
     /// mid-source and flushes the half-built screen a TUI session never
-    /// sees. So the grid waits for `UIEnter` on the sessions that can
-    /// afford to wait.
+    /// sees. So the grid waits for `UIEnter`.
     ///
-    /// Only when view owns both the cmdline and the messages, because those
-    /// are the two surfaces a startup can need the screen for: a
-    /// `vim.fn.input()` prompt and an `init.lua` error both reach the user
-    /// over their own surface here, painted above the shell layer and never
-    /// withheld, while a session that left either one with nvim has them in
-    /// the grid and must show it. A hold that could hide a prompt is a hang,
-    /// so that session withholds nothing.
+    /// A hold that could hide a prompt is a hang, so it ends the moment the
+    /// startup asks for the screen. Which way it asks depends on what the
+    /// session externalized, and both ways are covered without reading a
+    /// surface here: a prompt nvim hands over arrives as `cmdline_show` and
+    /// paints on its own layer *above* the withheld grid, and a prompt nvim
+    /// draws itself lands in its message area, which
+    /// [`Self::startup_needs_screen`] watches.
     #[must_use]
     pub fn withholds_grid(&self) -> bool {
-        !self.ui_entered
-            && self.owns(crate::native::ext::Ext::Cmdline)
-            && self.owns(crate::native::ext::Ext::Messages)
+        !self.ui_entered && !self.startup_needs_screen
+    }
+
+    /// Records that the startup has asked for the screen, ending the hold
+    /// for every flush from here.
+    ///
+    /// A no-op once nvim has reached `UIEnter`, so a prompt in the ordinary
+    /// session cannot re-arm anything: the flag is about the window before
+    /// the first content frame and nothing after it.
+    pub fn note_startup_needs_screen(&mut self) {
+        if !self.ui_entered {
+            self.startup_needs_screen = true;
+        }
+    }
+
+    /// Re-arms the hold for a replacement engine, which starts from
+    /// `VimEnter` exactly as the first one did and would otherwise paint
+    /// the pre-`VimEnter` screen this hold exists to keep off the terminal.
+    ///
+    /// [`Self::content_painted`] goes back to `false` with the rest: the
+    /// dead engine's grid is gone from the model whatever this does (the
+    /// replacement's own redraw batch overwrites it before the flush that
+    /// would show it), so the frame the hold covers is the shell one --
+    /// the same statusline placeholder the first start paints, over which
+    /// the supervision notice reads.
+    pub fn rearm_startup_hold(&mut self) {
+        self.content_painted = false;
+        self.ui_entered = false;
+        self.withheld_flush = false;
+        self.startup_needs_screen = false;
     }
 
     /// Lifts the startup grid hold: nvim has reached `UIEnter`, so every
@@ -2011,8 +2054,10 @@ mod tests {
     }
 
     /// A session attached the way `view.toml`'s `[native]` defaults leave
-    /// it: view owns the cmdline and the messages, so the grid hold is
-    /// available to it.
+    /// it: view owns the cmdline and the messages. The hold does not depend
+    /// on that -- see
+    /// `every_native_permutation_holds_the_grid_until_the_startup_asks_for_it`
+    /// -- so this is the shipped shape rather than the only holding one.
     fn holding_model() -> Model {
         let mut model = Model::new();
         model.attach_surfaces(vec![
@@ -2028,29 +2073,162 @@ mod tests {
         let _ = crate::update::update(model, crate::msg::Msg::Redraw(vec![UiEvent::Flush]));
     }
 
-    /// The release condition a startup that needs the screen depends on: a
-    /// prompt and an error reach the user over the cmdline and the message
-    /// surfaces, so a session that left either one with nvim has them in the
-    /// grid and cannot afford to hold it.
+    /// What a session left with nvim decides where a startup prompt or a
+    /// startup error is *drawn*, never whether the grid is held: a
+    /// permutation that reads its cmdline out of the grid releases the hold
+    /// when nvim announces one, and holds until then like every other.
     #[test]
-    fn only_a_session_owning_both_the_cmdline_and_the_messages_holds_the_grid() {
+    fn every_native_permutation_holds_the_grid_until_the_startup_asks_for_it() {
         use crate::native::ext::Ext;
-        let cases = [
-            (vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages], true),
-            (vec![Ext::LineGrid, Ext::Cmdline], false),
-            (vec![Ext::LineGrid, Ext::Messages], false),
-            (vec![Ext::LineGrid], false),
+        let permutations = [
+            vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages],
+            vec![Ext::LineGrid, Ext::Cmdline],
+            vec![Ext::LineGrid, Ext::Messages],
+            vec![Ext::LineGrid],
         ];
-        for (surfaces, holds) in cases {
+        for surfaces in permutations {
             let mut model = Model::new();
             model.attach_surfaces(surfaces.clone());
-            assert_eq!(
+            assert!(
                 model.withholds_grid(),
-                holds,
-                "attached {surfaces:?} must {} the grid",
-                if holds { "withhold" } else { "paint" }
+                "attached {surfaces:?} must withhold the grid before UIEnter"
+            );
+            model.note_startup_needs_screen();
+            assert!(
+                !model.withholds_grid(),
+                "attached {surfaces:?} must release once the startup asks"
             );
         }
+    }
+
+    /// The release signal, taken off the wire rather than out of a request
+    /// only a view-owned surface would answer: a startup that draws into
+    /// nvim's own message area is asking the user for something through the
+    /// grid, and the permutation that externalized neither the cmdline nor
+    /// the messages has nowhere else to show it.
+    #[test]
+    fn text_in_nvims_message_area_releases_the_hold_before_ui_enter() {
+        let mut model = holding_model();
+        let message = message_area(&mut model);
+        flush(&mut model);
+        assert!(model.withholds_grid(), "an empty message area holds");
+        write_row(&mut model, message, "PROMPTHERE: ");
+        flush(&mut model);
+        assert!(
+            !model.withholds_grid(),
+            "a prompt nvim drew itself must reach the user"
+        );
+    }
+
+    /// nvim announces its message area at every startup that left the
+    /// messages with it, drawn into or not: releasing on the announcement
+    /// would leave that permutation with no hold at all.
+    #[test]
+    fn the_announcement_of_an_empty_message_area_is_not_a_release_signal() {
+        let mut model = holding_model();
+        let _ = message_area(&mut model);
+        flush(&mut model);
+        assert!(model.withholds_grid(), "an announcement draws nothing");
+        assert!(model.withheld_flush, "and the flush behind it is held");
+    }
+
+    /// nvim's own "no message grid yet" answer, which precedes the real one
+    /// at every such startup and places nothing.
+    #[test]
+    fn the_zero_message_grid_is_not_a_release_signal() {
+        let mut model = holding_model();
+        msg_set_pos(&mut model, 0);
+        flush(&mut model);
+        assert!(model.withholds_grid(), "grid 0 announces no message area");
+    }
+
+    /// `msg_set_pos` for `grid`, the way nvim announces its message area to
+    /// a session that did not externalize the messages.
+    fn msg_set_pos(model: &mut Model, grid: u64) {
+        let _ = crate::update::update(
+            model,
+            crate::msg::Msg::Redraw(vec![UiEvent::MsgSetPos {
+                grid,
+                row: 23,
+                scrolled: false,
+                sep_char: String::new(),
+                zindex: 200,
+                compindex: 0,
+            }]),
+        );
+    }
+
+    /// Announces and sizes a message area, answering the grid it lives on.
+    fn message_area(model: &mut Model) -> u64 {
+        const MESSAGE_GRID: u64 = 3;
+        let _ = crate::update::update(
+            model,
+            crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
+                grid: MESSAGE_GRID,
+                width: 20,
+                height: 1,
+            }]),
+        );
+        msg_set_pos(model, MESSAGE_GRID);
+        MESSAGE_GRID
+    }
+
+    /// Draws `text` into `grid`'s first row, as `grid_line` delivers it.
+    fn write_row(model: &mut Model, grid: u64, text: &str) {
+        let _ = crate::update::update(
+            model,
+            crate::msg::Msg::Redraw(vec![UiEvent::GridLine {
+                grid,
+                row: 0,
+                col_start: 0,
+                cells: text
+                    .chars()
+                    .map(|c| crate::events::GridCell {
+                        text: c.to_string(),
+                        hl_id: 0,
+                        repeat: 1,
+                    })
+                    .collect(),
+            }]),
+        );
+    }
+
+    /// A signal arriving after the release changes nothing: the hold is over
+    /// once, and a cmdline opened mid-session is not a startup state.
+    #[test]
+    fn a_released_hold_is_not_re_entered_by_a_later_signal() {
+        let mut model = holding_model();
+        model.note_ui_entered();
+        model.note_startup_needs_screen();
+        assert!(!model.startup_needs_screen);
+        assert!(!model.withholds_grid());
+    }
+
+    /// A replacement engine runs its own startup, so it owes the same hold:
+    /// the flush its `VimEnter` has not reached yet is the same screen the
+    /// first start withholds.
+    #[test]
+    fn a_re_armed_hold_withholds_the_replacements_first_flush() {
+        let mut model = holding_model();
+        flush(&mut model);
+        model.note_ui_entered();
+        flush(&mut model);
+        assert!(model.content_painted, "the first engine painted");
+        model.rearm_startup_hold();
+        assert!(model.withholds_grid(), "the replacement is held too");
+        assert!(
+            !model.content_painted,
+            "and paints the shell frame while it is held"
+        );
+        flush(&mut model);
+        assert!(
+            model.withheld_flush,
+            "the replacement's pre-VimEnter flush is held back"
+        );
+        assert!(!model.content_painted, "which paints no grid");
+        model.note_ui_entered();
+        flush(&mut model);
+        assert!(!model.withholds_grid(), "and released by its own UIEnter");
     }
 
     /// The pre-`VimEnter` screen itself: a flush arriving while the hold is
@@ -2063,13 +2241,15 @@ mod tests {
         assert!(model.withheld_flush, "and must be remembered as held back");
     }
 
-    /// A session that never had the hold is the one this change must not
-    /// touch: its first flush paints, exactly as before.
+    /// A startup that has asked for the screen is not held at all: its next
+    /// flush paints the way every flush did before there was a hold, on the
+    /// permutation that reads its own cmdline out of the grid.
     #[test]
-    fn a_flush_with_no_hold_paints_on_the_first_one() {
+    fn a_flush_after_the_startup_asked_for_the_screen_paints_at_once() {
         let mut model = Model::new();
         model.attach_surfaces(vec![crate::native::ext::Ext::LineGrid]);
         model.content_painted = false;
+        model.note_startup_needs_screen();
         flush(&mut model);
         assert!(model.content_painted);
         assert!(!model.withheld_flush);
