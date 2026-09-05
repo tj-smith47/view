@@ -95,6 +95,8 @@ ratio_p50 = 1.604844360957922
 ratio_p99 = 1.50580910298798
 staleness_p99_ms = 1.069328
 
+[startup.minimal]
+
 [supervision.minimal]
 restart_rehydrate_p99_ms = 20.980584999999998
 wedge_detect_p99_ms = 11582.432190000001

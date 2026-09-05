@@ -283,6 +283,36 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             );
             Ok(metrics)
         }
+        "startup" => {
+            let pair = paired_specs(&world, fixture, bins)?;
+            plant_startup_marker(&world, "view")?;
+            plant_startup_marker(&world, "nvim")?;
+            let outcome = startup::run(
+                ViewSpec(&pair.view),
+                NvimSpec(&pair.nvim),
+                protocol,
+                STARTUP_MARKER,
+            )
+            .with_context(|| format!("startup/{fixture} run failed"))?;
+            println!(
+                "{}",
+                report::paired_cell(scenario, fixture, "view", &outcome.summary, protocol.warmup)
+            );
+            let mut metrics = CellMetrics::new();
+            for (metric, value) in [
+                (startup::FIRST_FRAME_METRIC, outcome.gated_first_frame_ms),
+                ("first_frame_ratio_p50", outcome.gated_first_frame_ratio_p50),
+                ("first_frame_ratio_p99", outcome.gated_first_frame_ratio_p99),
+            ] {
+                println!("{}", report::aggregate_line(metric, value, 1));
+                metrics.insert(metric.to_string(), value);
+            }
+            // the planted marker is an added file, not an edit to one the
+            // fixture ships, so the same during-the-run check the paired
+            // cold row makes still holds over every committed file
+            verify_fixture_copies_untouched(&world, fixture)?;
+            Ok(metrics)
+        }
         "memory" => {
             let side = world.side(fixture, "view")?;
             for (index, name) in memory::workload_files().iter().enumerate() {
@@ -548,4 +578,52 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             known_scenarios().join(", ")
         ),
     }
+}
+
+/// The marker the `startup` row waits for: text only the config's own
+/// `VimEnter` window can put on the screen.
+///
+/// Spelled apart from [`FIRST_PAINT_MARKER`] because the two rows time
+/// different screens; a shared marker would let the later boundary be
+/// reached by the earlier one's frame.
+const STARTUP_MARKER: &str = "VIEWBENCHVIMENTERMARKER";
+
+/// Writes the `VimEnter` autocommand carrying [`STARTUP_MARKER`] into one
+/// side's private fixture copy, as an added plugin file rather than an edit
+/// to anything the fixture ships.
+///
+/// The marker fills [`FIRST_PAINT_MARKER_LINES`] lines for the reason that
+/// count exists: more lines than the grid has rows, so no overlay can hide
+/// the screen this row is timing.
+///
+/// The window is opened from the autocommand rather than written into the
+/// opened buffer, because the boundary this row times is the screen nvim
+/// draws only once every `VimEnter` autocommand has run: a marker either
+/// editor could paint before then measures the first-paint boundary a
+/// second time.
+fn plant_startup_marker(world: &CellWorld, side_tag: &str) -> Result<()> {
+    let dir = world
+        .hermetic_dir
+        .join(side_tag)
+        .join("xdg_config_home")
+        .join("nvim")
+        .join("plugin");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let chunk = format!(
+        "vim.api.nvim_create_autocmd('VimEnter', {{\n\
+           once = true,\n\
+           callback = function()\n\
+             vim.cmd('vsplit')\n\
+             local scratch = vim.api.nvim_create_buf(false, true)\n\
+             vim.api.nvim_buf_set_lines(scratch, 0, -1, false,\n\
+               vim.split(string.rep('{STARTUP_MARKER}\\n',\n\
+                 {FIRST_PAINT_MARKER_LINES}), '\\n'))\n\
+             vim.api.nvim_win_set_buf(0, scratch)\n\
+           end,\n\
+         }})\n"
+    );
+    let path = dir.join("view-bench-startup.lua");
+    std::fs::write(&path, chunk)
+        .with_context(|| format!("planting the startup marker in {}", path.display()))?;
+    Ok(())
 }

@@ -56,6 +56,7 @@ pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
     // the panel's own composer, with no turn under it
     ("ai_composer", Some(TAPS_VIEW_BIN)),
     ("first_paint", Some(VIEW_BIN)),
+    ("startup", Some(VIEW_BIN)),
     ("scroll", Some(VIEW_BIN)),
     ("memory", Some(VIEW_BIN)),
     ("remote_memory", Some(VIEW_BIN)),

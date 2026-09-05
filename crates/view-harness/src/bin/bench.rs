@@ -39,7 +39,7 @@ use view_bench::report;
 #[cfg(unix)]
 use view_bench::scenarios::echo_control;
 use view_bench::scenarios::{
-    echo, first_paint, flood, memory, picker, scroll, supervision, Protocol,
+    echo, first_paint, flood, memory, picker, scroll, startup, supervision, Protocol,
 };
 
 // The internal-boundary and echo_path rows run through the unix-only tap
@@ -102,6 +102,12 @@ const MATRIX: &[(&str, &str)] = &[
     // adding it arms a bar on the classes that can witness one without
     // turning a shared runner's spread into a red gate
     ("first_paint", USER_FIXTURE),
+    // the screen after that one: the frame a real config's own VimEnter
+    // opens, which is where the grid hold, the attach order and the
+    // takeover's place on the critical path all show up. Its config comes
+    // from the fixture plus a planted VimEnter autocommand, so the row
+    // needs no fixture of its own
+    ("startup", "minimal"),
     ("memory", "minimal"),
     ("remote_memory", "minimal"),
     ("flood", "minimal"),
@@ -2057,6 +2063,79 @@ mod tests {
                 flag.is_some_and(|flag| VIEW_BIN_FLAGS.contains(&flag)),
                 "{scenario} names {flag:?}, which is not a flag the bench binary accepts"
             );
+        }
+    }
+
+    /// Which matrix scenario each bench scenario module is measured as,
+    /// and the grounds where a module runs no row of its own.
+    ///
+    /// A module that defines a row and reaches no matrix cell is measured
+    /// by nothing: it compiles, it is registered wherever its own crate
+    /// walks its sources, and no run ever calls it. `startup.rs` shipped
+    /// in exactly that state, which is what this table exists to make
+    /// impossible to repeat.
+    const SCENARIO_MODULE_ROWS: &[(&str, &[&str], &str)] = &[
+        (
+            "ai_session.rs",
+            &["ai_session_active", "ai_streaming", "ai_composer"],
+            "",
+        ),
+        ("clock.rs", &[], "a clock the scenarios read, not a row"),
+        ("echo.rs", &["echo"], ""),
+        ("echo_control.rs", &["echo_control"], ""),
+        ("echo_speculated.rs", &["echo_speculated"], ""),
+        (
+            "echo_speculated_rtt.rs",
+            &[],
+            "arms the relay the speculated row is driven with; it measures nothing itself",
+        ),
+        ("first_paint.rs", &["first_paint"], ""),
+        ("flood.rs", &["flood"], ""),
+        ("memory.rs", &["memory"], ""),
+        ("mod.rs", &[], "the module list"),
+        ("picker.rs", &["picker"], ""),
+        ("remote_memory.rs", &["remote_memory"], ""),
+        ("scroll.rs", &["scroll"], ""),
+        ("startup.rs", &["startup"], ""),
+        ("supervision.rs", &["supervision"], ""),
+    ];
+
+    /// Every scenario module the bench crate ships either names the matrix
+    /// rows that run it or says why it runs none, walked off the directory
+    /// rather than off a list somebody kept.
+    #[test]
+    fn every_bench_scenario_module_reaches_a_matrix_row() {
+        let root = workspace_root().join("crates/view-bench/src/scenarios");
+        let mut found: Vec<String> = std::fs::read_dir(&root)
+            .expect("the scenario sources must be readable")
+            .map(|entry| entry.expect("a scenario source entry must read"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        let listed: Vec<String> = SCENARIO_MODULE_ROWS
+            .iter()
+            .map(|(name, _, _)| (*name).to_string())
+            .collect();
+        assert_eq!(
+            found, listed,
+            "a scenario module is missing from the matrix-row table"
+        );
+        let known = known_scenarios();
+        for (module, scenarios, grounds) in SCENARIO_MODULE_ROWS {
+            if scenarios.is_empty() {
+                assert!(
+                    !grounds.is_empty(),
+                    "{module} runs no matrix row and says why on no line"
+                );
+                continue;
+            }
+            for scenario in *scenarios {
+                assert!(
+                    known.contains(scenario),
+                    "{module} is measured as {scenario}, which no matrix cell runs"
+                );
+            }
         }
     }
 

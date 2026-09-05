@@ -28,7 +28,12 @@ use crate::BenchError;
 
 /// The gated metric this row publishes: view's own p99 cold time, in
 /// milliseconds, to the first frame carrying the config's windows.
-pub const FIRST_FRAME_METRIC: &str = "first_frame";
+///
+/// The `cold` component is what earns the metric its gate policy: the
+/// classification rule reads name components, and a cold-spawn absolute is
+/// recorded on a shared class and gated on a controlled one
+/// (`view_harness::baselines::gate_headroom`).
+pub const FIRST_FRAME_METRIC: &str = "first_frame_cold_ms";
 
 /// One startup run: the paired summary over every interleaved spawn pair,
 /// plus the two figures the gate reads.
@@ -36,7 +41,7 @@ pub const FIRST_FRAME_METRIC: &str = "first_frame";
 pub struct StartupOutcome {
     pub summary: PairedSummary,
     /// view's p99 cold time to the post-`VimEnter` screen, in milliseconds.
-    /// The cell `startup.first_frame`.
+    /// Recorded under [`FIRST_FRAME_METRIC`].
     pub gated_first_frame_ms: f64,
     /// view p50 over nvim p50 at that boundary -- the bar S1.7 states, and
     /// the one a paired row can hold across load regimes.
