@@ -540,16 +540,16 @@ single-grid arm: `grid_destroy`, `win_close`, `win_float_pos`,
 
 `view_engine::ui_events::decode_redraw` answers `UiEvent::Unknown` for
 every name below, which is what the capture test asserts on rather than a
-list anyone maintains by hand. Five of them (`chdir`, `option_set`,
+list anyone maintains by hand. All five (`chdir`, `option_set`,
 `set_icon`, `set_title`, `update_menu`) are already unknown under
 single-grid and are unrelated to this work.
 
-Of the six names that are the multigrid delta, five now decode into the
-placement vocabulary the pane registry applies (`grid_destroy`,
-`win_close`, `win_float_pos`, `win_hide`, `win_pos`), as does
-`win_external_pos` from the third arm. `win_viewport_margins` is the one
-left: it reports a float's border thickness, which the float's own grid
-already includes, so nothing reads it.
+Every name that is the multigrid delta now decodes: the placement
+vocabulary the pane registry applies (`grid_destroy`, `win_close`,
+`win_float_pos`, `win_hide`, `win_pos`), `win_external_pos` from the third
+arm, and `win_viewport_margins`. Nothing paints from the margins -- the
+cells inside them arrive as `grid_line` like any other -- but the event is
+decoded so a `layout` trace names the grid each line belongs to.
 
 ### Names view's decoder has no variant for
 
@@ -559,7 +559,6 @@ option_set
 set_icon
 set_title
 update_menu
-win_viewport_margins
 ```
 
 ## Window-layout ground truth

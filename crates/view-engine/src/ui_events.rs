@@ -55,6 +55,7 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "win_hide" => decode_win_hide(args).unwrap_or_else(unknown),
         "win_close" => decode_win_close(args).unwrap_or_else(unknown),
         "win_viewport" => decode_win_viewport(args).unwrap_or_else(unknown),
+        "win_viewport_margins" => decode_win_viewport_margins(args).unwrap_or_else(unknown),
         "msg_set_pos" => decode_msg_set_pos(args).unwrap_or_else(unknown),
         "hl_attr_define" => decode_hl_attr_define(args).unwrap_or_else(unknown),
         "default_colors_set" => decode_default_colors_set(args).unwrap_or_else(unknown),
@@ -229,6 +230,20 @@ fn decode_win_viewport(args: &[Value]) -> Option<UiEvent> {
         botline: as_u64(botline)?,
         curline: as_u64(curline)?,
         curcol: as_u64(curcol)?,
+    })
+}
+
+fn decode_win_viewport_margins(args: &[Value]) -> Option<UiEvent> {
+    let [grid, win, top, bottom, left, right, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::WinViewportMargins {
+        grid: as_u64(grid)?,
+        win: WinHandle(decode_ext_handle(win)?),
+        top: as_u64(top)?,
+        bottom: as_u64(bottom)?,
+        left: as_u64(left)?,
+        right: as_u64(right)?,
     })
 }
 
@@ -671,6 +686,39 @@ mod tests {
         let params = vec![arr(vec![Value::from("set_title"), arr(vec![])])];
         let evs = decode_redraw(&params);
         assert!(matches!(&evs[0], UiEvent::Unknown { name } if name == "set_title"));
+    }
+
+    /// The margins event names the grid it narrows, which is the whole of
+    /// what a layout trace needs from it: left as `Unknown` it reaches such a
+    /// trace as a bare wire name, and nvim sends 30-odd of them per startup
+    /// batch.
+    #[test]
+    fn decodes_win_viewport_margins_with_the_grid_it_names() {
+        let params = vec![arr(vec![
+            Value::from("win_viewport_margins"),
+            arr(vec![
+                Value::from(3u64),
+                Value::Ext(1, vec![9]),
+                Value::from(1u64),
+                Value::from(0u64),
+                Value::from(2u64),
+                Value::from(0u64),
+            ]),
+        ])];
+
+        let evs = decode_redraw(&params);
+
+        assert_eq!(
+            evs,
+            vec![UiEvent::WinViewportMargins {
+                grid: 3,
+                win: WinHandle(9),
+                top: 1,
+                bottom: 0,
+                left: 2,
+                right: 0,
+            }]
+        );
     }
 
     /// The viewport event carries the one relocation nvim announces without

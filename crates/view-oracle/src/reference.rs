@@ -740,6 +740,7 @@ impl ReferenceSession {
             // comment's ext-event policy paragraph)
             UiEvent::DefaultColorsSet { .. }
             | UiEvent::WinViewport { .. }
+            | UiEvent::WinViewportMargins { .. }
             | UiEvent::HlGroupSet { .. }
             | UiEvent::Flush
             | UiEvent::ModeInfoSet { .. }

@@ -125,6 +125,22 @@ pub enum UiEvent {
         curline: u64,
         curcol: u64,
     },
+    /// The rows and columns of a window's grid that are not part of the
+    /// viewport `win_viewport` reports -- what 'winbar' and a floating
+    /// window's borders take out of it.
+    ///
+    /// Nothing that paints reads this: the cells inside a margin arrive as
+    /// `grid_line` like any other. It is decoded rather than left as
+    /// [`UiEvent::Unknown`] so that a layout trace names the grid each line
+    /// belongs to, which is the question such a trace exists to answer.
+    WinViewportMargins {
+        grid: u64,
+        win: WinHandle,
+        top: u64,
+        bottom: u64,
+        left: u64,
+        right: u64,
+    },
     /// A highlight attribute id was (re)defined.
     HlAttrDefine {
         id: u64,

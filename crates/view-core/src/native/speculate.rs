@@ -540,6 +540,9 @@ fn answered_by(redraw: &[UiEvent], cell: &PredictedCell) -> bool {
         // on its own says nothing, since nvim sends it for every cursor move
         // inside an unmoved window
         UiEvent::WinViewport { .. } => false,
+        // margins narrow where the viewport sits inside a grid whose cells
+        // nvim resends as `grid_line` either way
+        UiEvent::WinViewportMargins { .. } => false,
         // everything else moves no grid content: chrome, highlights,
         // overlays, and the cursor's own position (which is read at predict
         // time, never re-read here)

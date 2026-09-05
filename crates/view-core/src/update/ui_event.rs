@@ -398,7 +398,9 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         // as `grid_line`, and the only reader of a viewport is
         // `native::speculate`, which the host folds a batch through before
         // this applier ever sees it
-        UiEvent::WinViewport { .. } | UiEvent::Unknown { .. } => Vec::new(),
+        UiEvent::WinViewport { .. }
+        | UiEvent::WinViewportMargins { .. }
+        | UiEvent::Unknown { .. } => Vec::new(),
     }
 }
 

@@ -82,7 +82,7 @@ pub fn sink_dup() -> Option<std::fs::File> {
 /// Writes one `<mono_ms> <topic> <payload>` line if [`init`] opened a sink;
 /// a single `Option` check and return otherwise -- the zero-overhead path
 /// this module's docs promise. `topic` is a short fixed tag (`"startup"`,
-/// `"theme"`, `"msg"`, `"engine"`, `"fatal"`); `payload` is caller-formatted
+/// `"theme"`, `"msg"`, `"engine"`, `"layout"`, `"fatal"`); `payload` is caller-formatted
 /// free text, never parsed back by this module.
 ///
 /// For a `payload` that already exists as a `&str`/`&String` (nothing to
@@ -475,7 +475,8 @@ fn is_layout_event(ev: &view_core::events::UiEvent) -> bool {
             | UiEvent::WinFloatPos { .. }
             | UiEvent::WinHide { .. }
             | UiEvent::WinClose { .. }
-    ) || matches!(ev, UiEvent::Unknown { name } if name == "win_viewport_margins")
+            | UiEvent::WinViewportMargins { .. }
+    )
 }
 
 /// The box-moving events of one `Msg`, kept aside so [`log_layout`] can
@@ -550,10 +551,18 @@ fn layout_payload(
         ),
         UiEvent::WinHide { grid } => format!("win_hide grid={grid}"),
         UiEvent::WinClose { grid } => format!("win_close grid={grid}"),
-        // the one member view decodes no fields for: it reaches the fold as
-        // an unrecognized wire name, so the line records that the event
-        // happened and nothing else
-        UiEvent::Unknown { name } if name == "win_viewport_margins" => name.clone(),
+        UiEvent::WinViewportMargins {
+            grid,
+            win,
+            top,
+            bottom,
+            left,
+            right,
+        } => format!(
+            "win_viewport_margins grid={grid} win={} top={top} bottom={bottom} \
+             left={left} right={right}",
+            win.0
+        ),
         _ => return None,
     })
 }
@@ -669,8 +678,13 @@ mod tests {
             },
             UiEvent::WinHide { grid: 5 },
             UiEvent::WinClose { grid: 3 },
-            UiEvent::Unknown {
-                name: "win_viewport_margins".to_string(),
+            UiEvent::WinViewportMargins {
+                grid: 6,
+                win: WinHandle(1002),
+                top: 1,
+                bottom: 0,
+                left: 0,
+                right: 0,
             },
         ];
         let outsiders = vec![
@@ -697,6 +711,11 @@ mod tests {
                 payload.lines().count(),
                 1,
                 "one line per event, not {payload:?}"
+            );
+            assert!(
+                payload.contains("grid="),
+                "a line naming no grid answers nothing the topic exists for: \
+                 {payload:?}"
             );
         }
         for ev in &outsiders {

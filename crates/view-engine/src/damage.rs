@@ -99,11 +99,12 @@ struct GridEpochs {
 /// (highlight, mode, cmdline, message, tabline, popupmenu, `Flush`,
 /// `Unknown`).
 ///
-/// `WinViewport` is deliberately in the second group despite carrying a
-/// grid id: every rule keyed on this answer drops or elides *cell content*,
-/// and a viewport report is not cell content. Answering with its grid would
-/// only expose it to those rules, and a dropped viewport is a retirement
-/// `native::speculate` never gets to make.
+/// `WinViewport` and `WinViewportMargins` are deliberately in the second
+/// group despite carrying a grid id: every rule keyed on this answer drops
+/// or elides *cell content*, and neither a viewport report nor its margins
+/// is cell content. Answering with their grid would only expose them to
+/// those rules, and a dropped viewport is a retirement `native::speculate`
+/// never gets to make.
 fn grid_of(ev: &UiEvent) -> Option<u64> {
     match ev {
         UiEvent::GridResize { grid, .. }
