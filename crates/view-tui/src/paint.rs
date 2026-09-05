@@ -1669,7 +1669,7 @@ mod tests {
     use view_core::grid::registry::GLOBAL_GRID;
     use view_core::grid::GridOp;
     use view_core::native::ai_event::{AiEvent, ToolCallStatus};
-    use view_test_support::{WideTerm, Widening, WIDE_HALF};
+    use view_test_support::{widening_residue, WideTerm, Widening, WIDE_HALF};
 
     /// A whole-frame composite into a fresh `ratatui::Frame`. Lives here
     /// rather than beside [`composite_into`] because nothing in production
@@ -4595,6 +4595,125 @@ mod tests {
             emitted_positions(&box_run, &run_head_narrows),
             vec![(1, 0), (2, 0), (3, 0), (4, 0), (5, 0)],
             "a box-drawing run whose head became narrow left the run stale"
+        );
+
+        let mut bar_appears = base.clone();
+        bar_appears[(2, 0)].set_symbol("\u{2502}");
+        let mut bar_leaves = bar_appears.clone();
+        bar_leaves[(2, 0)].set_symbol(" ");
+        assert_eq!(
+            emitted_positions(&bar_appears, &bar_leaves),
+            vec![(2, 0), (3, 0)],
+            "a box-drawing glyph that became a space left its right \
+             neighbour holding the half it had covered"
+        );
+    }
+
+    /// A glyph `ratatui` sizes at two columns and a terminal may draw at one
+    /// has to arrive with both of its columns already blank, and the column
+    /// under its own second half has to be left alone: `ratatui`'s diff
+    /// yields that column as a clear, for a backend that prints it straight
+    /// after the glyph and lets the terminal's advance place it, and this
+    /// loop addresses cells absolutely after such a glyph -- where the clear
+    /// lands on the glyph's second half and the terminal drops the glyph.
+    #[test]
+    fn a_vs16_emoji_is_blanked_ahead_and_its_own_second_column_never_addressed() {
+        let area = ratatui::layout::Rect::new(0, 0, 8, 1);
+        let mut front = Buffer::empty(area);
+        // narrow text under both of the glyph's columns, which is what makes
+        // `ratatui` yield the trailing column as a clear at all: it yields it
+        // only where the column held something else before
+        front.set_string(0, 0, "QQab", Style::default());
+        let mut back = front.clone();
+        back.set_string(0, 0, "\u{2615}\u{fe0f}ab", Style::default());
+        assert_eq!(
+            back[(0, 0)].cell_width(),
+            2,
+            "the fixture's emoji is not the two-column VS16 sequence this pin \
+             is about"
+        );
+        assert!(
+            front.diff_iter(&back).any(|(x, _, _)| x == 1),
+            "the diff never yielded the glyph's own trailing column, so this \
+             pin holds nothing to the clear that lands on it"
+        );
+
+        let bytes = resynced_bytes(&front, &back);
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            text.contains("  \u{8}\u{8}\u{2615}\u{fe0f}"),
+            "the glyph arrived without the two spaces and two backspaces that \
+             blank both of the columns it may land in: {bytes:?}"
+        );
+        assert!(
+            !text.contains("\u{1b}[1;2H"),
+            "the cursor was addressed to the glyph's own second column, where \
+             a printed clear drops the glyph: {bytes:?}"
+        );
+
+        let mut narrow = WideTerm::new(area.width, area.height, Widening::Narrow);
+        let mut wide = WideTerm::new(area.width, area.height, Widening::Ambiguous);
+        for frame in [resynced_bytes(&Buffer::empty(area), &front), bytes] {
+            narrow.feed(&frame);
+            wide.feed(&frame);
+        }
+        for (widening, term) in [(Widening::Narrow, &narrow), (Widening::Ambiguous, &wide)] {
+            let row: Vec<&str> = (0..4).map(|x| term.cell(x, 0)).collect();
+            assert_eq!(
+                row,
+                vec!["\u{2615}\u{fe0f}", WIDE_HALF, "a", "b"],
+                "{widening:?} lost the glyph or left a gap before the text \
+                 that follows it"
+            );
+        }
+        assert_eq!(
+            widening_residue(&narrow, &wide),
+            Vec::new(),
+            "a widening terminal ended the frame holding something the narrow \
+             one does not"
+        );
+    }
+
+    /// A regional-indicator pair is two columns by `ratatui`'s own width and
+    /// four on a terminal that draws each indicator two wide, so the repaint
+    /// that replaces it with narrow text starts past the pair's own width
+    /// and covers the two columns of excess beyond it. A run sized at one
+    /// column, or started at the changed cell's own next column, leaves the
+    /// tail of the pair standing.
+    #[test]
+    fn a_regional_indicator_pair_repaints_every_column_its_excess_covers() {
+        let area = ratatui::layout::Rect::new(0, 0, 6, 1);
+        let mut front = Buffer::empty(area);
+        front.set_string(1, 0, "\u{1f1ef}\u{1f1f5}", Style::default());
+        assert_eq!(
+            front[(1, 0)].cell_width(),
+            2,
+            "the fixture's pair is not the two-column cell this pin is about"
+        );
+        let mut back = front.clone();
+        back.set_string(1, 0, "ab", Style::default());
+
+        assert_eq!(
+            emitted_positions(&front, &back),
+            vec![(1, 0), (2, 0), (3, 0), (4, 0)],
+            "the columns a widening terminal gave the pair beyond its own \
+             width were never repainted"
+        );
+
+        let mut narrow = WideTerm::new(area.width, area.height, Widening::Narrow);
+        let mut wide = WideTerm::new(area.width, area.height, Widening::Ambiguous);
+        for bytes in [
+            resynced_bytes(&Buffer::empty(area), &front),
+            resynced_bytes(&front, &back),
+        ] {
+            narrow.feed(&bytes);
+            wide.feed(&bytes);
+        }
+        assert_eq!(
+            widening_residue(&narrow, &wide),
+            Vec::new(),
+            "a widening terminal kept part of the pair past the text that \
+             replaced it"
         );
     }
 

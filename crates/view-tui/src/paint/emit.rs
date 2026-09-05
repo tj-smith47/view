@@ -49,24 +49,49 @@ pub(crate) fn terminal_may_widen(symbol: &str) -> bool {
     if symbol.is_ascii() {
         return false;
     }
-    symbol.chars().any(|c| {
-        c == '\u{fe0f}'
-            || (c as u32 >= 0x80
-                && (c.width() != c.width_cjk() || c.is_emoji_char() || is_regional_indicator(c)))
-    })
+    symbol.chars().any(|c| c == '\u{fe0f}' || char_may_widen(c))
 }
 
-/// The cell diff, plus the run of cells to the right of every changed cell
-/// whose old or new symbol a terminal may draw two wide: on such a terminal
-/// that neighbour is the glyph's second half, so it is stale whenever the
-/// glyph changes even though the model never touched it.
+/// Whether a terminal may draw `c` alone wider than `unicode_width` says.
 ///
-/// The walk continues while the cell it just yielded may itself widen, since
-/// repainting a two-column glyph pushes the same staleness one column further
-/// right, and stops at the first cell that does not -- a run of box drawing
-/// whose leftmost cell changes is repainted to its end. It also stops at a
-/// cell `ratatui` itself calls multi-column (its continuation column belongs
-/// to the glyph, not to stale content) and at the right edge of the area.
+/// The per-code-point half of [`terminal_may_widen`], minus the VS16 itself:
+/// a variation selector adds no column of its own, it selects the emoji
+/// presentation of the character before it, which this already answers for.
+fn char_may_widen(c: char) -> bool {
+    c as u32 >= 0x80
+        && (c.width() != c.width_cjk() || c.is_emoji_char() || is_regional_indicator(c))
+}
+
+/// How many columns beyond the width `ratatui` sizes its cell by a widening
+/// terminal may give `symbol`.
+///
+/// One per code point that widens on its own, because a terminal sizes each
+/// of them separately: `unicode-width` calls a regional-indicator pair two
+/// columns and a terminal drawing each indicator two wide covers four, so
+/// the pair's excess is two, while a box-drawing character sized one column
+/// and drawn two has an excess of one.
+fn widening_excess(symbol: &str) -> u16 {
+    if symbol.is_ascii() {
+        return 0;
+    }
+    let widening = symbol.chars().filter(|&c| char_may_widen(c)).count();
+    u16::try_from(widening).unwrap_or(u16::MAX)
+}
+
+/// The cell diff, plus the columns to the right of every changed cell whose
+/// old or new symbol a terminal may draw wider than `ratatui` sized it: on
+/// such a terminal those columns hold the glyph's own excess, so they are
+/// stale whenever the glyph changes even though the model never touched
+/// them.
+///
+/// The reach past a changed cell starts at the first column past the wider
+/// of its old and new [`CellWidth`] -- the columns inside that width belong
+/// to the glyph, not to stale content -- and runs for the glyph's
+/// [`widening_excess`], at least one column. It extends again from every
+/// cell it yields that itself widens, since repainting a widened glyph
+/// pushes the same staleness further right, so a run of box drawing whose
+/// leftmost cell changes is repainted to its end, and it stops at the right
+/// edge of the area.
 ///
 /// Row-major left-to-right order is preserved, so [`draw_resynced`]'s
 /// adjacency logic is unchanged, and a column the diff already carries is
@@ -78,23 +103,45 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 ) -> impl Iterator<Item = (u16, u16, &'n Cell)> + use<'p, 'n> {
     let right = back.area.right();
     let mut diff = diff.peekable();
-    let mut pending: Option<(u16, u16)> = None;
+    let mut reach: Option<(u16, u16, u16)> = None;
     std::iter::from_fn(move || {
-        let (x, y, cell) = match pending.take() {
-            Some((x, y)) => (x, y, back.cell((x, y))?),
-            None => diff.next()?,
+        let live = reach.filter(|&(next, end, _)| next < end);
+        // whichever of the two comes first in row-major order, and the diff
+        // when they name the same column, so no column is yielded twice
+        let from_reach = match (live, diff.peek()) {
+            (Some((next, _, row)), Some(&(dx, dy, _))) => (row, next) < (dy, dx),
+            (Some(_), None) => true,
+            (None, _) => false,
         };
+        let (x, y, cell) = if let Some((next, end, row)) = live.filter(|_| from_reach) {
+            reach = Some((next.saturating_add(1), end, row));
+            (next, row, back.cell((next, row))?)
+        } else {
+            let (x, y, cell) = diff.next()?;
+            reach = live
+                .filter(|&(_, end, row)| row == y && x < end)
+                .map(|(next, end, row)| (next.max(x.saturating_add(1)), end, row));
+            (x, y, cell)
+        };
+        let old = front.cell((x, y));
         let widened = terminal_may_widen(cell.symbol())
-            || front
-                .cell((x, y))
-                .is_some_and(|old| terminal_may_widen(old.symbol()));
-        if widened && cell.cell_width() <= 1 {
-            if let Some(nx) = x.checked_add(1).filter(|nx| *nx < right) {
-                let carried = matches!(diff.peek(), Some(&(px, py, _)) if px == nx && py == y);
-                if !carried && back.cell((nx, y)).is_some() {
-                    pending = Some((nx, y));
+            || old.is_some_and(|old| terminal_may_widen(old.symbol()));
+        if widened {
+            let span = cell
+                .cell_width()
+                .max(old.map_or(1, |old| old.cell_width()))
+                .max(1);
+            let excess = widening_excess(cell.symbol())
+                .max(old.map_or(0, |old| widening_excess(old.symbol())))
+                .max(1);
+            let start = x.saturating_add(span);
+            let end = start.saturating_add(excess).min(right);
+            reach = match reach {
+                Some((next, reached, row)) if row == y => {
+                    Some((next.max(start), reached.max(end), row))
                 }
-            }
+                _ => Some((start, end, y)),
+            };
         }
         Some((x, y, cell))
     })
@@ -104,6 +151,14 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
 /// diffing, same trailing reset -- and, after any cell whose symbol a
 /// terminal may draw wider than the shadow assumes, addresses the next cell
 /// absolutely instead of trusting the terminal's advance.
+///
+/// Two consequences of addressing absolutely, both of which the crossterm
+/// loop is free of because it never moves mid-run. A cell inside the span
+/// the previous symbol already covers is dropped rather than printed over
+/// that symbol's own second half; and a symbol `ratatui` sizes at two
+/// columns that a terminal may draw at one has both of its columns blanked
+/// first, so the column the terminal declines to cover is left blank rather
+/// than stale.
 ///
 /// # Errors
 ///
@@ -117,7 +172,16 @@ pub(crate) fn draw_resynced<'a, W: Write>(
     let mut underline_color = Color::Reset;
     let mut modifier = Modifier::empty();
     let mut last_pos: Option<(u16, u16)> = None;
+    let mut covered_until: Option<(u16, u16)> = None;
     for (x, y, cell) in content {
+        // `ratatui` yields the trailing column of a VS16 emoji as a clear,
+        // on the assumption a backend prints it straight after the glyph and
+        // lets the terminal's own advance place it; addressed absolutely it
+        // lands on the glyph's second half instead and the terminal drops
+        // the glyph
+        if matches!(covered_until, Some((cx, cy)) if cy == y && x < cx) {
+            continue;
+        }
         if !matches!(last_pos, Some((px, py)) if px.checked_add(1) == Some(x) && y == py) {
             queue!(writer, MoveTo(x, y))?;
         }
@@ -144,7 +208,14 @@ pub(crate) fn draw_resynced<'a, W: Write>(
             )?;
             underline_color = cell.underline_color;
         }
+        if cell.cell_width() >= 2 && terminal_may_widen(cell.symbol()) {
+            // nvim's TUI writes the same two spaces and two backspaces ahead
+            // of this class: on a terminal that draws the glyph one column
+            // wide the second column is then blank rather than stale
+            queue!(writer, Print("  \u{8}\u{8}"))?;
+        }
         queue!(writer, Print(cell.symbol()))?;
+        covered_until = x.checked_add(cell.cell_width()).map(|next| (next, y));
         if terminal_may_widen(cell.symbol()) {
             // the terminal's own cursor is now somewhere this loop cannot
             // predict, so the next cell is addressed rather than assumed
