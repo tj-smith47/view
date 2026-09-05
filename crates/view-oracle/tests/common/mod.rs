@@ -128,10 +128,13 @@ pub fn isolate_xdg_native_off_except(
     disable_native_features_except(home, keep);
 }
 
-/// [`isolate_xdg_native_off`] without the config file, for the one test
-/// whose subject is what a first launch does: reading the config, taking
-/// the superseded surfaces over, claiming the feature keys and introducing
-/// all of it once.
+/// [`isolate_xdg_native_off`] without the config file, so the session runs
+/// the `[native]` defaults a user gets.
+///
+/// Two subjects want that. One is what a first launch does: reading the
+/// config, taking the superseded surfaces over, claiming the feature keys
+/// and introducing all of it once. The other is any test whose screen is
+/// the one view really paints, chrome included.
 pub fn isolate_xdg_first_launch(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
     for (var, dir) in xdg_first_launch_env(home) {
         cmd.env(var, dir);

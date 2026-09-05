@@ -474,6 +474,7 @@ pub struct PtySession {
     parser: vt100::Parser,
     master: Box<dyn MasterPty + Send>,
     raw: Option<Vec<u8>>,
+    raw_limit: usize,
     // once the child has been reaped its pid can be recycled by the OS, so a
     // group kill aimed at that pid could hit an unrelated process; before
     // reaping the pid is held (live or zombie) and the group signal is safe
@@ -524,12 +525,14 @@ pub fn startup_shell_visible(screen: &vt100::Screen) -> bool {
     screen.alternate_screen() && screen.hide_cursor()
 }
 
-/// How much of a child's raw output a recording session keeps.
+/// How much of a child's raw output a recording session keeps by default.
 ///
 /// Bounded rather than open-ended because the escape traffic worth asserting
 /// on is what a child writes near its start -- its capability probe, the
 /// modes it sets, its first frames -- while an editor driven by the flood row
-/// writes megabytes no assertion has a use for.
+/// writes megabytes no assertion has a use for. A caller whose subject is a
+/// whole session rather than its opening asks for its own bound
+/// ([`PtySession::record_raw_output_up_to`]).
 const RAW_RECORD_LIMIT: usize = 256 * 1024;
 
 impl PtySession {
@@ -680,12 +683,15 @@ impl PtySession {
             parser,
             master: pair.master,
             raw: None,
+            raw_limit: RAW_RECORD_LIMIT,
             reaped: false,
         })
     }
 
     /// Starts keeping the child's raw output bytes, up to
-    /// [`RAW_RECORD_LIMIT`], alongside the parsed screen.
+    /// [`RAW_RECORD_LIMIT`], alongside the parsed screen -- see
+    /// [`record_raw_output_up_to`](Self::record_raw_output_up_to) for a
+    /// caller that needs more.
     ///
     /// The parsed screen cannot answer every question about a terminal
     /// child: a private mode it sets (synchronized output, the kitty
@@ -699,6 +705,22 @@ impl PtySession {
     /// [`wait_for`](Self::wait_for) or any other method that drains, or the
     /// bytes those already parsed are gone.
     pub fn record_raw_output(&mut self) {
+        self.record_raw_output_up_to(RAW_RECORD_LIMIT);
+    }
+
+    /// [`record_raw_output`](Self::record_raw_output) keeping `limit` bytes
+    /// instead of the default.
+    ///
+    /// A caller that replays the whole recording through a terminal model
+    /// -- a full-screen battery at a user's own geometry, where one frame
+    /// alone is hundreds of kilobytes -- outgrows the default and would
+    /// otherwise feed that model a stream truncated mid-frame, whose
+    /// remaining rows are then whatever the last complete frame left there.
+    ///
+    /// Raising it after recording has begun keeps what is already held; the
+    /// bytes a lower limit dropped are gone.
+    pub fn record_raw_output_up_to(&mut self, limit: usize) {
+        self.raw_limit = limit;
         self.raw.get_or_insert_with(Vec::new);
     }
 
@@ -826,7 +848,7 @@ impl PtySession {
     /// happened to take the chunk off the channel.
     fn absorb(&mut self, chunk: &[u8]) {
         if let Some(raw) = &mut self.raw {
-            let room = RAW_RECORD_LIMIT.saturating_sub(raw.len());
+            let room = self.raw_limit.saturating_sub(raw.len());
             raw.extend_from_slice(&chunk[..room.min(chunk.len())]);
         }
         self.parser.process(chunk);
