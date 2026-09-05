@@ -2333,7 +2333,7 @@ mod tests {
     /// taken off the wire (`vim.fn.input()` with `cmdheight` 0, 1 and 2, a
     /// buffer reaching the last row, a ruler with `laststatus` 0, a one-line
     /// buffer over blank end-of-buffer rows, a `getchar()` wait, a prompt as
-    /// wide as the screen, the swap-file prompt, a buffer cursor moved by
+    /// wide as the screen, a `-- More --` pager wait, a buffer cursor moved by
     /// `nvim__redraw`), drawn here the way each attach delivers it.
     #[test]
     fn every_startup_screen_gets_the_same_answer_with_and_without_a_message_grid() {
@@ -2456,7 +2456,7 @@ mod tests {
                 releases: false,
             },
             Screen {
-                name: "swap-file E325 with its -- More -- prompt",
+                name: "a -- More -- pager wait on the last row",
                 single_grid: |m| {
                     write_row_at(m, GLOBAL, LAST_ROW - 1, "\" already exists!");
                     write_row_at(m, GLOBAL, LAST_ROW, "-- More --");
