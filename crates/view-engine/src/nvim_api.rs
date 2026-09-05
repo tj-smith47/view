@@ -2584,8 +2584,19 @@ impl EngineHandle {
     /// the same table the notice's wording is built from, so the question
     /// asked and the answer's use cannot drift apart.
     ///
-    /// A `notify`, like [`register_bridge`](Self::register_bridge): nothing
-    /// waits on the arming, and the probe's own reply is the notification.
+    /// A request rather than a notify, unlike
+    /// [`register_bridge`](Self::register_bridge): nothing waits on the
+    /// arming and the readings still arrive as notifications, but a chunk
+    /// that fails to arm is otherwise silent on both sides -- an error
+    /// inside `nvim_exec_lua` reaches neither `:messages` nor `v:errmsg` --
+    /// and view withholds a superseded claimant's floats until this
+    /// question is answered. The error reply is what turns that into "no
+    /// claimant loaded" instead of a window held off the screen for the
+    /// life of the engine.
+    ///
+    /// The cost: one more reply on the startup path, read by the RPC reader
+    /// thread and routed to the pump like every other async reply. Nothing
+    /// blocks on it and the paint loop never sees it.
     ///
     /// # Errors
     ///
@@ -2596,7 +2607,7 @@ impl EngineHandle {
             .iter()
             .map(|claimant| Value::from(claimant.module))
             .collect();
-        self.notify(
+        self.request_claimants_probe(
             "nvim_exec_lua",
             vec![
                 Value::from(PROBE_CLAIMANTS_CHUNK),

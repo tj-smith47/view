@@ -103,6 +103,13 @@ enum Waiter {
     /// `msgid` either, and its `Response` carries every key the chunk
     /// claimed, routed to `pump` as `Msg::MappingsClaimed`.
     MappingClaims,
+    /// The arming of the surface-claimant probe (see
+    /// [`EngineHandle::probe_claimants`]): a request rather than a notify
+    /// only so that a chunk that fails to arm is heard. Its success reply
+    /// carries nothing -- the readings arrive as `view_bridge` `claimants`
+    /// notifications -- so only an error reply is routed, as
+    /// `Msg::ClaimantsProbed` naming nobody.
+    ClaimantsProbe,
     /// An async read of what this engine recovered while starting (see
     /// [`EngineHandle::probe_swap_recovery`]): nothing is blocked on this
     /// `msgid`, so its `Response` is decoded and routed to `pump` as
@@ -600,6 +607,22 @@ impl EngineHandle {
                                         Vec::new()
                                     };
                                     pump.route_claims(Msg::MappingsClaimed { claimed });
+                                }
+                            }
+                            Some(Waiter::ClaimantsProbe) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "nothing
+                                    // loaded": the chunk never armed, so no
+                                    // reading will ever come, and view holds
+                                    // floats off the screen until this
+                                    // question is answered -- an unanswered
+                                    // probe would leave a plugin's window
+                                    // withheld for the life of the engine.
+                                    // A success reply carries nothing the
+                                    // notifications do not
+                                    if error != Value::Nil {
+                                        pump.route_claimants(Msg::ClaimantsProbed(Vec::new()));
+                                    }
                                 }
                             }
                             Some(Waiter::SwapRecovery { generation }) => {
@@ -1612,6 +1635,23 @@ impl EngineHandle {
         write: bool,
     ) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::AiFs { request_id, write })
+    }
+
+    /// Issues `method`/`params` as the arming of the surface-claimant probe
+    /// (see [`Waiter::ClaimantsProbe`]). Async on the same terms as
+    /// [`request_probe`](Self::request_probe): nothing blocks on it, and
+    /// only a failure to arm is routed anywhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn request_claimants_probe(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::ClaimantsProbe)
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
@@ -2954,6 +2994,66 @@ mod tests {
             unreachable!("expected HeartbeatReply, got {msg:?}");
         };
         assert_eq!(generation, 7);
+    }
+
+    /// The arming is a request so that a chunk which never armed is heard:
+    /// nothing else on the wire says so -- an error inside `nvim_exec_lua`
+    /// reaches neither `:messages` nor `v:errmsg` -- and view holds a
+    /// superseded claimant's floats off the screen until this question is
+    /// answered.
+    #[test]
+    fn an_error_arming_the_claimant_probe_answers_that_nobody_loaded() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.probe_claimants(7).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, method, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("the arming is a request, not a notification");
+        };
+        assert_eq!(method, "nvim_exec_lua");
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::from("Vim:E5108: Error executing lua"),
+            result: Value::Nil,
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        let Msg::ClaimantsProbed(loaded) = msg else {
+            unreachable!("expected ClaimantsProbed, got {msg:?}");
+        };
+        assert!(
+            loaded.is_empty(),
+            "a probe that never armed loaded nobody: {loaded:?}"
+        );
+
+        // and a success reply carries nothing the `claimants` notifications
+        // do not: routing one would answer the probe before the readings
+        // arrive, which is the same wrong answer with better manners
+        h.probe_claimants(7).unwrap();
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Nil,
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            rx.try_recv().is_err(),
+            "an armed probe answers with its readings, not with its ack"
+        );
     }
 
     /// An engine that answers with an error answered: the reply resolves

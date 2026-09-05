@@ -656,6 +656,16 @@ impl PumpShared {
         self.route_queued(msg);
     }
 
+    /// Routes the `Msg::ClaimantsProbed` a failed arming degrades to, on
+    /// [`route_checktime`](Self::route_checktime)'s terms.
+    ///
+    /// Never dropped: it is the only answer that will ever come for a probe
+    /// whose chunk did not arm, and view holds a superseded claimant's
+    /// floats off the screen until the probe answers.
+    pub(crate) fn route_claimants(&self, msg: Msg) {
+        self.route_queued(msg);
+    }
+
     fn route_queued(&self, msg: Msg) {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
         route.retry_deferred();
