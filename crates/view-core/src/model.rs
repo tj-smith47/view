@@ -97,14 +97,14 @@ pub struct Model {
     /// the grid it drew is one the user is waiting on rather than one nvim
     /// would not be showing.
     ///
-    /// Set from the one base-protocol reading that says so: nvim's own
-    /// message area carrying text at a flush
+    /// Set from the one base-protocol reading that says so: the cursor
+    /// parked in nvim's own message area with text under it at a flush
     /// (`GridRegistry::message_area_has_text`). That area exists only on a
-    /// session that left the messages with nvim, and text in it before
+    /// session that left the messages with nvim, and a prompt in it before
     /// `UIEnter` is a startup addressing the user through the grid -- where
-    /// a `vim.fn.input()` prompt lands when neither the cmdline nor the
-    /// messages were externalized, which is the one permutation whose
-    /// prompt no layer above the grid can carry.
+    /// a `vim.fn.input()` lands when neither the cmdline nor the messages
+    /// were externalized, which is the one permutation whose prompt no
+    /// layer above the grid can carry.
     pub startup_needs_screen: bool,
     /// Set from `Msg::EngineStopped`'s payload when the engine's RPC reader
     /// thread stopped reading for a reason other than an ordinary process
@@ -2114,17 +2114,34 @@ mod tests {
     /// grid, and the permutation that externalized neither the cmdline nor
     /// the messages has nowhere else to show it.
     #[test]
-    fn text_in_nvims_message_area_releases_the_hold_before_ui_enter() {
+    fn a_prompt_in_nvims_message_area_releases_the_hold_before_ui_enter() {
         let mut model = holding_model();
         let message = message_area(&mut model);
         flush(&mut model);
         assert!(model.withholds_grid(), "an empty message area holds");
         write_row(&mut model, message, "PROMPTHERE: ");
+        cursor_goto(&mut model, message, 0, 12);
         flush(&mut model);
         assert!(
             !model.withholds_grid(),
             "a prompt nvim drew itself must reach the user"
         );
+    }
+
+    /// The message area is not only where nvim talks to the user: with
+    /// `laststatus` at 0 the ruler lives there too, and a startup that
+    /// forces its own redraws puts it there at every flush. The cursor is
+    /// what tells the two apart -- nvim parks it in a prompt and leaves it
+    /// in the buffer for a ruler.
+    #[test]
+    fn the_ruler_in_the_message_area_is_not_a_release_signal() {
+        let mut model = holding_model();
+        let message = message_area(&mut model);
+        write_row(&mut model, message, "1,1           Top");
+        cursor_goto(&mut model, GLOBAL, 0, 0);
+        flush(&mut model);
+        assert!(model.withholds_grid(), "a ruler is not a prompt");
+        assert!(model.withheld_flush, "and the flush behind it is held");
     }
 
     /// nvim announces its message area at every startup that left the
@@ -2189,11 +2206,147 @@ mod tests {
     #[test]
     fn a_buffer_line_on_the_last_row_is_not_a_release_signal() {
         let mut model = single_grid_model();
+        write_row_at(&mut model, GLOBAL, 0, "BUFFERLINE1");
         write_row_at(&mut model, GLOBAL, LAST_ROW, "BUFFERLINE24");
         cursor_goto(&mut model, GLOBAL, 0, 0);
         flush(&mut model);
         assert!(model.withholds_grid(), "buffer text is not a prompt");
         assert!(model.withheld_flush, "and the flush behind it is held");
+    }
+
+    /// `cmdheight` is not on the wire, so the last row is not where a
+    /// single-grid prompt is looked for: with `cmdheight` at 2 the prompt
+    /// sits on the row above it with the cursor there and the last row
+    /// blank. The cursor's own row is the message area's top, and a prompt
+    /// is the row that has nothing drawn beneath it.
+    #[test]
+    fn a_prompt_above_a_blank_last_row_releases_the_hold_with_no_message_grid() {
+        let mut model = single_grid_model();
+        write_row_at(&mut model, GLOBAL, LAST_ROW - 1, "PROMPTHERE: ");
+        cursor_goto(&mut model, GLOBAL, LAST_ROW - 1, 12);
+        flush(&mut model);
+        assert!(
+            !model.withholds_grid(),
+            "a prompt drawn above a blank cmdline row must reach the user"
+        );
+    }
+
+    /// One screen, one answer: what a fixture config draws before `UIEnter`
+    /// gets the same hold-or-release whether nvim placed a message grid for
+    /// it or composited the message area into grid 1. Each row is a screen
+    /// taken off the wire (`vim.fn.input()` with `cmdheight` 0, 1 and 2, a
+    /// buffer reaching the last row, a ruler with `laststatus` 0), drawn
+    /// here the way each attach delivers it.
+    #[test]
+    fn every_startup_screen_gets_the_same_answer_with_and_without_a_message_grid() {
+        struct Screen {
+            name: &'static str,
+            single_grid: fn(&mut Model),
+            multigrid: fn(&mut Model),
+            releases: bool,
+        }
+        let screens = [
+            Screen {
+                name: "cmdheight=0, a 60-line buffer reaching the last row, cursor left at the top",
+                single_grid: |m| {
+                    for row in 0..=LAST_ROW {
+                        write_row_at(m, GLOBAL, row, &format!("BUFFERLINE{}", row + 1));
+                    }
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                multigrid: |m| {
+                    let _ = message_area(m);
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                releases: false,
+            },
+            Screen {
+                name: "cmdheight=0, laststatus=0, the same buffer scrolled to its end",
+                single_grid: |m| {
+                    for row in 0..=LAST_ROW {
+                        write_row_at(m, GLOBAL, row, &format!("BUFFERLINE{}", row + 37));
+                    }
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                multigrid: |m| {
+                    let _ = message_area(m);
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                releases: false,
+            },
+            Screen {
+                name: "cmdheight=0, then vim.fn.input()",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, LAST_ROW, "PROMPTHERE: ");
+                    cursor_goto(m, GLOBAL, LAST_ROW, 12);
+                },
+                multigrid: |m| {
+                    let message = message_area_of_height(m, 3);
+                    write_row_at(m, message, 2, "PROMPTHERE: ");
+                    cursor_goto(m, message, 2, 12);
+                },
+                releases: true,
+            },
+            Screen {
+                name: "laststatus=0, forced redraws: the ruler in the message area",
+                single_grid: |m| {
+                    for row in 0..LAST_ROW {
+                        write_row_at(m, GLOBAL, row, &format!("BUFFERLINE{}", row + 1));
+                    }
+                    write_row_at(m, GLOBAL, LAST_ROW, &format!("{:62}1,1           Top", ""));
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                multigrid: |m| {
+                    let message = message_area(m);
+                    write_row_at(m, message, 0, "1,1           Top");
+                    cursor_goto(m, GLOBAL, 0, 0);
+                },
+                releases: false,
+            },
+            Screen {
+                name: "cmdheight=2, then vim.fn.input()",
+                single_grid: |m| {
+                    for row in 1..LAST_ROW - 1 {
+                        write_row_at(m, GLOBAL, row, "~");
+                    }
+                    write_row_at(m, GLOBAL, LAST_ROW - 1, "PROMPTHERE: ");
+                    cursor_goto(m, GLOBAL, LAST_ROW - 1, 12);
+                },
+                multigrid: |m| {
+                    let message = message_area_of_height(m, 2);
+                    write_row_at(m, message, 0, "PROMPTHERE: ");
+                    cursor_goto(m, message, 0, 12);
+                },
+                releases: true,
+            },
+        ];
+        let mut disagreed = Vec::new();
+        for screen in &screens {
+            for (branch, draw) in [
+                ("single grid", screen.single_grid),
+                ("message grid", screen.multigrid),
+            ] {
+                let mut model = if branch == "single grid" {
+                    single_grid_model()
+                } else {
+                    holding_model()
+                };
+                draw(&mut model);
+                flush(&mut model);
+                if model.withholds_grid() == screen.releases {
+                    disagreed.push(format!(
+                        "{} [{branch}]: expected {}",
+                        screen.name,
+                        if screen.releases { "release" } else { "hold" }
+                    ));
+                }
+            }
+        }
+        assert!(
+            disagreed.is_empty(),
+            "the hold answered these startup screens wrongly:\n  {}",
+            disagreed.join("\n  ")
+        );
     }
 
     /// nvim's global grid, which it numbers 1 in both attach modes.
@@ -2242,15 +2395,22 @@ mod tests {
         );
     }
 
-    /// Announces and sizes a message area, answering the grid it lives on.
+    /// Announces and sizes a one-row message area, answering the grid it
+    /// lives on.
     fn message_area(model: &mut Model) -> u64 {
+        message_area_of_height(model, 1)
+    }
+
+    /// Announces a message area `height` rows tall, the way nvim sizes it
+    /// for a prompt that lands below other message lines.
+    fn message_area_of_height(model: &mut Model, height: u64) -> u64 {
         const MESSAGE_GRID: u64 = 3;
         let _ = crate::update::update(
             model,
             crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
                 grid: MESSAGE_GRID,
                 width: 20,
-                height: 1,
+                height,
             }]),
         );
         msg_set_pos(model, MESSAGE_GRID);

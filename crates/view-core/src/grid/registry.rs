@@ -444,40 +444,59 @@ impl GridRegistry {
         panes
     }
 
-    /// Whether nvim's own message area is showing text.
+    /// Whether nvim is prompting out of its own message area: the cursor is
+    /// parked there and the row it sits on carries text, with nothing drawn
+    /// below it.
     ///
     /// A message area exists only where `ext_messages` is not attached, and
     /// nvim announces it (`msg_set_pos`) at every such startup whether or
     /// not it has drawn into it -- so the placement alone says nothing and
-    /// the cells are what answers. Text there before nvim has reached
-    /// `UIEnter` is a startup talking to the user out of the grid: a
-    /// `vim.fn.input()` prompt on a session that externalized neither the
-    /// cmdline nor the messages arrives this way and no other.
+    /// the cells are what answers. Text alone is not enough either: with
+    /// `laststatus` at 0 the ruler lives in that same area, and a startup
+    /// that forces its own redraws puts it there at every flush. What tells
+    /// a prompt from a ruler is the cursor, which nvim parks in every
+    /// prompt it draws and leaves in the buffer otherwise. A
+    /// `vim.fn.input()` on a session that externalized neither the cmdline
+    /// nor the messages arrives this way and no other.
     ///
     /// Without `ext_multigrid` there is no message grid to place. nvim
     /// composites its message area into the bottom of the global grid and
     /// names neither that area nor `cmdheight` on the wire (`option_set`
-    /// carries no such option), so the last row stands in for it. Unlike a
-    /// message grid that row is shared -- with `cmdheight` at 0 a buffer
-    /// line reaches it -- so it counts only while the cursor is parked on
-    /// it, which every prompt does and a buffer line does not.
+    /// carries no such option), so the cursor's own row stands in for it,
+    /// and the rows beneath must be blank: a prompt sits at the top of the
+    /// cmdline area with nothing under it, while a buffer line under the
+    /// cursor (which nvim leaves at the top while sourcing) has more of the
+    /// buffer below.
+    ///
+    /// Read once per withheld flush; scans the cursor's row and stops at
+    /// the first non-blank row below it.
     #[must_use]
     pub fn message_area_has_text(&self) -> bool {
-        if self.slots.is_empty() {
-            let Some(last) = self.global.size().1.checked_sub(1) else {
+        let grid = if self.slots.is_empty() {
+            &self.global
+        } else {
+            let Some(id) = self.cursor else {
                 return false;
             };
-            return self.global.cursor().0 == last && !self.global.row_text(last).trim().is_empty();
-        }
-        self.slots
-            .iter()
-            .filter(|slot| {
-                slot.placed
-                    .as_ref()
-                    .is_some_and(|p| matches!(p.kind, PaneKind::Message { .. }))
-            })
-            .filter_map(|slot| self.grid(slot.id))
-            .any(|grid| (0..grid.size().1).any(|row| !grid.row_text(row).trim().is_empty()))
+            let in_message_pane = self.slots.iter().any(|slot| {
+                slot.id == id
+                    && slot
+                        .placed
+                        .as_ref()
+                        .is_some_and(|p| matches!(p.kind, PaneKind::Message { .. }))
+            });
+            if !in_message_pane {
+                return false;
+            }
+            let Some(grid) = self.grid(id) else {
+                return false;
+            };
+            grid
+        };
+        let row = grid.cursor().0;
+        !grid.row_text(row).trim().is_empty()
+            && (row.saturating_add(1)..grid.size().1)
+                .all(|below| grid.row_text(below).trim().is_empty())
     }
 
     /// The grid the global screen coordinates fall inside, topmost pane
