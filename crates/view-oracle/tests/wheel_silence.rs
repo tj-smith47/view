@@ -107,62 +107,61 @@ fn ready(mut session: PtySession) -> PtySession {
     session
 }
 
-/// Blocks until the session has written nothing across two consecutive
-/// reads, and answers how many bytes it has written in all.
-fn settle(session: &mut PtySession) -> usize {
-    let deadline = Instant::now() + view_test_support::host_deadline(BUDGET);
-    let mut last = session.raw_output().len();
-    let mut still = 0_u8;
-    while Instant::now() < deadline {
-        std::thread::sleep(POLL);
-        let now = session.raw_output().len();
-        if now == last {
-            still += 1;
-            if still == 2 {
-                return now;
-            }
-        } else {
-            still = 0;
-        }
-        last = now;
-    }
-    last
-}
-
-/// Sends one burst of [`BURST`] wheel-down reports as a single write, then
-/// holds the window open from that write until [`SILENCE`] has passed,
-/// draining throughout so every byte the session produces is recorded.
-/// Answers how many bytes it has written in all.
-fn burst_and_watch(session: &mut PtySession) -> usize {
+/// Writes one burst of [`BURST`] wheel-down reports as a single write and
+/// answers the instant it went out, which is where the window that follows
+/// is measured from: a descheduled test thread then moves both ends of that
+/// window together.
+fn burst(session: &mut PtySession) -> Instant {
     let reports = WHEEL_DOWN.repeat(BURST);
     let dispatched = Instant::now();
     session.send(&reports).unwrap();
-    let window = view_test_support::host_deadline(SILENCE);
-    while dispatched.elapsed() < window {
-        std::thread::sleep(POLL);
-        let _ = session.raw_output();
-    }
-    session.raw_output().len()
+    dispatched
 }
 
-/// Overwrites line 1 and waits for it, which is what makes the silence above
-/// a measurement rather than a stall: the pty carries one ordered byte
-/// stream, so a marker on screen is the whole burst before it having been
+/// Holds both sessions' windows open at once, draining each throughout so
+/// every byte either produces is recorded.
+///
+/// Both together rather than one after the other: the two windows are the
+/// same wall clock, and running them in series would spend it twice.
+fn watch(
+    under_test: &mut PtySession,
+    view_at: Instant,
+    reference: &mut PtySession,
+    nvim_at: Instant,
+) {
+    let window = view_test_support::host_deadline(SILENCE);
+    while view_at.elapsed() < window || nvim_at.elapsed() < window {
+        std::thread::sleep(POLL);
+        let _ = under_test.raw_output();
+        let _ = reference.raw_output();
+    }
+}
+
+/// Reads how much the session has written, then overwrites line 1 and waits
+/// for it, and answers the length it read.
+///
+/// The read happens immediately before the marker goes out, so nothing the
+/// session wrote between its own window and this call falls outside the
+/// count the caller compares. The marker is what makes the count a
+/// measurement rather than a stall: the pty carries one ordered byte
+/// stream, so the marker on screen is the whole burst before it having been
 /// read and acted on.
-fn prove_alive(session: &mut PtySession, silent_at: usize) {
+fn marked(session: &mut PtySession, who: &str) -> usize {
+    let at_marker = session.raw_output().len();
     let command = format!(":call setline(1,'{MARKER}')\r");
     session.send(command.as_bytes()).unwrap();
     assert!(
         session.wait_for(MARKER, view_test_support::host_deadline(BUDGET)),
-        "the session never ran the marker command, so its silence was a stall \
-         rather than a frame it declined to write; screen:\n{}",
+        "{who} never ran the marker command, so its silence was a stall rather \
+         than a frame it declined to write; screen:\n{}",
         session.screen()
     );
     assert!(
-        session.raw_output().len() > silent_at,
-        "the marker reached the screen without the session writing a byte, so \
-         this recording is not reading the session's output at all"
+        session.raw_output().len() > at_marker,
+        "{who} put the marker on screen without writing a byte, so this \
+         recording is not reading its output at all"
     );
+    at_marker
 }
 
 /// The pin: a wheel burst that changes nothing on screen writes nothing to
@@ -170,8 +169,9 @@ fn prove_alive(session: &mut PtySession, silent_at: usize) {
 /// much "nothing" is.
 ///
 /// The first burst is the settle point -- whatever either editor does the
-/// first time the mouse is used, it has done by the time that one is over --
-/// and the second is the measurement. Both sides are asserted, so the pin
+/// first time the mouse is used, it has done by the time its window is over
+/// -- and the second is the measurement, whose count is read at the moment
+/// the marker goes out so no byte written between the two falls outside it. Both sides are asserted, so the pin
 /// says which parity it proves rather than resting on two sessions agreeing
 /// about a stream neither produced.
 ///
@@ -189,27 +189,29 @@ fn a_wheel_burst_that_scrolls_nothing_writes_nothing_at_either_editor() {
     let mut under_test = view_session(&view_paths);
     let mut reference = nvim_session(&nvim_paths);
 
-    let _ = burst_and_watch(&mut under_test);
-    let _ = burst_and_watch(&mut reference);
-    let view_settled = settle(&mut under_test);
-    let nvim_settled = settle(&mut reference);
+    let view_at = burst(&mut under_test);
+    let nvim_at = burst(&mut reference);
+    watch(&mut under_test, view_at, &mut reference, nvim_at);
+    let view_settled = under_test.raw_output().len();
+    let nvim_settled = reference.raw_output().len();
 
-    let view_after = burst_and_watch(&mut under_test);
-    let nvim_after = burst_and_watch(&mut reference);
+    let view_at = burst(&mut under_test);
+    let nvim_at = burst(&mut reference);
+    watch(&mut under_test, view_at, &mut reference, nvim_at);
 
-    prove_alive(&mut under_test, view_after);
-    prove_alive(&mut reference, nvim_after);
+    let nvim_after = marked(&mut reference, "the pinned engine");
+    let view_after = marked(&mut under_test, "view");
 
     assert_eq!(
-        nvim_after - nvim_settled,
-        0,
+        nvim_after,
+        nvim_settled,
         "the pinned engine wrote {} bytes for a wheel burst that changed \
          nothing, so this leg states no floor for view to be held to",
         nvim_after - nvim_settled
     );
     assert_eq!(
-        view_after - view_settled,
-        0,
+        view_after,
+        view_settled,
         "view wrote {} bytes for a wheel burst that changed nothing, where \
          nvim wrote none: a redraw batch nvim flushed without acting on \
          became a terminal write",
