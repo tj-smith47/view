@@ -267,6 +267,38 @@ fn an_escape_timing_set_by_the_users_own_config_reaches_the_reader() {
     );
 }
 
+/// `ttimeout` off is no wait at all at the reader.
+///
+/// nvim's two ways of saying "read a half-arrived key code at once" --
+/// `nottimeout`, and a negative `ttimeoutlen` -- are resolved in the
+/// chunk's own Lua, so no Rust-side test can reach them: what a session
+/// relays for a config that switched the wait off is only observable from
+/// a session that has one. A reader that took the raw `ttimeoutlen` here
+/// would hold every unfinished run for a wait its user turned off.
+#[test]
+fn an_escape_timing_switched_off_reaches_the_reader_as_no_wait() {
+    let session = Session::start("nottimeout", "vim.o.ttimeout = false\n");
+    let mut m = model();
+    // recorded rather than matched on the first arrival: the relay at
+    // registration carries the pre-config wait, so what this asserts is
+    // that the zero follows it, and the record names what nvim did relay
+    // when it does not
+    let heard = std::cell::RefCell::new(Vec::new());
+    let armed = session.wait_for(&mut m, ARRIVAL, |msg| match msg {
+        Msg::EscapeTimeout(within) => {
+            heard.borrow_mut().push(*within);
+            (*within == Duration::ZERO).then_some(*within)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        armed,
+        Some(Duration::ZERO),
+        "`nottimeout` never reached the reader as a zero wait; nvim relayed {:?}",
+        heard.borrow()
+    );
+}
+
 /// The bridge's own observable, end to end: a real `:colorscheme` in a live
 /// session becomes a typed message on the runtime's channel. Nothing in the
 /// redraw stream states this -- a highlight batch looks identical whether
