@@ -2479,14 +2479,31 @@ impl EngineHandle {
     /// before it dares call `ui_attach`, or config sourcing could start
     /// racing an unregistered hook.
     ///
+    /// `UIEnter` is registered in the same breath because it is the other
+    /// half of the same startup: nvim fires it once, after every `VimEnter`
+    /// autocommand has run, so it is the first moment the screen holds what
+    /// the user's config opened. It blocks nvim the way `VimEnter` does,
+    /// and that is what it is for -- nvim cannot flush again until the
+    /// reply lands, so the frame that releases startup's grid hold
+    /// (`view_core::model::Model::withholds_grid`) is necessarily the first
+    /// one drawn with those windows open, which a notification could never
+    /// promise: redraw damage coalesces behind one token, and the release
+    /// could land after the flush it was meant to let through. Both hooks
+    /// go out together, in one command, so a caller cannot register the
+    /// half that blocks without the half that answers.
+    ///
     /// # Errors
     ///
     /// Returns the `EngineError` from the underlying request if it fails,
     /// nvim rejects the command, or the reply does not arrive within
     /// [`REGISTER_VIM_ENTER_TIMEOUT`].
     pub fn register_vim_enter_autocmd(&self, channel_id: u64) -> Result<(), EngineError> {
-        let cmd =
-            format!("autocmd VimEnter * ++once call rpcrequest({channel_id}, 'view_vim_enter')");
+        let cmd = format!(
+            "autocmd VimEnter * ++once \
+             call rpcrequest({channel_id}, 'view_vim_enter')\n\
+             autocmd UIEnter * ++once \
+             call rpcrequest({channel_id}, 'view_ui_enter')"
+        );
         self.request_timeout(
             "nvim_command",
             vec![Value::from(cmd)],
@@ -4173,6 +4190,8 @@ mod tests {
     /// --clean --embed`: `++once` (self-clearing, never fires twice), plain
     /// `rpcrequest` (not `rpcnotify` -- the spec mandates blocking here),
     /// targeting `channel_id` explicitly (nvim has no loopback shorthand).
+    /// Both hooks in one command, newline-separated, so no caller can hold
+    /// the one that blocks nvim without the one that unblocks it.
     #[test]
     fn register_vim_enter_autocmd_sends_the_exact_verified_vimscript_shape() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
@@ -4184,7 +4203,10 @@ mod tests {
         assert_eq!(
             params,
             vec![Value::from(
-                "autocmd VimEnter * ++once call rpcrequest(7, 'view_vim_enter')"
+                "autocmd VimEnter * ++once \
+                 call rpcrequest(7, 'view_vim_enter')\n\
+                 autocmd UIEnter * ++once \
+                 call rpcrequest(7, 'view_ui_enter')"
             )]
         );
     }

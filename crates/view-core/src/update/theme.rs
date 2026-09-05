@@ -44,6 +44,20 @@ pub(super) fn on_vim_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> 
     effects
 }
 
+/// Lifts startup's grid hold and answers the request nvim is blocked on.
+///
+/// The reply is the whole effect: everything a startup owes view was
+/// already issued from `VimEnter`, and what this event adds is the
+/// ordering -- nvim's next flush is the first frame carrying the windows
+/// the user's config opened (see [`Model::withholds_grid`]).
+pub(super) fn on_ui_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> {
+    model.note_ui_entered();
+    vec![Effect::Reply {
+        token,
+        value: ReplyValue::Nil,
+    }]
+}
+
 /// What a colorscheme nvim could not find owes the user: the name they wrote
 /// and where they wrote it, so the fix is one edit away.
 ///

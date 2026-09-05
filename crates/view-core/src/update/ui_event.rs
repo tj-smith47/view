@@ -172,9 +172,14 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         }
         UiEvent::Flush => {
             model.dirty = true;
-            // idempotent past the first Flush: see Model::content_painted's
-            // doc comment for why this never resets
-            model.content_painted = true;
+            // idempotent past the first Flush view does not withhold: see
+            // Model::content_painted's doc comment for why this never resets,
+            // and Model::withholds_grid for which flush is the first one
+            if model.withholds_grid() {
+                model.withheld_flush = true;
+            } else {
+                model.content_painted = true;
+            }
             Vec::new()
         }
         UiEvent::ModeInfoSet {

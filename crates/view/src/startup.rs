@@ -875,8 +875,8 @@ pub(crate) enum CutoverOutcome {
     Quit(i32),
 }
 
-/// Resolves everything staged at cutover -- presink messages, pending
-/// damage, then the pre-attach input buffer (latest resize, then every
+/// Resolves everything staged at cutover -- pending damage, presink
+/// messages, then the pre-attach input buffer (latest resize, then every
 /// key, oldest first) -- directly through `runtime::dispatch`, in that
 /// order, then returns so the caller can start `runtime::run`. Never sends
 /// into `msg_tx`; see the "why nothing here can block" section below.
@@ -884,7 +884,8 @@ pub(crate) enum CutoverOutcome {
 /// Order matches arrival: presink messages and pending damage were both
 /// staged before this call ever ran (see
 /// `view_engine::damage::PumpShared::attach_sink`'s doc comment), so they
-/// resolve first; every key not yet delivered when this call runs (queued
+/// resolve first, damage ahead of the presink because a startup blocked on
+/// a reply this call is about to send cannot have drawn anything since; every key not yet delivered when this call runs (queued
 /// in `msg_tx` by the non-unix input thread, or still in the kernel's tty
 /// queue for the unix inline drain) was typed after `drain_pre_attach`
 /// observed `Msg::EngineReady`, which is after every key in `keys` was
@@ -936,6 +937,22 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
     let mut engine_alive = true;
     let mut engine_stopped_exit = Some(engine_stopped_exit);
 
+    // ahead of the presink, which is the wire order for this one pair: a
+    // config that sources fast enough stages its `VimEnter` *and* its
+    // `UIEnter` here, and nvim is blocked on the second of those, so the
+    // damage staged beside them is by construction the screen from before
+    // the config opened its windows. Resolved after the replies, that
+    // screen would paint as though it had arrived after them -- the frame
+    // `Model::withholds_grid` exists to withhold. Its own failure is noted
+    // rather than returned on, because the presink below is where a
+    // connection that died on the way up says so, and that saying still has
+    // to become an exit.
+    if !pending_redraw.is_empty() {
+        engine_alive =
+            crate::runtime::dispatch(model, executor, follow_ups, Msg::Redraw(pending_redraw))
+                == crate::runtime::Flow::Continue;
+    }
+
     for msg in presink {
         let msg = match msg {
             Msg::EngineStopped { reason, .. } => {
@@ -983,11 +1000,6 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
         }
     }
 
-    if engine_alive && !pending_redraw.is_empty() {
-        engine_alive =
-            crate::runtime::dispatch(model, executor, follow_ups, Msg::Redraw(pending_redraw))
-                == crate::runtime::Flow::Continue;
-    }
     if engine_alive {
         if let Some((width, height)) = resize {
             engine_alive = crate::runtime::dispatch(
@@ -1538,6 +1550,63 @@ mod tests {
         );
     }
 
+    /// A config fast enough to reach `UIEnter` before view's own loop
+    /// starts stages the damage from before it beside the replies that
+    /// release it, and nvim -- blocked on the second of those -- has drawn
+    /// nothing since. The staged screen is therefore the one
+    /// `Model::withholds_grid` exists to withhold, and resolving the
+    /// replies first would paint it as though it had arrived after them.
+    #[test]
+    fn damage_staged_beside_a_startups_own_replies_is_withheld_not_painted() {
+        use view_core::msg::{EngineRequest, ReplyToken};
+
+        let ops = crate::engine_ops::FakeOps::default();
+        let executor = crate::runtime::Executor::new(ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.content_painted = false;
+
+        let outcome = run_cutover(
+            &mut model,
+            &executor,
+            &mut crate::runtime::FollowUps {
+                native: &mut crate::native::NativeSession::inert(),
+                theme: &mut crate::bridge::ThemeBridge::new(None, None),
+                speculate: crate::speculate::SpeculationClock::default(),
+            },
+            CutoverInput {
+                presink: vec![
+                    Msg::EngineRequest(EngineRequest::VimEnter {
+                        token: ReplyToken { msgid: 1 },
+                    }),
+                    Msg::EngineRequest(EngineRequest::UiEnter {
+                        token: ReplyToken { msgid: 2 },
+                    }),
+                ],
+                pending_redraw: vec![UiEvent::Flush],
+                resize: None,
+                keys: Vec::new(),
+            },
+            || view_core::msg::ExitInfo {
+                code: None,
+                by_signal: false,
+            },
+        );
+
+        assert!(matches!(outcome, CutoverOutcome::Continue));
+        assert!(
+            model.withheld_flush,
+            "the staged flush must be dispatched, and held"
+        );
+        assert!(
+            !model.content_painted,
+            "a screen drawn before the config opened its windows must not paint"
+        );
+        assert!(
+            model.ui_entered,
+            "and the replies still went out, so the next flush is the one that does"
+        );
+    }
+
     /// Drives the literal production `run_cutover` -- not a hand-recreated
     /// shape of it -- against a `msg_tx` pre-filled to its full 64-slot
     /// capacity with no consumer draining it, proving the whole cutover
@@ -1592,7 +1661,11 @@ mod tests {
             );
             (
                 outcome,
-                model.content_painted,
+                // what a dispatched `Flush` leaves on a session holding the
+                // grid, which every `[native]` default is (see
+                // `Model::withholds_grid`); `content_painted` is the same
+                // reading on a session that holds nothing
+                model.withheld_flush,
                 executor.into_ops().calls.into_inner(),
             )
         });
@@ -1604,10 +1677,10 @@ mod tests {
              consumer -- a channel send was likely reintroduced into the \
              cutover path"
         );
-        let (outcome, content_painted, calls) = handle.join().unwrap();
+        let (outcome, flush_dispatched, calls) = handle.join().unwrap();
         assert!(matches!(outcome, CutoverOutcome::Continue));
         assert!(
-            content_painted,
+            flush_dispatched,
             "the pending-damage Flush was not dispatched"
         );
         // presink's VimEnter reply and the two calls that reply carries, then

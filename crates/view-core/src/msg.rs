@@ -986,6 +986,21 @@ pub enum EngineRequest {
     VimEnter {
         token: ReplyToken,
     },
+    /// nvim fired `UIEnter`: every `VimEnter` autocommand has run, so the
+    /// windows the user's config opens are open and the next screen nvim
+    /// draws is the one its own TUI would first show. That is what lifts
+    /// startup's grid hold (see [`crate::model::Model::withholds_grid`]).
+    ///
+    /// A separate event from [`Self::VimEnter`], and later than it, because
+    /// view's `VimEnter` hook is registered before the user's config is
+    /// sourced and therefore runs ahead of every hook that config adds --
+    /// including the one that opens the file tree. Blocking, like every
+    /// request here, and that is the point: nvim cannot flush again until
+    /// the reply lands, so the first flush after it is the frame the hold
+    /// was waiting for.
+    UiEnter {
+        token: ReplyToken,
+    },
     /// `"+p`/`"*p`: the injected `g:clipboard.paste` closure blocks nvim on
     /// this `rpcrequest`, so the loop must delegate rather than answer
     /// inline -- see [`Effect::ClipboardRead`]. `register` is `'+'` or

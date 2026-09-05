@@ -76,7 +76,9 @@ impl Frame {
 /// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
 ///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
 ///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
-///   `mouse_capture`, `mouse_on`, `next_overlay_id`
+///   `mouse_capture`, `mouse_on`, `next_overlay_id`, `ui_entered` and
+///   `withheld_flush` (both decide only which `Flush` flips
+///   `content_painted`, which is here)
 /// - read through a field already here: `engine` (this destructures it),
 ///   `grids` (via `grid`, which is the global grid's size -- the panes it
 ///   also holds reach no layer while the compositor paints that grid
@@ -201,7 +203,13 @@ impl SurfaceCache {
                 let cursor = cursor_spec(model, frame.inputs.offset, &frame.surface.layers);
                 frame.surface.cursor = cursor;
                 if frame.inputs.statusline_rows > 0 {
-                    refresh_statusline(&mut frame.surface, model, frame.inputs.grid.0);
+                    // the width the frame's own layers were built at, which
+                    // is not the engine's while the grid is withheld
+                    refresh_statusline(
+                        &mut frame.surface,
+                        model,
+                        crate::painted_grid_size(model).0,
+                    );
                 }
                 refresh_speculated(&mut frame.surface, model, frame.inputs.offset);
             }
@@ -889,6 +897,41 @@ mod tests {
             (cache.frames, cache.rebuilds),
             (2, 1),
             "a statusline segment change must refresh in place, not rebuild"
+        );
+    }
+
+    /// The bar's in-place refresh reads the width the frame around it was
+    /// built at, not the engine's own: while the startup hold is on, the
+    /// grid layer is an empty rect and the statusline beside it is too, and
+    /// a refresh at the engine's width would hand back a frame that
+    /// disagrees with a rebuild of the same model (the debug equivalence
+    /// check inside `render` is what says so).
+    #[test]
+    fn a_held_frames_statusline_refreshes_at_the_width_it_was_built_at() {
+        use view_core::native::statusline::SegmentUpdate;
+
+        let mut model = model_with_grid(20, 6);
+        model.statusline_enabled = true;
+        model.content_painted = false;
+        let mut cache = SurfaceCache::new();
+        let _ = cache.render(&model);
+
+        model
+            .engine
+            .statusline
+            .apply(SegmentUpdate::Ruler("3,7".to_string()));
+        // the assertion is `render`'s own debug equivalence check, which
+        // panics on a reused frame a rebuild would not have produced
+        let surface = cache.render(&model);
+
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Statusline(_)))
+            .expect("the statusline feature is on, so its layer must exist");
+        assert_eq!(
+            layer.rect.width, 0,
+            "a withheld frame's bar is as wide as the grid it sits under"
         );
     }
 

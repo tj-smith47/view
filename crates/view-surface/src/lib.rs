@@ -331,6 +331,28 @@ impl Surface {
     }
 }
 
+/// The size the grid layer is painted at: the engine's own grid, or an
+/// empty rect while view is withholding it.
+///
+/// A flush landing before nvim reaches `UIEnter` is a half-sourced screen
+/// its own TUI never paints, and the layer carrying it is the one thing
+/// that must not reach the terminal. Every surface above it -- the cmdline,
+/// the messages, the popupmenu, the native overlays -- paints regardless,
+/// so nothing a startup needs the screen for is held back (see
+/// `Model::withholds_grid`).
+///
+/// One derivation for the whole crate: the statusline bar's own width
+/// follows it, and a cache refreshing that bar at the engine's width while
+/// the frame around it was built at zero is a frame that disagrees with
+/// itself.
+pub(crate) fn painted_grid_size(model: &Model) -> (u16, u16) {
+    if model.content_painted {
+        model.engine.grid().size()
+    } else {
+        (0, 0)
+    }
+}
+
 /// Builds the [`Surface`] for one frame from `model`.
 ///
 /// The tabline is the only persistent chrome: when it is showing (more
@@ -367,7 +389,7 @@ impl Surface {
 #[must_use]
 pub fn render(model: &Model) -> Surface {
     let engine = &model.engine;
-    let (grid_w, grid_h) = engine.grid().size();
+    let (grid_w, grid_h) = painted_grid_size(model);
     let offset = model.chrome_rows();
 
     let mut layers = vec![Layer::new(
@@ -1010,6 +1032,14 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
             let col = cmdline_cursor_col(cmdline).min(width.saturating_sub(1));
             (height.saturating_sub(1).saturating_add(offset), col)
         }
+    } else if !model.content_painted {
+        // the buffer caret belongs to the grid this frame is withholding
+        // (see `Model::withholds_grid`), so it waits with it -- a caret
+        // parked mid-screen over an otherwise blank start is the same
+        // half-sourced screen the layer itself is held back for. The
+        // branches above are not held: an overlay or a cmdline that is
+        // painting owes the user the caret that says where the typing goes.
+        return None;
     } else {
         // the global grid's own cursor field only under single-grid: under
         // multigrid `grid_cursor_goto` names window grids, never grid 1, so
@@ -1518,6 +1548,113 @@ mod tests {
                 shape: CursorShape::Block,
             })
         );
+    }
+
+    /// The same model the startup grid hold is on: view owns the cmdline
+    /// and the messages, and no flush has been allowed to paint yet.
+    fn held_model(width: u16, height: u16) -> Model {
+        let mut model = model_with_grid(width, height);
+        model.attach_surfaces(vec![
+            view_core::native::ext::Ext::LineGrid,
+            view_core::native::ext::Ext::Cmdline,
+            view_core::native::ext::Ext::Messages,
+        ]);
+        model.content_painted = false;
+        model
+    }
+
+    /// The release condition a hold must never break: a `vim.fn.input()`
+    /// during startup reaches the user, because the surface it arrives on
+    /// paints above the layer the hold withholds. A hold that hid a prompt
+    /// would be a hang.
+    #[test]
+    fn a_startup_prompt_paints_while_the_grid_is_held() {
+        let mut model = held_model(20, 8);
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![("Your name: ".len() as u64 - 11, "Ada".to_string())],
+                pos: 3,
+                firstc: String::new(),
+                prompt: "Your name: ".to_string(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+
+        let cmdline = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Cmdline(_)))
+            .expect("the prompt paints through the hold");
+        let LayerKind::Cmdline(state) = &cmdline.kind else {
+            unreachable!()
+        };
+        assert_eq!(state.prompt, "Your name: ");
+        assert!(
+            surface
+                .layers
+                .iter()
+                .all(|l| l.kind != LayerKind::EngineGrid || l.rect.width == 0),
+            "and the half-sourced grid behind it still does not"
+        );
+    }
+
+    /// The other release condition: an `init.lua` that fails before
+    /// `VimEnter` says so, over the message surface view took, above the
+    /// held layer.
+    #[test]
+    fn a_startup_error_paints_while_the_grid_is_held() {
+        let mut model = held_model(40, 8);
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "emsg".to_string(),
+                content: vec![(0, "E5113: init.lua: boom".to_string())],
+                replace_last: false,
+            },
+        );
+
+        let surface = render(&model);
+
+        let texts: Vec<String> = surface
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.kind {
+                LayerKind::Toast { lines, .. } => Some(
+                    lines
+                        .iter()
+                        .map(|spans| spans.iter().map(|s| s.text.as_str()).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join(""),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("E5113")),
+            "the error must reach the user through the hold, got {texts:?}"
+        );
+    }
+
+    /// What the hold actually withholds, and the one thing it does: the
+    /// grid layer is an empty rect and the caret that belongs to it does
+    /// not park itself over the blank start.
+    #[test]
+    fn a_held_frame_carries_no_grid_and_no_buffer_caret() {
+        let model = held_model(20, 8);
+
+        let surface = render(&model);
+
+        let grid = surface
+            .layers
+            .iter()
+            .find(|l| l.kind == LayerKind::EngineGrid)
+            .expect("the layer is always present");
+        assert_eq!((grid.rect.width, grid.rect.height), (0, 0));
+        assert!(surface.cursor.is_none());
     }
 
     #[test]

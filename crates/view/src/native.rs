@@ -186,8 +186,18 @@ impl NativeSession {
     pub(crate) fn follow_up(&mut self, model: &mut Model, stage: Stage) -> Vec<Effect> {
         match stage {
             Stage::None => Vec::new(),
-            Stage::VimEnter => self.take_over(model),
-            Stage::Claims => self.announce(model),
+            Stage::VimEnter => {
+                crate::vlog::log("startup", "vim_enter received");
+                let effects = self.take_over(model);
+                crate::vlog::log_with("startup", || {
+                    format!("takeover sent calls={}", effects.len())
+                });
+                effects
+            }
+            Stage::Claims => {
+                crate::vlog::log("startup", "takeover answered");
+                self.announce(model)
+            }
         }
     }
 

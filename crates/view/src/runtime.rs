@@ -380,7 +380,7 @@ fn watch_deadline(wakeups: Wakeups<'_>) -> Option<std::time::Duration> {
     let watches = sooner(wakeups.write.poll_deadline(), wakeups.read.poll_deadline());
     let supervised = sooner(watches, wakeups.supervision.readout_deadline());
     let scheduled = sooner(sooner(supervised, wakeups.speculation), wakeups.reconnect);
-    sooner(scheduled, wakeups.spinner)
+    sooner(sooner(scheduled, wakeups.spinner), wakeups.startup_hold)
 }
 
 /// The nearer of two deadlines, where `None` is "as long as you like" and
@@ -419,6 +419,11 @@ struct Wakeups<'a> {
     /// ([`expire_ai_spinner`]) -- the one wakeup here that exists to move
     /// something on screen rather than to re-read something off the wire.
     spinner: Option<std::time::Duration>,
+    /// What is left of [`STARTUP_HOLD_CAP`], for the one pass that has to
+    /// happen without the engine sending anything: a startup that stops
+    /// short of `UIEnter` may also stop sending flushes, and a loop woken
+    /// only by traffic would hold its blank screen for the session.
+    startup_hold: Option<std::time::Duration>,
 }
 
 /// Waits for the loop's next message, bounded by whichever watch has a
@@ -708,6 +713,43 @@ pub struct MsgChannel {
 /// `startup::drain_pre_attach` for the buffering that covers exactly that
 /// window. The executor drives
 /// `engine.handle` through [`EngineOps`]. Painting fires immediately when
+/// Which of the two startup lines the loop's paint site has already
+/// written, so each is written once for the frame it describes.
+///
+/// Both under the `"startup"` `VIEW_LOG` topic, whose line prefix is the
+/// milliseconds since process start: a startup timeline is read off those
+/// numbers against the shell frame's own line and nvim's `--startuptime`.
+#[derive(Default)]
+struct StartupMilestones {
+    /// The engine's first flush reached a paint pass.
+    flush: bool,
+    /// The first frame carrying grid content was written.
+    content: bool,
+}
+
+/// How long the startup grid hold ([`Model::withholds_grid`]) may outlast
+/// the attach before the loop lifts it and paints whatever nvim has drawn.
+///
+/// The hold's release signal is `UIEnter`, which a healthy session reaches
+/// in about a fifth of this on the configs measured; the cap is what a
+/// session that does not reach it at all gets instead, and its whole job is
+/// to keep a hold that mirrors a TUI's blank start from becoming a blank
+/// screen with no end. Generous rather than tight on purpose: a value near
+/// a normal startup would put the pre-`VimEnter` screen back on any loaded
+/// host, which is the defect the hold exists for.
+const STARTUP_HOLD_CAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What is left of [`STARTUP_HOLD_CAP`] at `now`, or `None` once the hold
+/// is over -- either because it expired or because nothing is held.
+///
+/// `Some(ZERO)` is the expiry itself and never means "no wakeup": the
+/// caller lifts the hold on that pass.
+fn startup_hold_left(model: &Model, started: Instant, now: Instant) -> Option<std::time::Duration> {
+    model
+        .withholds_grid()
+        .then(|| STARTUP_HOLD_CAP.saturating_sub(now.saturating_duration_since(started)))
+}
+
 /// `update()` marks `model.dirty`, and the loop blocks in
 /// [`wait_for_msg`], which a redraw, a keystroke, or an engine request
 /// wakes directly.
@@ -865,6 +907,11 @@ pub fn run(
     let mut state = LoopState::default();
     let mut reconnect = ReconnectSchedule::default();
     let mut spinner_due: Option<Instant> = None;
+    let mut milestones = StartupMilestones::default();
+    // from the loop's own start rather than the process's: the hold covers
+    // the window between the attach and `UIEnter`, and the loop begins at
+    // the near end of it
+    let hold_started = Instant::now();
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -965,6 +1012,14 @@ pub fn run(
         // before the paint below rather than after it, so the frame this
         // pass draws is the one the deadline came due for
         crate::spinner::expire(&mut model, &mut spinner_due, Instant::now());
+        // the clock the pure core cannot hold: `Model` decides *whether* a
+        // flush is withheld, and this decides how long that may last
+        if startup_hold_left(&model, hold_started, Instant::now())
+            .is_some_and(|left| left.is_zero())
+        {
+            crate::vlog::log("startup", "grid hold expired before UIEnter");
+            model.release_startup_hold();
+        }
         drain_pass_handoffs(&osc52_rx, term, &executor);
         // a resize the input reader has already seen describes the terminal
         // as it is now, whatever traffic is still queued ahead of its
@@ -1022,6 +1077,19 @@ pub fn run(
         // each processed wakeup paints here on the next pass, immediately,
         // with no post-redraw silence timeout and no input-drain budget.
         if model.dirty {
+            // the two startup milestones a timeline needs and only this
+            // point holds: the first pass with anything to draw is the first
+            // flush the engine sent, and the first one drawing grid content
+            // is the frame the user calls the start (see
+            // `Model::withholds_grid` for the gap between them)
+            if !milestones.flush {
+                milestones.flush = true;
+                crate::vlog::log("startup", "first flush received");
+            }
+            if !milestones.content && model.content_painted {
+                milestones.content = true;
+                crate::vlog::log("startup", "first content frame written");
+            }
             let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
             term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
@@ -1035,6 +1103,7 @@ pub fn run(
             .then(|| reconnect.poll_deadline(std::time::Instant::now()))
             .flatten();
         let spinner = crate::spinner::next_frame(spinner_due, Instant::now());
+        let startup_hold = startup_hold_left(&model, hold_started, Instant::now());
         #[cfg(unix)]
         let received = wait_for_msg_unified(
             &msg_rx,
@@ -1045,6 +1114,7 @@ pub fn run(
                 speculation,
                 spinner,
                 reconnect: due,
+                startup_hold,
             },
             input,
             &waker,
@@ -1062,6 +1132,7 @@ pub fn run(
                 speculation,
                 spinner,
                 reconnect: due,
+                startup_hold,
             },
         );
         let Some(received) = received else {
@@ -4388,6 +4459,7 @@ mod tests {
                         supervision: &fold,
                         speculation: None,
                         spinner: None,
+                        startup_hold: None,
                         reconnect: None,
                     },
                 )
@@ -4412,6 +4484,72 @@ mod tests {
     /// for a threshold -- and nothing shortens it: the write side, with its
     /// backlog drained, asks for nothing at all, and the wait itself
     /// delivers only what is sent to it.
+    /// A session holding the grid on `view.toml`'s `[native]` defaults, the
+    /// state `STARTUP_HOLD_CAP` bounds.
+    fn holding_model() -> Model {
+        let mut model = Model::new();
+        model.attach_surfaces(vec![
+            view_core::native::ext::Ext::LineGrid,
+            view_core::native::ext::Ext::Cmdline,
+            view_core::native::ext::Ext::Messages,
+        ]);
+        model.content_painted = false;
+        model
+    }
+
+    /// The release condition for a startup that never reaches `UIEnter`:
+    /// the hold has an end, and the loop reads it as one.
+    #[test]
+    fn the_grid_hold_counts_down_and_comes_due_at_its_cap() {
+        let model = holding_model();
+        let started = Instant::now();
+        assert_eq!(
+            startup_hold_left(&model, started, started),
+            Some(STARTUP_HOLD_CAP),
+            "a hold just taken is armed for its whole cap"
+        );
+        let due = startup_hold_left(&model, started, started + STARTUP_HOLD_CAP)
+            .expect("the expiry is a wakeup, never the absence of one");
+        assert!(due.is_zero(), "the cap itself is the pass that lifts it");
+        assert!(
+            startup_hold_left(&model, started, started + STARTUP_HOLD_CAP * 2)
+                .is_some_and(|left| left.is_zero()),
+            "and it stays due until something lifts it"
+        );
+    }
+
+    /// A session with no hold arms nothing, so the cap costs an idle loop
+    /// no wakeup it did not already have.
+    #[test]
+    fn a_session_that_withholds_nothing_arms_no_hold_wakeup() {
+        let mut model = holding_model();
+        model.note_ui_entered();
+        let now = Instant::now();
+        assert_eq!(startup_hold_left(&model, now, now), None);
+    }
+
+    /// The wakeup a startup that stops flushing depends on: with every
+    /// other watch quiet, the hold's own deadline is what the loop sleeps
+    /// against, or it would hold a blank screen for the session.
+    #[test]
+    fn the_hold_alone_shortens_the_idle_wait_to_its_own_deadline() {
+        let watch = OutboxStallWatch::default();
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        let fold = SupervisionFold::default();
+        let hold = std::time::Duration::from_millis(7);
+        let armed = watch_deadline(Wakeups {
+            write: &watch,
+            read: &heartbeat,
+            supervision: &fold,
+            speculation: None,
+            spinner: None,
+            startup_hold: Some(hold),
+            reconnect: None,
+        })
+        .expect("a hold in flight always arms a wakeup");
+        assert_eq!(armed, hold);
+    }
+
     #[test]
     fn an_idle_session_arms_only_the_wedge_deadline_and_is_never_woken_early() {
         let mut peer = WedgedPeer::new();
@@ -4449,6 +4587,7 @@ mod tests {
             supervision: &fold,
             speculation: None,
             spinner: None,
+            startup_hold: None,
             reconnect: None,
         })
         .expect("an idle session must still arm the wakeup a silent engine needs");
@@ -4474,6 +4613,7 @@ mod tests {
                 supervision: &fold,
                 speculation: None,
                 spinner: None,
+                startup_hold: None,
                 reconnect: None,
             },
         );
@@ -4522,6 +4662,7 @@ mod tests {
                 supervision: &fold,
                 speculation: None,
                 spinner: None,
+                startup_hold: None,
                 reconnect: None,
             }),
             None,
@@ -4554,6 +4695,7 @@ mod tests {
             supervision: &fold,
             speculation,
             spinner: None,
+            startup_hold: None,
             reconnect: None,
         })
         .expect("a pending prediction must bound a wait nothing else bounds");
@@ -4578,6 +4720,7 @@ mod tests {
                     supervision: &fold,
                     speculation,
                     spinner: None,
+                    startup_hold: None,
                     reconnect: None,
                 },
             )
@@ -4656,6 +4799,7 @@ mod tests {
                     supervision: &fold,
                     speculation: None,
                     spinner: None,
+                    startup_hold: None,
                     reconnect: None,
                 },
             )

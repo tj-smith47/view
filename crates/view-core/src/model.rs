@@ -63,10 +63,33 @@ pub struct Model {
     /// the shell frame (a themed statusline bar, see
     /// `view_surface::LayerKind::Shell`) instead of an unthemed empty grid
     /// while the engine attaches. `update()` flips it back to `true` on the
-    /// first `Flush`, at which point `render()` drops the `Shell` layer for
-    /// good; never reset afterward, since a mid-session redraw storm is not
-    /// a second pre-attach state.
+    /// first `Flush` it does not withhold (see `Self::withholds_grid`), at
+    /// which point `render()` drops the `Shell` layer for good and starts
+    /// painting the grid; never reset afterward, since a mid-session redraw
+    /// storm is not a second pre-attach state.
     pub content_painted: bool,
+    /// Whether nvim has reached `UIEnter` -- the event it fires once every
+    /// `VimEnter` autocommand has run, so the windows the user's config
+    /// opens are open and the screen nvim is about to draw is the one its
+    /// own TUI would first show.
+    ///
+    /// `VimEnter` itself is too early to read that way: view's `VimEnter`
+    /// hook is registered before the config is sourced and therefore runs
+    /// *first* of all of them, ahead of the one that opens the file tree.
+    ///
+    /// Defaults `false`, set once, and reaches no layer: it decides only
+    /// which `Flush` is allowed to flip [`Self::content_painted`].
+    pub ui_entered: bool,
+    /// Whether a `Flush` has already been withheld by
+    /// [`Self::withholds_grid`], so the screen behind the hold is a frame
+    /// nvim has drawn and view has not shown.
+    ///
+    /// Read only by [`Self::release_startup_hold`], the timeout path: a
+    /// startup that never reaches `UIEnter` still owes the user whatever
+    /// nvim did draw, and this is what says there is something to draw.
+    /// `UIEnter`'s own path deliberately ignores it -- see
+    /// [`Self::note_ui_entered`].
+    pub withheld_flush: bool,
     /// Set from `Msg::EngineStopped`'s payload when the engine's RPC reader
     /// thread stopped reading for a reason other than an ordinary process
     /// exit (see that variant's doc comment). The bin crate reports this to
@@ -300,6 +323,8 @@ impl Model {
             term_width: 0,
             term_height: 0,
             content_painted: true,
+            ui_entered: false,
+            withheld_flush: false,
             fatal_reason: None,
             claimed_keys: Vec::new(),
             statusline_enabled: false,
@@ -333,6 +358,64 @@ impl Model {
     /// sent would answer [`Self::owns`] about a surface nvim never gave it.
     pub fn attach_surfaces(&mut self, surfaces: Vec<crate::native::ext::Ext>) {
         self.ext_surfaces = surfaces;
+    }
+
+    /// Whether a `Flush` arriving now carries a screen nvim's own TUI would
+    /// not be showing, so view withholds the grid rather than painting it.
+    ///
+    /// nvim's TUI client attaches with `rgb`/`ext_linegrid`/`ext_termcolors`
+    /// alone and its session flushes nothing between the blank screen and
+    /// the frame `VimEnter` produced. view's attach externalizes the
+    /// cmdline, the messages and the popupmenu, which plugins read as "a GUI
+    /// has taken these" and answer during startup -- noice's notification
+    /// about exactly that is what draws a float, pumps nvim's event loop
+    /// mid-source and flushes the half-built screen a TUI session never
+    /// sees. So the grid waits for `UIEnter` on the sessions that can
+    /// afford to wait.
+    ///
+    /// Only when view owns both the cmdline and the messages, because those
+    /// are the two surfaces a startup can need the screen for: a
+    /// `vim.fn.input()` prompt and an `init.lua` error both reach the user
+    /// over their own surface here, painted above the shell layer and never
+    /// withheld, while a session that left either one with nvim has them in
+    /// the grid and must show it. A hold that could hide a prompt is a hang,
+    /// so that session withholds nothing.
+    #[must_use]
+    pub fn withholds_grid(&self) -> bool {
+        !self.ui_entered
+            && self.owns(crate::native::ext::Ext::Cmdline)
+            && self.owns(crate::native::ext::Ext::Messages)
+    }
+
+    /// Lifts the startup grid hold: nvim has reached `UIEnter`, so every
+    /// frame from here is one its own TUI would be showing.
+    ///
+    /// The hold lifts for the *next* flush rather than repainting what the
+    /// withheld ones left, and that is the whole ordering the event buys:
+    /// nvim is blocked on the request this answers, so the flush that
+    /// follows is the first one drawn with the config's own windows open,
+    /// while the model at this instant still holds the screen before them.
+    pub fn note_ui_entered(&mut self) {
+        self.ui_entered = true;
+    }
+
+    /// Ends the hold on time rather than on `UIEnter`, and shows whatever
+    /// nvim has drawn behind it.
+    ///
+    /// The hold mirrors a TUI session that is shown nothing before
+    /// `VimEnter`; a startup that stops short of `UIEnter` -- a plugin
+    /// manager installing on first launch, a config blocked on something
+    /// that is not view's cmdline -- is a session where the TUI *is* shown
+    /// something, and holding past that point is the hang the hold exists
+    /// to avoid. So this lifts it unconditionally and, unlike
+    /// [`Self::note_ui_entered`], paints the withheld screen instead of
+    /// waiting for a further flush that may never come.
+    pub fn release_startup_hold(&mut self) {
+        self.ui_entered = true;
+        if self.withheld_flush {
+            self.content_painted = true;
+            self.dirty = true;
+        }
     }
 
     /// Whether this session externalized `surface`, so view renders it and
@@ -1899,7 +1982,7 @@ pub enum Tier {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::events::{TabEntry, TabHandle};
+    use crate::events::{TabEntry, TabHandle, UiEvent};
     use crate::native::views::Span;
 
     fn showed(model: &mut Model, kind: &str, text: &str) {
@@ -1925,6 +2008,112 @@ mod tests {
             .entries()
             .map(|entry| entry.lines().join(""))
             .collect()
+    }
+
+    /// A session attached the way `view.toml`'s `[native]` defaults leave
+    /// it: view owns the cmdline and the messages, so the grid hold is
+    /// available to it.
+    fn holding_model() -> Model {
+        let mut model = Model::new();
+        model.attach_surfaces(vec![
+            crate::native::ext::Ext::LineGrid,
+            crate::native::ext::Ext::Cmdline,
+            crate::native::ext::Ext::Messages,
+        ]);
+        model.content_painted = false;
+        model
+    }
+
+    fn flush(model: &mut Model) {
+        let _ = crate::update::update(model, crate::msg::Msg::Redraw(vec![UiEvent::Flush]));
+    }
+
+    /// The release condition a startup that needs the screen depends on: a
+    /// prompt and an error reach the user over the cmdline and the message
+    /// surfaces, so a session that left either one with nvim has them in the
+    /// grid and cannot afford to hold it.
+    #[test]
+    fn only_a_session_owning_both_the_cmdline_and_the_messages_holds_the_grid() {
+        use crate::native::ext::Ext;
+        let cases = [
+            (vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages], true),
+            (vec![Ext::LineGrid, Ext::Cmdline], false),
+            (vec![Ext::LineGrid, Ext::Messages], false),
+            (vec![Ext::LineGrid], false),
+        ];
+        for (surfaces, holds) in cases {
+            let mut model = Model::new();
+            model.attach_surfaces(surfaces.clone());
+            assert_eq!(
+                model.withholds_grid(),
+                holds,
+                "attached {surfaces:?} must {} the grid",
+                if holds { "withhold" } else { "paint" }
+            );
+        }
+    }
+
+    /// The pre-`VimEnter` screen itself: a flush arriving while the hold is
+    /// on paints no content and is remembered as one that did not.
+    #[test]
+    fn a_flush_under_the_hold_paints_nothing_and_is_recorded_as_withheld() {
+        let mut model = holding_model();
+        flush(&mut model);
+        assert!(!model.content_painted, "the held flush must paint no grid");
+        assert!(model.withheld_flush, "and must be remembered as held back");
+    }
+
+    /// A session that never had the hold is the one this change must not
+    /// touch: its first flush paints, exactly as before.
+    #[test]
+    fn a_flush_with_no_hold_paints_on_the_first_one() {
+        let mut model = Model::new();
+        model.attach_surfaces(vec![crate::native::ext::Ext::LineGrid]);
+        model.content_painted = false;
+        flush(&mut model);
+        assert!(model.content_painted);
+        assert!(!model.withheld_flush);
+    }
+
+    /// `UIEnter` buys an ordering, not a repaint: nvim is blocked on the
+    /// request it answers, so the screen worth showing is the *next* flush
+    /// and never the one the hold was covering.
+    #[test]
+    fn ui_enter_releases_the_next_flush_and_not_the_one_it_held() {
+        let mut model = holding_model();
+        flush(&mut model);
+        model.note_ui_entered();
+        assert!(
+            !model.content_painted,
+            "the screen held before UIEnter must not be the one that paints"
+        );
+        flush(&mut model);
+        assert!(model.content_painted, "the flush after UIEnter paints");
+    }
+
+    /// The startup that never reaches `UIEnter` -- a first-launch plugin
+    /// install, a config blocked on something that is not view's cmdline.
+    /// nvim's TUI shows whatever the server drew; so does view, once the
+    /// hold's cap is up.
+    #[test]
+    fn an_expired_hold_paints_the_screen_it_was_holding() {
+        let mut model = holding_model();
+        flush(&mut model);
+        model.dirty = false;
+        model.release_startup_hold();
+        assert!(model.content_painted, "what nvim drew must reach the user");
+        assert!(model.dirty, "and must be asked for as a frame");
+    }
+
+    /// The same expiry with nothing behind it paints nothing: a startup that
+    /// flushed no screen has none to show, and inventing a content frame
+    /// there would drop the shell's statusline for an empty grid.
+    #[test]
+    fn an_expired_hold_with_no_withheld_flush_paints_nothing() {
+        let mut model = holding_model();
+        model.release_startup_hold();
+        assert!(!model.content_painted);
+        assert!(!model.withholds_grid(), "the hold is over either way");
     }
 
     /// The whole point of the window: a plugin's setup-time complaints are
