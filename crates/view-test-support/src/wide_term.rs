@@ -347,12 +347,20 @@ fn widens_unambiguously(c: char) -> bool {
 }
 
 /// Cells where a widening terminal shows something other than what a narrow
-/// one shows, excluding the second half directly under a glyph the widening
-/// model holds wide.
+/// one shows, excluding the second half of a glyph where nothing was meant
+/// to show under it or where no painter could have written there.
 ///
 /// Each entry is `(x, y, narrow, wide)`. An empty answer is the claim a
 /// painter has to earn: every cell the widening terminal ended the frame
 /// holding is the cell the painter meant to be there.
+///
+/// A second half over a cell the narrow model shows content in is the
+/// user's own symptom -- a glyph that vanished under its neighbour -- and a
+/// painter that addresses the column writes the glyph back over the half,
+/// so it is not excused. The two shapes that are excused are the ones no
+/// emission can reach: a half over a blank, which costs the user nothing,
+/// and the second column of a regional-indicator pair, which is one cell to
+/// the painter's own grid and so has no column of its own to address.
 #[must_use]
 pub fn widening_residue(narrow: &WideTerm, wide: &WideTerm) -> Vec<(u16, u16, String, String)> {
     let mut found = Vec::new();
@@ -362,9 +370,11 @@ pub fn widening_residue(narrow: &WideTerm, wide: &WideTerm) -> Vec<(u16, u16, St
             if shown_narrow == shown_wide {
                 continue;
             }
+            let left = wide.cell(x.saturating_sub(1), y);
             let covered = shown_wide == WIDE_HALF
                 && x > 0
-                && WideTerm::widens(wide.cell(x.saturating_sub(1), y));
+                && WideTerm::widens(left)
+                && (shown_narrow == " " || left.chars().any(is_regional_indicator));
             if covered {
                 continue;
             }
@@ -428,6 +438,41 @@ mod tests {
             assert_eq!(term.cell(1, 0), " ", "{widening:?}");
             assert_eq!(term.cell(2, 0), "b", "{widening:?}");
         }
+    }
+
+    #[test]
+    fn a_glyph_left_under_its_widened_neighbour_is_residue() {
+        // the shape a user photographs: a run of two glyphs a terminal draws
+        // wide, then a repaint of the head that stops one column short of
+        // the run, so the second glyph stays hidden under the first's own
+        // second half
+        let painted = "\u{1b}[1;1H\u{2502}\u{252c}";
+        let short = format!("{painted}\u{1b}[1;1H\u{2502}");
+        assert_eq!(
+            widening_residue(
+                &fed(Widening::Narrow, &short),
+                &fed(Widening::Ambiguous, &short)
+            ),
+            vec![
+                (1, 0, "\u{252c}".to_string(), WIDE_HALF.to_string()),
+                (2, 0, " ".to_string(), "\u{252c}".to_string()),
+            ],
+            "a second half over a cell the narrow terminal shows a glyph in \
+             is the glyph the user cannot see, not an unavoidable cover"
+        );
+
+        // the same repaint carried one column further, which is what a
+        // painter that follows the run to its right puts on the wire
+        let reached = format!("{painted}\u{1b}[1;1H\u{2502}\u{1b}[1;2H\u{252c}");
+        assert!(
+            widening_residue(
+                &fed(Widening::Narrow, &reached),
+                &fed(Widening::Ambiguous, &reached)
+            )
+            .is_empty(),
+            "a second half over a blank is what a widening terminal costs \
+             the user and no emission can avoid"
+        );
     }
 
     #[test]
