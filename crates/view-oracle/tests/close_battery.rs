@@ -62,12 +62,13 @@ const FIRST_LINE: &str = "# close battery fixture";
 /// One line of each class of glyph a terminal may draw wider than the
 /// painter assumes, carried in the buffer text so every step has them on
 /// screen.
-const WIDENING_LINES: [&str; 5] = [
+const WIDENING_LINES: [&str; 6] = [
     "box drawing: \u{256d}\u{2500}\u{252c}\u{2500}\u{256e} \u{2502} \u{2570}\u{2500}\u{2534}\u{2500}\u{256f}",
     "geometric: \u{2605} \u{25b6} \u{25a0} \u{25c6} \u{2588}\u{2592}\u{2591}",
     "east asian: \u{6f22}\u{5b57}\u{30c6}\u{30ad}\u{30b9}\u{30c8}",
     "regional and variation: \u{1f1ef}\u{1f1f5} \u{2615}\u{fe0f}",
     "private use: \u{e0b0} \u{f0219} separators",
+    "text presentation: \u{1f5a5} \u{2328} \u{23f8} \u{1f321}",
 ];
 
 /// One step of the battery: its name, the command line typed at both
@@ -87,13 +88,14 @@ const SPLIT_ROW: u16 = 10;
 /// The reached-condition is what separates "the screens agree" from "the
 /// keys have landed": two editors that have not yet reacted to `:q` agree
 /// with each other perfectly.
-const STEPS: [Step; 6] = [
+const STEPS: [Step; 7] = [
     ("dir", "", lists_the_fixture),
     ("file", ":e README.md\r", shows_the_buffer),
     ("vsplit", ":vsplit\r", is_split_in_columns),
     ("split", ":split\r", is_split_in_rows),
     ("close1", ":q\r", is_split_in_columns_only),
     ("close2", ":q\r", is_one_window),
+    ("edit", "2G0f\u{256d}rx\x1b", edited_the_box_run),
 ];
 
 /// The directory listing has reached the screen.
@@ -147,6 +149,20 @@ fn is_one_window(screen: &vt100::Screen) -> bool {
     column_separators(screen) == 0
 }
 
+/// The head of the box-drawing run has been overwritten.
+///
+/// The one shape the other steps hide: a single changed cell at the head of
+/// a run of glyphs a terminal draws two columns wide, where every other step
+/// repaints whole regions. How far the painter then follows the run is not
+/// what the residue verdict below decides -- a reach of any length at all
+/// ends on a half sitting under the widening model's own glyph, which
+/// [`widening_residue`] excludes as unavoidable -- so the emitted columns
+/// are pinned in `view-tui`'s paint tests and what this step adds is the
+/// cell-for-cell agreement with nvim on a one-cell edit.
+fn edited_the_box_run(screen: &vt100::Screen) -> bool {
+    screen.contents().contains("box drawing: x")
+}
+
 /// The fixture workspace: a README long enough that a split scrolls, a
 /// subdirectory and a second file so the directory listing has rows.
 fn build_fixture(root: &Path) -> PathBuf {
@@ -193,8 +209,40 @@ fn warm_the_home(dir: &Path, home: &Path) {
         session.wait_for_screen(view_test_support::host_deadline(BUDGET), lists_the_fixture),
         "the warming session never listed the fixture directory"
     );
+    // the cache is written when the highlight probe confirms, which is
+    // ordered after the attach and not before the listing above: quitting
+    // on the listing alone leaves the measured session to meet a cold
+    // state directory and paint the fallback notice over its content rows
+    let deadline = Instant::now() + view_test_support::host_deadline(BUDGET);
+    while !theme_cache_written(home) && Instant::now() < deadline {
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        theme_cache_written(home),
+        "the warming session never wrote a theme cache under {}",
+        theme_cache_dir(home).display()
+    );
     session.send(b"\x1b:qa!\r").unwrap();
     let _ = session.wait_for_exit(BUDGET);
+}
+
+/// Where a session started with [`view_session`] writes its theme cache.
+///
+/// Spelled here rather than read from `view_native::paths::cache_dir`
+/// because this crate carries no edge to `view-native` and the audit keeps
+/// it that way; the state root itself comes from the same helper that sets
+/// the child's environment, so only the subdirectory name is restated.
+fn theme_cache_dir(home: &Path) -> PathBuf {
+    common::xdg_home(home, "XDG_STATE_HOME").join("view")
+}
+
+/// Whether a theme cache has appeared in `home`'s state directory.
+fn theme_cache_written(home: &Path) -> bool {
+    std::fs::read_dir(theme_cache_dir(home)).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("theme-"))
+    })
 }
 
 /// The pinned `nvim` on the same directory, with none of the host's
@@ -225,13 +273,18 @@ fn cell_text(screen: &vt100::Screen, row: u16, col: u16) -> String {
     }
 }
 
-/// A session's content rows, cell by cell.
-fn content_cells(session: &mut PtySession) -> Vec<Vec<String>> {
+/// A session's screen, cell by cell, down to `rows`.
+fn screen_cells(session: &mut PtySession, rows: u16) -> Vec<Vec<String>> {
     session.with_screen(|screen| {
-        (0..ROWS - CHROME_ROWS)
+        (0..rows)
             .map(|row| (0..COLS).map(|col| cell_text(screen, row, col)).collect())
             .collect()
     })
+}
+
+/// A session's content rows, cell by cell.
+fn content_cells(session: &mut PtySession) -> Vec<Vec<String>> {
+    screen_cells(session, ROWS - CHROME_ROWS)
 }
 
 /// [`content_cells`] as one string per row.
@@ -242,7 +295,10 @@ fn content_rows(session: &mut PtySession) -> Vec<String> {
         .collect()
 }
 
-/// A screen, cell by cell, beside the recorded bytes that produced it.
+/// A whole screen, cell by cell, beside the recorded bytes that produced
+/// it. Every row, chrome included: the recording is replayed through the
+/// widening models over the whole grid, so a row the model is never checked
+/// against is a row its residue verdict rests on nothing.
 type Frame = (Vec<Vec<String>>, Vec<u8>);
 
 /// A session's screen and the bytes that produced it, read so that the two
@@ -256,12 +312,15 @@ type Frame = (Vec<Vec<String>>, Vec<u8>);
 fn screen_and_recording(session: &mut PtySession) -> Frame {
     let deadline = Instant::now() + view_test_support::host_deadline(BUDGET);
     loop {
-        let before = content_cells(session);
+        let before = screen_cells(session, ROWS);
         let raw = session.raw_output().to_vec();
-        let after = content_cells(session);
+        let after = screen_cells(session, ROWS);
         if before == after || Instant::now() >= deadline {
             return (after, raw);
         }
+        // a child still writing would otherwise hold a core for the whole
+        // deadline re-reading a grid this size
+        std::thread::sleep(POLL);
     }
 }
 
@@ -352,7 +411,11 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
         }
         let settled = settle_together(&mut under_test, &mut reference);
         let (cells, raw) = screen_and_recording(&mut under_test);
-        let mine: Vec<String> = cells.iter().map(|row| row.concat()).collect();
+        let mine: Vec<String> = cells
+            .iter()
+            .take(usize::from(ROWS - CHROME_ROWS))
+            .map(|row| row.concat())
+            .collect();
         let theirs = content_rows(&mut reference);
         let path = dump(step, &mine, &theirs);
         assert!(
@@ -387,7 +450,7 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
         narrow.feed(&raw);
         wide.feed(&raw);
 
-        for row in 0..ROWS - CHROME_ROWS {
+        for row in 0..ROWS {
             for col in 0..COLS {
                 let modelled = narrow.cell(col, row);
                 if modelled == view_test_support::WIDE_HALF {
