@@ -232,7 +232,7 @@ fn set_cloexec_nonblock(fd: &OwnedFd) -> std::io::Result<()> {
 /// user's configuration actually says
 /// ([`set_escape_timeout`](InputSource::set_escape_timeout)), so a session
 /// that never hears differently waits exactly as long as nvim does before
-/// deciding a half-arrived key code was the Escape key.
+/// reading a half-arrived key code as the chord its bytes spell.
 #[cfg(unix)]
 const DEFAULT_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -280,10 +280,10 @@ pub struct InputSource {
     /// first byte did.
     pending: Option<(Vec<u8>, std::time::Instant)>,
     /// How long a half-arrived key code may wait for the rest of itself
-    /// before it is read as the Escape key and the literal bytes behind
-    /// it. `None` is nvim's `ttimeout` off: wait for the byte however long
-    /// it takes.
-    escape_timeout: Option<Duration>,
+    /// before it is read as the chord its bytes spell. Zero is what both
+    /// of nvim's own sentinels resolve to: read it on the pass that read
+    /// the bytes.
+    escape_timeout: Duration,
 }
 
 /// The state behind [`InputSource::open_after_probe`]: how long the terminal is
@@ -516,7 +516,7 @@ impl InputSource {
             guard: None,
             guard_msgs: std::collections::VecDeque::new(),
             pending: None,
-            escape_timeout: Some(DEFAULT_ESCAPE_TIMEOUT),
+            escape_timeout: DEFAULT_ESCAPE_TIMEOUT,
         };
         if guard.is_some() {
             source.guard = guard;
@@ -745,22 +745,22 @@ impl InputSource {
     }
 
     /// Sets how long a half-arrived key code may wait for the rest of
-    /// itself: nvim's own `ttimeoutlen`, relayed from the engine, or `None`
-    /// for the `ttimeout` off that waits forever.
+    /// itself: nvim's own effective `ttimeoutlen`, relayed from the engine.
     ///
     /// The value is the user's rather than view's because the decision it
     /// makes is one nvim would otherwise be making: with view reading the
     /// terminal's bytes itself, a `ttimeoutlen` the user tuned for a slow
     /// link would have stopped applying to the very sequences it was tuned
-    /// for.
-    pub fn set_escape_timeout(&mut self, within: Option<Duration>) {
+    /// for. `ttimeout` off and a negative `ttimeoutlen` both arrive here as
+    /// zero, which is the engine's own reading of them.
+    pub fn set_escape_timeout(&mut self, within: Duration) {
         self.escape_timeout = within;
     }
 
-    /// When a half-arrived key code must be read as the Escape key and the
-    /// bytes behind it, so the runtime loop can bound its sleep on it;
-    /// `None` while nothing is waiting, while `ttimeout` is off, or while
-    /// what is waiting is a paste no keystroke timeout bounds.
+    /// When a half-arrived key code must be read as the chord its bytes
+    /// spell, so the runtime loop can bound its sleep on it; `None` while
+    /// nothing is waiting, or while what is waiting is a paste no keystroke
+    /// timeout bounds.
     ///
     /// A deadline in the past is a flush the next
     /// [`drain`](Self::drain) performs, so a caller that turns this into a
@@ -835,10 +835,11 @@ impl InputSource {
     /// twice, so an arrow split across two reads arrives as the arrow. What
     /// bounds that wait is nvim's own `ttimeoutlen`
     /// ([`set_escape_timeout`](Self::set_escape_timeout)): once it has
-    /// passed, a run still waiting for its final byte is read as the Escape
-    /// key and the literal bytes behind it -- the reading under which a
-    /// bare `ESC [` ever reaches the buffer at all, and the one nvim takes
-    /// of the same bytes.
+    /// passed, a run still waiting for its final byte is read as the Alt
+    /// chord its bytes spell -- `<M-[>` for a bare `ESC [`, `<Esc>` for an
+    /// Escape with nothing behind it -- which is termkey's own reading of
+    /// the same bytes, and the reading under which either ever reaches the
+    /// buffer at all.
     fn read_and_decode(&mut self, sink: &mut impl FnMut(Msg)) {
         let (mut buf, since) = match self.pending.take() {
             Some((bytes, since)) => (bytes, Some(since)),
@@ -872,9 +873,7 @@ impl InputSource {
             Some(since) if !arrived => since,
             _ => std::time::Instant::now(),
         };
-        if self
-            .escape_timeout
-            .is_some_and(|within| opened + within <= std::time::Instant::now())
+        if opened + self.escape_timeout <= std::time::Instant::now()
             && crate::keys::forceable(&tail)
         {
             for msg in crate::keys::decode_residue_forced(&tail) {
@@ -909,9 +908,8 @@ fn emit(msg: Msg, sink: &mut impl FnMut(Msg)) {
 #[cfg(unix)]
 fn escape_deadline(
     pending: Option<&(Vec<u8>, std::time::Instant)>,
-    within: Option<Duration>,
+    within: Duration,
 ) -> Option<std::time::Instant> {
-    let within = within?;
     let (bytes, since) = pending?;
     crate::keys::forceable(bytes).then(|| *since + within)
 }
@@ -996,8 +994,8 @@ mod tests {
 
     /// The three answers the relayed wait produces, each of which is a
     /// wedged session if it drifts: a run that stops short is given up on
-    /// at the user's own `ttimeoutlen`, `ttimeout` off waits for the byte
-    /// however long it takes, and a paste is bounded by its own closing
+    /// at the user's own `ttimeoutlen`, a zero wait is already out the
+    /// moment it is armed, and a paste is bounded by its own closing
     /// sequence rather than by a keystroke timeout that would type the
     /// rest of the payload as commands.
     #[test]
@@ -1005,22 +1003,22 @@ mod tests {
         let now = std::time::Instant::now();
         let unfinished = (b"\x1b[".to_vec(), now);
         assert_eq!(
-            escape_deadline(Some(&unfinished), Some(Duration::from_millis(120))),
+            escape_deadline(Some(&unfinished), Duration::from_millis(120)),
             Some(now + Duration::from_millis(120))
         );
         assert_eq!(
-            escape_deadline(Some(&unfinished), None),
-            None,
-            "`ttimeout` off waits for the rest of the code, however long"
+            escape_deadline(Some(&unfinished), Duration::ZERO),
+            Some(now),
+            "both of nvim's sentinels arrive as zero, which is due at once"
         );
         assert_eq!(
-            escape_deadline(None, Some(DEFAULT_ESCAPE_TIMEOUT)),
+            escape_deadline(None, DEFAULT_ESCAPE_TIMEOUT),
             None,
             "nothing is waiting, so nothing bounds the loop's sleep"
         );
         let paste = (b"\x1b[200~half a file".to_vec(), now);
         assert_eq!(
-            escape_deadline(Some(&paste), Some(DEFAULT_ESCAPE_TIMEOUT)),
+            escape_deadline(Some(&paste), DEFAULT_ESCAPE_TIMEOUT),
             None,
             "a paste slower than the wait must never be typed as commands"
         );

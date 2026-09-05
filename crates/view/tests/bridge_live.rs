@@ -193,7 +193,7 @@ fn chrome(model: &Model) -> Vec<(ChromeGroup, view_core::theme::ResolvedStyle)> 
 /// Every event the `view_bridge` group registers, as the chunk asks nvim
 /// for them. Registration is a notify, so nvim reports nothing back about
 /// whether the chunk ran to completion.
-const TRIGGERS: [&str; 13] = [
+const TRIGGERS: [&str; 14] = [
     "ColorScheme",
     "DiagnosticChanged",
     "BufEnter",
@@ -207,6 +207,7 @@ const TRIGGERS: [&str; 13] = [
     "WinEnter",
     "WinClosed",
     "OptionSet",
+    "VimEnter",
 ];
 
 /// Registration is a notify over a chunk that creates its autocmds in
@@ -231,6 +232,39 @@ fn every_trigger_the_chunk_asks_for_is_registered_with_nvim() {
             "the view_bridge group is missing {trigger}: nvim holds {held:?}"
         );
     }
+}
+
+/// A `ttimeoutlen` the user's own `init.lua` sets reaches the reader.
+///
+/// This is the ordinary way the option is set, and it is the one way
+/// neither of the other two relays covers: the bridge is registered before
+/// nvim sources the config, and `OptionSet` does not fire for what the
+/// config assigns during startup. Only the `VimEnter` relay carries it, and
+/// a session that never heard it would read every unfinished key code at
+/// nvim's default however long its user had asked for.
+#[test]
+fn an_escape_timing_set_by_the_users_own_config_reaches_the_reader() {
+    let session = Session::start("ttimeout", "vim.o.ttimeoutlen = 300\n");
+    let mut m = model();
+    let tuned = Duration::from_millis(300);
+    // recorded rather than matched on the first arrival: the relay at
+    // registration necessarily carries the pre-config value, so what this
+    // asserts is that the tuned one follows it, and the record is what
+    // names the value nvim did relay when it does not
+    let heard = std::cell::RefCell::new(Vec::new());
+    let armed = session.wait_for(&mut m, ARRIVAL, |msg| match msg {
+        Msg::EscapeTimeout(within) => {
+            heard.borrow_mut().push(*within);
+            (*within == tuned).then_some(*within)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        armed,
+        Some(tuned),
+        "the config's own ttimeoutlen never reached the reader; nvim relayed {:?}",
+        heard.borrow()
+    );
 }
 
 /// The bridge's own observable, end to end: a real `:colorscheme` in a live
@@ -371,7 +405,8 @@ fn a_float_opened_after_the_leading_scan_is_still_reported() {
 
     let mut rounds = Vec::new();
     for gap in [250_u64, 500, 1000] {
-        let _ = session.float_filetypes(Duration::from_millis(300));
+        let _ =
+            session.float_filetypes(view_test_support::host_deadline(Duration::from_millis(300)));
         // the leading edge, then an event inside its window with nothing for
         // that scan to find, then the float it stands for -- opened from
         // inside nvim so the gap is measured against the same loop the
@@ -383,7 +418,13 @@ fn a_float_opened_after_the_leading_scan_is_still_reported() {
              _G.view_test_float(\"view_test_b\") end, {gap})')"
         ));
 
-        let seen = session.float_filetypes(Duration::from_millis(gap + 800));
+        // scaled, because what the round needs is for nvim's deferred float
+        // and the scan behind it to have happened, and a host that stalled
+        // this process stalled that engine with it: an unscaled window turns
+        // a slow round into a report that the trailing scan never ran
+        let seen = session.float_filetypes(view_test_support::host_deadline(
+            Duration::from_millis(gap + 800),
+        ));
         let first_b = seen.iter().position(|ft| ft == "view_test_b");
         let first_a = seen.iter().position(|ft| ft == "view_test_a");
         let leading_scan_ran_first = match (first_a, first_b) {

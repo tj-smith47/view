@@ -3616,27 +3616,32 @@ mod tests {
         );
     }
 
-    /// The escape timing, whose payload is a string because it carries a
-    /// value nvim types as a number and a sentinel that is not one: a
-    /// negative wait is `ttimeout` off, which the reader answers by never
-    /// forcing a run at all rather than by forcing it instantly.
+    /// The escape timing, whose payload is a string because the chunk
+    /// resolves nvim's own two sentinels into it and the wire carries only
+    /// the resolved count. Zero is the answer both of them resolve to, and
+    /// the reader forces a short run on the pass that read it.
     #[test]
-    fn a_bridge_ttimeout_event_decodes_a_wait_and_its_off_sentinel() {
+    fn a_bridge_ttimeout_event_decodes_a_wait_and_its_zero() {
         let decoded = decode_bridge_event(&[Value::from("ttimeout"), Value::from("120")]);
         assert!(
-            matches!(decoded, Some(Msg::EscapeTimeout(Some(within)))
+            matches!(decoded, Some(Msg::EscapeTimeout(within))
                 if within == std::time::Duration::from_millis(120)),
             "got {decoded:?}"
         );
-        let off = decode_bridge_event(&[Value::from("ttimeout"), Value::from("-1")]);
+        let at_once = decode_bridge_event(&[Value::from("ttimeout"), Value::from("0")]);
         assert!(
-            matches!(off, Some(Msg::EscapeTimeout(None))),
-            "a negative wait is off, not a zero-length wait: {off:?}"
+            matches!(at_once, Some(Msg::EscapeTimeout(within))
+                if within == std::time::Duration::ZERO),
+            "zero is what both of nvim's sentinels resolve to, not an \
+             absent wait: {at_once:?}"
         );
-        assert!(
-            decode_bridge_event(&[Value::from("ttimeout"), Value::from("")]).is_none(),
-            "a payload that is not a number leaves the reader's own timing in place"
-        );
+        for payload in ["", "-1"] {
+            assert!(
+                decode_bridge_event(&[Value::from("ttimeout"), Value::from(payload)]).is_none(),
+                "a payload the chunk cannot have sent leaves the \
+                 reader's own timing in place: {payload:?}"
+            );
+        }
     }
 
     /// The scan's end marker, which carries no argument at all -- the one

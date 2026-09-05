@@ -88,8 +88,8 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
 /// (see [`crate::nvim_api::REGISTER_BRIDGE_CHUNK`]'s doc): `colorscheme`
 /// and `colorscheme_failed` carry the scheme's name alone, `diagnostics` an `(errors, warnings)`
 /// count pair, `git` the branch name alone, `buffer` a `(name, modified)`
-/// pair, `ttimeout` the effective escape wait in milliseconds as a string
-/// (negative for "never force"), and `float` the twelve positional fields
+/// pair, `ttimeout` the effective escape wait in milliseconds as a string,
+/// and `float` the twelve positional fields
 /// [`decode_float_observed`] names.
 ///
 /// The bridge deliberately carries more triggers than there are consumers
@@ -129,14 +129,12 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
             let modified = rest.first()?.as_bool()?;
             Some(Msg::BufferChanged { name, modified })
         }
-        // milliseconds as a string, negative for "never force": the reader
-        // that consumes it holds no wait at all in that case, which is what
-        // `ttimeout` off asks for
+        // the chunk resolves nvim's own two sentinels before sending, so
+        // what arrives is always a plain count of milliseconds and a
+        // payload that is not one leaves the reader's timing alone
         "ttimeout" => {
-            let within: i64 = first.as_str()?.parse().ok()?;
-            Some(Msg::EscapeTimeout(
-                u64::try_from(within).ok().map(Duration::from_millis),
-            ))
+            let within: u64 = first.as_str()?.parse().ok()?;
+            Some(Msg::EscapeTimeout(Duration::from_millis(within)))
         }
         "float" => decode_float_observed(params),
         // the whole answer is the one array argument, and an empty one is a

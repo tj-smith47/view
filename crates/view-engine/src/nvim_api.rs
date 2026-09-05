@@ -437,12 +437,17 @@ return claimed";
 /// `ttimeout` is the one event the chunk sends before any autocommand
 /// fires: view's own terminal reader waits that long for the rest of a key
 /// code before reading what it holds as the Escape key, so a session whose
-/// user has tuned the option must hear the value at registration rather
-/// than at the first change. The payload is the effective wait in
-/// milliseconds as a string, or `-1` for "never force" -- which is what
-/// `ttimeout` off means. A negative `ttimeoutlen` is not that: nvim
-/// documents it as "use `timeoutlen`", so the chunk resolves it here and
-/// the `OptionSet` pattern carries `timeoutlen` for the same reason.
+/// user has tuned the option must hear the value without waiting for a
+/// change to it. Three relays, because no one of them covers the ways the
+/// value arrives -- registration precedes the user's config, `OptionSet`
+/// is documented as not firing during startup, and `VimEnter` is too late
+/// for a value already in force when the reader takes its first key.
+///
+/// The payload is the effective wait in milliseconds as a string, resolved
+/// exactly as `tui/input.c` resolves it: `ttimeout` off is a zero-length
+/// wait rather than an unbounded one, and so is a negative `ttimeoutlen`.
+/// Both mean the engine reads a run that stopped short on the pass that
+/// read it, which is why neither reaches the wire as a sentinel.
 const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -530,19 +535,17 @@ vim.api.nvim_create_autocmd('User', {
   callback = arm_float_scan,
 })
 local function relay_ttimeout()
-  local within = -1
-  if vim.o.ttimeout then
-    within = vim.o.ttimeoutlen
-    if within < 0 then
-      within = vim.o.timeoutlen
-    end
-  end
+  local within = vim.o.ttimeout and math.max(vim.o.ttimeoutlen, 0) or 0
   vim.rpcnotify(channel, 'view_bridge', 'ttimeout', tostring(within))
 end
 relay_ttimeout()
+vim.api.nvim_create_autocmd('VimEnter', {
+  group = group,
+  callback = relay_ttimeout,
+})
 vim.api.nvim_create_autocmd('OptionSet', {
   group = group,
-  pattern = { 'ttimeout', 'ttimeoutlen', 'timeoutlen' },
+  pattern = { 'ttimeout', 'ttimeoutlen' },
   callback = relay_ttimeout,
 })
 vim.api.nvim_create_autocmd('VimLeavePre', {
@@ -4691,33 +4694,6 @@ mod tests {
             REGISTER_BRIDGE_CHUNK.contains("vim.fn.expand('%:t')")
                 && REGISTER_BRIDGE_CHUNK.contains("vim.bo.modified"),
             "the buffer trigger must carry the current file's name and modified flag"
-        );
-    }
-
-    /// The escape timing reaches the reader at registration and resolves a
-    /// negative `ttimeoutlen` the way nvim documents it -- as `timeoutlen`,
-    /// not as "never". A session that heard nothing would read every
-    /// unfinished key code at 50 ms whatever its user had set, and one that
-    /// read a negative length as "never" would hold a bare `<Esc>` forever.
-    #[test]
-    fn the_bridge_chunk_relays_the_escape_timing_at_registration() {
-        assert!(
-            REGISTER_BRIDGE_CHUNK.contains("\nrelay_ttimeout()\n"),
-            "the relay must fire once on its own, not only from OptionSet: \
-             a user's setting must not wait for a change to reach the reader"
-        );
-        assert!(
-            REGISTER_BRIDGE_CHUNK.contains("within = vim.o.timeoutlen"),
-            "a negative ttimeoutlen means timeoutlen, per :h ttimeoutlen"
-        );
-        assert!(
-            REGISTER_BRIDGE_CHUNK.contains("pattern = { 'ttimeout', 'ttimeoutlen', 'timeoutlen' }"),
-            "all three options decide the effective wait, so all three \
-             must retrigger the relay"
-        );
-        assert!(
-            REGISTER_BRIDGE_CHUNK.contains("'view_bridge', 'ttimeout', tostring(within)"),
-            "the payload is the effective wait in milliseconds"
         );
     }
 

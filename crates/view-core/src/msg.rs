@@ -126,15 +126,16 @@ pub enum Msg {
     CapsUpgraded(crate::model::TermCaps),
     /// How long the terminal reader may wait for the rest of a key code
     /// before reading what it has as the Escape key and the literal bytes
-    /// behind it: nvim's own `ttimeoutlen`, relayed by the bridge at
-    /// registration and on every `OptionSet` that changes it. `None` is
-    /// `ttimeout` off -- wait for the byte however long it takes.
+    /// behind it: nvim's own effective `ttimeoutlen`, relayed by the
+    /// bridge. Zero is a real answer and the one both of nvim's sentinels
+    /// resolve to -- `ttimeout` off, and a negative `ttimeoutlen` -- which
+    /// is why there is no "never" to carry.
     ///
     /// The value belongs to the reader rather than to the model, so the
     /// loop hands it straight to the input source; the fold below is what
     /// a platform whose reader cannot take one does with it, which is
     /// nothing.
-    EscapeTimeout(Option<Duration>),
+    EscapeTimeout(Duration),
     /// A terminal bracketed-paste payload.
     Paste(String),
     /// A terminal mouse event in nvim's button/action/modifier vocabulary.

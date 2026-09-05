@@ -435,7 +435,7 @@ struct Wakeups<'a> {
     /// only half delivered
     /// ([`view_tui::input::InputSource::next_deadline`]). The terminal
     /// sends nothing more until the user presses another key, so a loop
-    /// woken only by traffic would hold the `<Esc>` a bare `ESC [` resolves
+    /// woken only by traffic would hold the `<M-[>` a bare `ESC [` resolves
     /// to until the next keystroke -- and then deliver it behind that one.
     input: Option<std::time::Duration>,
 }
