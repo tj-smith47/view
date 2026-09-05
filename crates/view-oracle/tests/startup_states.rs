@@ -208,6 +208,117 @@ fn the_hold_covers_every_native_permutation() {
     );
 }
 
+/// The prompt the hold must not hide, typed through the binary: a startup
+/// `vim.fn.input()` on the two attach sets that leave it to nvim's own
+/// message area -- the multigrid both-off set, where nvim places a message
+/// grid for it, and `single_grid = true`, where nvim composites it into
+/// grid 1 -- with `cmdheight` at 2 so the prompt sits a row above a blank
+/// last row on both. Each leg waits for the prompt on view's screen,
+/// answers it, and reaches the post-`VimEnter` layout; nvim under the same
+/// config is the reference that the prompt is what a TUI shows.
+///
+/// What tells a release on the prompt from one on the hold's 1 s cap is
+/// view's own record: the cap logs `grid hold expired before UIEnter` and
+/// the prompt path logs nothing, so the assertion reads the session's
+/// `VIEW_LOG` rather than a wall clock a loaded host can stretch past the
+/// cap. The time from view's first byte to the prompt is measured and
+/// printed alongside.
+///
+/// Disconfirm: making `GridRegistry::message_area_has_text` answer `false`
+/// leaves the prompt hidden until the cap, and both legs fail on the
+/// expiry line.
+#[test]
+fn a_startup_prompt_reaches_the_terminal_before_the_holds_cap() {
+    let nvim_paths = common::ScratchPaths::new("startup-prompt-nvim");
+    common::plant_nvim_config(&nvim_paths.isolated_home, "startup-prompt");
+    let mut reference = nvim_session(&nvim_paths.isolated_home);
+    assert!(
+        reference.wait_for(PROMPT, view_test_support::host_deadline(BUDGET)),
+        "nvim never showed the startup prompt, so it is not the reference \
+         this pin claims; screen:\n{}",
+        reference.screen()
+    );
+    reference
+        .send(b"\r")
+        .expect("the reference pty accepts the answer");
+    let _ = until_the_split(&mut reference, "nvim");
+
+    let mut regressed = Vec::new();
+    for single_grid in [false, true] {
+        let paths = common::ScratchPaths::new("startup-prompt-view");
+        common::plant_nvim_config(&paths.isolated_home, "startup-prompt");
+        plant_native_off(
+            &paths.isolated_home,
+            &["notifications", "palette"],
+            single_grid,
+        );
+        let view_log = paths.isolated_home.join("view.log");
+        let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+        common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+        cmd.env("VIEW_LOG", &view_log);
+        let spawned = std::time::Instant::now();
+        let mut under_test = recording(cmd);
+
+        let first_byte = until_the_first_chunk(&mut under_test);
+        let first_byte_after_spawn = spawned.elapsed();
+        assert!(
+            under_test.wait_for(PROMPT, view_test_support::host_deadline(BUDGET)),
+            "view never showed the startup prompt with single_grid = \
+             {single_grid}; screen:\n{}",
+            under_test.screen()
+        );
+        let prompt_after_first_byte = first_byte.elapsed();
+        println!(
+            "single_grid = {single_grid}: first byte {first_byte_after_spawn:?} after the spawn, \
+             prompt {prompt_after_first_byte:?} after the first byte"
+        );
+        under_test
+            .send(b"\r")
+            .expect("the pty under test accepts the answer");
+        let _ = until_the_split(&mut under_test, "view");
+
+        let log = std::fs::read_to_string(&view_log).unwrap_or_default();
+        if log.contains(HOLD_EXPIRED) {
+            regressed.push(format!(
+                "single_grid = {single_grid}: the prompt reached the terminal \
+                 only on the cap, {prompt_after_first_byte:?} after the first byte"
+            ));
+        }
+    }
+    assert!(
+        regressed.is_empty(),
+        "view held the startup prompt until the hold's cap: {}",
+        regressed.join("; ")
+    );
+}
+
+/// The prompt the startup-prompt fixture draws.
+const PROMPT: &str = "PROMPTHERE:";
+
+/// The `VIEW_LOG` line the runtime writes when the hold ends on its cap
+/// rather than on a signal.
+const HOLD_EXPIRED: &str = "grid hold expired before UIEnter";
+
+/// Blocks until the session has written anything at all, and answers the
+/// instant it did: the first byte view's terminal saw, which is the origin
+/// the prompt's arrival is measured from.
+///
+/// The predicate is evaluated once against the screen as it stands before
+/// any wait, then once per chunk absorbed; the first byte is the second
+/// evaluation.
+fn until_the_first_chunk(session: &mut PtySession) -> std::time::Instant {
+    let mut evaluations = 0;
+    assert!(
+        session.wait_for_screen(view_test_support::host_deadline(BUDGET), |_| {
+            evaluations += 1;
+            evaluations > 1
+        }),
+        "view wrote nothing at all; screen:\n{}",
+        session.screen()
+    );
+    std::time::Instant::now()
+}
+
 /// A replacement engine runs the same startup, so it owes the same hold:
 /// with `[supervision] auto_restart` on, an engine killed mid-session is
 /// respawned, sources the same config, and must not paint the buffer it
