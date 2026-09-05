@@ -825,7 +825,7 @@ fn composite_layers(
             LayerKind::Shell => paint_shell(&theme, area, damage, buf),
             LayerKind::Speculated(cells) => {
                 let offset = model.chrome_rows();
-                paint_speculated(cells, &theme, model.engine.hl(), offset, damage, buf);
+                paint_speculated(cells, offset, damage, buf);
             }
             LayerKind::Picker(_)
             | LayerKind::Tree(_)
@@ -1566,10 +1566,6 @@ fn paint_grid(
     }
 }
 
-/// nvim's own id for the default highlight -- the style a grid cell carries
-/// when no `hl_attr_define` applies to it.
-const DEFAULT_HL_ID: u64 = 0;
-
 /// Paints the display-only predicted glyphs over the cells they were
 /// predicted for.
 ///
@@ -1579,23 +1575,18 @@ const DEFAULT_HL_ID: u64 = 0;
 /// for both grid-content layers, and one fewer place the two could disagree
 /// about where a cell is.
 ///
-/// Styled as a default grid cell, deliberately, with no marker of any kind: a
-/// prediction that announced itself would advertise the latency this exists
-/// to hide, and restyling each cell again the moment the authoritative redraw
-/// confirms it would flicker at typing cadence.
+/// The symbol alone is written: the prediction wears whatever style the grid
+/// layer gave that cell in this same frame, which is the row's own highlight
+/// -- a cursorline, a visual selection, a search match, an inactive pane.
+/// Resolving a style here instead would stamp the default highlight into
+/// those rows at typing cadence, which is a hole in the row for as long as
+/// the prediction lives, and it would announce the latency this exists to
+/// hide.
 ///
 /// A cell outside the buffer is skipped rather than clamped, per
 /// `PredictedCell`'s own contract: a clamped prediction paints a glyph the
 /// user did not type at the last real column.
-fn paint_speculated(
-    cells: &[PredictedCell],
-    theme: &Theme,
-    hl: &HlTable,
-    offset: u16,
-    damage: &Damage,
-    buf: &mut Buffer,
-) {
-    let style = style_for(theme, DEFAULT_HL_ID, hl);
+fn paint_speculated(cells: &[PredictedCell], offset: u16, damage: &Damage, buf: &mut Buffer) {
     for cell in cells {
         let row = cell.row.saturating_add(offset);
         if !damage.covers(row) {
@@ -1609,7 +1600,6 @@ fn paint_speculated(
         // sanitization
         let mut encoded = [0u8; 4];
         out.set_symbol(cell.glyph.encode_utf8(&mut encoded));
-        out.set_style(style);
     }
 }
 
@@ -1814,6 +1804,69 @@ mod tests {
             &buf[(5, 3)].symbol(),
             &"z",
             "grid row 2 sits on terminal row 3 behind one chrome row"
+        );
+    }
+
+    /// A prediction lands inside a row the buffer already highlights -- a
+    /// cursorline, a visual selection, a search match -- and the glyph has to
+    /// wear that row's colours. Resolving the default highlight here instead
+    /// leaves a one-cell hole in the row for the prediction's whole life,
+    /// which on the remote path this feature exists for is a full round trip
+    /// per typed character.
+    ///
+    /// Disconfirm: styling the predicted cell with `style_for(theme,
+    /// DEFAULT_HL_ID, hl)` -- what it did before -- gives the predicted cell
+    /// `bg Reset` against the row's own `Rgb(170, 0, 0)`.
+    #[test]
+    fn a_predicted_glyph_wears_the_highlight_of_the_row_it_lands_in() {
+        let mut model = Model::new();
+        model.engine.apply_grid(GridOp::Resize {
+            width: 10,
+            height: 3,
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 7,
+                fg: Some(0x00FF_FFFF),
+                bg: Some(0x00AA_0000),
+                bold: true,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::GridLine {
+                grid: 1,
+                row: 1,
+                col_start: 0,
+                cells: vec![view_core::events::GridCell {
+                    text: " ".to_string(),
+                    hl_id: 7,
+                    repeat: 10,
+                }],
+            },
+        );
+        let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
+        assert!(model
+            .speculate
+            .predict("insert", GLOBAL_GRID, 'z', (1, 4), stamp)
+            .is_some());
+        let surface = view_surface::render(&model);
+
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        assert_eq!(buf[(4, 1)].symbol(), "z", "the prediction must be painted");
+        assert_eq!(
+            buf[(4, 1)].style(),
+            buf[(5, 1)].style(),
+            "the predicted glyph is wearing a style of its own instead of the \
+             one the grid layer gave its row"
         );
     }
 
