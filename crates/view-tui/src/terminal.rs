@@ -1026,12 +1026,6 @@ impl TermSizeCell {
     }
 }
 
-/// Spawns a dedicated thread that blocks on `crossterm::event::read()` and
-/// forwards every key, resize, paste, or mouse event to `tx` as a core
-/// [`Msg`] (see [`crate::input::event_to_msg`] for the translation both
-/// platforms share). Exits once `crossterm::event::read()` errors or `tx`'s
-/// receiver is gone.
-///
 /// The terminal's current size in `(width, height)` cells, read before any
 /// [`Term`] exists.
 ///
@@ -1049,6 +1043,12 @@ pub fn size_now() -> std::io::Result<(u16, u16)> {
     crossterm::terminal::size()
 }
 
+/// Spawns a dedicated thread that blocks on `crossterm::event::read()` and
+/// forwards every key, resize, paste, or mouse event to `tx` as a core
+/// [`Msg`] (see [`crate::input::event_to_msg`] for the translation both
+/// platforms share). Exits once `crossterm::event::read()` errors or `tx`'s
+/// receiver is gone.
+///
 /// The non-unix input path only: on unix the runtime loop polls the
 /// terminal fd itself and decodes inline through [`crate::input`], which
 /// deletes this thread's cross-thread wake from the keystroke path. Off

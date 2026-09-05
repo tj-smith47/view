@@ -1550,8 +1550,8 @@ mod tests {
         );
     }
 
-    /// The same model the startup grid hold is on: view owns the cmdline
-    /// and the messages, and no flush has been allowed to paint yet.
+    /// The same model the startup grid hold is on: the shipped `[native]`
+    /// surfaces, and no flush allowed to paint yet.
     fn held_model(width: u16, height: u16) -> Model {
         let mut model = model_with_grid(width, height);
         model.attach_surfaces(vec![
@@ -1573,7 +1573,7 @@ mod tests {
         apply(
             &mut model,
             UiEvent::CmdlineShow {
-                content: vec![("Your name: ".len() as u64 - 11, "Ada".to_string())],
+                content: vec![(0, "Ada".to_string())],
                 pos: 3,
                 firstc: String::new(),
                 prompt: "Your name: ".to_string(),

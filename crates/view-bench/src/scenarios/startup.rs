@@ -43,8 +43,8 @@ pub struct StartupOutcome {
     /// view's p99 cold time to the post-`VimEnter` screen, in milliseconds.
     /// Recorded under [`FIRST_FRAME_METRIC`].
     pub gated_first_frame_ms: f64,
-    /// view p50 over nvim p50 at that boundary -- the bar S1.7 states, and
-    /// the one a paired row can hold across load regimes.
+    /// view p50 over nvim p50 at that boundary -- the bar this row is held
+    /// to, and the one a paired row can hold across load regimes.
     pub gated_first_frame_ratio_p50: f64,
     /// view p99 over nvim p99 at the same boundary. Recorded everywhere,
     /// gated only on a load-controlled class, the same treatment

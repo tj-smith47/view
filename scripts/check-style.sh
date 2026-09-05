@@ -67,6 +67,14 @@ check_narrative_markers() {
   if grep -rnE "${anchor}[[:space:]]T[0-9]+[.,:]?([[:space:]]|\$)" "${targets[@]}"; then
     echo "STYLE FAIL: spec-task tag in comment"; fail=1
   fi
+  # roadmap-streak labels (S1.7, S2.10): the streak-and-task numbering of
+  # the plan a change came out of, which names the conversation's structure
+  # rather than anything the code does -- and points at a plan under
+  # .claude/ that no clone carries. Requires the dotted shape, so an
+  # ordinary "S3" or a `S1` type parameter never matches.
+  if grep -rnE "${anchor}\bS[0-9]+\.[0-9]+\b" "${targets[@]}"; then
+    echo "STYLE FAIL: roadmap-streak label in comment"; fail=1
+  fi
   # SDD-internal ledger-row citation ("ledger 133", "ledger:164"): the exit
   # drain's own numbered deferred-item list, not a fact about the code. Not
   # a blanket \bledger\b ban -- "ledger" is also this tree's own accounting
