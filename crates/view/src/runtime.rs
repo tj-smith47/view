@@ -1190,6 +1190,14 @@ pub fn run(
             // to a connection this session no longer runs
             continue;
         };
+        // the engine's escape timing belongs to the reader, not to the
+        // model: nothing downstream of here can act on it, and routing it
+        // through the fold would cost a frame's worth of work per relay
+        #[cfg(unix)]
+        if let Msg::EscapeTimeout(within) = msg {
+            input.set_escape_timeout(within);
+            continue;
+        }
         // the intake resolved a stop it judged a death rather than the
         // session ending: from here the supervision fold owns this
         // connection, and `WedgeKind::Dead` is a verdict it may reach
@@ -1283,6 +1291,30 @@ mod tests {
                  through the one condition it was armed for"
             );
         }
+    }
+
+    /// The engine's relayed escape timing reaches the terminal reader, and
+    /// reaches it instead of the fold: dispatched, it would cost a frame's
+    /// worth of update per relay and still leave the reader waiting out
+    /// view's own default rather than the user's `ttimeoutlen`.
+    #[test]
+    fn the_relayed_escape_timing_reaches_the_reader_rather_than_the_fold() {
+        let source = include_str!("runtime.rs");
+        let intercept = source
+            .find("if let Msg::EscapeTimeout(within) = msg {")
+            .expect("the loop must answer the relayed escape timing");
+        let dispatch = source
+            .find("let mut queue = vec![msg];")
+            .expect("the dispatch this must run ahead of");
+        assert!(
+            intercept < dispatch,
+            "the escape timing is dispatched before it is read, so the \
+             reader hears the user's own wait a message too late"
+        );
+        assert!(
+            source[intercept..dispatch].contains("input.set_escape_timeout(within);"),
+            "the intercepted wait must reach the source that acts on it"
+        );
     }
 
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same

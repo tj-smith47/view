@@ -336,6 +336,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 height: grid_height,
             })]
         }
+        Msg::EscapeTimeout(_) => {
+            // the reader consumes this before the fold ever sees it; the arm
+            // exists because a platform without a byte-level reader still
+            // has to answer the variant, and the answer is a still frame
+            Vec::new()
+        }
         Msg::CapsUpgraded(caps) => {
             // an upgrade is only ever sent for capabilities that actually
             // changed, and the frame already on screen was painted at the

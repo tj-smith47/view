@@ -193,7 +193,7 @@ fn chrome(model: &Model) -> Vec<(ChromeGroup, view_core::theme::ResolvedStyle)> 
 /// Every event the `view_bridge` group registers, as the chunk asks nvim
 /// for them. Registration is a notify, so nvim reports nothing back about
 /// whether the chunk ran to completion.
-const TRIGGERS: [&str; 12] = [
+const TRIGGERS: [&str; 13] = [
     "ColorScheme",
     "DiagnosticChanged",
     "BufEnter",
@@ -206,6 +206,7 @@ const TRIGGERS: [&str; 12] = [
     "CursorHoldI",
     "WinEnter",
     "WinClosed",
+    "OptionSet",
 ];
 
 /// Registration is a notify over a chunk that creates its autocmds in

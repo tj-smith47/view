@@ -433,6 +433,16 @@ return claimed";
 /// after a channel teardown (an engine replaced after a hang). Window ids
 /// are per-session and never persisted (see
 /// [`view_core::native::surfaces::FloatSighting`]).
+///
+/// `ttimeout` is the one event the chunk sends before any autocommand
+/// fires: view's own terminal reader waits that long for the rest of a key
+/// code before reading what it holds as the Escape key, so a session whose
+/// user has tuned the option must hear the value at registration rather
+/// than at the first change. The payload is the effective wait in
+/// milliseconds as a string, or `-1` for "never force" -- which is what
+/// `ttimeout` off means. A negative `ttimeoutlen` is not that: nvim
+/// documents it as "use `timeoutlen`", so the chunk resolves it here and
+/// the `OptionSet` pattern carries `timeoutlen` for the same reason.
 const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -518,6 +528,22 @@ vim.api.nvim_create_autocmd('User', {
   group = group,
   pattern = 'ViewScanFloats',
   callback = arm_float_scan,
+})
+local function relay_ttimeout()
+  local within = -1
+  if vim.o.ttimeout then
+    within = vim.o.ttimeoutlen
+    if within < 0 then
+      within = vim.o.timeoutlen
+    end
+  end
+  vim.rpcnotify(channel, 'view_bridge', 'ttimeout', tostring(within))
+end
+relay_ttimeout()
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = { 'ttimeout', 'ttimeoutlen', 'timeoutlen' },
+  callback = relay_ttimeout,
 })
 vim.api.nvim_create_autocmd('VimLeavePre', {
   group = group,
@@ -4525,6 +4551,7 @@ mod tests {
             "'WinClosed'",
             "'WinNew'",
             "'ViewScanFloats'",
+            "'OptionSet'",
         ] {
             assert!(
                 REGISTER_BRIDGE_CHUNK.contains(event),
@@ -4543,10 +4570,11 @@ mod tests {
             REGISTER_BRIDGE_CHUNK
                 .matches("channel, 'view_bridge'")
                 .count(),
-            6,
+            7,
             "colorscheme through the shared relay, plus diagnostics, git, \
-             buffer and float each sending their own richer payload instead \
-             of a bare match, and the marker that closes a float scan"
+             buffer, float and the escape timing each sending their own \
+             richer payload instead of a bare match, and the marker that \
+             closes a float scan"
         );
     }
 
@@ -4663,6 +4691,33 @@ mod tests {
             REGISTER_BRIDGE_CHUNK.contains("vim.fn.expand('%:t')")
                 && REGISTER_BRIDGE_CHUNK.contains("vim.bo.modified"),
             "the buffer trigger must carry the current file's name and modified flag"
+        );
+    }
+
+    /// The escape timing reaches the reader at registration and resolves a
+    /// negative `ttimeoutlen` the way nvim documents it -- as `timeoutlen`,
+    /// not as "never". A session that heard nothing would read every
+    /// unfinished key code at 50 ms whatever its user had set, and one that
+    /// read a negative length as "never" would hold a bare `<Esc>` forever.
+    #[test]
+    fn the_bridge_chunk_relays_the_escape_timing_at_registration() {
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("\nrelay_ttimeout()\n"),
+            "the relay must fire once on its own, not only from OptionSet: \
+             a user's setting must not wait for a change to reach the reader"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("within = vim.o.timeoutlen"),
+            "a negative ttimeoutlen means timeoutlen, per :h ttimeoutlen"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("pattern = { 'ttimeout', 'ttimeoutlen', 'timeoutlen' }"),
+            "all three options decide the effective wait, so all three \
+             must retrigger the relay"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("'view_bridge', 'ttimeout', tostring(within)"),
+            "the payload is the effective wait in milliseconds"
         );
     }
 

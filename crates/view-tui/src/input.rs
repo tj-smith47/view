@@ -771,9 +771,7 @@ impl InputSource {
     /// sleep saturates rather than waiting a whole clock's wrap.
     #[must_use]
     pub fn next_deadline(&self) -> Option<std::time::Instant> {
-        let within = self.escape_timeout?;
-        let (bytes, since) = self.pending.as_ref()?;
-        crate::keys::forceable(bytes).then(|| *since + within)
+        escape_deadline(self.pending.as_ref(), self.escape_timeout)
     }
 
     /// Drains everything ready without blocking: empties the SIGWINCH
@@ -895,6 +893,20 @@ impl InputSource {
 /// input-path interval closes on the RPC the key turns into, so a tap for a
 /// byte run that decodes to no key at all would pair with the next
 /// keystroke's RPC and report an interval spanning two keys.
+/// When the bytes held from an unfinished read must be given up on, given
+/// the wait in force: [`InputSource::next_deadline`]'s whole decision, as a
+/// function of the two values it reads, because the source itself can only
+/// be built on a real terminal.
+#[cfg(unix)]
+fn escape_deadline(
+    pending: Option<&(Vec<u8>, std::time::Instant)>,
+    within: Option<Duration>,
+) -> Option<std::time::Instant> {
+    let within = within?;
+    let (bytes, since) = pending?;
+    crate::keys::forceable(bytes).then(|| *since + within)
+}
+
 #[cfg(unix)]
 fn emit(msg: Msg, sink: &mut impl FnMut(Msg)) {
     #[cfg(all(unix, feature = "bench-taps"))]
@@ -980,5 +992,37 @@ mod tests {
     #[test]
     fn the_escape_timeout_starts_at_nvims_own_default() {
         assert_eq!(DEFAULT_ESCAPE_TIMEOUT, Duration::from_millis(50));
+    }
+
+    /// The three answers the relayed wait produces, each of which is a
+    /// wedged session if it drifts: a run that stops short is given up on
+    /// at the user's own `ttimeoutlen`, `ttimeout` off waits for the byte
+    /// however long it takes, and a paste is bounded by its own closing
+    /// sequence rather than by a keystroke timeout that would type the
+    /// rest of the payload as commands.
+    #[test]
+    fn the_relayed_wait_decides_when_a_short_run_is_given_up_on() {
+        let now = std::time::Instant::now();
+        let unfinished = (b"\x1b[".to_vec(), now);
+        assert_eq!(
+            escape_deadline(Some(&unfinished), Some(Duration::from_millis(120))),
+            Some(now + Duration::from_millis(120))
+        );
+        assert_eq!(
+            escape_deadline(Some(&unfinished), None),
+            None,
+            "`ttimeout` off waits for the rest of the code, however long"
+        );
+        assert_eq!(
+            escape_deadline(None, Some(DEFAULT_ESCAPE_TIMEOUT)),
+            None,
+            "nothing is waiting, so nothing bounds the loop's sleep"
+        );
+        let paste = (b"\x1b[200~half a file".to_vec(), now);
+        assert_eq!(
+            escape_deadline(Some(&paste), Some(DEFAULT_ESCAPE_TIMEOUT)),
+            None,
+            "a paste slower than the wait must never be typed as commands"
+        );
     }
 }

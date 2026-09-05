@@ -3616,6 +3616,29 @@ mod tests {
         );
     }
 
+    /// The escape timing, whose payload is a string because it carries a
+    /// value nvim types as a number and a sentinel that is not one: a
+    /// negative wait is `ttimeout` off, which the reader answers by never
+    /// forcing a run at all rather than by forcing it instantly.
+    #[test]
+    fn a_bridge_ttimeout_event_decodes_a_wait_and_its_off_sentinel() {
+        let decoded = decode_bridge_event(&[Value::from("ttimeout"), Value::from("120")]);
+        assert!(
+            matches!(decoded, Some(Msg::EscapeTimeout(Some(within)))
+                if within == std::time::Duration::from_millis(120)),
+            "got {decoded:?}"
+        );
+        let off = decode_bridge_event(&[Value::from("ttimeout"), Value::from("-1")]);
+        assert!(
+            matches!(off, Some(Msg::EscapeTimeout(None))),
+            "a negative wait is off, not a zero-length wait: {off:?}"
+        );
+        assert!(
+            decode_bridge_event(&[Value::from("ttimeout"), Value::from("")]).is_none(),
+            "a payload that is not a number leaves the reader's own timing in place"
+        );
+    }
+
     /// The scan's end marker, which carries no argument at all -- the one
     /// bridge event that does, and the reason the decoder answers it ahead
     /// of the split every other event's payload needs.

@@ -1362,6 +1362,10 @@ mod tests {
         assert_eq!(encode_residue_bytes(b"\x1b[13;2u"), vec!["<S-CR>"]);
         assert_eq!(encode_residue_bytes(b"\x1b[105;5u"), vec!["<C-i>"]);
         assert_eq!(encode_residue_bytes(b"\x1b[27u"), vec!["<Esc>"]);
+        // and the run is finished: an Escape the terminal spelled in full
+        // must never sit in the pending tail waiting out an escape timeout
+        // whose whole job is to resolve a run that stopped short
+        assert_eq!(decode_residue(b"\x1b[27u").unfinished, 0);
         // xterm's modifyOtherKeys spelling of the same kind of key
         assert_eq!(encode_residue_bytes(b"\x1b[27;5;13~"), vec!["<C-CR>"]);
         // an alternate-key pair reports both the key and what it typed,

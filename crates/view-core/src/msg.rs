@@ -124,11 +124,20 @@ pub enum Msg {
     /// repaint -- is the frontend's, and follows `Model::caps` on that
     /// repaint rather than needing a seam of its own.
     CapsUpgraded(crate::model::TermCaps),
-    /// A terminal bracketed-paste payload, decoded by the input reader from
-    /// crossterm's `Event::Paste`.
+    /// How long the terminal reader may wait for the rest of a key code
+    /// before reading what it has as the Escape key and the literal bytes
+    /// behind it: nvim's own `ttimeoutlen`, relayed by the bridge at
+    /// registration and on every `OptionSet` that changes it. `None` is
+    /// `ttimeout` off -- wait for the byte however long it takes.
+    ///
+    /// The value belongs to the reader rather than to the model, so the
+    /// loop hands it straight to the input source; the fold below is what
+    /// a platform whose reader cannot take one does with it, which is
+    /// nothing.
+    EscapeTimeout(Option<Duration>),
+    /// A terminal bracketed-paste payload.
     Paste(String),
-    /// A terminal mouse event, decoded by the input reader from crossterm's
-    /// `Event::Mouse` into nvim's button/action/modifier vocabulary.
+    /// A terminal mouse event in nvim's button/action/modifier vocabulary.
     Mouse(MouseInput),
     /// The async reply to an `nvim_get_hl(0, {name = "Normal"})` probe
     /// issued by `Effect::Rpc(RpcCall::GetDefaultHl)` on every
