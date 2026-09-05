@@ -70,11 +70,18 @@ fn char_may_widen(c: char) -> bool {
 /// columns and a terminal drawing each indicator two wide covers four, so
 /// the pair's excess is two, while a box-drawing character sized one column
 /// and drawn two has an excess of one.
+///
+/// A code point both rulers already call two columns wide is not counted:
+/// no terminal draws it wider than the two it is sized at, so a ZWJ
+/// sequence of them would otherwise claim a column of excess apiece.
 fn widening_excess(symbol: &str) -> u16 {
     if symbol.is_ascii() {
         return 0;
     }
-    let widening = symbol.chars().filter(|&c| char_may_widen(c)).count();
+    let widening = symbol
+        .chars()
+        .filter(|&c| char_may_widen(c) && c.width().unwrap_or(0) < 2)
+        .count();
     u16::try_from(widening).unwrap_or(u16::MAX)
 }
 
@@ -104,7 +111,7 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
     let right = back.area.right();
     let mut diff = diff.peekable();
     let mut reach: Option<(u16, u16, u16)> = None;
-    std::iter::from_fn(move || {
+    std::iter::from_fn(move || loop {
         let live = reach.filter(|&(next, end, _)| next < end);
         // whichever of the two comes first in row-major order, and the diff
         // when they name the same column, so no column is yielded twice
@@ -115,7 +122,13 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
         };
         let (x, y, cell) = if let Some((next, end, row)) = live.filter(|_| from_reach) {
             reach = Some((next.saturating_add(1), end, row));
-            (next, row, back.cell((next, row))?)
+            let Some(cell) = back.cell((next, row)) else {
+                // a reached column the buffer does not hold is skipped, not
+                // returned: ending the walk here would leave every remaining
+                // diff cell of the frame unpainted with nothing to say so
+                continue;
+            };
+            (next, row, cell)
         } else {
             let (x, y, cell) = diff.next()?;
             reach = live
@@ -143,7 +156,7 @@ pub(crate) fn with_widened_neighbours<'p, 'n>(
                 _ => Some((start, end, y)),
             };
         }
-        Some((x, y, cell))
+        return Some((x, y, cell));
     })
 }
 
