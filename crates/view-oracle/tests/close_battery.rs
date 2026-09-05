@@ -59,6 +59,11 @@ const RAW_LIMIT: usize = 4 * 1024 * 1024;
 /// buffer rather than the directory.
 const FIRST_LINE: &str = "# close battery fixture";
 
+/// The committed nvim configuration both sessions source: a highlight set
+/// whose groups all carry backgrounds of their own, so the colour
+/// comparison discriminates.
+const FIXTURE_CONFIG: &str = "close-battery";
+
 /// One line of each class of glyph a terminal may draw wider than the
 /// painter assumes, carried in the buffer text so every step has them on
 /// screen.
@@ -88,7 +93,7 @@ const SPLIT_ROW: u16 = 10;
 /// The reached-condition is what separates "the screens agree" from "the
 /// keys have landed": two editors that have not yet reacted to `:q` agree
 /// with each other perfectly.
-const STEPS: [Step; 7] = [
+const STEPS: [Step; 9] = [
     ("dir", "", lists_the_fixture),
     ("file", ":e README.md\r", shows_the_buffer),
     ("vsplit", ":vsplit\r", is_split_in_columns),
@@ -96,7 +101,31 @@ const STEPS: [Step; 7] = [
     ("close1", ":q\r", is_split_in_columns_only),
     ("close2", ":q\r", is_one_window),
     ("edit", "2G0f\u{256d}rx\x1b", edited_the_box_run),
+    ("panel", PANEL_KEYS, is_panel_beside_a_window),
+    ("panel-close", ":q\r", is_one_window),
 ];
+
+/// The user's own shape: a narrow left window in a background of its own,
+/// the cursor in the wide right one.
+///
+/// Typed rather than scripted so the pinned nvim reaches it the same way
+/// view does. Only `NormalNC` is remapped, which is what a file-tree panel
+/// does and what makes the step after this one discriminating: the panel is
+/// dark while the cursor is across from it, and takes the ordinary
+/// background -- which names no colour of its own -- the moment `:q` leaves
+/// it as the only window. The column it grows over is the one nvim painted
+/// its separator into, in the dark colour the panel just stopped wearing.
+const PANEL_KEYS: &str = concat!(
+    ":vsplit\r",
+    ":wincmd h\r",
+    ":vertical resize 30\r",
+    ":setlocal winhighlight=NormalNC:PanelNormal\r",
+    ":wincmd l\r",
+);
+
+/// The width the panel window is sized to, and so the screen column the
+/// separator between it and its neighbour falls in.
+const PANEL_WIDTH: u16 = 30;
 
 /// The directory listing has reached the screen.
 fn lists_the_fixture(screen: &vt100::Screen) -> bool {
@@ -147,6 +176,24 @@ fn is_split_in_columns_only(screen: &vt100::Screen) -> bool {
 
 fn is_one_window(screen: &vt100::Screen) -> bool {
     column_separators(screen) == 0
+}
+
+/// The panel is sized and the window beside it is the wide one: exactly one
+/// column boundary, and it is the panel's own right edge.
+fn is_panel_beside_a_window(screen: &vt100::Screen) -> bool {
+    separator_columns(screen) == vec![PANEL_WIDTH]
+}
+
+/// Which screen columns carry a vertical window separator on
+/// [`SPLIT_ROW`].
+fn separator_columns(screen: &vt100::Screen) -> Vec<u16> {
+    (0..COLS)
+        .filter(|col| {
+            screen
+                .cell(SPLIT_ROW, *col)
+                .is_some_and(|cell| cell.contents() == "\u{2502}")
+        })
+        .collect()
 }
 
 /// The head of the box-drawing run has been overwritten.
@@ -246,11 +293,19 @@ fn theme_cache_written(home: &Path) -> bool {
 }
 
 /// The pinned `nvim` on the same directory, with none of the host's
-/// configuration.
+/// configuration and all of the fixture's.
+///
+/// `--clean` is dropped from the isolated config's argument list, and only
+/// that one: it would make the reference read no `init.lua` at all, while
+/// view's own child reads the user's -- so the two sessions would be
+/// comparing two colourschemes rather than two compositors. What keeps this
+/// child off the operator's own files is the redirected `XDG_*_HOME` roots
+/// that [`view_session`] gives its child too, which is the mechanism either
+/// way.
 fn nvim_session(dir: &Path, home: &Path) -> PtySession {
     let cfg = view_engine::EngineConfig::isolated();
     let mut cmd = portable_pty::CommandBuilder::new(&cfg.nvim_bin);
-    for arg in &cfg.extra_args {
+    for arg in cfg.extra_args.iter().filter(|arg| *arg != "--clean") {
         cmd.arg(arg);
     }
     cmd.arg(".");
@@ -273,11 +328,59 @@ fn cell_text(screen: &vt100::Screen, row: u16, col: u16) -> String {
     }
 }
 
+/// One cell's painted colours, as the terminal received them.
+///
+/// The glyph alone cannot see a compositor that leaves a cell wearing the
+/// layer underneath it: a window grown over the column its neighbour's
+/// separator stood in shows a space either way, and only the background
+/// says whose space it is.
+fn cell_colors(screen: &vt100::Screen, row: u16, col: u16) -> (vt100::Color, vt100::Color) {
+    screen
+        .cell(row, col)
+        .map_or((vt100::Color::Default, vt100::Color::Default), |cell| {
+            (cell.fgcolor(), cell.bgcolor())
+        })
+}
+
+/// One cell's colours rendered for a failure message and a dump file.
+fn color_pair(colors: (vt100::Color, vt100::Color)) -> String {
+    format!("fg={:?} bg={:?}", colors.0, colors.1)
+}
+
+/// A session's content rows as colour pairs, one row per line.
+fn content_colors(session: &mut PtySession) -> Vec<Vec<(vt100::Color, vt100::Color)>> {
+    screen_colors(session, ROWS - CHROME_ROWS)
+}
+
+/// The first cells where two rows' colours differ, as
+/// `(column, view, nvim)`.
+fn first_color_differences(
+    mine: &[(vt100::Color, vt100::Color)],
+    theirs: &[(vt100::Color, vt100::Color)],
+) -> Vec<(usize, String, String)> {
+    mine.iter()
+        .zip(theirs)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(col, (a, b))| (col, color_pair(*a), color_pair(*b)))
+        .take(4)
+        .collect()
+}
+
 /// A session's screen, cell by cell, down to `rows`.
 fn screen_cells(session: &mut PtySession, rows: u16) -> Vec<Vec<String>> {
     session.with_screen(|screen| {
         (0..rows)
             .map(|row| (0..COLS).map(|col| cell_text(screen, row, col)).collect())
+            .collect()
+    })
+}
+
+/// A session's screen as colour pairs, down to `rows`.
+fn screen_colors(session: &mut PtySession, rows: u16) -> Vec<Vec<(vt100::Color, vt100::Color)>> {
+    session.with_screen(|screen| {
+        (0..rows)
+            .map(|row| (0..COLS).map(|col| cell_colors(screen, row, col)).collect())
             .collect()
     })
 }
@@ -295,11 +398,16 @@ fn content_rows(session: &mut PtySession) -> Vec<String> {
         .collect()
 }
 
-/// A whole screen, cell by cell, beside the recorded bytes that produced
-/// it. Every row, chrome included: the recording is replayed through the
-/// widening models over the whole grid, so a row the model is never checked
-/// against is a row its residue verdict rests on nothing.
-type Frame = (Vec<Vec<String>>, Vec<u8>);
+/// A whole screen -- glyphs and painted colours -- beside the recorded
+/// bytes that produced it. Every row, chrome included: the recording is
+/// replayed through the widening models over the whole grid, so a row the
+/// model is never checked against is a row its residue verdict rests on
+/// nothing.
+type Frame = (
+    Vec<Vec<String>>,
+    Vec<Vec<(vt100::Color, vt100::Color)>>,
+    Vec<u8>,
+);
 
 /// A session's screen and the bytes that produced it, read so that the two
 /// hold the same frame.
@@ -312,11 +420,11 @@ type Frame = (Vec<Vec<String>>, Vec<u8>);
 fn screen_and_recording(session: &mut PtySession) -> Frame {
     let deadline = Instant::now() + view_test_support::host_deadline(BUDGET);
     loop {
-        let before = screen_cells(session, ROWS);
+        let before = (screen_cells(session, ROWS), screen_colors(session, ROWS));
         let raw = session.raw_output().to_vec();
-        let after = screen_cells(session, ROWS);
+        let after = (screen_cells(session, ROWS), screen_colors(session, ROWS));
         if before == after || Instant::now() >= deadline {
-            return (after, raw);
+            return (after.0, after.1, raw);
         }
         // a child still writing would otherwise hold a core for the whole
         // deadline re-reading a grid this size
@@ -331,7 +439,9 @@ fn settle_together(under_test: &mut PtySession, reference: &mut PtySession) -> b
     let deadline = Instant::now() + view_test_support::host_deadline(BUDGET);
     let mut agreed = 0_u8;
     while Instant::now() < deadline {
-        if content_rows(under_test) == content_rows(reference) {
+        if content_rows(under_test) == content_rows(reference)
+            && content_colors(under_test) == content_colors(reference)
+        {
             agreed += 1;
             if agreed == 2 {
                 return true;
@@ -347,12 +457,25 @@ fn settle_together(under_test: &mut PtySession, reference: &mut PtySession) -> b
 /// Writes every differing row beside the scratch root and returns the path,
 /// so a failure at this geometry names a file to read rather than printing
 /// a 263-column grid into the test log.
-fn dump(step: &str, under_test: &[String], reference: &[String]) -> PathBuf {
+fn dump(
+    step: &str,
+    under_test: &[String],
+    reference: &[String],
+    my_colors: &[Vec<(vt100::Color, vt100::Color)>],
+    their_colors: &[Vec<(vt100::Color, vt100::Color)>],
+) -> PathBuf {
     let path = common::scratch_root().join(format!("close-battery-{step}.txt"));
     let mut text = String::new();
     for (row, (mine, theirs)) in under_test.iter().zip(reference).enumerate() {
         if mine != theirs {
             text.push_str(&format!("row {row}\n  view: {mine}\n  nvim: {theirs}\n"));
+        }
+    }
+    for (row, (mine, theirs)) in my_colors.iter().zip(their_colors).enumerate() {
+        for (col, first, second) in first_color_differences(mine, theirs) {
+            text.push_str(&format!(
+                "row {row} col {col}\n  view: {first}\n  nvim: {second}\n"
+            ));
         }
     }
     std::fs::write(&path, text).unwrap();
@@ -390,6 +513,13 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
     let nvim_paths = common::ScratchPaths::new("close-battery-nvim");
     let dir = build_fixture(&work.isolated_home);
 
+    // both sessions source the same committed highlights, so a colour they
+    // disagree about is the compositor's answer rather than two default
+    // colourschemes'
+    for home in [&view_paths.isolated_home, &nvim_paths.isolated_home] {
+        common::plant_nvim_config(home, FIXTURE_CONFIG);
+    }
+
     warm_the_home(&dir, &view_paths.isolated_home);
     let mut under_test = view_session(&dir, &view_paths.isolated_home);
     let mut reference = nvim_session(&dir, &nvim_paths.isolated_home);
@@ -410,14 +540,20 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
             );
         }
         let settled = settle_together(&mut under_test, &mut reference);
-        let (cells, raw) = screen_and_recording(&mut under_test);
+        let (cells, colors, raw) = screen_and_recording(&mut under_test);
         let mine: Vec<String> = cells
             .iter()
             .take(usize::from(ROWS - CHROME_ROWS))
             .map(|row| row.concat())
             .collect();
+        let my_colors: Vec<Vec<(vt100::Color, vt100::Color)>> = colors
+            .iter()
+            .take(usize::from(ROWS - CHROME_ROWS))
+            .cloned()
+            .collect();
         let theirs = content_rows(&mut reference);
-        let path = dump(step, &mine, &theirs);
+        let their_colors = content_colors(&mut reference);
+        let path = dump(step, &mine, &theirs, &my_colors, &their_colors);
         assert!(
             settled,
             "{step}: view's content rows never matched the pinned nvim's; \
@@ -430,6 +566,19 @@ fn closing_each_window_of_a_split_leaves_no_residue_on_a_widening_terminal() {
                 theirs,
                 "{step}: row {row} differs at {:?}; every differing row is in {}",
                 first_differences(mine, theirs),
+                path.display()
+            );
+        }
+        // the half a glyph comparison cannot see: a cell wearing the layer
+        // underneath it shows the same character either way, and only the
+        // colours say which pane painted it
+        for (row, (mine, theirs)) in my_colors.iter().zip(&their_colors).enumerate() {
+            assert_eq!(
+                mine,
+                theirs,
+                "{step}: row {row}'s colours differ at {:?}; every differing \
+                 cell is in {}",
+                first_color_differences(mine, theirs),
                 path.display()
             );
         }
