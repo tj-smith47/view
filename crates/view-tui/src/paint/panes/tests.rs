@@ -308,6 +308,68 @@ fn the_message_area_is_never_dimmed_like_an_inactive_window() {
     );
 }
 
+/// Closing one of two side-by-side windows leaves no trace of the column
+/// that separated them: the survivor grows over it, and the cell nvim
+/// painted its own separator into is a cell of the survivor's own text
+/// from that frame on.
+///
+/// nvim leaves that cell standing in grid 1 under `ext_multigrid` -- it
+/// sends no `grid_line` clearing it, because the window grid growing over
+/// it is what covers it -- so a compositor that stops short of it shows a
+/// one-column band in the old separator's colours down the whole height of
+/// the screen, which is what a `:q` on a side-by-side layout looked like.
+#[test]
+fn closing_one_of_two_windows_leaves_no_separator_column_behind() {
+    let mut model = vsplit();
+    drive(
+        &mut model,
+        vec![
+            UiEvent::WinClose { grid: RIGHT },
+            UiEvent::GridDestroy { grid: RIGHT },
+            UiEvent::WinPos {
+                grid: LEFT,
+                win: WinHandle(1001),
+                startrow: 0,
+                startcol: 0,
+                width: u64::from(WIDTH),
+                height: 5,
+            },
+            UiEvent::GridResize {
+                grid: LEFT,
+                width: u64::from(WIDTH),
+                height: 5,
+            },
+            UiEvent::GridLine {
+                grid: LEFT,
+                row: 0,
+                col_start: 0,
+                cells: vec![GridCell {
+                    text: " ".to_string(),
+                    hl_id: 0,
+                    repeat: u64::from(WIDTH),
+                }],
+            },
+            UiEvent::Flush,
+        ],
+    );
+    let buf = frame(&model);
+    let plain = buf[(0, 0)].style();
+    for row in 0..5 {
+        assert_eq!(
+            buf[(SEPARATOR_COL, row)].symbol(),
+            " ",
+            "row {row} still carries a separator glyph between windows that \
+             no longer face each other"
+        );
+        assert_eq!(
+            buf[(SEPARATOR_COL, row)].style(),
+            plain,
+            "row {row} of the old separator column kept a style of its own \
+             while the rest of the row is the survivor's"
+        );
+    }
+}
+
 /// A float paints over the windows it overlaps, whatever order nvim named
 /// the grids in.
 #[test]

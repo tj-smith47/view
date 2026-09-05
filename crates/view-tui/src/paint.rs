@@ -1636,28 +1636,43 @@ fn style_for(theme: &Theme, hl_id: u64, table: &HlTable) -> Style {
     ratatui_style(theme.style_for(hl_id, table))
 }
 
-/// Converts a backend-free [`ResolvedStyle`] into a `ratatui::style::Style`.
+/// Converts a backend-free [`ResolvedStyle`] into a `ratatui::style::Style`
+/// that states every attribute, so applying it to a cell replaces what the
+/// cell holds instead of merging with it.
+///
+/// `ratatui::buffer::Cell::set_style` patches: a `None` field leaves the
+/// cell's current value, and `add_modifier`/`sub_modifier` only add and
+/// remove what they name. A buffer cell is painted more than once per
+/// frame -- a window pane over the global grid's chrome, a chrome layer
+/// over grid text -- so a style that named only a foreground let the layer
+/// underneath keep supplying the background. That is how closing one of
+/// two side-by-side windows left a one-column band in the old separator's
+/// background down the height of the screen: nvim leaves its own separator
+/// cell standing in grid 1 under `ext_multigrid`, the surviving window
+/// grew over it, and the cell it painted there named no background of its
+/// own.
+///
+/// An attribute a highlight leaves unset means nvim's default rather than
+/// "whatever is underneath" -- `Color::Reset` is the terminal's own
+/// default foreground/background, which is what nvim paints such a cell in
+/// -- so stating them all is also the reading that matches the engine.
+///
+/// Latency consequence: none per cell. The conversion runs once per
+/// distinct highlight id per frame (see [`StyleCache`]) and the extra work
+/// is two `Option` wraps and one `Modifier` complement; the alternative --
+/// resetting each cell before styling it, as the chrome painters do -- is
+/// a second write per painted cell on the frame's hottest loop.
 fn ratatui_style(resolved: ResolvedStyle) -> Style {
-    let mut style = Style::default();
-    if let Some(c) = resolved.fg {
-        style = style.fg(rgb(c));
-    }
-    if let Some(c) = resolved.bg {
-        style = style.bg(rgb(c));
-    }
-    if resolved.bold {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if resolved.italic {
-        style = style.add_modifier(Modifier::ITALIC);
-    }
-    if resolved.underline {
-        style = style.add_modifier(Modifier::UNDERLINED);
-    }
-    if resolved.reverse {
-        style = style.add_modifier(Modifier::REVERSED);
-    }
-    style
+    let mut modifiers = Modifier::empty();
+    modifiers.set(Modifier::BOLD, resolved.bold);
+    modifiers.set(Modifier::ITALIC, resolved.italic);
+    modifiers.set(Modifier::UNDERLINED, resolved.underline);
+    modifiers.set(Modifier::REVERSED, resolved.reverse);
+    Style::default()
+        .fg(resolved.fg.map_or(Color::Reset, rgb))
+        .bg(resolved.bg.map_or(Color::Reset, rgb))
+        .add_modifier(modifiers)
+        .remove_modifier(modifiers.complement())
 }
 
 fn rgb(c: u32) -> Color {
@@ -6542,6 +6557,59 @@ mod tests {
     /// row through the real terminal compositor and asserts every role's
     /// painted cells carry exactly the style its `chrome_group()` mapping
     /// dictates -- read back through `theme.chrome(...)`, never a
+    /// Every style view paints with states every attribute it has, so
+    /// applying one to a buffer cell replaces what the cell holds.
+    ///
+    /// `ratatui::buffer::Cell::set_style` patches -- an unset field leaves
+    /// the cell's own value, and modifiers only accumulate -- and a cell is
+    /// painted more than once per frame, so a style that named only some of
+    /// its attributes let the layer underneath keep supplying the rest.
+    /// Walked over the whole cross product of "names a colour"/"does not"
+    /// against every modifier flag: the empty style is the one that leaks
+    /// everything, and the all-set one is the only one a patching
+    /// implementation gets right.
+    #[test]
+    fn every_painted_style_states_every_attribute_it_has() {
+        for fg in [None, Some(0x0011_2233_u32)] {
+            for bg in [None, Some(0x0044_5566_u32)] {
+                for flags in 0_u8..16 {
+                    let resolved = ResolvedStyle {
+                        fg,
+                        bg,
+                        bold: flags & 1 != 0,
+                        italic: flags & 2 != 0,
+                        underline: flags & 4 != 0,
+                        reverse: flags & 8 != 0,
+                    };
+                    let style = ratatui_style(resolved);
+                    assert!(
+                        style.fg.is_some() && style.bg.is_some(),
+                        "{resolved:?} leaves a colour for the layer underneath to supply: {style:?}"
+                    );
+                    assert_eq!(
+                        style.add_modifier | style.sub_modifier,
+                        Modifier::all(),
+                        "{resolved:?} leaves a modifier the layer underneath keeps: {style:?}"
+                    );
+                    assert!(
+                        (style.add_modifier & style.sub_modifier).is_empty(),
+                        "{resolved:?} both adds and removes a modifier: {style:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A colour a highlight leaves unset paints as the terminal's own
+    /// default, which is what nvim shows for such a cell -- not as whatever
+    /// the layer beneath it left there.
+    #[test]
+    fn an_unset_colour_paints_the_terminals_default_not_the_layer_beneath() {
+        let style = ratatui_style(ResolvedStyle::default());
+        assert_eq!(style.fg, Some(Color::Reset));
+        assert_eq!(style.bg, Some(Color::Reset));
+    }
+
     /// hardcoded color, so the assertion survives a colorscheme change --
     /// and the load-bearing case: `DiagnosticError` and `DiagnosticWarning`
     /// must resolve to genuinely different painted colors rather than both
