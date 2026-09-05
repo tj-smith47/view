@@ -2139,6 +2139,52 @@ mod tests {
         }
     }
 
+    /// The quoted names a source dispatches on: every string literal
+    /// followed by a match arm's `=>` or by the `|` joining it to the next
+    /// pattern.
+    fn dispatched_names(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in text.lines() {
+            let mut rest = line.trim();
+            while let Some(open) = rest.find('"') {
+                let after = &rest[open + 1..];
+                let Some(close) = after.find('"') else { break };
+                let tail = after[close + 1..].trim_start();
+                if tail.starts_with("=>") || tail.starts_with('|') {
+                    names.push(after[..close].to_string());
+                }
+                rest = &after[close + 1..];
+            }
+        }
+        names
+    }
+
+    /// Every scenario the matrix can select reaches a dispatch arm, read
+    /// off the dispatching sources rather than off a list somebody kept.
+    ///
+    /// The matrix and the dispatch are two halves of one cell and neither
+    /// half fails for the other: a cell with no arm compiles, passes every
+    /// test, and reaches `measure_cell`'s `unknown scenario` bail only
+    /// during a `task bench` run -- which is where `startup` sat, and what
+    /// this walk exists to make impossible to repeat.
+    #[test]
+    fn every_matrix_scenario_reaches_a_dispatch_arm() {
+        let root = workspace_root().join("crates/view-harness/src/bin/bench");
+        let mut armed: Vec<String> = Vec::new();
+        for source in ["rows.rs", "taps_rows.rs"] {
+            let text = std::fs::read_to_string(root.join(source))
+                .expect("the dispatching sources must be readable");
+            armed.extend(dispatched_names(&text));
+        }
+        for scenario in known_scenarios() {
+            assert!(
+                armed.iter().any(|name| name == scenario),
+                "{scenario} is a matrix cell no dispatch arm names, so a run selecting it \
+                 bails at `unknown scenario` instead of measuring anything"
+            );
+        }
+    }
+
     /// Every scenario the table names has to be one the matrix can select,
     /// or the table accumulates entries for rows that no longer exist and
     /// the pin above passes over a stale answer.
