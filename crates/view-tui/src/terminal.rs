@@ -1571,6 +1571,78 @@ mod tests {
         );
     }
 
+    /// A cursor-only move at a synchronizing terminal is content, so it is
+    /// bracketed: the pair is about whether anything was written between the
+    /// two escapes, never about whether a cell was repainted.
+    #[test]
+    fn a_bracketed_cursor_move_is_wrapped_by_the_pair() {
+        let model = probe_model(TermCaps::from_probe(true, true, true));
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        surface.cursor = caret_at(&model, 5, 2);
+        let moved = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        let at = cup(5, 2);
+        assert_eq!(
+            moved,
+            [SYNC_BEGIN, at.as_slice(), SYNC_END].concat(),
+            "a frame whose only news is the caret's position is still a frame \
+             with content, so the pair wraps that CUP and nothing else"
+        );
+    }
+
+    /// A shape change is the frame's whole content, and it is written after
+    /// the cursor arm rather than before the opener, so the pair wraps it.
+    #[test]
+    fn a_bracketed_shape_change_is_wrapped_by_the_pair() {
+        let model = probe_model(TermCaps::from_probe(true, true, true));
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        let mut spec = surface.cursor.unwrap();
+        spec.shape = if spec.shape == CursorShape::Block {
+            CursorShape::Vertical(25)
+        } else {
+            CursorShape::Block
+        };
+        surface.cursor = Some(spec);
+        let reshaped = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        let mut shape = Vec::new();
+        write_cursor_shape(&mut shape, spec.shape).unwrap();
+        assert_eq!(
+            reshaped,
+            [SYNC_BEGIN, shape.as_slice(), SYNC_END].concat(),
+            "the caret has not moved and no cell changed, so the shape escape \
+             is all the pair has to wrap"
+        );
+    }
+
+    /// The mouse toggle is queued ahead of the opener -- it is a terminal
+    /// mode change, not part of the update being synchronized -- so a frame
+    /// carrying only a toggle leaves the pair unopened.
+    #[test]
+    fn a_mouse_toggle_alone_opens_no_bracket() {
+        let mut model = probe_model(TermCaps::from_probe(true, true, true));
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        model.engine.mouse_on = true;
+        let toggled = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        let mut expected = Vec::new();
+        crossterm::queue!(expected, EnableMouseCapture).unwrap();
+        assert_eq!(
+            toggled, expected,
+            "a frame that only turns mouse reporting on writes that escape \
+             alone: the update it would bracket is empty"
+        );
+    }
+
     #[test]
     fn write_osc52_bytes_selects_c_for_plus_and_p_for_star() {
         let mut buf = Vec::new();
