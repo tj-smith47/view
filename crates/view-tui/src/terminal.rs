@@ -1032,6 +1032,23 @@ impl TermSizeCell {
 /// platforms share). Exits once `crossterm::event::read()` errors or `tx`'s
 /// receiver is gone.
 ///
+/// The terminal's current size in `(width, height)` cells, read before any
+/// [`Term`] exists.
+///
+/// The same question [`Term::size`] answers, asked at the one point in
+/// startup where there is no terminal object yet to ask: `nvim --embed`
+/// sources nothing until a UI attaches, and the size is all the attach is
+/// missing, so asking here is what lets the child run the user's config
+/// underneath the capability probe instead of behind it.
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` if the terminal cannot report
+/// its size.
+pub fn size_now() -> std::io::Result<(u16, u16)> {
+    crossterm::terminal::size()
+}
+
 /// The non-unix input path only: on unix the runtime loop polls the
 /// terminal fd itself and decodes inline through [`crate::input`], which
 /// deletes this thread's cross-thread wake from the keystroke path. Off

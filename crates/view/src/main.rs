@@ -1004,11 +1004,9 @@ fn main() -> Result<()> {
     // startup at all -- no `init.lua`, no file opened -- until a UI
     // attaches, so everything this thread does before the attach thread
     // reaches `ui_attach` is prepended whole to when the opened buffer
-    // reaches the screen. `Term::init` is the longest of those prefixes --
-    // the capability probe's first window is up to `tiers::PROBE_DEADLINE`,
-    // and over ssh a terminal answering across the network spends it -- and
-    // the child needs no terminal to come up: only the attach needs the
-    // size, and that reaches the thread through `attach_at` below.
+    // reaches the screen. The child needs no terminal to come up: only the
+    // attach needs the size, and that reaches the thread through
+    // `attach_at` below, which is itself ahead of the capability probe.
     //
     // The guard, not the call, is what makes this safe: from here to
     // `engine_result` this process owns a live nvim it has no other handle
@@ -1018,9 +1016,43 @@ fn main() -> Result<()> {
     // `AttachGuard`).
     let mut attach = startup::attach_in_background(cfg);
 
+    // ahead of `Term::init`, and this is the whole reason it can be: the
+    // attach needs a size and an `ext_*` set, the set follows the `[native]`
+    // switches rather than anything the terminal has to answer for, and the
+    // size is one ioctl. What sits between here and `Term::init`'s return is
+    // the capability probe's first window -- up to `tiers::PROBE_DEADLINE`,
+    // and a full network round trip of it over ssh -- which the child now
+    // spends sourcing the user's config instead of waiting to be told to
+    // start. The probed tier reaches the screen on the first frame anyway:
+    // it is read off `term` below, before anything is painted.
+    let (width, height) =
+        view_tui::terminal::size_now().context("failed to read the terminal size")?;
+    let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
+    let term_size = view_tui::terminal::TermSizeCell::default();
+    #[cfg(unix)]
+    let msg_tx = wake::LoopSender::with_waker(
+        raw_tx,
+        wake::LoopWaker::new().context("failed to create the runtime loop's wake pipe")?,
+    );
+    #[cfg(not(unix))]
+    let msg_tx = wake::LoopSender::new(raw_tx.clone());
+    // the `ext_*` set `nvim_ui_attach` requests follows the `[native]`
+    // switches, so a surface a user turned off is never taken from their
+    // plugins in the first place, and `[engine] single_grid` for whether
+    // nvim addresses each window's grid separately. Resolved once here and
+    // handed to `NativeSession` afterwards rather than read again there --
+    // two reads of one file can answer differently, and the attach would
+    // then have externalized a surface the rest of the session believes it
+    // declined.
+    let surfaces = view_native::config::ext_surfaces(&resolved);
+    attach.attach_at(msg_tx.clone(), width, height, surfaces.clone());
+
     let mut term = Term::init(resolved.ui.tier.value.map(Tier::from))
         .context("failed to initialize terminal backend")?;
-    let (width, height) = term.size()?;
+    // after the terminal is in raw mode, unlike the unix path above, which
+    // only builds a wake pipe: this thread reads the console itself
+    #[cfg(not(unix))]
+    view_tui::terminal::spawn_input_thread(raw_tx, term_size.clone());
 
     // the cwd is resolved once at startup, before any picker ever opens:
     // `Source::Files` with no root override searches from here
@@ -1042,18 +1074,6 @@ fn main() -> Result<()> {
     // of its own `init.lua`. The `[native]` read between them is the one
     // that cannot wait behind the attach: it decides the surfaces the
     // attach asks for.
-    let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
-    let term_size = view_tui::terminal::TermSizeCell::default();
-    #[cfg(unix)]
-    let msg_tx = wake::LoopSender::with_waker(
-        raw_tx,
-        wake::LoopWaker::new().context("failed to create the runtime loop's wake pipe")?,
-    );
-    #[cfg(not(unix))]
-    let msg_tx = {
-        view_tui::terminal::spawn_input_thread(raw_tx.clone(), term_size.clone());
-        wake::LoopSender::new(raw_tx)
-    };
     // Any notice the reads below owe the user is buffered as an effect
     // rather than printed: the terminal is already raw-mode/alternate-screen
     // owned by `Term::init` above, where a bare stderr write is invisible at
@@ -1075,27 +1095,9 @@ fn main() -> Result<()> {
         pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
     }
 
-    // the `ext_*` set `nvim_ui_attach` requests follows the `[native]`
-    // switches, so a surface a user turned off is never taken from their
-    // plugins in the first place, and `[engine] single_grid` for whether
-    // nvim addresses each window's grid separately. Resolved once above and
-    // handed to `NativeSession` afterwards rather than read again there --
-    // two reads of one file can answer differently, and the attach would
-    // then have externalized a surface the rest of the session believes it
-    // declined.
-    let surfaces = view_native::config::ext_surfaces(&resolved);
-    model.attach_surfaces(surfaces.clone());
-
-    // released here, at the first point every half exists, rather than
-    // anywhere below: everything between this line and the shell frame is
-    // work the child's own startup now runs underneath.
-    //
-    // What the residue channel costs: nothing but the shell frame's own
-    // paint. The attach's last step blocks on it, and it is handed over the
-    // moment that frame is up (see `settle_probe` below), so editable
-    // content lands at the attach's own cost on every terminal -- including
-    // one that never answers the fence at all.
-    attach.attach_at(msg_tx.clone(), width, height, surfaces);
+    // the same set the attach above was given: `Model::owns` answers about
+    // the surfaces nvim was actually asked for, so the two can never differ
+    model.attach_surfaces(surfaces);
 
     // seeded here, once, before the engine exists: `update()` has no
     // filesystem access, so whether this project is trusted for AI agent
@@ -1903,7 +1905,7 @@ mod tests {
         let result = offset_of(".engine_result()");
         for step in [
             "Term::init(",
-            "term.size()?",
+            "view_tui::terminal::size_now()",
             "startup::paint_shell_frame(",
             ".settle_probe()",
             "InputSource::open",
