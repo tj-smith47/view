@@ -76,19 +76,21 @@ pub const TAG_AREA_RESOLVED: u8 = b'G';
 /// put there, so the [`TAG_TERM_WRITTEN`] that closes this frame is a write
 /// speculation explains rather than one nothing does.
 ///
-/// Emitted at the head of the frame instead of beside the write it
-/// qualifies, for two reasons: the answer is already known there (the
-/// surface handed to the painter is the frame), and the write's own bracket
-/// ([`TAG_FLUSH_START`] to [`TAG_TERM_WRITTEN`]) isolates the pty write
-/// cost, which a tap landing inside it would inflate. A reader pairs it
-/// with the next terminal write, which is this frame's.
+/// Emitted beside the write it qualifies rather than at the head of the
+/// frame, because a frame that composes to no changed cell performs no
+/// write at all: an announcement made before the frame's bytes are known
+/// would pair with the *next* frame's terminal write and explain away a
+/// paint it had nothing to do with. Still ahead of [`TAG_FLUSH_START`],
+/// so it stays outside the bracket that isolates the pty write cost. A
+/// reader pairs it with the next terminal write, which is this frame's.
 pub const TAG_SPECULATED_PAINT: u8 = b'D';
 /// The frame now being drawn repaints the agent panel's rows and nothing
 /// else, so the write closing it is that panel repainting -- a streamed
 /// agent chunk, most of all -- rather than anything the keystroke did.
 ///
 /// Paired with the next terminal write exactly as [`TAG_SPECULATED_PAINT`]
-/// is, and deliberately silent on any frame that reaches past the panel:
+/// is, announced beside that write for the same reason, and deliberately
+/// silent on any frame that reaches past the panel:
 /// a frame carrying engine grid damage is at least partly the engine's
 /// answer, and one repainting a row the panel does not cover (a toast
 /// expiring, chrome ticking) was driven by something this tag cannot

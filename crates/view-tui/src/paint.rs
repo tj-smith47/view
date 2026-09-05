@@ -441,7 +441,7 @@ impl Shadow {
     ///
     /// Returns whether any cell reached the writer, which the caller needs to
     /// decide what the rest of its frame owes the terminal (see
-    /// [`emit::draw_resynced`]).
+    /// `emit::draw_resynced`).
     ///
     /// # Errors
     ///

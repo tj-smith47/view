@@ -514,6 +514,12 @@ pub struct Term {
     /// never the fact that they were probed rather than assumed or
     /// overridden.
     caps_source: tiers::CapsSource,
+    /// Whether the frame just queued repaints the agent panel's rows and
+    /// nothing else. Carried from where the answer is known -- the frame's
+    /// own damage -- to where the announcement belongs, beside the write
+    /// that frame turns out to perform.
+    #[cfg(all(unix, feature = "bench-taps"))]
+    agent_repaint: bool,
     /// The capability probe still in flight, if the terminal was given a
     /// batch to answer at all. [`Term::settle_probe`] takes whatever it has
     /// heard by then; a `--tier` override leaves it `None`.
@@ -555,6 +561,8 @@ impl Term {
             last_offset: None,
             caps,
             caps_source,
+            #[cfg(all(unix, feature = "bench-taps"))]
+            agent_repaint: false,
             probe,
         })
     }
@@ -718,20 +726,33 @@ impl Term {
         // the frame's single real write: everything queued above -- mouse
         // toggles, the sync bracket, the content diff, cursor escapes --
         // reaches the terminal in one syscall, atomically from the pty
-        // reader's point of view. The tap here brackets exactly that write
-        // and flush against TAG_TERM_WRITTEN, isolating the pty write cost.
-        #[cfg(all(unix, feature = "bench-taps"))]
-        crate::tap::tap(crate::tap::TAG_FLUSH_START);
+        // reader's point of view. Every tap sits inside the emptiness
+        // check: a frame with nothing to write performs no write, and a
+        // TAG_TERM_WRITTEN stamped for it would be read as this frame's
+        // bytes having reached the terminal. The two announcements are
+        // here rather than at the head of the frame for the same reason --
+        // one made before the frame is known to be empty pairs with the
+        // next frame's write -- and still ahead of TAG_FLUSH_START, so
+        // neither lands inside the bracket that isolates the pty write.
         let mut frame = self.frame_buf.borrow_mut();
         if !frame.is_empty() {
+            #[cfg(all(unix, feature = "bench-taps"))]
+            if surface.carries_speculation() {
+                crate::tap::tap(crate::tap::TAG_SPECULATED_PAINT);
+            }
+            #[cfg(all(unix, feature = "bench-taps"))]
+            if self.agent_repaint {
+                crate::tap::tap(crate::tap::TAG_AGENT_PAINT);
+            }
+            #[cfg(all(unix, feature = "bench-taps"))]
+            crate::tap::tap(crate::tap::TAG_FLUSH_START);
             let mut out = std::io::stdout().lock();
             out.write_all(&frame)?;
             frame.clear();
             out.flush()?;
+            #[cfg(all(unix, feature = "bench-taps"))]
+            crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         }
-        drop(frame);
-        #[cfg(all(unix, feature = "bench-taps"))]
-        crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         Ok(())
     }
 
@@ -749,10 +770,6 @@ impl Term {
     ) -> std::io::Result<()> {
         #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_DRAW_START);
-        #[cfg(all(unix, feature = "bench-taps"))]
-        if surface.carries_speculation() {
-            crate::tap::tap(crate::tap::TAG_SPECULATED_PAINT);
-        }
         // capabilities the terminal only admitted to after the probe handed
         // it over reach this type the same way `mouse_on` does -- off the
         // model, on the frame that first carries them -- so the upgrade
@@ -807,6 +824,10 @@ impl Term {
                 sink,
                 crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
             )?;
+            // the terminal moves its own cursor on a resize -- clamped on a
+            // shrink, reflowed on a width change -- and the erase does not
+            // put it back, so no recorded position survives one
+            self.last_cursor = None;
         }
         let damage = Damage::from_frame(grid_damage, offset, &overlay_damage, force_full);
         // the streamed turn repainting its own panel and nothing else: the
@@ -815,12 +836,10 @@ impl Term {
         // than to the editor answering the key. A frame that also carries
         // grid damage, or damage past the panel's rows, is left unexplained
         #[cfg(all(unix, feature = "bench-taps"))]
-        let agent_repaint = !grid_damage.full
-            && grid_damage.rows.is_empty()
-            && damage.covers_only(&crate::paint::agent_panel_rows(surface));
-        #[cfg(all(unix, feature = "bench-taps"))]
-        if agent_repaint {
-            crate::tap::tap(crate::tap::TAG_AGENT_PAINT);
+        {
+            self.agent_repaint = !grid_damage.full
+                && grid_damage.rows.is_empty()
+                && damage.covers_only(&crate::paint::agent_panel_rows(surface));
         }
         // paint only the damaged rows into the persistent shadow, then emit
         // the cells that actually changed against what the terminal already
@@ -853,6 +872,13 @@ impl Term {
                 }
             }
             None => {
+                // the emission left the terminal's cursor after the last
+                // glyph it printed and this frame re-addresses nothing, so
+                // the recorded position is now a claim about a cell the
+                // caret has left
+                if painted_cells {
+                    self.last_cursor = None;
+                }
                 if self.cursor_shown != Some(false) {
                     self.inner.hide_cursor()?;
                     self.cursor_shown = Some(false);
@@ -949,6 +975,8 @@ impl Term {
             last_offset: None,
             caps,
             caps_source: tiers::CapsSource::Assumed,
+            #[cfg(all(unix, feature = "bench-taps"))]
+            agent_repaint: false,
             probe: None,
         })
     }
@@ -1333,10 +1361,9 @@ mod tests {
         std::mem::take(&mut *term.frame_buf.borrow_mut())
     }
 
-    /// The whole point of the change: nvim flushes a redraw batch for input
-    /// it did not act on -- a wheel report at a buffer's end -- and a frame
-    /// composing the same cells at the same cursor must cost the terminal
-    /// nothing at all.
+    /// nvim flushes a redraw batch for input it did not act on -- a wheel
+    /// report at a buffer's end -- and a frame composing the same cells at
+    /// the same cursor must cost the terminal nothing at all.
     ///
     /// Disconfirm: writing the SGR trailer unconditionally, or re-stating the
     /// cursor position every frame, makes the second frame non-empty here.
@@ -1430,18 +1457,21 @@ mod tests {
         let mut term = Term::frame_probe(model.caps);
 
         let hidden = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
-        assert_eq!(
-            occurrences(&hidden, HIDE_CURSOR),
-            1,
-            "a surface carrying no caret hides the terminal's"
+        assert!(
+            hidden.ends_with(HIDE_CURSOR),
+            "a surface carrying no caret hides the terminal's, and the hide is \
+             the frame's last word; frame: {hidden:?}"
         );
 
         surface.cursor = caret_at(&model, 1, 1);
+        let mut shape = Vec::new();
+        write_cursor_shape(&mut shape, surface.cursor.unwrap().shape).unwrap();
         let shown = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
         assert_eq!(
-            occurrences(&shown, SHOW_CURSOR),
-            1,
-            "the caret coming back is one show; frame: {shown:?}"
+            shown,
+            [cup(1, 1), SHOW_CURSOR.to_vec(), shape].concat(),
+            "the caret coming back is a position, a show and the shape no frame \
+             has stated yet, in that order and nothing else"
         );
 
         let again = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
@@ -1449,6 +1479,68 @@ mod tests {
             occurrences(&again, SHOW_CURSOR),
             0,
             "a caret that never left is shown no second time; frame: {again:?}"
+        );
+    }
+
+    /// A frame that repainted cells with the caret hidden left the
+    /// terminal's own caret wherever the last glyph landed, so the position
+    /// this type remembers is no longer a fact about the terminal.
+    ///
+    /// Disconfirm: removing the `last_cursor = None` from `queue_frame`'s
+    /// hidden arm leaves the third frame writing only the show, and the
+    /// caret comes back at the last glyph rather than where the model has
+    /// it.
+    #[test]
+    fn a_painted_frame_with_the_caret_hidden_forgets_where_it_was() {
+        let mut model = probe_model(TermCaps::default());
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        model.engine.apply_grid(view_core::grid::GridOp::PutLine {
+            row: 1,
+            col_start: 3,
+            cells: vec![("X".to_string(), 0, 1)],
+        });
+        surface.cursor = None;
+        let painted = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+        assert!(
+            painted.ends_with(HIDE_CURSOR),
+            "the frame that hides the caret must still say so; frame: {painted:?}"
+        );
+
+        surface.cursor = caret_at(&model, 2, 1);
+        let back = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert_eq!(
+            back,
+            [cup(2, 1), SHOW_CURSOR.to_vec()].concat(),
+            "the caret returning to the cell it left must still be addressed: \
+             the frame in between moved the terminal's own caret and \
+             re-addressed nothing"
+        );
+    }
+
+    /// A resize moves the terminal's own caret -- clamped on a shrink,
+    /// reflowed on a width change -- and the erase that follows does not put
+    /// it back, so the position this type remembers cannot survive one.
+    ///
+    /// Disconfirm: removing the `last_cursor = None` from `queue_frame`'s
+    /// resize arm leaves the resized frame carrying no CUP at all.
+    #[test]
+    fn a_resize_forgets_where_the_caret_was() {
+        let mut model = probe_model(TermCaps::default());
+        let mut surface = view_surface::render(&model);
+        surface.cursor = caret_at(&model, 2, 1);
+        let mut term = Term::frame_probe(model.caps);
+        let _ = frame_bytes(&mut term, &model, &surface, &GridDamage::full());
+
+        model.term_height += 1;
+        let resized = frame_bytes(&mut term, &model, &surface, &GridDamage::default());
+        assert!(
+            occurrences(&resized, &cup(2, 1)) > 0,
+            "a frame whose terminal changed size owes the caret its position \
+             again, whatever its cells compose to; frame: {resized:?}"
         );
     }
 
