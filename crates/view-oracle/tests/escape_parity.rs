@@ -45,18 +45,25 @@ const BUDGET: Duration = Duration::from_secs(20);
 /// Each marker is a word nothing else on either screen spells, so a screen
 /// carrying it can only be the mapping having run.
 ///
-/// The three runs are the three readings a folded `ESC` gets wrong. Two
-/// `ESC`s in one read are one Escape key to a parser that treats the second
-/// as the first one's payload, so a mapping written against the pair never
-/// fires. A run that stops after the introducer is a key code no further
-/// byte will ever complete, so a parser with no wait of its own holds it --
-/// and the `[` a user mapped never arrives. And a key code behind a
-/// doubled `ESC` loses its own introducer to that fold, arriving as the
-/// literal characters of the sequence.
-const RUNS: [(&str, &[u8], &str); 3] = [
+/// The first three runs are the three readings a folded `ESC` gets wrong.
+/// Two `ESC`s in one read are one Escape key to a parser that treats the
+/// second as the first one's payload, so a mapping written against the pair
+/// never fires. A run that stops after the introducer is a key code no
+/// further byte will ever complete, so a parser with no wait of its own
+/// holds it -- and the `[` a user mapped never arrives. And a key code
+/// behind a doubled `ESC` loses its own introducer to that fold, arriving
+/// as the literal characters of the sequence.
+///
+/// The fourth run is the same bytes as the second with the chord itself
+/// mapped, and it is the only one of the four that can tell the two
+/// readings of them apart: unmapped, nvim degrades `<M-[>` to `<Esc>`
+/// followed by `[`, so a decoder producing either reading fires the `[`
+/// mapping and leg two passes for both. Mapped, only the chord fires it.
+const RUNS: [(&str, &[u8], &str); 4] = [
     ("<Esc><Esc>", b"\x1b\x1b", "REACHEDDOUBLEESCAPE"),
     ("[", b"\x1b[", "REACHEDBAREBRACKET"),
     ("<Up>", b"\x1b\x1b[A", "REACHEDUPBEHINDESCAPE"),
+    ("<M-[>", b"\x1b[", "REACHEDMETABRACKET"),
 ];
 
 /// A `view` session with every native feature off, so the screen it paints
