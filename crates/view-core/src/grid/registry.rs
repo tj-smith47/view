@@ -702,6 +702,22 @@ impl GridRegistry {
         }
     }
 
+    /// Whether view is holding `grid`'s float off the screen.
+    ///
+    /// Distinct from "absent from [`panes_in_z_order`]", which a hidden or
+    /// unplaced grid answers the same way: a reader working out which pane
+    /// owned a cell has to tell view's own hold apart from nvim's.
+    ///
+    /// [`panes_in_z_order`]: Self::panes_in_z_order
+    #[must_use]
+    pub fn float_withheld(&self, grid: GridId) -> bool {
+        self.slots
+            .iter()
+            .find(|slot| slot.id == grid)
+            .and_then(|slot| slot.placed.as_ref())
+            .is_some_and(|placed| placed.withheld)
+    }
+
     /// Holds `grid`'s float off the screen, or gives it back, and answers
     /// whether this call changed anything.
     ///

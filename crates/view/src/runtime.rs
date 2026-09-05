@@ -149,6 +149,10 @@ pub(crate) fn dispatch<E: EngineOps>(
     msg: Msg,
 ) -> Flow {
     crate::vlog::log_msg(&msg);
+    // kept aside rather than logged here: a float's `layout` line carries
+    // whether view is holding it off the screen, which is the fold below's
+    // own answer. Empty, and so free, with no `VIEW_LOG` sink open
+    let layout = crate::vlog::layout_events(&msg);
     let stage = crate::native::stage(&msg);
     let trigger = follow_ups.theme.classify(&msg);
     // the one call site that legitimately needs redraw content: what the
@@ -157,7 +161,9 @@ pub(crate) fn dispatch<E: EngineOps>(
         reconcile_speculation(model, events);
     }
     let mut flow = Flow::Continue;
-    for eff in update(model, msg) {
+    let effects = update(model, msg);
+    crate::vlog::log_layout(model, &layout);
+    for eff in effects {
         // read off what is actually going to the engine rather than off the
         // message that produced it: a key a native overlay claimed never
         // reaches nvim at all, and a glyph predicted for one would stand

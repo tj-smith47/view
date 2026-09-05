@@ -455,6 +455,119 @@ pub fn ai_prompt_submit_payload(text: &str) -> String {
     format!("AiPromptSubmit {{ text: {} }}", capped(text))
 }
 
+/// Whether `ev` is one of the box-moving events the `layout` topic
+/// records.
+///
+/// These are the events that move, size or remove a box on screen without
+/// naming a single cell, so the question a stale cell raises -- which pane
+/// owned it, and on which frame that stopped being true -- is answerable
+/// from nothing else. `grid_line` is deliberately not among them: one line
+/// per cell run would be the log's whole volume and would answer a
+/// different question.
+fn is_layout_event(ev: &view_core::events::UiEvent) -> bool {
+    use view_core::events::UiEvent;
+    matches!(
+        ev,
+        UiEvent::GridResize { .. }
+            | UiEvent::GridClear { .. }
+            | UiEvent::GridDestroy { .. }
+            | UiEvent::WinPos { .. }
+            | UiEvent::WinFloatPos { .. }
+            | UiEvent::WinHide { .. }
+            | UiEvent::WinClose { .. }
+    ) || matches!(ev, UiEvent::Unknown { name } if name == "win_viewport_margins")
+}
+
+/// The box-moving events of one `Msg`, kept aside so [`log_layout`] can
+/// write them out beside the fold's own answer.
+///
+/// Empty whenever no sink is open, so a run without `VIEW_LOG` clones
+/// nothing and allocates nothing. This is where the deferral [`log_with`]
+/// gives an ordinary call site lives for this topic: the payload cannot be
+/// built until `update` has run, so the sink check moves ahead of the
+/// clone instead of ahead of the `format!`.
+#[must_use]
+pub fn layout_events(msg: &view_core::msg::Msg) -> Vec<view_core::events::UiEvent> {
+    let (Some(Some(_)), view_core::msg::Msg::Redraw(events)) = (SINK.get(), msg) else {
+        return Vec::new();
+    };
+    events
+        .iter()
+        .filter(|ev| is_layout_event(ev))
+        .cloned()
+        .collect()
+}
+
+/// One `layout` line for `ev`, or `None` for an event the topic does not
+/// record.
+///
+/// A float's line carries `withheld` -- view's own hold, distinct from the
+/// `hidden` nvim announces -- read off `model` after the fold, because a
+/// withheld float paints no cell and a reader working out which pane owned
+/// one has to be able to rule it out.
+fn layout_payload(
+    model: &view_core::model::Model,
+    ev: &view_core::events::UiEvent,
+) -> Option<String> {
+    use view_core::events::UiEvent;
+    Some(match ev {
+        UiEvent::GridResize {
+            grid,
+            width,
+            height,
+        } => format!("grid_resize grid={grid} width={width} height={height}"),
+        UiEvent::GridClear { grid } => format!("grid_clear grid={grid}"),
+        UiEvent::GridDestroy { grid } => format!("grid_destroy grid={grid}"),
+        UiEvent::WinPos {
+            grid,
+            win,
+            startrow,
+            startcol,
+            width,
+            height,
+        } => format!(
+            "win_pos grid={grid} win={} startrow={startrow} startcol={startcol} \
+             width={width} height={height}",
+            win.0
+        ),
+        UiEvent::WinFloatPos {
+            grid,
+            win,
+            anchor_grid,
+            zindex,
+            compindex,
+            screen_row,
+            screen_col,
+        } => format!(
+            "win_float_pos grid={grid} win={} anchor_grid={anchor_grid} zindex={zindex} \
+             compindex={compindex} screen_row={screen_row} screen_col={screen_col} \
+             withheld={}",
+            win.0,
+            model
+                .engine
+                .grids()
+                .float_withheld(view_core::grid::registry::GridId(*grid))
+        ),
+        UiEvent::WinHide { grid } => format!("win_hide grid={grid}"),
+        UiEvent::WinClose { grid } => format!("win_close grid={grid}"),
+        // the one member view decodes no fields for: it reaches the fold as
+        // an unrecognized wire name, so the line records that the event
+        // happened and nothing else
+        UiEvent::Unknown { name } if name == "win_viewport_margins" => name.clone(),
+        _ => return None,
+    })
+}
+
+/// One `layout` line per event [`layout_events`] kept, written after
+/// `update` folded the batch.
+pub fn log_layout(model: &view_core::model::Model, events: &[view_core::events::UiEvent]) {
+    for ev in events {
+        if let Some(payload) = layout_payload(model, ev) {
+            log("layout", &payload);
+        }
+    }
+}
+
 fn log_ui_event(ev: &view_core::events::UiEvent) {
     use view_core::events::UiEvent;
     match ev {
@@ -513,6 +626,121 @@ mod tests {
                 sp: None,
             },
         ]));
+    }
+
+    /// Every event the `layout` topic keeps has a line to write, and every
+    /// event it does not keep has none.
+    ///
+    /// The two halves are separate functions -- one filters the batch
+    /// ahead of the fold, the other formats after it -- so a member added
+    /// to one and not the other would keep an event that logs nothing, or
+    /// format one that never arrives. This walks the whole topic against a
+    /// batch carrying one of each, plus the two events nearest to it that
+    /// it must not claim: `grid_line`, which the topic excludes by volume,
+    /// and an unrecognized wire name that is not the margins event.
+    #[test]
+    fn every_layout_event_the_topic_keeps_writes_exactly_one_line() {
+        use view_core::events::{UiEvent, WinHandle};
+
+        let members = vec![
+            UiEvent::GridResize {
+                grid: 2,
+                width: 30,
+                height: 80,
+            },
+            UiEvent::GridClear { grid: 2 },
+            UiEvent::GridDestroy { grid: 3 },
+            UiEvent::WinPos {
+                grid: 2,
+                win: WinHandle(1000),
+                startrow: 0,
+                startcol: 0,
+                width: 30,
+                height: 80,
+            },
+            UiEvent::WinFloatPos {
+                grid: 4,
+                win: WinHandle(1001),
+                anchor_grid: 1,
+                zindex: 50,
+                compindex: 0,
+                screen_row: 2,
+                screen_col: 166,
+            },
+            UiEvent::WinHide { grid: 5 },
+            UiEvent::WinClose { grid: 3 },
+            UiEvent::Unknown {
+                name: "win_viewport_margins".to_string(),
+            },
+        ];
+        let outsiders = vec![
+            UiEvent::GridLine {
+                grid: 2,
+                row: 0,
+                col_start: 0,
+                cells: Vec::new(),
+            },
+            UiEvent::Unknown {
+                name: "set_title".to_string(),
+            },
+        ];
+
+        let model = view_core::model::Model::new();
+        for ev in &members {
+            assert!(
+                is_layout_event(ev),
+                "the topic must keep {ev:?} for the fold to have anything to write"
+            );
+            let payload =
+                layout_payload(&model, ev).expect("a kept event must have a line to write");
+            assert_eq!(
+                payload.lines().count(),
+                1,
+                "one line per event, not {payload:?}"
+            );
+        }
+        for ev in &outsiders {
+            assert!(!is_layout_event(ev), "the topic must not keep {ev:?}");
+            assert!(
+                layout_payload(&model, ev).is_none(),
+                "a line written for an event the topic never keeps: {ev:?}"
+            );
+        }
+    }
+
+    /// A float's line answers whether view is holding it off the screen,
+    /// not only where nvim put it: a withheld float paints no cell, so a
+    /// reader working out which pane owned one has to be able to rule it
+    /// out.
+    #[test]
+    fn a_floats_layout_line_carries_views_own_hold() {
+        use view_core::events::{UiEvent, WinHandle};
+        use view_core::grid::registry::{GridEvent, GridId};
+
+        let float = UiEvent::WinFloatPos {
+            grid: 4,
+            win: WinHandle(1001),
+            anchor_grid: 1,
+            zindex: 50,
+            compindex: 0,
+            screen_row: 2,
+            screen_col: 166,
+        };
+        let mut model = view_core::model::Model::new();
+        model.engine.apply_grid_event(GridEvent::Float {
+            grid: GridId(4),
+            anchor_grid: GridId(1),
+            screen_row: 2,
+            screen_col: 166,
+            zindex: 50,
+            compindex: 0,
+        });
+        let shown = layout_payload(&model, &float).unwrap();
+        assert!(shown.contains("withheld=false"), "{shown}");
+
+        assert!(model.engine.withhold_float(GridId(4), true));
+        let held = layout_payload(&model, &float).unwrap();
+        assert!(held.contains("withheld=true"), "{held}");
     }
 
     /// The payloads that have no bound of their own never reach the log at
