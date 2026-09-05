@@ -37,6 +37,7 @@ pub mod picker;
 #[cfg(unix)]
 pub mod remote_memory;
 pub mod scroll;
+pub mod startup;
 pub mod supervision;
 // The tap channel is FIFO + raw-CLOCK_MONOTONIC based (see taps.rs); neither
 // exists on Windows, so the module and the rows built on it are unix-only and

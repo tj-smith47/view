@@ -506,6 +506,11 @@ mod tests {
              footprint too",
         ),
         ("scroll.rs", TAKES_THEM_DOWN),
+        (
+            "startup.rs",
+            "the boundary is the cold startup itself, driven through \
+             `first_paint::run`, so its treatment of the notices is that row's",
+        ),
         ("supervision.rs", TAKES_THEM_DOWN),
         (
             "taps/ai.rs",
