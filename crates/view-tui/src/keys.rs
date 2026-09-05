@@ -249,7 +249,12 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
 /// paste cut in half by a read boundary is dropped instead, which is
 /// [`ResidueDecode::unfinished`]'s own rule for a caller that has run out
 /// of reads: half a paste typed into a buffer runs its body as normal-mode
-/// commands.
+/// commands, and the lead byte of a half-arrived character read as Latin-1
+/// is a key nobody pressed. What the `ESC`s in front of either spell is
+/// still delivered, so `ESC` and half an `e-acute` is `<Esc>`. termkey's
+/// own forced pass eats the fragment the same way and emits its invalid
+/// codepoint for it; dropping it is what this decoder does with every
+/// byte run no character encodes ([`Utf8::Invalid`]).
 pub(crate) fn decode_residue_forced(residue: &[u8]) -> Vec<Msg> {
     let decoded = decode_residue(residue);
     let mut msgs = decoded.msgs;
@@ -268,14 +273,17 @@ pub(crate) fn decode_residue_forced(residue: &[u8]) -> Vec<Msg> {
         KeyModifiers::NONE
     };
     match held.get(opened) {
-        None => msgs.extend(forced_key(KeyCode::Esc, alt)),
-        Some(&byte) => {
+        Some(&byte) if byte.is_ascii() => {
             msgs.extend(forced_key(
                 KeyCode::Char(char::from(byte)),
                 KeyModifiers::ALT,
             ));
             msgs.extend(decode_residue(&held[opened + 1..]).msgs);
         }
+        // nothing behind the escapes, or a character the read cut in half:
+        // `char::from(u8)` is Latin-1, so forcing the lead byte of a
+        // multi-byte character types one nobody pressed
+        _ => msgs.extend(forced_key(KeyCode::Esc, alt)),
     }
     msgs
 }
@@ -292,9 +300,13 @@ fn forced_key(code: KeyCode, mods: KeyModifiers) -> Option<Msg> {
 /// type the pasted body into the buffer as normal-mode commands. The
 /// opener is what identifies it, so a read cut off inside those six bytes
 /// is flushed like any other run -- nvim reads that boundary the same way,
-/// and a terminal writes the opener whole.
+/// and a terminal writes the opener whole. `ESC`s in front of an opener do
+/// not hide it: they fold over a key, never over a paste.
 pub(crate) fn forceable(held: &[u8]) -> bool {
-    held.first() == Some(&0x1b) && !held.starts_with(PASTE_OPEN)
+    let opened = held.iter().take_while(|&&byte| byte == 0x1b).count();
+    // the escapes folding over a run do not hide what it is: an unfinished
+    // paste behind one is still a paste
+    opened > 0 && !held[opened - 1..].starts_with(PASTE_OPEN)
 }
 
 /// `ESC [` and `ESC O`: the two bytes a sequence opens with, and where
@@ -602,15 +614,13 @@ fn string_sequence_len(run: &[u8]) -> Option<usize> {
 /// (`getchar.c`), so a session that maps neither sees the same two
 /// keystrokes either way.
 ///
-/// Three runs are not that chord. A second `ESC` ends the first one and
-/// nothing more: the `ESC` is Alt held over whatever the bytes behind it
-/// decode to, however many of them there are, which is how the engine's
-/// own reader composes the chord (termkey's `peekkey_simple` recurses past
-/// an `ESC` and ors `KEYMOD_ALT` into the key it finds). So `ESC ESC` is
-/// `<M-Esc>`, `ESC ESC [ A` is `<M-Up>` and `ESC ESC x` is `<M-x>` -- one
-/// chord each, not a key per byte. nvim then degrades a chord no mapping
-/// claims back to `<Esc>` and the key (`getchar.c`), which is why an
-/// unmapped `ESC ESC` still opens as two Escape keys in a buffer.
+/// One run is never that chord: a bracketed paste. The engine does not
+/// fold one either -- `tui/input.c`'s `handle_raw_buffer` cuts its buffer
+/// at every `ESC` after the first, so the escape in front of an opener
+/// reaches termkey alone and the opener reaches `handle_bracketed_paste`
+/// as the paste it is. Folded here instead, the opener would be eaten and
+/// the tail left behind flushed at the next escape timeout, with the
+/// pasted body typed into the buffer as normal-mode commands.
 ///
 /// An `ESC` with nothing behind it is unfinished: the byte that would make
 /// it a chord may be in the read that has not happened yet, and the engine
@@ -618,24 +628,27 @@ fn string_sequence_len(run: &[u8]) -> Option<usize> {
 /// ([`decode_residue_forced`]). A character cut short by the end of the
 /// read is unfinished for the same reason.
 fn alt_key(run: &[u8], held: KeyModifiers) -> Escape {
-    let held = held | KeyModifiers::ALT;
+    let alt = held | KeyModifiers::ALT;
     match run.get(1) {
         None => Escape::Unfinished,
-        Some(&0x1b) => match escape_run(&run[1..], held) {
+        Some(&0x1b) if run[1..].starts_with(PASTE_OPEN) => escape_key(1, held),
+        Some(&0x1b) => match escape_run(&run[1..], alt) {
             Escape::Decoded { len, msg } => Escape::Decoded { len: len + 1, msg },
             Escape::Unknown { len } => Escape::Unknown { len: len + 1 },
             Escape::Unfinished => Escape::Unfinished,
         },
         Some(&byte) if byte >= 0x80 => match utf8_char(&run[1..]) {
-            Utf8::Char(typed, len) => decoded(1 + len, KeyCode::Char(typed), held),
+            Utf8::Char(typed, len) => decoded(1 + len, KeyCode::Char(typed), alt),
             Utf8::Unfinished => Escape::Unfinished,
             // an `ESC` in front of bytes no character encodes: the escape
-            // is the user's keystroke and the rest is the terminal's noise
-            Utf8::Invalid => escape_key(1, held - KeyModifiers::ALT),
+            // is the user's keystroke and the rest is the terminal's noise.
+            // Only this level's Alt is dropped -- `held` is what the
+            // escapes in front of this one already spelled
+            Utf8::Invalid => escape_key(1, held),
         },
         Some(&byte) => match plain_key(byte) {
-            Some((code, mods)) => decoded(2, code, mods | held),
-            None => escape_key(1, held - KeyModifiers::ALT),
+            Some((code, mods)) => decoded(2, code, mods | alt),
+            None => escape_key(1, held),
         },
     }
 }
@@ -1366,6 +1379,11 @@ mod tests {
         // the key at the end of it, however many of them the terminal sent
         assert_eq!(encode_residue_bytes(b"\x1b\x1bx"), vec!["<M-x>"]);
         assert_eq!(encode_residue_bytes(b"\x1b\x1b\x1b"), vec!["<M-Esc>"]);
+        // noise behind a doubled `ESC` leaves the escape the user pressed
+        // carrying the Alt the outer one spelled: only this level's is
+        // dropped with the bytes no character encodes
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b\x80"), vec!["<M-Esc>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b\x80"), vec!["<Esc>"]);
         // and the `ESC` that ends a run is the Escape key: this entry
         // point has no later read to make a chord out of it
         assert_eq!(encode_residue_bytes(b"ok\x1b"), vec!["o", "k", "<Esc>"]);
@@ -1833,6 +1851,13 @@ mod tests {
         assert_eq!(notations(b"\x1b"), vec!["<Esc>"]);
         assert_eq!(notations(b"\x1b\x1b"), vec!["<M-Esc>"]);
         assert_eq!(notations(b"\x1b\x1b\x1b"), vec!["<M-Esc>"]);
+        // a character the read cut in half is unfinished bytes, not a key:
+        // its lead byte forced as Latin-1 types one nobody pressed, so the
+        // escapes are read alone and the fragment is dropped -- termkey
+        // eats the same bytes on its own forced pass
+        assert_eq!(notations(b"\x1b\xc3"), vec!["<Esc>"]);
+        assert_eq!(notations(b"\x1b\xe2\x82"), vec!["<Esc>"]);
+        assert_eq!(notations(b"\x1b\x1b\xc3"), vec!["<M-Esc>"]);
         // the keys in front of a half-arrived run are the keys they were
         assert_eq!(notations(b"ok\x1b["), vec!["o", "k", "<M-[>"]);
         // and a finished run is decoded exactly as it is without this
@@ -1844,18 +1869,40 @@ mod tests {
         assert!(forceable(b"\x1b["), "a bare CSI introducer waits on a key");
         assert!(forceable(b"\x1bO"));
         // a paste's closer arrives when the pasted text ends, which no
-        // keystroke timeout bounds
+        // keystroke timeout bounds -- and an `ESC` in front of the opener
+        // does not make one out of it
         assert!(!forceable(b"\x1b[200~half a paste"));
+        assert!(!forceable(b"\x1b\x1b[200~half"));
         // and half a character is not an escape run at all
         assert!(!forceable(&"\u{e9}".as_bytes()[..1]));
         assert!(!forceable(b""));
         // half a paste flushed anyway would type its body as normal-mode
         // commands, so the forced decode drops it rather than splitting it
         assert!(decode_residue_forced(b"\x1b[200~rm -rf").is_empty());
+        // the guard window forces with no wait at all, so a stray `ESC`
+        // landing in the same read as an opener is where the body would
+        // reach the buffer: the escape is a key and the paste is held
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b[200~half"), vec!["<Esc>"]);
+        assert_eq!(
+            encode_residue_bytes(b"\x1b\x1b[200~rm -rf\x1b[201~"),
+            vec!["<Esc>"]
+        );
     }
 
     #[test]
     fn residue_a_bracketed_paste_arrives_as_one_paste_not_as_keystrokes() {
+        // an `ESC` sharing the read with the opener is a keystroke of its
+        // own: folded into `<M-[>` it would swallow the opener and leave
+        // the body to be typed as normal-mode commands
+        assert!(
+            matches!(
+                decode_residue(b"\x1b\x1b[200~two words\x1b[201~").msgs.as_slice(),
+                [Msg::Key(key), Msg::Paste(text)]
+                    if key.notation == "<Esc>" && text == "two words"
+            ),
+            "{:?}",
+            decode_residue(b"\x1b\x1b[200~two words\x1b[201~").msgs
+        );
         let decoded = decode_residue(b"\x1b[200~two words\x1b[201~a");
         assert_eq!(decoded.unfinished, 0);
         assert!(

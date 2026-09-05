@@ -110,4 +110,19 @@ fn a_half_arrived_key_code_waits_the_engines_own_timing_and_then_is_read() {
         input.next_deadline().is_none(),
         "nothing may be left waiting once the wait is zero"
     );
+
+    // an `ESC` sharing a read with a paste opener is a keystroke of its
+    // own. Folded into the opener it would leave a run this wait flushes --
+    // at zero, in this very drain -- and the pasted body would reach the
+    // buffer as normal-mode commands
+    write(b"\x1b\x1b[200~body");
+    assert_eq!(
+        drained(&mut input),
+        vec!["<Esc>"],
+        "a paste behind a stray Escape must not be flushed as keystrokes"
+    );
+    assert!(
+        input.next_deadline().is_none(),
+        "a paste is bounded by its closer, not by the escape timeout"
+    );
 }

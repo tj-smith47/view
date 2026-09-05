@@ -1022,5 +1022,12 @@ mod tests {
             None,
             "a paste slower than the wait must never be typed as commands"
         );
+        let folded = (b"\x1b\x1b[200~half a file".to_vec(), now);
+        assert_eq!(
+            escape_deadline(Some(&folded), DEFAULT_ESCAPE_TIMEOUT),
+            None,
+            "an Escape in front of an opener does not make the paste a run \
+             a keystroke timeout may flush"
+        );
     }
 }
