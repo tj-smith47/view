@@ -101,10 +101,11 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// it (see [`tiers::detect`](crate::tiers::detect) for how this residue is
 /// separated from the probe's own capability replies).
 ///
-/// This is not a general terminal-input decoder: it only has to cover what
-/// a person can type inside the probe's ~50ms window, not the full grammar
-/// [`crossterm::event::read`] already owns for every keystroke after
-/// startup. Printable ASCII passes through as literal characters (matching
+/// The same decoder the runtime loop's own drain uses, entered here with
+/// the terminal already drained to `EAGAIN`: what it holds is what the
+/// probe's window caught, and there is no later read to resolve a run left
+/// half-arrived, so this entry point forces one rather than waiting.
+/// Printable ASCII passes through as literal characters (matching
 /// [`encode_key`]'s plain-char case, including `<` becoming `<lt>`);
 /// `\r` maps to `<CR>`, `\t` to `<Tab>`, `0x7f` to `<BS>`, and the
 /// remaining C0 controls to the `<C-...>` chord they spell -- `\n`
@@ -142,14 +143,14 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// can wait for the rest does; this entry point cannot and drops it.
 ///
 /// `ESC` and one key in the same run are Alt and that key -- for a
-/// multi-byte character as much as for a printable ASCII one. Two `ESC`s
-/// in a run are two Escape keys, and a lone trailing `ESC` is one: it is
-/// the one key that cannot afford to wait a read, and the caller here has
-/// already drained the fd to `EAGAIN`.
+/// multi-byte character as much as for a printable ASCII one, and for a
+/// whole sequence as much as for a single byte, so `ESC ESC` is `<M-Esc>`
+/// and `ESC ESC [ A` is `<M-Up>`. A lone trailing `ESC` is the Escape key,
+/// forced here because the caller has already drained the fd to `EAGAIN`
+/// and no later read can turn it into a chord.
 #[must_use]
 pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
-    decode_residue(residue)
-        .msgs
+    decode_residue_forced(residue)
         .into_iter()
         .filter_map(|msg| match msg {
             Msg::Key(key) => Some(key.notation),
@@ -190,14 +191,7 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
         match residue[i] {
             0x1b => {
                 let run = &residue[i..];
-                let escape = if let Some(len) = string_sequence_len(run) {
-                    Escape::Unknown { len }
-                } else if matches!(run.get(1), Some(&b'[') | Some(&b'O')) {
-                    escape_sequence(run)
-                } else {
-                    alt_key(run)
-                };
-                match escape {
+                match escape_run(run, KeyModifiers::NONE) {
                     Escape::Decoded { len, msg } => {
                         msgs.extend(msg);
                         i += len;
@@ -239,10 +233,14 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
 }
 
 /// [`decode_residue`]'s answer for a run whose escape timeout has expired:
-/// nvim waits `ttimeoutlen` for the rest of a key code and then reads what
-/// it has as the Escape key followed by the literal bytes behind it
-/// (`tui/input.c`), so `ESC [` becomes `<Esc>` and `[` rather than waiting
-/// for a final byte that is never coming.
+/// the engine waits `ttimeoutlen` for the rest of a key code and then
+/// reads what it has as an Alt chord over the byte that never became a
+/// sequence (`tui/input.c` handing the run to termkey forced,
+/// `driver-csi.c`'s `peekkey_csi` and `termkey.c`'s `peekkey_simple`), so
+/// `ESC [` is `<M-[>` and `ESC O` is `<M-O>`, with the parameters behind
+/// an unfinished introducer typed as the characters they are. An `ESC`
+/// with nothing behind it is the Escape key; the `ESC`s in front of it are
+/// Alt, so `ESC ESC` is `<M-Esc>`.
 ///
 /// Only an escape run is flushed this way. A character or a bracketed
 /// paste cut in half by a read boundary is dropped instead, which is
@@ -253,11 +251,35 @@ pub(crate) fn decode_residue_forced(residue: &[u8]) -> Vec<Msg> {
     let decoded = decode_residue(residue);
     let mut msgs = decoded.msgs;
     let held = &residue[residue.len() - decoded.unfinished..];
-    if forceable(held) {
-        msgs.push(key_msg("<Esc>"));
-        msgs.extend(decode_residue(&held[1..]).msgs);
+    if !forceable(held) {
+        return msgs;
+    }
+    // every leading `ESC` but the last is Alt over what follows, which is
+    // how the engine's own reader composes the chord -- and why a run of
+    // nothing but escapes collapses to one chord rather than to a key per
+    // byte
+    let opened = held.iter().take_while(|&&byte| byte == 0x1b).count();
+    let alt = if opened > 1 {
+        KeyModifiers::ALT
+    } else {
+        KeyModifiers::NONE
+    };
+    match held.get(opened) {
+        None => msgs.extend(forced_key(KeyCode::Esc, alt)),
+        Some(&byte) => {
+            msgs.extend(forced_key(
+                KeyCode::Char(char::from(byte)),
+                KeyModifiers::ALT,
+            ));
+            msgs.extend(decode_residue(&held[opened + 1..]).msgs);
+        }
     }
     msgs
+}
+
+/// One key of a forced run, or nothing when nvim has no notation for it.
+fn forced_key(code: KeyCode, mods: KeyModifiers) -> Option<Msg> {
+    encode_key(&KeyEvent::new(code, mods)).map(key_msg)
 }
 
 /// Whether an unfinished tail is one an escape timeout may flush.
@@ -301,21 +323,37 @@ enum Escape {
     Unfinished,
 }
 
-fn escape_sequence(run: &[u8]) -> Escape {
+/// One `ESC` run, whatever kind it is, with the modifiers the `ESC`s in
+/// front of it have already spelled.
+///
+/// `held` is how an Alt chord composes: the terminal writes one for every
+/// key it can, and `ESC` in front of any of those runs is Alt held over
+/// whatever the rest of it decodes to.
+fn escape_run(run: &[u8], held: KeyModifiers) -> Escape {
+    if let Some(len) = string_sequence_len(run) {
+        Escape::Unknown { len }
+    } else if matches!(run.get(1), Some(&b'[') | Some(&b'O')) {
+        escape_sequence(run, held)
+    } else {
+        alt_key(run, held)
+    }
+}
+
+fn escape_sequence(run: &[u8], held: KeyModifiers) -> Escape {
     if run.get(1) == Some(&b'O') {
         // SS3 is exactly three bytes: introducer and one final
         let Some(&final_byte) = run.get(2) else {
             return Escape::Unfinished;
         };
         return match cursor_key(final_byte) {
-            Some(code) => decoded(3, code, KeyModifiers::NONE),
+            Some(code) => decoded(3, code, held),
             None => Escape::Unknown { len: 3 },
         };
     }
-    csi_sequence(run)
+    csi_sequence(run, held)
 }
 
-fn csi_sequence(run: &[u8]) -> Escape {
+fn csi_sequence(run: &[u8], held: KeyModifiers) -> Escape {
     let mut at = ESCAPE_INTRODUCER_LEN;
     // parameter and intermediate bytes both precede the final byte, and
     // neither can be mistaken for it: the ranges do not overlap
@@ -331,11 +369,11 @@ fn csi_sequence(run: &[u8]) -> Escape {
         return paste(run, len);
     }
     let fields = param_fields(params);
-    let modifier = modifiers(field(&fields, 1));
+    let modifier = modifiers(field(&fields, 1)) | held;
     let unnamed = Escape::Unknown { len };
     match final_byte {
         b'~' => match tilde_key(&fields) {
-            Some((code, mods)) => decoded(len, code, mods),
+            Some((code, mods)) => decoded(len, code, mods | held),
             None => unnamed,
         },
         // the kitty keyboard protocol's own form, which a terminal keeps
@@ -345,8 +383,12 @@ fn csi_sequence(run: &[u8]) -> Escape {
         b'u' => match kitty_key(&fields) {
             Some((code, mods)) => Escape::Decoded {
                 len,
-                msg: encode_key(&KeyEvent::new_with_kind(code, mods, event_kind(&fields)))
-                    .map(key_msg),
+                msg: encode_key(&KeyEvent::new_with_kind(
+                    code,
+                    mods | held,
+                    event_kind(&fields),
+                ))
+                .map(key_msg),
             },
             None => unnamed,
         },
@@ -354,9 +396,7 @@ fn csi_sequence(run: &[u8]) -> Escape {
         // letter, with nothing between them
         b'[' if fields.is_empty() => match run.get(len) {
             None => Escape::Unfinished,
-            Some(&letter @ b'A'..=b'E') => {
-                decoded(len + 1, KeyCode::F(1 + letter - b'A'), KeyModifiers::NONE)
-            }
+            Some(&letter @ b'A'..=b'E') => decoded(len + 1, KeyCode::F(1 + letter - b'A'), held),
             Some(_) => Escape::Unknown { len: len + 1 },
         },
         // a focus report, which `event_to_msg` also drops for crossterm's
@@ -557,31 +597,47 @@ fn string_sequence_len(run: &[u8]) -> Option<usize> {
 /// decode is what makes it one here.
 ///
 /// Three runs are not that chord. A second `ESC` ends the first one and
-/// nothing more: the first byte is the Escape key on its own and the
-/// decoder re-enters on the second, which is what nvim's tty input layer
-/// does with a doubled `ESC` (`handle_forced_escape` pushes the first
-/// through forced and re-reads from the byte behind it), so `ESC ESC` is
-/// two `<Esc>` and `ESC ESC [ A` is `<Esc>` and `<Up>`. An `ESC` with
-/// nothing behind it is the Escape key too. A character cut short by the
-/// end of the read is unfinished, because the rest of it is still in
-/// flight.
-fn alt_key(run: &[u8]) -> Escape {
-    let escape_key = |len| Escape::Decoded {
-        len,
-        msg: Some(key_msg("<Esc>")),
-    };
+/// nothing more: the `ESC` is Alt held over whatever the bytes behind it
+/// decode to, however many of them there are, which is how the engine's
+/// own reader composes the chord (termkey's `peekkey_simple` recurses past
+/// an `ESC` and ors `KEYMOD_ALT` into the key it finds). So `ESC ESC` is
+/// `<M-Esc>`, `ESC ESC [ A` is `<M-Up>` and `ESC ESC x` is `<M-x>` -- one
+/// chord each, not a key per byte. nvim then degrades a chord no mapping
+/// claims back to `<Esc>` and the key (`getchar.c`), which is why an
+/// unmapped `ESC ESC` still opens as two Escape keys in a buffer.
+///
+/// An `ESC` with nothing behind it is unfinished: the byte that would make
+/// it a chord may be in the read that has not happened yet, and the engine
+/// waits `ttimeoutlen` for it before reading the `ESC` alone
+/// ([`decode_residue_forced`]). A character cut short by the end of the
+/// read is unfinished for the same reason.
+fn alt_key(run: &[u8], held: KeyModifiers) -> Escape {
+    let held = held | KeyModifiers::ALT;
     match run.get(1) {
-        None | Some(&0x1b) => escape_key(1),
+        None => Escape::Unfinished,
+        Some(&0x1b) => match escape_run(&run[1..], held) {
+            Escape::Decoded { len, msg } => Escape::Decoded { len: len + 1, msg },
+            Escape::Unknown { len } => Escape::Unknown { len: len + 1 },
+            Escape::Unfinished => Escape::Unfinished,
+        },
         Some(&byte) if byte >= 0x80 => match utf8_char(&run[1..]) {
-            Utf8::Char(typed, len) => decoded(1 + len, KeyCode::Char(typed), KeyModifiers::ALT),
+            Utf8::Char(typed, len) => decoded(1 + len, KeyCode::Char(typed), held),
             Utf8::Unfinished => Escape::Unfinished,
-            Utf8::Invalid => escape_key(1),
+            // an `ESC` in front of bytes no character encodes: the escape
+            // is the user's keystroke and the rest is the terminal's noise
+            Utf8::Invalid => escape_key(1, held - KeyModifiers::ALT),
         },
         Some(&byte) => match plain_key(byte) {
-            Some((code, mods)) => decoded(2, code, mods | KeyModifiers::ALT),
-            None => escape_key(1),
+            Some((code, mods)) => decoded(2, code, mods | held),
+            None => escape_key(1, held - KeyModifiers::ALT),
         },
     }
+}
+
+/// The Escape key itself, carrying whatever modifiers the `ESC`s in front
+/// of it spelled.
+fn escape_key(len: usize, held: KeyModifiers) -> Escape {
+    decoded(len, KeyCode::Esc, held)
 }
 
 /// One character off the front of a byte run.
@@ -1277,11 +1333,15 @@ mod tests {
         }
     }
 
+    /// The Alt chord an `ESC` in front of anything spells, which is the
+    /// engine's own reading of the pair (termkey recurses past the escape
+    /// and ors `KEYMOD_ALT` into whatever it finds). A user whose mapping
+    /// is written against the chord gets it; one with no such mapping gets
+    /// nvim's own degrade back to `<Esc>` and the key, which is why an
+    /// unmapped doubled `ESC` still opens as two Escape keys.
     #[test]
-    fn residue_bare_esc_not_followed_by_bracket_maps_to_esc_token() {
+    fn residue_an_escape_in_front_of_a_key_is_that_key_with_alt() {
         assert_eq!(encode_residue_bytes(b"\x1b"), vec!["<Esc>"]);
-        // `ESC` and a key in one run is that key with Alt held, which is
-        // how crossterm reads the pair everywhere else in the session
         assert_eq!(encode_residue_bytes(b"\x1bx"), vec!["<M-x>"]);
         assert_eq!(encode_residue_bytes(b"\x1b\r"), vec!["<M-CR>"]);
         assert_eq!(encode_residue_bytes(b"\x1b<"), vec!["<M-lt>"]);
@@ -1292,14 +1352,16 @@ mod tests {
             encode_residue_bytes("\x1b\u{e9}".as_bytes()),
             vec!["<M-\u{e9}>"]
         );
-        // two `ESC`s in one run are two Escape keys: the first ends on its
-        // own byte and the decoder re-enters on the second, which is what
-        // nvim's own forced escape does with the pair
-        assert_eq!(encode_residue_bytes(b"\x1b\x1b"), vec!["<Esc>", "<Esc>"]);
-        // so the sequence behind a doubled `ESC` is still the sequence it
-        // is, rather than the two literal keys a swallowed `ESC` leaves
-        assert_eq!(encode_residue_bytes(b"\x1b\x1b[A"), vec!["<Esc>", "<Up>"]);
-        // and the `ESC` that ends a run is still the Escape key
+        // two `ESC`s in one run are the Escape key with Alt held, and the
+        // sequence behind a doubled `ESC` is that sequence with Alt held
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b"), vec!["<M-Esc>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b[A"), vec!["<M-Up>"]);
+        // Alt is held, not accumulated: a run of escapes is one chord over
+        // the key at the end of it, however many of them the terminal sent
+        assert_eq!(encode_residue_bytes(b"\x1b\x1bx"), vec!["<M-x>"]);
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b\x1b"), vec!["<M-Esc>"]);
+        // and the `ESC` that ends a run is the Escape key: this entry
+        // point has no later read to make a chord out of it
         assert_eq!(encode_residue_bytes(b"ok\x1b"), vec!["o", "k", "<Esc>"]);
     }
 
@@ -1544,14 +1606,19 @@ mod tests {
     /// leaving the naming of that pair to [`encode_key`], which the tests
     /// above hold to the pinned engine's own answers.
     ///
-    /// Three readings are deliberately not crossterm's, and each is pinned
-    /// on its own above: a doubled `ESC` is two Escape keys rather than one
-    /// (`residue_bare_esc_not_followed_by_bracket_maps_to_esc_token`), a
-    /// CSI no table names is consumed rather than raising an error
+    /// Four readings are deliberately not crossterm's, and each is pinned
+    /// on its own above: an `ESC` in front of another `ESC` or a whole
+    /// sequence is Alt over it rather than an Escape key of its own
+    /// (`residue_an_escape_in_front_of_a_key_is_that_key_with_alt`), a
+    /// trailing `ESC` waits for the byte that would make it a chord
+    /// instead of being read at once (same pin), a CSI no table names is
+    /// consumed rather than raising an error
     /// (`residue_an_escape_run_no_table_names_is_consumed_whole`), and a
     /// run whose final byte has not arrived is reported as a tail rather
     /// than held in a buffer with no timeout
-    /// (`a_run_out_of_time_is_the_escape_key_and_the_bytes_behind_it`).
+    /// (`a_run_out_of_time_is_the_alt_chord_its_bytes_spell`). The first
+    /// two are the engine's own reading of those bytes, which is the
+    /// contract this decoder answers to.
     #[test]
     fn every_crossterm_key_event_decodes_identically() {
         let expected = |code, mods| vec![encode_key(&KeyEvent::new(code, mods)).unwrap()];
@@ -1737,11 +1804,12 @@ mod tests {
     }
 
     #[test]
-    fn a_run_out_of_time_is_the_escape_key_and_the_bytes_behind_it() {
-        // nvim's own `ttimeoutlen` flush: what a terminal never finished
-        // sending is read as the Escape key and the literal keys behind
-        // it, so a user who presses Escape and nothing else still gets an
-        // Escape rather than a decoder waiting forever on a final byte
+    fn a_run_out_of_time_is_the_alt_chord_its_bytes_spell() {
+        // the engine's own `ttimeoutlen` flush: what a terminal never
+        // finished sending is read as Alt over the byte that failed to
+        // open a sequence, with the parameters behind it typed as the
+        // characters they are, so a user who presses Escape and nothing
+        // else still gets a key rather than a decoder waiting forever
         let notations = |run: &[u8]| {
             decode_residue_forced(run)
                 .into_iter()
@@ -1751,11 +1819,16 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(notations(b"\x1b["), vec!["<Esc>", "["]);
-        assert_eq!(notations(b"\x1bO"), vec!["<Esc>", "O"]);
-        assert_eq!(notations(b"\x1b[1;5"), vec!["<Esc>", "[", "1", ";", "5"]);
+        assert_eq!(notations(b"\x1b["), vec!["<M-[>"]);
+        assert_eq!(notations(b"\x1bO"), vec!["<M-O>"]);
+        assert_eq!(notations(b"\x1b[1;5"), vec!["<M-[>", "1", ";", "5"]);
+        // an `ESC` with nothing behind it is the Escape key, and the
+        // escapes in front of one are Alt over it
+        assert_eq!(notations(b"\x1b"), vec!["<Esc>"]);
+        assert_eq!(notations(b"\x1b\x1b"), vec!["<M-Esc>"]);
+        assert_eq!(notations(b"\x1b\x1b\x1b"), vec!["<M-Esc>"]);
         // the keys in front of a half-arrived run are the keys they were
-        assert_eq!(notations(b"ok\x1b["), vec!["o", "k", "<Esc>", "["]);
+        assert_eq!(notations(b"ok\x1b["), vec!["o", "k", "<M-[>"]);
         // and a finished run is decoded exactly as it is without this
         assert_eq!(notations(b"\x1b[A"), vec!["<Up>"]);
     }
@@ -1806,8 +1879,12 @@ mod tests {
                 run.len() - 2,
                 "the whole fragment must be reported for {run:?}"
             );
-            assert_eq!(encode_residue_bytes(run), vec!["o", "k"]);
         }
+        // the guard's own entry point has no later read to wait for, so an
+        // escape run it holds is forced rather than dropped -- a paste is
+        // the one shape that is dropped instead
+        assert_eq!(encode_residue_bytes(b"ok\x1b["), vec!["o", "k", "<M-[>"]);
+        assert_eq!(encode_residue_bytes(b"ok\x1b[200~half"), vec!["o", "k"]);
         // half a multi-byte character is a tail too: its second byte is in
         // the read that has not happened yet, and dropped now it would
         // reach that read as bytes no character encodes to
@@ -1816,8 +1893,10 @@ mod tests {
         assert_eq!(encode_residue_bytes(split), vec!["o", "k"]);
         // including behind an `ESC`, where the whole chord is the tail
         assert_eq!(decode_residue(&"\x1b\u{e9}".as_bytes()[..2]).unfinished, 2);
-        // a bare `ESC` is the Escape key, never a tail to wait on
-        assert_eq!(decode_residue(b"ok\x1b").unfinished, 0);
+        // a bare `ESC` is a tail too: the byte that would make it a chord
+        // may be in the read that has not happened yet, which is the wait
+        // `ttimeoutlen` bounds
+        assert_eq!(decode_residue(b"ok\x1b").unfinished, 1);
     }
 
     #[test]

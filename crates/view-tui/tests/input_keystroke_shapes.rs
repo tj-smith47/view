@@ -56,8 +56,24 @@ fn every_keyboard_shape_survives_the_guard_that_reads_it_first() {
             .collect::<Vec<_>>()
     };
 
+    // the one shape that does not arrive in the read that carries it: the
+    // byte that would make a bare `ESC` an Alt chord may be in the read
+    // that has not happened yet, so it waits the escape timeout the engine
+    // relays, exactly as the engine's own reader does. `escape_timeout.rs`
+    // pins the wait; here it is why the table below does not carry it
+    write(b"\x1b");
+    assert!(
+        notations(&drained(&mut input)).is_empty(),
+        "a bare Escape must wait for the byte that would make it a chord"
+    );
+    write(b"x");
+    assert_eq!(
+        notations(&drained(&mut input)),
+        vec!["<M-x>"],
+        "the byte that arrives behind an Escape makes the chord it waited for"
+    );
+
     for (bytes, expected, shape) in [
-        (b"\x1b".as_slice(), vec!["<Esc>"], "a bare Escape"),
         (b"\x1bx".as_slice(), vec!["<M-x>"], "Alt-prefixed"),
         (b"\x17".as_slice(), vec!["<C-w>"], "a control chord"),
         (b"\x1b[A".as_slice(), vec!["<Up>"], "a CSI arrow"),

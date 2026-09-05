@@ -242,13 +242,10 @@ const DEFAULT_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 /// [`drain`](Self::drain).
 ///
 /// The self-pipe exists because a resize is a signal, not a byte on the
-/// tty: crossterm parks SIGWINCH in its own internal signal pipe, which
-/// only its `event::poll` inspects, so a loop sleeping in a raw fd poll
-/// would never learn of a resize until the next keystroke. Registering a
-/// second, crate-owned pipe on the same signal (signal-hook fans one
-/// signal out to every registered hook) gives the loop's poll set a
-/// readable fd for exactly that moment; the drain that follows lets
-/// crossterm translate its own copy of the signal into `Event::Resize`.
+/// tty: a loop sleeping in a raw fd poll would never learn of one until
+/// the next keystroke. A crate-owned pipe registered on SIGWINCH gives the
+/// loop's poll set a readable fd for exactly that moment; the drain that
+/// follows asks the terminal its new size and delivers the message.
 ///
 /// A second self-pipe carries the signals that ask this process to stop.
 /// They are folded into the loop rather than left to their default
@@ -376,13 +373,11 @@ impl InputSource {
     /// fence is asked last, so a fence that arrived proves nothing is still
     /// in flight and plain [`open`](Self::open) is right. A fence that never
     /// arrived proves the opposite, and a reply landing after the probe has
-    /// handed the terminal over is not harmless: crossterm's parser holds an
-    /// unrecognized private-mode sequence (`ESC [ ? 2026 ; 1 $ y` is one --
-    /// it resolves neither to an event nor to an error) in its buffer and
-    /// appends every later byte to it, so the reply does not merely arrive
-    /// as garbage, it swallows every keystroke behind it until one happens
-    /// to complete a sequence it recognizes. A DCS answer is worse still: it
-    /// decodes into a run of literal keys typed into the buffer.
+    /// handed the terminal over is not harmless: an unrecognized
+    /// private-mode answer (`ESC [ ? 2026 ; 1 $ y` is one) reaches the key
+    /// path as a sequence to consume, so what it answered about the
+    /// terminal is lost -- and the capability it carries is one the session
+    /// then paints a whole run of frames without.
     ///
     /// While armed, ready bytes are read here first and matched against the
     /// four grammars the query batch can be answered with
@@ -530,22 +525,21 @@ impl InputSource {
         Ok(source)
     }
 
-    /// Whether this handle is still reading the terminal ahead of crossterm
-    /// for an answer the startup probe did not get.
+    /// Whether this handle is still holding the terminal's bytes back for
+    /// an answer the startup probe did not get.
     ///
     /// False is the steady state and the state of every session whose
     /// terminal answered its fence in time. It is also the only way to
     /// observe the guard from outside: every other difference it makes is
-    /// one crossterm cannot be asked to demonstrate without being handed
-    /// the sequence that wedges it.
+    /// a reply that never reached the key path.
     #[must_use]
     pub fn still_listening(&self) -> bool {
         self.guard.is_some()
     }
 
-    /// Reads whatever the terminal still owes the capability probe before
-    /// crossterm can see it, keeping its bytes off the key path and its
-    /// answer as a capability upgrade. A no-op unless armed, which is the
+    /// Reads whatever the terminal still owes the capability probe,
+    /// keeping its bytes off the key path and its answer as a capability
+    /// upgrade. A no-op unless armed, which is the
     /// whole cost on every session whose terminal answered the fence.
     fn sweep_late_replies(&mut self) {
         let Some(mut guard) = self.guard.take() else {
@@ -620,13 +614,15 @@ impl InputSource {
         self.guard = Some(guard);
     }
 
-    /// Queues `bytes` as the messages they decode to, for a caller that has
-    /// read them off the terminal ahead of crossterm. A sequence still
-    /// arriving when this runs has run out of reads to arrive in, so it is
-    /// dropped rather than typed as the fragment it is.
+    /// Queues `bytes` as the messages they decode to, for a caller that
+    /// read them off the terminal during the probe's own window. An escape
+    /// run still arriving when this runs has run out of reads to arrive
+    /// in, so it is forced here rather than dropped: the guard has already
+    /// drained the descriptor, and the keystroke behind a run it dropped
+    /// would be one the user typed at startup and never saw.
     fn queue_residue(&mut self, bytes: &[u8]) {
         self.guard_msgs
-            .extend(crate::keys::decode_residue(bytes).msgs);
+            .extend(crate::keys::decode_residue_forced(bytes));
     }
 
     /// The terminal read fd, for readiness polling only.
@@ -844,13 +840,15 @@ impl InputSource {
     /// bare `ESC [` ever reaches the buffer at all, and the one nvim takes
     /// of the same bytes.
     fn read_and_decode(&mut self, sink: &mut impl FnMut(Msg)) {
-        let (mut buf, opened) = match self.pending.take() {
-            Some((bytes, opened)) => (bytes, Some(opened)),
+        let (mut buf, since) = match self.pending.take() {
+            Some((bytes, since)) => (bytes, Some(since)),
             None => (Vec::new(), None),
         };
+        let mut arrived = false;
         while let Some(chunk) = read_ready(self.tty.as_fd()) {
             #[cfg(all(unix, feature = "bench-taps"))]
             crate::tap::tap(crate::tap::TAG_BYTES_READ);
+            arrived = true;
             buf.extend_from_slice(&chunk);
         }
         if buf.is_empty() {
@@ -864,12 +862,14 @@ impl InputSource {
         if tail.is_empty() {
             return;
         }
-        // dated from the byte the waiting run opened with: a pass that
-        // decoded nothing at all is that same run still waiting, and its
-        // clock does not restart every time the terminal delivers another
-        // byte that fails to finish it
-        let opened = match opened {
-            Some(opened) if buf.is_empty() => opened,
+        // dated from the read that delivered a byte, not from the one the
+        // run opened with: the engine re-arms its escape timer on every
+        // read that leaves a sequence unfinished (`tui/input.c`), so a
+        // sequence trickling in a byte at a time gets the whole wait again
+        // for each of them. A pass that read nothing is the timer itself
+        // coming due, and keeps the instant it is being measured against
+        let opened = match since {
+            Some(since) if !arrived => since,
             _ => std::time::Instant::now(),
         };
         if self

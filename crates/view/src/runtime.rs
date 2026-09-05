@@ -602,8 +602,16 @@ fn wait_for_msg_unified(
         // ahead of the timeout verdict, and on a timeout as much as on a
         // readable fd: one of the deadlines armed above is the half-arrived
         // key code's own, and the drain is what flushes it -- the fd has
-        // nothing more to report and never becomes ready again on its own
-        if ready.input || ready.timed_out {
+        // nothing more to report and never becomes ready again on its own.
+        // A timeout that is any of the other deadlines drains nothing: the
+        // spinner and the heartbeat come due on an idle terminal all
+        // session, and a drain each is three syscalls for a descriptor
+        // nothing has written to
+        let flush_due = ready.timed_out
+            && input
+                .next_deadline()
+                .is_some_and(|at| at <= std::time::Instant::now());
+        if ready.input || flush_due {
             input.drain(term_size, |msg| pending.push_back(msg));
         }
         if ready.timed_out {
