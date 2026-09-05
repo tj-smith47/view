@@ -159,6 +159,12 @@ static KITTY_KBD_PUSHED: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// Whether the terminal is reporting keys in the kitty keyboard protocol,
 /// which decides the name [`crate::keys::encode_terminal_key`] gives four
 /// of the C0 bytes.
+///
+/// The non-unix reader's question alone. On unix the bytes are decoded
+/// here rather than by crossterm ([`crate::keys::decode_residue`]), and
+/// that decoder reads those four bytes as the chords nvim names them
+/// without having to repair a table afterwards, so it never has to ask.
+#[cfg(not(unix))]
 pub(crate) fn kitty_keyboard_pushed() -> bool {
     KITTY_KBD_PUSHED.load(std::sync::atomic::Ordering::Relaxed)
 }

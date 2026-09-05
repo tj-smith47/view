@@ -386,7 +386,8 @@ fn watch_deadline(wakeups: Wakeups<'_>) -> Option<std::time::Duration> {
     let watches = sooner(wakeups.write.poll_deadline(), wakeups.read.poll_deadline());
     let supervised = sooner(watches, wakeups.supervision.readout_deadline());
     let scheduled = sooner(sooner(supervised, wakeups.speculation), wakeups.reconnect);
-    sooner(sooner(scheduled, wakeups.spinner), wakeups.startup_hold)
+    let animated = sooner(sooner(scheduled, wakeups.spinner), wakeups.startup_hold);
+    sooner(animated, wakeups.input)
 }
 
 /// The nearer of two deadlines, where `None` is "as long as you like" and
@@ -430,6 +431,13 @@ struct Wakeups<'a> {
     /// short of `UIEnter` may also stop sending flushes, and a loop woken
     /// only by traffic would hold its blank screen for the session.
     startup_hold: Option<std::time::Duration>,
+    /// What is left of nvim's `ttimeoutlen` for a key code the terminal has
+    /// only half delivered
+    /// ([`view_tui::input::InputSource::next_deadline`]). The terminal
+    /// sends nothing more until the user presses another key, so a loop
+    /// woken only by traffic would hold the `<Esc>` a bare `ESC [` resolves
+    /// to until the next keystroke -- and then deliver it behind that one.
+    input: Option<std::time::Duration>,
 }
 
 /// Waits for the loop's next message, bounded by whichever watch has a
@@ -559,7 +567,16 @@ fn wait_for_msg_unified(
             Err(mpsc::TryRecvError::Disconnected) => return Ok(Some(Err(mpsc::RecvError))),
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        let deadline = watch_deadline(wakeups);
+        // the input deadline is read here rather than taken from the
+        // caller: the run it bounds can be opened by a drain inside this
+        // very loop, and a value resolved before the loop would be `None`
+        // for exactly the pass that needed it
+        let deadline = watch_deadline(Wakeups {
+            input: input
+                .next_deadline()
+                .map(|at| at.saturating_duration_since(std::time::Instant::now())),
+            ..wakeups
+        });
         // logged on change rather than on every block: an idle session
         // re-arms the same engine-liveness deadline twice a second forever,
         // and a log a user is asked to attach to a bug report was 96% that
@@ -582,12 +599,16 @@ fn wait_for_msg_unified(
             crate::vlog::log_with("exit", || format!("signal {signal}"));
             return Ok(Some(Ok(Msg::Terminated { signal })));
         }
+        // ahead of the timeout verdict, and on a timeout as much as on a
+        // readable fd: one of the deadlines armed above is the half-arrived
+        // key code's own, and the drain is what flushes it -- the fd has
+        // nothing more to report and never becomes ready again on its own
+        if ready.input || ready.timed_out {
+            input.drain(term_size, |msg| pending.push_back(msg));
+        }
         if ready.timed_out {
             crate::vlog::log("sleep", "expired");
             return Ok(None);
-        }
-        if ready.input {
-            input.drain(term_size, |msg| pending.push_back(msg));
         }
     }
 }
@@ -1132,6 +1153,7 @@ pub fn run(
                 spinner,
                 reconnect: due,
                 startup_hold,
+                input: None,
             },
             input,
             &waker,
@@ -1150,6 +1172,7 @@ pub fn run(
                 spinner,
                 reconnect: due,
                 startup_hold,
+                input: None,
             },
         );
         let Some(received) = received else {
@@ -1224,6 +1247,43 @@ mod tests {
     use view_core::msg::{
         BufferHandle, OptionValue, RegisterType, ReplyToken, ReplyValue, ReviewOpenTarget, TextEdit,
     };
+
+    /// Every deadline [`Wakeups`] declares reaches the fold above.
+    ///
+    /// A field added to the struct and not to the fold compiles, runs, and
+    /// sleeps through exactly the condition it was added to arm -- there is no
+    /// exhaustive destructure to catch it, because the struct is read field by
+    /// field. So the walk is over the source: each `Option<Duration>` the
+    /// struct declares must be named in the fold's own body.
+    #[test]
+    fn every_wakeup_the_struct_declares_reaches_the_deadline_fold() {
+        let source = include_str!("runtime.rs");
+        let (_, rest) = source
+            .split_once("struct Wakeups<'a> {")
+            .expect("the struct this walk is about");
+        let (declared, _) = rest.split_once("\n}").expect("the struct's own end");
+        let (_, rest) = source
+            .split_once("fn watch_deadline(")
+            .expect("the fold this walk is about");
+        let (fold, _) = rest.split_once("\n}").expect("the fold's own end");
+        let fields: Vec<&str> = declared
+            .lines()
+            .filter_map(|line| line.trim().strip_suffix(": Option<std::time::Duration>,"))
+            .collect();
+        assert!(
+            fields.len() >= 5,
+            "the walk found {} deadline fields, which is fewer than the struct \
+             has carried since it was written: it is reading the wrong span",
+            fields.len()
+        );
+        for field in fields {
+            assert!(
+                fold.contains(&format!("wakeups.{field}")),
+                "`{field}` is a deadline nothing folds in, so the loop sleeps \
+                 through the one condition it was armed for"
+            );
+        }
+    }
 
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
     /// reason `view-native::paths`' and `view-ai::trust`'s own suites each
@@ -4477,6 +4537,7 @@ mod tests {
                         speculation: None,
                         spinner: None,
                         startup_hold: None,
+                        input: None,
                         reconnect: None,
                     },
                 )
@@ -4561,6 +4622,7 @@ mod tests {
             speculation: None,
             spinner: None,
             startup_hold: Some(hold),
+            input: None,
             reconnect: None,
         })
         .expect("a hold in flight always arms a wakeup");
@@ -4605,6 +4667,7 @@ mod tests {
             speculation: None,
             spinner: None,
             startup_hold: None,
+            input: None,
             reconnect: None,
         })
         .expect("an idle session must still arm the wakeup a silent engine needs");
@@ -4631,6 +4694,7 @@ mod tests {
                 speculation: None,
                 spinner: None,
                 startup_hold: None,
+                input: None,
                 reconnect: None,
             },
         );
@@ -4680,6 +4744,7 @@ mod tests {
                 speculation: None,
                 spinner: None,
                 startup_hold: None,
+                input: None,
                 reconnect: None,
             }),
             None,
@@ -4697,6 +4762,28 @@ mod tests {
         assert_eq!(model.speculate.pending().len(), 1);
         model.dirty = false;
 
+        // and the input path's own: a key code the terminal half
+        // delivered is bounded by nvim's `ttimeoutlen` and by nothing
+        // else, since the terminal sends no further byte until the user
+        // presses another key
+        let armed = watch_deadline(Wakeups {
+            write: &watch,
+            read: &heartbeat,
+            supervision: &fold,
+            speculation: None,
+            spinner: None,
+            startup_hold: None,
+            input: Some(std::time::Duration::from_millis(7)),
+            reconnect: None,
+        })
+        .expect("a half-arrived key code must bound a wait nothing else bounds");
+        assert_eq!(
+            armed,
+            std::time::Duration::from_millis(7),
+            "the loop slept past the flush, so the `<Esc>` a bare `ESC [` \
+             resolves to waits for the next keystroke and arrives behind it"
+        );
+
         // the same session a hair before the bound, modelled by moving the
         // clock's origin back rather than by sleeping out most of a second
         let grace = std::time::Duration::from_millis(50);
@@ -4713,6 +4800,7 @@ mod tests {
             speculation,
             spinner: None,
             startup_hold: None,
+            input: None,
             reconnect: None,
         })
         .expect("a pending prediction must bound a wait nothing else bounds");
@@ -4738,6 +4826,7 @@ mod tests {
                     speculation,
                     spinner: None,
                     startup_hold: None,
+                    input: None,
                     reconnect: None,
                 },
             )
@@ -4817,6 +4906,7 @@ mod tests {
                     speculation: None,
                     spinner: None,
                     startup_hold: None,
+                    input: None,
                     reconnect: None,
                 },
             )

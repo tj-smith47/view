@@ -12,9 +12,12 @@
 //! serialized deep-idle wakes per keystroke (kernel to input thread, then
 //! input thread to loop); this one pays exactly the first.
 
+#[cfg(not(unix))]
 use crate::keys::encode_terminal_key;
+#[cfg(not(unix))]
 use crate::mouse::encode_mouse;
 use crate::terminal::TermSizeCell;
+#[cfg(not(unix))]
 use crossterm::event::Event;
 #[cfg(unix)]
 use std::io::IsTerminal;
@@ -25,7 +28,9 @@ use std::time::Duration;
 // the reader that upgrades a capability is the unix descriptor loop below
 #[cfg_attr(not(unix), allow(unused_imports))]
 use view_core::model::TermCaps;
-use view_core::msg::{Key, Msg};
+#[cfg(not(unix))]
+use view_core::msg::Key;
+use view_core::msg::Msg;
 
 /// The descriptor terminal input arrives on, mirroring crossterm's own
 /// choice (`tty_fd()` in its unix backend) so readiness on this fd always
@@ -223,19 +228,13 @@ fn set_cloexec_nonblock(fd: &OwnedFd) -> std::io::Result<()> {
     Ok(rustix::fs::fcntl_setfl(fd, status_flags)?)
 }
 
-/// How many zero-timeout crossterm polls one
-/// [`InputSource::has_buffered`] answer may spend before it gives up.
-///
-/// crossterm's poll returns as soon as it has parsed one event, leaving the
-/// rest of the same read in its own queue, and reports nothing at all for an
-/// event its public filter rejects. Three such events exist -- a cursor
-/// position report, the keyboard-enhancement flags, and the primary device
-/// attributes, every one of them a terminal's answer to a query -- so at
-/// most three can sit ahead of a keystroke and a fourth poll always reaches
-/// it. The bound is what keeps this off the shape where an endlessly
-/// answering source could hold the loop here.
+/// nvim's own default `ttimeoutlen`, held until the engine relays what the
+/// user's configuration actually says
+/// ([`set_escape_timeout`](InputSource::set_escape_timeout)), so a session
+/// that never hears differently waits exactly as long as nvim does before
+/// deciding a half-arrived key code was the Escape key.
 #[cfg(unix)]
-const BUFFERED_POLL_LIMIT: usize = 4;
+const DEFAULT_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// The pollable input handle: the terminal read fd plus a SIGWINCH
 /// self-pipe, both exposed as borrowed fds for the runtime loop's
@@ -280,6 +279,14 @@ pub struct InputSource {
     /// capability upgrade a recognized answer resolves to -- waiting for
     /// the next [`drain`](InputSource::drain) to hand them over.
     guard_msgs: std::collections::VecDeque<Msg>,
+    /// A sequence whose final byte has not arrived, with the instant its
+    /// first byte did.
+    pending: Option<(Vec<u8>, std::time::Instant)>,
+    /// How long a half-arrived key code may wait for the rest of itself
+    /// before it is read as the Escape key and the literal bytes behind
+    /// it. `None` is nvim's `ttimeout` off: wait for the byte however long
+    /// it takes.
+    escape_timeout: Option<Duration>,
 }
 
 /// The state behind [`InputSource::open_after_probe`]: how long the terminal is
@@ -326,11 +333,8 @@ const FATAL_SIGNALS: [std::ffi::c_int; 3] = [
 
 #[cfg(unix)]
 impl InputSource {
-    /// Opens the handle: resolves the terminal fd, registers the SIGWINCH
-    /// and fatal-signal self-pipes, and touches crossterm's event source
-    /// once so its own SIGWINCH registration exists from here on (it is
-    /// created lazily on first use; a resize delivered before that would
-    /// otherwise be lost rather than translated on the next drain).
+    /// Opens the handle: resolves the terminal fd and registers the
+    /// SIGWINCH and fatal-signal self-pipes.
     ///
     /// # Errors
     ///
@@ -436,10 +440,9 @@ impl InputSource {
     /// `[ ? 2 0 2 6 ; 1 $ y` tail arrives with no introducer in front of it
     /// and reads as literal keys.
     ///
-    /// A separate constructor rather than a call after `open`, because
-    /// `open` itself lets crossterm's reader touch the terminal: a reply
-    /// landing in that gap would reach the parser this exists to keep it
-    /// away from.
+    /// A separate constructor rather than a call after `open`, so the
+    /// seeded tail is in hand before this handle's first read rather than
+    /// one read later.
     ///
     /// # Errors
     ///
@@ -517,15 +520,12 @@ impl InputSource {
             dead: false,
             guard: None,
             guard_msgs: std::collections::VecDeque::new(),
+            pending: None,
+            escape_timeout: Some(DEFAULT_ESCAPE_TIMEOUT),
         };
         if guard.is_some() {
             source.guard = guard;
-            // ahead of the crossterm touch below, which reads: the guard
-            // has to own the terminal from this handle's first byte
             source.sweep_late_replies();
-        }
-        if crossterm_may_read(source.guard.is_some()) {
-            let _ = crossterm::event::poll(Duration::ZERO);
         }
         Ok(source)
     }
@@ -723,40 +723,19 @@ impl InputSource {
         }
     }
 
-    /// Whether an event is already decodable right now, including one no
-    /// readiness poll on [`tty_fd`](Self::tty_fd) can ever see.
+    /// Whether a message is already decodable right now, without waiting
+    /// for the terminal fd to become readable again.
     ///
-    /// One terminal has two readers here: the loop's readiness poll watches
-    /// the kernel's tty queue, while crossterm's own reads move bytes out of
-    /// that queue and into a userspace buffer of its own. Once bytes have
-    /// moved, the kernel queue is empty and the fd is not ready, so a gate
-    /// built on the fd alone reports "nothing to drain" while a fully
-    /// decoded keystroke sits in crossterm waiting to be handed over. It
-    /// stays there until some unrelated later byte re-arms the fd -- and if
-    /// the input ended with that burst, forever. Asking crossterm directly
-    /// is the half of the terminal's state the descriptor cannot describe.
+    /// The one thing that can be: what the late-reply guard's own sweep
+    /// pulled off the fd and decoded ahead of this call. Nothing else is
+    /// held in userspace -- every byte this handle reads is decoded in the
+    /// same call that reads it, so the descriptor's own readiness describes
+    /// the whole of the terminal's state and the loop can sleep on it.
     ///
-    /// The query is itself a zero-timeout crossterm poll, so it can pull
-    /// ready kernel bytes into that same buffer. That is deliberate rather
-    /// than a leak: bytes this call moves are bytes its own answer already
-    /// accounts for. An error reads as "nothing to hand over" -- liveness is
-    /// [`drain`](Self::drain)'s call to make, and it makes it as soon as the
-    /// fd itself reports the hangup.
-    ///
-    /// One such poll answers for at most one newly parsed event, so a reply
-    /// crossterm parses but never hands out -- a terminal answering a
-    /// capability query after the prober that asked has stopped listening --
-    /// spends that answer while the keys parsed behind it, out of the very
-    /// same read, stay invisible. Repeating the poll walks past those
-    /// replies one at a time, up to `BUFFERED_POLL_LIMIT`, which is what
-    /// makes the answer describe the whole buffer rather than its first
-    /// entry.
-    ///
-    /// Runs the late-reply guard's sweep first when one is armed, for the
-    /// same reason [`drain`](Self::drain) does: this is the call the runtime
-    /// loop makes before every sleep, and it lets crossterm read, so a
-    /// terminal's late answer would otherwise reach crossterm's parser here
-    /// rather than through the drain.
+    /// A sequence whose final byte has not arrived is the exception that
+    /// proves it: those bytes wait here, but what they are waiting for is a
+    /// read or a deadline ([`next_deadline`](Self::next_deadline)), not a
+    /// caller to come and collect them.
     pub fn has_buffered(&mut self) -> bool {
         if self.dead {
             return false;
@@ -766,35 +745,47 @@ impl InputSource {
             return false;
         }
         self.sweep_late_replies();
-        if !self.guard_msgs.is_empty() {
-            return true;
-        }
-        if !crossterm_may_read(self.guard.is_some()) {
-            return false;
-        }
-        for _ in 0..BUFFERED_POLL_LIMIT {
-            match crossterm::event::poll(Duration::ZERO) {
-                Ok(true) => return true,
-                Ok(false) => {}
-                Err(_) => return false,
-            }
-        }
-        false
+        !self.guard_msgs.is_empty()
+    }
+
+    /// Sets how long a half-arrived key code may wait for the rest of
+    /// itself: nvim's own `ttimeoutlen`, relayed from the engine, or `None`
+    /// for the `ttimeout` off that waits forever.
+    ///
+    /// The value is the user's rather than view's because the decision it
+    /// makes is one nvim would otherwise be making: with view reading the
+    /// terminal's bytes itself, a `ttimeoutlen` the user tuned for a slow
+    /// link would have stopped applying to the very sequences it was tuned
+    /// for.
+    pub fn set_escape_timeout(&mut self, within: Option<Duration>) {
+        self.escape_timeout = within;
+    }
+
+    /// When a half-arrived key code must be read as the Escape key and the
+    /// bytes behind it, so the runtime loop can bound its sleep on it;
+    /// `None` while nothing is waiting, while `ttimeout` is off, or while
+    /// what is waiting is a paste no keystroke timeout bounds.
+    ///
+    /// A deadline in the past is a flush the next
+    /// [`drain`](Self::drain) performs, so a caller that turns this into a
+    /// sleep saturates rather than waiting a whole clock's wrap.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<std::time::Instant> {
+        let within = self.escape_timeout?;
+        let (bytes, since) = self.pending.as_ref()?;
+        crate::keys::forceable(bytes).then(|| *since + within)
     }
 
     /// Drains everything ready without blocking: empties the SIGWINCH
-    /// self-pipe, then decodes every complete terminal event crossterm has
-    /// (or can read) into core [`Msg`]s handed to `sink`, publishing any
-    /// resize to `size` before its message is delivered -- the same
-    /// publish-before-queue ordering the input thread kept, so no frame
-    /// paints at a shape the terminal has left.
+    /// self-pipe, then reads whatever the terminal has and decodes it into
+    /// core [`Msg`]s handed to `sink`, publishing any resize to `size`
+    /// before its message is delivered -- the same publish-before-queue
+    /// ordering the input thread kept, so no frame paints at a shape the
+    /// terminal has left.
     ///
     /// Events with no nvim equivalent (key releases, keys with no
     /// notation) are dropped here, exactly as the input thread dropped
-    /// them. A failing event source marks the handle dead and reports
-    /// [`DrainOutcome::SourceLost`]; input delivery ends for the session
-    /// (matching the input thread, which exited on a read error) while the
-    /// engine-side channel keeps the session itself alive.
+    /// them.
     ///
     /// A terminal that has *hung up* is the one case that ends more than
     /// input: there is nothing left to paint to and nothing left to read, so
@@ -811,8 +802,8 @@ impl InputSource {
             resized = true;
         }
         self.sweep_late_replies();
-        for msg in self.guard_msgs.drain(..) {
-            sink(msg);
+        for msg in std::mem::take(&mut self.guard_msgs) {
+            emit(msg, &mut sink);
         }
         // a resize is the one thing the guard used to hand the fd back
         // for. It arrives as a signal, and its new shape is a TIOCGWINSZ
@@ -823,10 +814,8 @@ impl InputSource {
         // refuse the ioctl, shells out to `tput` -- a subprocess spawn
         // inside the first-paint window. A shape this cannot read, or one
         // the kernel reports as zero because it does not know it yet, is
-        // not lost either: the guard ends inside its cap and crossterm's
-        // own copy of the signal is an `Event::Resize` on the next drain --
-        // the same message, to the same shape
-        if resized && self.guard.is_some() {
+        // corrected by the next resize rather than lost for good
+        if resized {
             if let Ok(shape) = rustix::termios::tcgetwinsize(self.tty_fd()) {
                 let (width, height) = (shape.ws_col, shape.ws_row);
                 if width > 0 && height > 0 {
@@ -835,66 +824,101 @@ impl InputSource {
                 }
             }
         }
-        if !crossterm_may_read(self.guard.is_some()) {
-            return DrainOutcome::Drained;
+        // while the guard is armed the fd is the sweep's alone: a read here
+        // would take the byte that finishes an answer and decode it as the
+        // keys it is not
+        if self.guard.is_none() {
+            self.read_and_decode(&mut sink);
         }
-        loop {
-            match crossterm::event::poll(Duration::ZERO) {
-                Ok(true) => {}
-                Ok(false) => return DrainOutcome::Drained,
-                Err(_) => {
-                    self.dead = true;
-                    return DrainOutcome::SourceLost;
-                }
-            }
-            match crossterm::event::read() {
-                Ok(event) => {
-                    if let Some(msg) = event_to_msg(event, size) {
-                        sink(msg);
-                    }
-                }
-                Err(_) => {
-                    self.dead = true;
-                    return DrainOutcome::SourceLost;
-                }
-            }
+        DrainOutcome::Drained
+    }
+
+    /// Reads every byte the terminal has ready and hands `sink` what they
+    /// decode to, keeping a sequence whose final byte has not arrived for
+    /// the read that brings it.
+    ///
+    /// The kept bytes are prepended to the next read rather than decoded
+    /// twice, so an arrow split across two reads arrives as the arrow. What
+    /// bounds that wait is nvim's own `ttimeoutlen`
+    /// ([`set_escape_timeout`](Self::set_escape_timeout)): once it has
+    /// passed, a run still waiting for its final byte is read as the Escape
+    /// key and the literal bytes behind it -- the reading under which a
+    /// bare `ESC [` ever reaches the buffer at all, and the one nvim takes
+    /// of the same bytes.
+    fn read_and_decode(&mut self, sink: &mut impl FnMut(Msg)) {
+        let (mut buf, opened) = match self.pending.take() {
+            Some((bytes, opened)) => (bytes, Some(opened)),
+            None => (Vec::new(), None),
+        };
+        while let Some(chunk) = read_ready(self.tty.as_fd()) {
+            #[cfg(all(unix, feature = "bench-taps"))]
+            crate::tap::tap(crate::tap::TAG_BYTES_READ);
+            buf.extend_from_slice(&chunk);
         }
+        if buf.is_empty() {
+            return;
+        }
+        let decoded = crate::keys::decode_residue(&buf);
+        let tail = buf.split_off(buf.len() - decoded.unfinished);
+        for msg in decoded.msgs {
+            emit(msg, sink);
+        }
+        if tail.is_empty() {
+            return;
+        }
+        // dated from the byte the waiting run opened with: a pass that
+        // decoded nothing at all is that same run still waiting, and its
+        // clock does not restart every time the terminal delivers another
+        // byte that fails to finish it
+        let opened = match opened {
+            Some(opened) if buf.is_empty() => opened,
+            _ => std::time::Instant::now(),
+        };
+        if self
+            .escape_timeout
+            .is_some_and(|within| opened + within <= std::time::Instant::now())
+            && crate::keys::forceable(&tail)
+        {
+            for msg in crate::keys::decode_residue_forced(&tail) {
+                emit(msg, sink);
+            }
+            return;
+        }
+        self.pending = Some((tail, opened));
     }
 }
 
-/// Whether crossterm may touch the terminal on this pass.
+/// Hands one decoded message to the runtime loop, marking a key as the
+/// first instant view owns that keystroke.
 ///
-/// A crossterm poll is a read. While the late-reply guard is armed the fd
-/// is the guard's alone: a reply landing between the sweep's last empty
-/// read and a poll here reaches exactly the parser the guard exists to keep
-/// it away from, and that parser answers a private-mode reply it does not
-/// recognize by waiting forever for a final byte that already went past.
-/// The loop still wakes on the terminal fd itself
-/// (`view/src/wake.rs` polls [`InputSource::tty_fd`]), so nothing is missed
-/// by not asking crossterm -- the next sweep reads the same bytes.
-///
-/// There is no exception. A resize was one until its shape turned out to
-/// be readable without the fd -- [`drain`](InputSource::drain) answers a
-/// SIGWINCH with a `TIOCGWINSZ` on the fd it already holds, so the frame is
-/// corrected on the pass the signal arrives and the parser still never sees
-/// a byte.
+/// The tap fires per delivered key rather than per read: the gated
+/// input-path interval closes on the RPC the key turns into, so a tap for a
+/// byte run that decodes to no key at all would pair with the next
+/// keystroke's RPC and report an interval spanning two keys.
 #[cfg(unix)]
-const fn crossterm_may_read(guard_armed: bool) -> bool {
-    !guard_armed
+fn emit(msg: Msg, sink: &mut impl FnMut(Msg)) {
+    #[cfg(all(unix, feature = "bench-taps"))]
+    if matches!(msg, Msg::Key(_)) {
+        crate::tap::tap(crate::tap::TAG_KEY_READ);
+    }
+    sink(msg);
 }
 
 /// Translates one crossterm event into the core [`Msg`] the runtime loop
-/// dispatches, or `None` for events with no nvim equivalent. Shared by the
-/// unix drain above and the non-unix input thread, so the two platforms
-/// cannot drift in what a key, resize, paste, or mouse event becomes.
+/// dispatches, or `None` for events with no nvim equivalent.
+///
+/// The non-unix input thread's own translation. On unix the terminal's
+/// bytes are decoded here rather than by crossterm's parser
+/// ([`crate::keys::decode_residue`]), because that parser folds a doubled
+/// `ESC` into one Escape key and holds a bare `ESC [` for a final byte no
+/// timeout of its own ever gives up on -- neither of which is what nvim
+/// does with the same bytes, and view's whole contract is that a key means
+/// there what it means in nvim.
+#[cfg(not(unix))]
 pub(crate) fn event_to_msg(event: Event, size: &TermSizeCell) -> Option<Msg> {
     match event {
-        Event::Key(k) => {
-            #[cfg(all(unix, feature = "bench-taps"))]
-            crate::tap::tap(crate::tap::TAG_KEY_READ);
-            encode_terminal_key(&k, crate::terminal::kitty_keyboard_pushed())
-                .map(|notation| Msg::Key(Key { notation }))
-        }
+        Event::Key(k) => encode_terminal_key(&k, crate::terminal::kitty_keyboard_pushed())
+            .map(|notation| Msg::Key(Key { notation })),
         Event::Resize(width, height) => {
             // published before the message is queued: the message may sit
             // behind a burst of keys or redraw tokens, and every frame
@@ -914,48 +938,47 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
+    /// One decoder, in the guard's window and out of it: a second reader
+    /// of the same fd is what folded a doubled `ESC` into one Escape key
+    /// and held a bare `ESC [` forever, and either is back the moment a
+    /// call site here reaches for crossterm's parser again.
     #[test]
-    fn the_guard_owns_the_terminal_and_nothing_reads_past_it() {
+    fn nothing_on_the_unix_path_reads_the_terminal_through_crossterm() {
+        let source = include_str!("input.rs");
+        let reads = [
+            concat!("crossterm::event::", "poll("),
+            concat!("crossterm::event::", "read("),
+        ];
+        for (at, line) in source.lines().enumerate() {
+            // prose may name the parser this stopped using; code may not
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for read in reads {
+                assert!(
+                    !line.contains(read),
+                    "line {} reads the terminal through crossterm: its parser \
+                     answers `ESC ESC` with one `<Esc>` and waits on `ESC [` \
+                     with no timeout of its own, so a byte it sees is a byte \
+                     nvim's own timing no longer decides",
+                    at + 1
+                );
+            }
+        }
+        // the translation the non-unix thread still needs is fenced off
+        // this platform rather than left compiled and unreachable
         assert!(
-            crossterm_may_read(false),
-            "an unarmed session is crossterm's own"
-        );
-        assert!(
-            !crossterm_may_read(true),
-            "while the guard is armed a poll is a read of the fd it owns, \
-             and a resize is answered by an ioctl rather than by one"
+            source.contains(concat!("#[cfg(not(unix))]\n", "pub(crate) fn event_to_msg")),
+            "`event_to_msg` is reachable on unix again, which is a second \
+             reading of the same bytes"
         );
     }
 
-    /// Every `poll` in this file is behind that rule, which is the half a
-    /// truth table cannot state: the rule holding while a call site walks
-    /// out from under it is exactly the regression.
+    /// The default is nvim's own, so a session whose engine never relays
+    /// anything still waits exactly as long as nvim would before reading a
+    /// half-arrived key code as the Escape key.
     #[test]
-    fn no_crossterm_poll_in_this_file_stands_outside_that_rule() {
-        let source = include_str!("input.rs");
-        let needle = concat!("crossterm::event::", "poll(");
-        let gate = concat!("crossterm_may", "_read(");
-        let lines: Vec<&str> = source.lines().collect();
-        let mut sites = 0;
-        for (at, line) in lines.iter().enumerate() {
-            if !line.contains(needle) {
-                continue;
-            }
-            sites += 1;
-            let window = lines[at.saturating_sub(8)..at].join("\n");
-            assert!(
-                window.contains(gate),
-                "the poll at line {} is not gated on the guard: a read here \
-                 takes the byte the guard is waiting for and hands it to the \
-                 parser that wedges on it",
-                at + 1
-            );
-        }
-        assert_eq!(
-            sites, 3,
-            "this file polls crossterm {sites} times, not the three the walk \
-             above was written against; a new one is a new place the guard \
-             can be walked past"
-        );
+    fn the_escape_timeout_starts_at_nvims_own_default() {
+        assert_eq!(DEFAULT_ESCAPE_TIMEOUT, Duration::from_millis(50));
     }
 }

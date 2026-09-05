@@ -1,21 +1,16 @@
-//! `InputSource::has_buffered` against a real terminal descriptor holding a
-//! capability reply in front of a keystroke.
+//! `InputSource` against a real terminal descriptor holding a capability
+//! reply in front of a keystroke.
 //!
-//! The shape under test is the one no fd readiness poll can describe: a
-//! terminal answers a query after the startup prober has stopped listening,
-//! the user types, and both land in one kernel read. crossterm parses the
-//! whole read but hands out one event per poll -- and never hands out the
-//! reply at all, since its public filter rejects it -- so a single poll
-//! reports "nothing buffered" about a buffer holding a decoded key. The
-//! runtime loop then sleeps on a descriptor whose queue it has itself just
-//! emptied, and the keystroke waits for an unrelated later one.
+//! The shape under test is one read carrying both: a terminal answers a
+//! query after the startup prober has stopped listening, the user types,
+//! and the two land together. What must come out of it is the keystroke
+//! and nothing else -- the reply consumed, the key behind it delivered,
+//! and the loop never told to sleep on a keystroke it has not handed over.
 //!
-//! A pty this test owns, put on descriptor 0 before crossterm's
-//! process-wide reader binds to anything, is what makes that reachable: the
-//! reader resolves the same descriptor the source does, and one write into
-//! the master reproduces the coalesced read exactly. Descriptor 0 is
-//! process state, so this file deliberately holds one test -- the reader is
-//! built once per process and cannot be pointed at a second terminal later.
+//! A pty this test owns, put on descriptor 0, is what makes that
+//! reachable: one write into the master reproduces the coalesced read
+//! exactly. Descriptor 0 is process state, so this file deliberately holds
+//! one test.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -40,8 +35,8 @@ fn has_buffered_reports_a_key_parsed_behind_a_dropped_capability_reply() {
     let _watchdog = view_test_support::watchdog();
     let (master, slave) = common::stdin_pty();
 
-    // opened while the queue is empty, so crossterm's reader binds to this
-    // terminal without consuming any of the burst written below
+    // opened while the queue is empty, so nothing of the burst written
+    // below is consumed before the assertions about it
     let mut input = InputSource::open().unwrap();
     assert!(
         !input.has_buffered(),
@@ -54,11 +49,14 @@ fn has_buffered_reports_a_key_parsed_behind_a_dropped_capability_reply() {
         "the pty never delivered the bytes written into its master"
     );
 
+    // the gate says nothing is held here, and that is the whole answer:
+    // every byte this source reads is decoded in the call that reads it,
+    // so there is no userspace buffer for the descriptor's own readiness
+    // to be wrong about, and the loop wakes on the fd that is still ready
     assert!(
-        input.has_buffered(),
-        "the keystroke behind the dropped reply is decodable, so the gate \
-         that decides whether the loop may sleep must say so -- answering \
-         no here strands it until an unrelated later keystroke arrives"
+        !input.has_buffered(),
+        "a source that reports something held must be holding it for a \
+         caller to collect; nothing here is"
     );
 
     let size = TermSizeCell::default();

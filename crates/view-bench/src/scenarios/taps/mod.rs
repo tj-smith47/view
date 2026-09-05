@@ -53,7 +53,7 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
 /// Every tap tag, grouped by the crate whose sequence counter numbers it.
 /// A tag missing from this table is a tag whose loss no drop check can
 /// see, so the chain walkers below assert their own tags against it.
-const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFPGCDA")];
+const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFPGCDAI")];
 
 /// Verifies each crate's tap sequence stream is contiguous. The engine's
 /// two tags share one counter and the tui's tags share their own, so the

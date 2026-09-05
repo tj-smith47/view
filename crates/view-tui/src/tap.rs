@@ -49,6 +49,16 @@ pub const TAG_TERM_WRITTEN: u8 = b'T';
 /// tap would have cost the gated interval more than the segment it
 /// resolved.
 pub const TAG_KEY_READ: u8 = b'K';
+/// One non-empty read of the terminal fd returned, before any of its bytes
+/// have been looked at. With [`TAG_KEY_READ`] it brackets view's own
+/// decode of those bytes -- the segment that used to sit inside crossterm,
+/// where no tap could reach it, and the one the input-path budget could
+/// otherwise only bound by subtraction.
+///
+/// One record per read rather than per key: a burst delivered in one read
+/// decodes to several keys, and a reader pairs this with the first
+/// [`TAG_KEY_READ`] behind it.
+pub const TAG_BYTES_READ: u8 = b'I';
 /// The runtime loop dequeued one message (any kind); emitted by the bin
 /// crate's loop through this module so the loop-wakeup boundary shares
 /// the paint tag's sequence counter.

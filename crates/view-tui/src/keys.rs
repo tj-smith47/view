@@ -1,6 +1,8 @@
 //! Crossterm key event to nvim input notation encoding.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use view_core::msg::{Key, Msg};
 
 /// Encodes a crossterm [`KeyEvent`] as an nvim `nvim_input` notation string.
@@ -139,15 +141,11 @@ pub(crate) fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// [`decode_residue`] reports the length of such a tail so a caller that
 /// can wait for the rest does; this entry point cannot and drops it.
 ///
-/// `ESC` and one key in the same run are Alt and that key, which is how
-/// crossterm reads them for the rest of the session -- for a multi-byte
-/// character as much as for a printable ASCII one. Two `ESC`s in a run are
-/// the Escape key rather than `Alt`+`Esc`, again as crossterm reads them.
-/// A lone trailing `ESC` is the Escape key too and maps to `<Esc>`:
-/// crossterm holds one only while the fd still has bytes to give it, and
-/// the caller here has already drained the fd to `EAGAIN`, so the two
-/// answers differ only for a chord whose second byte was still in flight
-/// at that moment.
+/// `ESC` and one key in the same run are Alt and that key -- for a
+/// multi-byte character as much as for a printable ASCII one. Two `ESC`s
+/// in a run are two Escape keys, and a lone trailing `ESC` is one: it is
+/// the one key that cannot afford to wait a read, and the caller here has
+/// already drained the fd to `EAGAIN`.
 #[must_use]
 pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
     decode_residue(residue)
@@ -240,6 +238,40 @@ pub(crate) fn decode_residue(residue: &[u8]) -> ResidueDecode {
     }
 }
 
+/// [`decode_residue`]'s answer for a run whose escape timeout has expired:
+/// nvim waits `ttimeoutlen` for the rest of a key code and then reads what
+/// it has as the Escape key followed by the literal bytes behind it
+/// (`tui/input.c`), so `ESC [` becomes `<Esc>` and `[` rather than waiting
+/// for a final byte that is never coming.
+///
+/// Only an escape run is flushed this way. A character or a bracketed
+/// paste cut in half by a read boundary is dropped instead, which is
+/// [`ResidueDecode::unfinished`]'s own rule for a caller that has run out
+/// of reads: half a paste typed into a buffer runs its body as normal-mode
+/// commands.
+pub(crate) fn decode_residue_forced(residue: &[u8]) -> Vec<Msg> {
+    let decoded = decode_residue(residue);
+    let mut msgs = decoded.msgs;
+    let held = &residue[residue.len() - decoded.unfinished..];
+    if forceable(held) {
+        msgs.push(key_msg("<Esc>"));
+        msgs.extend(decode_residue(&held[1..]).msgs);
+    }
+    msgs
+}
+
+/// Whether an unfinished tail is one an escape timeout may flush.
+///
+/// A bracketed paste is the exception: its closer arrives when the pasted
+/// text ends, which no keystroke timeout bounds, and flushing one would
+/// type the pasted body into the buffer as normal-mode commands. The
+/// opener is what identifies it, so a read cut off inside those six bytes
+/// is flushed like any other run -- nvim reads that boundary the same way,
+/// and a terminal writes the opener whole.
+pub(crate) fn forceable(held: &[u8]) -> bool {
+    held.first() == Some(&0x1b) && !held.starts_with(PASTE_OPEN)
+}
+
 /// `ESC [` and `ESC O`: the two bytes a sequence opens with, and where
 /// its parameters start.
 const ESCAPE_INTRODUCER_LEN: usize = 2;
@@ -254,6 +286,7 @@ const PASTE_OPEN_PARAMS: &[u8] = b"200";
 /// and both end a report here for the same reason they do in the
 /// capability probe's own scan.
 const STRING_TERMINATOR: &[u8] = b"\x1b\\";
+const PASTE_OPEN: &[u8] = b"\x1b[200~";
 const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 
 /// How the residue decoder reads one `ESC [` / `ESC O` run.
@@ -342,11 +375,137 @@ fn csi_sequence(run: &[u8]) -> Escape {
         // a report crossterm types nothing from
         b'R' if params.starts_with(b";") => decoded(len, KeyCode::F(3), modifier),
         b'R' => Escape::Decoded { len, msg: None },
+        b'M' | b'm' => mouse_report(run, params, final_byte, len),
         _ => match cursor_key(final_byte) {
             Some(code) => decoded(len, code, modifier),
             None => unnamed,
         },
     }
+}
+
+/// The three mouse encodings a terminal answers `EnableMouseCapture` with,
+/// as the [`Msg::Mouse`] each is, or the sequence it still is when the
+/// button spells no button this vocabulary has.
+///
+/// `?1006h` (SGR) is what a modern terminal takes, and it is the only one
+/// of the three that can spell a release: its parameters open with `<` and
+/// its final byte is lowercase for a release, uppercase for a press. A
+/// terminal that took `?1015h` instead answers in rxvt's form, the same
+/// parameters without the `<` and with the button biased by 32; one that
+/// took neither answers X10's, where the button and both coordinates are
+/// three raw bytes behind the final rather than parameters at all -- which
+/// is why that form is the one that can be cut short by the end of a read.
+///
+/// Both coordinates are one-based on the wire and zero-based in every
+/// consumer, and a terminal that reports a zero saturates rather than
+/// wrapping to the far edge of the screen.
+fn mouse_report(run: &[u8], params: &[u8], final_byte: u8, len: usize) -> Escape {
+    if params.is_empty() {
+        let Some(report) = run.get(len..len + X10_REPORT_LEN) else {
+            return Escape::Unfinished;
+        };
+        return mouse_decoded(
+            len + X10_REPORT_LEN,
+            report[0].wrapping_sub(X10_BIAS),
+            u16::from(report[1].wrapping_sub(X10_BIAS)),
+            u16::from(report[2].wrapping_sub(X10_BIAS)),
+            final_byte,
+        );
+    }
+    let sgr = params.first() == Some(&b'<');
+    let fields = param_fields(if sgr { &params[1..] } else { params });
+    let (Some(button), Some(column), Some(row)) =
+        (field(&fields, 0), field(&fields, 1), field(&fields, 2))
+    else {
+        return Escape::Unknown { len };
+    };
+    let Ok(button) = u8::try_from(button) else {
+        return Escape::Unknown { len };
+    };
+    mouse_decoded(
+        len,
+        if sgr {
+            button
+        } else {
+            button.wrapping_sub(X10_BIAS)
+        },
+        saturate_u16(column),
+        saturate_u16(row),
+        final_byte,
+    )
+}
+
+/// X10's three-byte report and the offset every one of its fields carries,
+/// so a coordinate stays a printable byte.
+const X10_REPORT_LEN: usize = 3;
+const X10_BIAS: u8 = 32;
+
+/// One decoded mouse report as the message it is, with the one-based wire
+/// coordinates brought down to the zero-based cell the rest of view counts
+/// in.
+fn mouse_decoded(len: usize, button: u8, column: u16, row: u16, final_byte: u8) -> Escape {
+    let Some((kind, modifiers)) = mouse_kind(button) else {
+        return Escape::Unknown { len };
+    };
+    // only SGR distinguishes a release, and it does it with the case of the
+    // final byte rather than in the button field: the other two forms
+    // report every release as button 3 and cannot say which button it was
+    let kind = match (final_byte, kind) {
+        (b'm', MouseEventKind::Down(button)) => MouseEventKind::Up(button),
+        (_, kind) => kind,
+    };
+    Escape::Decoded {
+        len,
+        msg: Some(Msg::Mouse(crate::mouse::encode_mouse(&MouseEvent {
+            kind,
+            column: column.saturating_sub(1),
+            row: row.saturating_sub(1),
+            modifiers,
+        }))),
+    }
+}
+
+/// The button field of a mouse report, split into the event it describes
+/// and the modifiers held while it happened. `None` for a button no nvim
+/// action names -- the report is consumed either way, never typed.
+fn mouse_kind(button: u8) -> Option<(MouseEventKind, KeyModifiers)> {
+    // the button number is split across two ranges of the same field: the
+    // low pair, and the two high bits a terminal reports the extra buttons
+    // (wheel and beyond) in
+    let number = (button & 0b0000_0011) | ((button & 0b1100_0000) >> 4);
+    let dragging = button & 0b0010_0000 != 0;
+    let kind = match (number, dragging) {
+        (0, false) => MouseEventKind::Down(MouseButton::Left),
+        (1, false) => MouseEventKind::Down(MouseButton::Middle),
+        (2, false) => MouseEventKind::Down(MouseButton::Right),
+        (0, true) => MouseEventKind::Drag(MouseButton::Left),
+        (1, true) => MouseEventKind::Drag(MouseButton::Middle),
+        (2, true) => MouseEventKind::Drag(MouseButton::Right),
+        (3, false) => MouseEventKind::Up(MouseButton::Left),
+        (3..=5, true) => MouseEventKind::Moved,
+        (4, false) => MouseEventKind::ScrollUp,
+        (5, false) => MouseEventKind::ScrollDown,
+        (6, false) => MouseEventKind::ScrollLeft,
+        (7, false) => MouseEventKind::ScrollRight,
+        _ => return None,
+    };
+    let mut modifiers = KeyModifiers::empty();
+    if button & 0b0000_0100 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if button & 0b0000_1000 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if button & 0b0001_0000 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    Some((kind, modifiers))
+}
+
+/// A wire coordinate as the `u16` a cell position is, with anything past
+/// the widest terminal there is clamped rather than wrapped.
+fn saturate_u16(value: u32) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 /// The kitty protocol's `base:shifted` alternate-key pair: with `Shift`
@@ -397,19 +556,22 @@ fn string_sequence_len(run: &[u8]) -> Option<usize> {
 /// character an Alt chord there as much as an ASCII one, and the same
 /// decode is what makes it one here.
 ///
-/// Three runs are not that chord. A second `ESC` is the Escape key --
-/// crossterm's parser names the byte after the first and `ESC` is one of
-/// the names -- and so is an `ESC` with nothing behind it. A character cut
-/// short by the end of the read is unfinished, because the rest of it is
-/// still in flight.
+/// Three runs are not that chord. A second `ESC` ends the first one and
+/// nothing more: the first byte is the Escape key on its own and the
+/// decoder re-enters on the second, which is what nvim's tty input layer
+/// does with a doubled `ESC` (`handle_forced_escape` pushes the first
+/// through forced and re-reads from the byte behind it), so `ESC ESC` is
+/// two `<Esc>` and `ESC ESC [ A` is `<Esc>` and `<Up>`. An `ESC` with
+/// nothing behind it is the Escape key too. A character cut short by the
+/// end of the read is unfinished, because the rest of it is still in
+/// flight.
 fn alt_key(run: &[u8]) -> Escape {
     let escape_key = |len| Escape::Decoded {
         len,
         msg: Some(key_msg("<Esc>")),
     };
     match run.get(1) {
-        None => escape_key(1),
-        Some(&0x1b) => escape_key(2),
+        None | Some(&0x1b) => escape_key(1),
         Some(&byte) if byte >= 0x80 => match utf8_char(&run[1..]) {
             Utf8::Char(typed, len) => decoded(1 + len, KeyCode::Char(typed), KeyModifiers::ALT),
             Utf8::Unfinished => Escape::Unfinished,
@@ -1130,13 +1292,13 @@ mod tests {
             encode_residue_bytes("\x1b\u{e9}".as_bytes()),
             vec!["<M-\u{e9}>"]
         );
-        // two `ESC`s in one run are the Escape key rather than `Alt`+`Esc`:
-        // crossterm names the second byte, and `Esc` is one of its names
-        assert_eq!(encode_residue_bytes(b"\x1b\x1b"), vec!["<Esc>"]);
-        // both bytes go with it, so what follows opens nothing -- the same
-        // reading crossterm takes, whose buffer clears at the `Esc` and
-        // meets the `[` as the character it then is
-        assert_eq!(encode_residue_bytes(b"\x1b\x1b[A"), vec!["<Esc>", "[", "A"]);
+        // two `ESC`s in one run are two Escape keys: the first ends on its
+        // own byte and the decoder re-enters on the second, which is what
+        // nvim's own forced escape does with the pair
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b"), vec!["<Esc>", "<Esc>"]);
+        // so the sequence behind a doubled `ESC` is still the sequence it
+        // is, rather than the two literal keys a swallowed `ESC` leaves
+        assert_eq!(encode_residue_bytes(b"\x1b\x1b[A"), vec!["<Esc>", "<Up>"]);
         // and the `ESC` that ends a run is still the Escape key
         assert_eq!(encode_residue_bytes(b"ok\x1b"), vec!["o", "k", "<Esc>"]);
     }
@@ -1329,6 +1491,284 @@ mod tests {
         // keyboard producing that run inside a single read is not, and
         // typing a report's body runs it as normal-mode commands
         assert!(encode_residue_bytes(b"\x1b]12\x07").is_empty());
+    }
+
+    /// Every modifier combination a legacy terminal can spell, as the
+    /// parameter it spells it with: bit 1 shift, bit 2 alt, bit 4 ctrl,
+    /// biased by one.
+    fn modifier_params() -> impl Iterator<Item = (u32, KeyModifiers)> {
+        (0..8).map(|bits| {
+            let mut mods = KeyModifiers::empty();
+            if bits & 0b001 != 0 {
+                mods |= KeyModifiers::SHIFT;
+            }
+            if bits & 0b010 != 0 {
+                mods |= KeyModifiers::ALT;
+            }
+            if bits & 0b100 != 0 {
+                mods |= KeyModifiers::CONTROL;
+            }
+            (bits + 1, mods)
+        })
+    }
+
+    /// What one decoded message reads as, for a corpus that has to name
+    /// mouse reports and pastes as well as keys.
+    fn rendered(msgs: Vec<Msg>) -> Vec<String> {
+        msgs.into_iter()
+            .map(|msg| match msg {
+                Msg::Key(key) => key.notation,
+                Msg::Paste(text) => format!("paste:{text}"),
+                Msg::Mouse(m) => format!(
+                    "mouse:{}:{}:{}:{}:{}",
+                    m.button, m.action, m.modifier, m.row, m.col
+                ),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The whole population the unix read path took over from crossterm's
+    /// parser, walked one byte run at a time.
+    ///
+    /// The expectations are written out by hand from that parser's own
+    /// source (crossterm 0.29, `event/sys/unix/parse.rs`) rather than
+    /// obtained from it: `parse_event` is private and crossterm's public
+    /// reader is built once per process against the real terminal, so no
+    /// test can put bytes of its own through it. What each run means is
+    /// stated as the `(KeyCode, KeyModifiers)` that parser resolves it to,
+    /// leaving the naming of that pair to [`encode_key`], which the tests
+    /// above hold to the pinned engine's own answers.
+    ///
+    /// Three readings are deliberately not crossterm's, and each is pinned
+    /// on its own above: a doubled `ESC` is two Escape keys rather than one
+    /// (`residue_bare_esc_not_followed_by_bracket_maps_to_esc_token`), a
+    /// CSI no table names is consumed rather than raising an error
+    /// (`residue_an_escape_run_no_table_names_is_consumed_whole`), and a
+    /// run whose final byte has not arrived is reported as a tail rather
+    /// than held in a buffer with no timeout
+    /// (`a_run_out_of_time_is_the_escape_key_and_the_bytes_behind_it`).
+    #[test]
+    fn every_crossterm_key_event_decodes_identically() {
+        let expected = |code, mods| vec![encode_key(&KeyEvent::new(code, mods)).unwrap()];
+        // the cursor and edit keys in both of their spellings, at every
+        // modifier a terminal can put on them
+        for (final_byte, code) in [
+            (b'A', KeyCode::Up),
+            (b'B', KeyCode::Down),
+            (b'C', KeyCode::Right),
+            (b'D', KeyCode::Left),
+            (b'H', KeyCode::Home),
+            (b'F', KeyCode::End),
+        ] {
+            assert_eq!(
+                encode_residue_bytes(&[0x1b, b'[', final_byte]),
+                expected(code, KeyModifiers::NONE)
+            );
+            assert_eq!(
+                encode_residue_bytes(&[0x1b, b'O', final_byte]),
+                expected(code, KeyModifiers::NONE)
+            );
+            for (param, mods) in modifier_params() {
+                let run = format!("\x1b[1;{param}{}", char::from(final_byte));
+                assert_eq!(
+                    encode_residue_bytes(run.as_bytes()),
+                    expected(code, mods),
+                    "{run:?}"
+                );
+            }
+        }
+        // the keypad and function keys, in the `~` form and the modifier
+        // parameter crossterm reads off the same field
+        for (param, code) in [
+            (2, KeyCode::Insert),
+            (3, KeyCode::Delete),
+            (5, KeyCode::PageUp),
+            (6, KeyCode::PageDown),
+            (11, KeyCode::F(1)),
+            (12, KeyCode::F(2)),
+            (13, KeyCode::F(3)),
+            (14, KeyCode::F(4)),
+            (15, KeyCode::F(5)),
+            (17, KeyCode::F(6)),
+            (18, KeyCode::F(7)),
+            (19, KeyCode::F(8)),
+            (20, KeyCode::F(9)),
+            (21, KeyCode::F(10)),
+            (23, KeyCode::F(11)),
+            (24, KeyCode::F(12)),
+        ] {
+            assert_eq!(
+                encode_residue_bytes(format!("\x1b[{param}~").as_bytes()),
+                expected(code, KeyModifiers::NONE)
+            );
+            for (modifier, mods) in modifier_params() {
+                assert_eq!(
+                    encode_residue_bytes(format!("\x1b[{param};{modifier}~").as_bytes()),
+                    expected(code, mods),
+                    "CSI {param};{modifier}~"
+                );
+            }
+        }
+        // F1-F4's SS3 spelling, the one a terminal sends unmodified
+        for (final_byte, code) in [
+            (b'P', KeyCode::F(1)),
+            (b'Q', KeyCode::F(2)),
+            (b'R', KeyCode::F(3)),
+            (b'S', KeyCode::F(4)),
+        ] {
+            assert_eq!(
+                encode_residue_bytes(&[0x1b, b'O', final_byte]),
+                expected(code, KeyModifiers::NONE)
+            );
+        }
+        // `ESC` and a printable is that key with Alt held, which is how
+        // crossterm's parser reads the pair (it recurses on the bytes
+        // behind the `ESC` and ors the modifier in)
+        for byte in b' '..=b'~' {
+            let typed = char::from(byte);
+            // except the two bytes an escape sequence opens with, which
+            // are that opening until the read that finishes it
+            if typed == '[' || typed == 'O' {
+                continue;
+            }
+            assert_eq!(
+                encode_residue_bytes(&[0x1b, byte]),
+                expected(KeyCode::Char(typed), KeyModifiers::ALT),
+                "ESC {typed}"
+            );
+        }
+        // every C0 byte is one key and exactly one, whatever it is named
+        for byte in 0x00..=0x1f_u8 {
+            assert_eq!(
+                encode_residue_bytes(&[byte]).len(),
+                1,
+                "the byte {byte:#04x} decodes to one key"
+            );
+        }
+        // the kitty protocol's own form for the same keys
+        for (code, key) in [
+            (13, KeyCode::Enter),
+            (27, KeyCode::Esc),
+            (9, KeyCode::Tab),
+            (127, KeyCode::Backspace),
+            (97, KeyCode::Char('a')),
+        ] {
+            for (param, mods) in modifier_params() {
+                assert_eq!(
+                    encode_residue_bytes(format!("\x1b[{code};{param}u").as_bytes()),
+                    expected(key, mods),
+                    "CSI {code};{param}u"
+                );
+            }
+        }
+        // focus in and out reach no key at all, in either decoder: typed
+        // through they would open a line or insert at the line start
+        assert!(encode_residue_bytes(b"\x1b[I").is_empty());
+        assert!(encode_residue_bytes(b"\x1b[O").is_empty());
+        // a paste is one message however much of an escape sequence its
+        // body spells
+        assert_eq!(
+            rendered(decode_residue(b"\x1b[200~a\x1b[Ab\x1b[201~").msgs),
+            vec!["paste:a\x1b[Ab"]
+        );
+    }
+
+    /// The mouse forms are the half of the population no key notation can
+    /// carry, so they are walked against the [`MouseInput`] they encode to
+    /// rather than against a notation.
+    ///
+    /// Same provenance as the corpus above: read off crossterm's `parse_cb`
+    /// and its three mouse parsers by hand.
+    #[test]
+    fn every_crossterm_mouse_report_decodes_identically() {
+        // SGR (`?1006h`), the form a modern terminal answers with: press,
+        // drag, release, and each wheel direction, at column 10 row 5 on
+        // the wire and one less than that in every cell coordinate
+        for (bytes, expected) in [
+            (b"\x1b[<0;10;5M".as_slice(), "mouse:left:press::4:9"),
+            (b"\x1b[<1;10;5M".as_slice(), "mouse:middle:press::4:9"),
+            (b"\x1b[<2;10;5M".as_slice(), "mouse:right:press::4:9"),
+            (b"\x1b[<0;10;5m".as_slice(), "mouse:left:release::4:9"),
+            (b"\x1b[<32;10;5M".as_slice(), "mouse:left:drag::4:9"),
+            (b"\x1b[<35;10;5M".as_slice(), "mouse:move:move::4:9"),
+            (b"\x1b[<64;10;5M".as_slice(), "mouse:wheel:up::4:9"),
+            (b"\x1b[<65;10;5M".as_slice(), "mouse:wheel:down::4:9"),
+            (b"\x1b[<66;10;5M".as_slice(), "mouse:wheel:left::4:9"),
+            (b"\x1b[<67;10;5M".as_slice(), "mouse:wheel:right::4:9"),
+            // the modifier bits ride in the same field as the button
+            (b"\x1b[<4;10;5M".as_slice(), "mouse:left:press:S-:4:9"),
+            (b"\x1b[<8;10;5M".as_slice(), "mouse:left:press:M-:4:9"),
+            (b"\x1b[<16;10;5M".as_slice(), "mouse:left:press:C-:4:9"),
+            (b"\x1b[<28;10;5M".as_slice(), "mouse:left:press:C-S-M-:4:9"),
+        ] {
+            assert_eq!(
+                rendered(decode_residue(bytes).msgs),
+                vec![expected.to_owned()],
+                "{bytes:?}"
+            );
+        }
+        // X10's form, where the button and both coordinates are three raw
+        // bytes behind the final rather than parameters -- and so the one
+        // form of the three that a read boundary can cut in half
+        assert_eq!(
+            rendered(decode_residue(b"\x1b[M\x20\x2a\x25").msgs),
+            vec!["mouse:left:press::4:9"]
+        );
+        assert_eq!(decode_residue(b"\x1b[M\x20\x2a").unfinished, 5);
+        // rxvt's (`?1015h`), the same parameters without the `<` and with
+        // the button carrying X10's bias
+        assert_eq!(
+            rendered(decode_residue(b"\x1b[32;10;5M").msgs),
+            vec!["mouse:left:press::4:9"]
+        );
+        // a button this vocabulary does not name consumes its report
+        // rather than typing it
+        assert!(decode_residue(b"\x1b[<200;10;5M").msgs.is_empty());
+        // and the keys behind a report are the keys they were
+        assert_eq!(
+            rendered(decode_residue(b"\x1b[<0;10;5Mok").msgs),
+            vec!["mouse:left:press::4:9", "o", "k"]
+        );
+    }
+
+    #[test]
+    fn a_run_out_of_time_is_the_escape_key_and_the_bytes_behind_it() {
+        // nvim's own `ttimeoutlen` flush: what a terminal never finished
+        // sending is read as the Escape key and the literal keys behind
+        // it, so a user who presses Escape and nothing else still gets an
+        // Escape rather than a decoder waiting forever on a final byte
+        let notations = |run: &[u8]| {
+            decode_residue_forced(run)
+                .into_iter()
+                .filter_map(|msg| match msg {
+                    Msg::Key(key) => Some(key.notation),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(notations(b"\x1b["), vec!["<Esc>", "["]);
+        assert_eq!(notations(b"\x1bO"), vec!["<Esc>", "O"]);
+        assert_eq!(notations(b"\x1b[1;5"), vec!["<Esc>", "[", "1", ";", "5"]);
+        // the keys in front of a half-arrived run are the keys they were
+        assert_eq!(notations(b"ok\x1b["), vec!["o", "k", "<Esc>", "["]);
+        // and a finished run is decoded exactly as it is without this
+        assert_eq!(notations(b"\x1b[A"), vec!["<Up>"]);
+    }
+
+    #[test]
+    fn only_an_escape_run_is_ever_flushed_by_a_timeout() {
+        assert!(forceable(b"\x1b["), "a bare CSI introducer waits on a key");
+        assert!(forceable(b"\x1bO"));
+        // a paste's closer arrives when the pasted text ends, which no
+        // keystroke timeout bounds
+        assert!(!forceable(b"\x1b[200~half a paste"));
+        // and half a character is not an escape run at all
+        assert!(!forceable(&"\u{e9}".as_bytes()[..1]));
+        assert!(!forceable(b""));
+        // half a paste flushed anyway would type its body as normal-mode
+        // commands, so the forced decode drops it rather than splitting it
+        assert!(decode_residue_forced(b"\x1b[200~rm -rf").is_empty());
     }
 
     #[test]
