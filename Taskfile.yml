@@ -51,7 +51,7 @@ tasks:
       - cargo clippy --workspace --bins -- -D warnings
 
   lint:cross:
-    desc: Clippy for a unix target that is not Linux, so an item only a Linux fence uses fails here rather than on a remote leg
+    desc: Clippy for the targets whose fences select other source than Linux does, so a platform-only item fails here rather than on a remote leg
     # x86_64-unknown-freebsd stands in for the macOS leg: it selects the same
     # source for every `cfg(unix)` / `cfg(target_os = "linux")` fence in the
     # tree, and unlike darwin and windows-msvc it cross-compiles from any
@@ -59,12 +59,20 @@ tasks:
     # both build for it, and both refuse the other two.
     #
     # Linux only, because that is the host the fences are written on and the
-    # only one for which this is a *cross* check at all; the macOS and
-    # Windows legs compile their own source directly.
+    # only one for which this is a *cross* check at all; the macOS leg
+    # compiles its own source directly.
     platforms: [linux]
     cmds:
       - rustup target add x86_64-unknown-freebsd
       - cargo clippy --workspace --all-targets --all-features --target x86_64-unknown-freebsd -- -D warnings
+      # the freebsd leg above selects the same source a `cfg(unix)` fence
+      # selects on Linux, so an item only the unix arm uses passes it and
+      # fails on Windows. This is that arm's mirror image, and the reason
+      # it is three named libs rather than the workspace: view-ai's ureq
+      # pulls ring, whose build refuses windows-msvc without `lib.exe`,
+      # and the crates carrying the unix fences are these
+      - rustup target add x86_64-pc-windows-msvc
+      - cargo clippy -p view-core -p view-engine -p view-tui --lib --target x86_64-pc-windows-msvc -- -D warnings
 
   test:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)
