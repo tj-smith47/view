@@ -1653,11 +1653,10 @@ fn loop_tokens_are_noops_and_engine_request_always_replies() {
                 value: ReplyValue::Nil
             },
             // what the engine is asked the moment it is answered, and the
-            // ordering between the three, is
+            // ordering between the two, is
             // `vim_enter_is_answered_first_and_then_asked_what_it_recovered`'s
             // subject
             Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }),
-            Effect::Rpc(RpcCall::ClaimStdoutTty),
         ]
     ));
 }
@@ -9795,7 +9794,6 @@ fn vim_enter_is_answered_first_and_then_asked_what_it_recovered() {
                     ..
                 },
                 Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }),
-                Effect::Rpc(RpcCall::ClaimStdoutTty),
             ]
         ),
         "a probe queued ahead of the reply waits on the engine that is \

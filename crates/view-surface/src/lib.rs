@@ -332,14 +332,13 @@ impl Surface {
 }
 
 /// The size the grid layer is painted at: the engine's own grid, or an
-/// empty rect while view is withholding it.
+/// empty rect until nvim has drawn content into it.
 ///
-/// A flush landing before nvim reaches `UIEnter` is a half-sourced screen
-/// its own TUI never paints, and the layer carrying it is the one thing
-/// that must not reach the terminal. Every surface above it -- the cmdline,
-/// the messages, the popupmenu, the native overlays -- paints regardless,
-/// so nothing a startup needs the screen for is held back (see
-/// `Model::withholds_grid`).
+/// The startup shell owns the screen until then, and the layer carrying a
+/// grid nvim has not written to is the one thing that must not reach the
+/// terminal over it. Every surface above it -- the cmdline, the messages,
+/// the popupmenu, the native overlays -- paints regardless, so nothing a
+/// startup needs the screen for waits on this.
 ///
 /// One derivation for the whole crate: the statusline bar's own width
 /// follows it, and a cache refreshing that bar at the engine's width while
@@ -1033,12 +1032,12 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
             (height.saturating_sub(1).saturating_add(offset), col)
         }
     } else if !model.content_painted {
-        // the buffer caret belongs to the grid this frame is withholding
-        // (see `Model::withholds_grid`), so it waits with it -- a caret
-        // parked mid-screen over an otherwise blank start is the same
-        // half-sourced screen the layer itself is held back for. The
-        // branches above are not held: an overlay or a cmdline that is
-        // painting owes the user the caret that says where the typing goes.
+        // the buffer caret belongs to the grid this frame is not painting
+        // (see `painted_grid_size`), so it waits with it -- a caret parked
+        // mid-screen over the startup shell points at a buffer that is not
+        // on screen. The branches above are not held: an overlay or a
+        // cmdline that is painting owes the user the caret that says where
+        // the typing goes.
         return None;
     } else {
         // the global grid's own cursor field only under single-grid: under

@@ -444,15 +444,14 @@ impl EngineSession {
     /// Spawns a real `nvim --embed`, attaches at `cols`x`rows` with the
     /// full `ext_*` set, and returns a session ready to drive.
     ///
-    /// Deliberately skips the `VimEnter` autocmd registration
-    /// `view`'s own production startup performs
-    /// (`view_engine::handle::EngineHandle::register_vim_enter_autocmd`):
-    /// that registration exists to prove the paint loop's
-    /// `Msg::EngineRequest` -> `Effect::Reply` plumbing end to end, which
-    /// this driver has no paint loop to exercise. Registering it here with
-    /// nothing consuming the resulting `Msg::EngineRequest` would leave
-    /// nvim's `VimEnter` autocmd's blocking `rpcrequest` waiting forever
-    /// for a reply this driver never sends.
+    /// Deliberately skips the `VimEnter` autocmd `view`'s own production
+    /// startup hands the child on its spawn `--cmd`
+    /// (`view_engine::process::EngineConfig::with_late_attach`): that hook
+    /// exists to prove the paint loop's `Msg::EngineRequest` ->
+    /// `Effect::Reply` plumbing end to end, which this driver has no paint
+    /// loop to exercise. Arming it here with nothing consuming the resulting
+    /// `Msg::EngineRequest` would leave nvim's `VimEnter` autocmd's blocking
+    /// `rpcrequest` waiting forever for a reply this driver never sends.
     ///
     /// Always spawns with `--clean`: an oracle a compat script drives must
     /// be deterministic across hosts and CI, which the developer's own

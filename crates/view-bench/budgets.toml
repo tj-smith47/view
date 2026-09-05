@@ -157,6 +157,32 @@ scenario = "first_paint"
 metric = "marker_ratio_p50"
 max = 0.30
 
+# The two startup cells, in the vocabulary spec 3.1 states them in: what a
+# person waits through, and the one diagnostic that decomposes it. Neither
+# carries a `classes` list yet -- the `startup` row's own baselines are
+# empty on every class, so a class restriction here would be a guess about
+# where the number will first be recorded rather than a statement about
+# where it means something. `server_delta_ms`'s 5 ms is the controlled-leg
+# bar spec 3.1 states; a shared class reports it and, having no recorded
+# value to earn a ceiling from, cannot fail on it.
+[[budget]]
+spec_row = "Launch -> the settled screen, real config"
+scenario = "startup"
+metric = "settled_ratio_p50"
+max = 1.0
+kind = "felt"
+felt = "launch -> the screen you can start working in (tree, tabline, statusline settled), paired with nvim on the same host in the same run"
+config = "real"
+
+[[budget]]
+spec_row = "Embedded engine startup cost"
+scenario = "startup"
+metric = "server_delta_ms"
+max = 5.0
+kind = "diagnostic"
+decomposes = "startup.settled_ratio_p50"
+config = "real"
+
 # The flood row states its bound by reference: "coalesced paint stays inside
 # the staleness budget". So the row that carries the number is the scroll
 # row, and that is the one named here. Restating 16.0 against the flood row

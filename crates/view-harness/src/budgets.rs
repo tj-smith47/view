@@ -19,6 +19,15 @@
 //! max = 1.0
 //! classes = ["dev-linux"]   # optional; absent means every class
 //!
+//! [[budget]]
+//! spec_row = "Launch -> the settled screen, real config"
+//! scenario = "startup"
+//! metric = "settled_ratio_p50"
+//! max = 1.0
+//! kind = "felt"             # optional; "felt" or "diagnostic"
+//! felt = "launch -> the screen you can start working in"
+//! config = "real"           # optional; which config the row is measured under
+//!
 //! [[shortfall]]
 //! scenario = "echo"
 //! fixture = "minimal"
@@ -56,6 +65,14 @@
 //! rather than a measurement of it.
 //!
 //! No state is quiet: everything except a value inside its bound prints.
+//!
+//! `kind`, `felt`, `config` and `decomposes` describe what a row *means* to
+//! a person rather than how it is checked, and every one of them is
+//! optional: the rows that predate the vocabulary carry none, and a loader
+//! that demanded them would refuse a file the gate has always accepted.
+//! Nothing reads them yet beyond the report, so a row that omits `kind` is
+//! not thereby a lesser bound -- it is a bound whose felt statement has not
+//! been written down.
 
 use std::path::Path;
 
@@ -77,6 +94,18 @@ pub struct Budget {
     pub max: f64,
     /// Machine classes this bound applies to; `None` means all of them.
     pub classes: Option<Vec<String>>,
+    /// What kind of claim this row makes: `felt` for a bound a person
+    /// experiences directly, `diagnostic` for one that only explains a
+    /// felt row's number.
+    pub kind: Option<String>,
+    /// The moment a `felt` row stands for, in the words a person would use
+    /// for it.
+    pub felt: Option<String>,
+    /// The configuration the bound is stated under -- `real` for a
+    /// plugin config a user would run, `minimal` for a bare engine.
+    pub config: Option<String>,
+    /// The `scenario.metric` this row decomposes, for a `diagnostic`.
+    pub decomposes: Option<String>,
 }
 
 impl Budget {

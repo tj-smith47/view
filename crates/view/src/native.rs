@@ -214,15 +214,16 @@ impl NativeSession {
     /// statusline, so this push does not read `self.cfg` or `self.plan` at
     /// all.
     ///
-    /// `cmdheight=0` follows the attach rather than `self.plan`, and it is
-    /// the attach that now follows the switches: the last screen line is
+    /// `cmdheight=0` follows the externalized surfaces rather than
+    /// `self.plan`, and the attach that externalizes them closes the
+    /// sequence: the last screen line is
     /// nvim's own cmdline and message area, so taking it away is correct
     /// only for a session that externalized *both* of those surfaces. A
     /// session that left either one with nvim -- `native.palette = false`
     /// keeps the cmdline there, `native.notifications = false` keeps the
     /// messages -- needs the row it draws them on, and zeroing it would
     /// leave the user typing `:` into a line that is not on screen.
-    fn take_over(&mut self, model: &Model) -> Vec<Effect> {
+    fn take_over(&mut self, model: &mut Model) -> Vec<Effect> {
         if self.handed_over {
             return Vec::new();
         }
@@ -261,6 +262,23 @@ impl NativeSession {
             let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
             format!("takeover options={taken:?} channel={}", self.channel_id)
         });
+        // after every call above and after the reply `update()` put ahead of
+        // all of them: nvim applies one connection's traffic in the order it
+        // arrives, so the frame the attach produces is drawn with this
+        // takeover already in force -- a `cmdheight` or a `laststatus`
+        // landing after it would cost a second frame showing the surface
+        // view had just taken. The reply leads because nvim is blocked
+        // inside the request it answers, and a redraw asked for while it is
+        // blocked is deferred to a flush carrying nothing
+        // ([`Model::takes_attach`]).
+        effects.extend(model.takes_attach().map(Effect::Rpc));
+        // and last of all: `nvim_ui_set_option` is about a UI on this
+        // channel and is refused where there is none. The claim is worth
+        // nothing earlier anyway -- nvim's own tty defaults have finished
+        // looking for a terminal by `VimEnter`, so claiming here buys
+        // `ui_send` delivery without the startup query and keystroke-eating
+        // wait that finding it earlier would have cost
+        effects.push(Effect::Rpc(RpcCall::ClaimStdoutTty));
         effects
     }
 
@@ -460,6 +478,52 @@ mod tests {
         assert!(
             session.follow_up(&mut m, Stage::VimEnter).is_empty(),
             "a second VimEnter must register nothing: the second pass would read view's own keys back as the user's"
+        );
+    }
+
+    /// The UI goes on last, behind every takeover call, so the one frame the
+    /// attach produces is drawn with the surfaces already taken -- and the
+    /// option that only exists once a UI does goes on behind the attach
+    /// itself, where nvim will accept it.
+    #[test]
+    fn the_attach_closes_the_takeover_and_the_stdout_claim_closes_the_attach() {
+        let mut session = NativeSession::all_enabled(7, None);
+        let mut m = model();
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let tail: Vec<&Effect> = effects.iter().rev().take(2).collect();
+        assert!(
+            matches!(tail[0], Effect::Rpc(RpcCall::ClaimStdoutTty)),
+            "the stdout claim must be the last call of the takeover: {effects:?}"
+        );
+        assert!(
+            matches!(tail[1], Effect::Rpc(RpcCall::UiAttach { .. })),
+            "the attach must be the call the takeover itself closes with: {effects:?}"
+        );
+        assert!(
+            session.follow_up(&mut m, Stage::VimEnter).is_empty(),
+            "one connection is attached exactly once"
+        );
+    }
+
+    /// A session whose UI went on before its config was sourced -- the one
+    /// spawn that keeps `--embed`'s barrier, because nvim reads its piped
+    /// stdin during startup (`EngineConfig::attaches_late`) -- still owes
+    /// the claim, and must not attach a second time.
+    #[test]
+    fn a_session_already_attached_claims_stdout_without_attaching_again() {
+        let mut session = NativeSession::all_enabled(7, None);
+        let mut m = model();
+        let _ = m.takes_attach();
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::UiAttach { .. }))),
+            "a second attach on one connection: {effects:?}"
+        );
+        assert!(
+            matches!(effects.last(), Some(Effect::Rpc(RpcCall::ClaimStdoutTty))),
+            "the stdout claim is owed either way: {effects:?}"
         );
     }
 

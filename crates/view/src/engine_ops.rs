@@ -10,6 +10,7 @@ use view_core::msg::{
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
 };
+use view_core::native::ext::Ext;
 use view_core::native::mappings::MappingSpec;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::nvim_api::BufWriteOutcome;
@@ -48,6 +49,15 @@ pub trait EngineOps {
     /// the session, so a plugin's messages cross as `ext_messages` traffic
     /// (see `RpcCall::HoldNotify`).
     fn hold_notify(&self) -> Result<(), EngineError>;
+    /// Attaches view as nvim's UI, externalizing exactly `surfaces` (see
+    /// `RpcCall::UiAttach`).
+    fn ui_attach(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[Ext],
+        stdin_relay: bool,
+    ) -> Result<(), EngineError>;
     /// Answers a request nvim is blocked on.
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError>;
     /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe tagged
@@ -282,6 +292,16 @@ impl EngineOps for EngineHandle {
     fn hold_notify(&self) -> Result<(), EngineError> {
         self.hold_notify()
     }
+    fn ui_attach(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[Ext],
+        stdin_relay: bool,
+    ) -> Result<(), EngineError> {
+        let names: Vec<&str> = surfaces.iter().copied().map(Ext::as_str).collect();
+        self.ui_attach_notify(width, height, &names, stdin_relay)
+    }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.reply(token, value)
     }
@@ -460,6 +480,15 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         (**self).hold_notify()
+    }
+    fn ui_attach(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[Ext],
+        stdin_relay: bool,
+    ) -> Result<(), EngineError> {
+        (**self).ui_attach(width, height, surfaces, stdin_relay)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
@@ -642,6 +671,15 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         (**self).hold_notify()
+    }
+    fn ui_attach(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[Ext],
+        stdin_relay: bool,
+    ) -> Result<(), EngineError> {
+        (**self).ui_attach(width, height, surfaces, stdin_relay)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
@@ -849,6 +887,19 @@ impl EngineOps for FakeOps {
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         self.record("hold_notify()".to_string())
+    }
+    fn ui_attach(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[Ext],
+        stdin_relay: bool,
+    ) -> Result<(), EngineError> {
+        let names: Vec<&str> = surfaces.iter().copied().map(Ext::as_str).collect();
+        self.record(format!(
+            "ui_attach({width},{height},{},{stdin_relay})",
+            names.join("+")
+        ))
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.record(format!("reply({},{value:?})", token.msgid))
@@ -1089,6 +1140,15 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn ui_attach(
+        &self,
+        _width: u16,
+        _height: u16,
+        _surfaces: &[Ext],
+        _stdin_relay: bool,
+    ) -> Result<(), EngineError> {
         Ok(())
     }
     fn reply(&self, _token: ReplyToken, _value: ReplyValue) -> Result<(), EngineError> {

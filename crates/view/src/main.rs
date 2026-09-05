@@ -1000,13 +1000,23 @@ fn main() -> Result<()> {
     #[cfg(unix)]
     let _stderr = route_stderr_off_the_terminal();
 
-    // ahead of `Term::init` rather than after it: `nvim --embed` runs no
-    // startup at all -- no `init.lua`, no file opened -- until a UI
-    // attaches, so everything this thread does before the attach thread
-    // reaches `ui_attach` is prepended whole to when the opened buffer
-    // reaches the screen. The child needs no terminal to come up: only the
-    // attach needs the size, and that reaches the thread through
-    // `attach_at` below, which is itself ahead of the capability probe.
+    // ahead of the spawn, and one ioctl: the child is started `--headless`
+    // and lays its own windows out while this thread is still resolving
+    // what kind of terminal it is talking to, so it has to be told the size
+    // at spawn or it would source the user's config against nvim's 80x24
+    // default and reflow every window at the attach.
+    let (width, height) =
+        view_tui::terminal::size_now().context("failed to read the terminal size")?;
+
+    // ahead of `Term::init` rather than after it: the child sources
+    // `init.lua` and opens its files without waiting for a UI
+    // (`EngineConfig::with_late_attach`), so everything this thread does
+    // between here and the attach is work nvim performs underneath rather
+    // than behind. What sits in that window is the capability probe's first
+    // window -- up to `tiers::PROBE_DEADLINE`, and a full network round
+    // trip of it over ssh. The probed tier reaches the screen on the first
+    // frame anyway: it is read off `term` below, before anything is
+    // painted.
     //
     // The guard, not the call, is what makes this safe: from here to
     // `engine_result` this process owns a live nvim it has no other handle
@@ -1014,19 +1024,30 @@ fn main() -> Result<()> {
     // channel while doing so, which is why the guard owns every sender the
     // attach can wait for rather than leaving one as a local here (see
     // `AttachGuard`).
+    // the `ext_*` set `nvim_ui_attach` requests follows the `[native]`
+    // switches, so a surface a user turned off is never taken from their
+    // plugins in the first place, and `[engine] single_grid` for whether
+    // nvim addresses each window's grid separately. Resolved once here and
+    // handed to `NativeSession` afterwards rather than read again there --
+    // two reads of one file can answer differently, and the attach would
+    // then have externalized a surface the rest of the session believes it
+    // declined. Ahead of the spawn because the child answers `nvim_list_uis()`
+    // with them all through a startup no UI is present for
+    // ([`EngineConfig::with_late_attach`])
+    let surfaces = view_native::config::ext_surfaces(&resolved);
+    let names: Vec<&str> = surfaces
+        .iter()
+        .copied()
+        .map(view_core::native::ext::Ext::as_str)
+        .collect();
+    // read before the config is consumed: `update()` builds the attach and
+    // has no config left to ask which descriptor the child's piped stdin is
+    // on, nor whether the child was already attached on its way up
+    let cfg = cfg.with_late_attach(width, height, &names);
+    let stdin_relay = cfg.stdin_relay_requested();
+    let attaches_late = cfg.attaches_late();
     let mut attach = startup::attach_in_background(cfg);
 
-    // ahead of `Term::init`, and this is the whole reason it can be: the
-    // attach needs a size and an `ext_*` set, the set follows the `[native]`
-    // switches rather than anything the terminal has to answer for, and the
-    // size is one ioctl. What sits between here and `Term::init`'s return is
-    // the capability probe's first window -- up to `tiers::PROBE_DEADLINE`,
-    // and a full network round trip of it over ssh -- which the child now
-    // spends sourcing the user's config instead of waiting to be told to
-    // start. The probed tier reaches the screen on the first frame anyway:
-    // it is read off `term` below, before anything is painted.
-    let (width, height) =
-        view_tui::terminal::size_now().context("failed to read the terminal size")?;
     let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
     let term_size = view_tui::terminal::TermSizeCell::default();
     #[cfg(unix)]
@@ -1036,16 +1057,7 @@ fn main() -> Result<()> {
     );
     #[cfg(not(unix))]
     let msg_tx = wake::LoopSender::new(raw_tx.clone());
-    // the `ext_*` set `nvim_ui_attach` requests follows the `[native]`
-    // switches, so a surface a user turned off is never taken from their
-    // plugins in the first place, and `[engine] single_grid` for whether
-    // nvim addresses each window's grid separately. Resolved once here and
-    // handed to `NativeSession` afterwards rather than read again there --
-    // two reads of one file can answer differently, and the attach would
-    // then have externalized a surface the rest of the session believes it
-    // declined.
-    let surfaces = view_native::config::ext_surfaces(&resolved);
-    attach.attach_at(msg_tx.clone(), width, height, surfaces.clone());
+    attach.release(msg_tx.clone(), width, height, surfaces.clone());
 
     let mut term = Term::init(resolved.ui.tier.value.map(Tier::from))
         .context("failed to initialize terminal backend")?;
@@ -1095,9 +1107,16 @@ fn main() -> Result<()> {
         pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
     }
 
-    // the same set the attach above was given: `Model::owns` answers about
-    // the surfaces nvim was actually asked for, so the two can never differ
+    // the same set the attach is given: `Model::owns` answers about the
+    // surfaces nvim is actually asked for, so the two can never differ
     model.attach_surfaces(surfaces);
+    model.stdin_relay = stdin_relay;
+    if !attaches_late {
+        // a child that had to be attached before it could read its piped
+        // stdin is attached already (`startup::spawn_and_attach`), and its
+        // `VimEnter` must not send a second one
+        let _ = model.takes_attach();
+    }
 
     // seeded here, once, before the engine exists: `update()` has no
     // filesystem access, so whether this project is trusted for AI agent
@@ -1860,6 +1879,19 @@ mod tests {
     /// refused remote, a relayed stdin), so a new entry in this list is
     /// either one of those or a read that owes the engine's startup its
     /// latency and must move below the spawn instead.
+    ///
+    /// The terminal size is the second such exception, and the same shape as
+    /// the first: the child sources the user's config against the geometry
+    /// the spawn hands it, so a size read after the spawn would be a size the
+    /// config never saw. It is one `ioctl` on a descriptor this process
+    /// already holds.
+    ///
+    /// The `ext_*` set is the third, and the same shape again: the child
+    /// answers `nvim_list_uis()` with those surfaces for the whole of a
+    /// startup no UI is attached for, which is when a plugin decides what
+    /// to claim ([`view_engine::EngineConfig::with_late_attach`]). It reads
+    /// nothing further -- the config chain above has already been resolved,
+    /// and this walks the `[native]` table it produced.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1886,6 +1918,16 @@ mod tests {
                 "view_tui::input::adopt_terminal_stdin",
                 "vlog::log",
                 "route_stderr_off_the_terminal",
+                "view_tui::terminal::size_now",
+                "context",
+                "view_native::config::ext_surfaces",
+                "iter",
+                "copied",
+                "map",
+                "collect",
+                "with_late_attach",
+                "stdin_relay_requested",
+                "attaches_late",
             ],
             "a call added before the engine spawn prepends its own latency \
              to nvim's whole startup: move it below the spawn, or state \
@@ -1899,13 +1941,20 @@ mod tests {
     /// unless `AttachGuard` is still alive to kill it. Each of these is a
     /// `?`; the guard is what makes a new one safe by construction, and
     /// this is what catches the reordering that would put one outside it.
+    ///
+    /// The terminal size is read ahead of the window rather than inside it,
+    /// and owes it nothing: the spawn it feeds has not happened yet, so a
+    /// failure there has no child to leave behind.
     #[test]
     fn every_fallible_startup_step_runs_inside_the_attach_guards_window() {
         let spawn = offset_of("startup::attach_in_background(");
         let result = offset_of(".engine_result()");
+        assert!(
+            offset_of("view_tui::terminal::size_now()") < spawn,
+            "the geometry the spawn is armed with must be read before it"
+        );
         for step in [
             "Term::init(",
-            "view_tui::terminal::size_now()",
             "startup::paint_shell_frame(",
             ".settle_probe()",
             "InputSource::open",

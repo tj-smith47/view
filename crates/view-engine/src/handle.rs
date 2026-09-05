@@ -1032,8 +1032,6 @@ impl EngineHandle {
                         };
                         let routed = if method == "view_vim_enter" {
                             Some(Msg::EngineRequest(EngineRequest::VimEnter { token }))
-                        } else if method == "view_ui_enter" {
-                            Some(Msg::EngineRequest(EngineRequest::UiEnter { token }))
                         } else if method == "view_clipboard_get" {
                             decode_clipboard_get(token, &params)
                         } else if method == "view_clipboard_set" {

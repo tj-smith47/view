@@ -53,12 +53,6 @@ const BUF_SET_TEXT_TIMEOUT: Duration = Duration::from_secs(5);
 /// outside.
 const UI_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Upper bound on how long [`EngineHandle::register_vim_enter_autocmd`]
-/// waits for nvim's reply. Same rationale as [`UI_ATTACH_TIMEOUT`]: this
-/// runs during startup, before the paint loop's own unbounded-notify regime
-/// begins, so it still needs a bound.
-const REGISTER_VIM_ENTER_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Upper bound on how long [`EngineHandle::eval_str`] waits for nvim's
 /// reply. Callers of this probe are test/oracle harnesses driving their own
 /// bounded polling loops (see `view-oracle`'s `EngineSession`), never the
@@ -448,7 +442,7 @@ return claimed";
 /// wait rather than an unbounded one, and so is a negative `ttimeoutlen`.
 /// Both mean the engine reads a run that stopped short on the pass that
 /// read it, which is why neither reaches the wire as a sentinel.
-const REGISTER_BRIDGE_CHUNK: &str = "\
+pub(crate) const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
 local function relay(event)
@@ -592,7 +586,7 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
 /// The notify is wrapped in a `pcall` for the reason the float sweep's is:
 /// it is timer-driven, so it is one of the few that can land after a channel
 /// teardown.
-const PROBE_CLAIMANTS_CHUNK: &str = "\
+pub(crate) const PROBE_CLAIMANTS_CHUNK: &str = "\
 local channel, modules = ...
 local group = vim.api.nvim_create_augroup(
   'view_bridge_claimants', { clear = true })
@@ -2473,72 +2467,41 @@ impl EngineHandle {
         Ok(())
     }
 
-    /// Registers a one-shot `VimEnter` autocmd whose callback issues a
-    /// BLOCKING `rpcrequest(channel_id, 'view_vim_enter')` back to this
-    /// connection -- the end-to-end proof that `update()`'s
-    /// `Msg::EngineRequest(EngineRequest::VimEnter)` arm and its
-    /// `Effect::Reply` actually unblock nvim's own main loop, not merely
-    /// that the message decodes (a deadlock here hangs startup forever).
+    /// [`ui_attach`](Self::ui_attach) as a notification: the same call,
+    /// with the same options, sent by a caller that must not wait for the
+    /// answer.
     ///
-    /// # Ordering: call this BEFORE [`ui_attach`](Self::ui_attach), never
-    /// after
-    ///
-    /// Live-verified against a real `nvim --clean --embed`: registering
-    /// this autocmd immediately AFTER `ui_attach` returns loses
-    /// the race entirely -- a `--clean` startup's config sourcing and
-    /// `VimEnter` dispatch were both already complete (300+ redraw damage
-    /// events already staged) by the time the registration request even
-    /// reached nvim's main loop. The embed contract's "attach precedes
-    /// config sourcing" guarantee protects exactly the window BEFORE
-    /// `ui_attach`: nvim services ordinary requests on this connection
-    /// freely while blocked waiting for a UI to attach, but cannot begin
-    /// sourcing config (and thus cannot fire `VimEnter`) until `ui_attach`
-    /// itself returns. Registering here, before that call, is what actually
-    /// wins the race; after it is not "usually late", it is unconditionally
-    /// too late for a `--clean`-speed startup.
-    ///
-    /// `channel_id` is this connection's own id from `nvim_get_api_info`
-    /// (captured in [`crate::process::Engine::api_info`] at spawn time): a
-    /// self-targeted `rpcrequest` needs an explicit channel number, and nvim
-    /// has no "loopback" shorthand for dispatching a request back to the
-    /// very connection asking.
-    ///
-    /// A `request`, not a `notify`, for the same reason [`ui_attach`]
-    /// (Self::ui_attach) is: the caller needs to know the autocmd is live
-    /// before it dares call `ui_attach`, or config sourcing could start
-    /// racing an unregistered hook.
-    ///
-    /// `UIEnter` is registered in the same breath because it is the other
-    /// half of the same startup: nvim fires it once, after every `VimEnter`
-    /// autocommand has run, so it is the first moment the screen holds what
-    /// the user's config opened. It blocks nvim the way `VimEnter` does,
-    /// and that is what it is for -- nvim cannot flush again until the
-    /// reply lands, so the frame that releases startup's grid hold
-    /// (`view_core::model::Model::withholds_grid`) is necessarily the first
-    /// one drawn with those windows open, which a notification could never
-    /// promise: redraw damage coalesces behind one token, and the release
-    /// could land after the flush it was meant to let through. Both hooks
-    /// go out together, in one command, so a caller cannot register the
-    /// half that blocks without the half that answers.
+    /// The paint loop is that caller. view attaches after nvim's own
+    /// `VimEnter` (see `view_core::model::Model::takes_attach`), which is a
+    /// message the loop dispatches, and a blocking request made from there
+    /// would be the loop awaiting RPC. Nothing is lost by not waiting:
+    /// nvim's answer to an attach it accepted is the redraw batch itself,
+    /// which arrives on this connection either way, and an engine that
+    /// cannot answer at all is already reported through the pump's own
+    /// stopped path.
     ///
     /// # Errors
     ///
-    /// Returns the `EngineError` from the underlying request if it fails,
-    /// nvim rejects the command, or the reply does not arrive within
-    /// [`REGISTER_VIM_ENTER_TIMEOUT`].
-    pub fn register_vim_enter_autocmd(&self, channel_id: u64) -> Result<(), EngineError> {
-        let cmd = format!(
-            "autocmd VimEnter * ++once \
-             call rpcrequest({channel_id}, 'view_vim_enter')\n\
-             autocmd UIEnter * ++once \
-             call rpcrequest({channel_id}, 'view_ui_enter')"
-        );
-        self.request_timeout(
-            "nvim_command",
-            vec![Value::from(cmd)],
-            REGISTER_VIM_ENTER_TIMEOUT,
-        )?;
-        Ok(())
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn ui_attach_notify(
+        &self,
+        width: u16,
+        height: u16,
+        surfaces: &[&str],
+        stdin_relay: bool,
+    ) -> Result<(), EngineError> {
+        let mut opts = attach_options(surfaces);
+        if stdin_relay {
+            opts.push((
+                Value::from("stdin_fd"),
+                Value::from(i64::from(STDIN_RELAY_CHILD_FD)),
+            ));
+        }
+        self.notify(
+            "nvim_ui_attach",
+            vec![Value::from(width), Value::from(height), Value::Map(opts)],
+        )
     }
 
     /// Registers the single `view_bridge` autocmd group -- the one channel
@@ -2548,26 +2511,22 @@ impl EngineHandle {
     /// `view_bridge` notification carrying an event name and the event's
     /// `match`; `colorscheme` becomes `Msg::ColorSchemeChanged`.
     ///
-    /// # Ordering: call this BEFORE [`ui_attach`](Self::ui_attach), never
-    /// after
+    /// # Ordering: the group has to exist before the config is sourced
     ///
-    /// The window this needs is the one
-    /// [`register_vim_enter_autocmd`](Self::register_vim_enter_autocmd)
-    /// documents in full: nvim cannot begin sourcing the user's config until
-    /// `ui_attach` returns, and a config whose `:colorscheme` fires before
-    /// this group exists is a switch nothing observes -- the cold-start cache
-    /// then keeps whatever it was seeded with until the user changes scheme a
-    /// second time.
+    /// A config whose `:colorscheme` fires before this group exists is a
+    /// switch nothing observes -- the cold-start cache then keeps whatever it
+    /// was seeded with until the user changes scheme a second time. view's
+    /// own startup therefore does not call this at all: it hands
+    /// [`REGISTER_BRIDGE_CHUNK`] to the child on the spawn's own `--cmd`
+    /// (`crate::process::EngineConfig::with_late_attach`), which runs ahead
+    /// of `init.lua` rather than racing it. This method is what a caller that
+    /// already has a running child uses to reach the same state.
     ///
-    /// A `notify`, where `register_vim_enter_autocmd` is a `request`, and the
-    /// difference is not an inconsistency. That one must be *live* before
-    /// `ui_attach` is called, because what it registers is a hook nvim will
-    /// block on. This one only needs to be *ordered* before it: the writer
-    /// thread preserves the order calls are made in and nvim services one
-    /// connection's stream in order, so this chunk runs before nvim answers
-    /// the `ui_attach` request and therefore before config sourcing can fire
-    /// anything. Waiting for a reply would buy nothing and would put a
-    /// bounded blocking call on the same trait the paint loop drives.
+    /// A `notify` rather than a `request`: the writer thread preserves the
+    /// order calls are made in and nvim services one connection's stream in
+    /// order, so this chunk runs before anything sent after it. Waiting for a
+    /// reply would buy nothing and would put a bounded blocking call on the
+    /// same trait the paint loop drives.
     ///
     /// The cost of a notify is that a chunk nvim rejects fails silently.
     /// [`REGISTER_BRIDGE_CHUNK`] is constant, so the only way it can fail is
@@ -4224,31 +4183,6 @@ mod tests {
         });
         let (h, _notif_rx) = EngineHandle::start(our_read, our_write);
         (h, cap_rx)
-    }
-
-    /// Pins the exact vimscript shape live-verified against a real `nvim
-    /// --clean --embed`: `++once` (self-clearing, never fires twice), plain
-    /// `rpcrequest` (not `rpcnotify` -- the spec mandates blocking here),
-    /// targeting `channel_id` explicitly (nvim has no loopback shorthand).
-    /// Both hooks in one command, newline-separated, so no caller can hold
-    /// the one that blocks nvim without the one that unblocks it.
-    #[test]
-    fn register_vim_enter_autocmd_sends_the_exact_verified_vimscript_shape() {
-        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
-        h.register_vim_enter_autocmd(7).unwrap();
-        let (method, params) = cap_rx
-            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
-            .unwrap();
-        assert_eq!(method, "nvim_command");
-        assert_eq!(
-            params,
-            vec![Value::from(
-                "autocmd VimEnter * ++once \
-                 call rpcrequest(7, 'view_vim_enter')\n\
-                 autocmd UIEnter * ++once \
-                 call rpcrequest(7, 'view_ui_enter')"
-            )]
-        );
     }
 
     /// The registration crosses as one chunk with its data as arguments,

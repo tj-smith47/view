@@ -538,7 +538,7 @@ pub type CellMetrics = BTreeMap<String, f64>;
 /// from this list is refused at the moment it produces it, before anything
 /// is recorded, and the per-metric policy table in this module's tests is
 /// checked against this list rather than hand-kept beside it.
-pub const RECORDED_METRICS: [&str; 34] = [
+pub const RECORDED_METRICS: [&str; 35] = [
     "ratio_p50",
     "ratio_p99",
     "paired_delta_p99_ms",
@@ -549,8 +549,9 @@ pub const RECORDED_METRICS: [&str; 34] = [
     "marker_ratio_p50",
     "marker_ratio_p99",
     "first_frame_cold_ms",
-    "first_frame_ratio_p50",
+    "settled_ratio_p50",
     "first_frame_ratio_p99",
+    "server_delta_ms",
     "pss_mb",
     "phys_footprint_mb",
     "local_pss_mb",
@@ -2431,7 +2432,7 @@ mod tests {
             ("ratio_p50", ratio, ratio),
             ("pace_ratio", ratio, ratio),
             ("marker_ratio_p50", ratio, ratio),
-            ("first_frame_ratio_p50", ratio, ratio),
+            ("settled_ratio_p50", ratio, ratio),
             ("control_ratio_p50", ratio, ratio),
             ("speculated_ratio_p50", ratio, ratio),
             // remote_local_ratio: a single window measured the paired
@@ -2476,6 +2477,12 @@ mod tests {
             ("speculated_paint_p99_ms", None, absolute),
             ("paired_delta_p99_ms", None, signed),
             ("control_delta_p99_ms", None, signed),
+            // server_delta_ms: a difference between two cold spawns
+            // interleaved in one run, so the cross-boot state that exempts
+            // each side's own absolute is common to both and cancels; it
+            // gates on every class, in the signed shape a delta that reads
+            // below zero whenever view costs the engine nothing needs
+            ("server_delta_ms", signed, signed),
         ];
         // the table above classifies the declared vocabulary, so the two
         // cannot drift: a metric declared and left unclassified, or

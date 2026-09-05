@@ -448,10 +448,17 @@ impl<E: EngineOps> Executor<E> {
                         paths,
                         force,
                     } => self.ops.checktime(request_id, &paths, force),
+                    RpcCall::UiAttach {
+                        width,
+                        height,
+                        surfaces,
+                        stdin_relay,
+                    } => self.ops.ui_attach(width, height, &surfaces, stdin_relay),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile.
-                    // BufSetText, the two AiFs calls, and Checktime are
-                    // matched explicitly above rather than falling through
+                    // BufSetText, the two AiFs calls, Checktime and
+                    // UiAttach are matched explicitly above rather than
+                    // falling through
                     // here: unlike every other call this catch-all covers, a
                     // silently no-op'd write would drop a buffer edit the
                     // user already accepted, a silently no-op'd filesystem
@@ -459,7 +466,9 @@ impl<E: EngineOps> Executor<E> {
                     // request nothing else will ever settle, and a silently
                     // no-op'd checktime would leave a watcher-detected write
                     // -- or the user's own "reload, discard local edits"
-                    // answer to a conflict prompt -- never carried out.
+                    // answer to a conflict prompt -- never carried out, and
+                    // a silently no-op'd attach would leave a session that
+                    // never paints anything but its shell frame.
                     _ => return Flow::Continue,
                 };
                 match result {

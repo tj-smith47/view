@@ -284,9 +284,20 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             Ok(metrics)
         }
         "startup" => {
-            let pair = paired_specs(&world, fixture, bins)?;
+            let mut pair = paired_specs(&world, fixture, bins)?;
             plant_startup_marker(&world, "view")?;
             plant_startup_marker(&world, "nvim")?;
+            let view_log = world.hermetic_dir.join("view-startuptime.log");
+            let nvim_log = world.hermetic_dir.join("nvim-startuptime.log");
+            for (spec, log) in [(&mut pair.view, &view_log), (&mut pair.nvim, &nvim_log)] {
+                // ahead of the file operand rather than after it: view
+                // forwards its trailing arguments to the engine in the order
+                // they were typed, and the operand is what decides the
+                // buffer the settled screen is measured on
+                let at = spec.args.len().saturating_sub(1);
+                spec.args.insert(at, OsString::from("--startuptime"));
+                spec.args.insert(at + 1, log.clone().into_os_string());
+            }
             let outcome = startup::run(
                 ViewSpec(&pair.view),
                 NvimSpec(&pair.nvim),
@@ -294,6 +305,8 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 STARTUP_MARKER,
             )
             .with_context(|| format!("startup/{fixture} run failed"))?;
+            let server_delta = startup::server_delta_ms(&view_log, &nvim_log, protocol.warmup)
+                .with_context(|| format!("startup/{fixture} engine-startup delta"))?;
             println!(
                 "{}",
                 report::paired_cell(scenario, fixture, "view", &outcome.summary, protocol.warmup)
@@ -301,8 +314,12 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             let mut metrics = CellMetrics::new();
             for (metric, value) in [
                 (startup::FIRST_FRAME_METRIC, outcome.gated_first_frame_ms),
-                ("first_frame_ratio_p50", outcome.gated_first_frame_ratio_p50),
+                (
+                    startup::SETTLED_RATIO_METRIC,
+                    outcome.gated_first_frame_ratio_p50,
+                ),
                 ("first_frame_ratio_p99", outcome.gated_first_frame_ratio_p99),
+                (startup::SERVER_DELTA_METRIC, server_delta),
             ] {
                 println!("{}", report::aggregate_line(metric, value, 1));
                 metrics.insert(metric.to_string(), value);

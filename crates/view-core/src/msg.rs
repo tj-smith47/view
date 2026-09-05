@@ -72,13 +72,23 @@ pub enum Msg {
         reason: Option<String>,
     },
     /// Loop plumbing: startup's pre-attach key-buffering loop consumes this
-    /// the moment the background attach thread finishes `nvim_ui_attach`,
-    /// unblocking its `recv()` without a poll or a timer. Never reachable
-    /// once the steady-state loop in `runtime::run` begins (the sender side
-    /// only ever fires once, before that loop starts), but `update()` still
-    /// carries a no-op arm for it, mirroring `RedrawReady`/`EngineStopped`'s
-    /// contract.
+    /// the moment the background attach thread has the engine up and its
+    /// startup hooks registered, unblocking its `recv()` without a poll or
+    /// a timer. Never reachable once the steady-state loop in
+    /// `runtime::run` begins (the sender side only ever fires once, before
+    /// that loop starts), but `update()` still carries a no-op arm for it,
+    /// mirroring `RedrawReady`/`EngineStopped`'s contract.
     EngineReady,
+    /// The startup ran out of time waiting for nvim's `VimEnter`, so the
+    /// attach happens now with whatever the child is doing.
+    ///
+    /// A startup can stop short of `VimEnter` for as long as it likes --
+    /// `vim.fn.input()` in a config, a `-- More --` prompt, a plugin
+    /// manager installing on first launch -- and every one of those is a
+    /// session nvim's own TUI would be showing something for. The attach
+    /// is what makes them visible and answerable, so it cannot be left
+    /// waiting on an event that may never come.
+    AttachDeadline,
     /// A connection is attached, its pump is running, and view may ask it
     /// things: the moment the cutover hands the session over to a new engine,
     /// whether that is the first one or a replacement.
@@ -996,21 +1006,6 @@ pub enum EngineRequest {
     VimEnter {
         token: ReplyToken,
     },
-    /// nvim fired `UIEnter`: every `VimEnter` autocommand has run, so the
-    /// windows the user's config opens are open and the next screen nvim
-    /// draws is the one its own TUI would first show. That is what lifts
-    /// startup's grid hold (see [`crate::model::Model::withholds_grid`]).
-    ///
-    /// A separate event from [`Self::VimEnter`], and later than it, because
-    /// view's `VimEnter` hook is registered before the user's config is
-    /// sourced and therefore runs ahead of every hook that config adds --
-    /// including the one that opens the file tree. Blocking, like every
-    /// request here, and that is the point: nvim cannot flush again until
-    /// the reply lands, so the first flush after it is the frame the hold
-    /// was waiting for.
-    UiEnter {
-        token: ReplyToken,
-    },
     /// `"+p`/`"*p`: the injected `g:clipboard.paste` closure blocks nvim on
     /// this `rpcrequest`, so the loop must delegate rather than answer
     /// inline -- see [`Effect::ClipboardRead`]. `register` is `'+'` or
@@ -1761,6 +1756,26 @@ pub enum RpcCall {
     /// `Msg::HlProbeReply` through the same dispatch seam other
     /// engine-originated traffic uses, never by blocking the caller that
     /// emitted this effect.
+    /// Attaches view as nvim's UI, externalizing exactly `surfaces`.
+    ///
+    /// Issued after nvim's own `VimEnter`, never at spawn: the child runs
+    /// its startup `--headless` and the attach is what turns the settled
+    /// screen into the first frame (see
+    /// [`crate::model::Model::takes_attach`], which is the only place this
+    /// is built).
+    ///
+    /// Fire-and-forget like every other `RpcCall`, and it can be: nvim
+    /// answers an attach it accepts with the redraw batch itself, and an
+    /// engine that cannot answer at all is already the engine-down path.
+    UiAttach {
+        width: u16,
+        height: u16,
+        surfaces: Vec<crate::native::ext::Ext>,
+        /// Names `stdin_fd` in the attach options, for a session that
+        /// handed the child a duplicate of its own stdin
+        /// (`:help ui-startup-stdin`).
+        stdin_relay: bool,
+    },
     GetDefaultHl {
         generation: u64,
     },

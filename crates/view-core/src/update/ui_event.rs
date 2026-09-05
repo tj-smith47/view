@@ -187,24 +187,11 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         }
         UiEvent::Flush => {
             model.dirty = true;
-            // a startup that has parked the cursor in nvim's own message
-            // area just past the text it drew is prompting the user out of the grid
-            // -- the one place a prompt lands on a session that externalized
-            // neither the cmdline nor the messages -- so the hold ends here
-            // rather than hiding it. Costs the two bools `withholds_grid`
-            // reads on every flush after the hold is over, and the cursor
-            // row's cells only under it.
-            if model.withholds_grid() && model.engine.grids().message_area_has_text() {
-                model.note_startup_needs_screen();
-            }
-            // idempotent past the first Flush view does not withhold: see
-            // Model::content_painted's doc comment for why this never resets,
-            // and Model::withholds_grid for which flush is the first one
-            if model.withholds_grid() {
-                model.withheld_flush = true;
-            } else {
-                model.content_painted = true;
-            }
+            // idempotent past the first Flush: view attaches after the
+            // config has been sourced, so this one carries the settled
+            // screen (see Model::takes_attach), and Model::content_painted
+            // documents why it never resets
+            model.content_painted = true;
             Vec::new()
         }
         UiEvent::ModeInfoSet {

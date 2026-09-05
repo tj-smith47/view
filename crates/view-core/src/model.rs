@@ -63,49 +63,36 @@ pub struct Model {
     /// the shell frame (a themed statusline bar, see
     /// `view_surface::LayerKind::Shell`) instead of an unthemed empty grid
     /// while the engine attaches. `update()` flips it back to `true` on the
-    /// first `Flush` it does not withhold (see `Self::withholds_grid`), at
-    /// which point `render()` drops the `Shell` layer for good and starts
-    /// painting the grid. A mid-session redraw storm never resets it -- it
-    /// is not a second pre-attach state -- but a respawned engine is one,
-    /// and [`Self::rearm_startup_hold`] clears this along with the rest of
-    /// the hold so the replacement's own pre-`VimEnter` screen is withheld
-    /// the way the first engine's was.
+    /// first `Flush`, which is the settled screen: the UI attaches after
+    /// the config has been sourced (see [`Self::takes_attach`]), so the
+    /// first frame nvim draws is the one its own TUI would first show. A
+    /// mid-session redraw storm never resets it -- it is not a second
+    /// pre-attach state -- but a respawned engine is one, and a restart
+    /// sets it back to `false` so the shell frame carries the supervision
+    /// notice until the replacement's own first frame lands.
     pub content_painted: bool,
-    /// Whether nvim has reached `UIEnter` -- the event it fires once every
-    /// `VimEnter` autocommand has run, so the windows the user's config
-    /// opens are open and the screen nvim is about to draw is the one its
-    /// own TUI would first show.
+    /// Whether the UI attach has been issued for the engine this session
+    /// holds.
     ///
-    /// `VimEnter` itself is too early to read that way: view's `VimEnter`
-    /// hook is registered before the config is sourced and therefore runs
-    /// *first* of all of them, ahead of the one that opens the file tree.
+    /// The attach happens after nvim's own `VimEnter` (see
+    /// [`Self::takes_attach`]), and two paths can reach it -- the takeover
+    /// that `VimEnter` performs, and the deadline a startup that never
+    /// reaches `VimEnter` runs out. This is what makes the second one
+    /// harmless: whichever arrives first attaches, and the other finds it
+    /// done.
     ///
-    /// Defaults `false`, set once, and reaches no layer: it decides only
-    /// which `Flush` is allowed to flip [`Self::content_painted`].
-    pub ui_entered: bool,
-    /// Whether a `Flush` has already been withheld by
-    /// [`Self::withholds_grid`], so the screen behind the hold is a frame
-    /// nvim has drawn and view has not shown.
+    /// Private, and moved only through [`Self::takes_attach`], because
+    /// "has view attached" and "has the attach call been produced" have to
+    /// be one fact: a caller that could read the flag and build the call
+    /// itself would issue two attaches on the pass they interleave.
+    attached: bool,
+    /// Whether this session handed the child a duplicate of its own stdin
+    /// (`view -` reading a pipe), so the attach names the descriptor nvim
+    /// should read that content from.
     ///
-    /// Read only by [`Self::release_startup_hold`], the timeout path: a
-    /// startup that never reaches `UIEnter` still owes the user whatever
-    /// nvim did draw, and this is what says there is something to draw.
-    /// `UIEnter`'s own path deliberately ignores it -- see
-    /// [`Self::note_ui_entered`].
-    pub withheld_flush: bool,
-    /// Whether the startup has asked for the screen before `UIEnter`, so
-    /// the grid it drew is one the user is waiting on rather than one nvim
-    /// would not be showing.
-    ///
-    /// Set from the one base-protocol reading that says so: the cursor
-    /// parked in nvim's own message area with text under it at a flush
-    /// (`GridRegistry::message_area_has_text`). That area exists only on a
-    /// session that left the messages with nvim, and a prompt in it before
-    /// `UIEnter` is a startup addressing the user through the grid -- where
-    /// a `vim.fn.input()` lands when neither the cmdline nor the messages
-    /// were externalized, which is the one permutation whose prompt no
-    /// layer above the grid can carry.
-    pub startup_needs_screen: bool,
+    /// Seeded at startup from the engine config, since the attach is built
+    /// here and `update()` reads no environment of its own.
+    pub stdin_relay: bool,
     /// Set from `Msg::EngineStopped`'s payload when the engine's RPC reader
     /// thread stopped reading for a reason other than an ordinary process
     /// exit (see that variant's doc comment). The bin crate reports this to
@@ -339,9 +326,8 @@ impl Model {
             term_width: 0,
             term_height: 0,
             content_painted: true,
-            ui_entered: false,
-            withheld_flush: false,
-            startup_needs_screen: false,
+            attached: false,
+            stdin_relay: false,
             fatal_reason: None,
             claimed_keys: Vec::new(),
             statusline_enabled: false,
@@ -377,88 +363,55 @@ impl Model {
         self.ext_surfaces = surfaces;
     }
 
-    /// Whether a `Flush` arriving now carries a screen nvim's own TUI would
-    /// not be showing, so view withholds the grid rather than painting it.
+    /// Whether the attach this session owes nvim is still outstanding.
     ///
-    /// nvim's TUI client attaches with `rgb`/`ext_linegrid`/`ext_termcolors`
-    /// alone and its session flushes nothing between the blank screen and
-    /// the frame `VimEnter` produced. view's attach externalizes the
-    /// cmdline, the messages and the popupmenu, which plugins read as "a GUI
-    /// has taken these" and answer during startup -- noice's notification
-    /// about exactly that is what draws a float, pumps nvim's event loop
-    /// mid-source and flushes the half-built screen a TUI session never
-    /// sees. So the grid waits for `UIEnter`.
-    ///
-    /// A hold that could hide a prompt is a hang, so it ends the moment the
-    /// startup asks for the screen. Which way it asks depends on what the
-    /// session externalized, and both ways are covered without reading a
-    /// surface here: a prompt nvim hands over arrives as `cmdline_show` and
-    /// paints on its own layer *above* the withheld grid, and a prompt nvim
-    /// draws itself lands in its message area, which
-    /// [`Self::startup_needs_screen`] watches.
+    /// The loop's own read: it is what arms the deadline that attaches a
+    /// startup which never reaches `VimEnter`, and a `Model` cannot hold a
+    /// clock (see `runtime`'s `ATTACH_DEADLINE`).
     #[must_use]
-    pub fn withholds_grid(&self) -> bool {
-        !self.ui_entered && !self.startup_needs_screen
+    pub fn awaits_attach(&self) -> bool {
+        !self.attached
     }
 
-    /// Records that the startup has asked for the screen, ending the hold
-    /// for every flush from here.
+    /// The attach this session still owes nvim, once and never twice.
     ///
-    /// A no-op once nvim has reached `UIEnter`, so a prompt in the ordinary
-    /// session cannot re-arm anything: the flag is about the window before
-    /// the first content frame and nothing after it.
-    pub fn note_startup_needs_screen(&mut self) {
-        if !self.ui_entered {
-            self.startup_needs_screen = true;
+    /// # Why the attach is not part of starting the engine
+    ///
+    /// The child is spawned `--headless`, so it sources the user's config
+    /// without waiting for a UI (`:help --embed`). Attaching before that
+    /// finishes is what made view's startup roughly twice its own engine's:
+    /// a frontend that externalizes the cmdline, the messages and the
+    /// popupmenu is a GUI the config can see, and a config that reacts to
+    /// one -- noice's health check is the measured case -- does that work
+    /// inside `init.lua`, where every plugin it drags in is prepended to
+    /// the first frame. Attaching after `VimEnter` moves all of it behind
+    /// the screen the user is waiting for, and the attach's own redraw is
+    /// then a single flush carrying the settled screen rather than a blank
+    /// one the session has to hold.
+    ///
+    /// `width`/`height` are the grid's, not the terminal's: the chrome
+    /// this session reserves is reserved before nvim is told what size to
+    /// lay out against, and attaching at the full terminal height would
+    /// put the statusline a row below the screen.
+    #[must_use]
+    pub fn takes_attach(&mut self) -> Option<crate::msg::RpcCall> {
+        if self.attached {
+            return None;
         }
+        self.attached = true;
+        let (width, height) = self.grid_target();
+        Some(crate::msg::RpcCall::UiAttach {
+            width,
+            height,
+            surfaces: self.ext_surfaces.clone(),
+            stdin_relay: self.stdin_relay,
+        })
     }
 
-    /// Re-arms the hold for a replacement engine, which starts from
-    /// `VimEnter` exactly as the first one did and would otherwise paint
-    /// the pre-`VimEnter` screen this hold exists to keep off the terminal.
-    ///
-    /// [`Self::content_painted`] goes back to `false` with the rest: the
-    /// dead engine's grid is gone from the model whatever this does (the
-    /// replacement's own redraw batch overwrites it before the flush that
-    /// would show it), so the frame the hold covers is the shell one --
-    /// the same statusline placeholder the first start paints, over which
-    /// the supervision notice reads.
-    pub fn rearm_startup_hold(&mut self) {
-        self.content_painted = false;
-        self.ui_entered = false;
-        self.withheld_flush = false;
-        self.startup_needs_screen = false;
-    }
-
-    /// Lifts the startup grid hold: nvim has reached `UIEnter`, so every
-    /// frame from here is one its own TUI would be showing.
-    ///
-    /// The hold lifts for the *next* flush rather than repainting what the
-    /// withheld ones left, and that is the whole ordering the event buys:
-    /// nvim is blocked on the request this answers, so the flush that
-    /// follows is the first one drawn with the config's own windows open,
-    /// while the model at this instant still holds the screen before them.
-    pub fn note_ui_entered(&mut self) {
-        self.ui_entered = true;
-    }
-
-    /// Ends the hold on time rather than on `UIEnter`, and shows whatever
-    /// nvim has drawn behind it.
-    ///
-    /// The hold mirrors a TUI session that is shown nothing before
-    /// `VimEnter`; a startup that stops short of `UIEnter` -- a plugin
-    /// manager installing on first launch, a config blocked on something
-    /// that is not view's cmdline -- is a session where the TUI *is* shown
-    /// something, and holding past that point is the hang the hold exists
-    /// to avoid. So this lifts it unconditionally and, unlike
-    /// [`Self::note_ui_entered`], paints the withheld screen instead of
-    /// waiting for a further flush that may never come.
-    pub fn release_startup_hold(&mut self) {
-        self.ui_entered = true;
-        if self.withheld_flush {
-            self.content_painted = true;
-            self.dirty = true;
-        }
+    /// Arms [`Self::takes_attach`] for a replacement engine, which runs its
+    /// own startup and owes its own attach.
+    pub fn rearm_attach(&mut self) {
+        self.attached = false;
     }
 
     /// Whether this session externalized `surface`, so view renders it and
@@ -2062,7 +2015,7 @@ pub enum Tier {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::events::{TabEntry, TabHandle, UiEvent};
+    use crate::events::{TabEntry, TabHandle};
     use crate::native::views::Span;
 
     fn showed(model: &mut Model, kind: &str, text: &str) {
@@ -2088,688 +2041,6 @@ mod tests {
             .entries()
             .map(|entry| entry.lines().join(""))
             .collect()
-    }
-
-    /// A session attached the way `view.toml`'s `[native]` defaults leave
-    /// it: view owns the cmdline and the messages. The hold does not depend
-    /// on that -- see
-    /// `every_native_permutation_holds_the_grid_until_the_startup_asks_for_it`
-    /// -- so this is the shipped shape rather than the only holding one.
-    fn holding_model() -> Model {
-        let mut model = Model::new();
-        model.attach_surfaces(vec![
-            crate::native::ext::Ext::LineGrid,
-            crate::native::ext::Ext::Cmdline,
-            crate::native::ext::Ext::Messages,
-        ]);
-        model.content_painted = false;
-        // nvim sizes the global grid before anything else at every attach,
-        // and a cursor reported on it lands where that size allows
-        let _ = crate::update::update(
-            &mut model,
-            crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
-                grid: GLOBAL,
-                width: 80,
-                height: 24,
-            }]),
-        );
-        model
-    }
-
-    fn flush(model: &mut Model) {
-        let _ = crate::update::update(model, crate::msg::Msg::Redraw(vec![UiEvent::Flush]));
-    }
-
-    /// What a session left with nvim decides where a startup prompt or a
-    /// startup error is *drawn*, never whether the grid is held: a
-    /// permutation that reads its cmdline out of the grid releases the hold
-    /// when nvim announces one, and holds until then like every other.
-    #[test]
-    fn every_native_permutation_holds_the_grid_until_the_startup_asks_for_it() {
-        use crate::native::ext::Ext;
-        let owned = [
-            vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages],
-            vec![Ext::LineGrid, Ext::Cmdline],
-            vec![Ext::LineGrid, Ext::Messages],
-            vec![Ext::LineGrid],
-        ];
-        // both values of `[engine] single_grid`, which decides where nvim
-        // draws a startup prompt and so which signal has to find it
-        let permutations = owned.into_iter().flat_map(|set| {
-            let mut multigrid = set.clone();
-            multigrid.push(Ext::Multigrid);
-            [set, multigrid]
-        });
-        for surfaces in permutations {
-            let mut model = Model::new();
-            model.attach_surfaces(surfaces.clone());
-            assert!(
-                model.withholds_grid(),
-                "attached {surfaces:?} must withhold the grid before UIEnter"
-            );
-            model.note_startup_needs_screen();
-            assert!(
-                !model.withholds_grid(),
-                "attached {surfaces:?} must release once the startup asks"
-            );
-        }
-    }
-
-    /// The release signal, taken off the wire rather than out of a request
-    /// only a view-owned surface would answer: a startup that draws into
-    /// nvim's own message area is asking the user for something through the
-    /// grid, and the permutation that externalized neither the cmdline nor
-    /// the messages has nowhere else to show it.
-    #[test]
-    fn a_prompt_in_nvims_message_area_releases_the_hold_before_ui_enter() {
-        let mut model = holding_model();
-        let message = message_area(&mut model);
-        flush(&mut model);
-        assert!(model.withholds_grid(), "an empty message area holds");
-        write_row(&mut model, message, "PROMPTHERE: ");
-        cursor_goto(&mut model, message, 0, 12);
-        flush(&mut model);
-        assert!(
-            !model.withholds_grid(),
-            "a prompt nvim drew itself must reach the user"
-        );
-    }
-
-    /// The message area is not only where nvim talks to the user: with
-    /// `laststatus` at 0 the ruler lives there too, and a startup that
-    /// forces its own redraws puts it there at every flush. The cursor is
-    /// what tells the two apart -- nvim parks it in a prompt and leaves it
-    /// in the buffer for a ruler.
-    #[test]
-    fn the_ruler_in_the_message_area_is_not_a_release_signal() {
-        let mut model = holding_model();
-        let message = message_area(&mut model);
-        write_row(&mut model, message, "1,1           Top");
-        cursor_goto(&mut model, GLOBAL, 0, 0);
-        flush(&mut model);
-        assert!(model.withholds_grid(), "a ruler is not a prompt");
-        assert!(model.withheld_flush, "and the flush behind it is held");
-    }
-
-    /// nvim announces its message area at every startup that left the
-    /// messages with it, drawn into or not: releasing on the announcement
-    /// would leave that permutation with no hold at all.
-    #[test]
-    fn the_announcement_of_an_empty_message_area_is_not_a_release_signal() {
-        let mut model = holding_model();
-        let _ = message_area(&mut model);
-        flush(&mut model);
-        assert!(model.withholds_grid(), "an announcement draws nothing");
-        assert!(model.withheld_flush, "and the flush behind it is held");
-    }
-
-    /// nvim's own "no message grid yet" answer, which precedes the real one
-    /// at every such startup and places nothing.
-    #[test]
-    fn the_zero_message_grid_is_not_a_release_signal() {
-        let mut model = holding_model();
-        msg_set_pos(&mut model, 0);
-        flush(&mut model);
-        assert!(model.withholds_grid(), "grid 0 announces no message area");
-    }
-
-    /// The signal is read at the flush, never at the cells, and that is
-    /// what holds a config that only talks: `print` and `echomsg` draw into
-    /// nvim's message area while sourcing but nvim flushes nothing before
-    /// `UIEnter` for them, so the text is on the next screen the user was
-    /// always going to see rather than a screen of its own.
-    #[test]
-    fn message_text_with_no_flush_behind_it_does_not_release_the_hold() {
-        let mut model = holding_model();
-        let message = message_area(&mut model);
-        write_row(&mut model, message, "INFOHERE");
-        assert!(
-            model.withholds_grid(),
-            "cells nvim never flushed are not a screen nvim showed"
-        );
-    }
-
-    /// `[engine] single_grid = true` with both message surfaces off: nvim
-    /// places no message grid at all and composites its message area into
-    /// the bottom of grid 1, so a startup `vim.fn.input()` arrives as cells
-    /// on the last row with the cursor parked in them.
-    #[test]
-    fn a_prompt_on_the_last_row_releases_the_hold_with_no_message_grid() {
-        let mut model = single_grid_model();
-        flush(&mut model);
-        assert!(model.withholds_grid(), "an empty last row holds");
-        write_row_at(&mut model, GLOBAL, LAST_ROW, "PROMPTHERE: ");
-        cursor_goto(&mut model, GLOBAL, LAST_ROW, 12);
-        flush(&mut model);
-        assert!(
-            !model.withholds_grid(),
-            "a prompt nvim drew into grid 1 must reach the user"
-        );
-    }
-
-    /// The last row is the message area only while nvim is using it: with
-    /// `cmdheight` at 0 a buffer line reaches the bottom of the screen, and
-    /// a half-built buffer is the screen this hold exists to withhold.
-    #[test]
-    fn a_buffer_line_on_the_last_row_is_not_a_release_signal() {
-        let mut model = single_grid_model();
-        write_row_at(&mut model, GLOBAL, 0, "BUFFERLINE1");
-        write_row_at(&mut model, GLOBAL, LAST_ROW, "BUFFERLINE24");
-        cursor_goto(&mut model, GLOBAL, 0, 0);
-        flush(&mut model);
-        assert!(model.withholds_grid(), "buffer text is not a prompt");
-        assert!(model.withheld_flush, "and the flush behind it is held");
-    }
-
-    /// `cmdheight` is not on the wire, so the last row is not where a
-    /// single-grid prompt is looked for: with `cmdheight` at 2 the prompt
-    /// sits on the row above it with the cursor parked after it and the
-    /// last row blank.
-    #[test]
-    fn a_prompt_above_a_blank_last_row_releases_the_hold_with_no_message_grid() {
-        let mut model = single_grid_model();
-        write_row_at(&mut model, GLOBAL, LAST_ROW - 1, "PROMPTHERE: ");
-        cursor_goto(&mut model, GLOBAL, LAST_ROW - 1, 12);
-        flush(&mut model);
-        assert!(
-            !model.withholds_grid(),
-            "a prompt drawn above a blank cmdline row must reach the user"
-        );
-    }
-
-    /// A buffer that fills nothing below its first line -- `cmdheight` and
-    /// `laststatus` at 0, blank end-of-buffer fill -- is text on the
-    /// cursor's row with nothing under it, which is also a prompt's shape.
-    /// What is not a prompt's shape is the cursor: nvim leaves a buffer's
-    /// at the top-left corner while sourcing, on the first character, and
-    /// parks a prompt's on the blank cell after the text.
-    #[test]
-    fn a_one_line_buffer_over_blank_rows_is_not_a_release_signal() {
-        let mut model = single_grid_model();
-        write_row_at(&mut model, GLOBAL, 0, "ONLYLINE");
-        cursor_goto(&mut model, GLOBAL, 0, 0);
-        flush(&mut model);
-        assert!(
-            model.withholds_grid(),
-            "a buffer line under the cursor is not a prompt"
-        );
-        assert!(model.withheld_flush, "and the flush behind it is held");
-    }
-
-    /// The same buffer whose first line opens with whitespace puts the
-    /// cursor on a blank cell, as a prompt does -- but with nothing to its
-    /// left, where a prompt has the text it just drew.
-    #[test]
-    fn a_leading_blank_under_the_cursor_is_not_a_release_signal() {
-        let mut model = single_grid_model();
-        write_row_at(&mut model, GLOBAL, 0, "    INDENTED");
-        cursor_goto(&mut model, GLOBAL, 0, 0);
-        flush(&mut model);
-        assert!(
-            model.withholds_grid(),
-            "a blank with no text before it is not a prompt"
-        );
-        assert!(model.withheld_flush, "and the flush behind it is held");
-    }
-
-    /// A `getchar()` wait after a message is a prompt nvim draws into the
-    /// message grid while reporting the cursor on the global grid at the
-    /// message area's row -- the one shape where the cursor's grid and the
-    /// text's grid differ, and the reading follows the placement.
-    #[test]
-    fn a_getchar_wait_with_its_cursor_reported_on_the_global_grid_releases_the_hold() {
-        let mut model = holding_model();
-        let message = message_area(&mut model);
-        write_row_at(&mut model, message, 0, "Press a key");
-        cursor_goto(&mut model, GLOBAL, LAST_ROW, 11);
-        flush(&mut model);
-        assert!(
-            !model.withholds_grid(),
-            "a wait nvim drew into its message area must reach the user"
-        );
-    }
-
-    /// The wire cursor moves while a config sources when a plugin calls
-    /// `nvim__redraw({cursor = true})`, so a buffer's cursor can sit on a
-    /// blank cell with text to its left -- inside a line, or on the blank
-    /// row under a full-width one. What a prompt has and a buffer does not
-    /// is nothing after the cursor on its row; the blank row below a
-    /// full-width line has nothing after it either, which is why a prompt
-    /// exactly as wide as the screen is left to the cap.
-    #[test]
-    fn a_buffer_cursor_on_a_blank_inside_its_line_is_not_a_release_signal() {
-        let mut model = single_grid_model();
-        write_row_at(&mut model, GLOBAL, 0, "BUFFERLINE more text");
-        cursor_goto(&mut model, GLOBAL, 0, 10);
-        flush(&mut model);
-        assert!(
-            model.withholds_grid(),
-            "text after the cursor is not a prompt"
-        );
-        assert!(model.withheld_flush, "and the flush behind it is held");
-    }
-
-    /// The same, with the cursor moved to the blank row under a full-width
-    /// first line.
-    #[test]
-    fn a_buffer_cursor_moved_below_a_full_width_line_is_not_a_release_signal() {
-        let mut model = single_grid_model();
-        write_row_at(&mut model, GLOBAL, 0, &"BUFFERLINE".repeat(8));
-        cursor_goto(&mut model, GLOBAL, 1, 0);
-        flush(&mut model);
-        assert!(
-            model.withholds_grid(),
-            "a blank row under buffer text is not a prompt"
-        );
-        assert!(model.withheld_flush, "and the flush behind it is held");
-    }
-
-    /// One screen, one answer: what a fixture config draws before `UIEnter`
-    /// gets the same hold-or-release whether nvim placed a message grid for
-    /// it or composited the message area into grid 1. Each row is a screen
-    /// taken off the wire (`vim.fn.input()` with `cmdheight` 0, 1 and 2, a
-    /// buffer reaching the last row, a ruler with `laststatus` 0, a one-line
-    /// buffer over blank end-of-buffer rows, a `getchar()` wait, a prompt as
-    /// wide as the screen, a `-- More --` pager wait, a buffer cursor moved by
-    /// `nvim__redraw`), drawn here the way each attach delivers it.
-    #[test]
-    fn every_startup_screen_gets_the_same_answer_with_and_without_a_message_grid() {
-        struct Screen {
-            name: &'static str,
-            single_grid: fn(&mut Model),
-            multigrid: fn(&mut Model),
-            releases: bool,
-        }
-        let screens = [
-            Screen {
-                name: "cmdheight=0, a 60-line buffer reaching the last row, cursor left at the top",
-                single_grid: |m| {
-                    for row in 0..=LAST_ROW {
-                        write_row_at(m, GLOBAL, row, &format!("BUFFERLINE{}", row + 1));
-                    }
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                multigrid: |m| {
-                    let _ = message_area(m);
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                releases: false,
-            },
-            Screen {
-                name: "cmdheight=0, laststatus=0, the same buffer scrolled to its end",
-                single_grid: |m| {
-                    for row in 0..=LAST_ROW {
-                        write_row_at(m, GLOBAL, row, &format!("BUFFERLINE{}", row + 37));
-                    }
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                multigrid: |m| {
-                    let _ = message_area(m);
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                releases: false,
-            },
-            Screen {
-                name: "cmdheight=0, then vim.fn.input()",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, LAST_ROW, "PROMPTHERE: ");
-                    cursor_goto(m, GLOBAL, LAST_ROW, 12);
-                },
-                multigrid: |m| {
-                    let message = message_area_of_height(m, 3);
-                    write_row_at(m, message, 2, "PROMPTHERE: ");
-                    cursor_goto(m, message, 2, 12);
-                },
-                releases: true,
-            },
-            Screen {
-                name: "laststatus=0, forced redraws: the ruler in the message area",
-                single_grid: |m| {
-                    for row in 0..LAST_ROW {
-                        write_row_at(m, GLOBAL, row, &format!("BUFFERLINE{}", row + 1));
-                    }
-                    write_row_at(m, GLOBAL, LAST_ROW, &format!("{:62}1,1           Top", ""));
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                multigrid: |m| {
-                    let message = message_area(m);
-                    write_row_at(m, message, 0, "1,1           Top");
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                releases: false,
-            },
-            Screen {
-                name: "cmdheight=2, then vim.fn.input()",
-                single_grid: |m| {
-                    for row in 1..LAST_ROW - 1 {
-                        write_row_at(m, GLOBAL, row, "~");
-                    }
-                    write_row_at(m, GLOBAL, LAST_ROW - 1, "PROMPTHERE: ");
-                    cursor_goto(m, GLOBAL, LAST_ROW - 1, 12);
-                },
-                multigrid: |m| {
-                    let message = message_area_of_height(m, 2);
-                    write_row_at(m, message, 0, "PROMPTHERE: ");
-                    cursor_goto(m, message, 0, 12);
-                },
-                releases: true,
-            },
-            Screen {
-                name: "cmdheight=0, laststatus=0, blank end-of-buffer rows under a one-line buffer",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, 0, "ONLYLINE");
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                multigrid: |m| {
-                    let _ = message_area(m);
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                releases: false,
-            },
-            Screen {
-                name: "print(), then getchar(): the cursor reported on grid 1 at the message row",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, LAST_ROW, "Press a key");
-                    cursor_goto(m, GLOBAL, LAST_ROW, 11);
-                },
-                multigrid: |m| {
-                    let message = message_area(m);
-                    write_row_at(m, message, 0, "Press a key");
-                    cursor_goto(m, GLOBAL, LAST_ROW, 11);
-                },
-                releases: true,
-            },
-            Screen {
-                name: "vim.fn.input() with a prompt exactly as wide as the screen (left to the cap)",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, LAST_ROW - 1, &"P".repeat(80));
-                    cursor_goto(m, GLOBAL, LAST_ROW, 0);
-                },
-                multigrid: |m| {
-                    let message = message_area_of_height(m, 2);
-                    write_row_at(m, message, 0, &"P".repeat(80));
-                    cursor_goto(m, message, 1, 0);
-                },
-                releases: false,
-            },
-            Screen {
-                name: "a -- More -- pager wait on the last row",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, LAST_ROW - 1, "\" already exists!");
-                    write_row_at(m, GLOBAL, LAST_ROW, "-- More --");
-                    cursor_goto(m, GLOBAL, LAST_ROW, 10);
-                },
-                multigrid: |m| {
-                    let message = message_area_of_height(m, 24);
-                    write_row_at(m, message, 22, "\" already exists!");
-                    write_row_at(m, message, 23, "-- More --");
-                    cursor_goto(m, message, 23, 10);
-                },
-                releases: true,
-            },
-            Screen {
-                name: "a full-width first line, the cursor moved to the blank row below by nvim__redraw",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, 0, &"BUFFERLINE".repeat(8));
-                    cursor_goto(m, GLOBAL, 1, 0);
-                },
-                multigrid: |m| {
-                    let _ = message_area(m);
-                    cursor_goto(m, WINDOW, 1, 0);
-                },
-                releases: false,
-            },
-            Screen {
-                name: "a buffer cursor moved onto a blank inside its line by nvim__redraw",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, 0, "BUFFERLINE more text");
-                    cursor_goto(m, GLOBAL, 0, 10);
-                },
-                multigrid: |m| {
-                    let _ = message_area(m);
-                    cursor_goto(m, WINDOW, 0, 10);
-                },
-                releases: false,
-            },
-            Screen {
-                name: "the same, with a first line that opens with whitespace",
-                single_grid: |m| {
-                    write_row_at(m, GLOBAL, 0, "    INDENTED");
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                multigrid: |m| {
-                    let _ = message_area(m);
-                    cursor_goto(m, GLOBAL, 0, 0);
-                },
-                releases: false,
-            },
-        ];
-        let mut disagreed = Vec::new();
-        for screen in &screens {
-            for (branch, draw) in [
-                ("single grid", screen.single_grid),
-                ("message grid", screen.multigrid),
-            ] {
-                let mut model = if branch == "single grid" {
-                    single_grid_model()
-                } else {
-                    holding_model()
-                };
-                draw(&mut model);
-                flush(&mut model);
-                if model.withholds_grid() == screen.releases {
-                    disagreed.push(format!(
-                        "{} [{branch}]: expected {}",
-                        screen.name,
-                        if screen.releases { "release" } else { "hold" }
-                    ));
-                }
-            }
-        }
-        assert!(
-            disagreed.is_empty(),
-            "the hold answered these startup screens wrongly:\n  {}",
-            disagreed.join("\n  ")
-        );
-    }
-
-    /// nvim's global grid, which it numbers 1 in both attach modes.
-    const GLOBAL: u64 = 1;
-    /// The first window's grid under `ext_multigrid`, where a buffer cursor
-    /// is reported.
-    const WINDOW: u64 = 2;
-    /// The last row of [`single_grid_model`]'s screen.
-    const LAST_ROW: u64 = 23;
-
-    /// A session attached with neither the message surfaces nor
-    /// `ext_multigrid`, holding one 80x24 grid and nothing else.
-    fn single_grid_model() -> Model {
-        let mut model = Model::new();
-        model.attach_surfaces(vec![crate::native::ext::Ext::LineGrid]);
-        model.content_painted = false;
-        let _ = crate::update::update(
-            &mut model,
-            crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
-                grid: GLOBAL,
-                width: 80,
-                height: 24,
-            }]),
-        );
-        model
-    }
-
-    /// `grid_cursor_goto`, which nvim sends for every prompt it draws.
-    fn cursor_goto(model: &mut Model, grid: u64, row: u64, col: u64) {
-        let _ = crate::update::update(
-            model,
-            crate::msg::Msg::Redraw(vec![UiEvent::GridCursorGoto { grid, row, col }]),
-        );
-    }
-
-    /// `msg_set_pos` for `grid`, the way nvim announces its message area to
-    /// a session that did not externalize the messages.
-    fn msg_set_pos(model: &mut Model, grid: u64) {
-        let _ = crate::update::update(
-            model,
-            crate::msg::Msg::Redraw(vec![UiEvent::MsgSetPos {
-                grid,
-                row: 23,
-                scrolled: false,
-                sep_char: String::new(),
-                zindex: 200,
-                compindex: 0,
-            }]),
-        );
-    }
-
-    /// Announces and sizes a one-row message area, answering the grid it
-    /// lives on.
-    fn message_area(model: &mut Model) -> u64 {
-        message_area_of_height(model, 1)
-    }
-
-    /// Announces a message area `height` rows tall, the way nvim sizes it
-    /// for a prompt that lands below other message lines.
-    fn message_area_of_height(model: &mut Model, height: u64) -> u64 {
-        const MESSAGE_GRID: u64 = 3;
-        let _ = crate::update::update(
-            model,
-            crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
-                grid: MESSAGE_GRID,
-                width: 80,
-                height,
-            }]),
-        );
-        msg_set_pos(model, MESSAGE_GRID);
-        MESSAGE_GRID
-    }
-
-    /// Draws `text` into `grid`'s first row, as `grid_line` delivers it.
-    fn write_row(model: &mut Model, grid: u64, text: &str) {
-        write_row_at(model, grid, 0, text);
-    }
-
-    /// Draws `text` into `row` of `grid`, as `grid_line` delivers it.
-    fn write_row_at(model: &mut Model, grid: u64, row: u64, text: &str) {
-        let _ = crate::update::update(
-            model,
-            crate::msg::Msg::Redraw(vec![UiEvent::GridLine {
-                grid,
-                row,
-                col_start: 0,
-                cells: text
-                    .chars()
-                    .map(|c| crate::events::GridCell {
-                        text: c.to_string(),
-                        hl_id: 0,
-                        repeat: 1,
-                    })
-                    .collect(),
-            }]),
-        );
-    }
-
-    /// A signal arriving after the release changes nothing: the hold is over
-    /// once, and a cmdline opened mid-session is not a startup state.
-    #[test]
-    fn a_released_hold_is_not_re_entered_by_a_later_signal() {
-        let mut model = holding_model();
-        model.note_ui_entered();
-        model.note_startup_needs_screen();
-        assert!(!model.startup_needs_screen);
-        assert!(!model.withholds_grid());
-    }
-
-    /// A replacement engine runs its own startup, so it owes the same hold:
-    /// the flush its `VimEnter` has not reached yet is the same screen the
-    /// first start withholds.
-    #[test]
-    fn a_re_armed_hold_withholds_the_replacements_first_flush() {
-        let mut model = holding_model();
-        flush(&mut model);
-        model.note_ui_entered();
-        flush(&mut model);
-        assert!(model.content_painted, "the first engine painted");
-        model.rearm_startup_hold();
-        assert!(model.withholds_grid(), "the replacement is held too");
-        assert!(
-            !model.content_painted,
-            "and paints the shell frame while it is held"
-        );
-        flush(&mut model);
-        assert!(
-            model.withheld_flush,
-            "the replacement's pre-VimEnter flush is held back"
-        );
-        assert!(!model.content_painted, "which paints no grid");
-        model.note_ui_entered();
-        flush(&mut model);
-        assert!(!model.withholds_grid(), "and released by its own UIEnter");
-    }
-
-    /// The pre-`VimEnter` screen itself: a flush arriving while the hold is
-    /// on paints no content and is remembered as one that did not.
-    #[test]
-    fn a_flush_under_the_hold_paints_nothing_and_is_recorded_as_withheld() {
-        let mut model = holding_model();
-        flush(&mut model);
-        assert!(!model.content_painted, "the held flush must paint no grid");
-        assert!(model.withheld_flush, "and must be remembered as held back");
-    }
-
-    /// A startup that has asked for the screen is not held at all: its next
-    /// flush paints the way every flush did before there was a hold, on the
-    /// permutation that reads its own cmdline out of the grid.
-    #[test]
-    fn a_flush_after_the_startup_asked_for_the_screen_paints_at_once() {
-        let mut model = Model::new();
-        model.attach_surfaces(vec![crate::native::ext::Ext::LineGrid]);
-        model.content_painted = false;
-        model.note_startup_needs_screen();
-        flush(&mut model);
-        assert!(model.content_painted);
-        assert!(!model.withheld_flush);
-    }
-
-    /// `UIEnter` buys an ordering, not a repaint: nvim is blocked on the
-    /// request it answers, so the screen worth showing is the *next* flush
-    /// and never the one the hold was covering.
-    #[test]
-    fn ui_enter_releases_the_next_flush_and_not_the_one_it_held() {
-        let mut model = holding_model();
-        flush(&mut model);
-        model.note_ui_entered();
-        assert!(
-            !model.content_painted,
-            "the screen held before UIEnter must not be the one that paints"
-        );
-        flush(&mut model);
-        assert!(model.content_painted, "the flush after UIEnter paints");
-    }
-
-    /// The startup that never reaches `UIEnter` -- a first-launch plugin
-    /// install, a config blocked on something that is not view's cmdline.
-    /// nvim's TUI shows whatever the server drew; so does view, once the
-    /// hold's cap is up.
-    #[test]
-    fn an_expired_hold_paints_the_screen_it_was_holding() {
-        let mut model = holding_model();
-        flush(&mut model);
-        model.dirty = false;
-        model.release_startup_hold();
-        assert!(model.content_painted, "what nvim drew must reach the user");
-        assert!(model.dirty, "and must be asked for as a frame");
-    }
-
-    /// The same expiry with nothing behind it paints nothing: a startup that
-    /// flushed no screen has none to show, and inventing a content frame
-    /// there would drop the shell's statusline for an empty grid.
-    #[test]
-    fn an_expired_hold_with_no_withheld_flush_paints_nothing() {
-        let mut model = holding_model();
-        model.release_startup_hold();
-        assert!(!model.content_painted);
-        assert!(!model.withholds_grid(), "the hold is over either way");
     }
 
     /// The whole point of the window: a plugin's setup-time complaints are

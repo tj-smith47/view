@@ -304,7 +304,7 @@ pub(crate) struct Restarted {
 /// it replaced: the executor's connection, the clipboard worker's reply
 /// route, and the damage pump.
 ///
-/// The teardown happens first, inside [`crate::startup::restart_and_attach`],
+/// The teardown happens first, inside [`crate::startup::respawn_engine`],
 /// so the two engines never exist at once and the fresh one opens the swap
 /// files the dead one left -- which is the only state a restart recovers,
 /// since view holds no buffer text of its own. `engine` is borrowed rather
@@ -312,16 +312,16 @@ pub(crate) struct Restarted {
 /// asked to replace: a dropped remote connection is retried, and a loop with
 /// no engine at all has nothing to paint the failure with.
 ///
-/// The grid is attached at [`Model::grid_target`], not at the terminal's own
-/// size: the chrome this session already reserved was reserved through a
+/// The replacement starts at [`Model::grid_target`], not at the terminal's
+/// own size: the chrome this session already reserved was reserved through a
 /// resize the dead engine was told about and the fresh one has never heard
-/// of (see [`crate::startup::restart_and_attach`]).
+/// of (see [`crate::startup::respawn_engine`]).
 ///
 /// # Latency
 ///
 /// This is the one blocking call the loop makes, and the frame it is on is
 /// the one it stalls: the teardown is bounded by the engine's
-/// `shutdown_timeout` and the spawn/attach by its `handshake_timeout`, which
+/// `shutdown_timeout` and the spawn by its `handshake_timeout`, which
 /// view leaves at its default. Nothing is painted and no keystroke is folded
 /// for as long as it runs, and the banner on screen is frozen at whatever it
 /// last said.
@@ -357,21 +357,27 @@ pub(crate) fn restart_engine(
     // past the death names one of its windows
     // ([`SurfaceConflicts::forget_engine`])
     model.forget_engine_conflicts();
-    // the replacement runs its own startup, so its first flush carries the
-    // same pre-`VimEnter` screen the first engine's did: hold it until the
-    // replacement's own `UIEnter` ([`Model::rearm_startup_hold`])
-    model.rearm_startup_hold();
-    // the forgets change what is painted whether or not the attach below
+    // the replacement runs its own startup and owes its own attach
+    // ([`Model::rearm_attach`]); until that lands there is no grid to
+    // paint, so the shell frame carries the supervision notice the way the
+    // first start's did
+    model.rearm_attach();
+    model.content_painted = false;
+    // the forgets change what is painted whether or not the spawn below
     // succeeds: a failed attempt goes back to a loop that only repaints on
     // its own account, and would leave the dropped overlays painted and the
     // released startup lines unpainted until something else dirtied the model
     model.dirty = true;
-    let mut engine = crate::startup::restart_and_attach(
+    let names: Vec<&str> = model
+        .attached_surfaces()
+        .iter()
+        .copied()
+        .map(view_core::native::ext::Ext::as_str)
+        .collect();
+    let mut engine = crate::startup::respawn_engine(
         engine,
-        respawn(),
-        width,
-        height,
-        model.attached_surfaces().to_vec(),
+        respawn().with_late_attach(width, height, &names),
+        || model.takes_attach(),
     )?;
     let (pump, cutover) = engine.start_pump(channels.msg.clone());
     let pending_redraw = if cutover.redraw_pending {
@@ -390,9 +396,9 @@ pub(crate) fn restart_engine(
         staged: crate::startup::CutoverInput {
             presink: cutover.presink,
             pending_redraw,
-            // nothing to replay: the attach above already used this
-            // session's current grid size, and no key was buffered on the
-            // way here -- the loop's own input path never stopped running
+            // nothing to replay: the attach this restart owes reads the
+            // session's current grid size itself, and no key was buffered on
+            // the way here -- the loop's own input path never stopped running
             resize: None,
             keys: Vec::new(),
         },

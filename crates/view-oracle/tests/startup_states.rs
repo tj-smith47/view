@@ -2,13 +2,14 @@
 //! must be the frame nvim's own TUI first draws, and every screen nvim
 //! never showed must never reach the terminal.
 //!
-//! nvim `--embed` sources nothing until a UI attaches, and what it draws
-//! while sourcing depends on who attached: view externalizes the cmdline,
-//! the messages and the popupmenu, which a config can read and answer --
-//! the user's does, through noice's notification about exactly that, which
-//! nvim-notify animates and the animation redraws. A TUI attach sets none
-//! of those, gets no notification, and draws nothing before `VimEnter`. The
-//! fixture config here is that mechanism reduced to its two moving parts.
+//! What an editor draws while it sources depends on who is attached, and
+//! on whether anyone is: view externalizes the cmdline, the messages and
+//! the popupmenu, which a config can read and answer -- the user's does,
+//! through noice's notification about exactly that, which nvim-notify
+//! animates and the animation redraws. A TUI attach sets none of those,
+//! gets no notification, and draws nothing before `VimEnter`. view attaches
+//! after `VimEnter` and so is sent nothing to draw at all. The fixture
+//! config here is that mechanism reduced to its two moving parts.
 //!
 //! Both sessions run under the same planted config, so nvim is the
 //! reference rather than a second claim: the assertion is that the buffer
@@ -60,7 +61,7 @@ fn recording(cmd: portable_pty::CommandBuilder) -> PtySession {
 ///
 /// The permutations this pin walks are the ones a noice / nvim-notify user
 /// reaches: what a session leaves with nvim decides where a startup prompt
-/// or error is *drawn*, and the hold has to cover every way that lands --
+/// or error is *drawn*, and the pin has to cover every way that lands --
 /// including `single_grid = true`, where nvim places no message grid and
 /// composites its message area into the last row of grid 1.
 fn plant_native_off(home: &std::path::Path, off: &[&str], single_grid: bool) {
@@ -119,7 +120,7 @@ fn wrote(stream: &[u8], needle: &str) -> bool {
         .any(|window| window == needle.as_bytes())
 }
 
-/// The pin: the buffer a startup holds before its config has opened its
+/// The pin: the buffer a startup shows before its config has opened its
 /// windows never reaches the terminal, at either editor.
 ///
 /// The count of screens is what this reads, in the one form that cannot
@@ -127,10 +128,9 @@ fn wrote(stream: &[u8], needle: &str) -> bool {
 /// stream carrying the post-`VimEnter` layout and not the buffer before it
 /// is a start of exactly two states -- the blank one and the finished one.
 ///
-/// Disconfirm: dropping the `withholds_grid` arm from
-/// `view_core::update::ui_event`'s `Flush`, or answering `UIEnter` with a
-/// notification instead of the blocking request, puts `PREVIMENTERBUFFER`
-/// back into view's stream while nvim's stays clean.
+/// Disconfirm: moving `Model::takes_attach` off the `VimEnter` follow-up
+/// and back ahead of the child's own startup puts `PREVIMENTERBUFFER` into
+/// view's stream while nvim's stays clean.
 #[test]
 fn the_buffer_before_vim_enter_reaches_neither_editors_terminal() {
     let view_paths = common::ScratchPaths::new("startup-states-view");
@@ -171,12 +171,11 @@ fn the_buffer_before_vim_enter_reaches_neither_editors_terminal() {
 /// permutations regress" is the question and a walk that stops at the first
 /// answers it for one.
 ///
-/// Disconfirm: keying `Model::withholds_grid` on the cmdline and the
-/// message surfaces again -- or forcing it to `false` -- puts
-/// `PREVIMENTERBUFFER` into all four streams while the defaults leg above
-/// stays clean.
+/// Disconfirm: attaching ahead of the child's startup on any of these
+/// switch sets puts `PREVIMENTERBUFFER` into that leg's stream while the
+/// defaults leg above stays clean.
 #[test]
-fn the_hold_covers_every_native_permutation() {
+fn the_late_attach_covers_every_native_permutation() {
     let mut regressed = Vec::new();
     for (off, single_grid) in [
         (&["notifications"][..], false),
@@ -202,7 +201,7 @@ fn the_hold_covers_every_native_permutation() {
     );
 }
 
-/// The prompt the hold must not hide, typed through the binary: a startup
+/// The prompt the late attach must not hide, typed through the binary: a startup
 /// `vim.fn.input()` on the two attach sets that leave it to nvim's own
 /// message area -- the multigrid both-off set, where nvim places a message
 /// grid for it, and `single_grid = true`, where nvim composites it into
@@ -211,18 +210,20 @@ fn the_hold_covers_every_native_permutation() {
 /// answers it, and reaches the post-`VimEnter` layout; nvim under the same
 /// config is the reference that the prompt is what a TUI shows.
 ///
-/// What tells a release on the prompt from one on the hold's 1 s cap is
-/// view's own record: the cap logs `grid hold expired before UIEnter` and
-/// the prompt path logs nothing, so the assertion reads the session's
-/// `VIEW_LOG` rather than a wall clock a loaded host can stretch past the
-/// cap. The time from view's first byte to the prompt is measured and
+/// A prompt is drawn before `VimEnter`, which is the hook view's attach
+/// hangs off, so the only thing that can carry it to the terminal is
+/// `runtime::ATTACH_DEADLINE` -- and reaching the deadline is exactly what
+/// this pin measures. The session's own record is what says which path ran:
+/// the deadline logs `attach deadline reached before vim_enter`, and the
+/// assertion is that it did, rather than a wall clock a loaded host can
+/// stretch. The time from view's first byte to the prompt is measured and
 /// printed alongside.
 ///
-/// Disconfirm: making `GridRegistry::message_area_has_text` answer `false`
-/// leaves the prompt hidden until the cap, and both legs fail on the
-/// expiry line.
+/// Disconfirm: dropping the `Msg::AttachDeadline` arm from
+/// `view_core::update` leaves the prompt unreachable and both legs time out
+/// waiting for it.
 #[test]
-fn a_startup_prompt_reaches_the_terminal_before_the_holds_cap() {
+fn a_startup_prompt_reaches_the_terminal_on_the_attach_deadline() {
     let nvim_paths = common::ScratchPaths::new("startup-prompt-nvim");
     common::plant_nvim_config(&nvim_paths.isolated_home, "startup-prompt");
     let mut reference = nvim_session(&nvim_paths.isolated_home);
@@ -272,16 +273,18 @@ fn a_startup_prompt_reaches_the_terminal_before_the_holds_cap() {
         let _ = until_the_split(&mut under_test, "view");
 
         let log = std::fs::read_to_string(&view_log).unwrap_or_default();
-        if log.contains(HOLD_EXPIRED) {
+        if !log.contains(ATTACH_DEADLINE_REACHED) {
             regressed.push(format!(
                 "single_grid = {single_grid}: the prompt reached the terminal \
-                 only on the cap, {prompt_after_first_byte:?} after the first byte"
+                 {prompt_after_first_byte:?} after the first byte without the \
+                 deadline that is the only thing able to carry it"
             ));
         }
     }
     assert!(
         regressed.is_empty(),
-        "view held the startup prompt until the hold's cap: {}",
+        "the startup prompt did not reach the terminal by the attach \
+         deadline: {}",
         regressed.join("; ")
     );
 }
@@ -372,9 +375,9 @@ const ONLY_LINE: &str = "ONLYLINE";
 /// The prompt the startup-prompt fixture draws.
 const PROMPT: &str = "PROMPTHERE:";
 
-/// The `VIEW_LOG` line the runtime writes when the hold ends on its cap
-/// rather than on a signal.
-const HOLD_EXPIRED: &str = "grid hold expired before UIEnter";
+/// The `VIEW_LOG` line the runtime writes when it attaches on its own
+/// deadline rather than on the child's `VimEnter`.
+const ATTACH_DEADLINE_REACHED: &str = "attach deadline reached before vim_enter";
 
 /// Blocks until the session has written anything at all, and answers the
 /// instant it did: the first byte view's terminal saw, which is the origin
@@ -396,17 +399,17 @@ fn until_the_first_chunk(session: &mut PtySession) -> std::time::Instant {
     std::time::Instant::now()
 }
 
-/// A replacement engine runs the same startup, so it owes the same hold:
-/// with `[supervision] auto_restart` on, an engine killed mid-session is
-/// respawned, sources the same config, and must not paint the buffer it
-/// holds before its own `VimEnter`.
+/// A replacement engine runs the same startup, so it owes the same late
+/// attach: with `[supervision] auto_restart` on, an engine killed
+/// mid-session is respawned, sources the same config, and must not paint
+/// the buffer it holds before its own `VimEnter`.
 ///
-/// Disconfirm: dropping `Model::rearm_startup_hold` from
+/// Disconfirm: dropping `Model::rearm_attach` from
 /// `recovery::restart_engine` puts `PREVIMENTERBUFFER` into the stream on
 /// the restart while the first start stays clean.
 #[test]
 #[cfg(target_os = "linux")]
-fn a_restarted_engine_holds_its_own_pre_vim_enter_screen() {
+fn a_restarted_engine_attaches_after_its_own_vim_enter() {
     let paths = common::ScratchPaths::new("startup-states-restart");
     common::plant_nvim_config(&paths.isolated_home, "startup-states");
 
@@ -425,8 +428,8 @@ fn a_restarted_engine_holds_its_own_pre_vim_enter_screen() {
     // a restart that never happened
     let mark = first.len();
     kill(engine);
-    // whichever lands first, so a replacement that paints the held screen
-    // fails on that rather than on the wait: without the re-arm it writes
+    // whichever lands first, so a replacement that paints the pre-VimEnter
+    // screen fails on that rather than on the wait: without the re-arm it writes
     // `PREVIMENTERBUFFER` and never gets as far as rewriting the layout
     let after = until_either(&mut under_test, mark, [PRE_VIM_ENTER, SPLIT]);
     assert!(

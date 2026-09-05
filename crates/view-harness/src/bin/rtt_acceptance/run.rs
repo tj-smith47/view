@@ -402,10 +402,8 @@ pub fn main() -> Result<()> {
             ..Protocol::default()
         };
         // the pre-attach shell frame paints once and then holds bit-for-bit
-        // static until the real engine attach (register_vim_enter_autocmd,
-        // register_bridge, ui_attach -- each its own RPC round trip)
-        // replaces it; every one of those round trips pays this tier's
-        // relay delay twice. A quiet span sized for a local attach (this
+        // static until the real engine attach replaces it; the child's whole
+        // startup, and then the attach itself, pay this tier's relay delay. A quiet span sized for a local attach (this
         // scenario's own `DEFAULT_STARTUP_QUIET`) is satisfied by that
         // static frame well before attach's real content ever lands at
         // 100ms+ RTT, so `prepare`'s first settle declares the spawn ready

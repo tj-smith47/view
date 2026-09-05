@@ -27,11 +27,6 @@ pub(super) fn on_vim_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> 
         Effect::Rpc(RpcCall::ProbeSwapRecovery {
             generation: model.supervision.renew_swap_probe(),
         }),
-        // and the first moment claiming a terminal is free: nvim's own tty
-        // defaults have finished looking for one by now, so the claim buys
-        // `ui_send` delivery without the startup query and keystroke-eating
-        // wait that finding it earlier would have cost
-        Effect::Rpc(RpcCall::ClaimStdoutTty),
     ];
     // last, and only when the user named one: a scheme applied any earlier
     // is one the config sourcing right up to this event would replace, and
@@ -42,20 +37,6 @@ pub(super) fn on_vim_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> 
         effects.push(Effect::Rpc(RpcCall::Colorscheme { name: name.clone() }));
     }
     effects
-}
-
-/// Lifts startup's grid hold and answers the request nvim is blocked on.
-///
-/// The reply is the whole effect: everything a startup owes view was
-/// already issued from `VimEnter`, and what this event adds is the
-/// ordering -- nvim's next flush is the first frame carrying the windows
-/// the user's config opened (see [`Model::withholds_grid`]).
-pub(super) fn on_ui_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> {
-    model.note_ui_entered();
-    vec![Effect::Reply {
-        token,
-        value: ReplyValue::Nil,
-    }]
 }
 
 /// What a colorscheme nvim could not find owes the user: the name they wrote
@@ -135,7 +116,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|eff| matches!(eff, Effect::Rpc(RpcCall::ClaimStdoutTty))),
+                .any(|eff| matches!(eff, Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }))),
             "and everything `VimEnter` already owed is still owed: {effects:?}"
         );
     }

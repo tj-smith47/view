@@ -353,6 +353,20 @@ pub struct EngineConfig {
     /// this field alone would describe a bundled engine reading whatever
     /// runtime the host carries.
     bundled: Option<BundledEngine>,
+    /// The terminal geometry the startup chunk lays the child out at, or
+    /// `None` for a child that is not given one. Private for the reason
+    /// `hermetic` is: it decides `--headless` and the startup chunk
+    /// together (see [`late_attach_cmd`] and [`EngineConfig::attaches_late`]),
+    /// and a caller that could set the size alone would describe a child
+    /// nobody ever hooked.
+    late_attach: Option<(u16, u16)>,
+    /// The `ext_*` names the UI that eventually attaches will externalize,
+    /// which the startup chunk answers `nvim_list_uis()` with while there
+    /// is no UI yet (see [`late_attach_cmd`]). Beside the geometry rather
+    /// than inside it because they arrive together and mean nothing apart:
+    /// a size with no surfaces describes a session that externalizes
+    /// nothing.
+    late_attach_exts: Vec<String>,
     /// The remote target [`build_command`] routes the spawn through, or
     /// `None` for a local child. Private for the same reason `hermetic` is:
     /// where the child runs decides what its whole environment plan means,
@@ -372,6 +386,8 @@ impl Default for EngineConfig {
             handshake_timeout: Duration::from_secs(5),
             shutdown_timeout: Duration::from_millis(500),
             hermetic: false,
+            late_attach: None,
+            late_attach_exts: Vec::new(),
             #[cfg(unix)]
             stdin_relay: None,
             bundled: None,
@@ -516,6 +532,92 @@ impl EngineConfig {
     pub fn with_remote(mut self, remote: RemoteSpec) -> Self {
         self.remote = Some(remote);
         self
+    }
+
+    /// Starts the child at `width` x `height` with the one `--cmd` chunk
+    /// that gives init-time layout code the real terminal size and registers
+    /// every hook that has to exist before the user's config is sourced (see
+    /// [`late_attach_cmd`]), and -- unless a stdin relay is armed -- with
+    /// `--headless`, so that startup runs ahead of the UI (`:help --embed`,
+    /// "startup will continue without waiting for `nvim_ui_attach`").
+    ///
+    /// The size is the terminal's, not the grid's: it is what nvim lays out
+    /// against while it sources, and the attach that follows names whatever
+    /// the session has reserved for its own chrome by then.
+    ///
+    /// `surfaces` are the `ext_*` names the attach will carry, and they
+    /// are needed here rather than only at the attach because a plugin
+    /// decides what to claim from `nvim_list_uis()` while it is setting
+    /// itself up -- long before any UI exists on this spawn (see
+    /// [`late_attach_cmd`]).
+    ///
+    /// For the editor a user launched, and for the replacement a restart
+    /// brings up. Never for a harness that spawns an engine and drives it
+    /// without attaching: startup no longer waits, so a command such a
+    /// caller sends races the config it means to run against.
+    #[must_use]
+    pub fn with_late_attach(mut self, width: u16, height: u16, surfaces: &[&str]) -> Self {
+        self.late_attach = Some((width, height));
+        self.late_attach_exts = surfaces.iter().map(|&name| name.to_string()).collect();
+        self
+    }
+
+    /// The geometry the startup chunk was armed with, or `None` for a child
+    /// that was given none.
+    ///
+    /// Readable so a caller that has already handed the config over can
+    /// still report the shape it spawned, rather than keeping a second copy
+    /// of the answer beside the config that owns it.
+    #[must_use]
+    pub fn late_attach(&self) -> Option<(u16, u16)> {
+        self.late_attach
+    }
+
+    /// Whether this child runs its whole startup before a UI attaches, and
+    /// so owes its caller an attach only once it says `VimEnter`.
+    ///
+    /// Two spawns keep the barrier, and both keep it because nvim does
+    /// something during startup that it can only do for a UI that is
+    /// already there. Either one still gets the startup chunk and still
+    /// owes its caller an attach; what neither gets is `--headless`.
+    ///
+    /// A relayed stdin is the first: nvim reads piped content once, during
+    /// startup, from the descriptor a UI named in `stdin_fd` (`:help
+    /// ui-startup-stdin`) -- so a child that did not wait for that UI reads
+    /// its own RPC descriptor instead and opens an empty buffer.
+    ///
+    /// A swap recovery ([`RECOVERY_ARG`]) is the second, and it is the
+    /// destructive one. `create_windows` runs the recovery and leaves
+    /// through `getout(1)` when it produced no buffer, and the prompt that
+    /// stands between those two on an interactive startup is a prompt only
+    /// a UI can be shown: measured on the pinned engine, `nvim --embed
+    /// --headless -n <file> -r` with no swap left to read exits 1 before
+    /// `VimEnter`, where the same spawn without `--headless` parks and lets
+    /// its caller read what the recovery raised. A recovery that ends the
+    /// child has nobody left to tell the user their buffer came up empty,
+    /// which is the whole account view owes on that path.
+    #[must_use]
+    pub fn attaches_late(&self) -> bool {
+        self.late_attach.is_some() && !self.stdin_relay_requested() && !self.recovers_a_swap()
+    }
+
+    /// Whether this spawn carries nvim's own recovery flag, from a caller
+    /// that put it there or from [`recovering`](Self::recovering).
+    #[must_use]
+    fn recovers_a_swap(&self) -> bool {
+        self.extra_args.iter().any(|arg| arg == RECOVERY_ARG)
+    }
+
+    /// This config with nvim's recovery flag on it, where it has a file to
+    /// recover ([`with_recovery`]).
+    ///
+    /// Public because the flag decides how the spawn is shaped, not only
+    /// what it is passed: a caller that has to know whether its
+    /// replacement attaches late ([`attaches_late`](Self::attaches_late))
+    /// has to ask a config that already carries the flag.
+    #[must_use]
+    pub fn recovering(self) -> Self {
+        with_recovery(self)
     }
 
     /// The remote target a caller armed with [`with_remote`](Self::with_remote),
@@ -1245,7 +1347,7 @@ impl Engine {
     ///
     /// The same shapes [`spawn`](Self::spawn) returns, for the same reasons.
     pub fn spawn_recovering(cfg: EngineConfig) -> Result<Self, EngineError> {
-        Self::spawn(with_recovery(cfg))
+        Self::spawn(cfg.recovering())
     }
 
     /// Whether this engine's child is the ssh client of a remote spawn
@@ -1721,6 +1823,113 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      end, \
      })";
 
+/// The single `--cmd` a late-attaching spawn adds
+/// ([`EngineConfig::with_late_attach`]), and everything that has to be in
+/// place before the user's `init.lua` is sourced.
+///
+/// `--headless` removes the barrier that used to guarantee that window:
+/// startup no longer waits for `nvim_ui_attach`, so nothing sent over RPC
+/// after the spawn is serviced until the config has finished sourcing --
+/// measured against the pinned engine, a notify written in the very first
+/// burst still ran with `v:vim_did_enter` at 1 and the config's own
+/// `:colorscheme` already applied. A `--cmd` runs before any of it, which
+/// is why the `VimEnter` hook, the `view_bridge` group and the
+/// surface-claimant probe all ride here rather than over the channel.
+///
+/// The channel is discovered rather than passed: an `--embed` child's
+/// stdio channel exists by the time `--cmd` arguments run, and a spawn has
+/// no reply to read a channel id out of yet.
+///
+/// The two chunks are loaded verbatim through `load` rather than pasted in,
+/// so what runs here is byte for byte what
+/// [`EngineHandle::register_bridge`](crate::nvim_api::EngineHandle::register_bridge)
+/// and
+/// [`EngineHandle::probe_claimants`](crate::nvim_api::EngineHandle::probe_claimants)
+/// send over the channel for a caller that does not spawn this way.
+///
+/// `g:view` is set for a config that wants to branch on which editor is
+/// driving it. Nothing in this workspace reads it; it is a user-facing
+/// marker and is set before the config that would read it.
+///
+/// # The UI that is not there yet
+///
+/// A plugin decides what to claim while it is setting itself up, and what
+/// it asks is `nvim_list_uis()`. On this spawn that list is empty for the
+/// whole of startup, and every such plugin therefore decides against a
+/// session it is being told does not exist: measured on the pinned engine
+/// against `compat/scenarios/noice.toml`, noice claims the cmdline, the
+/// message area and the popup menu through `vim.ui_attach` and keeps
+/// routing them after view's own attach lands, so a `vim.notify` view holds
+/// still ends up in nvim-notify's history. lazy.nvim reads the same list to
+/// decide it is running headless.
+///
+/// So the list answers for the UI that is on its way: view's own, at the
+/// terminal's size, externalizing exactly what the attach will ask for. The
+/// shim delegates the moment a real UI exists, which makes it correct for
+/// the rest of the session rather than only until `VimEnter`, and it is the
+/// Lua binding alone -- a vimscript `nvim_list_uis()` still answers for what
+/// has attached.
+///
+/// Every surface view can externalize is spelled out `false` before the
+/// requested ones are set `true`, so a plugin comparing against `false`
+/// reads what nvim would have answered. The three nvim externalizes that
+/// view has no vocabulary for (`ext_hlstate`, `ext_termcolors`,
+/// `ext_wildmenu`) are absent rather than `false`, which every Lua test of
+/// the form `if ui.ext_x then` reads identically.
+fn late_attach_cmd(width: u16, height: u16, surfaces: &[String]) -> String {
+    let modules: Vec<String> = view_core::native::surfaces::SURFACE_CLAIMANTS
+        .iter()
+        .map(|claimant| format!("'{}'", claimant.module))
+        .collect();
+    let modules = modules.join(", ");
+    let exts: Vec<String> = surfaces.iter().map(|name| format!("'{name}'")).collect();
+    let exts = exts.join(", ");
+    let vocabulary: Vec<String> = crate::nvim_api::UI_EXT_OPTIONS_MULTIGRID
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect();
+    let vocabulary = vocabulary.join(", ");
+    let bridge = crate::nvim_api::REGISTER_BRIDGE_CHUNK;
+    let claimants = crate::nvim_api::PROBE_CLAIMANTS_CHUNK;
+    format!(
+        "lua vim.o.columns = {width} vim.o.lines = {height}\n\
+         vim.g.view = 1\n\
+         local channel\n\
+         for _, chan in ipairs(vim.api.nvim_list_chans()) do\n\
+         if chan.stream == 'stdio' then channel = chan.id end\n\
+         end\n\
+         local pending = {{\n\
+         chan = channel,\n\
+         width = {width},\n\
+         height = {height},\n\
+         rgb = true,\n\
+         override = false,\n\
+         stdin_tty = false,\n\
+         stdout_tty = false,\n\
+         }}\n\
+         for _, ext in ipairs({{ {vocabulary} }}) do pending[ext] = false end\n\
+         for _, ext in ipairs({{ {exts} }}) do pending[ext] = true end\n\
+         local attached = vim.api.nvim_list_uis\n\
+         vim.api.nvim_list_uis = function()\n\
+         local uis = attached()\n\
+         if #uis > 0 then return uis end\n\
+         return {{ pending }}\n\
+         end\n\
+         vim.api.nvim_create_autocmd('VimEnter', {{\n\
+         once = true,\n\
+         callback = function()\n\
+         vim.rpcrequest(channel, 'view_vim_enter')\n\
+         end,\n\
+         }})\n\
+         assert(load([==[\n\
+         {bridge}\n\
+         ]==]))(channel)\n\
+         assert(load([==[\n\
+         {claimants}\n\
+         ]==]))(channel, {{ {modules} }})"
+    )
+}
+
 /// Everything a started engine can say about a swap recovery it performed,
 /// as one vimscript expression answering
 /// `[recovered, reported, failure, empty]`.
@@ -2119,11 +2328,16 @@ fn local_command(cfg: &EngineConfig) -> Command {
     // nvim runs `--cmd` commands before it opens any of them, and an
     // autocommand registered after the file it is meant to guard is already
     // open guards nothing
-    command
-        .arg("--embed")
-        .arg("--cmd")
-        .arg(SWAP_RECOVERY_CMD)
-        .args(&cfg.extra_args);
+    command.arg("--embed").arg("--cmd").arg(SWAP_RECOVERY_CMD);
+    if let Some((width, height)) = cfg.late_attach {
+        if cfg.attaches_late() {
+            command.arg("--headless");
+        }
+        command
+            .arg("--cmd")
+            .arg(late_attach_cmd(width, height, &cfg.late_attach_exts));
+    }
+    command.args(&cfg.extra_args);
     for (name, value) in cfg.env_plan() {
         match value {
             Some(value) => command.env(name, value),
@@ -2222,6 +2436,16 @@ fn remote_command_line(remote: &RemoteSpec, cfg: &EngineConfig) -> Result<OsStri
     tokens.push(b"--embed".to_vec());
     tokens.push(b"--cmd".to_vec());
     tokens.push(SWAP_RECOVERY_CMD.as_bytes().to_vec());
+    // the same tokens the local half adds, in the same place: a remote
+    // editor that waited for its UI would spend the whole ssh round trip
+    // before sourcing anything
+    if let Some((width, height)) = cfg.late_attach {
+        if cfg.attaches_late() {
+            tokens.push(b"--headless".to_vec());
+        }
+        tokens.push(b"--cmd".to_vec());
+        tokens.push(late_attach_cmd(width, height, &cfg.late_attach_exts).into_bytes());
+    }
     for arg in &cfg.extra_args {
         tokens.push(token_bytes(arg)?);
     }
@@ -3757,6 +3981,47 @@ mod tests {
         let dev_null = std::fs::File::open("/dev/null").expect("/dev/null always opens");
         let cfg = EngineConfig::default().with_stdin_relay(dev_null.into());
         assert!(cfg.stdin_relay_requested());
+    }
+
+    /// Every spawn shape that keeps nvim's wait-for-attach barrier, read
+    /// off the one predicate that decides it, because the two that keep it
+    /// keep it for reasons that look nothing alike -- a descriptor nvim
+    /// reads piped content from, and a startup path that ends the child --
+    /// and a third shape added without an answer here would silently take
+    /// `--headless` from the default branch.
+    #[test]
+    fn a_relayed_stdin_and_a_swap_recovery_each_keep_the_attach_barrier() {
+        let plain =
+            EngineConfig::default().with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS);
+        assert!(
+            plain.attaches_late(),
+            "an ordinary late attach runs headless"
+        );
+
+        let dev_null = std::fs::File::open("/dev/null").expect("/dev/null always opens");
+        let relaying = EngineConfig::default()
+            .with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS)
+            .with_stdin_relay(dev_null.into());
+        assert!(
+            !relaying.attaches_late(),
+            "a child whose stdin is relayed has to be attached before it reads it"
+        );
+
+        let recovering = EngineConfig::default()
+            .with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS)
+            .with_arg("notes.txt")
+            .recovering();
+        assert!(
+            !recovering.attaches_late(),
+            "a swap recovery has to be attached before nvim can park at its prompt"
+        );
+        assert!(
+            EngineConfig::default()
+                .with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS)
+                .recovering()
+                .attaches_late(),
+            "a restart with no file to recover carries no recovery flag and runs headless"
+        );
     }
 
     /// `relay_stdin_fd`'s own fd-flag effect, isolated from the spawn

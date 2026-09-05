@@ -916,6 +916,15 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn ui_attach(
+            &self,
+            _width: u16,
+            _height: u16,
+            _surfaces: &[view_core::native::ext::Ext],
+            _stdin_relay: bool,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn register_clipboard(
             &self,
             _channel_id: u64,

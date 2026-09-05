@@ -1,9 +1,11 @@
 //! The startup sequence (see the design spec's startup-sequence section):
 //! paint a themed placeholder shell
-//! immediately from the cached theme, spawn the engine and attach on a
-//! background thread so a slow-starting nvim can never delay that first
-//! paint, buffer keys (and the latest resize) seen in the gap, and hand
-//! everything back to `main.rs` once attach completes.
+//! immediately from the cached theme, spawn the engine on a background
+//! thread so a slow-starting nvim can never delay that first paint, buffer
+//! keys (and the latest resize) seen in the gap, and hand everything back
+//! to `main.rs` once the child is up. The UI itself goes on later, from the
+//! loop, once nvim has sourced the user's config (see
+//! [`view_core::model::Model::takes_attach`]).
 //!
 //! [`paint_shell_frame`] happens entirely outside `runtime::run`'s
 //! steady-state loop: nothing has set `Model::dirty` yet at this point,
@@ -28,7 +30,7 @@ use std::time::Instant;
 
 use view_core::events::UiEvent;
 use view_core::model::Model;
-use view_core::msg::{Effect, Key, Msg};
+use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::ext::Ext;
 use view_engine::handle::EngineError;
 use view_engine::process::{Engine, EngineConfig};
@@ -158,37 +160,34 @@ pub fn paint_shell_frame(
 pub enum AttachFailure {
     /// `Engine::spawn` itself failed: the process never started.
     Spawn(EngineError),
-    /// The process started, but registering the `VimEnter` autocmd or
-    /// `ui_attach` failed or timed out.
+    /// The process started, but the post-spawn registrations against it
+    /// failed or timed out.
     Attach(EngineError),
 }
 
-/// Spawns `nvim --embed`, registers the `VimEnter` autocmd and the
-/// `view_bridge` autocmd group BEFORE `ui_attach` (see
-/// [`EngineHandle::register_vim_enter_autocmd`](view_engine::handle::EngineHandle::register_vim_enter_autocmd)'s
-/// doc comment for why that ordering is load-bearing, not incidental, and
-/// [`EngineHandle::register_bridge`](view_engine::handle::EngineHandle::register_bridge)'s
-/// for the one difference between the two),
-/// attaches at the size `size` reports, and forwards the
-/// capability-probe's leftover `residue` bytes. Deliberately does not call
-/// [`Engine::start_pump`]: only `main.rs` does, once the buffered
-/// pre-attach window has been fully replayed (see
-/// [`attach_in_background`]'s doc comment for why).
+/// Spawns `nvim --embed --headless`, whose own startup hooks ride the
+/// spawn's `--cmd` arguments ([`EngineConfig::with_late_attach`]).
+/// Deliberately does not attach: the UI goes on after nvim's own
+/// `VimEnter`, from the loop
+/// ([`view_core::model::Model::takes_attach`]). Deliberately does not call
+/// [`Engine::start_pump`] either: only `main.rs` does, once the buffered
+/// pre-attach window has been fully replayed (see [`attach_in_background`]'s
+/// doc comment for why).
 ///
-/// The size arrives through a callback rather than as two arguments
-/// because the caller does not have it yet when the child should start:
-/// `nvim --embed` performs no startup at all until a UI attaches, so the
-/// terminal handshake that resolves the size
-/// is work the child's own startup can run underneath instead of behind
-/// (see `main.rs`'s call ordering). Only the attach needs a terminal.
+/// The one child that is attached here is the one that cannot start without
+/// a UI: a spawn carrying a relayed stdin reads its piped content during
+/// startup, from the descriptor the attach names
+/// ([`EngineConfig::attaches_late`]), so it is still parked waiting for one.
 ///
-/// A `None` size means that handshake failed and no attach will ever
-/// happen. The child is killed and reaped here, before returning, so a
-/// process that could not take the terminal cannot leave an nvim running
-/// behind it; the failure is reported as [`AttachFailure::Attach`], which
-/// is what it is -- a child that started and never got attached -- though
-/// the one caller that can reach it is already returning the terminal's
-/// own error instead.
+/// The terminal's own facts arrive through a callback rather than as
+/// arguments because the caller does not have them yet when the child should
+/// start: the child sources the user's config while this thread is still
+/// initializing the terminal.
+///
+/// A `None` from that callback means the terminal handshake failed and no
+/// session will ever run. The child is killed and reaped here, before
+/// returning, so a process that could not take the terminal cannot leave an
+/// nvim running behind it.
 fn spawn_and_attach(
     cfg: EngineConfig,
     spawned: &AtomicU32,
@@ -196,8 +195,10 @@ fn spawn_and_attach(
     residue: impl FnOnce() -> Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
     // read before `Engine::spawn` consumes `cfg` by value: there is no
-    // config left to ask afterward, and the choice below depends on it
+    // config left to ask afterward, and both the log line and the branch
+    // below depend on them
     let stdin_relay = cfg.stdin_relay_requested();
+    let attaches_late = cfg.attaches_late();
     let engine = Engine::spawn(cfg).map_err(AttachFailure::Spawn)?;
     // published before the handshake and the registrations below, not
     // after them: the window this pid identifies a child through is
@@ -208,102 +209,6 @@ fn spawn_and_attach(
     crate::vlog::log_with("engine", || {
         format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
     });
-    register_and_attach(engine, stdin_relay, start, residue)
-}
-
-/// Replaces a failed engine with a fresh one and brings it through the same
-/// registration and attach sequence [`spawn_and_attach`] performs, so a
-/// restarted session is registered and attached in the one order that has
-/// ever been correct rather than in a second copy of it.
-///
-/// `width`/`height` are the grid's own target size, not the raw terminal's:
-/// the chrome the session already reserved (the statusline row, most
-/// notably) was reserved by a resize the dead engine was told about and the
-/// fresh one has never heard of, so attaching at the terminal's full height
-/// would put the statusline one row below the screen -- the same failure
-/// `NativeSession::load`'s own resize exists to prevent at startup.
-///
-/// `surfaces` is likewise the session's own attached set rather than the
-/// full one: the `[native]` table was read once at startup and is not read
-/// again here, so a replacement that attached everything would hand a
-/// user's plugins back a surface they were given for the whole session so
-/// far -- and view would start rendering a palette the config turned off.
-///
-/// No `residue`: the capability probe's leftover bytes belong to the
-/// terminal handshake this process performed once, long before any restart.
-///
-/// The engine being replaced is torn down here, in place, and then kept:
-/// the teardown is [`Engine::kill_exit`], so no replacement is ever brought
-/// up alongside a live connection -- but the caller still holds
-/// the corpse when this returns, whichever way it returned. That is what
-/// lets a failed attempt be retried: a session whose replacement could not
-/// be started has no second engine to report through, and one that had
-/// dropped its first has nothing to keep painting with either.
-pub(crate) fn restart_and_attach(
-    engine: &mut Engine,
-    cfg: EngineConfig,
-    width: u16,
-    height: u16,
-    surfaces: Vec<Ext>,
-) -> Result<Engine, AttachFailure> {
-    let stdin_relay = cfg.stdin_relay_requested();
-    // on every attempt, not only the first: a child already reaped reports
-    // its cached status and this returns at once. `kill_exit`, never
-    // `wait_exit`: a restart reached with the child still alive is one the
-    // user's unsaved work depends on getting back off the swap file, and
-    // `wait_exit`'s opening `qa!` is what deletes it (see `kill_exit`)
-    let _ = engine.kill_exit();
-    let engine = Engine::spawn_recovering(cfg).map_err(AttachFailure::Spawn)?;
-    crate::vlog::log_with("engine", || {
-        format!(
-            "restarted pid={} stdin_relay={stdin_relay} grid={width}x{height}",
-            engine.pid()
-        )
-    });
-    register_and_attach(
-        engine,
-        stdin_relay,
-        || Some((width, height, surfaces)),
-        Vec::new,
-    )
-}
-
-/// The half of [`spawn_and_attach`] that runs against a child that is
-/// already up: the `VimEnter` autocmd, the `view_bridge` group, the attach
-/// itself, and the terminal handshake's leftover bytes.
-///
-/// `size` is asked as late as it can be -- after both registrations, which
-/// need a channel id and no terminal at all, and immediately before the
-/// one call that does need it. On the startup path that callback is a wait
-/// on the terminal handshake, so everything above it is work nvim performs
-/// while the frontend is still resolving what kind of terminal it is
-/// talking to.
-fn register_and_attach(
-    engine: Engine,
-    stdin_relay: bool,
-    start: impl FnOnce() -> Option<(u16, u16, Vec<Ext>)>,
-    residue: impl FnOnce() -> Vec<u8>,
-) -> Result<Engine, AttachFailure> {
-    engine
-        .handle
-        .register_vim_enter_autocmd(engine.api_info.channel_id)
-        .map_err(AttachFailure::Attach)?;
-    crate::vlog::log("engine", "registered VimEnter autocmd");
-    engine
-        .handle
-        .register_bridge(engine.api_info.channel_id)
-        .map_err(AttachFailure::Attach)?;
-    crate::vlog::log("engine", "registered view_bridge autocmd group");
-    // armed here rather than from the `VimEnter` arm the way the other
-    // startup probes are: the chunk waits for the first idle transition
-    // itself, and arming it before sourcing begins is what makes it
-    // unmissable -- a config that errors out mid-source still reaches an
-    // idle main loop, and still owes the user the answer
-    engine
-        .handle
-        .probe_claimants(engine.api_info.channel_id)
-        .map_err(AttachFailure::Attach)?;
-    crate::vlog::log("engine", "armed the surface-claimant probe");
     let Some((width, height, surfaces)) = start() else {
         crate::vlog::log("engine", "no terminal size ever came; killing the child");
         // `Engine`'s own `Drop` is the kill and the reap (see its impl):
@@ -312,26 +217,19 @@ fn register_and_attach(
         drop(engine);
         return Err(AttachFailure::Attach(EngineError::Closed));
     };
-    let names: Vec<&str> = surfaces.iter().copied().map(Ext::as_str).collect();
-    if stdin_relay {
+    if !attaches_late {
+        let names: Vec<&str> = surfaces.iter().copied().map(Ext::as_str).collect();
         engine
             .handle
             .ui_attach_with_stdin_relay(width, height, &names)
             .map_err(AttachFailure::Attach)?;
-        crate::vlog::log("engine", "ui_attach_with_stdin_relay returned ok");
-    } else {
-        engine
-            .handle
-            .ui_attach(width, height, &names)
-            .map_err(AttachFailure::Attach)?;
-        crate::vlog::log("engine", "ui_attach returned ok");
+        crate::vlog::log_with("engine", || {
+            format!("attached ahead of startup surfaces={names:?}")
+        });
     }
-    crate::vlog::log_with("engine", || format!("attached surfaces={names:?}"));
-    // resolved here rather than at the call site, and here rather than
-    // anywhere earlier in this function: on the startup path this waits on
-    // a channel the capability probe fills, and every line above is work
-    // that must not be held up for a terminal's reply (see
-    // `attach_in_background`)
+    // resolved here rather than at the call site: this waits on a channel
+    // the capability probe fills, and everything above it is work that must
+    // not be held up for a terminal's reply (see `attach_in_background`)
     let residue = residue();
     // best-effort, matching this project's original startup ordering: a
     // write failure here means the connection is already gone, which the
@@ -343,21 +241,99 @@ fn register_and_attach(
     Ok(engine)
 }
 
-/// What [`attach_in_background`]'s thread waits for before it attaches:
-/// the runtime loop's sender (its one use of it is the `EngineReady`
-/// marker), the terminal size `ui_attach` needs, and the `ext_*` surfaces
-/// it externalizes. None of the three exists until `Term::init` has
-/// returned and `view.toml` has been read, and the child's own startup
-/// depends on none of them, which is why the thread starts without them.
+/// Replaces a failed engine with a fresh one, spawned the same way
+/// [`spawn_and_attach`] spawns the first: its `VimEnter` hook, its
+/// `view_bridge` group and its surface-claimant probe all ride the spawn's
+/// own `--cmd` arguments, so a replacement is armed in the one order that
+/// has ever been correct rather than in a second copy of it. The UI goes on
+/// afterwards, from the loop, exactly as the first start's did (see
+/// [`view_core::model::Model::takes_attach`]) -- unless the replacement is
+/// one nvim will not run headless, which is what `attach` is for: it yields
+/// the session's pending attach, and is left uncalled (and so the attach
+/// left pending for `VimEnter`) wherever the replacement does attach late.
+/// A swap recovery is the case that reaches it
+/// ([`EngineConfig::attaches_late`]).
+///
+/// `cfg` therefore carries the grid's own target size, not the raw
+/// terminal's: the chrome the session already reserved (the statusline row,
+/// most notably) was reserved by a resize the dead engine was told about and
+/// the fresh one has never heard of, so starting at the terminal's full
+/// height would put the statusline one row below the screen -- the same
+/// failure `NativeSession::load`'s own resize exists to prevent at startup.
+///
+/// The engine being replaced is torn down here, in place, and then kept:
+/// the teardown is [`Engine::kill_exit`], so no replacement is ever brought
+/// up alongside a live connection -- but the caller still holds
+/// the corpse when this returns, whichever way it returned. That is what
+/// lets a failed attempt be retried: a session whose replacement could not
+/// be started has no second engine to report through, and one that had
+/// dropped its first has nothing to keep painting with either.
+pub(crate) fn respawn_engine(
+    engine: &mut Engine,
+    cfg: EngineConfig,
+    attach: impl FnOnce() -> Option<RpcCall>,
+) -> Result<Engine, AttachFailure> {
+    // the recovery flag goes on before anything is asked of the config: it
+    // is what decides whether this replacement can run headless at all
+    let cfg = cfg.recovering();
+    let stdin_relay = cfg.stdin_relay_requested();
+    let attaches_late = cfg.attaches_late();
+    let grid = cfg.late_attach();
+    // on every attempt, not only the first: a child already reaped reports
+    // its cached status and this returns at once. `kill_exit`, never
+    // `wait_exit`: a restart reached with the child still alive is one the
+    // user's unsaved work depends on getting back off the swap file, and
+    // `wait_exit`'s opening `qa!` is what deletes it (see `kill_exit`)
+    let _ = engine.kill_exit();
+    let engine = Engine::spawn(cfg).map_err(AttachFailure::Spawn)?;
+    crate::vlog::log_with("engine", || {
+        format!(
+            "restarted pid={} stdin_relay={stdin_relay} grid={grid:?} late={attaches_late}",
+            engine.pid()
+        )
+    });
+    if !attaches_late {
+        if let Some(RpcCall::UiAttach {
+            width,
+            height,
+            surfaces,
+            stdin_relay,
+        }) = attach()
+        {
+            let names: Vec<&str> = surfaces.iter().copied().map(Ext::as_str).collect();
+            if stdin_relay {
+                engine
+                    .handle
+                    .ui_attach_with_stdin_relay(width, height, &names)
+            } else {
+                engine.handle.ui_attach(width, height, &names)
+            }
+            .map_err(AttachFailure::Attach)?;
+            crate::vlog::log_with("engine", || {
+                format!("restart attached ahead of startup surfaces={names:?}")
+            });
+        }
+    }
+    Ok(engine)
+}
+
+/// What [`attach_in_background`]'s thread waits for before it hands its
+/// engine back: the runtime loop's sender, whose one use here is the
+/// [`Msg::EngineReady`] marker, and the terminal size and `ext_*` surfaces
+/// the one child that still attaches here needs
+/// ([`EngineConfig::attaches_late`]). None of them exists until `Term::init`
+/// has returned and `view.toml` has been read, and an ordinary child's own
+/// startup depends on none of them, which is why the thread starts without
+/// them -- and why their absence is the signal that no session will ever run.
 type AttachStart = (crate::wake::LoopSender, u16, u16, Vec<Ext>);
 
 /// Runs [`spawn_and_attach`] on a background thread so a slow-starting
 /// nvim can never delay [`paint_shell_frame`], and returns the
-/// [`AttachGuard`] that owns it: the child starts immediately, the
-/// terminal size reaches it later through [`AttachGuard::attach_at`], and
-/// its result is read exactly once, success or failure, through
+/// [`AttachGuard`] that owns it: the child starts immediately, the loop
+/// sender reaches it later through [`AttachGuard::release`], and its result
+/// is read exactly once, success or failure, through
 /// [`AttachGuard::engine_result`]. The same background thread then sends
-/// `Msg::EngineReady` down the sender `attach_at` handed it, so
+/// `Msg::EngineReady` down the sender `release` handed it, so
 /// [`drain_pre_attach`]'s blocking loop wakes deterministically instead of
 /// polling, with no timer and no poll.
 ///
@@ -450,7 +426,7 @@ pub fn attach_in_background(cfg: EngineConfig) -> AttachGuard {
 /// editor that failed to paint its first frame would hang holding the very
 /// child this exists to kill.
 pub struct AttachGuard {
-    /// Dropping this is what tells the attach thread no size is coming.
+    /// Dropping this is what tells the attach thread no session is coming.
     start_tx: Option<SyncSender<AttachStart>>,
     /// Dropping this is what tells it no probe residue is coming, which is
     /// the last thing an attach that already succeeded waits for.
@@ -463,10 +439,10 @@ pub struct AttachGuard {
 }
 
 impl AttachGuard {
-    /// Hands the attach the terminal size it has been waiting on, and the
-    /// loop sender it announces itself over, releasing it to run
-    /// `ui_attach`.
-    pub fn attach_at(
+    /// Hands the attach the loop sender it announces itself over and the
+    /// terminal facts the one attaching child still needs (see
+    /// [`spawn_and_attach`]), releasing it to finish and report.
+    pub fn release(
         &self,
         msg_tx: crate::wake::LoopSender,
         width: u16,
@@ -483,7 +459,7 @@ impl AttachGuard {
     }
 
     /// Hands the attach the capability probe's leftover bytes, the last
-    /// thing it waits for (see `register_and_attach`).
+    /// thing it waits for (see [`spawn_and_attach`]).
     pub fn send_residue(&self, residue: Vec<u8>) {
         let _ = self
             .residue_tx
@@ -937,14 +913,11 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
     let mut engine_alive = true;
     let mut engine_stopped_exit = Some(engine_stopped_exit);
 
-    // ahead of the presink, which is the wire order for this one pair: a
-    // config that sources fast enough stages its `VimEnter` *and* its
-    // `UIEnter` here, and nvim is blocked on the second of those, so the
-    // damage staged beside them is by construction the screen from before
-    // the config opened its windows. Resolved after the replies, that
-    // screen would paint as though it had arrived after them -- the frame
-    // `Model::withholds_grid` exists to withhold. Its own failure is noted
-    // rather than returned on, because the presink below is where a
+    // ahead of the presink, which is the wire order: nvim sends no UI event
+    // at all before a UI attaches, and the attach this window's `VimEnter`
+    // performs is in the presink, so damage staged here belongs to a
+    // connection that was already attached -- a restart's. Its own failure
+    // is noted rather than returned on, because the presink below is where a
     // connection that died on the way up says so, and that saying still has
     // to become an exit.
     if !pending_redraw.is_empty() {
@@ -1039,26 +1012,33 @@ mod tests {
         }
     }
 
-    // `spawn_and_attach` is private to this crate, and `view` ships no lib
-    // target for an integration test under tests/ to link against, so this
-    // is the only place its stdin-relay branch (the `if stdin_relay`
-    // dispatch to `ui_attach_with_stdin_relay` rather than plain
-    // `ui_attach`) can be exercised at all. Spawns a real nvim, matching
-    // `cli_live.rs`'s own live-relay test and this crate's `task test`
-    // target, which already documents "requires nvim >= 0.11 on PATH".
+    // nvim reads piped stdin once, during startup, from the descriptor a UI
+    // named in `stdin_fd` -- so this is the one spawn that keeps `--embed`'s
+    // wait-for-attach barrier and the one `spawn_and_attach` still attaches
+    // itself ([`EngineConfig::attaches_late`]). A child given the late-attach
+    // geometry and a relay together must therefore still come up with its
+    // content in buffer 1. Spawns a real nvim, matching `cli_live.rs`'s own
+    // live-relay test and this crate's `task test` target, which already
+    // documents "requires nvim >= 0.11 on PATH".
     #[cfg(unix)]
     #[test]
-    fn spawn_and_attach_takes_the_stdin_relay_branch_when_armed() {
+    fn a_relayed_stdin_keeps_the_barrier_and_reaches_the_child() {
         use std::os::fd::AsFd;
 
-        let scratch = ScratchDir::new("startup-spawn-and-attach-stdin-relay").unwrap();
+        let scratch = ScratchDir::new("startup-relayed-stdin").unwrap();
         let content = scratch.join("source.txt");
-        std::fs::write(&content, "hello from spawn_and_attach\n").unwrap();
+        std::fs::write(&content, "hello from the relay\n").unwrap();
         let source = std::fs::File::open(&content).unwrap();
 
         let cfg = EngineConfig::isolated()
             .with_arg("-")
-            .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap());
+            .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap())
+            .with_late_attach(80, 24, view_engine::UI_EXT_OPTIONS);
+        assert!(
+            !cfg.attaches_late(),
+            "a relayed stdin must keep the wait-for-attach barrier, or nvim \
+             reads its own RPC descriptor instead of the relayed one"
+        );
         let mut engine = spawn_and_attach(
             cfg,
             &AtomicU32::new(0),
@@ -1069,11 +1049,10 @@ mod tests {
 
         assert_eq!(
             engine.handle.eval_str("getline(1)").unwrap(),
-            "hello from spawn_and_attach",
-            "spawn_and_attach must call ui_attach_with_stdin_relay, not \
-             plain ui_attach, whenever EngineConfig::stdin_relay_requested() \
-             is true, or the fd nvim was told to read from never gets wired \
-             up at all"
+            "hello from the relay",
+            "spawn_and_attach must attach a relaying child itself, naming \
+             `stdin_fd`, or the fd nvim was told to read from never gets \
+             wired up at all"
         );
         let _ = engine.wait_exit();
     }
@@ -1115,7 +1094,7 @@ mod tests {
             crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
 
         let guard = attach_in_background(EngineConfig::isolated());
-        guard.attach_at(msg_tx, 80, 24, view_core::native::ext::ALL.to_vec());
+        guard.release(msg_tx, 80, 24, view_core::native::ext::ALL.to_vec());
         let pid = wait_for_spawn(&guard);
 
         drop(guard);
@@ -1134,7 +1113,7 @@ mod tests {
             crate::wake::LoopSender::with_waker(raw_tx, crate::wake::LoopWaker::new().unwrap());
 
         let guard = attach_in_background(EngineConfig::isolated());
-        guard.attach_at(msg_tx, 80, 24, view_core::native::ext::ALL.to_vec());
+        guard.release(msg_tx, 80, 24, view_core::native::ext::ALL.to_vec());
         guard.send_residue(Vec::new());
         assert!(
             matches!(msg_rx.recv().unwrap(), Msg::EngineReady),
@@ -1550,63 +1529,6 @@ mod tests {
         );
     }
 
-    /// A config fast enough to reach `UIEnter` before view's own loop
-    /// starts stages the damage from before it beside the replies that
-    /// release it, and nvim -- blocked on the second of those -- has drawn
-    /// nothing since. The staged screen is therefore the one
-    /// `Model::withholds_grid` exists to withhold, and resolving the
-    /// replies first would paint it as though it had arrived after them.
-    #[test]
-    fn damage_staged_beside_a_startups_own_replies_is_withheld_not_painted() {
-        use view_core::msg::{EngineRequest, ReplyToken};
-
-        let ops = crate::engine_ops::FakeOps::default();
-        let executor = crate::runtime::Executor::new(ops);
-        let mut model = Model::with_term_size(80, 24);
-        model.content_painted = false;
-
-        let outcome = run_cutover(
-            &mut model,
-            &executor,
-            &mut crate::runtime::FollowUps {
-                native: &mut crate::native::NativeSession::inert(),
-                theme: &mut crate::bridge::ThemeBridge::new(None, None),
-                speculate: crate::speculate::SpeculationClock::default(),
-            },
-            CutoverInput {
-                presink: vec![
-                    Msg::EngineRequest(EngineRequest::VimEnter {
-                        token: ReplyToken { msgid: 1 },
-                    }),
-                    Msg::EngineRequest(EngineRequest::UiEnter {
-                        token: ReplyToken { msgid: 2 },
-                    }),
-                ],
-                pending_redraw: vec![UiEvent::Flush],
-                resize: None,
-                keys: Vec::new(),
-            },
-            || view_core::msg::ExitInfo {
-                code: None,
-                by_signal: false,
-            },
-        );
-
-        assert!(matches!(outcome, CutoverOutcome::Continue));
-        assert!(
-            model.withheld_flush,
-            "the staged flush must be dispatched, and held"
-        );
-        assert!(
-            !model.content_painted,
-            "a screen drawn before the config opened its windows must not paint"
-        );
-        assert!(
-            model.ui_entered,
-            "and the replies still went out, so the next flush is the one that does"
-        );
-    }
-
     /// Drives the literal production `run_cutover` -- not a hand-recreated
     /// shape of it -- against a `msg_tx` pre-filled to its full 64-slot
     /// capacity with no consumer draining it, proving the whole cutover
@@ -1661,10 +1583,9 @@ mod tests {
             );
             (
                 outcome,
-                // what a dispatched `Flush` leaves on a session holding the
-                // grid, which every session is before `UIEnter` (see
-                // `Model::withholds_grid`)
-                model.withheld_flush,
+                // what a dispatched `Flush` leaves behind (see
+                // `Model::content_painted`)
+                model.content_painted,
                 executor.into_ops().calls.into_inner(),
             )
         });
@@ -1682,18 +1603,19 @@ mod tests {
             flush_dispatched,
             "the pending-damage Flush was not dispatched"
         );
-        // presink's VimEnter reply and the two calls that reply carries, then
-        // the attach probe the cutover closes the staged traffic with, then
-        // the resize, then every buffered key, in that exact order -- the
-        // arrival order run_cutover's doc comment claims
-        let expected_len = 5 + KEY_RING_CAPACITY;
-        assert_eq!(calls.len(), expected_len);
+        // presink's VimEnter reply and the call it carries, then the attach
+        // probe the cutover closes the staged traffic with, then the resize,
+        // then every buffered key, in that exact order -- the arrival order
+        // run_cutover's doc comment claims. The takeover and the attach it
+        // closes with belong to a session that has one, which this inert one
+        // is deliberately not (`NativeSession::inert`)
+        let expected_len = 4 + KEY_RING_CAPACITY;
+        assert_eq!(calls.len(), expected_len, "{calls:?}");
         assert_eq!(calls[0], "reply(1,Nil)");
         assert_eq!(calls[1], "probe_swap_recovery(1)");
-        assert_eq!(calls[2], "claim_stdout_tty()");
-        assert_eq!(calls[3], "probe_swap_recovery(2)");
-        assert!(calls[4].starts_with("try_resize("));
-        assert_eq!(calls[5], "input(0)");
+        assert_eq!(calls[2], "probe_swap_recovery(2)");
+        assert!(calls[3].starts_with("try_resize("));
+        assert_eq!(calls[4], "input(0)");
         assert_eq!(
             calls[expected_len - 1],
             format!("input({})", KEY_RING_CAPACITY - 1)
@@ -1743,10 +1665,8 @@ mod tests {
 
         assert!(matches!(outcome, CutoverOutcome::Quit(3)));
         assert!(exit_called.get());
-        // neither the pending Flush nor the replayed key ever reached
-        // update(): Quit short-circuits everything, the attach probe
-        // included
-        assert!(!model.content_painted);
+        // no call was made at all: Quit short-circuits everything, the
+        // attach probe included
         assert!(executor.into_ops().calls.into_inner().is_empty());
     }
 
@@ -1879,7 +1799,6 @@ mod tests {
         // lost
         let calls = executor.into_ops().calls.into_inner();
         assert_eq!(calls, vec!["reply(1,Nil)"]);
-        assert!(!model.content_painted);
     }
 
     /// The takeover a real session performs is triggered here, not by

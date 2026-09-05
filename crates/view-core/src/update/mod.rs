@@ -83,7 +83,7 @@ use surfaces::{
     open_message_history, open_picker, picker_preview_request, picker_source_for_verb,
     toggle_ai_panel, toggle_tree_sidebar, tree_git_refresh_effect,
 };
-use theme::{on_colorscheme_missing, on_ui_enter, on_vim_enter};
+use theme::{on_colorscheme_missing, on_vim_enter};
 use ui_event::apply_ui_event;
 use watch::{
     on_checktime_reply, on_confirm_external_removal, on_external_watch_degraded,
@@ -254,6 +254,9 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // ever starts, so that arm is unreachable in practice but kept for
         // the same defensive-totality reason
         Msg::RedrawReady | Msg::EngineStopped { .. } | Msg::EngineReady => Vec::new(),
+        // whichever of the two attach paths arrives first performs it, and
+        // the other finds it done (see `Model::takes_attach`)
+        Msg::AttachDeadline => model.takes_attach().map(Effect::Rpc).into_iter().collect(),
         // asked before this connection can say it has finished starting, and
         // deliberately: a startup error parks nvim ahead of its own
         // `VimEnter`, so a chain that waited for that event would never hear
@@ -288,7 +291,6 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }]
         }
         Msg::EngineRequest(EngineRequest::VimEnter { token }) => on_vim_enter(model, token),
-        Msg::EngineRequest(EngineRequest::UiEnter { token }) => on_ui_enter(model, token),
         // delegated, not answered here: the worker owns the reply (see
         // Effect::ClipboardRead/ClipboardWrite's docs), so this loop never
         // blocks on the system clipboard the way a direct Effect::Reply
