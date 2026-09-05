@@ -153,12 +153,12 @@ fn is_one_window(screen: &vt100::Screen) -> bool {
 ///
 /// The one shape the other steps hide: a single changed cell at the head of
 /// a run of glyphs a terminal draws two columns wide, where every other step
-/// repaints whole regions. How far the painter then follows the run is not
-/// what the residue verdict below decides -- a reach of any length at all
-/// ends on a half sitting under the widening model's own glyph, which
-/// [`widening_residue`] excludes as unavoidable -- so the emitted columns
-/// are pinned in `view-tui`'s paint tests and what this step adds is the
-/// cell-for-cell agreement with nvim on a one-cell edit.
+/// repaints whole regions and so satisfies a painter that follows the run
+/// no further than its first column. This is the step that reads how far
+/// the painter follows it: stopping short leaves the run's next glyph under
+/// the head's own second half, which [`widening_residue`] names
+/// (`(15, 1, "\u{252c}", "\0")` at this fixture's geometry) rather than
+/// excusing.
 fn edited_the_box_run(screen: &vt100::Screen) -> bool {
     screen.contents().contains("box drawing: x")
 }
