@@ -294,23 +294,10 @@ fn theme_cache_written(home: &Path) -> bool {
 
 /// The pinned `nvim` on the same directory, with none of the host's
 /// configuration and all of the fixture's.
-///
-/// `--clean` is dropped from the isolated config's argument list, and only
-/// that one: it would make the reference read no `init.lua` at all, while
-/// view's own child reads the user's -- so the two sessions would be
-/// comparing two colourschemes rather than two compositors. What keeps this
-/// child off the operator's own files is the redirected `XDG_*_HOME` roots
-/// that [`view_session`] gives its child too, which is the mechanism either
-/// way.
 fn nvim_session(dir: &Path, home: &Path) -> PtySession {
-    let cfg = view_engine::EngineConfig::isolated();
-    let mut cmd = portable_pty::CommandBuilder::new(&cfg.nvim_bin);
-    for arg in cfg.extra_args.iter().filter(|arg| *arg != "--clean") {
-        cmd.arg(arg);
-    }
+    let mut cmd = common::reference_nvim(home);
     cmd.arg(".");
     cmd.cwd(dir);
-    common::isolate_xdg_first_launch(&mut cmd, home);
     PtySession::spawn_configured(cmd, COLS, ROWS)
         .expect("PtySession::spawn_configured against the pinned nvim")
 }

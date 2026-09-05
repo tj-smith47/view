@@ -1,8 +1,5 @@
 -- The highlight set the close battery's colour comparison needs to
--- discriminate, shaped after the configuration the stripe was reported
--- from: a side panel that is dark while the cursor is elsewhere and takes
--- the ordinary background the moment the cursor lands in it, with the
--- column between the windows painted in the panel's own colour.
+-- discriminate.
 --
 -- No colourscheme, no plugins: the battery's text comparison is against the
 -- pinned nvim on the same config, so anything here that moved a character
@@ -21,8 +18,8 @@ local function apply()
   vim.api.nvim_set_hl(0, "NormalNC", { fg = "#f8f8f2", bg = "#1e1f29" })
 
   -- What the panel window sets through `winhighlight` for the state it is
-  -- not focused in, and the colour a closing neighbour used to leave a
-  -- one-column band of down the height of the screen.
+  -- not focused in, so the panel is dark only while the cursor is across
+  -- from it.
   vim.api.nvim_set_hl(0, "PanelNormal", { fg = "#f8f8f2", bg = "#21222c" })
 
   -- Its own foreground and its own background: the background is what the

@@ -89,13 +89,7 @@ fn view_session(home: &std::path::Path) -> PtySession {
 /// The pinned `nvim` under the same config, drawing its own screen: the
 /// reference the bar is stated against.
 fn nvim_session(home: &std::path::Path) -> PtySession {
-    let cfg = view_engine::EngineConfig::default();
-    let mut cmd = portable_pty::CommandBuilder::new(&cfg.nvim_bin);
-    // `-n` alone, never `--clean`: the planted config is the subject, and
-    // `EngineConfig::isolated`'s argument list would skip it
-    cmd.arg("-n");
-    common::isolate_xdg_first_launch(&mut cmd, home);
-    recording(cmd)
+    recording(common::reference_nvim(home))
 }
 
 /// Waits for the whole post-`VimEnter` layout -- both windows -- and

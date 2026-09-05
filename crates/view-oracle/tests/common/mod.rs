@@ -198,6 +198,28 @@ pub fn plant_nvim_config(home: &Path, fixture: &str) {
     std::fs::copy(&source, dir.join("init.lua")).expect("the committed fixture must be readable");
 }
 
+/// The pinned `nvim` spawned against the config planted in `home`, ready for
+/// the caller's own arguments and spawn.
+///
+/// `-n` alone, never `--clean`: a leg that plants an `init.lua` is measuring
+/// what that config makes nvim draw, and `--clean` -- which
+/// `EngineConfig::isolated`'s argument list carries -- would make this child
+/// read no config at all, so the two sessions would be comparing two
+/// colourschemes rather than two implementations. What keeps the child off
+/// the operator's own files is [`isolate_xdg_first_launch`]'s redirected
+/// `XDG_*_HOME` roots, which is the mechanism either way.
+///
+/// `-n` itself buys an embedded child nothing until a UI attaches; here the
+/// child owns the terminal, so it reaches the `no_swap_file` branch and the
+/// flag means what it says.
+pub fn reference_nvim(home: &Path) -> portable_pty::CommandBuilder {
+    let cfg = view_engine::EngineConfig::default();
+    let mut cmd = portable_pty::CommandBuilder::new(&cfg.nvim_bin);
+    cmd.arg("-n");
+    isolate_xdg_first_launch(&mut cmd, home);
+    cmd
+}
+
 /// Writes a `view.toml` under `home` that switches every native feature
 /// off.
 ///

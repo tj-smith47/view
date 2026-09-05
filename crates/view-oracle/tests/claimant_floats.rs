@@ -61,12 +61,7 @@ fn view_session(home: &std::path::Path) -> PtySession {
 
 /// The pinned `nvim` under the same config, drawing its own screen.
 fn nvim_session(home: &std::path::Path) -> PtySession {
-    let cfg = view_engine::EngineConfig::default();
-    let mut cmd = portable_pty::CommandBuilder::new(&cfg.nvim_bin);
-    // `-n` alone, never `--clean`: the planted config is the subject
-    cmd.arg("-n");
-    common::isolate_xdg_first_launch(&mut cmd, home);
-    recording(cmd)
+    recording(common::reference_nvim(home))
 }
 
 /// The `view.toml` this pin is stated against: the message surface native,
