@@ -453,8 +453,22 @@ impl GridRegistry {
     /// `UIEnter` is a startup talking to the user out of the grid: a
     /// `vim.fn.input()` prompt on a session that externalized neither the
     /// cmdline nor the messages arrives this way and no other.
+    ///
+    /// Without `ext_multigrid` there is no message grid to place. nvim
+    /// composites its message area into the bottom of the global grid and
+    /// names neither that area nor `cmdheight` on the wire (`option_set`
+    /// carries no such option), so the last row stands in for it. Unlike a
+    /// message grid that row is shared -- with `cmdheight` at 0 a buffer
+    /// line reaches it -- so it counts only while the cursor is parked on
+    /// it, which every prompt does and a buffer line does not.
     #[must_use]
     pub fn message_area_has_text(&self) -> bool {
+        if self.slots.is_empty() {
+            let Some(last) = self.global.size().1.checked_sub(1) else {
+                return false;
+            };
+            return self.global.cursor().0 == last && !self.global.row_text(last).trim().is_empty();
+        }
         self.slots
             .iter()
             .filter(|slot| {

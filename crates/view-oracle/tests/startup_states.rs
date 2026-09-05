@@ -55,18 +55,24 @@ fn recording(cmd: portable_pty::CommandBuilder) -> PtySession {
 }
 
 /// Writes a `view.toml` under `home` with each named `[native]` feature
-/// switched off and every other one left at its default.
+/// switched off, `[engine] single_grid` as asked, and every other setting
+/// left at its default.
 ///
 /// The permutations this pin walks are the ones a noice / nvim-notify user
-/// reaches: the surfaces view externalizes decide where a startup prompt or
-/// error is *drawn*, and the hold has to cover all four ways that lands.
-fn plant_native_off(home: &std::path::Path, off: &[&str]) {
+/// reaches: what a session leaves with nvim decides where a startup prompt
+/// or error is *drawn*, and the hold has to cover every way that lands --
+/// including `single_grid = true`, where nvim places no message grid and
+/// composites its message area into the last row of grid 1.
+fn plant_native_off(home: &std::path::Path, off: &[&str], single_grid: bool) {
     let dir = common::xdg_home(home, "XDG_CONFIG_HOME").join("view");
     std::fs::create_dir_all(&dir).expect("the isolated config home must be creatable");
     let mut text = String::from("[native]\n");
     for feature in off {
         text.push_str(feature);
         text.push_str(" = false\n");
+    }
+    if single_grid {
+        text.push_str("\n[engine]\nsingle_grid = true\n");
     }
     std::fs::write(dir.join("view.toml"), text).expect("the isolated view.toml must be writable");
 }
@@ -156,39 +162,43 @@ fn the_buffer_before_vim_enter_reaches_neither_editors_terminal() {
     );
 }
 
-/// The same pin across the `[native]` permutations, which decide which
-/// surfaces nvim keeps drawing into the grid and so where a startup prompt
-/// or a startup error appears -- and never whether the pre-`VimEnter`
-/// screen is shown.
+/// The same pin across the permutations that decide which surfaces nvim
+/// keeps drawing into the grid, and so where a startup prompt or a startup
+/// error appears -- and never whether the pre-`VimEnter` screen is shown.
+/// The last leg is the narrowest one: with `single_grid = true` and both
+/// message surfaces off nvim externalizes nothing, so its message area is
+/// the last row of grid 1 and the half-built buffer sits in the rows above
+/// it.
 ///
 /// Every leg is a session the fixture really does flush a half-built screen
-/// to: the config's mid-source flush is gated on `ext_multigrid`, which
-/// every permutation attaches, so no leg can pass by drawing nothing. The
-/// legs run to completion and report together, because "which permutations
-/// regress" is the question and a walk that stops at the first answers it
-/// for one.
+/// to: the config's mid-source flush is gated on the attach being a remote
+/// one, which every permutation is, so no leg can pass by drawing nothing.
+/// The legs run to completion and report together, because "which
+/// permutations regress" is the question and a walk that stops at the first
+/// answers it for one.
 ///
 /// Disconfirm: keying `Model::withholds_grid` on the cmdline and the
 /// message surfaces again -- or forcing it to `false` -- puts
-/// `PREVIMENTERBUFFER` into all three streams while the defaults leg above
+/// `PREVIMENTERBUFFER` into all four streams while the defaults leg above
 /// stays clean.
 #[test]
 fn the_hold_covers_every_native_permutation() {
     let mut regressed = Vec::new();
-    for off in [
-        &["notifications"][..],
-        &["palette"][..],
-        &["notifications", "palette"][..],
+    for (off, single_grid) in [
+        (&["notifications"][..], false),
+        (&["palette"][..], false),
+        (&["notifications", "palette"][..], false),
+        (&["notifications", "palette"][..], true),
     ] {
         let paths = common::ScratchPaths::new("startup-states-permutation");
         common::plant_nvim_config(&paths.isolated_home, "startup-states");
-        plant_native_off(&paths.isolated_home, off);
+        plant_native_off(&paths.isolated_home, off, single_grid);
 
         let mut under_test = view_session(&paths.isolated_home);
         let stream = until_the_split(&mut under_test, "view");
 
         if wrote(&stream, PRE_VIM_ENTER) {
-            regressed.push(format!("{off:?}"));
+            regressed.push(format!("{off:?} single_grid = {single_grid}"));
         }
     }
     assert!(

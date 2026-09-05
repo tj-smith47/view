@@ -2080,12 +2080,19 @@ mod tests {
     #[test]
     fn every_native_permutation_holds_the_grid_until_the_startup_asks_for_it() {
         use crate::native::ext::Ext;
-        let permutations = [
+        let owned = [
             vec![Ext::LineGrid, Ext::Cmdline, Ext::Messages],
             vec![Ext::LineGrid, Ext::Cmdline],
             vec![Ext::LineGrid, Ext::Messages],
             vec![Ext::LineGrid],
         ];
+        // both values of `[engine] single_grid`, which decides where nvim
+        // draws a startup prompt and so which signal has to find it
+        let permutations = owned.into_iter().flat_map(|set| {
+            let mut multigrid = set.clone();
+            multigrid.push(Ext::Multigrid);
+            [set, multigrid]
+        });
         for surfaces in permutations {
             let mut model = Model::new();
             model.attach_surfaces(surfaces.clone());
@@ -2142,6 +2149,83 @@ mod tests {
         assert!(model.withholds_grid(), "grid 0 announces no message area");
     }
 
+    /// The signal is read at the flush, never at the cells, and that is
+    /// what holds a config that only talks: `print` and `echomsg` draw into
+    /// nvim's message area while sourcing but nvim flushes nothing before
+    /// `UIEnter` for them, so the text is on the next screen the user was
+    /// always going to see rather than a screen of its own.
+    #[test]
+    fn message_text_with_no_flush_behind_it_does_not_release_the_hold() {
+        let mut model = holding_model();
+        let message = message_area(&mut model);
+        write_row(&mut model, message, "INFOHERE");
+        assert!(
+            model.withholds_grid(),
+            "cells nvim never flushed are not a screen nvim showed"
+        );
+    }
+
+    /// `[engine] single_grid = true` with both message surfaces off: nvim
+    /// places no message grid at all and composites its message area into
+    /// the bottom of grid 1, so a startup `vim.fn.input()` arrives as cells
+    /// on the last row with the cursor parked in them.
+    #[test]
+    fn a_prompt_on_the_last_row_releases_the_hold_with_no_message_grid() {
+        let mut model = single_grid_model();
+        flush(&mut model);
+        assert!(model.withholds_grid(), "an empty last row holds");
+        write_row_at(&mut model, GLOBAL, LAST_ROW, "PROMPTHERE: ");
+        cursor_goto(&mut model, GLOBAL, LAST_ROW, 12);
+        flush(&mut model);
+        assert!(
+            !model.withholds_grid(),
+            "a prompt nvim drew into grid 1 must reach the user"
+        );
+    }
+
+    /// The last row is the message area only while nvim is using it: with
+    /// `cmdheight` at 0 a buffer line reaches the bottom of the screen, and
+    /// a half-built buffer is the screen this hold exists to withhold.
+    #[test]
+    fn a_buffer_line_on_the_last_row_is_not_a_release_signal() {
+        let mut model = single_grid_model();
+        write_row_at(&mut model, GLOBAL, LAST_ROW, "BUFFERLINE24");
+        cursor_goto(&mut model, GLOBAL, 0, 0);
+        flush(&mut model);
+        assert!(model.withholds_grid(), "buffer text is not a prompt");
+        assert!(model.withheld_flush, "and the flush behind it is held");
+    }
+
+    /// nvim's global grid, which it numbers 1 in both attach modes.
+    const GLOBAL: u64 = 1;
+    /// The last row of [`single_grid_model`]'s screen.
+    const LAST_ROW: u64 = 23;
+
+    /// A session attached with neither the message surfaces nor
+    /// `ext_multigrid`, holding one 80x24 grid and nothing else.
+    fn single_grid_model() -> Model {
+        let mut model = Model::new();
+        model.attach_surfaces(vec![crate::native::ext::Ext::LineGrid]);
+        model.content_painted = false;
+        let _ = crate::update::update(
+            &mut model,
+            crate::msg::Msg::Redraw(vec![UiEvent::GridResize {
+                grid: GLOBAL,
+                width: 80,
+                height: 24,
+            }]),
+        );
+        model
+    }
+
+    /// `grid_cursor_goto`, which nvim sends for every prompt it draws.
+    fn cursor_goto(model: &mut Model, grid: u64, row: u64, col: u64) {
+        let _ = crate::update::update(
+            model,
+            crate::msg::Msg::Redraw(vec![UiEvent::GridCursorGoto { grid, row, col }]),
+        );
+    }
+
     /// `msg_set_pos` for `grid`, the way nvim announces its message area to
     /// a session that did not externalize the messages.
     fn msg_set_pos(model: &mut Model, grid: u64) {
@@ -2175,11 +2259,16 @@ mod tests {
 
     /// Draws `text` into `grid`'s first row, as `grid_line` delivers it.
     fn write_row(model: &mut Model, grid: u64, text: &str) {
+        write_row_at(model, grid, 0, text);
+    }
+
+    /// Draws `text` into `row` of `grid`, as `grid_line` delivers it.
+    fn write_row_at(model: &mut Model, grid: u64, row: u64, text: &str) {
         let _ = crate::update::update(
             model,
             crate::msg::Msg::Redraw(vec![UiEvent::GridLine {
                 grid,
-                row: 0,
+                row,
                 col_start: 0,
                 cells: text
                     .chars()

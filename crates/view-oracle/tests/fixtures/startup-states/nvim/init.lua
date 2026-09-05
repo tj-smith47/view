@@ -21,8 +21,12 @@ vim.api.nvim_buf_set_lines(0, 0, -1, false, startup)
 -- offered over a window rather than once, so no single moment of view's
 -- own startup can be the reason a frame did or did not reach the terminal:
 -- whatever else it is doing, its paint loop is running for most of this.
+-- keyed on the attach being a remote one rather than on any externalized
+-- surface, so the loop runs under every permutation the editor under test
+-- can be configured into -- `single_grid = true` externalizes nothing at
+-- all -- and under none of the reference TUI's.
 local ui = vim.api.nvim_list_uis()[1]
-if ui and ui.ext_multigrid then
+if ui and not ui.stdout_tty then
   for _ = 1, 60 do
     vim.api.nvim__redraw({ valid = false, flush = true })
     vim.uv.sleep(10)
