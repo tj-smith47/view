@@ -2292,21 +2292,39 @@ mod tests {
         );
     }
 
-    /// A prompt exactly as wide as the grid wraps the cursor to column 0 of
-    /// the next row, with nothing to its left; the full-width row above it
-    /// is what says it is a prompt, and nvim leaving the wire cursor at the
-    /// top-left corner while sourcing is what keeps a buffer from ever
-    /// reading the same way.
+    /// The wire cursor moves while a config sources when a plugin calls
+    /// `nvim__redraw({cursor = true})`, so a buffer's cursor can sit on a
+    /// blank cell with text to its left -- inside a line, or on the blank
+    /// row under a full-width one. What a prompt has and a buffer does not
+    /// is nothing after the cursor on its row; the blank row below a
+    /// full-width line has nothing after it either, which is why a prompt
+    /// exactly as wide as the screen is left to the cap.
     #[test]
-    fn a_prompt_as_wide_as_the_screen_wraps_its_cursor_and_still_releases_the_hold() {
+    fn a_buffer_cursor_on_a_blank_inside_its_line_is_not_a_release_signal() {
         let mut model = single_grid_model();
-        write_row_at(&mut model, GLOBAL, LAST_ROW - 1, &"P".repeat(80));
-        cursor_goto(&mut model, GLOBAL, LAST_ROW, 0);
+        write_row_at(&mut model, GLOBAL, 0, "BUFFERLINE more text");
+        cursor_goto(&mut model, GLOBAL, 0, 10);
         flush(&mut model);
         assert!(
-            !model.withholds_grid(),
-            "a prompt wrapped onto the next row must reach the user"
+            model.withholds_grid(),
+            "text after the cursor is not a prompt"
         );
+        assert!(model.withheld_flush, "and the flush behind it is held");
+    }
+
+    /// The same, with the cursor moved to the blank row under a full-width
+    /// first line.
+    #[test]
+    fn a_buffer_cursor_moved_below_a_full_width_line_is_not_a_release_signal() {
+        let mut model = single_grid_model();
+        write_row_at(&mut model, GLOBAL, 0, &"BUFFERLINE".repeat(8));
+        cursor_goto(&mut model, GLOBAL, 1, 0);
+        flush(&mut model);
+        assert!(
+            model.withholds_grid(),
+            "a blank row under buffer text is not a prompt"
+        );
+        assert!(model.withheld_flush, "and the flush behind it is held");
     }
 
     /// One screen, one answer: what a fixture config draws before `UIEnter`
@@ -2315,7 +2333,8 @@ mod tests {
     /// taken off the wire (`vim.fn.input()` with `cmdheight` 0, 1 and 2, a
     /// buffer reaching the last row, a ruler with `laststatus` 0, a one-line
     /// buffer over blank end-of-buffer rows, a `getchar()` wait, a prompt as
-    /// wide as the screen), drawn here the way each attach delivers it.
+    /// wide as the screen, the swap-file prompt, a buffer cursor moved by
+    /// `nvim__redraw`), drawn here the way each attach delivers it.
     #[test]
     fn every_startup_screen_gets_the_same_answer_with_and_without_a_message_grid() {
         struct Screen {
@@ -2424,7 +2443,7 @@ mod tests {
                 releases: true,
             },
             Screen {
-                name: "vim.fn.input() with a prompt exactly as wide as the screen",
+                name: "vim.fn.input() with a prompt exactly as wide as the screen (left to the cap)",
                 single_grid: |m| {
                     write_row_at(m, GLOBAL, LAST_ROW - 1, &"P".repeat(80));
                     cursor_goto(m, GLOBAL, LAST_ROW, 0);
@@ -2434,7 +2453,46 @@ mod tests {
                     write_row_at(m, message, 0, &"P".repeat(80));
                     cursor_goto(m, message, 1, 0);
                 },
+                releases: false,
+            },
+            Screen {
+                name: "swap-file E325 with its -- More -- prompt",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, LAST_ROW - 1, "\" already exists!");
+                    write_row_at(m, GLOBAL, LAST_ROW, "-- More --");
+                    cursor_goto(m, GLOBAL, LAST_ROW, 10);
+                },
+                multigrid: |m| {
+                    let message = message_area_of_height(m, 24);
+                    write_row_at(m, message, 22, "\" already exists!");
+                    write_row_at(m, message, 23, "-- More --");
+                    cursor_goto(m, message, 23, 10);
+                },
                 releases: true,
+            },
+            Screen {
+                name: "a full-width first line, the cursor moved to the blank row below by nvim__redraw",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, 0, &"BUFFERLINE".repeat(8));
+                    cursor_goto(m, GLOBAL, 1, 0);
+                },
+                multigrid: |m| {
+                    let _ = message_area(m);
+                    cursor_goto(m, WINDOW, 1, 0);
+                },
+                releases: false,
+            },
+            Screen {
+                name: "a buffer cursor moved onto a blank inside its line by nvim__redraw",
+                single_grid: |m| {
+                    write_row_at(m, GLOBAL, 0, "BUFFERLINE more text");
+                    cursor_goto(m, GLOBAL, 0, 10);
+                },
+                multigrid: |m| {
+                    let _ = message_area(m);
+                    cursor_goto(m, WINDOW, 0, 10);
+                },
+                releases: false,
             },
             Screen {
                 name: "the same, with a first line that opens with whitespace",
@@ -2480,6 +2538,9 @@ mod tests {
 
     /// nvim's global grid, which it numbers 1 in both attach modes.
     const GLOBAL: u64 = 1;
+    /// The first window's grid under `ext_multigrid`, where a buffer cursor
+    /// is reported.
+    const WINDOW: u64 = 2;
     /// The last row of [`single_grid_model`]'s screen.
     const LAST_ROW: u64 = 23;
 

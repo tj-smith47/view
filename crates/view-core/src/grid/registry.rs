@@ -460,15 +460,20 @@ impl GridRegistry {
     /// left. A `vim.fn.input()` on a session that externalized neither the
     /// cmdline nor the messages arrives this way and no other.
     ///
-    /// Two shapes of that reading, both off the wire. A prompt exactly as
-    /// wide as the grid wraps the cursor to column 0 of the row below its
-    /// text, so a cursor at column 0 under a full-width row counts too; the
-    /// invariant that makes this safe is that nvim leaves the wire cursor at
-    /// `(0, 0)` while sourcing, so no buffer puts it on a row below the
-    /// first before `UIEnter`. And a `getchar()` wait after a message draws
-    /// the text into the message grid but reports the cursor on the global
-    /// grid at the message area's row, so a global-grid cursor whose row
-    /// falls inside a placed `Message` pane reads as that pane's row.
+    /// The whole reading is one row: the cell under the cursor is blank,
+    /// text lies to its left, and nothing non-blank lies to its right --
+    /// every prompt ends at its cursor. The wire cursor can move while a
+    /// config sources (`nvim__redraw({cursor = true})`, which plugins call
+    /// from their setup), so a buffer cursor on a blank cell inside a line
+    /// is a screen this has to hold, and the cells after it are what say
+    /// so. A prompt exactly as wide as the grid wraps its cursor to column
+    /// 0 of the next row, which is the same screen as a full-width buffer
+    /// line with the cursor on the blank row below it; that prompt is left
+    /// to the hold's cap rather than read as a release. And a `getchar()`
+    /// wait after a message draws the text into the message grid but
+    /// reports the cursor on the global grid at the message area's row, so
+    /// a global-grid cursor whose row falls inside a placed `Message` pane
+    /// reads as that pane's row.
     ///
     /// Without `ext_multigrid` there is no message grid to place. nvim
     /// composites its message area into the bottom of the global grid and
@@ -480,27 +485,19 @@ impl GridRegistry {
     /// buffer rows under a one-line file, a first line that opens with
     /// whitespace -- never puts it there.
     ///
-    /// Read once per withheld flush; costs the cells of the cursor's row up
-    /// to the cursor, or the row above it for a cursor at column 0.
+    /// Read once per withheld flush; costs the cells of the cursor's row.
     #[must_use]
     pub fn message_area_has_text(&self) -> bool {
         let Some((grid, row, col)) = self.message_area_cursor() else {
             return false;
         };
-        let blank = |r: u16, c: u16| {
-            grid.cell(r, c)
+        let blank = |c: u16| {
+            grid.cell(row, c)
                 .is_none_or(|cell| cell.text.trim().is_empty())
         };
-        if !blank(row, col) {
-            return false;
-        }
-        if col > 0 {
-            return (0..col).any(|c| !blank(row, c));
-        }
-        let Some(above) = row.checked_sub(1) else {
-            return false;
-        };
-        (0..grid.size().0).all(|c| !blank(above, c))
+        blank(col)
+            && (0..col).any(|c| !blank(c))
+            && (col.saturating_add(1)..grid.size().0).all(blank)
     }
 
     /// The grid the cursor's message-area reading is taken from, with the
