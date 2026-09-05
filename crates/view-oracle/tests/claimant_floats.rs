@@ -22,6 +22,16 @@ const ROWS: u16 = 24;
 /// under widens it.
 const BUDGET: Duration = Duration::from_secs(20);
 
+/// How many scroll keys the per-key assertion walks, matching the recorder
+/// timeline in the report.
+///
+/// What is asserted per key is that a frame landed and that it carried no
+/// float text -- not a write count. The pty reader's chunk boundaries are
+/// its own read boundaries, not the child's writes, so a count taken here
+/// would be a property of the host's scheduling; the write counts in the
+/// report come from a recorder that times the reads against the keys.
+const KEYS: usize = 6;
+
 /// The float's own first line. On the terminal it is proof of a frame
 /// carrying a window view was supposed to be holding back.
 const FLOAT_TEXT: &str = "CLAIMANTFLOATTEXT";
@@ -154,6 +164,28 @@ fn a_superseded_claimants_float_reaches_the_history_and_never_the_terminal() {
         "view painted a superseded claimant's float; screen:\n{}",
         under_test.screen()
     );
+
+    for key in 1..=KEYS {
+        let before = under_test.raw_output().len();
+        under_test
+            .send(b"\x1b[B")
+            .expect("the pty under test accepts a scroll key");
+        let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
+        while under_test.raw_output().len() == before && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let written = under_test.raw_output()[before..].to_vec();
+        assert!(
+            !written.is_empty(),
+            "key {key} drew no frame at all, so the assertion below is vacuous"
+        );
+        assert!(
+            !wrote(&written, FLOAT_TEXT),
+            "key {key} carried a superseded claimant's float onto the screen; \
+             screen:\n{}",
+            under_test.screen()
+        );
+    }
 
     // read after the stream is taken, since the history view puts the text
     // on the terminal itself -- which is the point of it
