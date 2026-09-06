@@ -37,15 +37,26 @@ use view_bench::session::{BenchSession, SpawnSpec, GRID_COLS, GRID_ROWS};
 use view_oracle::{PtySession, QueryPolicy};
 
 /// How long the pinned engine blocks its own tty startup waiting for the
-/// DSR answer behind its background query, in milliseconds
-/// (`vim.wait(100, ...)` in `runtime/lua/vim/_core/defaults.lua`).
-const ENGINE_BACKGROUND_WAIT_MS: f64 = 100.0;
+/// DSR answer behind its background query (`vim.wait(100, ...)` in
+/// `runtime/lua/vim/_core/defaults.lua`).
+const ENGINE_BACKGROUND_WAIT: Duration = Duration::from_millis(100);
 
 /// Ceiling on the harness figure as a multiple of the same engine's figure
 /// under a real terminal. A multiple rather than a duration: a loaded host
 /// stretches both legs together, and what this leg is about is the gap
 /// between them.
 const REAL_TERMINAL_MULTIPLE: f64 = 2.0;
+
+/// How many times each leg below is drawn, the better draw standing for
+/// it: one spawn the host stretched is not a verdict about a pty, and both
+/// figures here are floors a stretch can only push the wrong way.
+const DRAWS_PER_LEG: usize = 2;
+
+/// The better of `DRAWS_PER_LEG` draws of `leg`, which for a startup figure
+/// is the smallest.
+fn best_of(mut leg: impl FnMut(usize) -> f64) -> f64 {
+    (0..DRAWS_PER_LEG).map(&mut leg).fold(f64::MAX, f64::min)
+}
 
 /// Long enough for a cold `nvim --clean` to reach `NVIM STARTED` and exit
 /// on a host that is doing something else at the time; scaled, because
@@ -121,11 +132,18 @@ fn started_through_a_silent_pty(log: &Path) -> f64 {
 /// host has no `tmux` to provide one.
 fn started_under_tmux(log: &Path) -> Option<f64> {
     if Command::new("tmux").arg("-V").output().is_err() {
-        eprintln!(
-            "skipped: no tmux on this host, so there is no real terminal to \
-             hold the harness's own figure against (see this file's own \
-             module docs)"
+        // announced rather than passed over in silence: cargo captures a
+        // passing test's stderr, and a leg that never ran reads as a
+        // verified claim on the checks page
+        let reason = "no tmux on this host, so there is no real terminal to hold the harness's \
+                      own figure against (see this file's own module docs)";
+        println!(
+            "skipping the_nvim_arm_starts_as_fast_under_the_bench_pty_as_under_a_real_terminal: \
+             {reason}"
         );
+        if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+            println!("::warning::nvim arm real-terminal leg skipped: {reason}");
+        }
         return None;
     }
     // a socket nothing else on the host shares, so the kill below reaches
@@ -174,16 +192,18 @@ fn started_under_tmux(log: &Path) -> Option<f64> {
 #[test]
 fn the_bench_pty_spares_the_nvim_arm_the_wait_a_silent_one_costs_it() {
     let dir = view_test_support::ScratchDir::new("nvim-arm-startup").unwrap();
-    let answered = started_through_the_bench_pty(&dir.join("answered.log"));
-    let unanswered = started_through_a_silent_pty(&dir.join("silent.log"));
-    eprintln!("NVIM STARTED: bench pty {answered:.1} ms, silent pty {unanswered:.1} ms");
+    let answered_took =
+        best_of(|draw| started_through_the_bench_pty(&dir.join(format!("answered-{draw}.log"))));
+    let unanswered_took =
+        best_of(|draw| started_through_a_silent_pty(&dir.join(format!("silent-{draw}.log"))));
+    eprintln!("NVIM STARTED: bench pty {answered_took:.1} ms, silent pty {unanswered_took:.1} ms");
     assert!(
-        unanswered - answered >= ENGINE_BACKGROUND_WAIT_MS / 2.0,
-        "an unanswered pty cost the engine {unanswered:.1} ms against the \
-         bench pty's {answered:.1} ms, which is less than half the \
-         {ENGINE_BACKGROUND_WAIT_MS:.0} ms wait it is supposed to be \
-         spending -- either the query is going unanswered on both, or the \
-         engine no longer waits for it and this leg proves nothing"
+        unanswered_took - answered_took >= ENGINE_BACKGROUND_WAIT.as_secs_f64() * 1_000.0 / 2.0,
+        "an unanswered pty cost the engine {unanswered_took:.1} ms against \
+         the bench pty's {answered_took:.1} ms, which is less than half the \
+         {ENGINE_BACKGROUND_WAIT:?} wait it is supposed to be spending -- \
+         either the query is going unanswered on both, or the engine no \
+         longer waits for it and this leg proves nothing"
     );
 }
 
@@ -192,10 +212,15 @@ fn the_bench_pty_spares_the_nvim_arm_the_wait_a_silent_one_costs_it() {
 #[test]
 fn the_nvim_arm_starts_as_fast_under_the_bench_pty_as_under_a_real_terminal() {
     let dir = view_test_support::ScratchDir::new("nvim-arm-real-terminal").unwrap();
-    let Some(real) = started_under_tmux(&dir.join("tmux.log")) else {
+    let Some(real) = started_under_tmux(&dir.join("tmux-0.log")) else {
         return;
     };
-    let harness = started_through_the_bench_pty(&dir.join("harness.log"));
+    let real = (1..DRAWS_PER_LEG).fold(real, |best, draw| {
+        started_under_tmux(&dir.join(format!("tmux-{draw}.log")))
+            .map_or(best, |next| best.min(next))
+    });
+    let harness =
+        best_of(|draw| started_through_the_bench_pty(&dir.join(format!("harness-{draw}.log"))));
     eprintln!("NVIM STARTED: bench pty {harness:.1} ms, tmux {real:.1} ms");
     assert!(
         harness <= real * REAL_TERMINAL_MULTIPLE,

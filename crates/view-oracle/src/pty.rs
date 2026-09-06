@@ -47,11 +47,12 @@ type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum QueryPolicy {
-    /// Answer the DA1 fence and nothing optional beyond the two queries
-    /// [`BACKGROUND`] and [`DSR`] every answering terminal replies to, as a
-    /// VT100-class terminal does. The child resolves no optional capability
-    /// and derives its most conservative tier, which keeps an assertion
-    /// about *content* free of the escapes a richer tier would interleave.
+    /// Answer the DA1 fence and nothing optional beyond the three queries
+    /// [`BACKGROUND`], [`DSR`] and [`CPR`] every answering terminal replies
+    /// to, as a VT100-class terminal does. The child is granted no optional
+    /// capability and derives its most conservative tier, which keeps an
+    /// assertion about *content* free of the escapes a richer tier would
+    /// interleave.
     AnswerDa1,
     /// Answer the whole probe batch, as a modern terminal does, so the child
     /// derives its full tier. A benchmark wants this: the budget table names
@@ -154,8 +155,27 @@ const BACKGROUND: Answer = (b"\x1b]11;?\x07", b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07")
 /// nvim's whole startup again and lands in any figure taken across it.
 const DSR: Answer = (b"\x1b[5n", b"\x1b[0n");
 
-const BASE_ANSWERS: &[Answer] = &[BACKGROUND, DSR, DA1];
-const FULL_TIER: &[Answer] = &[BACKGROUND, DSR, SYNC, KITTY, TRUECOLOR, BOX_GLYPH, DA1];
+/// A bare cursor-position request, and the reply of a terminal whose cursor
+/// sits at the home position.
+///
+/// Not a capability probe either, and answered under every answering policy
+/// for the same reason [`DSR`] is: a ConPTY master releases nothing a child
+/// has written until the cursor report it asked for is answered, measured
+/// against `cmd.exe /c echo hi` as well as the engine
+/// (`docs/conpty-harness-wire-capture.md`), so on that platform it is every
+/// child rather than nvim's.
+///
+/// [`BOX_GLYPH`]'s probe carries a cursor report of its own, behind a glyph
+/// written from a known column, and that one does resolve a capability. It
+/// is the longer query, so it keeps its own position-dependent answer and
+/// this one replies only where nothing longer claims the bytes. Where the
+/// longer query is not in the table at all -- the DA1-only tier -- the
+/// glyph probe gets the home position, which is the same answer that tier's
+/// own contract gives every optional capability: not granted.
+const CPR: Answer = (b"\x1b[6n", b"\x1b[1;1R");
+
+const BASE_ANSWERS: &[Answer] = &[BACKGROUND, DSR, CPR, DA1];
+const FULL_TIER: &[Answer] = &[BACKGROUND, DSR, SYNC, KITTY, TRUECOLOR, BOX_GLYPH, CPR, DA1];
 
 impl QueryPolicy {
     /// The query/reply pairs a session under this policy answers.
@@ -212,11 +232,6 @@ impl QueryResponder {
         }
     }
 
-    /// How far back a chunk boundary can cut a query this responder answers.
-    fn longest_query(&self) -> usize {
-        self.answers.iter().map(|(q, _)| q.len()).max().unwrap_or(1)
-    }
-
     /// The replies (concatenated) for every query found in `chunk`, or empty
     /// if none. Carries an unmatched tail forward so a split query is caught.
     pub fn replies_for(&mut self, chunk: &[u8]) -> Vec<u8> {
@@ -224,7 +239,6 @@ impl QueryResponder {
         scan.extend_from_slice(chunk);
         let mut out = Vec::new();
         let mut i = 0;
-        let mut consumed = 0;
         while i < scan.len() {
             // longest match wins, so a table where one query is a prefix of
             // another cannot answer the short one and swallow the rest
@@ -236,18 +250,24 @@ impl QueryResponder {
             if let Some((query, reply)) = matched {
                 out.extend_from_slice(reply);
                 i += query.len();
-                consumed = i;
+            } else if self
+                .answers
+                .iter()
+                .any(|(query, _)| query.len() > scan.len() - i && query.starts_with(&scan[i..]))
+            {
+                // everything left is the start of a longer query, so it is
+                // held rather than scanned: answering the shorter query
+                // nested inside it (the cursor report inside the box-glyph
+                // probe) would spend that probe's own answer on a position
+                // the child reads as a capability it does not have
+                break;
             } else {
                 i += 1;
             }
         }
-        // keep only bytes past the last match that could still start a query,
-        // so a query cut by this chunk's end completes against the next
-        let keep_from = scan
-            .len()
-            .saturating_sub(self.longest_query() - 1)
-            .max(consumed);
-        self.tail = scan[keep_from..].to_vec();
+        // a query cut by this chunk's end completes against the next: the
+        // scan stops at its first byte, which is where the tail starts
+        self.tail = scan[i..].to_vec();
         out
     }
 }
@@ -1098,12 +1118,44 @@ mod responder_tests {
     #[test]
     fn a_base_responder_leaves_the_optional_capabilities_unresolved() {
         let mut r = QueryResponder::new(BASE_ANSWERS);
-        assert_eq!(r.replies_for(&probe_batch()), DA1.1);
+        // the glyph probe's own cursor report is answered from the home
+        // position, which is this tier's answer to every optional
+        // capability: not granted
+        let mut expected = CPR.1.to_vec();
+        expected.extend_from_slice(DA1.1);
+        assert_eq!(r.replies_for(&probe_batch()), expected);
     }
 
-    /// Neither of these resolves a capability, and the engine's tty
-    /// startup blocks on the second of them, so the policy a session picked
-    /// for its capability tier must not decide whether it waits.
+    /// A cursor report is a question every real terminal answers, and the
+    /// only thing that may answer it differently is the probe that wrote a
+    /// glyph in front of it to find out where the cursor landed.
+    #[test]
+    fn a_bare_cursor_report_is_answered_without_taking_the_glyph_probes_answer() {
+        let mut r = QueryResponder::new(FULL_TIER);
+        assert_eq!(r.replies_for(CPR.0), CPR.1);
+        assert_eq!(r.replies_for(BOX_GLYPH.0), BOX_GLYPH.1);
+    }
+
+    /// The same two, with the chunk boundary cutting the longer query at
+    /// every byte: the shorter one is nested inside it, so a responder that
+    /// answered whatever completed first would hand the probe the home
+    /// position and the child would derive a charset it never asked about.
+    #[test]
+    fn a_glyph_probe_cut_anywhere_still_gets_its_own_answer() {
+        for split in 1..BOX_GLYPH.0.len() {
+            let mut r = QueryResponder::new(FULL_TIER);
+            let (head, tail) = BOX_GLYPH.0.split_at(split);
+            let mut got = r.replies_for(head);
+            got.extend_from_slice(&r.replies_for(tail));
+            assert_eq!(got, BOX_GLYPH.1, "split after {split} bytes");
+        }
+    }
+
+    /// None of these resolves a capability, and each of them stops a child
+    /// that asked: the engine's tty startup blocks on the second, and a
+    /// ConPTY master releases nothing at all before the third. So the
+    /// policy a session picked for its capability tier must not decide
+    /// whether it waits.
     #[test]
     fn every_answering_policy_answers_the_queries_no_tier_depends_on() {
         for policy in [
@@ -1115,8 +1167,10 @@ mod responder_tests {
             let mut r = QueryResponder::for_policy(policy);
             let mut asked = BACKGROUND.0.to_vec();
             asked.extend_from_slice(DSR.0);
+            asked.extend_from_slice(CPR.0);
             let mut expected = BACKGROUND.1.to_vec();
             expected.extend_from_slice(DSR.1);
+            expected.extend_from_slice(CPR.1);
             assert_eq!(r.replies_for(&asked), expected, "{policy:?}");
         }
     }

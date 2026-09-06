@@ -145,6 +145,14 @@ const DECLARED_ABSOLUTES: &[DeclaredAbsolute] = &[
                   spent waiting rather than compared",
     },
     DeclaredAbsolute {
+        file: "view-bench/tests/nvim_arm_startup.rs",
+        line: "unanswered_took - answered_took >= ENGINE_BACKGROUND_WAIT.as_secs_f64() * 1_000.0 / 2.0,",
+        grounds: "it is half the engine's own vim.wait(100, ...), which is \
+                  what separates an answered pty from an unanswered one, and \
+                  both figures are the child's own --startuptime clock rather \
+                  than anything the host stretched",
+    },
+    DeclaredAbsolute {
         file: "view-oracle/src/reference.rs",
         line: "started.elapsed() < QUIESCE_DEADLINE,",
         grounds: "it is the deadline quiesce itself was handed, which the \

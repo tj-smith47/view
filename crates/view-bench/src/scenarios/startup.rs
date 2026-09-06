@@ -58,7 +58,7 @@ pub const SETTLED_RATIO_METRIC: &str = "settled_ratio_p50";
 pub const SERVER_DELTA_METRIC: &str = "server_delta_ms";
 
 /// The `--startuptime` line whose figure is the engine's whole startup.
-pub const STARTED_LINE: &str = "--- NVIM STARTED ---";
+const STARTED_LINE: &str = "--- NVIM STARTED ---";
 
 /// What a `--startuptime` section header reads up to the process it names.
 const SECTION_PREFIX: &str = "--- Startup times for process: ";
@@ -85,6 +85,15 @@ const EDITOR_PROCESS: &str = "Embedded";
 ///
 /// A log with no section header at all is one process throughout, which is
 /// what an engine that writes no header wrote.
+///
+/// Line-stateful over a file two processes append to concurrently, which
+/// holds exactly while each process's whole report fits one flush: the
+/// engine's `profile.c` gives the stream an 8 KiB fully-buffered `bufsize`
+/// "big enough for the entire --startuptime report". A report past that
+/// auto-flushes mid-write, and a `Primary` line can then land under an
+/// `Embedded` header and be read as the editor's -- a cell whose fixture
+/// sources enough scripts to cross 8 KiB (`heavy`, `user`) needs a section
+/// boundary this parser does not have.
 ///
 /// The figure is the first field of the line carrying [`STARTED_LINE`]:
 /// `clock` in `--startuptime`'s own `clock  self+sourced self` header,
