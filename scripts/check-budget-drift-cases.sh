@@ -199,6 +199,9 @@ findings() {
     /^BUDGET DRIFT FAIL: reseat-(named|unnamed) / {
       c = $5; sub(/:$/, "", c); print $4 ":" c; next
     }
+    /^BUDGET DRIFT FAIL: spec-id / {
+      c = $5; sub(/:$/, "", c); print "spec-id:" c; next
+    }
     claims && /^  [^ ]+:[0-9]+: / {
       where = $1; sub(/:$/, "", where); print "claim:" where; next
     }
@@ -267,6 +270,17 @@ printf '\n| cold start (`first_paint.marker_cold_ms`) | 2.1 to 5.2x sooner |\n' 
 expect 1 'claim:docs/benchmarking.md:12' 'a claim anchored by a shortfall row, which declares no kind'
 
 # ---------------------------------------------------------------------------
+# a table row is its own anchor unit: the felt id one row up anchors nothing
+# ---------------------------------------------------------------------------
+new_case
+awk '{ print } /echo\.view_p99_ms/ {
+  print "| speculative echo | 5.2x faster than bare Neovim |"
+}' "$CASE/$BENCH" > "$CASE/$BENCH.tmp"
+mv "$CASE/$BENCH.tmp" "$CASE/$BENCH"
+expect 1 'claim:docs/benchmarking.md:8' \
+  'a claim on a table row whose felt id sits on a different row'
+
+# ---------------------------------------------------------------------------
 # the comparative without a number, and the number that is not a comparative
 # ---------------------------------------------------------------------------
 new_case
@@ -319,6 +333,20 @@ machine_class = "dev-linux"
 marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR"
 TOML
 expect 1 'reseat-unnamed:dev-linux' 'a class that withdrew a ratio the page tells no reader about'
+
+# ---------------------------------------------------------------------------
+# an identifier a spec row carries is one some file declares
+# ---------------------------------------------------------------------------
+new_case
+sed 's/`echo\.view_p99_ms`/`echo.view_p99_millis`/' "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+expect 1 'spec-id:echo.view_p99_millis' \
+  'a spec row naming a cell id no budget and no baseline declares'
+
+new_case
+sed 's/| bench suite |/| bench suite, `first_paint.minimal` |/' "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+expect 0 '' 'a spec row naming a cell the class baselines record and no budget bounds'
 
 # ---------------------------------------------------------------------------
 # the two cross-checks that shipped before this one

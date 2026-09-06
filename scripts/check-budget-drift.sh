@@ -158,6 +158,19 @@ claims_in() {
   local shown="${page#"$root"/}"
   [[ -f "$page" ]] || return 0
   sed -n "${first},${last:-\$}p" "$page" | awk -v ids="$felt_ids" -v page="$shown" -v off="$((first - 1))" '
+    # A table row is its own anchor unit. Paragraph scope reads an 18-row
+    # table as one claim, so the felt id on the echo row anchors every
+    # diagnostic row under it -- which is the shipped defect'"'"'s own shape,
+    # a diagnostic quoted as a win, surviving on the surface the rule was
+    # written to cover. Prose keeps the paragraph scope: a sentence takes
+    # its anchor from the ones around it, a row does not.
+    function row_verdict(line, at,   j) {
+      if (line !~ claim) { return }
+      for (j = 1; j <= names; j++) {
+        if (index(line, id[j]) > 0) { return }
+      }
+      print page ":" (at + off) ": " line
+    }
     function verdict(   i, j, anchored) {
       if (hits == 0) { return }
       anchored = 0
@@ -172,6 +185,7 @@ claims_in() {
       }
     }
     BEGIN { names = split(ids, id, " "); claim = ENVIRON["CLAIM"] }
+    /^[[:space:]]*\|/ { row_verdict($0, NR); next }
     /^[[:space:]]*$/ { verdict(); lines = 0; hits = 0; next }
     {
       lines++
@@ -260,6 +274,79 @@ if [[ -d "$baselines_dir" && -f "$bench_page" ]]; then
       fail=1
     fi
   done
+fi
+
+# Fifth cross-check: an identifier a spec row carries is one that exists.
+# The two rules above read a spec row for its text and its Diagnostic
+# marker; neither ever reads a backticked token as an identifier, so
+# `shell_visible_ms` named a metric no file declares and would have kept
+# passing under any later rename. The vocabulary is what the bench system
+# itself declares -- budgets.toml's scenarios, metrics and fixtures, plus
+# the names the shipped class baselines record, since a row may cite a cell
+# that is measured and reported without being bounded.
+declare -A vocab_scenario=() vocab_leaf=()
+while IFS=$'\t' read -r kind name; do
+  [[ -n "$name" ]] || continue
+  case "$kind" in
+    s) vocab_scenario["$name"]=1 ;;
+    *) vocab_leaf["$name"]=1 ;;
+  esac
+done < <(
+  awk '
+    /^scenario = / { v=$0; sub(/^scenario = "/, "", v); sub(/"$/, "", v); print "s\t" v }
+    /^metric = / { v=$0; sub(/^metric = "/, "", v); sub(/"$/, "", v); print "m\t" v }
+    /^fixture = / { v=$0; sub(/^fixture = "/, "", v); sub(/"$/, "", v); print "m\t" v }
+    /^fixtures = / {
+      v=$0; gsub(/[^a-z_,]/, "", v); n=split(v, f, ",")
+      for (i = 1; i <= n; i++) { if (f[i] != "fixtures") print "m\t" f[i] }
+    }
+  ' "$budgets"
+  # A class baseline is the record of what a row actually publishes; a
+  # sidecar (dev-linux.headroom, dev-linux.measured) keeps its class's name
+  # with a suffix and adds no name of its own.
+  for class_file in "$root/crates/view-bench/baselines"/*.toml; do
+    [[ -f "$class_file" ]] || continue
+    case "$(basename "$class_file" .toml)" in *.*) continue ;; esac
+    awk '
+      /^\[/ {
+        h=$0; gsub(/[][]/, "", h); n=split(h, part, ".")
+        if (part[1] == "withdrawn") { if (n >= 3) { print "s\t" part[2]; print "m\t" part[3] } }
+        else if (n >= 2) { print "s\t" part[1]; print "m\t" part[2] }
+        table=1; next
+      }
+      table && /^[a-z_0-9]+ = / { print "m\t" $1 }
+    ' "$class_file"
+  done
+)
+
+# Identifiers §3.1 names because they no longer exist. Each is spelled out
+# rather than pattern-matched, so a typo cannot hide behind one.
+declare -A retired=(
+  [cold_ms]="withdrawn from the content-marker row in 2026-07-27's amendment, and named there as the defect that withdrew it"
+  [ratio_vs_nvim]="withdrawn from the content-marker row by the same amendment"
+  [echo_path]="a decomposition row of the diagnostic matrix; it publishes no baseline and carries no budget, so no file declares its name"
+)
+
+bounds="$(section_bounds '### 3.1 Budgets (CI-gated once the harness lands, P3)' '^#{2,3} ')"
+if [[ -n "$bounds" ]]; then
+  while IFS= read -r token; do
+    [[ -n "$token" ]] || continue
+    [[ -n "${retired[$token]:-}" ]] && continue
+    if [[ "$token" == *.* ]]; then
+      left="${token%%.*}"
+      right="${token#*.}"
+      [[ -n "${vocab_scenario[$left]:-}" && -n "${vocab_leaf[$right]:-}" ]] && continue
+    else
+      [[ -n "${vocab_scenario[$token]:-}" || -n "${vocab_leaf[$token]:-}" ]] && continue
+    fi
+    echo "BUDGET DRIFT FAIL: spec-id $token: a spec 3.1 row names it, and neither budgets.toml nor the shipped class baselines declare a scenario, metric or fixture by that name" >&2
+    fail=1
+  done < <(
+    sed -n "${bounds%:*},${bounds#*:}p" "$spec" |
+      grep '^[[:space:]]*|' |
+      grep -oE '`[a-z_]+(\.[a-z_0-9]+)?`' |
+      tr -d '`' | sort -u
+  )
 fi
 
 if [[ $entries -eq 0 ]]; then

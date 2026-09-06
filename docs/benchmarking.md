@@ -112,7 +112,7 @@ Recorded baselines on a shared Linux dev host:
 |---|---|---|---|
 | UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower (`first_paint.marker_ratio_p99`) |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
 | First paint, cold, full login, `user` (p99) | 80.5 ms | not recorded on its own | `first_paint.marker_cold_ms`, seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`marker_ratio_p50` 1.084, `marker_ratio_p99` 1.046) |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
@@ -251,8 +251,8 @@ identical protocol on the same host:
 
 | steady typing, dev-linux (no plugins / 15-plugin stack) | vs bare Neovim (`echo.ratio_p50`) |
 |---|---|
-| Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** |
-| view, at the time of that measurement | 1.22x / 1.24x |
+| Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** (`echo.ratio_p50`) |
+| view, at the time of that measurement | 1.22x / 1.24x (`echo.ratio_p50`) |
 
 Speaking the protocol from another process costs about 2-4%. Roughly nine
 tenths of the gap was view's own code. (Three earlier theories, a
@@ -274,8 +274,8 @@ waking an idle core accounts for most of the improvement:
 | RPC handoff to bytes written | 42.5 µs | **10.5 µs** |
 | Keystroke to RPC bytes written (p99) | 154.7 µs | **117.7 µs** |
 | Steady typing vs Neovim, no plugins (`echo.ratio_p50`) | 1.354x | **1.172x** |
-| Steady typing vs Neovim, 15 plugins | 1.244x | **1.184x** |
-| Tail (p99) typing ratio, 15 plugins | 1.142x | **1.010x** |
+| Steady typing vs Neovim, 15 plugins (`echo.ratio_p50`) | 1.244x | **1.184x** |
+| Tail (p99) typing ratio, 15 plugins (the paired tail beside the felt `echo.view_p99_ms`) | 1.142x | **1.010x** |
 
 What remains is measured, not guessed. Of the ~644 µs from keypress to
 glyph, 366 are spent inside Neovim itself, 80 in the OS's terminal plumbing
