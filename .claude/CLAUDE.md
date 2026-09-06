@@ -104,4 +104,5 @@ the same edit done twice.
 - `scripts/audit-deps.sh` enforces crate dependency direction; `scripts/check-style.sh` enforces comment/doc style. Both run in CI.
 - `.claude/settings.json` hooks block `git push` and plain `git commit`, and check edited Rust files for formatting and comment style.
 - Conventions for Rust code: `.claude/rules/rust.md`. Conventions for what a
-  bench cell may claim: `.claude/rules/bench.md`.
+  bench cell may claim: `.claude/rules/bench.md`. Conventions for the scripts
+  a gate runs: `.claude/rules/shell.md`.

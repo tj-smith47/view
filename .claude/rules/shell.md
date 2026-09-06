@@ -3,7 +3,7 @@ paths: ["scripts/**", "Taskfile.yml"]
 ---
 # Shell conventions
 
-## Every script a task runs is written to bash 3.2
+## Every script under `scripts/` is written to bash 3.2
 
 `Taskfile.yml` runs its scripts as `bash scripts/…`, so whichever bash is
 first on `PATH` decides whether a gate runs at all. macOS ships
@@ -24,15 +24,21 @@ The same ban covers `mapfile`, `readarray`, `[[ -v x ]]`, `${x,,}`,
 `${x^^}`, `\|&`, `&>>` and `;;&`.
 
 Two cases in `scripts/check-budget-drift-cases.sh` enforce it over every
-script `Taskfile.yml` names, so a script added to a task is graded without
-anyone remembering to add it here: one greps the construct list, and one
-parses each script under `/bin/bash` when that is a pre-4 bash — which is
-the only leg that sees the two paren-counting shapes, and it runs on the
-host the contract is about.
+`scripts/**/*.sh` in the tree, so a script is graded without anyone
+remembering to add it here: one greps the construct list, and one parses
+each script under `/bin/bash` when that is a pre-4 bash — which is the
+only leg that sees the two paren-counting shapes, and it runs on the host
+the contract is about. The population is the directory rather than the
+scripts `Taskfile.yml` names, because the release path runs
+`scripts/package-bundle.sh` from a workflow and `scripts/mbp-build-leg.sh`
+runs on the macOS host the contract is about — five scripts no task names,
+and a broken one there fails where nobody is watching for it.
 
 ## A pipeline stage names the file it reads
 
 `grep`/`awk`/`sed` with no file argument reads stdin, so a stage whose file
 list came out empty does not fail — it sits there having graded nothing. A
 list built by a `grep` over another file is checked for emptiness before it
-is passed on.
+is passed on, and where two legs read the same list the check sits above
+both: a leg that reports `ok` having graded nothing disagrees with its own
+sibling about what an empty list means.

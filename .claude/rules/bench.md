@@ -73,9 +73,14 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
 - a class `docs/benchmarking.md` names, in one sentence, as carrying a
   withdrawn first-paint ratio carries none in `baselines/<class>.toml`, or
   a class carrying one is named by no such sentence;
+- a table row states a comparative that names the engine ("faster than
+  bare Neovim", "ahead of nvim"), whatever anchors it;
 - a backticked token in a spec 3.1 table row resolves to no scenario,
-  metric or fixture that `budgets.toml` or a shipped class baseline
-  declares.
+  metric or fixture that `budgets.toml`, a shipped class baseline or the
+  harness row table (`view-harness/src/builds.rs`) declares, unless the
+  sentence it stands in withdraws it in words -- `withdraw` is the marker,
+  so the exemption dies with the retraction that earned it rather than
+  outliving it in a hand-kept list.
 
 A table row is its own anchor unit and prose keeps the paragraph scope: a
 line whose first non-space character is `|` is graded alone. An 18-row
@@ -85,6 +90,13 @@ own shape surviving on the surface the rule was written for. So a
 diagnostic row that states a multiplier names the felt cell it decomposes
 on that row, and a resource row -- which decomposes nothing -- states its
 bound and its footprint without a comparative's grammar.
+
+An anchor licenses a multiplier and never the engine's name: a felt id
+beside a number cannot tell a bound ("`ratio_p50` <= 0.30x the paired
+bare-nvim run") from a win, so an anchored row was free to state either.
+A row states a win by publishing the paired numbers; "faster than bare
+Neovim" on a row is refused wherever it stands, and a comparative naming
+no engine ("never faster than the server that draws it") is not touched.
 
 The re-seat rule is what keeps three files telling the same story: a
 commit that deletes a `withdrawn` entry re-seats the shortfall ledger and
@@ -102,10 +114,10 @@ user-facing pages therefore carry no comparative at all -- naming the cell
 that would anchor one is what the identifier rule refuses there -- so they
 state moments and paired numbers, and the comparisons live in
 `docs/benchmarking.md` beside the cell that earns them.
-`scripts/check-budget-drift-cases.sh` grades all six rules and is what
+`scripts/check-budget-drift-cases.sh` grades all seven rules and is what
 stops the check regressing to the identifier-only form. It runs the checker
-under its own interpreter, and two of its cases grade every script
-`Taskfile.yml` runs for bash 3.2 portability (`.claude/rules/shell.md`),
+under its own interpreter, and two of its cases grade every script under
+`scripts/` for bash 3.2 portability (`.claude/rules/shell.md`),
 because a gate that does not run on the bash macOS ships is a gate whose
 verdict a contributor never sees.
 
