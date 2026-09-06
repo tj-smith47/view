@@ -76,10 +76,10 @@ That architecture is why none of view's surfaces can be a repackaged plugin:
 the render path, input handling, the native UI, and the AI integration are
 all view's own code. It also changes what a launch looks like: a distro has
 nothing to draw until your config has run, while view's own chrome is on
-screen in about 4 ms whether your setup has zero plugins or forty, with your
-config still loading behind it. That frame is not the screen you start
-working in -- that one arrives when your config is done, and it is the
-moment the numbers below are about.
+screen in about 4 ms -- not the screen you start working in, which arrives
+when your config is done, but view's own frame, painted whether your setup
+has zero plugins or forty with your config still loading behind it. That
+later screen is the moment the numbers below are about.
 
 ## Performance
 
@@ -92,10 +92,11 @@ can start working in. Under a real plugin config that moment is not yet
 recorded, and it is left blank rather than filled in from a bench fixture.
 What is recorded: with no plugins at all, that screen arrives in 16.1 ms
 under view against 14.7 ms under Neovim -- view 1.4 ms behind, on a config
-nobody runs. view's own chrome is on screen in about 4 ms regardless, while
-your config is still loading, and view does not make Neovim's own startup
-slower: the embedded engine reaches its started mark within 0.7 ms of the
-same engine under Neovim's terminal UI.
+nobody runs. view's own chrome is on screen in about 4 ms regardless -- the
+earlier frame, not that screen, painted while your config is still loading
+-- and view does not make Neovim's own startup slower: the embedded engine
+reaches its started mark within 0.7 ms of the same engine under Neovim's
+terminal UI.
 
 **You type.** You press a key and the character appears. Under a real
 config, not yet recorded. Plugin-free, view's worst keystroke in a thousand
