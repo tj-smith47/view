@@ -71,8 +71,8 @@ Recorded baselines on a shared Linux dev host:
 | What | view | bare Neovim | |
 |---|---|---|---|
 | UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | measured under a real terminal: see the retake | |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | measured under a real terminal: see the retake | |
+| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | 25.4 ms | |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 99.7 ms | |
 | First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded | |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
@@ -81,16 +81,30 @@ Recorded baselines on a shared Linux dev host:
 | Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
 
-The two bare-Neovim first-paint figures are withdrawn rather than
-restated. Both sides are spawned on a pty the harness owns, and until that
-pty answered the DSR that Neovim's tty startup writes behind its
-background-colour query, the bare side waited out its own `vim.wait(100,
-...)` on every cold sample -- roughly 100 ms that view's side never paid,
-because view's engine owns no tty and never asks. The pty answers it now
-(`view_oracle::pty`, pinned by `view-bench/tests/nvim_arm_startup.rs`), and
-the column stays empty until both ratios are re-measured on a quiet host.
-Every class baseline has had its recorded first-paint ratio bars removed
-meanwhile, so a gate run fails on them rather than attesting to them.
+The two bare-Neovim first-paint figures are the 2026-09-06 dev-linux
+retake. The figures they replace were withdrawn: both sides are spawned on
+a pty the harness owns, and until that pty answered the DSR that Neovim's
+tty startup writes behind its background-colour query, the bare side waited
+out its own `vim.wait(100, ...)` on every cold sample -- roughly 100 ms that
+view's side never paid, because view's engine owns no tty and never asks.
+The pty answers it now (`view_oracle::pty`, pinned by
+`view-bench/tests/nvim_arm_startup.rs`).
+
+view's column is its recorded gate bar, which ratchets and comes from a
+quieter run than the retake, so the honest comparison is the retake's own
+interleaved pair: `minimal` view p50 16.88 ms against bare nvim's 15.43 ms
+(ratio_p50 1.094, p99 1.076), `heavy` 55.08 against 50.04 (1.101, 1.045),
+`user` 58.73 against 54.16 (1.084, 1.046). view trails bare Neovim by 8-10%
+on every paired cold cell -- on `minimal` about 1.4 ms, the size of the
+post-VimEnter attach-plus-takeover round trip the late-attach design pays
+serially, since Neovim's own TUI attaches before init runs. Attribution
+past that outline is open work, not a claim this page makes.
+
+dev-linux is the only class re-seated. `dev-macos`, `gh-linux` and
+`gh-macos` carry their first-paint ratios as `withdrawn` entries with the
+reason attached, so a gate run on those classes fails loudly on the missing
+bars rather than attesting to them, until each is re-seated from a run
+under the answering pty.
 
 The `user` row is measured by the same code as the two above it and lands
 with the next recorded baseline; it is listed empty rather than omitted so
