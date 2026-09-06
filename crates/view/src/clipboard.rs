@@ -870,6 +870,12 @@ mod tests {
         fn hold_notify(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn disable_claimants(
+            &self,
+            _modules: &[String],
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn reply(
             &self,
             token: ReplyToken,

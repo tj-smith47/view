@@ -1745,17 +1745,38 @@ pub enum RpcCall {
     /// the session ends and it is never issued at all for a user who has
     /// turned `notifications` off.
     HoldNotify,
-    /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe, tagged
-    /// with `generation` (`HlTable::probe_generation` at the moment
-    /// `update()` emitted this, from its `DefaultColorsSet` arm). Resolves
-    /// the wire ambiguity `default_colors_set` alone cannot: nvim sends
-    /// `rgb_bg = 0` both when `Normal` has no background at all and when a
-    /// colorscheme genuinely sets `guibg = #000000`, and a probe reply's
-    /// `fg`/`bg` map key presence disambiguates the two. Fire-and-forget
-    /// like every other `RpcCall`: the reply crosses back as
-    /// `Msg::HlProbeReply` through the same dispatch seam other
-    /// engine-originated traffic uses, never by blocking the caller that
-    /// emitted this effect.
+    /// Turns off every loaded plugin in `modules` that exists to render a
+    /// surface this session externalized, by calling the module's own
+    /// `disable`.
+    ///
+    /// The other half of the answer spec 5.5 gives a claimed surface, and
+    /// the half that makes the notice true: view attaches with the real
+    /// vocabulary only once nvim has finished sourcing, so a plugin that
+    /// configured itself against nvim's plain terminal UI has already taken
+    /// the cmdline, the messages and the popup menu through `vim.ui_attach`
+    /// -- a channel no attach of view's can take them back over. Asking the
+    /// plugin to stop is what leaves one renderer per surface; the
+    /// alternative is two, and a user reading a plugin's health errors
+    /// about a conflict view created.
+    ///
+    /// Ordered ahead of [`HoldNotify`](Self::HoldNotify) wherever both are
+    /// issued, and that order is load-bearing rather than tidy: a claimant's
+    /// own `disable` restores the `vim.notify` it saved when it took the
+    /// function (noice's `source/notify.lua`), so a hold installed first is
+    /// overwritten by the very call that was meant to clear the way for it.
+    ///
+    /// Carries the module names rather than reading the claimant table
+    /// engine-side: which claimants this session supersedes is a `[native]`
+    /// answer, and a session that handed a plugin's surfaces back has no
+    /// business turning that plugin off.
+    ///
+    /// Reversible on the same terms as every other call here: session
+    /// state, never a config edit. A plugin that has no `disable`, or one
+    /// whose `disable` raises, leaves the session exactly as it was --
+    /// the notice still names the conflict.
+    DisableClaimants {
+        modules: Vec<String>,
+    },
     /// Attaches view as nvim's UI, externalizing exactly `surfaces`.
     ///
     /// Issued after nvim's own `VimEnter`, never at spawn: the child runs
@@ -1776,6 +1797,17 @@ pub enum RpcCall {
         /// (`:help ui-startup-stdin`).
         stdin_relay: bool,
     },
+    /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe, tagged
+    /// with `generation` (`HlTable::probe_generation` at the moment
+    /// `update()` emitted this, from its `DefaultColorsSet` arm). Resolves
+    /// the wire ambiguity `default_colors_set` alone cannot: nvim sends
+    /// `rgb_bg = 0` both when `Normal` has no background at all and when a
+    /// colorscheme genuinely sets `guibg = #000000`, and a probe reply's
+    /// `fg`/`bg` map key presence disambiguates the two. Fire-and-forget
+    /// like every other `RpcCall`: the reply crosses back as
+    /// `Msg::HlProbeReply` through the same dispatch seam other
+    /// engine-originated traffic uses, never by blocking the caller that
+    /// emitted this effect.
     GetDefaultHl {
         generation: u64,
     },

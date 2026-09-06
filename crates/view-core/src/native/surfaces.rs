@@ -190,6 +190,28 @@ pub const SURFACE_CLAIMANTS: &[SurfaceClaimant] = &[SurfaceClaimant {
     identities: &["noice"],
 }];
 
+/// The claimants this session supersedes: every row whose plugin exists to
+/// render a surface this session externalized.
+///
+/// The gate on turning a plugin off (`crate::msg::RpcCall::DisableClaimants`)
+/// and it is the whole `[native]` answer: `palette = false` leaves the
+/// command line and the completion menu with the plugin, `notifications =
+/// false` leaves the messages, and a session that handed all three back
+/// supersedes nobody and turns nothing off.
+///
+/// Wider than [`view_draws`] on purpose: that predicate gates a *notice*
+/// and so excludes a surface view absorbs rather than owns, while this one
+/// gates whether two renderers are pointed at the same cells, which the
+/// completion menu is as much as the command line.
+pub fn superseded_claimants(model: &Model) -> impl Iterator<Item = &'static SurfaceClaimant> + '_ {
+    SURFACE_CLAIMANTS.iter().filter(|claimant| {
+        claimant
+            .surfaces
+            .iter()
+            .any(|surface| owned(*surface, model).is_some())
+    })
+}
+
 /// The claimants `probed` names, in table order -- the order a notice per
 /// claimant is raised in, so two claimants read the same way whichever
 /// module the probe listed first.

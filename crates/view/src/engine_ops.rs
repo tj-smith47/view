@@ -49,6 +49,10 @@ pub trait EngineOps {
     /// the session, so a plugin's messages cross as `ext_messages` traffic
     /// (see `RpcCall::HoldNotify`).
     fn hold_notify(&self) -> Result<(), EngineError>;
+    /// Calls `disable` on every loaded module in `modules`, so a plugin
+    /// that claimed a surface view externalized stops drawing it (see
+    /// `RpcCall::DisableClaimants`).
+    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError>;
     /// Attaches view as nvim's UI, externalizing exactly `surfaces` (see
     /// `RpcCall::UiAttach`).
     fn ui_attach(
@@ -292,6 +296,9 @@ impl EngineOps for EngineHandle {
     fn hold_notify(&self) -> Result<(), EngineError> {
         self.hold_notify()
     }
+    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
+        self.disable_claimants(modules)
+    }
     fn ui_attach(
         &self,
         width: u16,
@@ -480,6 +487,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         (**self).hold_notify()
+    }
+    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
+        (**self).disable_claimants(modules)
     }
     fn ui_attach(
         &self,
@@ -671,6 +681,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         (**self).hold_notify()
+    }
+    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
+        (**self).disable_claimants(modules)
     }
     fn ui_attach(
         &self,
@@ -887,6 +900,9 @@ impl EngineOps for FakeOps {
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
         self.record("hold_notify()".to_string())
+    }
+    fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
+        self.record(format!("disable_claimants({})", modules.join("+")))
     }
     fn ui_attach(
         &self,
@@ -1140,6 +1156,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn hold_notify(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn disable_claimants(&self, _modules: &[String]) -> Result<(), EngineError> {
         Ok(())
     }
     fn ui_attach(

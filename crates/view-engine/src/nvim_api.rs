@@ -192,6 +192,32 @@ vim.api.nvim_create_autocmd('SafeState', {
   callback = hold,
 })";
 
+/// The lua chunk [`EngineHandle::disable_claimants`] runs inside nvim,
+/// taking the module names to turn off as its single vararg. Constant by
+/// construction for the same reason as [`FEED_KEYS_CHUNK`]: the names
+/// travel as an argument and are only ever used as table keys and as
+/// `require` arguments.
+///
+/// `package.loaded` rather than `require` alone, on the same terms as
+/// [`PROBE_CLAIMANTS_CHUNK`]: a plugin present on disk but never loaded has
+/// claimed nothing, and requiring it here to ask would load it in order to
+/// turn it off.
+///
+/// `pcall` around the whole call rather than only around `require`: a
+/// module with no `disable` at all, and one whose `disable` raises on a
+/// half-configured plugin, are the same outcome for view -- the surface
+/// stays contested and the notice that names the conflict is still raised.
+/// Neither may take down the takeover the rest of this sequence performs.
+const DISABLE_CLAIMANTS_CHUNK: &str = "\
+local modules = ...
+for _, name in ipairs(modules) do
+  if package.loaded[name] ~= nil then
+    pcall(function()
+      require(name).disable()
+    end)
+  end
+end";
+
 /// [`HOLD_OPTION_CHUNK`] itself, for the cross-crate pin that reads the
 /// augroup name this chunk builds. Gated behind `test-support` for the
 /// reason [`HIDDEN_LOAD_CHUNK`] is.
@@ -2970,6 +2996,33 @@ impl EngineHandle {
         )
     }
 
+    /// Calls `disable` on every one of `modules` that is loaded, the
+    /// hand-back [`crate::RpcCall::DisableClaimants`] describes.
+    ///
+    /// Issued ahead of [`hold_notify`](Self::hold_notify) by every caller
+    /// that issues both, because a claimant's `disable` restores the
+    /// `vim.notify` it took: see [`DISABLE_CLAIMANTS_CHUNK`] for what the
+    /// chunk guards, and `RpcCall::DisableClaimants` for why the order is
+    /// the whole point.
+    ///
+    /// A notification, not a request, like every other call the paint loop
+    /// may emit: nothing waits on the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
+        let names: Vec<Value> = modules.iter().map(|name| Value::from(&name[..])).collect();
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(DISABLE_CLAIMANTS_CHUNK),
+                Value::Array(vec![Value::Array(names)]),
+            ],
+        )
+    }
+
     /// Runs nvim's own `:colorscheme name` (see [`COLORSCHEME_CHUNK`] for
     /// why it is wrapped, and [`view_core::msg::RpcCall::Colorscheme`] for
     /// why the command rather than a palette).
@@ -4853,6 +4906,46 @@ mod tests {
             params,
             vec![Value::from(HOLD_NOTIFY_CHUNK), Value::Array(Vec::new())]
         );
+    }
+
+    #[test]
+    fn disable_claimants_sends_the_constant_chunk_with_the_names_as_one_list() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        // a module name is table-sourced today; it still travels as data,
+        // for the reason `feed_keys` does
+        let hostile = "x'); os.exit()--".to_string();
+        h.disable_claimants(&["noice".to_string(), hostile.clone()])
+            .unwrap();
+        let (method, params) = cap_rx
+            .recv_timeout(view_test_support::host_deadline(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(
+            params,
+            vec![
+                Value::from(DISABLE_CLAIMANTS_CHUNK),
+                Value::Array(vec![Value::Array(vec![
+                    Value::from("noice"),
+                    Value::from(&hostile[..]),
+                ])]),
+            ]
+        );
+        assert!(
+            !DISABLE_CLAIMANTS_CHUNK.contains(&hostile),
+            "a module name reached the source"
+        );
+    }
+
+    /// The chunk's two guards: it asks `package.loaded` rather than
+    /// requiring the plugin it means to turn off, and it survives a module
+    /// with no `disable` at all. A chunk that lost either would still pass
+    /// the wire-shape test above -- and losing the second takes down every
+    /// call the takeover sends behind this one.
+    #[test]
+    fn the_disable_chunk_asks_what_is_loaded_and_survives_a_module_that_refuses() {
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("package.loaded[name] ~= nil"));
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("pcall(function()"));
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("require(name).disable()"));
     }
 
     /// The name travels as an argument, and the source is the same constant

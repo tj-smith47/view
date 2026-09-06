@@ -82,8 +82,11 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
             continue;
         }
         named = true;
+        let disabled = surfaces::superseded_claimants(model)
+            .any(|superseded| superseded.module == claimant.module)
+            .then_some(claimant.class);
         let family = claimant_family(claimant.class);
-        let text = notice(&family, &claimed, model.config_was_read(), true);
+        let text = notice(&family, &claimed, model.config_was_read(), true, disabled);
         effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
         effects.extend(absorb_float_notices(model, claimant, &claimed));
         model.dirty = true;
@@ -156,7 +159,7 @@ fn absorb_float_notices(
             model.dirty |= model.engine.withdraw_native_notice(&family);
             continue;
         }
-        let text = notice(&family, &rest, model.config_was_read(), false);
+        let text = notice(&family, &rest, model.config_was_read(), false, None);
         effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
     }
     effects
@@ -514,7 +517,7 @@ fn raise_notice(model: &mut Model, identity: Option<&str>, surface: Surface) -> 
         return Vec::new();
     };
     let family = family(identity);
-    let text = notice(&family, &claimed, model.config_was_read(), false);
+    let text = notice(&family, &claimed, model.config_was_read(), false, None);
     // reaching here at all means the claim is news, so the wording is about
     // to change and the frame does owe a repaint
     model.dirty = true;
@@ -578,13 +581,18 @@ pub(super) fn cmdline_closed(model: &mut Model) -> Vec<Effect> {
 /// `record_native_notice_once`'s `starts_with` withdrawal requires, and why
 /// the family is prepended here rather than left to the caller.
 ///
-/// Three lines at most, broken on `\n` because that is the only break the
+/// Four lines at most, broken on `\n` because that is the only break the
 /// message box takes: `MessageEntry::lines` splits on it, and the layer that
 /// sizes the box clips at the grid width rather than wrapping, so a remedy
 /// pushed onto the end of the first sentence is a remedy the user cannot
 /// read.
 ///
-/// `startup_account` adds the third line, and only the claimant notice
+/// `disabled` names the plugin view turned off, and only the claimant
+/// notice ever carries one: a named plugin is one view can
+/// ask to stop (`crate::msg::RpcCall::DisableClaimants`), while an
+/// anonymous float is a window nobody can be asked anything about.
+///
+/// `startup_account` adds the last line, and only the claimant notice
 /// passes it true: that notice is the account of a launch, and the history
 /// is where everything else from that launch is. It is not conditional on
 /// anything having actually been parked -- view's own startup lines are in
@@ -598,6 +606,7 @@ fn notice(
     claimed: &[Surface],
     config_was_read: bool,
     startup_account: bool,
+    disabled: Option<&str>,
 ) -> String {
     let rows: Vec<_> = claimed
         .iter()
@@ -638,8 +647,14 @@ fn notice(
     } else {
         ""
     };
+    // its own row rather than a clause on the first: the message layer
+    // clips at the grid's width less two rather than wrapping
+    let turned_off = match disabled {
+        Some(class) => format!("\nview turned {class} off for this session."),
+        None => String::new(),
+    };
     format!(
-        "{family}{}, which view owns.{remedy}{history}",
+        "{family}{}, which view owns.{turned_off}{remedy}{history}",
         join(&labels)
     )
 }
@@ -1581,6 +1596,7 @@ mod tests {
             vec![
                 "view: noice.nvim is using the command line and the message area, \
                  which view owns.\n\
+                 view turned noice.nvim off for this session.\n\
                  Set [native] palette = false and [native] notifications = false \
                  in view.toml to give them back.\n\
                  Startup messages from this launch are in the history -- <leader>fm."
@@ -1668,6 +1684,7 @@ mod tests {
                 vec![
                     "view: noice.nvim is using the command line and the message area, \
                      which view owns.",
+                    "view turned noice.nvim off for this session.",
                     "Set [native] palette = false and [native] notifications = false \
                      in view.toml to give them back.",
                     "Startup messages from this launch are in the history -- <leader>fm.",
@@ -2892,8 +2909,10 @@ mod tests {
         ] {
             for read in [true, false] {
                 for parked in [true, false] {
-                    let text = super::notice(&family, &claimed, read, parked);
-                    assert!(text.starts_with(&family), "{text:?} is not in {family:?}");
+                    for disabled in [Some("noice.nvim"), None] {
+                        let text = super::notice(&family, &claimed, read, parked, disabled);
+                        assert!(text.starts_with(&family), "{text:?} is not in {family:?}");
+                    }
                 }
             }
         }

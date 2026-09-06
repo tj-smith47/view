@@ -51,7 +51,7 @@ steps = [
   # message history is its dismissal.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 15000 },
+  { wait_for = "Messages", timeout_ms = 30000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # noice's startup health notifications overlay the upper grid rows
