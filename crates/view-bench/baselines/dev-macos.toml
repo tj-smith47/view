@@ -2,18 +2,6 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "dev-macos"
 
-[withdrawn.first_paint.heavy]
-marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-
-[withdrawn.first_paint.minimal]
-marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-
-[withdrawn.first_paint.user]
-marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
-
 [withdrawn.echo.user]
 paired_delta_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
 ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
@@ -72,15 +60,21 @@ control_ratio_p99 = 1.3325415676959622
 
 [first_paint.heavy]
 marker_cold_ms = 84.02604099999999
+marker_ratio_p50 = 1.0452704108959787
+marker_ratio_p99 = 1.057584108886523
 shell_visible_cold_ms = 6.112
 
 [first_paint.minimal]
 marker_cold_ms = 32.922
+marker_ratio_p50 = 0.9857855380865984
+marker_ratio_p99 = 0.9888031691217639
 shell_visible_cold_ms = 7.594208
 
 [first_paint.user]
 marker_cold_ms = 87.563291
-shell_visible_cold_ms = 12.560375
+marker_ratio_p50 = 1.0607366517449557
+marker_ratio_p99 = 1.0605116824009866
+shell_visible_cold_ms = 12.504332999999999
 
 [flood.minimal]
 cadence_p99_ms = 13.352667
