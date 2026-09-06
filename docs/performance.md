@@ -24,21 +24,22 @@ the tree, the tabline and the statusline present and still.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| screen ready | not yet recorded | not yet recorded | your config (lazy.nvim, noice, nvim-notify), same host, same run |
+| screen ready | 56.0 ms | 51.4 ms | your config (lazy.nvim, noice, nvim-notify), same host, same run |
 
-What is known so far, and what it is not: with no plugins at all, that
-screen arrives in 16.1 ms under view against 14.7 ms under Neovim -- view
-1.4 ms behind, on a config nobody runs. Under a login-shaped config the
-file's first line lands at 58.7 ms against 54.2 ms. Neither is the row
-above, and neither is written into it.
+view is 4.6 ms behind on that screen, and the bar view holds itself to for
+this moment is level with Neovim -- so this row is a bar view has not met,
+by 9%. At the worst launch in a thousand the two are within a millisecond
+of each other (78.2 ms against 77.2 ms). With no plugins at all the same
+screen arrives in 16.1 ms against 14.7 ms, which is a bench fixture and not
+this row.
 
 What makes it that number: view paints its own shell -- the chrome you see
 before anything has loaded -- in about 4 ms, and that frame is on screen
 whether your config has zero plugins or forty. The rest is your `init.lua`,
-which view does not make slower: the embedded engine reaches its own
-"started" mark within 0.7 ms of the same engine under Neovim's own terminal
-UI. The 1.4 ms above is view's attach and takeover, which happen after your
-`VimEnter` runs rather than before it.
+which view does not make slower: under this same config the embedded
+engine's own "started" mark lands 0.08 ms earlier than the same engine
+under Neovim's own terminal UI. The 4.6 ms is view's attach and takeover,
+which happen after your `VimEnter` runs rather than before it.
 
 ## You type
 
@@ -46,21 +47,23 @@ You press a key and the character appears.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| keypress to glyph, worst case in a thousand | not yet recorded | not yet recorded | your config, same host, same run |
-| with the engine on the far side of a network | not yet recorded | not yet recorded | your config, same host, same run |
+| keypress to glyph, worst case in a thousand | 1.58 ms | 1.43 ms | your config, same host, same run |
+| with the engine on the far side of a network | 0.32 ms | 1.25 ms | your config, same host, same run -- view's engine is remote, Neovim's is local |
 
-Under a plugin-free config, view's worst keystroke in a thousand takes
-0.73 ms and Neovim's takes 0.67 ms; at the median view is about 13% behind.
-Both are far under the ~10 ms where a person begins to notice a key lagging
-their finger, which is why the gap is tracked rather than felt.
+At the median view is 11% behind on the first row, against a bar of 10%:
+another bar view has not met, and by 1% of the round trip. Both sides are
+far under the ~10 ms where a person begins to notice a key lagging their
+finger, which is why the gap is tracked rather than felt. Plugin-free, the
+same worst keystroke is 0.73 ms against 0.67 ms.
 
 When the engine runs on another machine, view can show the character before
 the round trip is back -- a predicted glyph, corrected the moment the engine
-answers. Measured plugin-free, that puts the predicted glyph on screen in
-0.30 ms at the worst of a thousand keystrokes, with the engine on another
-machine and the round trip still in flight. The paired reading against a
-local Neovim on the same run, and the cell that carries it, are in
-[docs/benchmarking.md](benchmarking.md).
+answers. Under your config that puts the predicted glyph on screen in
+0.32 ms at the worst of a thousand keystrokes, with the engine on another
+machine and the round trip still in flight, while the local Neovim it is
+paired against takes 1.25 ms to paint the same character. A prediction
+answered 99.9% of the keystrokes measured; the rest waited out the engine
+and can only understate the row.
 
 What makes it that number: the key leaves your terminal and reaches Neovim
 in under a tenth of a millisecond, and the redraw that comes back reaches
@@ -74,18 +77,21 @@ You hold a key down in a 100,000-line file and watch the text keep up.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| how stale the screen ever gets | not yet recorded | not yet recorded | your config, same host, same run |
+| how stale the screen ever gets | 1.57 ms | 0.95 ms | your config, same host, same run |
 
-Plugin-free, the screen is never more than 1.07 ms behind your input, and
-with the 15-plugin bench stack never more than 1.23 ms -- against a 16 ms
-budget, which is one frame at 60 Hz. Paired on the same run, view's
-staleness is the larger of the two figures: both are a fraction of a frame,
-so the gap is a bar view has not met rather than a lag you can see. The
-paired reading is in [docs/benchmarking.md](benchmarking.md).
+Both are a fraction of the 16 ms budget, which is one frame at 60 Hz, and
+view's staleness is the larger of the two: 0.6 ms more of it, which is a
+gap this page writes down rather than a lag you can see. Plugin-free the
+same figure is 1.07 ms.
 
 A plugin storm or a `:terminal` flood pouring output into the screen is the
-same moment under load, and there the screen answers on a 14.6 ms cadence --
-still inside one frame -- while keeping pace with the flood exactly.
+same moment under load. Under your config the screen answers on a 16.9 ms
+cadence -- just past one frame, so this too is a bar view has not met -- and
+the Neovim it is paired against answers on a 17.5 ms one in the same run,
+both of them past the frame under this plugin stack. view drains the flood
+within 2% of the lines Neovim drains in the same window, and the longest it
+goes without painting is 48.9 ms. Plugin-free the cadence is 14.6 ms,
+inside the frame.
 
 ## You search a huge tree
 

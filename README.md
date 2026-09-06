@@ -88,24 +88,24 @@ on the same host, with the same config, samples interleaved. Neovim
 `v0.12.4`, a shared Linux dev host.
 
 **You open a project.** You type `view ~/.config` and wait for the screen you
-can start working in. Under a real plugin config that moment is not yet
-recorded, and it is left blank rather than filled in from a bench fixture.
-What is recorded: with no plugins at all, that screen arrives in 16.1 ms
-under view against 14.7 ms under Neovim -- view 1.4 ms behind, on a config
-nobody runs. view's own chrome is on screen in about 4 ms regardless -- the
-earlier frame, not that screen, painted while your config is still loading
--- and view does not make Neovim's own startup slower: the embedded engine
-reaches its started mark within 0.7 ms of the same engine under Neovim's
-terminal UI.
+can start working in. Under a login-shaped plugin config -- lazy.nvim, noice
+and nvim-notify -- that screen arrives in 56.0 ms under view against 51.4 ms
+under Neovim: view 4.6 ms behind, which is a bar view has not met, since the
+bar for this moment is level with Neovim. view's own chrome is on screen in
+about 4 ms regardless -- the earlier frame, not that screen, painted while
+your config is still loading -- and view does not make Neovim's own startup
+slower: under that same config the embedded engine's started mark lands
+0.08 ms earlier than the same engine under Neovim's terminal UI.
 
-**You type.** You press a key and the character appears. Under a real
-config, not yet recorded. Plugin-free, view's worst keystroke in a thousand
-takes 0.73 ms against Neovim's 0.67 ms, and at the median view is about 13%
-behind -- both a fraction of the ~10 ms where a person starts to notice a
-key lagging their finger. With the engine on the far side of a network, view
-paints a predicted character in 0.30 ms at that same worst case, without
-waiting for the round trip: the glyph is corrected the moment the engine
-answers.
+**You type.** You press a key and the character appears. Under that same
+config, view's worst keystroke in a thousand takes 1.58 ms against Neovim's
+1.43 ms, and at the median view is 11% behind against a bar of 10% -- a
+second bar missed, by 1% of the round trip, and both a fraction of the
+~10 ms where a person starts to notice a key lagging their finger. With the
+engine on the far side of a network, view paints a predicted character in
+0.32 ms at that same worst case, without waiting for the round trip, where
+the local Neovim it is paired against takes 1.25 ms: the glyph is corrected
+the moment the engine answers.
 
 Scrolling, the picker, what happens when the engine hangs, memory, and what
 contributes to each of the numbers above:

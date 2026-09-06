@@ -175,18 +175,39 @@ The no-plugins memory row is view's own process only: the embedded Neovim
 engine is a separate process this budget deliberately excludes, so the
 bare-Neovim column reads `n/a` rather than a real comparison.
 
-### The real-config legs, and what is not recorded yet
+### The real-config legs, and which classes still owe them
 
 Every felt row is stated under a real config, and the matrix seats five
-cells on the `user` fixture that no quiet-host run has measured yet:
-`echo.user`, `echo_speculated.user`, `scroll.user`, `flood.user` and
-`startup.user`. They are committed as empty cells with a
-`[withdrawn.<scenario>.user]` reason beside them, which is the state a gate
-run reports loudly (`GATE COVERAGE FAIL`) rather than the state it passes
-over quietly. Until they are recorded, `docs/performance.md` says "not yet
-recorded" in words for those moments and quotes no fixture number in their
-place -- a plugin-free reading standing in for a real-config one is the
-substitution the whole vocabulary exists to refuse.
+cells on the `user` fixture: `echo.user`, `echo_speculated.user`,
+`scroll.user`, `flood.user` and `startup.user`. dev-linux records all five,
+taken 2026-09-06 in two quiet windows, each cell's null-pair calibration
+inside 1.1%:
+
+| cell, `user` fixture | view | bare Neovim | reading |
+|---|---|---|---|
+| `startup.settled_ratio_p50` | 56.031 ms p50 | 51.415 ms p50 | 1.090 against the 1.0 bar, unmet; the diagnostic `startup.server_delta_ms` reads -0.076 ms, so the engine's own startup is not the cost |
+| `echo.ratio_p50`, `echo.view_p99_ms` | 0.920 ms p50, 1.583 ms p99 | 0.829 ms p50, 1.429 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, paired delta p99 0.726 ms |
+| `echo_speculated.speculated_ratio_p50` | 0.200 ms p50, 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
+| `scroll.staleness_p99_ms` | 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |
+| `flood.cadence_p99_ms` | 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, unmet on both sides under this stack; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.018, worst no-paint gap 48.9 ms reported and not gated |
+
+The three unmet cells are `[[shortfall]]` entries in
+`crates/view-bench/budgets.toml`, each accepted at its recorded value with
+its bar untouched. Which class holds the five:
+
+| class | the five `user` cells | how the rest get seated |
+|---|---|---|
+| `dev-linux` | all five recorded | -- |
+| `dev-macos` | all five owed | a quiet-window session on mbp, `task user-fixture` first |
+| `gh-linux` | all five owed | re-seat from the `bench-measured-gh-linux.toml` artifact its gate leg uploads |
+| `gh-macos` | all five owed | the same re-seat from `bench-measured-gh-macos.toml` |
+| `controlled-linux` | none owed | it measures none of the five scenarios |
+
+An owed cell is committed empty with a `[withdrawn.<scenario>.user]` reason
+beside it, which is the state a gate run reports loudly (`GATE COVERAGE
+FAIL`) rather than the state it passes over quietly. Filling one from the
+plugin-free leg's number is the substitution this whole vocabulary exists to
+refuse.
 
 Recording them is one quiet-host session per class:
 
@@ -238,8 +259,9 @@ not a ceiling on what a plugin stack can cost once its triggers do fire.
 
 ## The typing gap
 
-Steady typing is currently about 13% slower than bare Neovim
-(`echo.ratio_p50`), and sustained scrolling about 1.6 to 1.9x the paired
+Steady typing is currently about 13% slower than bare Neovim on the
+plugin-free leg and 11% on the login-shaped one (`echo.ratio_p50` 1.172 and
+1.110), and sustained scrolling about 1.6 to 1.9x the paired
 figure beside the felt `scroll.staleness_p99_ms`. Both are sub-millisecond and far inside their budgets,
 so neither is perceptible. The goal is to beat Neovim, though, not to tie
 it, so the gap gets tracked down rather than shrugged off.
