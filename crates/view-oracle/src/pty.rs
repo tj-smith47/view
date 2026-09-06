@@ -170,8 +170,12 @@ const DSR: Answer = (b"\x1b[5n", b"\x1b[0n");
 /// is the longer query, so it keeps its own position-dependent answer and
 /// this one replies only where nothing longer claims the bytes. Where the
 /// longer query is not in the table at all -- the DA1-only tier -- the
-/// glyph probe gets the home position, which is the same answer that tier's
-/// own contract gives every optional capability: not granted.
+/// glyph probe's nested cursor report gets this home-position reply, whose
+/// column 1 is outside `view_tui::tiers::BOX_GLYPH_ANSWERED_COLUMNS`: the
+/// probe stays unanswered and the child's locale hint decides the
+/// capability, exactly as that tier's contract says. The six bytes land in
+/// the probe's residue, where a positional cursor report is consumed
+/// rather than typed.
 const CPR: Answer = (b"\x1b[6n", b"\x1b[1;1R");
 
 const BASE_ANSWERS: &[Answer] = &[BACKGROUND, DSR, CPR, DA1];
@@ -1119,8 +1123,8 @@ mod responder_tests {
     fn a_base_responder_leaves_the_optional_capabilities_unresolved() {
         let mut r = QueryResponder::new(BASE_ANSWERS);
         // the glyph probe's own cursor report is answered from the home
-        // position, which is this tier's answer to every optional
-        // capability: not granted
+        // position, a column no glyph can produce, so the probe reads no
+        // answer out of it and the capability stays unresolved
         let mut expected = CPR.1.to_vec();
         expected.extend_from_slice(DA1.1);
         assert_eq!(r.replies_for(&probe_batch()), expected);
@@ -1348,6 +1352,42 @@ mod responder_tests {
         assert!(
             !rows.is_empty(),
             "no rows read out of REGISTER in {}: the walk below would assert nothing",
+            path.display()
+        );
+        // a bare cursor report is answered under every answering policy, so
+        // the reply's column has to stay outside the range the glyph probe
+        // reads its own answer from: inside it, the DA1-only tier would
+        // resolve unicode_boxes from this pty instead of from the child's
+        // locale
+        let answered_columns = after_const(&source, "BOX_GLYPH_ANSWERED_COLUMNS");
+        let range = answered_columns
+            .split_once('=')
+            .expect("BOX_GLYPH_ANSWERED_COLUMNS must be initialized")
+            .1
+            .split_once(';')
+            .expect("BOX_GLYPH_ANSWERED_COLUMNS's initializer must end")
+            .0
+            .trim();
+        let (low, high) = range
+            .split_once("..=")
+            .unwrap_or_else(|| panic!("{range:?} is not an inclusive range"));
+        let low: u32 = low.trim().parse().expect("the range's low column");
+        let high: u32 = high.trim().parse().expect("the range's high column");
+        let column: u32 = std::str::from_utf8(CPR.1)
+            .expect("the cursor report reply is ASCII")
+            .trim_start_matches("\u{1b}[")
+            .trim_end_matches('R')
+            .split_once(';')
+            .expect("a cursor report reply carries row;column")
+            .1
+            .parse()
+            .expect("the reply's column");
+        assert!(
+            !(low..=high).contains(&column),
+            "the bare cursor report answers column {column}, inside {}'s \
+             BOX_GLYPH_ANSWERED_COLUMNS {low}..={high}, so a child under any answering policy \
+             would read this reply as the glyph probe's answer and resolve unicode_boxes from \
+             the pty rather than from its locale",
             path.display()
         );
         for row in rows {
