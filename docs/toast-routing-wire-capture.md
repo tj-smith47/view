@@ -173,6 +173,9 @@ local function is_engine_notify(fn)
   if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
     return false
   end
+  if rawequal(fn, rawget(_G, 'view_notify_hold')) then
+    return true
+  end
   local ok, sink = pcall(debug.getinfo, fn, 'S')
   local fine, own = pcall(debug.getinfo, vim.notify_once, 'S')
   return ok and fine and sink ~= nil and own ~= nil
@@ -212,6 +215,13 @@ vim.api.nvim_create_autocmd('SafeState', {
   end,
 })
 ```
+
+`view_notify_hold` is the function view's own hold installs at
+`vim.notify`, published under that name by the hold chunk itself. Asked by
+identity rather than by source, because view's hold is not the engine's
+default and a source comparison therefore reads it as a plugin's: a session
+that owns the messages surface would report a foreign notifier for its own
+sink, and `foreign` is the one word this reading has to mean literally.
 
 `SafeState` rather than an inline read at `VimEnter`: a manager that
 finishes its own deferred loading on a timer after `VimEnter` (lazy.nvim's

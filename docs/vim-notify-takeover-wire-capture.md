@@ -164,6 +164,7 @@ local function notify(msg, level, opts)
     _truncate = opts and opts._truncate,
   })
 end
+_G.view_notify_hold = notify
 local function hold()
   if vim.notify ~= notify then
     vim.notify = notify
@@ -177,6 +178,13 @@ vim.api.nvim_create_autocmd('SafeState', {
   callback = hold,
 })
 ```
+
+The global is the hold's own function published under a name every reading
+of `vim.notify` can compare against by identity. Without it the readings
+fall back to comparing `debug.getinfo(...).source` against
+`vim.notify_once`'s, and view's hold -- which is not the engine's default
+and never claimed to be -- reads as a plugin's notifier in the session that
+installed it.
 
 Run in the same session, immediately after the block above, then one
 `vim.notify('held-<level>', …)` per level:

@@ -181,6 +181,7 @@ local function notify(msg, level, opts)
     _truncate = opts and opts._truncate,
   })
 end
+_G.view_notify_hold = notify
 local function hold()
   if vim.notify ~= notify then
     vim.notify = notify
@@ -210,6 +211,9 @@ macro_rules! notify_predicate_lua {
 local function is_engine_notify(fn)
   if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
     return false
+  end
+  if rawequal(fn, rawget(_G, 'view_notify_hold')) then
+    return true
   end
   local ok, sink = pcall(debug.getinfo, fn, 'S')
   local fine, own = pcall(debug.getinfo, vim.notify_once, 'S')
@@ -4852,6 +4856,36 @@ mod tests {
         assert!(
             notify_predicate_lua!().contains("type(fn) ~= 'function'"),
             "a value getinfo cannot be asked about is not the engine's default"
+        );
+    }
+
+    /// A session that owns notifications reads its own sink as view's, not
+    /// as a plugin's. view's hold is not the engine's default function, so
+    /// the source comparison alone answers "foreign" for the one notifier
+    /// view installed itself, and `foreign` is the word this reading has to
+    /// mean literally: a triage read of the log line concludes the session
+    /// is speaking through somebody else's notifier.
+    #[test]
+    fn the_hold_view_installs_is_read_as_views_own_sink() {
+        assert!(
+            HOLD_NOTIFY_CHUNK.contains("_G.view_notify_hold = notify"),
+            "the hold must publish the function it installs"
+        );
+        assert!(
+            notify_predicate_lua!().contains("rawequal(fn, rawget(_G, 'view_notify_hold'))"),
+            "the predicate must recognise view's own hold by identity"
+        );
+        let marker = HOLD_NOTIFY_CHUNK
+            .find("_G.view_notify_hold = notify")
+            .expect("the marker is there");
+        let installed = HOLD_NOTIFY_CHUNK
+            .find("vim.notify = notify")
+            .expect("the hold installs the function");
+        assert!(
+            marker < installed,
+            "the marker must be published before the function it names can \
+             stand at vim.notify, or the first reading of a session answers \
+             about a global that is not set yet"
         );
     }
 

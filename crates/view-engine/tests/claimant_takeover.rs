@@ -434,6 +434,46 @@ fn the_takeover_reads_which_notifier_its_own_hand_back_left_standing() {
     );
 }
 
+/// A session that owns notifications reads its own sink as view's.
+///
+/// `HoldNotify` is the step every owning session sends, and what it leaves
+/// at `vim.notify` is view's own function -- not the engine's default, and
+/// so not something a source comparison can place. Read as foreign, the
+/// line a triage read starts from says the session is speaking through a
+/// plugin's notifier when it is speaking through none.
+///
+/// The fixture's own `claimed` function stands at `vim.notify` before the
+/// hold runs, so a reading taken ahead of the step, or of the wrong
+/// function, answers `true` here.
+#[test]
+fn a_session_holding_its_own_notify_reads_the_sink_as_views() {
+    let dir = config_home("sink-held");
+    let mut engine = engine(&dir);
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine.handle.takeover(&[TakeoverStep::HoldNotify]).unwrap();
+
+    let deadline = Instant::now() + common::rpc_deadline();
+    let mut foreign = None;
+    while Instant::now() < deadline && foreign.is_none() {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Msg::NotifySinkRead { foreign: read }) => foreign = Some(read),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        foreign,
+        Some(false),
+        "the function view itself installed is view's sink, never a foreign one"
+    );
+    assert_eq!(
+        notify_owner(&engine),
+        "other",
+        "the hold must actually be standing for that reading to be about it"
+    );
+}
+
 /// nvim-notify's module is a table with a `__call` metamethod, and LuaJIT's
 /// `debug.getinfo` raises on one. Raised inside the takeover's single
 /// batch, that error degraded the whole reply -- the reading, the claims
