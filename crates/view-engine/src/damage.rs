@@ -342,6 +342,14 @@ struct Route {
     /// it and the claim report arrive from one reply, and nvim is asked for
     /// the startup messages exactly once.
     deferred_startup_messages: Option<Msg>,
+    /// The `Msg::NotifySinkRead` an attached-but-full sink refused, held
+    /// for the next routing attempt to retry.
+    ///
+    /// Its own slot for [`Route::deferred_startup_messages`]'s reason: it
+    /// arrives from the same one reply, which is issued once per
+    /// connection, so a shared slot would let one of the three write over
+    /// another for good.
+    deferred_notify_sink: Option<Msg>,
     /// The newest `Msg::PickerBufferList` an attached-but-full sink refused,
     /// held for the next routing attempt to retry.
     ///
@@ -439,6 +447,7 @@ enum Held {
     Heartbeat,
     Claims,
     StartupMessages,
+    NotifySink,
     BufferList,
     HiddenBufferLoaded,
     Preview,
@@ -457,6 +466,7 @@ impl Route {
             Held::Heartbeat => &mut self.deferred_heartbeat,
             Held::Claims => &mut self.deferred_claims,
             Held::StartupMessages => &mut self.deferred_startup_messages,
+            Held::NotifySink => &mut self.deferred_notify_sink,
             Held::BufferList => &mut self.deferred_buffer_list,
             Held::HiddenBufferLoaded => &mut self.deferred_hidden_buffer_loaded,
             Held::Preview => &mut self.deferred_preview,
@@ -478,6 +488,7 @@ impl Route {
             Held::Heartbeat,
             Held::Claims,
             Held::StartupMessages,
+            Held::NotifySink,
             Held::BufferList,
             Held::HiddenBufferLoaded,
             Held::Preview,
@@ -745,6 +756,17 @@ impl PumpShared {
     /// notice would go on promising a history that never got them.
     pub(crate) fn route_startup_messages(&self, msg: Msg) {
         self.route_held(msg, Held::StartupMessages);
+    }
+
+    /// Routes a `Msg::NotifySinkRead` without ever dropping it on a full
+    /// sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped reading is silent and permanent: `vim.notify` is read once
+    /// per connection, and the safe default it would fall back to paints a
+    /// toast over the notifier the session handed the surface to.
+    pub(crate) fn route_notify_sink(&self, msg: Msg) {
+        self.route_held(msg, Held::NotifySink);
     }
 
     /// Routes a `Msg::PickerBufferList` without ever dropping it on a full

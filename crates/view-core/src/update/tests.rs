@@ -20,6 +20,7 @@ use crate::native::ai_event::{
     AiCommand, PermissionOption, PermissionOptionKind, PermissionOutcome,
 };
 use crate::native::ai_panel::ReviewSync;
+use crate::native::ext::Ext;
 use crate::native::geometry::OverlayBox;
 use crate::native::keys::{Action, Direction};
 use crate::native::supervision::{
@@ -6640,6 +6641,190 @@ fn a_native_running_count_never_takes_down_a_sticky_notice() {
     );
 }
 
+/// A session that handed the messages surface back to a config whose
+/// notifier is a plugin's, which is the pair that routes view's notices
+/// away from the toast stack.
+fn handed_back_model_with_a_plugin_notifier() -> Model {
+    let mut m = started_model();
+    m.attach_surfaces(vec![Ext::LineGrid, Ext::Multigrid]);
+    let _ = update(&mut m, Msg::NotifySinkRead { foreign: true });
+    m
+}
+
+/// The session that kept its own notifier hears view's notices through it,
+/// and sees no toast: two notifiers anchored to the same corner is the
+/// occlusion the hand-back exists to avoid.
+#[test]
+fn a_handed_back_session_speaks_its_own_notices_through_the_users_notify() {
+    let mut m = handed_back_model_with_a_plugin_notifier();
+
+    let effects = m
+        .engine
+        .record_native_notice("view: theme cache rebuilt".to_string(), false);
+
+    assert_eq!(
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(RpcCall::Notify { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["view: theme cache rebuilt".to_string()],
+        "the notice has to reach the notifier the user kept: {effects:?}"
+    );
+    assert!(
+        visible_texts(&m).is_empty(),
+        "nothing of view's may be painted over that notifier: {:?}",
+        visible_texts(&m)
+    );
+    assert!(
+        !m.engine.messages.entries.is_empty(),
+        "the notice stays on the log all the same -- it is what keeps a \
+         repeat from telling the user's notifier the same thing twice"
+    );
+
+    let repeat = m
+        .engine
+        .record_native_notice_once("view: path", "view: path unreadable".to_string());
+    assert_eq!(repeat.len(), 1, "the first raise speaks: {repeat:?}");
+    assert!(
+        m.engine
+            .record_native_notice_once("view: path", "view: path unreadable".to_string())
+            .is_empty(),
+        "and the identical repeat says nothing at all"
+    );
+}
+
+/// The same notice in the session that owns the surface: view draws it, and
+/// nothing is sent to a `vim.notify` view itself took over.
+#[test]
+fn a_session_that_owns_the_messages_paints_its_notices_and_sends_nothing() {
+    let mut m = started_model();
+    m.attach_surfaces(vec![Ext::LineGrid, Ext::Messages, Ext::Multigrid]);
+
+    let effects = m
+        .engine
+        .record_native_notice("view: theme cache rebuilt".to_string(), false);
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Notify { .. }))),
+        "view's own notify is the one standing in this session: {effects:?}"
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec!["view: theme cache rebuilt".to_string()]
+    );
+}
+
+/// The one notice a handed-back session still paints: the engine being down
+/// is exactly when no `vim.notify` of view's can be delivered.
+#[test]
+fn the_engine_down_condition_is_painted_even_by_a_handed_back_session() {
+    let mut m = handed_back_model_with_a_plugin_notifier();
+
+    assert!(m
+        .engine
+        .messages
+        .set_native_condition(Some("view: the editor process stopped")));
+
+    assert_eq!(
+        visible_texts(&m),
+        vec!["view: the editor process stopped".to_string()],
+        "a condition raised while the engine is gone has nowhere else to go"
+    );
+}
+
+/// The hand-back alone does not route a notice away from the stack. With
+/// only nvim's own echo at `vim.notify` there is no float to collide with,
+/// and echoing a multi-line notice at `cmdheight = 0` is a blocking
+/// hit-enter prompt at startup -- so view keeps painting until a notifier
+/// of the user's is actually there.
+#[test]
+fn a_handed_back_session_with_only_nvims_echo_paints_its_notices() {
+    let mut m = started_model();
+    m.attach_surfaces(vec![Ext::LineGrid, Ext::Multigrid]);
+    let _ = update(&mut m, Msg::NotifySinkRead { foreign: false });
+
+    let effects = m
+        .engine
+        .record_native_notice("view: theme cache rebuilt".to_string(), false);
+
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Notify { .. }))),
+        "nvim's echo is not a notifier view may hand a notice to: {effects:?}"
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec!["view: theme cache rebuilt".to_string()],
+        "and with nothing else drawing it, view draws it"
+    );
+}
+
+/// The reading arrives with the takeover, which is a whole config's
+/// sourcing after the attach: whatever view raised in between is still on
+/// the stack, and the reading is what takes it off.
+#[test]
+fn the_notifier_reading_settles_a_notice_raised_before_it_arrived() {
+    let mut m = started_model();
+    m.attach_surfaces(vec![Ext::LineGrid, Ext::Multigrid]);
+
+    let _ = m
+        .engine
+        .record_native_notice("view: theme cache rebuilt".to_string(), false);
+    assert_eq!(
+        visible_texts(&m),
+        vec!["view: theme cache rebuilt".to_string()],
+        "before the reading, painting is the safe answer"
+    );
+
+    m.dirty = false;
+    let _ = update(&mut m, Msg::NotifySinkRead { foreign: true });
+    assert!(
+        m.dirty,
+        "the frame drawn before the reading is not the frame after it"
+    );
+    assert!(
+        visible_texts(&m).is_empty(),
+        "the notifier is drawing now, so view is not: {:?}",
+        visible_texts(&m)
+    );
+}
+
+/// The stack's answer and the attach's answer are one answer: a session
+/// hands its notices to the user's notifier exactly when it did not ask
+/// nvim for the messages surface.
+#[test]
+fn what_the_stack_paints_follows_the_ext_set_the_attach_asked_for() {
+    let mut m = model();
+    assert_eq!(
+        m.engine.messages.handed_back(),
+        !m.owns(Ext::Messages),
+        "a model that never attached anything must already agree with \
+         itself: surfaces {:?}",
+        crate::native::ext::shipped_multigrid()
+    );
+
+    for surfaces in [
+        vec![Ext::LineGrid],
+        vec![Ext::LineGrid, Ext::Messages],
+        vec![Ext::LineGrid, Ext::Messages, Ext::Cmdline, Ext::Multigrid],
+        Vec::new(),
+    ] {
+        m.attach_surfaces(surfaces.clone());
+        assert_eq!(
+            m.engine.messages.handed_back(),
+            !m.owns(Ext::Messages),
+            "the stack and the attach disagree about who draws messages \
+             for {surfaces:?}"
+        );
+    }
+}
+
 #[test]
 fn a_native_notice_asking_for_a_replace_finds_no_nvim_line_to_take() {
     // `replace_last` is nvim's own replace and names nvim's own last line,
@@ -9543,11 +9728,15 @@ fn what_nvim_said_before_the_attach_reaches_the_history_and_never_the_stack() {
         m.engine
             .toast_history
             .entries()
-            .map(|e| e.lines().join(""))
+            .map(|e| e.lines())
             .collect::<Vec<_>>(),
-        vec!["second line".to_string(), "PRE-ATTACH-MARKER".to_string()],
-        "every non-blank line the child said belongs to the history, in \
-         the newest-first order the overlay reads every other entry in"
+        vec![vec![
+            "PRE-ATTACH-MARKER".to_string(),
+            "second line".to_string()
+        ]],
+        "one entry carries the whole launch, its lines top-down: the \
+         history reads newest first, so an entry per line hands a startup \
+         traceback back upside down"
     );
     assert!(
         m.engine.messages.entries.is_empty(),

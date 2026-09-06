@@ -247,6 +247,13 @@ pub struct Messages {
     /// Whether the pause key is holding the stack open. See
     /// [`Self::toggle_pause`].
     paused: bool,
+    /// Whether this session left the messages surface with nvim, which is
+    /// what `[native] notifications = false` asks for. See
+    /// [`Self::hand_back`].
+    handed_back: bool,
+    /// Whether a notifier other than nvim's own echo stands at
+    /// `vim.notify`. See [`Self::set_foreign_notifier`].
+    foreign_notifier: bool,
 }
 
 /// Which of `items` fit in `budget`, given each one's cost and whether it
@@ -360,6 +367,67 @@ impl Messages {
         }
     }
 
+    /// Records whether this session left the messages surface with nvim.
+    ///
+    /// Set from [`crate::model::Model::attach_surfaces`], off the same
+    /// `ext_*` set `nvim_ui_attach` is given, so the stack can never
+    /// disagree with the attach about who draws messages this session.
+    pub(crate) fn hand_back(&mut self, handed_back: bool) {
+        self.handed_back = handed_back;
+    }
+
+    /// Whether this session left the messages surface with nvim.
+    pub(crate) fn handed_back(&self) -> bool {
+        self.handed_back
+    }
+
+    /// Records whether a notifier other than nvim's own echo stands at
+    /// `vim.notify`, as the takeover read it
+    /// ([`crate::msg::Msg::NotifySinkRead`]).
+    pub(crate) fn set_foreign_notifier(&mut self, foreign: bool) {
+        self.foreign_notifier = foreign;
+    }
+
+    /// Whether view's own notices are spoken through the user's
+    /// `vim.notify` rather than painted on the toast stack.
+    ///
+    /// Both halves are needed and neither is enough. A session that owns
+    /// the messages surface draws every notice itself, whatever sits at
+    /// `vim.notify`. A session that handed it back but has only nvim's own
+    /// echo there has no float to collide with and a sink that turns a
+    /// multi-line notice into a blocking hit-enter prompt at
+    /// `cmdheight = 0`, so it keeps painting -- speaking is for the
+    /// plugin notifier that is already drawing nvim's messages.
+    #[must_use]
+    pub fn speaks_notices(&self) -> bool {
+        self.handed_back() && self.foreign_notifier
+    }
+
+    /// Whether `entry` reaches the toast stack at all.
+    ///
+    /// A session that speaks its notices ([`Self::speaks_notices`]) paints
+    /// none of them: they went to the user's own `vim.notify`
+    /// ([`crate::msg::RpcCall::Notify`]) and a toast beside that would be a
+    /// second notifier on screen, drawn in the corner nvim-notify anchors
+    /// its own float to. They stay in `entries` all the same -- that is the
+    /// record `record_native_notice_once` reads to keep from telling the
+    /// user's notifier the same thing twice, and nothing takes them off it,
+    /// since a line view cannot retract from a notifier it does not own is
+    /// worth saying once a session.
+    ///
+    /// A raised condition is the exception, and the reason the predicate is
+    /// not simply "native": it says the engine is down or restarting, which
+    /// is exactly when no `vim.notify` of view's can be delivered, so it is
+    /// painted by view or it is not seen.
+    fn paints(&self, entry: &MessageEntry) -> bool {
+        !(self.speaks_notices() && entry.is_native() && !entry.is_condition())
+    }
+
+    /// Every entry the toast stack draws, in `entries` order.
+    fn painted(&self) -> impl Iterator<Item = &MessageEntry> {
+        self.entries.iter().filter(|e| self.paints(e))
+    }
+
     /// The entry occupying the top slot of the toast stack -- the oldest
     /// entry still standing that takes a slot at all -- or `None` when
     /// nothing does.
@@ -385,6 +453,7 @@ impl Messages {
     pub fn top_slot(&self) -> Option<MessageId> {
         self.entries
             .iter()
+            .filter(|e| self.paints(e))
             .find(|e| !e.outranks_transient())
             .map(MessageEntry::id)
     }
@@ -645,6 +714,7 @@ impl Messages {
     /// | `startup_hold` | back to `Pending`: the replacement's first redraw batch is the one the hold exists to catch |
     /// | `held` | drained or discarded as the dead engine's deadline would have, never carried into a hold whose outcome a different engine's probe decides |
     /// | `entries`, `next_message_id`, `armed_slot`, `armed_lines`, `paused` | kept: the toast stack and the scrollback outlive the connection, and an id stamped once is never reissued |
+    /// | `handed_back`, `foreign_notifier` | kept: the first is the session's `[native]` answer and the replacement attaches with the same `ext_*` set; the second is a reading of the user's config, which a new connection re-reads and re-answers |
     pub(crate) fn forget_engine(&mut self) {
         // the restart marks the model dirty on either outcome of the attach
         // that follows, and `update()` arms the top slot on the next fold
@@ -814,8 +884,7 @@ impl Messages {
     /// for the boxes it hands back.
     fn keep_visible(&self, max_rows: usize) -> Vec<bool> {
         let costs: Vec<(bool, usize)> = self
-            .entries
-            .iter()
+            .painted()
             .map(|e| (e.outranks_transient(), e.line_count().saturating_add(2)))
             .collect();
         let mut keep = keep_within(&costs, max_rows);
@@ -848,8 +917,7 @@ impl Messages {
     /// clips it, which is a truncated notice instead of no notice at all.
     #[must_use]
     pub fn visible_toasts(&self, max_rows: usize) -> Vec<Vec<Vec<Span>>> {
-        self.entries
-            .iter()
+        self.painted()
             .zip(self.keep_visible(max_rows))
             .filter(|(_, shown)| *shown)
             .map(|(e, _)| {

@@ -230,6 +230,17 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// session that owns the messages and overwrites this assignment in the
 /// same takeover, so the two never disagree and neither has to know about
 /// the other.
+///
+/// The re-point repairs one thing -- a restore that landed on nvim's own
+/// echo -- so it fires only when that is what the restore left. A claimant
+/// whose `disable` puts back a function the user's own config wrote is
+/// already at the sink that config chose, and taking that function away
+/// for nvim-notify would be view overriding the config it just handed the
+/// surface back to. The engine's default is recognised by the chunk it is
+/// defined in: `vim.notify` and `vim.notify_once` are declared side by side
+/// in the engine's own runtime (`vim/_core/editor` on the pinned engine),
+/// and a function assigned by a config or a plugin reports that file
+/// instead.
 const DISABLE_CLAIMANTS_CHUNK: &str = "\
 local modules = ...
 local handed_back = false
@@ -242,9 +253,35 @@ for _, name in ipairs(modules) do
     end
   end
 end
-if handed_back and package.loaded.notify ~= nil then
+local function is_engine_default(fn)
+  local restored = debug.getinfo(fn, 'S')
+  local sibling = debug.getinfo(vim.notify_once, 'S')
+  return restored ~= nil and sibling ~= nil
+    and restored.source == sibling.source
+end
+if handed_back
+  and package.loaded.notify ~= nil
+  and is_engine_default(vim.notify)
+then
   vim.notify = package.loaded.notify
 end";
+
+/// The lua chunk [`EngineHandle::raise_notice`] runs inside nvim, taking
+/// the notice text as its single vararg. Constant by construction for the
+/// same reason as [`FEED_KEYS_CHUNK`]: the text travels as an argument and
+/// is never spliced into the source.
+///
+/// `vim.notify` rather than a renderer of view's choosing: which function
+/// stands there is the answer the user's config gave and the hand-back
+/// preserved ([`DISABLE_CLAIMANTS_CHUNK`]), and a session that handed the
+/// surface back has no business deciding it again for its own notices.
+///
+/// `INFO` for every notice: view's own toast stack draws them all alike, so
+/// a level picked here would be a distinction the shipped surface does not
+/// make.
+const RAISE_NOTICE_CHUNK: &str = "\
+local text = ...
+vim.notify(text, vim.log.levels.INFO)";
 
 /// [`HOLD_OPTION_CHUNK`] itself, for the cross-crate pin that reads the
 /// augroup name this chunk builds. Gated behind `test-support` for the
@@ -774,6 +811,14 @@ end";
 /// point went to nvim's own history and nowhere else -- not to
 /// `ext_messages`, which nothing was attached for, and not to stderr, which
 /// the spawn nulls.
+///
+/// The `vim.notify` reading comes last, after every step, because the steps
+/// are what move it: a claimant's `disable` restores whatever it saved, and
+/// [`DISABLE_CLAIMANTS_CHUNK`] may re-point it at nvim-notify from there.
+/// It answers the same question that chunk asks -- is this the engine's own
+/// default, recognised by the source file it shares with `vim.notify_once`
+/// -- and reports the opposite polarity, since what view needs to know is
+/// whether a notifier of the user's is drawing.
 const TAKEOVER_CHUNK: &str = "\
 local steps = ...
 local unpack = unpack or table.unpack
@@ -788,12 +833,18 @@ for _, step in ipairs(steps) do
 end
 answer.messages = vim.api.nvim_exec2(
   'messages', { output = true }).output
+local sink = debug.getinfo(vim.notify, 'S')
+local engine = debug.getinfo(vim.notify_once, 'S')
+answer.foreign_notifier = sink ~= nil and engine ~= nil
+  and sink.source ~= engine.source
 return answer";
 
 /// The key [`TAKEOVER_CHUNK`] returns the mapping registration's own answer
-/// under, and the key it returns nvim's startup messages under.
+/// under, the key it returns nvim's startup messages under, and the key it
+/// returns its reading of `vim.notify` under.
 pub(crate) const TAKEOVER_CLAIMS_KEY: &str = "claims";
 pub(crate) const TAKEOVER_MESSAGES_KEY: &str = "messages";
+pub(crate) const TAKEOVER_NOTIFIER_KEY: &str = "foreign_notifier";
 
 /// [`EngineHandle::set_option`] as a chunk, for the one caller that batches
 /// it ([`TAKEOVER_CHUNK`]): `nvim_set_option_value` is an API call rather
@@ -3078,6 +3129,36 @@ impl EngineHandle {
         self.notify(
             "nvim_exec_lua",
             vec![Value::from(HOLD_NOTIFY_CHUNK), Value::Array(Vec::new())],
+        )
+    }
+
+    /// Raises `text` through whatever `vim.notify` this session is left
+    /// with, the notice [`crate::RpcCall::Notify`] describes.
+    ///
+    /// The mirror image of [`hold_notify`](Self::hold_notify), for the
+    /// session that issues that call and this one never together: a
+    /// session owning the messages draws its own notices, and one that
+    /// handed the surface back speaks them where the user's own
+    /// notifications go.
+    ///
+    /// `text` rides as an *argument* to a constant chunk (same rule as
+    /// [`feed_keys`](Self::feed_keys)): no notice text can escape into the
+    /// Lua source, whatever a config file or a filesystem error put in it.
+    ///
+    /// A notification, not a request, like every other call the paint loop
+    /// may emit: nothing waits on the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn raise_notice(&self, text: &str) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(RAISE_NOTICE_CHUNK),
+                Value::Array(vec![Value::from(text)]),
+            ],
         )
     }
 

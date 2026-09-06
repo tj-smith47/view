@@ -369,6 +369,11 @@ impl Model {
     /// sent would answer [`Self::owns`] about a surface nvim never gave it.
     pub fn attach_surfaces(&mut self, surfaces: Vec<crate::native::ext::Ext>) {
         self.ext_surfaces = surfaces;
+        // the same answer, read once: a session that leaves the messages
+        // with nvim speaks its own notices through the user's `vim.notify`
+        // rather than painting a toast over the notifier drawing them
+        let owns_messages = self.owns(crate::native::ext::Ext::Messages);
+        self.engine.messages.hand_back(!owns_messages);
     }
 
     /// Whether the attach this session owes nvim is still outstanding.
@@ -1523,6 +1528,13 @@ impl EngineModel {
                 .apply(crate::native::statusline::SegmentUpdate::SearchCount(text));
             return Vec::new();
         }
+        // view's own notice, in a session that left the messages with a
+        // plugin notifier: it is spoken through the sink the user's config
+        // chose (`RpcCall::Notify`), and `Messages::paints` keeps it off
+        // the stack so the two are never both on screen
+        let spoken = (self.messages.speaks_notices()
+            && crate::model::MessageEntry::is_native_kind(&kind))
+        .then(|| content.iter().map(|(_, t)| t.as_str()).collect::<String>());
         let id = self.messages.push(kind, content, replace_last);
         // recorded by id, not `.entries.last()`: `push`'s replace path can
         // overwrite an entry that sits before a still-open condition
@@ -1541,7 +1553,14 @@ impl EngineModel {
         // arrived (`Messages::arm_top_slot`): a message landing behind one
         // already standing arms nothing, and a parked one that took its
         // predecessor's place before being held hands the slot back here
-        self.messages.arm_top_slot().into_iter().collect()
+        let mut effects: Vec<crate::msg::Effect> =
+            self.messages.arm_top_slot().into_iter().collect();
+        if let Some(text) = spoken {
+            effects.push(crate::msg::Effect::Rpc(crate::msg::RpcCall::Notify {
+                text,
+            }));
+        }
+        effects
     }
 
     /// Seeds the notification history with what nvim said while it was
@@ -1554,19 +1573,30 @@ impl EngineModel {
     /// view's claimant notice promises. Toasting them would replay a whole
     /// launch at the moment the screen settles.
     ///
+    /// One entry for the whole launch, never one per line: the history
+    /// reads newest first, so a line-per-entry seeding hands back a
+    /// traceback bottom-up -- unreadable for exactly the startup error this
+    /// exists to carry. `:messages` marks no message boundaries, so one
+    /// entry per launch is the finest split its text supports, and
+    /// [`MessageEntry::lines`] splits the embedded newlines back out in
+    /// order.
+    ///
     /// Answers whether anything was seeded, so a caller can leave the
     /// screen alone for the ordinary launch that said nothing.
     pub fn seed_startup_history(&mut self, text: &str) -> bool {
-        let mut seeded = false;
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let entry = self.messages.history_only_entry(
-                STARTUP_MESSAGE_KIND.to_string(),
-                vec![(0, line.to_string())],
-            );
-            self.toast_history.push(&entry);
-            seeded = true;
+        let seeded: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        if seeded.is_empty() {
+            return false;
         }
-        seeded
+        let entry = self.messages.history_only_entry(
+            STARTUP_MESSAGE_KIND.to_string(),
+            vec![(0, seeded.join("\n"))],
+        );
+        self.toast_history.push(&entry);
+        true
     }
 
     /// A locally-synthesized notice -- never from nvim's own `msg_show` --

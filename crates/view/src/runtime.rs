@@ -1725,6 +1725,20 @@ mod tests {
     }
 
     #[test]
+    fn notify_effect_maps_to_engine_ops_raise_notice() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::Notify {
+            text: "view: theme cache rebuilt".into(),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(
+            ops.calls.borrow()[0],
+            "raise_notice(view: theme cache rebuilt)"
+        );
+    }
+
+    #[test]
     fn hold_option_write_failure_returns_engine_lost() {
         let ops = FakeOps::default();
         *ops.fail_next.borrow_mut() = true;

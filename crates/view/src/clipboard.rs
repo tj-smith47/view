@@ -876,6 +876,9 @@ mod tests {
         fn hold_notify(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn raise_notice(&self, _text: &str) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn disable_claimants(
             &self,
             _modules: &[String],

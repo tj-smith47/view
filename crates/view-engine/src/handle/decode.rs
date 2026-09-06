@@ -306,25 +306,40 @@ pub(super) fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
         .collect()
 }
 
-/// Decodes the takeover's one reply: the mapping registration's claims
-/// under `claims`, and nvim's own `:messages` at `VimEnter` under
-/// `messages`.
+/// What the takeover's one reply carries: the mapping registration's
+/// claims, nvim's own `:messages` at `VimEnter`, and whether a notifier
+/// other than nvim's own stands at `vim.notify` once every step has run.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct TakeoverReading {
+    pub(super) claimed: Vec<MappingClaim>,
+    pub(super) messages: String,
+    pub(super) foreign_notifier: bool,
+}
+
+/// Decodes the takeover's one reply: the claims under `claims`, the startup
+/// messages under `messages`, and the `vim.notify` reading under
+/// `foreign_notifier`.
 ///
-/// Either key absent is the honest answer for that half alone -- a session
-/// that registered no mappings, or a startup that said nothing -- so
-/// neither can take the other down with it.
-pub(super) fn decode_takeover_reply(result: &Value) -> (Vec<MappingClaim>, String) {
+/// Any key absent is the honest answer for that part alone -- a session
+/// that registered no mappings, a startup that said nothing, a reading a
+/// `debug.getinfo` could not take -- so none can take the others down with
+/// it, and the notifier's absent answer is the painting side.
+pub(super) fn decode_takeover_reply(result: &Value) -> TakeoverReading {
     let Some(pairs) = result.as_map() else {
-        return (Vec::new(), String::new());
+        return TakeoverReading::default();
     };
-    let claims = crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_CLAIMS_KEY)
-        .map(decode_mapping_claims)
-        .unwrap_or_default();
-    let messages = crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_MESSAGES_KEY)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    (claims, messages)
+    TakeoverReading {
+        claimed: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_CLAIMS_KEY)
+            .map(decode_mapping_claims)
+            .unwrap_or_default(),
+        messages: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_MESSAGES_KEY)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        foreign_notifier: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_NOTIFIER_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 /// Decodes a buffer-list reply into each listed buffer's `name`, dropping

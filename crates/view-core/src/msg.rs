@@ -275,6 +275,23 @@ pub enum Msg {
     StartupMessages {
         text: String,
     },
+    /// Whether a notifier other than nvim's own stands at `vim.notify`,
+    /// read once by the takeover ([`RpcCall::Takeover`]) after every step
+    /// has run -- so it reports the sink the hand-back actually left, not
+    /// the one the session started with.
+    ///
+    /// What it decides: whether view's own notices are spoken through that
+    /// sink ([`RpcCall::Notify`]) or painted as toasts. A plugin notifier
+    /// draws a float, and a toast beside it would be a second notifier on
+    /// screen; nvim's own default is an echo, which cannot render a
+    /// multi-line notice at `cmdheight = 0` without a blocking hit-enter
+    /// prompt, so a session with no plugin notifier keeps painting.
+    ///
+    /// `false` until the takeover answers, which is the painting side: a
+    /// notice raised before the reply is one view can still show.
+    NotifySinkRead {
+        foreign: bool,
+    },
     /// nvim applied a new colorscheme: the `ColorScheme` autocmd registered
     /// by [`RpcCall::RegisterBridge`] fired, carrying the scheme's name (or
     /// an empty string when nvim reported none).
@@ -1764,6 +1781,32 @@ pub enum RpcCall {
     /// the session ends and it is never issued at all for a user who has
     /// turned `notifications` off.
     HoldNotify,
+    /// Raises one of view's own notices through the session's own
+    /// `vim.notify`, for a session that left the messages surface with nvim
+    /// (`[native] notifications = false`).
+    ///
+    /// The inverse of [`HoldNotify`](Self::HoldNotify), and issued by the
+    /// same sessions that never issue it: view's notices are the only
+    /// traffic view still has to place, and a handed-back session places it
+    /// where the user's own notifications go rather than in a toast stack
+    /// painted over the notifier drawing them. What that sink is has
+    /// already been settled by the hand-back
+    /// ([`DisableClaimants`](Self::DisableClaimants)) -- nvim-notify where
+    /// the config loaded it, nvim's own echo otherwise -- so this carries
+    /// text and no opinion about the renderer.
+    ///
+    /// One severity for every notice, the engine's `INFO`, because view's
+    /// own stack draws them all alike: a level chosen here would be a
+    /// distinction the shipped surface does not make.
+    ///
+    /// Fire-and-forget like every other `RpcCall`. A notice that cannot be
+    /// delivered because the engine is gone is one nobody could have read
+    /// anyway, and the engine-down condition itself is never routed here --
+    /// it stays a painted notice for exactly that reason
+    /// (`Messages::paints`).
+    Notify {
+        text: String,
+    },
     /// Turns off every loaded plugin in `modules` that exists to render a
     /// surface this session externalized, by calling the module's own
     /// `disable`.

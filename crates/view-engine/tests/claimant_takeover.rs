@@ -15,9 +15,40 @@
 //! asked that.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use rmpv::Value;
+use std::sync::mpsc;
+use std::time::Instant;
+use view_core::msg::{Msg, TakeoverStep};
 use view_engine::process::{Engine, EngineConfig};
 use view_test_support::ScratchDir;
+
+/// Whether the takeover's reply says a notifier other than nvim's own is
+/// standing at `vim.notify`, run as the real batch against `dir`'s config.
+fn takeover_reads_a_foreign_notifier(dir: &ScratchDir) -> bool {
+    let mut engine = engine(dir);
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .takeover(&[TakeoverStep::DisableClaimants {
+            modules: vec!["noice".to_string()],
+        }])
+        .unwrap();
+
+    let deadline = Instant::now() + common::rpc_deadline();
+    let mut read = None;
+    while Instant::now() < deadline && read.is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Msg::NotifySinkRead { foreign }) => read = Some(foreign),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    read.expect("the takeover reply must carry a reading of vim.notify")
+}
 
 /// A config that installs a stand-in for the claimant view supersedes: a
 /// loaded `noice` module whose `disable` records the call and restores the
@@ -33,26 +64,44 @@ use view_test_support::ScratchDir;
 /// one is standing, rather than inferring it from a side effect: `orig` is
 /// what a restore puts back, `claimed` is the claimant's own.
 fn config_home(name: &str) -> ScratchDir {
-    write_config(name, "")
+    write_config(name, "", "")
 }
 
 /// [`config_home`] plus a loaded `notify` module, the shape a lazy.nvim
 /// config leaves behind: nvim-notify is on `package.loaded` because the
 /// claimant pulled it in, and nothing ever assigned `vim.notify` to it.
 fn config_home_with_notify(name: &str) -> ScratchDir {
+    write_config(name, "", NOTIFY_MODULE)
+}
+
+/// [`config_home_with_notify`], except that the function the claimant saved
+/// -- and so the one its `disable` restores -- is the config's own: the
+/// `prologue` assigns `vim.notify` before the claimant ever runs, which is
+/// a user who chose their sink rather than one who left nvim's.
+fn config_home_with_custom_sink(name: &str) -> ScratchDir {
     write_config(
         name,
-        "_G.view_pin.notify = function(...) end\n\
-         package.loaded['notify'] = _G.view_pin.notify\n",
+        "_G.view_pin_custom = function(...) end\n\
+         vim.notify = _G.view_pin_custom\n",
+        NOTIFY_MODULE,
     )
 }
 
-fn write_config(name: &str, extra: &str) -> ScratchDir {
+/// A loaded nvim-notify, as the claimant's own `require` leaves it. It
+/// records what it was told so a notice raised through the standing sink
+/// can be read back by the one that received it.
+const NOTIFY_MODULE: &str = "_G.view_pin.notify = function(msg)\n\
+       _G.view_pin.seen = msg\n\
+     end\n\
+     package.loaded['notify'] = _G.view_pin.notify\n";
+
+fn write_config(name: &str, prologue: &str, extra: &str) -> ScratchDir {
     let dir = ScratchDir::new(&format!("claimant-takeover-{name}")).unwrap();
     std::fs::write(
         dir.join("init.lua"),
         format!(
-            "_G.view_pin = {{ orig = vim.notify, disables = 0 }}\n\
+            "{prologue}\
+             _G.view_pin = {{ orig = vim.notify, disables = 0 }}\n\
              _G.view_pin.claimed = function(...) end\n\
              vim.notify = _G.view_pin.claimed\n\
              package.loaded['noice'] = {{\n\
@@ -255,5 +304,88 @@ fn view_own_hold_still_outranks_the_sink_the_hand_back_leaves() {
         "other",
         "the takeover's own notify is issued behind the hand-back and is \
          the one left standing"
+    );
+}
+
+/// The sink repair is for the restore that lands on nvim's echo, and for no
+/// other: a claimant that put the config's own `vim.notify` back has left
+/// the session exactly where it would have been without the plugin, and
+/// re-pointing that at nvim-notify would be view overriding the config it
+/// just handed the surface back to.
+#[test]
+fn a_restore_that_leaves_the_configs_own_notify_is_kept_over_nvim_notify() {
+    let dir = config_home_with_custom_sink("sink-edge");
+    let engine = engine(&dir);
+    assert_eq!(
+        notify_owner(&engine),
+        "claimed",
+        "the fixture never took vim.notify, so this pin proves nothing"
+    );
+
+    engine
+        .handle
+        .disable_claimants(&["noice".to_string()])
+        .unwrap();
+
+    assert_eq!(disables(&engine), 1);
+    assert_eq!(
+        notify_owner(&engine),
+        "orig",
+        "the restore put the config's own function back, and nvim-notify \
+         being loaded is not a reason to take it away"
+    );
+}
+
+/// The other half of the hand-back: a session that handed the messages
+/// surface back still has its own notices to place, and they go to the sink
+/// the hand-back left standing rather than onto a toast stack painted over
+/// the notifier that draws them.
+#[test]
+fn a_notice_raised_after_the_hand_back_reaches_the_sink_it_left() {
+    let dir = config_home_with_notify("raised");
+    let engine = engine(&dir);
+
+    engine
+        .handle
+        .disable_claimants(&["noice".to_string()])
+        .unwrap();
+    engine
+        .handle
+        .raise_notice("view: took the statusline over")
+        .unwrap();
+
+    let seen = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![Value::from("return _G.view_pin.seen"), Value::Array(vec![])],
+        )
+        .unwrap();
+    assert_eq!(
+        seen.as_str(),
+        Some("view: took the statusline over"),
+        "the notice must arrive at the function `vim.notify` names after \
+         the hand-back, whatever that function is"
+    );
+}
+
+/// What the takeover reads at `vim.notify` once every one of its steps has
+/// run, which is what decides whether view speaks its own notices or paints
+/// them.
+///
+/// The pair is the whole discrimination: both configs load the claimant and
+/// both have it restore nvim's own default, and they differ only in whether
+/// nvim-notify is on `package.loaded` for the re-point to find. A reading
+/// taken before the steps -- or of the wrong function -- answers the same
+/// for both.
+#[test]
+fn the_takeover_reads_which_notifier_its_own_hand_back_left_standing() {
+    assert!(
+        !takeover_reads_a_foreign_notifier(&config_home("sink-plain")),
+        "a restore that landed on nvim's own echo is not a notifier view          may hand a notice to"
+    );
+    assert!(
+        takeover_reads_a_foreign_notifier(&config_home_with_notify("sink-notify")),
+        "the re-point put nvim-notify there, and a float drawing the          messages is exactly what view must not paint over"
     );
 }

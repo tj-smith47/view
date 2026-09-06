@@ -17,7 +17,7 @@ use decode::{
     decode_clipboard_set, decode_delete_confirm_reply, decode_feature_invoke,
     decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_claims, decode_preview_reply,
     decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
-    SwapRecoveryReading,
+    SwapRecoveryReading, TakeoverReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -627,17 +627,22 @@ impl EngineHandle {
                                     // run under its own `pcall`, so the
                                     // only way an error reaches here is a
                                     // takeover that did not run at all
-                                    let (claimed, messages) = if error == Value::Nil {
+                                    let reading = if error == Value::Nil {
                                         decode_takeover_reply(&result)
                                     } else {
-                                        (Vec::new(), String::new())
+                                        TakeoverReading::default()
                                     };
-                                    if !messages.is_empty() {
+                                    if !reading.messages.is_empty() {
                                         pump.route_startup_messages(Msg::StartupMessages {
-                                            text: messages,
+                                            text: reading.messages,
                                         });
                                     }
-                                    pump.route_claims(Msg::MappingsClaimed { claimed });
+                                    pump.route_notify_sink(Msg::NotifySinkRead {
+                                        foreign: reading.foreign_notifier,
+                                    });
+                                    pump.route_claims(Msg::MappingsClaimed {
+                                        claimed: reading.claimed,
+                                    });
                                 }
                             }
                             Some(Waiter::ClaimantsProbe) => {
