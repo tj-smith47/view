@@ -58,6 +58,7 @@ README='README.md'
 PERF='docs/performance.md'
 BENCH='docs/benchmarking.md'
 BASELINES='crates/view-bench/baselines'
+BUILDS='crates/view-harness/src/builds.rs'
 
 # One felt row and one diagnostic that decomposes it, plus a [[shortfall]]
 # whose own scenario/metric pair is nowhere near either: a reader of this
@@ -163,15 +164,28 @@ marker_ratio_p50 = 1.0936971456650568
 TOML
 }
 
+# The harness's row table: a scenario it dispatches is a name a spec row may
+# cite, and echo_path is the shipped case -- a decomposition row measured and
+# reported every run that publishes no baseline and carries no budget.
+plant_harness() {
+  cat > "$CASE/$BUILDS" <<'RS'
+pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
+    ("echo", Some(VIEW_BIN)),
+    ("echo_path", Some(TAPS_VIEW_BIN)),
+];
+RS
+}
+
 new_case() {
   n=$((n + 1))
   CASE="$WORK/case$n"
   mkdir -p "$CASE/crates/view-bench" "$CASE/.claude/specs" "$CASE/docs" \
-    "$CASE/$BASELINES"
+    "$CASE/$BASELINES" "$CASE/crates/view-harness/src"
   plant_budgets
   plant_spec
   plant_pages
   plant_baselines
+  plant_harness
 }
 
 # Each failure the check can raise collapses to one token. Headers collapse
@@ -251,9 +265,25 @@ printf '\nThe cell behind those two figures is `view_p99_ms`.\n' >> "$CASE/$PERF
 expect 1 'identifier:performance.md:view_p99_ms' 'a metric identifier on a page that states moments'
 
 new_case
-printf '\n| speculative echo (`echo.view_p99_ms`) | 5.2x faster than bare Neovim |\n' \
+printf '\n| speculative echo (`echo.view_p99_ms`) | 5.2x faster |\n' \
   >> "$CASE/$BENCH"
 expect 0 '' 'a claim standing beside the felt cell that earns it'
+
+# ---------------------------------------------------------------------------
+# a felt anchor licenses a multiplier on the row, never a comparative naming
+# the engine: the anchor cannot tell a bound from a win, so the row that
+# names what it beats is refused wherever it stands
+# ---------------------------------------------------------------------------
+new_case
+printf '\n| first paint (`echo.view_p99_ms`) | 5.2x faster than bare Neovim |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'claim:docs/benchmarking.md:12' \
+  'a row naming the engine it beats, standing beside a felt cell id'
+
+new_case
+printf '\n| settled screen (`echo.view_p99_ms`) | never faster than the server that draws it |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a comparative on an anchored row that names no engine'
 
 # ---------------------------------------------------------------------------
 # the same claim, anchored by nothing, by a diagnostic, and by an id the
@@ -306,10 +336,17 @@ mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
 expect 1 'claim:.claude/specs/2026-07-17-view-design.md:5' 'a claim in the spec section that defines the product'
 
 new_case
-sed 's/| p99 <= 8 ms |/| p99 <= 8 ms, 5.2x ahead of bare Neovim |/' \
+sed 's/| p99 <= 8 ms |/| p99 <= 8 ms, 5.2x ahead of the round trip |/' \
   "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
 mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
 expect 0 '' 'a claim in the budget table, on the row whose own cell id anchors it'
+
+new_case
+sed 's/| p99 <= 8 ms |/| p99 <= 8 ms, 5.2x ahead of bare Neovim |/' \
+  "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+expect 1 'claim:.claude/specs/2026-07-17-view-design.md:13' \
+  'a budget row naming the engine it beats, anchored by its own cell id'
 
 new_case
 sed 's/^## 1\. Product definition$/## 1. What view is/' "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
@@ -351,6 +388,32 @@ sed 's/| bench suite |/| bench suite, `first_paint.minimal` |/' "$CASE/$SPEC" > 
 mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
 expect 0 '' 'a spec row naming a cell the class baselines record and no budget bounds'
 
+new_case
+sed 's/| bench suite |/| bench suite, `echo_path` |/' "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+expect 0 '' 'a spec row naming a live harness row that publishes no baseline'
+
+new_case
+sed 's/| bench suite |/| bench suite, `echo_path` |/' "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+rm "$CASE/$BUILDS"
+expect 1 'spec-id:echo_path' \
+  'a spec row naming a row no harness table declares any more'
+
+# ---------------------------------------------------------------------------
+# a retired identifier is exempt where its own row retracts it, and only there
+# ---------------------------------------------------------------------------
+new_case
+sed 's/| bench suite |/| bench suite, `cold_ms` |/' "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+expect 1 'spec-id:cold_ms' 'a retired identifier in a row that says nothing about withdrawing it'
+
+new_case
+sed 's/| bench suite |/| bench suite. `cold_ms` was withdrawn from this row |/' \
+  "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+expect 0 '' 'a retired identifier inside the sentence that withdraws it'
+
 # ---------------------------------------------------------------------------
 # the two cross-checks that shipped before this one
 # ---------------------------------------------------------------------------
@@ -379,10 +442,13 @@ expect 1 'marker:view_p99_ms no-felt' \
 # first on PATH decides whether the gate runs at all. A bash-4 construct is
 # not a syntax error under 3.2, it is a gate that dies mid-run with a message
 # reading as a script bug -- so the population is graded, not just the two
-# scripts this matrix is about, and the list comes from the Taskfile so a
-# script added to a task is graded without anyone remembering to add it here.
+# scripts this matrix is about. Every script in the tree, not only the ones
+# Taskfile.yml names: the release path runs scripts/package-bundle.sh from a
+# workflow and scripts/mbp-build-leg.sh runs on the macOS host the contract
+# is about, so a Taskfile-derived list left the five scripts no task names
+# ungraded. The walk also keeps a new script graded without an edit here.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GUARDED=$(grep -oE 'scripts/[A-Za-z0-9_/-]+\.sh' "$ROOT/Taskfile.yml" | sort -u) || true
+GUARDED=$(cd "$ROOT" && find scripts -name '*.sh' | LC_ALL=C sort) || true
 
 report() {
   n=$((n + 1))
@@ -395,19 +461,25 @@ report() {
   printf '%s\n' "$2" | sed 's/^/  | /'
 }
 
+# An empty list is a finding on both legs and a pass on neither: grep with no
+# file argument reads stdin, and the parse loop below iterates zero times and
+# reports the scripts parsed having parsed none of them.
+empty=""
+if [ -z "$GUARDED" ]; then
+  empty="scripts/ holds no *.sh file, so nothing was graded"
+fi
+
 # The tokens whose spelling would otherwise match this line are written with
 # their first character bracketed: same language, and the scan grades this
 # file by the same rule as every other without matching its own pattern.
-# An empty list is a finding, not a pass: grep with no file argument would
-# read stdin and the matrix would sit there having graded nothing.
-if [ -z "$GUARDED" ]; then
-  modern="Taskfile.yml names no scripts/*.sh, so nothing was graded"
+if [ -n "$empty" ]; then
+  modern="$empty"
 else
   modern=$(cd "$ROOT" && grep -nE \
     'declare[[:space:]]+-[a-zA-Z]*[An]|local[[:space:]]+-[a-zA-Z]*[An]|typeset[[:space:]]+-[a-zA-Z]*[An]|\b[m]apfile\b|\b[r]eadarray\b|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,|\^\^)|\|[&]|[&]>>|;;[&]' \
     $GUARDED) || true
 fi
-report 'no bash-4-only construct in the scripts Taskfile.yml runs as bash' "$modern"
+report 'no bash-4-only construct in the scripts under scripts/' "$modern"
 
 # The grep above reads constructs; it cannot see the two shapes that made 3.2
 # refuse this very checker -- a case pattern and an apostrophe in a comment,
@@ -417,7 +489,9 @@ report 'no bash-4-only construct in the scripts Taskfile.yml runs as bash' "$mod
 # so where it is not.
 stock=/bin/bash
 stock_major=$("$stock" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 9)
-if [ "${stock_major:-9}" -ge 4 ]; then
+if [ -n "$empty" ]; then
+  report "the scripts parse under $stock" "$empty"
+elif [ "${stock_major:-9}" -ge 4 ]; then
   n=$((n + 1))
   printf 'ok %s - %s # skip %s is bash %s, nothing pre-4 to parse under\n' \
     "$n" 'the scripts parse under stock bash' "$stock" "$stock_major"

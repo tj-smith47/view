@@ -158,6 +158,18 @@ fi
 # sequences inside a -v assignment and would eat the regex's backslashes.
 export CLAIM='[0-9](\.[0-9]+)?[ ]*(x|\xc3\x97)([^0-9]|$)|(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([^a-z]|$)'
 
+# A comparative that names the engine, on a table row, is refused whatever
+# anchors it. A felt anchor licenses a multiplier -- the cell that earns the
+# number is named beside it -- but it cannot tell a bound ("ratio_p50 <= 0.30x
+# the paired bare-nvim run") from a win, so on a row the anchor bought the
+# writer permission to state either. A row states a win by publishing the
+# paired numbers; the adjective is the part a rule can refuse. The engine has
+# to be the comparative's own object, with only a determiner or an adjective
+# standing between them: reaching to the end of the sentence instead refuses
+# "ahead of that boundary ... paid identically by bare nvim", where the
+# comparative names no engine and the engine is another clause's subject.
+export ENGINE='(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([ ]+(a|an|the|bare|stock|plain|vanilla|its|our|same|paired))*[ -]+([Nn]vim|NVIM|[Nn]eovim)'
+
 claims_in() {
   local page="$1" first="${2:-1}" last="${3:-}"
   local shown="${page#"$root"/}"
@@ -170,6 +182,7 @@ claims_in() {
     # written to cover. Prose keeps the paragraph scope: a sentence takes
     # its anchor from the ones around it, a row does not.
     function row_verdict(line, at,   j) {
+      if (line ~ engine) { print page ":" (at + off) ": " line; return }
       if (line !~ claim) { return }
       for (j = 1; j <= names; j++) {
         if (index(line, id[j]) > 0) { return }
@@ -189,7 +202,11 @@ claims_in() {
         if (para[i] ~ claim) { print page ":" (no[i] + off) ": " para[i] }
       }
     }
-    BEGIN { names = split(ids, id, " "); claim = ENVIRON["CLAIM"] }
+    BEGIN {
+      names = split(ids, id, " ")
+      claim = ENVIRON["CLAIM"]
+      engine = ENVIRON["ENGINE"]
+    }
     /^[[:space:]]*\|/ { row_verdict($0, NR); next }
     /^[[:space:]]*$/ { verdict(); lines = 0; hits = 0; next }
     {
@@ -286,9 +303,11 @@ fi
 # marker; neither ever reads a backticked token as an identifier, so
 # `shell_visible_ms` named a metric no file declares and would have kept
 # passing under any later rename. The vocabulary is what the bench system
-# itself declares -- budgets.toml's scenarios, metrics and fixtures, plus
-# the names the shipped class baselines record, since a row may cite a cell
-# that is measured and reported without being bounded.
+# itself declares -- budgets.toml's scenarios, metrics and fixtures, the
+# names the shipped class baselines record, since a row may cite a cell
+# that is measured and reported without being bounded, and the scenario
+# names the harness dispatches, since a decomposition row is measured and
+# reported every run while publishing no baseline and carrying no budget.
 # Newline-joined and matched whole with grep -Fqx rather than keyed in a map:
 # an identifier is a whole word here, and a set of them is a set either way.
 vocab_scenario=""
@@ -328,21 +347,27 @@ done < <(
       table && /^[a-z_0-9]+ = / { print "m\t" $1 }
     ' "$class_file"
   done
+  # The row table the harness dispatches from, read the way the baselines
+  # are: a scenario it names is a name the vocabulary holds, so a live row
+  # needs no exemption spelled out beside the retired ones to go stale in.
+  # No apostrophe in a comment inside this substitution: bash 3.2 reads one
+  # as a quote and never finds the end.
+  builds="$root/crates/view-harness/src/builds.rs"
+  if [ -f "$builds" ]; then
+    awk '
+      /MEASURED_BUILD/ { table=1; next }
+      table && /^\];/ { table=0 }
+      table && /^[[:space:]]*\("[a-z_0-9]+"/ {
+        v=$0; sub(/^[^"]*"/, "", v); sub(/".*$/, "", v); print "s\t" v
+      }
+    ' "$builds"
+  fi
 )
 
 bounds="$(section_bounds '### 3.1 Budgets (CI-gated once the harness lands, P3)' '^#{2,3} ')"
 if [[ -n "$bounds" ]]; then
   while IFS= read -r token; do
     [[ -n "$token" ]] || continue
-    # Identifiers §3.1 names because they no longer exist, spelled out rather
-    # than pattern-matched so a typo cannot hide behind one: cold_ms and
-    # ratio_vs_nvim were withdrawn from the content-marker row by 2026-07-27's
-    # amendment, which names the defect that withdrew them, and echo_path is a
-    # decomposition row of the diagnostic matrix that publishes no baseline and
-    # carries no budget.
-    case "$token" in
-      cold_ms | ratio_vs_nvim | echo_path) continue ;;
-    esac
     if [[ "$token" == *.* ]]; then
       left="${token%%.*}"
       right="${token#*.}"
@@ -354,13 +379,31 @@ if [[ -n "$bounds" ]]; then
       grep -Fqx "$token" <<<"$vocab_leaf"; then
       continue
     fi
-    echo "BUDGET DRIFT FAIL: spec-id $token: a spec 3.1 row names it, and neither budgets.toml nor the shipped class baselines declare a scenario, metric or fixture by that name" >&2
+    echo "BUDGET DRIFT FAIL: spec-id $token: a spec 3.1 row names it, and no budgets.toml entry, shipped class baseline or harness row declares a scenario, metric or fixture by that name, and no sentence in that row withdraws it" >&2
     fail=1
   done < <(
+    # An identifier a row withdraws is exempt where the withdrawal stands:
+    # the sentence that retracts it is what earns the exemption, so the
+    # exemption dies with the sentence rather than outliving it in a
+    # hand-kept list nothing grades. Sentence scope, not row scope, so the
+    # rest of a row that retracts one identifier is still read.
     sed -n "${bounds%:*},${bounds#*:}p" "$spec" |
-      grep '^[[:space:]]*|' |
-      grep -oE '`[a-z_]+(\.[a-z_0-9]+)?`' |
-      tr -d '`' | sort -u
+      awk '
+        function emit(text,   n, part, i, tok) {
+          n = split(text, part, "`")
+          for (i = 2; i <= n; i += 2) {
+            tok = part[i]
+            if (tok ~ /^[a-z_]+(\.[a-z_0-9]+)?$/) { print tok }
+          }
+        }
+        /^[[:space:]]*\|/ {
+          n = split($0, sentence, /\. /)
+          for (i = 1; i <= n; i++) {
+            if (sentence[i] ~ /[Ww]ithdraw/) { continue }
+            emit(sentence[i])
+          }
+        }
+      ' | sort -u
   )
 fi
 
