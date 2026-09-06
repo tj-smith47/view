@@ -2076,19 +2076,19 @@ mod tests {
                 })
             })
             .collect();
+        let is_real =
+            |scenario: &str, metric: &str| recorded_somewhere.contains(&(scenario, metric));
         let mut unreal = Vec::new();
-        let mut checked = 0usize;
         for (path, file) in &files {
             for (scenario, fixtures) in &file.withdrawn {
                 for (fixture, withdrawn) in fixtures {
                     for (metric, why) in withdrawn {
-                        checked += 1;
                         assert!(
                             !why.trim().is_empty(),
                             "{path}: [{scenario}.{fixture}] {metric} is withdrawn without a \
                              reason, so nothing tells the re-seat what to cite"
                         );
-                        if !recorded_somewhere.contains(&(scenario.as_str(), metric.as_str())) {
+                        if !is_real(scenario, metric) {
                             unreal.push(format!(
                                 "{path}: [{scenario}.{fixture}] withdraws {metric}, which no \
                                  shipped class records for this scenario"
@@ -2103,11 +2103,11 @@ mod tests {
             "unreal withdrawals:\n{}",
             unreal.join("\n")
         );
-        assert!(
-            checked > 0,
-            "the gh classes still owe their first-paint re-seat, so this walk must find \
-             withdrawals to check"
-        );
+        // the walk above is only as strong as the union it reads, and a tree
+        // with no withdrawals left would exercise nothing, so the predicate is
+        // proven on a name no row records and on one every class records
+        assert!(!is_real("first_paint", "a_metric_no_row_records"));
+        assert!(is_real("first_paint", "marker_cold_ms"));
     }
 
     #[test]
