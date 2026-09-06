@@ -11,6 +11,15 @@ each leg's printed `gated <metric> <value>` line is one draw. Sizing is the
 excursion over the recorded value, and a factor clearing both the worst
 excursion and `median + 2 x half-width` against the recorded value.
 
+> Withdrawn 2026-09-06, the `first_paint.*.marker_ratio_p50` rows only.
+> Every draw behind them was taken on a harness pty that never answered the
+> DSR the engine's tty startup blocks on, so the bare-nvim arm of each one
+> carries a fixed ~100 ms that view's arm never paid; the spread they
+> characterise is that wait's, not the runner's. The `gh-macos`
+> `"first_paint.marker_ratio_p50" = 1.48` entry and its draws are gone from
+> the sidecar, and the factor is re-earned from draws taken after the fix.
+> Every other row here reads a steady-state statistic and is untouched.
+
 ## What failed
 
 Run 32784781768's gh-linux record leg exited 3:

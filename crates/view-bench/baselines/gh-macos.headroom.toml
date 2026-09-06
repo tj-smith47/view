@@ -25,41 +25,6 @@
 machine_class = "gh-macos"
 
 [headroom]
-# 14 CI bench legs, runs 30856641597, 30861044267, 30868862255,
-# 30874125937 and 30879797693 (2026-08-03/04), 32533279176, 32534348333,
-# 32537625267, 32619785446 and 32784781768 (2026-08-21/24; 32531092866
-# was cancelled before this cell ran), then 33204611952, 33235574037,
-# 33238348497 and 33244439984 (2026-08-28/29), runner load at start 1.55
-# to 35.15, both first_paint fixtures, gated statistic per leg. This
-# ratio comes from a single cold spawn -- median of 1 trial -- which is
-# why it resolves an order worse here than the 1000-sample steady-state
-# ratios on the same legs (echo's ratio_p50 half-width 3.2%).
-#   minimal 0.195 0.220 0.205 0.241 0.185 0.242 0.249 0.251 0.232 0.252
-#           0.207 0.217 0.198 0.208:
-#     median 0.2185, half-width 0.0335 (15.33%)
-#   heavy   0.359 0.380 0.373 0.386 0.399 0.394 0.385 0.387 0.383 0.415
-#           0.377 0.371 0.414 0.353:
-#     median 0.384, half-width 0.031 (8.07%)
-# Worst excursion above a recorded value 1.227x (minimal 0.252 against
-# 0.2053); the 2x half-width rule asks 1.391x (0.2185 + 2 x 0.0335
-# against 0.2053). 1.48 clears both, and replaces a default of 1.25 that
-# this runner's cold-start spread crosses. Scoped to first_paint: a
-# future scenario reusing the name must earn its own characterization.
-#
-# Spread, not a code trend: view's cold marker p50 spans 40.1 to 57.6 ms
-# across the fourteen legs with the 08-03/04 group already reaching 56.4,
-# while nvim's holds 217..234 ms -- the groups overlap in both
-# directions.
-# The same statistic on gh-linux is the opposite case and is deliberately
-# absent from that class's sidecar, where the two groups do not overlap.
-#
-# The factor survives its own ratchet: the lowest draw is what the
-# min-ratchet seats, and 0.185 x 1.48 = 0.2738 still clears the campaign's
-# worst reading 0.252 (heavy: 0.353 x 1.48 = 0.5224 against a 0.415
-# worst). A later draw that turns either margin negative is a re-sizing,
-# not a rounding.
-"first_paint.marker_ratio_p50" = 1.48
-
 # picker.match_paint_p50_ms is deliberately absent, and the grounds for
 # that moved when the row's sample count did. Five draws at the 100
 # measured opens (+10 warmup) per trial this scenario resolves at today
@@ -160,20 +125,6 @@ machine_class = "gh-macos"
 # characterization walk re-checks them in: a draws key names one cell,
 # `recorded` is the seat the factor was sized against, and `values` are
 # the kept draws the comment lists.
-[draws."first_paint.minimal.marker_ratio_p50"]
-recorded = 0.2053216711213456
-values = [
-  0.195, 0.220, 0.205, 0.241, 0.185, 0.242, 0.249,
-  0.251, 0.232, 0.252, 0.207, 0.217, 0.198, 0.208,
-]
-
-[draws."first_paint.heavy.marker_ratio_p50"]
-recorded = 0.3731988944795349
-values = [
-  0.359, 0.380, 0.373, 0.386, 0.399, 0.394, 0.385,
-  0.387, 0.383, 0.415, 0.377, 0.371, 0.414, 0.353,
-]
-
 [draws."picker.minimal.first_page_p50_ms"]
 recorded = 3.0648329999999997
 values = [3.960, 3.249, 2.980, 3.509, 3.772]

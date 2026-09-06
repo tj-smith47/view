@@ -32,20 +32,14 @@ speculated_ratio_p50 = 0.3496171611575586
 
 [first_paint.heavy]
 marker_cold_ms = 87.80524100000001
-marker_ratio_p50 = 0.42622682364179454
-marker_ratio_p99 = 0.45887056984492347
 shell_visible_cold_ms = 3.967567
 
 [first_paint.minimal]
 marker_cold_ms = 26.553036
-marker_ratio_p50 = 0.17330279745760482
-marker_ratio_p99 = 0.20177850569483782
 shell_visible_cold_ms = 3.94175
 
 [first_paint.user]
 marker_cold_ms = 96.32648400000001
-marker_ratio_p50 = 0.4473049059624524
-marker_ratio_p99 = 0.48849377672066074
 shell_visible_cold_ms = 4.850114
 
 [flood.minimal]

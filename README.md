@@ -45,11 +45,11 @@ to real agents, with in-editor review of every proposed change. See
   oracle checks view against a reference Neovim on every build, and a compat
   suite drives pinned real-world plugin stacks (telescope, lualine, noice,
   nvim-cmp, treesitter, mini.nvim, and more) through a real pty.
-- **Fast where you feel it.** view paints a usable shell in ~4 ms and first
-  content 2.1 to 5.2x sooner than bare Neovim, at 4.96 MB resident for view's
-  own process (the embedded Neovim engine runs separately and is not
-  included). Every claim is measured, paired, and regression-gated in CI.
-  See [Performance](#performance).
+- **Fast where you feel it.** view paints a usable shell in ~4 ms, before
+  the Neovim engine has even started, at 4.96 MB resident for view's own
+  process (the embedded Neovim engine runs separately and is not included).
+  Every claim is measured, paired, and regression-gated in CI. See
+  [Performance](#performance).
 - **Modern out of the box.** The surfaces view owns (statusline, picker,
   file tree, notifications, command palette) share one design system. Prefer
   the plugin you already use? It still loads, and a single config key hands
@@ -92,16 +92,20 @@ stays fixed at that value even after `.engine-pin` moves on.
 | | view | bare Neovim |
 |---|---|---|
 | Shell painted, config still loading (p99) | **3.8-4.1 ms** | n/a |
-| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | 130.3 ms |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 164.3 ms |
+| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | measured under a real terminal: see the retake |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | measured under a real terminal: see the retake |
 | First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a |
 | Keystroke to cell change, steady typing (p99) | 0.73 ms | **0.67 ms** |
 
-Cold start is a big win. The no-plugins memory row above is view's own
-process only (the embedded Neovim engine is a separate process this budget
-excludes) and has no bare-Neovim comparison. Under the 15-plugin lazy.nvim
-stack, a diagnostic (not CI-gated) reading does have one: bare Neovim's
+The bare-Neovim cold-start figures are withdrawn until they are re-measured
+under a real terminal: the harness's own pty left Neovim's tty startup
+waiting on a query it never answered, and every recorded first-paint ratio
+came out of that wait rather than out of view
+([Performance](docs/performance.md#current-numbers) has the whole account).
+The no-plugins memory row above is view's own process only (the embedded
+Neovim engine is a separate process this budget excludes) and has no
+bare-Neovim comparison. Under the 15-plugin lazy.nvim stack, a diagnostic (not CI-gated) reading does have one: bare Neovim's
 whole process is 4.39 MB, view's own process is 5.00 MB, and view's own
 process plus its embedded Neovim engine child -- the honest comparison,
 since view can never be smaller than the Neovim it embeds -- is 27.96 MB,

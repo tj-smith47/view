@@ -71,8 +71,8 @@ Recorded baselines on a shared Linux dev host:
 | What | view | bare Neovim | |
 |---|---|---|---|
 | UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | 130.3 ms | **5.2x faster** |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 164.3 ms | **2.1x faster** |
+| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | measured under a real terminal: see the retake | |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | measured under a real terminal: see the retake | |
 | First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded | |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
@@ -80,6 +80,17 @@ Recorded baselines on a shared Linux dev host:
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
 | Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
+
+The two bare-Neovim first-paint figures are withdrawn rather than
+restated. Both sides are spawned on a pty the harness owns, and until that
+pty answered the DSR that Neovim's tty startup writes behind its
+background-colour query, the bare side waited out its own `vim.wait(100,
+...)` on every cold sample -- roughly 100 ms that view's side never paid,
+because view's engine owns no tty and never asks. The pty answers it now
+(`view_oracle::pty`, pinned by `view-bench/tests/nvim_arm_startup.rs`), and
+the column stays empty until both ratios are re-measured on a quiet host.
+Every class baseline has had its recorded first-paint ratio bars removed
+meanwhile, so a gate run fails on them rather than attesting to them.
 
 The `user` row is measured by the same code as the two above it and lands
 with the next recorded baseline; it is listed empty rather than omitted so
