@@ -195,15 +195,67 @@ fn fixture_lockfile_plugins(fixture: &str) -> Result<BTreeSet<String>> {
     Ok(pinned.into_keys().collect())
 }
 
-/// Whether `cache_dir` already holds every plugin `plugins` names.
+/// Whether `cache_dir` already holds every plugin `plugins` names, as a
+/// complete clone.
 ///
 /// Read from the directories themselves rather than from a stamp file a
 /// previous run wrote: a cache half-populated by an interrupted run then
 /// reads as cold and is filled, where a stamp would report it warm and hand
 /// the remaining clone straight back to a scenario's timed wait.
+///
+/// The marker is what makes "populated" mean "cloned": `git clone` creates
+/// the target directory before it has fetched anything into it, so a run
+/// interrupted mid-clone leaves a directory that a presence test alone
+/// calls warm on every later run -- and the scenario then fails its
+/// `wait_for` on a plugin that never loaded, which says nothing about the
+/// plugin under test.
+///
+/// `.git/index` rather than `.git` itself, because `.git` appears at the
+/// start of a clone and not at the end of one: an interrupted clone
+/// observed here left `.git` holding `objects/`, `refs/` and `FETCH_HEAD`
+/// alone, with no worktree, and a check on the directory read it as warm on
+/// every later run. The index is written when the checkout that finishes
+/// the clone writes the worktree, so it is present for every complete
+/// install and for no partial one -- true of all 54 plugin directories in
+/// this tree's four cache keys. `lazy.nvim` installs with `git clone` and
+/// always checks out, so no cached plugin is ever index-less by design.
 fn cache_is_warm(cache_dir: &Path, plugins: &BTreeSet<String>) -> bool {
     let installed = cache_dir.join("nvim").join("lazy");
-    plugins.iter().all(|name| installed.join(name).is_dir())
+    plugins
+        .iter()
+        .all(|name| clone_is_complete(&installed, name))
+}
+
+/// Whether `installed/name` is a plugin directory a clone actually
+/// finished writing. See [`cache_is_warm`] for why the index is the marker.
+fn clone_is_complete(installed: &Path, name: &str) -> bool {
+    installed.join(name).join(".git").join("index").exists()
+}
+
+/// Removes every plugin directory under `cache_dir` that exists without the
+/// clone marker [`cache_is_warm`] requires, and answers with the names it
+/// took away.
+///
+/// The other half of that check: an interrupted clone leaves a directory
+/// `Lazy! restore` treats as an installed plugin, so a re-run repairs
+/// nothing until the remains are gone.
+///
+/// # Errors
+///
+/// Returns an error if a directory that fails the marker cannot be removed.
+fn drop_incomplete_clones(cache_dir: &Path, plugins: &BTreeSet<String>) -> Result<Vec<String>> {
+    let installed = cache_dir.join("nvim").join("lazy");
+    let mut dropped = Vec::new();
+    for name in plugins {
+        let dir = installed.join(name);
+        if !dir.exists() || clone_is_complete(&installed, name) {
+            continue;
+        }
+        std::fs::remove_dir_all(&dir)
+            .with_context(|| format!("removing the incomplete clone {}", dir.display()))?;
+        dropped.push(name.clone());
+    }
+    Ok(dropped)
 }
 
 /// Resolves an effective `fixture` name (a state's own override, or the
@@ -680,7 +732,7 @@ fn warm_plugin_caches(scenarios: &[(PathBuf, ScenarioFile)], nvim_bin: NvimBin<'
         }
         println!("compat: warming plugin cache {key} for {named} ...");
         let start = Instant::now();
-        warm_one_cache(fixture, nvim_bin)?;
+        warm_one_cache(fixture, &cache_dir, &plugins, nvim_bin)?;
         if !cache_is_warm(&cache_dir, &plugins) {
             bail!(
                 "the plugin bootstrap for fixture {fixture:?} reported success but \
@@ -703,7 +755,25 @@ fn warm_plugin_caches(scenarios: &[(PathBuf, ScenarioFile)], nvim_bin: NvimBin<'
 /// missing during startup either way, but the bang makes this run wait for
 /// that install and for the lockfile checkout behind it, instead of
 /// quitting out from under a clone still in flight.
-fn warm_one_cache(fixture: &str, nvim_bin: NvimBin<'_>) -> Result<()> {
+///
+/// What a previous run left half-cloned is removed first
+/// ([`drop_incomplete_clones`]): lazy.nvim reads a directory as an
+/// installed plugin, so a restore over the remains of an interrupted clone
+/// repairs nothing.
+///
+/// # Errors
+///
+/// Returns an error if an incomplete clone cannot be removed, the fixture
+/// does not resolve, or the bootstrap engine fails.
+fn warm_one_cache(
+    fixture: &str,
+    cache_dir: &Path,
+    plugins: &BTreeSet<String>,
+    nvim_bin: NvimBin<'_>,
+) -> Result<()> {
+    for name in drop_incomplete_clones(cache_dir, plugins)? {
+        println!("compat: dropping the incomplete clone {name} before re-cloning it");
+    }
     let sock_path = compat_scratch_root().join(format!(
         "view-compat-warm-{}-{}.sock",
         std::process::id(),
@@ -1499,6 +1569,65 @@ mod tests {
                  file does not declare"
             );
         }
+    }
+
+    /// A plugin directory is warm only as a complete clone, and the warm
+    /// step takes away what fails that before cloning again.
+    ///
+    /// The directory `git clone` creates before it has fetched anything is
+    /// the shape this exists for: read as installed, it is warm forever and
+    /// the failure surfaces a minute later as a scenario `wait_for` timeout
+    /// naming a plugin that never loaded.
+    #[cfg(unix)]
+    #[test]
+    fn a_half_cloned_plugin_is_cold_and_is_taken_away_before_the_re_clone() {
+        let root = ScratchDir::new("harness-compat-half-clone").unwrap();
+        let cache_dir = root.join("2895d052d37fc12c");
+        let lazy = cache_dir.join("nvim").join("lazy");
+        let plugins: BTreeSet<String> = ["dressing.nvim".to_string()].into_iter().collect();
+
+        std::fs::create_dir_all(lazy.join("dressing.nvim").join("lua")).unwrap();
+        assert!(
+            !cache_is_warm(&cache_dir, &plugins),
+            "a directory with no clone marker is what an interrupted clone \
+             leaves behind, and it is not a plugin"
+        );
+
+        assert_eq!(
+            drop_incomplete_clones(&cache_dir, &plugins).unwrap(),
+            vec!["dressing.nvim".to_string()],
+            "the warm step has to take the remains away, or the re-clone \
+             finds a directory lazy.nvim reads as installed"
+        );
+        assert!(!lazy.join("dressing.nvim").exists());
+
+        // the shape an interrupted clone actually leaves: `.git` is there,
+        // and nothing a checkout would have written is
+        std::fs::create_dir_all(lazy.join("dressing.nvim").join(".git").join("objects")).unwrap();
+        assert!(
+            !cache_is_warm(&cache_dir, &plugins),
+            "a clone that got as far as .git and no further is not an \
+             installed plugin"
+        );
+        assert_eq!(
+            drop_incomplete_clones(&cache_dir, &plugins).unwrap(),
+            vec!["dressing.nvim".to_string()],
+        );
+
+        std::fs::create_dir_all(lazy.join("dressing.nvim").join(".git")).unwrap();
+        std::fs::write(lazy.join("dressing.nvim").join(".git").join("index"), "x").unwrap();
+        assert!(
+            cache_is_warm(&cache_dir, &plugins),
+            "a finished checkout writes the index, and nothing an \
+             interrupted clone leaves does"
+        );
+        assert!(
+            drop_incomplete_clones(&cache_dir, &plugins)
+                .unwrap()
+                .is_empty(),
+            "a warm cache must survive the sweep untouched: removing it \
+             would re-clone every plugin on every run"
+        );
     }
 
     /// The warm step fills exactly the shared cache keys the scenario loop
