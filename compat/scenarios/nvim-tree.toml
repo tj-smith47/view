@@ -45,7 +45,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # Backslash is nvim's default leader; the fixture leaves it unchanged.
@@ -92,7 +92,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # Backslash is nvim's default leader; the fixture leaves it unchanged.
@@ -134,7 +134,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # native.tree = false hands `<leader>e` back unclaimed; the fixture never

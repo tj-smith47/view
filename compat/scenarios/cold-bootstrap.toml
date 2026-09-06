@@ -51,13 +51,19 @@ steps = [
   # message history is its dismissal.
   { wait_for = "view: noice.nvim is using", timeout_ms = 60000 },
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 60000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # noice's startup health notifications overlay the upper grid rows
   # (including buffer line 1, where this text renders) for the first few
   # seconds after launch; the timeout must outlast their dismissal.
-  { wait_for = "hello", timeout_ms = 15000 },
+  #
+  # 60 s rather than the 15 s its warm siblings carry, and only here: this
+  # scenario clones lazy.nvim and every pinned plugin on every run, so
+  # everything after the install competes with that I/O still settling.
+  # This exact wait is the one that has actually run out at 15 s, four
+  # separate times, always at this line and never in a warm sibling.
+  { wait_for = "hello", timeout_ms = 60000 },
   { assert_absent = "E5108" },
   { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
 ]

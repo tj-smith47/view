@@ -47,7 +47,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # noice's startup health notifications overlay the upper grid rows for
@@ -93,7 +93,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # noice's startup health notifications overlay the upper grid rows for
@@ -124,7 +124,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   { wait_for = "hello", timeout_ms = 15000 },
