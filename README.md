@@ -103,9 +103,10 @@ pty that answers the startup queries a real terminal answers; the figures
 they replace were withdrawn because the harness's own pty left Neovim's tty
 startup waiting on a query it never answered. Both first-paint columns are
 that retake's own interleaved pair (view's recorded gate bar, 25.2 and
-79.3 ms, comes from a quieter run and ratchets separately): view reaches the opened file 1.4 ms after bare Neovim
-on the plugin-free config (16.9 ms against 15.4 ms p50) and 5 ms after it on
-the 15-plugin one (55.1 ms against 50.0 ms), neither of them a difference a
+79.3 ms, comes from a quieter run and ratchets separately): view reaches
+the opened file 1.4 ms after bare Neovim on the plugin-free config (16.9 ms
+against 15.4 ms p50) and 5 ms after it on the 15-plugin one (55.1 ms
+against 50.0 ms), neither of them a difference a
 person can feel ([Performance](docs/performance.md#current-numbers) has the
 whole account).
 The no-plugins memory row above is view's own process only (the embedded
