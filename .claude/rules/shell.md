@@ -24,7 +24,8 @@ The same ban covers `mapfile`, `readarray`, `[[ -v x ]]`, `${x,,}`,
 `${x^^}`, `\|&`, `&>>` and `;;&`.
 
 Two cases in `scripts/check-budget-drift-cases.sh` enforce it over every
-`scripts/**/*.sh` in the tree, so a script is graded without anyone
+file under `scripts/` whose shebang names bash or `sh` -- the remote-test
+fixtures carry no suffix -- so a script is graded without anyone
 remembering to add it here: one greps the construct list, and one parses
 each script under `/bin/bash` when that is a pre-4 bash — which is the
 only leg that sees the two paren-counting shapes, and it runs on the host
