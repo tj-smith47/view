@@ -47,10 +47,11 @@ type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum QueryPolicy {
-    /// Answer only the DA1 fence, as a VT100-class terminal does. The child
-    /// resolves no optional capability and derives its most conservative
-    /// tier, which keeps an assertion about *content* free of the escapes a
-    /// richer tier would interleave.
+    /// Answer the DA1 fence and nothing optional beyond the two queries
+    /// [`BACKGROUND`] and [`DSR`] every answering terminal replies to, as a
+    /// VT100-class terminal does. The child resolves no optional capability
+    /// and derives its most conservative tier, which keeps an assertion
+    /// about *content* free of the escapes a richer tier would interleave.
     AnswerDa1,
     /// Answer the whole probe batch, as a modern terminal does, so the child
     /// derives its full tier. A benchmark wants this: the budget table names
@@ -131,14 +132,36 @@ const TRUECOLOR: Answer = (b"\x1bP$qm\x1b\\", b"\x1bP1$r0;48;2;1;2;3m\x1b\\");
 /// is a different frame and therefore different paint work.
 const BOX_GLYPH: Answer = (b"\r\xe2\x95\xad\x1b[6n\r\x1b[K", b"\x1b[1;2R");
 
-const DA1_ONLY: &[Answer] = &[DA1];
-const FULL_TIER: &[Answer] = &[SYNC, KITTY, TRUECOLOR, BOX_GLYPH, DA1];
+/// The OSC 11 background-colour query, and the reply of a terminal whose
+/// background is the dark one the pinned engine already defaults to, so
+/// answering changes what a child paints in no way beyond removing the
+/// unanswered case (`'background'` stays `dark`, and no `E1568` warning
+/// lands on the screen).
+///
+/// Written with the BEL terminator the query carried, which is what a real
+/// terminal does and what [`DSR`]'s own note makes load-bearing.
+const BACKGROUND: Answer = (b"\x1b]11;?\x07", b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07");
+
+/// The DSR (Device Status Report) request, and the "terminal OK" reply.
+///
+/// Not a capability probe, and answered under every answering policy for
+/// that reason: the pinned engine's TUI writes it immediately behind
+/// [`BACKGROUND`] and then blocks its own startup in `vim.wait(100, ...)`
+/// until *this* reply lands (`runtime/lua/vim/_core/defaults.lua`, whose
+/// `did_dsr_response` the background reply does not set). A session that
+/// leaves it unanswered therefore adds a fixed ~100ms to every child that
+/// owns a tty -- before its first line of user config is read -- which is
+/// nvim's whole startup again and lands in any figure taken across it.
+const DSR: Answer = (b"\x1b[5n", b"\x1b[0n");
+
+const BASE_ANSWERS: &[Answer] = &[BACKGROUND, DSR, DA1];
+const FULL_TIER: &[Answer] = &[BACKGROUND, DSR, SYNC, KITTY, TRUECOLOR, BOX_GLYPH, DA1];
 
 impl QueryPolicy {
     /// The query/reply pairs a session under this policy answers.
     pub(crate) fn answers(self) -> &'static [Answer] {
         match self {
-            Self::AnswerDa1 => DA1_ONLY,
+            Self::AnswerDa1 => BASE_ANSWERS,
             Self::AnswerFullTier | Self::AnswerFullTierLate | Self::AnswerFullTierBarelyLate => {
                 FULL_TIER
             }
@@ -1044,13 +1067,13 @@ mod responder_tests {
 
     #[test]
     fn responder_answers_a_da1_query_in_one_chunk() {
-        let mut r = QueryResponder::new(DA1_ONLY);
+        let mut r = QueryResponder::new(BASE_ANSWERS);
         assert_eq!(r.replies_for(DA1.0), DA1.1);
     }
 
     #[test]
     fn responder_answers_a_da1_query_split_across_two_chunks() {
-        let mut r = QueryResponder::new(DA1_ONLY);
+        let mut r = QueryResponder::new(BASE_ANSWERS);
         let (head, tail) = DA1.0.split_at(2);
         assert!(r.replies_for(head).is_empty(), "no full query yet");
         assert_eq!(r.replies_for(tail), DA1.1);
@@ -1058,13 +1081,13 @@ mod responder_tests {
 
     #[test]
     fn responder_stays_silent_on_output_that_holds_no_query() {
-        let mut r = QueryResponder::new(DA1_ONLY);
+        let mut r = QueryResponder::new(BASE_ANSWERS);
         assert!(r.replies_for(b"\x1b[1mbold\x1b[0m normal text").is_empty());
     }
 
     #[test]
     fn responder_answers_each_of_two_queries_in_one_chunk() {
-        let mut r = QueryResponder::new(DA1_ONLY);
+        let mut r = QueryResponder::new(BASE_ANSWERS);
         let mut two = DA1.0.to_vec();
         two.extend_from_slice(DA1.0);
         let mut both = DA1.1.to_vec();
@@ -1073,9 +1096,29 @@ mod responder_tests {
     }
 
     #[test]
-    fn a_da1_only_responder_leaves_the_optional_capabilities_unresolved() {
-        let mut r = QueryResponder::new(DA1_ONLY);
+    fn a_base_responder_leaves_the_optional_capabilities_unresolved() {
+        let mut r = QueryResponder::new(BASE_ANSWERS);
         assert_eq!(r.replies_for(&probe_batch()), DA1.1);
+    }
+
+    /// Neither of these resolves a capability, and the engine's tty
+    /// startup blocks on the second of them, so the policy a session picked
+    /// for its capability tier must not decide whether it waits.
+    #[test]
+    fn every_answering_policy_answers_the_queries_no_tier_depends_on() {
+        for policy in [
+            QueryPolicy::AnswerDa1,
+            QueryPolicy::AnswerFullTier,
+            QueryPolicy::AnswerFullTierLate,
+            QueryPolicy::AnswerFullTierBarelyLate,
+        ] {
+            let mut r = QueryResponder::for_policy(policy);
+            let mut asked = BACKGROUND.0.to_vec();
+            asked.extend_from_slice(DSR.0);
+            let mut expected = BACKGROUND.1.to_vec();
+            expected.extend_from_slice(DSR.1);
+            assert_eq!(r.replies_for(&asked), expected, "{policy:?}");
+        }
     }
 
     #[test]

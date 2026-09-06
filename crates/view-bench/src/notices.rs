@@ -643,6 +643,12 @@ mod tests {
              no view under it to measure",
         ),
         (
+            "view-bench/tests/nvim_arm_startup.rs",
+            "None",
+            "no operand",
+            "a bare engine spawned as itself, timed into a log and exiting on its own",
+        ),
+        (
             "view-bench/tests/remote_ui.rs",
             "None",
             "`-n` in a headless child",
