@@ -495,13 +495,19 @@ config = "real"
 #
 # The 2026-08-03 ratification by the user covered eleven entries as
 # accepted-and-gated debt, together with the spec §3.1 echo-row amendment;
-# seven of them are still listed (three dev-linux, four dev-macos), the rest
-# spent and deleted with a note in their place. The three echo ratio_p50
-# entries carry a pinned closure path in the P4 plan: input-thread/runtime-loop
-# unification first, incremental rendering second. The two first_paint
-# marker_ratio_p50 minimal entries postdate it: they are what the 2026-09-06
-# retake under the answering pty made visible, an entry each rather than a
-# widened bar.
+# the ones spent since are deleted with a note in their place. The three
+# echo ratio_p50 entries carry a pinned closure path in the P4 plan:
+# input-thread/runtime-loop unification first, incremental rendering second.
+# The two first_paint marker_ratio_p50 minimal entries postdate it: they are
+# what the 2026-09-06 retake under the answering pty made visible, an entry
+# each rather than a widened bar.
+#
+# Listed below: 11 entries -- 4 dev-linux, 7 dev-macos.
+#
+# A count stated in prose about the file's own contents is a fact the file
+# can check, so the line above is pinned against the parsed entries; the
+# header it replaces stated numbers nothing read, and they were wrong by
+# the time anyone audited the ledger from them.
 #
 # Improving past the budget does not need an edit here to pass; deleting the
 # entry is the housekeeping that follows.

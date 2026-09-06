@@ -2746,6 +2746,53 @@ mod tests {
         );
     }
 
+    /// The ledger's header tells a reader how many entries it is auditing,
+    /// and that count is a fact about the file's own contents -- so the
+    /// file checks it rather than a later reader discovering the header
+    /// counts an older tree. The whole line is compared rather than its
+    /// numbers, because a class added to the ledger has to appear in the
+    /// sentence a reader reads.
+    #[test]
+    fn the_ledger_header_counts_the_entries_the_file_holds() {
+        let path = budgets_path();
+        let text =
+            std::fs::read_to_string(&path).expect("the shipped budget table must be readable");
+        let file = budgets::load(&path).expect("the shipped budget table must load");
+        let mut classes: Vec<&str> = file
+            .shortfall
+            .iter()
+            .map(|entry| entry.class.as_str())
+            .collect();
+        classes.sort_unstable();
+        classes.dedup();
+        let counted: Vec<String> = classes
+            .iter()
+            .map(|class| {
+                let held = file
+                    .shortfall
+                    .iter()
+                    .filter(|entry| entry.class == *class)
+                    .count();
+                format!("{held} {class}")
+            })
+            .collect();
+        let want = format!(
+            "# Listed below: {} entries -- {}.",
+            file.shortfall.len(),
+            counted.join(", ")
+        );
+        let stated = text
+            .lines()
+            .find(|line| line.starts_with("# Listed below:"))
+            .unwrap_or("");
+        assert_eq!(
+            stated,
+            want,
+            "the shortfall ledger's header in {} miscounts the entries below it",
+            path.display()
+        );
+    }
+
     /// Every row named in the exemption list is still a row: an entry left
     /// behind after its budget row was renamed or deleted would silently
     /// hold the exemption open for nothing.
