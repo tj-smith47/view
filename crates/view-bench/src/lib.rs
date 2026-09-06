@@ -126,6 +126,15 @@ Found a swap file by the name \".scratch.txt.swp\"
 Swap file \".scratch.txt.swp\" already exists!
 -- More -- SPACE/d/j: screen/page/line down, b/u/k: up, q: quit";
 
+    /// The shape `(y/n)` actually names: nvim's `ask_yesno` appends it to
+    /// whatever question it is answering (`input.c`, `%s (y/n)?`), which is
+    /// what a harness with nothing to type parks on the same way it parks
+    /// on the swap prompts above.
+    const YESNO_PARKED_SCREEN: &str = "\
+buffer content \"VIEWBENCHVIMENTERMARKER\" never painted within 30s of spawn; screen:
+WARNING: The file has been changed since reading it!!!
+Do you really want to write to it (y/n)?";
+
     #[test]
     fn a_desync_on_a_prompt_names_the_prompt_before_the_screen_dump() {
         let rendered = BenchError::Desync {
@@ -153,6 +162,19 @@ Swap file \".scratch.txt.swp\" already exists!
             rendered.contains("parked at a prompt: -- More --"),
             "a prompt an editor draws on the bottom row rather than in a float is the same \
              park, and the legend after the phrase must not hide it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_desync_on_a_yesno_prompt_names_it_too() {
+        let rendered = BenchError::Desync {
+            context: YESNO_PARKED_SCREEN.to_string(),
+        }
+        .to_string();
+        assert!(
+            rendered.contains("parked at a prompt: Do you really want to write to it (y/n)?"),
+            "the phrase generic enough to match other screens has to be shown proven against \
+             the one nvim actually parks on: {rendered}"
         );
     }
 

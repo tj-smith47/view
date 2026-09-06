@@ -4,7 +4,13 @@
 //!
 //! Unix only: the kill a sample ends with is a process-group signal, and
 //! the operand's swap is materialised here by the same pty-hosted editor a
-//! row measures.
+//! row measures. A different platform fact is why the cleanup itself can
+//! fail rather than why this file is fenced: `remove_file` on a still-open
+//! handle succeeds on unix and is refused on Windows, so a child that
+//! outlives `BenchSession::drop`'s 2s wait leaves its swap there --
+//! `session.rs`'s own `#[cfg(windows)]` unit test exercises that case
+//! directly, since `empty_swap_dir` is crate-private to this integration
+//! test.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -110,7 +116,12 @@ fn three_consecutive_killed_spawns_are_never_offered_a_second_swap() {
     // first-run record it writes during its claims stage, and the theme
     // cache it reads on the next launch. A side that loses these between
     // samples measures a first run on every one of them, against a bare
-    // engine that has no such state to lose
+    // engine that has no such state to lose. The assertion below only cares
+    // that two files beside the swap directory survive, so the names here
+    // are today's real ones (`view-native/src/paths.rs`'s first-run record,
+    // `view/src/theme_cache.rs`'s cache) written as plain literals rather
+    // than reached through a dependency this crate's direction audit would
+    // have to allow
     let warm = state_home.join("view");
     std::fs::create_dir_all(&warm).unwrap();
     let record = warm.join("native-first-run.toml");

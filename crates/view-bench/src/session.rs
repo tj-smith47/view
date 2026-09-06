@@ -450,4 +450,27 @@ mod tests {
         let env = env_of(&[("TERM", "xterm-256color")]);
         assert_eq!(per_spawn_env(&env, 3), env);
     }
+
+    /// The one platform where the best-effort cleanup can leave a swap:
+    /// `remove_file` on a still-open handle succeeds on unix (`tests/
+    /// swap_hygiene.rs` covers that leg through a live editor) and is
+    /// refused on Windows, which is the leftover a child outliving
+    /// `BenchSession::drop`'s 2s wait can still hand the next spawn.
+    /// `empty_swap_dir` is crate-private, so a Windows pin against a real
+    /// hold has to live in this module rather than in that integration
+    /// test.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_open_swap_file_survives_the_best_effort_cleanup() {
+        let dir = view_test_support::ScratchDir::new("bench-swap-windows-held").unwrap();
+        let held = dir.join("scratch.txt.swp");
+        let file = std::fs::File::create(&held).unwrap();
+        empty_swap_dir(&dir);
+        assert!(
+            held.exists(),
+            "an open file refuses Windows' best-effort remove_file, which is the leftover \
+             this cleanup shrinks but cannot always prevent"
+        );
+        drop(file);
+    }
 }

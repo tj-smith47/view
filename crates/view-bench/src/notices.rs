@@ -556,106 +556,132 @@ mod tests {
         }
     }
     /// Every `SpawnSpec` literal in the tree, against the answer it writes
-    /// for [`SpawnSpec::measured_program`] and why that answer is the
-    /// right one.
+    /// for [`SpawnSpec::measured_program`], whether it leaves the swap
+    /// cleanup something to find, and why that answer is the right one.
     ///
-    /// Rows are `(path under `crates/`, answer, grounds)`, in source order
-    /// within a file.
-    const SPAWN_SPEC_LITERALS: &[(&str, &str, &str)] = &[
+    /// Rows are `(path under `crates/`, answer, state home, grounds)`, in
+    /// source order within a file. [`crate::session::engine_swap_dir`]
+    /// reads a spawn's own `XDG_STATE_HOME` and answers `None` for a spawn
+    /// whose root `make_hermetic` fills in instead -- so a spawn with a
+    /// file operand and no state home here is silently uncleaned. The
+    /// state-home column says which side of that a literal is on: "own",
+    /// "side's own" or "inherited from the side" name where the value
+    /// comes from when the funnel can find it, and every other row states
+    /// why the spawn cannot leave a swap behind at all ("never spawned",
+    /// "no operand", "`-n` in a headless child", "remote engine").
+    const SPAWN_SPEC_LITERALS: &[(&str, &str, &str, &str)] = &[
         (
             "view-bench/src/notices.rs",
             "None",
+            "never spawned",
             "a test spec whose program is the one it measures",
         ),
         (
             "view-bench/src/remote_ui.rs",
             "..nvim.clone()",
+            "inherited from the side",
             "the pty-hosted client re-points the spawn it derives from at a socket; what runs \
              is unchanged",
         ),
         (
             "view-bench/src/remote_ui.rs",
             "None",
+            "never spawned",
             "a test spec whose program is the one it measures",
         ),
         (
             "view-bench/src/remote_ui.rs",
             "Some(PathBuf::from(\"target/release/view\"))",
+            "never spawned",
             "a test base shaped like a wrapped spawn, so a derivation that dropped the record \
              fails there",
         ),
         (
             "view-bench/src/scenarios/echo_speculated_rtt.rs",
             "None",
+            "inherited from the side",
             "the tier's inner spawn names the binary it runs; the tap shim it is handed to \
              records that binary as it moves it into the shell's argv",
         ),
         (
             "view-bench/src/scenarios/flood.rs",
             "None",
+            "never spawned",
             "a test spec naming a program that cannot be spawned at all",
         ),
         (
             "view-bench/src/scenarios/picker.rs",
             "..spec.clone()",
+            "inherited from the side",
             "a corpus root moves where a spawn starts, not what it runs",
         ),
         (
             "view-bench/src/scenarios/picker.rs",
             "Some(PathBuf::from(\"target/release/view\"))",
+            "never spawned",
             "a test base shaped like a wrapped spawn, so a derivation that dropped the record \
              fails there",
         ),
         (
             "view-bench/src/scenarios/remote_memory.rs",
             "None",
+            "remote engine",
             "a test spec whose program is the one it measures",
         ),
         (
             "view-bench/src/scenarios/taps/mod.rs",
             "Some(measured_program)",
+            "inherited from the side",
             "the one wrapper in the tree: it spawns a shell and measures the binary that \
              shell execs",
         ),
         (
             "view-bench/src/scenarios/taps/mod.rs",
             "None",
+            "no operand",
             "the pty floor control spawns a shell that never becomes an editor, so there is \
              no view under it to measure",
         ),
         (
             "view-bench/tests/remote_ui.rs",
             "None",
+            "`-n` in a headless child",
             "a bare engine spawned as itself",
         ),
         (
             "view-bench/tests/swap_hygiene.rs",
             "None",
+            "own",
             "a bare engine spawned as itself, to leave the swap file the cleanup removes",
         ),
         (
             "view-harness/src/bin/bench/cell_world.rs",
             "None",
+            "side's own",
             "a matrix cell's view side spawns the binary it measures",
         ),
         (
             "view-harness/src/bin/bench/cell_world.rs",
             "None",
+            "side's own",
             "a matrix cell's baseline spawns the engine it measures",
         ),
         (
             "view-harness/src/bin/bench/remote_rows.rs",
             "None",
+            "inherited from the side",
             "a remote row spawns view directly, reaching its engine over the transport",
         ),
         (
             "view-harness/src/bin/rtt_acceptance/run.rs",
             "None",
+            "inherited from the side",
             "the tier's baseline spawns the engine it measures",
         ),
         (
             "view-harness/tests/user_fixture.rs",
             "None",
+            "own",
             "a side spec whose program the caller fills in with the binary it measures",
         ),
     ];
@@ -885,11 +911,44 @@ mod tests {
                 assignments.push((name.clone(), assigned));
             }
         }
-        compare_census(&literals, SPAWN_SPEC_LITERALS, "the SpawnSpec literals");
+        compare_census(
+            &literals,
+            &measured_program_census(SPAWN_SPEC_LITERALS),
+            "the SpawnSpec literals",
+        );
         compare_census(
             &assignments,
             PROGRAM_ASSIGNMENTS,
             "the reassignments of a spawn's program",
         );
+    }
+
+    /// [`SPAWN_SPEC_LITERALS`] read as the `(path, answer, grounds)` triples
+    /// [`compare_census`] compares against what the tree builds: the extra
+    /// state-home column is metadata about the row, not part of what a
+    /// spawn's `measured_program` answer is checked against.
+    fn measured_program_census(
+        literals: &'static [(&'static str, &'static str, &'static str, &'static str)],
+    ) -> Vec<(&'static str, &'static str, &'static str)> {
+        literals
+            .iter()
+            .map(|(name, answer, _, grounds)| (*name, *answer, *grounds))
+            .collect()
+    }
+
+    /// Every row states whether its literal names a state home the swap
+    /// cleanup can find, or why the spawn cannot leave a swap without one --
+    /// so a new `SpawnSpec` literal with a file operand and neither answer
+    /// is the uncovered gap [`crate::session::engine_swap_dir`]'s
+    /// spec-only reach would otherwise leave silent.
+    #[test]
+    fn every_spawn_spec_literal_states_its_state_home_or_why_it_has_none() {
+        for (name, _, state_home, _) in SPAWN_SPEC_LITERALS {
+            assert!(
+                !state_home.is_empty(),
+                "{name}: a SpawnSpec literal names neither a state home nor a reason it \
+                 cannot leave a swap"
+            );
+        }
     }
 }
