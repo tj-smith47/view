@@ -629,6 +629,11 @@ mod tests {
             "a bare engine spawned as itself",
         ),
         (
+            "view-bench/tests/swap_hygiene.rs",
+            "None",
+            "a bare engine spawned as itself, to leave the swap file the cleanup removes",
+        ),
+        (
             "view-harness/src/bin/bench/cell_world.rs",
             "None",
             "a matrix cell's view side spawns the binary it measures",

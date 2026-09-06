@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::session::SpawnSpec;
+use crate::session::{engine_swap_dir, SpawnSpec};
 use crate::BenchError;
 
 /// How long [`RemoteUiServer::start`] waits for the headless server to
@@ -39,6 +39,10 @@ const LISTEN_RECHECK: Duration = Duration::from_millis(20);
 pub struct RemoteUiServer {
     child: Child,
     socket: PathBuf,
+    /// Where the server's own swap file lands, emptied once it is reaped:
+    /// this spawn opens the row's operand and dies by group `SIGKILL`, the
+    /// two properties a pty-hosted sample is cleaned up for.
+    swap_dir: Option<PathBuf>,
     // a reaped pid can be recycled, so the drop guard's group kill must be
     // skipped once the exit status has been collected
     reaped: bool,
@@ -136,6 +140,7 @@ impl RemoteUiServer {
         let mut server = Self {
             child,
             socket,
+            swap_dir: engine_swap_dir(&nvim.env),
             reaped: false,
         };
         server.await_listening()?;
@@ -197,6 +202,9 @@ impl Drop for RemoteUiServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket);
+        if let Some(dir) = &self.swap_dir {
+            crate::session::empty_swap_dir(dir);
+        }
     }
 }
 

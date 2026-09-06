@@ -94,6 +94,11 @@ pub use pty::{
     QueryResponder, SpawnEnv, BARELY_LATE_ANSWER_DELAY, LATE_ANSWER_DELAY,
 };
 pub use reference::ReferenceSession;
+/// The directory an engine keeps its state under, re-exported for the same
+/// reason the attach options are: a caller cleaning up after a spawn names
+/// the directory the engine itself chose, per platform, rather than
+/// restating a name that moves on Windows.
+pub use view_engine::env::engine_state_dir_name;
 /// The `nvim_ui_attach` option sets a driver attaches with, re-exported from
 /// the crate that owns every attach: a runner that picks a set for one side
 /// of a comparison names the same list the other side's attach takes, and

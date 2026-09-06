@@ -75,6 +75,7 @@ pub struct SettleBound {
 /// A spawned editor under measurement.
 pub struct BenchSession {
     pty: PtySession,
+    swap_dir: Option<PathBuf>,
 }
 
 /// The environment variable the compat fixtures read their probe-channel
@@ -93,24 +94,56 @@ pub struct BenchSession {
 const PROBE_SOCKET_VAR: &str = "VIEW_COMPAT_SOCK";
 
 /// The environment variable deciding where the editor under measurement
-/// keeps its swap files.
+/// keeps its state, the swap directory this session empties included.
 ///
-/// Made unique per spawn for the reason [`PROBE_SOCKET_VAR`] is. A sample
-/// killed at its first painted frame never runs an exit path, so the swap
-/// file its engine opened outlives it, and the next spawn in the same side
-/// directory finds it: one stale swap is answered by view's own recovery
-/// autocommand, two or more put nvim's "Enter number of swap file to use"
-/// on screen, where a harness with nothing to type parks until the wait
-/// gives up. Observed on the `startup` row, whose fourth cold spawn was
-/// still at that prompt 30 s later. It is one-sided, so the pair was not
-/// even facing the same startup: bare nvim in a pty writes no swap file
-/// for the buffer it opens, while view's engine -- which always has an RPC
-/// client attached to it -- writes one within the first second.
+/// Shared by every spawn of a side rather than made unique per spawn: view
+/// keeps its own first-run record and theme cache under this same root, so
+/// a fresh one per sample would make every view sample a first run while
+/// the bare-nvim arm it is paired against pays nothing -- an asymmetry
+/// straight into the ratio the row reports. What a killed sample actually
+/// leaves here is the engine's swap file, and that is removed once the
+/// child is reaped ([`BenchSession::drop`]).
 const STATE_HOME_VAR: &str = "XDG_STATE_HOME";
+
+/// The engine's swap directory under the state home `env` names, and
+/// `None` for an environment that names none.
+///
+/// The name is the engine's own (`nvim` on unix, `nvim-data` on Windows),
+/// read from the crate that owns the spawn rather than restated here.
+pub(crate) fn engine_swap_dir(env: &[(OsString, OsString)]) -> Option<PathBuf> {
+    env.iter()
+        .find(|(key, _)| key == STATE_HOME_VAR)
+        .map(|(_, value)| {
+            PathBuf::from(value)
+                .join(view_oracle::engine_state_dir_name())
+                .join("swap")
+        })
+}
+
+/// Removes every file `dir` holds, best effort, leaving the directory
+/// itself and everything beside it in place.
+///
+/// A sample killed at its first painted frame runs no exit path, so the
+/// swap file its engine opened outlives it, and the next spawn into the
+/// same state home finds it: one stale swap is answered by view's own
+/// recovery autocommand, two or more put nvim's "Enter number of swap file
+/// to use" on screen, where a harness with nothing to type parks until the
+/// wait gives up. Observed on the `startup` row, whose fourth cold spawn
+/// was still at that prompt 30 s later. Emptying rather than removing the
+/// root: the state home is also where view keeps the first-run record and
+/// theme cache a warm side is measured with.
+pub(crate) fn empty_swap_dir(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
 
 /// The environment entries no spawn may inherit from the spawn before it,
 /// each for the reason its own constant records.
-const PER_SPAWN_VARS: [&str; 2] = [PROBE_SOCKET_VAR, STATE_HOME_VAR];
+const PER_SPAWN_VARS: [&str; 1] = [PROBE_SOCKET_VAR];
 
 /// Distinguishes the per-spawn paths of each spawn from the last one's.
 static SPAWN_SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -119,10 +152,11 @@ static SPAWN_SERIAL: AtomicU64 = AtomicU64::new(0);
 /// `serial`, leaving every other entry untouched and adding nothing for a
 /// variable that is absent.
 ///
-/// Suffixing rather than sweeping what the last spawn left: unlinking the
-/// stale socket, or emptying the swap directory, would work only while no
-/// two spawns ever share a side directory, and a per-spawn path does not
-/// depend on that holding.
+/// Suffixing rather than unlinking what the last spawn left bound: an
+/// address the next spawn cannot collide with does not depend on the
+/// unlink having happened, and the address is the harness's to choose --
+/// unlike the state home, which is the side's and carries state the
+/// measurement wants kept.
 fn per_spawn_env(env: &[(OsString, OsString)], serial: u64) -> Vec<(OsString, OsString)> {
     env.iter()
         .map(|(key, value)| {
@@ -167,7 +201,10 @@ impl BenchSession {
             GRID_ROWS,
             QueryPolicy::AnswerFullTier,
         )?;
-        Ok(Self { pty })
+        Ok(Self {
+            pty,
+            swap_dir: engine_swap_dir(&spec.env),
+        })
     }
 
     /// Writes `bytes` to the pty as if typed.
@@ -277,6 +314,11 @@ impl Drop for BenchSession {
     fn drop(&mut self) {
         self.pty.kill();
         let _ = self.pty.wait_for_exit(Duration::from_secs(2));
+        // after the reap, so the file the child is still writing is not the
+        // one removed
+        if let Some(dir) = &self.swap_dir {
+            empty_swap_dir(dir);
+        }
     }
 }
 
@@ -304,18 +346,85 @@ mod tests {
         );
     }
 
-    /// The same claim for the other leftover a killed sample has: the swap
-    /// file its engine never closed, which the next spawn in the same
-    /// state directory is offered to recover instead of painting.
+    /// The claim [`PER_SPAWN_VARS`] itself makes, walked rather than
+    /// spelled once per entry: an entry added to the set is pinned by this
+    /// test the moment it joins, and a rewriter that stopped covering one
+    /// fails naming it.
     #[test]
-    fn two_spawns_never_share_a_state_directory() {
+    fn every_per_spawn_entry_differs_between_two_spawns() {
+        for var in PER_SPAWN_VARS {
+            let env = env_of(&[(var, "/scratch/nvim/per-spawn")]);
+            let first = per_spawn_env(&env, 0);
+            let second = per_spawn_env(&env, 1);
+            assert_ne!(
+                first[0].1, second[0].1,
+                "{var} survives a killed sample, so a value shared with the next spawn is a \
+                 leftover that spawn cannot get past"
+            );
+        }
+    }
+
+    /// The state home is the side's, not the spawn's: view reads its
+    /// first-run record and theme cache from it, so a value made unique
+    /// per spawn measures a first run on every sample of the view arm and
+    /// nothing at all on the nvim arm it is paired against.
+    #[test]
+    fn the_state_home_reaches_every_spawn_of_a_side_unchanged() {
         let env = env_of(&[(STATE_HOME_VAR, "/scratch/nvim/xdg_state_home")]);
-        let first = per_spawn_env(&env, 0);
-        let second = per_spawn_env(&env, 1);
-        assert_ne!(
-            first[0].1, second[0].1,
-            "a killed sample leaves its swap file behind, so a shared state directory is a \
-             swap prompt the next sample cannot answer"
+        assert_eq!(per_spawn_env(&env, 0), env);
+        assert_eq!(per_spawn_env(&env, 1), env);
+    }
+
+    #[test]
+    fn the_swap_directory_is_the_engines_own_under_the_state_home() {
+        let env = env_of(&[(STATE_HOME_VAR, "/scratch/nvim/xdg_state_home")]);
+        assert_eq!(
+            engine_swap_dir(&env),
+            Some(
+                PathBuf::from("/scratch/nvim/xdg_state_home")
+                    .join(view_oracle::engine_state_dir_name())
+                    .join("swap")
+            )
+        );
+        assert_eq!(
+            engine_swap_dir(&env_of(&[("TERM", "xterm-256color")])),
+            None
+        );
+    }
+
+    /// The half of the cleanup that keeps the two arms comparable: what a
+    /// killed sample left goes, and the state a warm side is measured with
+    /// stays.
+    #[test]
+    fn emptying_the_swap_directory_leaves_views_own_state_beside_it() {
+        let dir = view_test_support::ScratchDir::new("bench-swap-empty").unwrap();
+        let state_home = dir.join("xdg_state_home");
+        let swap = state_home
+            .join(view_oracle::engine_state_dir_name())
+            .join("swap");
+        std::fs::create_dir_all(&swap).unwrap();
+        std::fs::write(swap.join("scratch.txt.swp"), b"stale").unwrap();
+        let first_run = state_home.join("view").join("first-run.toml");
+        std::fs::create_dir_all(state_home.join("view")).unwrap();
+        std::fs::write(&first_run, b"seen").unwrap();
+
+        let env = env_of(&[(STATE_HOME_VAR, &state_home.to_string_lossy())]);
+        empty_swap_dir(&engine_swap_dir(&env).unwrap());
+
+        assert!(
+            swap.is_dir(),
+            "the swap directory itself is the next spawn's to write into, and removing the \
+             root takes view's own state with it"
+        );
+        assert_eq!(
+            std::fs::read_dir(&swap).unwrap().count(),
+            0,
+            "a swap the next spawn is offered to recover is the prompt this cleanup exists for"
+        );
+        assert!(
+            first_run.exists(),
+            "view's own state lives under the same root; removing it makes every sample a \
+             first run while the nvim arm pays nothing"
         );
     }
 

@@ -73,8 +73,10 @@ pub enum BenchError {
 /// -- the marker simply never arrives -- so the desync says only that the
 /// screen never changed, and the prompt itself is one line inside a
 /// forty-row dump nobody reads to the end. The phrases are nvim's own,
-/// each the fragment that survives the wrapping and the box drawing a
-/// float puts around it. The table is the population: a prompt outside it
+/// each a fragment short enough to survive what the two shapes a prompt
+/// arrives in put around it: the box drawing of view's Command Line float,
+/// and the trailing legend nvim's own bottom-row pager writes after the
+/// phrase. The table is the population: a prompt outside it
 /// still reaches the reader in the screen dump the message carries, and
 /// joins the note by being written down here.
 const BLOCKING_PROMPTS: [&str; 5] = [
@@ -113,6 +115,17 @@ buffer content \"VIEWBENCHVIMENTERMARKER\" never painted within 30s of spawn; sc
                   │ > Enter number of swap file to use (0 to quit):    │
                   ╰───────────────────────────────────────────╯";
 
+    /// The other shape the same prompt arrives in: the bare bottom row an
+    /// editor with no float to draw in parks on, which is what the nvim
+    /// side of every pair would hold, with the pager legend nvim writes
+    /// after the phrase.
+    const BARE_PARKED_SCREEN: &str = "\
+buffer content \"VIEWBENCHVIMENTERMARKER\" never painted within 30s of spawn; screen:
+E325: ATTENTION
+Found a swap file by the name \".scratch.txt.swp\"
+Swap file \".scratch.txt.swp\" already exists!
+-- More -- SPACE/d/j: screen/page/line down, b/u/k: up, q: quit";
+
     #[test]
     fn a_desync_on_a_prompt_names_the_prompt_before_the_screen_dump() {
         let rendered = BenchError::Desync {
@@ -127,6 +140,19 @@ buffer content \"VIEWBENCHVIMENTERMARKER\" never painted within 30s of spawn; sc
             note.contains("parked at a prompt")
                 && note.contains("Enter number of swap file to use"),
             "the prompt belongs ahead of the dump, not inside it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_desync_on_a_bare_bottom_row_prompt_names_it_too() {
+        let rendered = BenchError::Desync {
+            context: BARE_PARKED_SCREEN.to_string(),
+        }
+        .to_string();
+        assert!(
+            rendered.contains("parked at a prompt: -- More --"),
+            "a prompt an editor draws on the bottom row rather than in a float is the same \
+             park, and the legend after the phrase must not hide it: {rendered}"
         );
     }
 
