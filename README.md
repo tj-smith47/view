@@ -45,11 +45,12 @@ to real agents, with in-editor review of every proposed change. See
   oracle checks view against a reference Neovim on every build, and a compat
   suite drives pinned real-world plugin stacks (telescope, lualine, noice,
   nvim-cmp, treesitter, mini.nvim, and more) through a real pty.
-- **Fast where you feel it.** view paints a usable shell in ~4 ms, before
-  the Neovim engine has even started, at 4.96 MB resident for view's own
-  process (the embedded Neovim engine runs separately and is not included).
-  Every claim is measured, paired, and regression-gated in CI. See
-  [Performance](#performance).
+- **Fast where you feel it.** Every performance claim is a moment you live
+  through -- launch until the screen is ready, keypress until the character
+  is there, scrolling a huge file -- measured paired against bare Neovim in
+  the same run and regression-gated in CI. Where a moment has not been
+  measured under a real config yet, it says so instead of borrowing a
+  bench-fixture number. See [Performance](#performance).
 - **Modern out of the box.** The surfaces view owns (statusline, picker,
   file tree, notifications, command palette) share one design system. Prefer
   the plugin you already use? It still loads, and a single config key hands
@@ -59,9 +60,9 @@ to real agents, with in-editor review of every proposed change. See
   instead? Then `native.picker = false` on a line of its own is the whole
   config. view never edits your config, so that one key is the whole
   reversal.
-- **Honest about the gaps.** The benchmark table below includes the rows
-  where view is currently *slower* than Neovim, and the build fails if any
-  of them quietly regress further.
+- **Honest about the gaps.** The moments where view is currently *slower*
+  than Neovim are written down with the rest, and the build fails if any of
+  them quietly regresses further.
 
 ## Not another Neovim distro
 
@@ -73,58 +74,41 @@ paints every frame itself.
 
 That architecture is why none of view's surfaces can be a repackaged plugin:
 the render path, input handling, the native UI, and the AI integration are
-all view's own code. It is also where the speed comes from. A distro waits
-for your config before it can draw anything; view's shell is on screen in
-about 4 ms while your config is still loading (3.8 to 4.1 ms across
-fixtures), regardless of whether your setup has zero plugins or forty.
+all view's own code. It also changes what a launch looks like: a distro has
+nothing to draw until your config has run, while view's own chrome is on
+screen in about 4 ms whether your setup has zero plugins or forty, with your
+config still loading behind it. That frame is not the screen you start
+working in -- that one arrives when your config is done, and it is the
+moment the numbers below are about.
 
 ## Performance
 
-Numbers below are recorded baselines on a Linux dev host, Neovim `v0.12.4`,
-1000 samples per cell, measured *paired*: view and bare Neovim in the same
-run, same host, same config, samples interleaved. Reproduce with
-`task perf-audit`, which gates every recorded row and reports the `user`
-row above as uncovered until that recording lands. The Neovim version there
-is the provenance of these recordings, not a claim about what view ships or
-requires: it names the engine the numbers were measured against, and it
-stays fixed at that value even after `.engine-pin` moves on.
+Two moments, measured paired: view and bare Neovim launched in the same run,
+on the same host, with the same config, samples interleaved. Neovim
+`v0.12.4`, a shared Linux dev host.
 
-| | view | bare Neovim |
-|---|---|---|
-| Shell painted, config still loading (p99) | **3.8-4.1 ms** | n/a |
-| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** |
-| First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded |
-| Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a |
-| Keystroke to cell change, steady typing (p99) | 0.73 ms | **0.67 ms** |
+**You open a project.** You type `view ~/.config` and wait for the screen you
+can start working in. Under a real plugin config that moment is not yet
+recorded, and it is left blank rather than filled in from a bench fixture.
+What is recorded: with no plugins at all, that screen arrives in 16.1 ms
+under view against 14.7 ms under Neovim -- view 1.4 ms behind, on a config
+nobody runs. view's own chrome is on screen in about 4 ms regardless, while
+your config is still loading, and view does not make Neovim's own startup
+slower: the embedded engine reaches its started mark within 0.7 ms of the
+same engine under Neovim's terminal UI.
 
-The bare-Neovim cold-start figures are the 2026-09-06 retake, measured on a
-pty that answers the startup queries a real terminal answers; the figures
-they replace were withdrawn because the harness's own pty left Neovim's tty
-startup waiting on a query it never answered. Both first-paint columns are
-that retake's own interleaved pair (view's recorded gate bar, 25.2 and
-79.3 ms, comes from a quieter run and ratchets separately): view reaches
-the opened file 1.4 ms after bare Neovim on the plugin-free config (16.9 ms
-against 15.4 ms p50) and 5 ms after it on the 15-plugin one (55.1 ms
-against 50.0 ms), neither of them a difference a person can feel
-([Performance](docs/performance.md#current-numbers) has the whole account).
-The no-plugins memory row above is view's own process only (the embedded
-Neovim engine is a separate process this budget excludes) and has no
-bare-Neovim comparison. Under the 15-plugin lazy.nvim stack, a diagnostic
-(not CI-gated) reading does have one: bare Neovim's whole process is
-4.39 MB, view's own process is 5.00 MB, and view's own process plus its
-embedded Neovim engine child -- the honest comparison, since view can never
-be smaller than the Neovim it embeds -- is 27.96 MB, about 6.4x bare
-Neovim. See [Performance](#performance) for the full equivalence matrix.
-Typing and sustained scrolling are currently a bit slower than bare Neovim
-(about 13% and 1.9x, on paths that are sub-millisecond either way, so
-neither is something you can feel). We are actively closing those gaps
-rather than explaining them away: profiling already cut the typing overhead
-roughly in half, and what remains is itemized down to the microsecond.
+**You type.** You press a key and the character appears. Under a real
+config, not yet recorded. Plugin-free, view's worst keystroke in a thousand
+takes 0.73 ms against Neovim's 0.67 ms, and at the median view is about 13%
+behind -- both a fraction of the ~10 ms where a person starts to notice a
+key lagging their finger. With the engine on the far side of a network, view
+paints a predicted character at 0.39x the time bare Neovim takes locally.
 
-The full story, including methodology, the per-stage breakdown of a
-keystroke, and how budgets are enforced in CI, lives in
-[docs/performance.md](docs/performance.md).
+Scrolling, the picker, what happens when the engine hangs, memory, and what
+contributes to each of the numbers above:
+[docs/performance.md](docs/performance.md). How they are measured and which
+cells are diagnostics that carry no claim:
+[docs/benchmarking.md](docs/benchmarking.md).
 
 ## Roadmap
 

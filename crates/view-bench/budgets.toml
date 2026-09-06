@@ -50,12 +50,18 @@ scenario = "input_path"
 metric = "key_to_rpc_p99_us"
 max = 100.0
 classes = ["controlled-linux"]
+kind = "diagnostic"
+decomposes = "echo.view_p99_ms"
+config = "fixture"
 
 [[budget]]
 spec_row = "view output path: redraw event parsed -> terminal write"
 scenario = "output_path"
 metric = "p99_ms"
 max = 1.0
+kind = "diagnostic"
+decomposes = "echo.view_p99_ms"
+config = "fixture"
 
 # Both AI rows inherit their session-absent counterpart's bar rather than
 # carrying one computed from the recording that seeded them.
@@ -86,6 +92,9 @@ scenario = "ai_session_active"
 metric = "key_to_rpc_p99_us"
 max = 100.0
 classes = ["controlled-linux"]
+kind = "diagnostic"
+decomposes = "echo.view_p99_ms"
+config = "fixture"
 
 [[budget]]
 spec_row = "view output path, agent response streaming: redraw event parsed -> terminal write"
@@ -93,30 +102,45 @@ scenario = "ai_streaming"
 metric = "p99_ms"
 max = 1.0
 classes = ["controlled-linux"]
+kind = "diagnostic"
+decomposes = "echo.view_p99_ms"
+config = "fixture"
 
 [[budget]]
 spec_row = "Keypress -> cell change end-to-end, steady typing"
 scenario = "echo"
 metric = "view_p99_ms"
 max = 8.0
+kind = "felt"
+felt = "you type and the character is on screen -- keypress to the changed cell, paired with nvim on the same host in the same run"
+config = "real"
 
 [[budget]]
 spec_row = "Keypress -> cell change end-to-end, steady typing"
 scenario = "echo"
 metric = "ratio_p50"
 max = 1.1
+kind = "felt"
+felt = "you type and the character is on screen -- keypress to the changed cell, paired with nvim on the same host in the same run"
+config = "real"
 
 [[budget]]
 spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "scroll"
 metric = "staleness_p99_ms"
 max = 16.0
+kind = "felt"
+felt = "you hold a scroll key down through a 100k-line file and the text under your eyes keeps up, paired with nvim on the same host in the same run"
+config = "real"
 
 [[budget]]
-spec_row = "First paint: view's own UI shell visible, engine still loading"
+spec_row = "Shell painted before content: view's own UI shell visible, engine still loading"
 scenario = "first_paint"
 metric = "shell_visible_cold_ms"
 max = 50.0
+kind = "diagnostic"
+decomposes = "startup.settled_ratio_p50"
+config = "fixture"
 
 # 30 ms, not a rounder number, because the ratchet already bounds this
 # metric above it on a class where both gates run (the recorded 25.151
@@ -146,16 +170,22 @@ max = 50.0
 # recorded quiet value stays under 30, and every run above 30 prints a
 # line saying so.
 [[budget]]
-spec_row = "First paint: the opened file's content on screen"
+spec_row = "Content marker on screen: the opened file's first line painted"
 scenario = "first_paint"
 metric = "marker_cold_ms"
 max = 30.0
+kind = "diagnostic"
+decomposes = "startup.settled_ratio_p50"
+config = "fixture"
 
 [[budget]]
-spec_row = "First paint: the opened file's content on screen"
+spec_row = "Content marker on screen: the opened file's first line painted"
 scenario = "first_paint"
 metric = "marker_ratio_p50"
 max = 0.30
+kind = "diagnostic"
+decomposes = "startup.settled_ratio_p50"
+config = "fixture"
 
 # The two startup cells, in the vocabulary spec 3.1 states them in: what a
 # person waits through, and the one diagnostic that decomposes it. Neither
@@ -215,6 +245,9 @@ spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "flood"
 metric = "cadence_p99_ms"
 max = 16.0
+kind = "felt"
+felt = "a plugin storm or a :terminal flood is pouring into the screen and it still answers your scroll, paired with nvim on the same host in the same run"
+config = "real"
 
 # The spec row says "PSS", which names a Linux quantity. macOS has no PSS;
 # its counterpart is the phys_footprint the memory scenario already records.
@@ -233,6 +266,8 @@ scenario = "memory"
 metric = "pss_mb"
 max = 150.0
 classes = ["controlled-linux"]
+kind = "resource"
+config = "fixture"
 
 [[budget]]
 spec_row = "view-side memory (PSS), 10 buffers, post-workload"
@@ -240,6 +275,8 @@ scenario = "memory"
 metric = "phys_footprint_mb"
 max = 150.0
 classes = ["controlled-macos"]
+kind = "resource"
+config = "fixture"
 
 # Superseded 2026-08-17: this row used to bound pss_mb at 6.0, "headroom over the recorded 4.962
 # local-spawn figure this class inherits from memory.minimal", scoped to
@@ -281,6 +318,8 @@ spec_row = "Remote editing: view's own local footprint once the engine runs remo
 scenario = "remote_memory"
 metric = "remote_local_ratio"
 max = 1.10
+kind = "resource"
+config = "fixture"
 
 # Both picker rows bound the tail (p99) of the row's own statistic, so the
 # spec bar holds at the worst measured open/keystroke rather than at a
@@ -295,12 +334,18 @@ spec_row = "Picker match: keystroke -> first results painted, 100k resident entr
 scenario = "picker"
 metric = "match_paint_p99_ms"
 max = 16.0
+kind = "felt"
+felt = "you type in the picker over 100k entries and the matching results are on screen under your fingers"
+config = "fixture"
 
 [[budget]]
 spec_row = "Picker scan: 1M-file tree"
 scenario = "picker"
 metric = "first_page_p99_ms"
 max = 100.0
+kind = "felt"
+felt = "you open the picker on a million-file tree and the first page of results is already there"
+config = "fixture"
 
 # 12500 is not a chosen round number: it is what the heartbeat's own two
 # constants add up to, plus what reading the result costs. The sum is
@@ -340,6 +385,9 @@ spec_row = "Engine supervision: time to notice a read-side hang"
 scenario = "supervision"
 metric = "wedge_detect_p99_ms"
 max = 12500.0
+kind = "felt"
+felt = "the engine stops answering and the banner naming the wedge is on screen instead of a frozen editor"
+config = "fixture"
 
 # 1.0 is the ceiling the speculated-echo row exists to beat, stated before
 # anything measured it: at 1.0 view shows the typed glyph exactly as fast as
@@ -371,6 +419,9 @@ scenario = "echo_speculated"
 metric = "speculated_ratio_p50"
 max = 1.0
 classes = ["controlled-linux"]
+kind = "felt"
+felt = "you type with the engine on the far side of a network and the character is on screen before the round trip is back"
+config = "real"
 
 # Metrics measured outside their budget today.
 #

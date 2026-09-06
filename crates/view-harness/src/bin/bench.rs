@@ -89,11 +89,18 @@ use view_harness::fixture::{
 const MATRIX: &[(&str, &str)] = &[
     ("echo", "minimal"),
     ("echo", "heavy"),
+    // the leg the typing bound is stated on: a felt bound is a bound
+    // under the config a person runs, and the two fixtures above are
+    // bench configs (`budgets::UNPAIRED_FELT` names the only rows exempt
+    // from that, and none of them is here)
+    ("echo", USER_FIXTURE),
     ("echo_speculated", "minimal"),
+    ("echo_speculated", USER_FIXTURE),
     ("echo_control", "minimal"),
     ("echo_control", "heavy"),
     ("scroll", "minimal"),
     ("scroll", "heavy"),
+    ("scroll", USER_FIXTURE),
     ("first_paint", "minimal"),
     ("first_paint", "heavy"),
     // the login-shaped third leg: the same plugin set as `heavy`, loaded
@@ -106,11 +113,17 @@ const MATRIX: &[(&str, &str)] = &[
     // opens, which is where the grid hold, the attach order and the
     // takeover's place on the critical path all show up. Its config comes
     // from the fixture plus a planted VimEnter autocommand, so the row
-    // needs no fixture of its own
+    // needs no fixture of its own. The felt bound is stated on the
+    // login-shaped leg -- a launch is a launch of the editor a person
+    // starts -- and the plugin-free leg beside it holds the config
+    // constant at nothing, which is what leaves view's own attach and
+    // takeover alone in the delta
     ("startup", "minimal"),
+    ("startup", USER_FIXTURE),
     ("memory", "minimal"),
     ("remote_memory", "minimal"),
     ("flood", "minimal"),
+    ("flood", USER_FIXTURE),
     ("input_path", "minimal"),
     ("output_path", "minimal"),
     ("picker", "minimal"),
@@ -2486,11 +2499,13 @@ mod tests {
     /// empty" instead: it is built from a cache a compat or bench run
     /// fills, and a tree that has never run one has nothing to build from.
     ///
-    /// The same walk reads the performance doc, because a fixture is a
+    /// The same walk reads the benchmarking doc, because a fixture is a
     /// name a reader of a recorded number has to be able to look up: the
     /// baseline half of a new fixture announces itself at gate time as an
     /// uncovered cell, and the documentation half announces itself
-    /// nowhere at all.
+    /// nowhere at all. It is that doc rather than the performance page
+    /// because a fixture name is an identifier, and the page a user reads
+    /// carries none.
     /// The plugin count the prose names is the committed lockfile's, in
     /// every document that names one. A count is the one number a reader
     /// cannot check against the rows, and the lockfile moves without any
@@ -2509,7 +2524,7 @@ mod tests {
             .filter(|line| line.contains("\"commit\""))
             .count()
             - usize::from(lockfile.contains("\"lazy.nvim\""));
-        for doc in ["README.md", "docs/performance.md"] {
+        for doc in ["README.md", "docs/performance.md", "docs/benchmarking.md"] {
             let text = std::fs::read_to_string(workspace_root().join(doc))
                 .expect("every document this walk names must be readable");
             for suffix in ["-plugin", " plugins"] {
@@ -2540,8 +2555,9 @@ mod tests {
 
     #[test]
     fn every_matrix_fixture_resolves_to_a_config_tree() {
-        let doc_path = workspace_root().join("docs").join("performance.md");
-        let doc = std::fs::read_to_string(&doc_path).expect("docs/performance.md must be readable");
+        let doc_path = workspace_root().join("docs").join("benchmarking.md");
+        let doc =
+            std::fs::read_to_string(&doc_path).expect("docs/benchmarking.md must be readable");
         let mut fixtures: Vec<&str> = MATRIX
             .iter()
             .chain(DIAGNOSTIC_MATRIX)
@@ -2589,6 +2605,78 @@ mod tests {
             );
         }
         assert!(known_scenarios().contains(&"echo_path"));
+    }
+
+    /// A bound stated under a config a person runs must be measured under
+    /// one: `budgets.toml` says what the number means and `MATRIX` says
+    /// what it was taken on, and nothing but this walk holds the two
+    /// together. The `startup` row shipped for two weeks declaring
+    /// `config = "real"` while seated on the plugin-free fixture, which
+    /// makes the felt statement in the file a description of a
+    /// measurement nobody took.
+    #[test]
+    fn every_felt_bound_is_seated_on_the_config_it_claims() {
+        let file = budgets::load(&budgets_path()).expect("the shipped budget table must load");
+        let mut unseated = Vec::new();
+        for budget in &file.budget {
+            if budget.kind.as_deref() != Some("felt") {
+                continue;
+            }
+            let listed = budgets::UNPAIRED_FELT.iter().any(|(scenario, metric, _)| {
+                *scenario == budget.scenario && *metric == budget.metric
+            });
+            match budget.config.as_deref() {
+                Some("real") => {
+                    if !MATRIX.iter().any(|(scenario, fixture)| {
+                        *scenario == budget.scenario && *fixture == USER_FIXTURE
+                    }) {
+                        unseated.push(format!(
+                            "{}.{} is felt under a real config and the matrix seats it on no \
+                             {USER_FIXTURE:?} fixture",
+                            budget.scenario, budget.metric
+                        ));
+                    }
+                }
+                // the loader refuses this already; the walk says so in the
+                // matrix's own vocabulary rather than leaving the reader
+                // to find the other file
+                _ if !listed => unseated.push(format!(
+                    "{}.{} is felt under {:?} and is not listed in budgets::UNPAIRED_FELT",
+                    budget.scenario,
+                    budget.metric,
+                    budget.config.as_deref().unwrap_or("nothing")
+                )),
+                _ => {}
+            }
+        }
+        assert!(
+            unseated.is_empty(),
+            "a felt bound is stated under the config it was measured on:\n  {}",
+            unseated.join("\n  ")
+        );
+    }
+
+    /// Every row named in the exemption list is still a row: an entry left
+    /// behind after its budget row was renamed or deleted would silently
+    /// hold the exemption open for nothing.
+    #[test]
+    fn every_unpaired_felt_exemption_names_a_shipped_row() {
+        let file = budgets::load(&budgets_path()).expect("the shipped budget table must load");
+        for (scenario, metric, why) in budgets::UNPAIRED_FELT {
+            assert!(
+                !why.trim().is_empty(),
+                "{scenario}.{metric} is exempt without grounds"
+            );
+            assert!(
+                file.budget.iter().any(|budget| {
+                    budget.scenario == *scenario
+                        && budget.metric == *metric
+                        && budget.kind.as_deref() == Some("felt")
+                }),
+                "budgets::UNPAIRED_FELT names {scenario}.{metric}, which is no longer a felt \
+                 [[budget]] row"
+            );
+        }
     }
 
     #[test]

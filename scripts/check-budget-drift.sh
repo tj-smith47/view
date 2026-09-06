@@ -66,6 +66,48 @@ done < <(awk '
   /^max = / { max=$0; sub(/^max = /, "", max); if (row != "") print row "\t" max }
 ' "$budgets")
 
+# Second cross-check: what a row *means* travels with its number. A budget
+# that carries no claim a person can feel -- a diagnostic segment, a
+# footprint -- is the one thing a docs page will happily quote as a win,
+# because it is usually the flattering number. Two rules, both greppable:
+# the spec row of such a budget says so in its own text, and the two
+# user-facing surfaces name no metric identifier at all. The second is the
+# stricter form of "a diagnostic is never cited as a win", and it is the
+# form with no false positives: prose about a moment reads "the key reaches
+# nvim in under a tenth of a millisecond", never `key_to_rpc_p99_us`, so
+# any identifier on those pages is a number quoted out of the gate's
+# vocabulary. Identifiers belong in docs/benchmarking.md, which is written
+# for whoever runs the harness and is not checked here.
+declare -A marker=([diagnostic]="Diagnostic" [resource]="Resource")
+while IFS=$'\t' read -r spec_row kind metric; do
+  want="${marker[$kind]:-}"
+  [[ -n "$want" ]] || continue
+  row="$(sed "s/$arrow/->/g; s/\`//g" "$spec" | grep -F "$spec_row" | head -1 || true)"
+  if ! grep -qF "$want" <<<"$row"; then
+    echo "BUDGET DRIFT FAIL: $metric is a $kind budget, and its spec row does not say \"$want\". A row that cannot carry a claim has to say so where a person reads it:" >&2
+    echo "  ${row:0:200}" >&2
+    fail=1
+  fi
+done < <(awk '
+  /^\[\[budget\]\]/ { row=""; kind=""; metric=""; next }
+  /^spec_row = / { row=$0; sub(/^spec_row = "/, "", row); sub(/"$/, "", row) }
+  /^metric = / { metric=$0; sub(/^metric = "/, "", metric); sub(/"$/, "", metric) }
+  /^kind = / { kind=$0; sub(/^kind = "/, "", kind); sub(/"$/, "", kind); if (row != "") print row "\t" kind "\t" metric }
+' "$budgets")
+
+facing=("$root/README.md" "$root/docs/performance.md")
+while IFS= read -r metric; do
+  for page in "${facing[@]}"; do
+    [[ -f "$page" ]] || continue
+    hits="$(grep -nF "$metric" "$page" || true)"
+    if [[ -n "$hits" ]]; then
+      echo "BUDGET DRIFT FAIL: $(basename "$page") names the metric identifier $metric. The pages a user reads state moments in words and cite no identifiers; the identifiers live in docs/benchmarking.md:" >&2
+      sed 's/^/  /' <<<"$hits" >&2
+      fail=1
+    fi
+  done
+done < <(grep -E '^metric = ' "$budgets" | sed 's/^metric = "//; s/"$//' | sort -u)
+
 if [[ $entries -eq 0 ]]; then
   echo "BUDGET DRIFT FAIL: no [[budget]] entries found in $budgets" >&2
   exit 1

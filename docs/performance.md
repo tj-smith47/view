@@ -1,303 +1,126 @@
 # Performance
 
-view's performance claims are measured, not asserted. This page explains how
-the measurements work, what the current numbers are, and where view is still
-slower than bare Neovim.
+One section per moment you actually live through in the editor. Each says
+what you feel, gives view and bare Neovim side by side on the same host in
+the same run, and then says what makes it that number.
 
-## How we measure
+Nothing here is a number view took because it was easy to take. A segment
+inside the input path, the frame view paints before your config has run, the
+resident footprint -- those explain the moments below and never stand in for
+one, so none of them appears as a headline. Everything they add up to is on
+this page; the identifiers, the statistics and the machinery are in
+[docs/benchmarking.md](benchmarking.md).
 
-Every latency comparison is *paired*: view and bare Neovim run in the same
-invocation, on the same host, with the same config, and their samples are
-interleaved so background noise lands on both sides equally. 1000 samples
-per cell. `task perf-audit` reproduces the full matrix; `task bench` runs
-the gated subset CI uses.
+Two rules this page keeps, because breaking either is how benchmark pages
+start lying: a moment measured under a config nobody runs is reported as not
+yet measured, never filled in from a bench fixture; and a comparison is
+paired -- view and bare Neovim launched in the same run on the same host,
+samples interleaved -- or it is not a comparison.
 
-On macOS every timed target holds a power assertion for the length of its
-run (`scripts/hold-awake.sh`, fronting each harness in `Taskfile.yml`): the
-host takes unattended maintenance sleeps, and a Mach monotonic clock does
-not advance across one, so a cell measured through a sleep is a number
-nothing produced. Reach a measurement through its `task` target and the
-assertion comes with it.
+## You open a project
 
-The engine is pinned (`.engine-pin`, currently Neovim `v0.12.4`) and the
-harness verifies the binary on `PATH` actually reports that version before
-recording anything. Plugin-heavy cells use a committed lazy.nvim fixture
-with 15 plugins pinned by its `lazy-lock.json`, driven through a real pty.
+You type `view ~/.config` and wait for the screen you can start working in:
+the tree, the tabline and the statusline present and still.
 
-### The three first-paint configs
-
-Cold start is measured against three named fixtures, and every first-paint
-number below says which one it belongs to:
-
-| fixture | what it is |
-|---|---|
-| `minimal` | no plugins at all: nvim's own startup and nothing else |
-| `heavy` | the committed 15-plugin lazy.nvim stack, loaded as that fixture's spec asks |
-| `user` | the same pinned plugin set arranged as a login: a `lua/config` module tree, a leader, a colorscheme, and `setup()` called on every plugin the cache holds |
-
-The `user` fixture is generated at run time from the plugin cache the
-harness already keeps, never committed: its plugin set *is* whatever that
-cache holds, and it shares the cache with `heavy` by carrying the same
-lockfile, so a run installs nothing.
-
-Its delta over `heavy` is the shape, not the plugin count. Both load their
-top-level plugins eagerly and both enable treesitter highlighting. What
-`user` adds is what a config file carries and a compat fixture does not:
-17 options set before the plugins load, five leader mappings, two
-autocommands, the `habamax` colorscheme, the two plugins `heavy` carries
-only as dependencies loaded as spec entries of their own, and `setup()` on
-every plugin through one generic pass rather than per-entry options.
-Whether that is also *slower* than `heavy` through a pty is what its
-recorded row answers;
-headless, the two start within a few milliseconds of each other. The
-reason it exists is coverage rather than a bigger number: a real config is
-what decides how long view's startup shell sits on screen saying it is
-waiting for Neovim, and until this fixture existed no recorded bar moved
-when that window got longer.
-
-Two run-time notes for anyone recording it. The fixture is driven through
-a real session first (`task user-fixture`, after `task compat` has filled
-the plugin cache) as a precondition of a record run: a plugin that draws a
-message where the content marker is read would otherwise land in the
-number rather than in a failure. And a `first_paint` cell costs 100 warmup
-plus 1000 measured cold spawns per side, so adding this one grows every
-class's bench leg and every `task perf-audit` by roughly 2200 cold spawns
--- about one `first_paint/heavy` again.
-
-## Current numbers
-
-Recorded baselines on a shared Linux dev host:
-
-| What | view | bare Neovim | |
+| | view | Neovim | on |
 |---|---|---|---|
-| UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower |
-| First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded | |
-| Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
-| Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower |
-| Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
-| Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
-| Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
+| screen ready | not yet recorded | not yet recorded | your config (lazy.nvim, noice, nvim-notify), same host, same run |
 
-The two bare-Neovim first-paint figures are the 2026-09-06 dev-linux
-retake. The figures they replace were withdrawn: both sides are spawned on
-a pty the harness owns, and until that pty answered the DSR that Neovim's
-tty startup writes behind its background-colour query, the bare side waited
-out its own `vim.wait(100, ...)` on every cold sample -- roughly 100 ms that
-view's side never paid, because view's engine owns no tty and never asks.
-The pty answers it now (`view_oracle::pty`, pinned by
-`view-bench/tests/nvim_arm_startup.rs`).
+What is known so far, and what it is not: with no plugins at all, that
+screen arrives in 16.1 ms under view against 14.7 ms under Neovim -- view
+1.4 ms behind, on a config nobody runs. Under a login-shaped config the
+file's first line lands at 58.7 ms against 54.2 ms. Neither is the row
+above, and neither is written into it.
 
-Both first-paint columns are the retake's own interleaved pair; view's
-recorded gate bar (25.2 and 79.3 ms) ratchets separately and came from a
-quieter run. The pair at p50: `minimal` view 16.88 ms against bare nvim's
-15.43 ms (ratio_p50 1.094, p99 1.076), `heavy` 55.08 against 50.04 (1.101,
-1.045), `user` 58.73 against 54.16 (1.084, 1.046). view trails bare Neovim
-by 8-10% on every paired cold cell -- on `minimal` about 1.4 ms, the size
-of the post-VimEnter attach-plus-takeover round trip the late-attach design
-pays serially, since Neovim's own TUI attaches before init runs.
-Attribution past that outline is open work, not a claim this page makes.
+What makes it that number: view paints its own shell -- the chrome you see
+before anything has loaded -- in about 4 ms, and that frame is on screen
+whether your config has zero plugins or forty. The rest is your `init.lua`,
+which view does not make slower: the embedded engine reaches its own
+"started" mark within 0.7 ms of the same engine under Neovim's own terminal
+UI. The 1.4 ms above is view's attach and takeover, which happen after your
+`VimEnter` runs rather than before it.
 
-dev-linux is the only class re-seated. `dev-macos`, `gh-linux` and
-`gh-macos` carry their first-paint ratios as `withdrawn` entries with the
-reason attached, so a gate run on those classes fails loudly on the missing
-bars rather than attesting to them, until each is re-seated from a run
-under the answering pty.
+## You type
 
-The `user` row is measured by the same code as the two above it and lands
-with the next recorded baseline; it is listed empty rather than omitted so
-its absence is visible.
+You press a key and the character appears.
 
-Until a class records that cell, a gate run against that class reports it
-as uncovered and exits on it -- the designed signal for a measured row
-with nothing to compare against, not a fault to work around. Every class
-has to record it before its gate is green again: the dev classes in a
-quiet-host session each, the CI classes by re-seating from the
-`bench-measured-<class>.toml` artifact their gate leg uploads (CI runs no
-`--record` leg).
+| | view | Neovim | on |
+|---|---|---|---|
+| keypress to glyph, worst case in a thousand | not yet recorded | not yet recorded | your config, same host, same run |
+| with the engine on the far side of a network | not yet recorded | not yet recorded | your config, same host, same run |
 
-The first row is unpaired on purpose: view paints its shell before it has
-even started the Neovim child, so bare Neovim has no comparable event. It
-shows nothing until your config finishes loading. The 3.8-4.1 ms range is
-nearly identical on a bare config (4.1 ms) and on the 15-plugin stack
-(3.8 ms), because none of your config has run yet at that point.
+Under a plugin-free config, view's worst keystroke in a thousand takes
+0.73 ms and Neovim's takes 0.67 ms; at the median view is about 13% behind.
+Both are far under the ~10 ms where a person begins to notice a key lagging
+their finger, which is why the gap is tracked rather than felt.
 
-The no-plugins memory row is view's own process only: the embedded Neovim
-engine is a separate process this budget deliberately excludes, so the
-bare-Neovim column reads `n/a` rather than a real comparison.
+When the engine runs on another machine, view can show the character before
+the round trip is back -- a predicted glyph, corrected the moment the engine
+answers. Measured plugin-free, that puts the character on screen at 0.39x
+the time bare Neovim takes locally, and it is the one place view is
+decisively ahead rather than close.
 
-### Memory equivalence, 15-plugin lazy.nvim stack
+What makes it that number: the key leaves your terminal and reaches Neovim
+in under a tenth of a millisecond, and the redraw that comes back reaches
+your screen in under a tenth of a millisecond. Of the round trip between
+them, more than half is spent inside Neovim itself, where view's code does
+not run.
 
-view embeds Neovim, so it can never be smaller than the Neovim it embeds --
-no claim here says otherwise. Under the committed 15-plugin lazy.nvim
-fixture, the same standard workload, recorded diagnostically (`task bench
--- --scenario memory --fixture heavy`, not CI-gated):
+## You scroll a big file
 
-| reading | PSS |
-|---|---|
-| bare Neovim, whole process | 4.39 MB |
-| view, own process only (excludes its Neovim child) | 5.00 MB |
-| view, own process + embedded Neovim engine child (tree) | **27.96 MB** |
+You hold a key down in a 100,000-line file and watch the text keep up.
 
-The first two rows are not a fair comparison: view's own-process number
-deliberately excludes the Neovim child it spawns, the same exclusion the
-no-plugins row above documents. The tree row is the honest one, summing
-view's process and its embedded engine's, and it is what a bare-Neovim
-comparison must be read against: view's real footprint here is about 6.4x
-bare Neovim's. Neither side changes much between this reading and the
-no-plugins one for view's own-process number (4.96 MB vs 5.00 MB) because
-lazy.nvim defers most of the 15 plugins until their trigger event fires,
-and the standard workload (opening and paging through plain text buffers)
-never fires one -- this reading is each side settled after that workload,
-not a ceiling on what a plugin stack can cost once its triggers do fire.
+| | view | Neovim | on |
+|---|---|---|---|
+| how stale the screen ever gets | not yet recorded | not yet recorded | your config, same host, same run |
 
-## The typing gap
+Plugin-free, the screen is never more than 1.07 ms behind your input, and
+with the 15-plugin bench stack never more than 1.23 ms -- against a 16 ms
+budget, which is one frame at 60 Hz. Paired, view is 1.6 to 1.9x Neovim's
+figure on the same run: both numbers are a fraction of a frame, so the ratio
+is a bar view has not met rather than a lag you can see.
 
-Steady typing is currently about 13% slower than bare Neovim, and sustained
-scrolling about 1.6 to 1.9x. Both are sub-millisecond and far inside their budgets,
-so neither is perceptible. The goal is to beat Neovim, though, not to tie
-it, so the gap gets tracked down rather than shrugged off.
+A plugin storm or a `:terminal` flood pouring output into the screen is the
+same moment under load, and there the screen answers on a 14.6 ms cadence --
+still inside one frame -- while keeping pace with the flood exactly.
 
-An obvious suspect was the architecture itself: maybe an out-of-process UI
-speaking Neovim's RPC protocol just costs this much. Neovim ships its own
-out-of-process TUI, which makes that theory testable. Measured under the
-identical protocol on the same host:
+## You search a huge tree
 
-| steady typing, dev-linux (no plugins / 15-plugin stack) | vs bare Neovim |
-|---|---|
-| Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** |
-| view, at the time of that measurement | 1.22x / 1.24x |
+You open the picker and type; the matches are under your fingers.
 
-Speaking the protocol from another process costs about 2-4%. Roughly nine
-tenths of the gap was view's own code. (Three earlier theories, a
-thread-hop cost floor, the pty transport, and the measurement
-instrumentation itself, also failed to survive measurement; each retraction
-is recorded in the design spec.)
+| | view | Neovim | on |
+|---|---|---|---|
+| keystroke to matching results, 100k entries | 4.7 ms | n/a | bench fixture, worst case in a thousand |
+| first page of results, 1M-file tree | 5.0 ms | n/a | bench fixture, worst case in a thousand |
 
-So we profiled it. A tapped build times every stage of a keystroke's round
-trip, and the largest stage view owned was the handoff to a background
-thread whose only job was writing bytes to a pipe. That thread exists so a
-wedged Neovim stalls a background thread instead of the screen, but the
-goal only requires the write to never *block*, not to always *defer*. The
-main loop now writes the bytes itself whenever the pipe has signalled it
-can accept them and nothing is queued ahead. Skipping the ~40 µs cost of
-waking an idle core accounts for most of the improvement:
+Neovim ships no picker to pair against, so this moment has no second column
+-- what makes it realistic is the size of the tree, not the plugin set. The
+results stream while the scan is still running: there is no wait for a walk
+to finish before the first page appears.
 
-| | before | after |
-|---|---|---|
-| RPC handoff to bytes written | 42.5 µs | **10.5 µs** |
-| Keystroke to RPC bytes written (p99) | 154.7 µs | **117.7 µs** |
-| Steady typing vs Neovim, no plugins | 1.354x | **1.172x** |
-| Steady typing vs Neovim, 15 plugins | 1.244x | **1.184x** |
-| Tail (p99) typing ratio, 15 plugins | 1.142x | **1.010x** |
+## The engine hangs
 
-What remains is measured, not guessed. Of the ~644 µs from keypress to
-glyph, 366 are spent inside Neovim itself, 80 in the OS's terminal plumbing
-before view sees anything, and 36 in the terminal emulator drawing the
-result. view's own share is 139 µs: 71 carrying the keystroke in, 68
-painting the answer. About half of the 71 is one structural cost, handing
-the keystroke from the thread that reads the terminal to the thread that
-owns editor state, which has to happen because view must decide whether a
-key belongs to Neovim or to view's own UI. No other stage on either path
-exceeds 21 µs.
+A plugin drives Neovim into a synchronous loop and the editor stops
+answering. You get a banner naming the wedge instead of a frozen screen.
 
-*Measured 2026-08-03 (`df411f19`). The largest item above, the
-key-decoded->loop-wake hop (49.1 µs p50 in this table; 52.4 µs p50 in
-the reading taken immediately before the change), has since collapsed
-to 13.9 µs p50 with the input-thread/runtime-loop unification
-(spec:97-99's 2026-08-09 adjudication) -- this decomposition's ~644 µs
-total predates that change and reads high.*
+| | view | Neovim | on |
+|---|---|---|---|
+| hang to banner on screen | 11.6 s | n/a | bench fixture, worst case in a thousand |
 
-## Bisecting, and A/B on the quiet host
+Bare Neovim has no counterpart moment: when it wedges, nothing tells you.
+The 11.6 s is not a target to admire, it is the sum of a 10 s wedge
+threshold and one 2 s probe interval -- the earliest a probe fired just
+before the engine stopped serving can possibly report back.
 
-A paired measurement -- the same scenario against the binary from two
-revisions -- is built by `scripts/ab-build.sh`, never by hand:
+## Memory
 
-```
-$ bash scripts/ab-build.sh 6ed8bc9 f63f7d0
-before: ~/.cache/view-ab/before/target/release/view
-after:  ~/.cache/view-ab/after/target/release/view
-$ VIEW_BIN=~/.cache/view-ab/before/target/release/view task bench -- \
-      --scenario echo --fixture minimal
-```
+view's own process holds 4.96 MB with no plugins loaded. It embeds a real
+Neovim, so the honest number is the pair: view plus its engine child under
+the 15-plugin stack is 27.96 MB, against 4.39 MB for bare Neovim alone.
+view can never be smaller than the Neovim it embeds, and no row here says
+otherwise.
 
-Each side is exported with `git archive` into its own tree and built with
-its own `CARGO_TARGET_DIR`, and the script refuses to hand back two
-byte-identical binaries. Both rules come from one incident: a pair built
-through a single shared target dir compiled nothing on the second build --
-cargo's dep-info still named the first tree's files, all of them fresh --
-and the run reported a null result that was really the same binary measured
-twice.
+---
 
-A bisect is the same loop with one revision per step (`git archive <sha>`
-into a scratch tree, one target dir of its own, then the bench cell), which
-is how the gh-runner regression window was narrowed to a single pair of
-revisions.
-
-Everything under "How we measure" still applies: the host has to be quiet,
-and its class has to be declared.
-
-## How budgets are enforced
-
-Budgets are recorded per machine class and regression-gated: a change that
-makes any tracked metric worse fails the build. Each metric is also checked
-against the design spec's own budget, not just the last recorded value.
-
-A machine's class is declared, never detected: `CLASS=controlled-linux task
-bench` (and the same word on `task perf-audit` and `task acceptance`) says
-this host is quiet enough for the tail metrics and the controlled-only
-budget rows. Undeclared, a host is `dev-<platform>`, and the acceptance
-legs whose bound is armed on a controlled class alone -- today the
-RTT-injection proof, `scripts/acceptance/remote-rtt.sh` -- announce a skip
-and pass, rather than measuring against a bar nobody recorded for them.
-
-Where a metric does not yet meet its spec budget, it is listed in
-`crates/view-bench/budgets.toml` with the value it was accepted at and a
-written reason. The build fails if a new shortfall appears, if a listed one
-gets worse, or if a listed one is fixed but left on the list.
-
-## Re-seating a bar, or re-sizing the spread it gates under
-
-A recorded bar only ratchets down as far as the class's published spread
-says honest runs move; a measurement further below it than that is one
-lucky draw, and `--record` refuses it rather than pinning a bar most honest
-runs would then fail. Moving such a bar takes a campaign -- N gated
-replicates of the same cells on a quiet host -- and that campaign is a mode
-of the tool that already measures:
-
-```
-$ task bench -- --scenario scroll --fixture minimal --class dev-macos --campaign 8
-campaign on class dev-macos: 8 included replicate(s) wanted, at most 16 run(s) over 1 cell(s) = up to 16 cell measurement(s), excluding any replicate whose pre-run 1-min load exceeds 2
-CAMPAIGN scroll/minimal dev-macos: replicate 1 (included 1/8)  load 1.42  brackets 1.0204/1.0311  ratio_p50 2.2810  INCLUDED
-CAMPAIGN dev-macos: replicate 1 took 4m12s; 8 included ~= 33m36s, the 16-run cap ~= 1h07m
-CAMPAIGN scroll/minimal dev-macos: replicate 2 (included 1/8)  load 2.31  brackets 1.0290/1.0402  ratio_p50 2.4020  EXCLUDED (load > 2), replacing
-...
-CAMPAIGN dev-macos: 8 included of 11 run
-  scroll/minimal ratio_p50: median 2.2725  half-width 1.37%  worst 2.3094  proposes "scroll.minimal.ratio_p50" = 1.03
-CAMPAIGN wrote crates/view-bench/baselines/dev-macos.campaign.toml (seats, factors, draws)
-```
-
-Each replicate is a full `--record`-grade measurement, null-pair
-calibration brackets included -- those brackets are printed and recorded
-per replicate, so an included draw that sat just under the floor is
-visible rather than indistinguishable from a clean one. A replicate whose
-pre-run load exceeds `--max-load` (2.0 by default) is published as an
-excluded draw and replaced, and one that refuses its own measurement is
-replaced too. Past twice the wanted replicates the campaign refuses,
-naming every load it saw.
-
-Nothing caps how many cells a campaign may span -- `--all` is a legal
-request -- so the tool states the magnitude instead: the start line gives
-the cell measurements the cap permits, and once the first replicate lands
-it projects the wanted band and the cap from that replicate's own measured
-cost.
-
-The file it writes is a proposal and nothing reads it: it carries each
-cell's proposed seat (its median), the headroom factor that seat and its
-draws size under the same three-leg rule the characterization walk
-re-checks a published factor with, and the `[draws]` tables that let the
-walk do so. Committing a campaign means reviewing that file and moving its
-contents into `baselines/<class>.toml` and `baselines/<class>.headroom.toml`
--- the tool proposes, the diff decides.
+How these were measured, what each cell is called, which of them are
+diagnostics, and how a bar is re-seated: [docs/benchmarking.md](benchmarking.md).

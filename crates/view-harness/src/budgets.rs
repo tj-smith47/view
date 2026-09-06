@@ -13,20 +13,23 @@
 //! schema = 1
 //!
 //! [[budget]]
-//! spec_row = "view output path: redraw event parsed -> terminal write"
-//! scenario = "output_path"
-//! metric = "p99_ms"
-//! max = 1.0
-//! classes = ["dev-linux"]   # optional; absent means every class
-//!
-//! [[budget]]
 //! spec_row = "Launch -> the settled screen, real config"
 //! scenario = "startup"
 //! metric = "settled_ratio_p50"
 //! max = 1.0
-//! kind = "felt"             # optional; "felt" or "diagnostic"
-//! felt = "launch -> the screen you can start working in"
-//! config = "real"           # optional; which config the row is measured under
+//! classes = ["dev-linux"]   # optional; absent means every class
+//! kind = "felt"             # felt | diagnostic | resource
+//! felt = "launch -> the screen you can start working in (tree, tabline, statusline settled), paired with nvim on the same host in the same run"
+//! config = "real"           # real (a plugin config a person runs) | fixture
+//!
+//! [[budget]]
+//! spec_row = "Embedded engine startup cost"
+//! scenario = "startup"
+//! metric = "server_delta_ms"
+//! max = 5.0
+//! kind = "diagnostic"
+//! decomposes = "startup.settled_ratio_p50"
+//! config = "real"
 //!
 //! [[shortfall]]
 //! scenario = "echo"
@@ -66,13 +69,23 @@
 //!
 //! No state is quiet: everything except a value inside its bound prints.
 //!
-//! `kind`, `felt`, `config` and `decomposes` describe what a row *means* to
-//! a person rather than how it is checked, and every one of them is
-//! optional: the rows that predate the vocabulary carry none, and a loader
-//! that demanded them would refuse a file the gate has always accepted.
-//! Nothing reads them yet beyond the report, so a row that omits `kind` is
-//! not thereby a lesser bound -- it is a bound whose felt statement has not
-//! been written down.
+//! `kind`, `felt`, `config` and `decomposes` say what a row *means* to a
+//! person, and [`parse`] refuses a row that leaves any of them unanswered.
+//! A bound whose human moment is unwritten is a bound nobody can tell from
+//! a number measured because it was easy to measure: `felt` is the moment
+//! itself in the words a person would use, `config` is whether it was
+//! measured under a plugin config a person runs or under a bench fixture,
+//! and a `diagnostic` names the felt row it decomposes so it can never be
+//! read as a claim of its own. `scripts/check-budget-drift.sh` fails the
+//! build if a diagnostic's metric appears next to a win in the README, in
+//! `docs/performance.md` or in the spec, and
+//! `view-harness/src/bin/bench.rs`'s own pin fails a `real`-config row
+//! whose scenario has no seat on the real-config fixture.
+//!
+//! A felt row is measured under a real config, because the bar is what a
+//! person feels in the editor they actually run. The exceptions are
+//! written down one by one in [`UNPAIRED_FELT`] with their grounds, and a
+//! felt row that is neither `real` nor listed there is refused.
 
 use std::path::Path;
 
@@ -81,6 +94,49 @@ use thiserror::Error;
 
 /// The one schema this loader understands.
 pub const SUPPORTED_SCHEMA: u32 = 1;
+
+/// The `kind` values a row may declare.
+///
+/// `felt` is a moment a person lives through, `diagnostic` explains one of
+/// those and never stands alone, `resource` is a footprint and carries no
+/// speed claim at all. There is no fourth answer: a metric that fits none
+/// of the three is a measurement without a reason to exist.
+pub const KINDS: &[&str] = &["felt", "diagnostic", "resource"];
+
+/// The `config` values a row may declare: a plugin config a person would
+/// actually run, or a bench fixture built for the measurement.
+pub const CONFIGS: &[&str] = &["real", "fixture"];
+
+/// Felt rows measured under a bench fixture rather than a real config, and
+/// why each one is honest that way.
+///
+/// The rule they are exempt from exists because a plugin config changes
+/// what the editor does between the keypress and the glyph; where it
+/// cannot, a real config buys the row nothing but runtime. Each entry is a
+/// view-side quantity with no bare-nvim counterpart to pair against, whose
+/// realism lives in the size of the data or in the fault being induced.
+/// The list is the whole exemption: a new felt row is measured under a
+/// real config or it is added here with its own grounds.
+pub const UNPAIRED_FELT: &[(&str, &str, &str)] = &[
+    (
+        "picker",
+        "match_paint_p99_ms",
+        "view's own picker over 100k resident entries; nvim ships no counterpart to pair \
+         against, and what makes the moment realistic is the entry count, not the plugin set",
+    ),
+    (
+        "picker",
+        "first_page_p99_ms",
+        "view's own picker over a 1M-file tree; same absent counterpart, and the realism is \
+         the tree",
+    ),
+    (
+        "supervision",
+        "wedge_detect_p99_ms",
+        "the banner view paints when the engine stops answering; bare nvim has no such \
+         moment to pair against, and the realism is the induced wedge",
+    ),
+];
 
 /// One spec budget: an upper bound on one metric of one scenario.
 #[derive(Debug, Clone, Deserialize)]
@@ -94,17 +150,19 @@ pub struct Budget {
     pub max: f64,
     /// Machine classes this bound applies to; `None` means all of them.
     pub classes: Option<Vec<String>>,
-    /// What kind of claim this row makes: `felt` for a bound a person
-    /// experiences directly, `diagnostic` for one that only explains a
-    /// felt row's number.
+    /// What kind of claim this row makes, one of [`KINDS`]. `Option` for
+    /// the deserializer's sake alone: [`parse`] refuses a row without it,
+    /// as it does for the three fields below.
     pub kind: Option<String>,
     /// The moment a `felt` row stands for, in the words a person would use
-    /// for it.
+    /// for it. Required on a `felt` row and refused on any other, where it
+    /// would read as a claim the row is not entitled to make.
     pub felt: Option<String>,
-    /// The configuration the bound is stated under -- `real` for a
-    /// plugin config a user would run, `minimal` for a bare engine.
+    /// The configuration the bound is stated under, one of [`CONFIGS`].
     pub config: Option<String>,
-    /// The `scenario.metric` this row decomposes, for a `diagnostic`.
+    /// The `scenario.metric` a `diagnostic` decomposes: required there,
+    /// refused elsewhere, and checked against the felt rows the file
+    /// declares.
     pub decomposes: Option<String>,
 }
 
@@ -295,6 +353,63 @@ pub enum BudgetError {
         scenario: String,
         metric: String,
     },
+    #[error("{path}: [[budget]] {scenario}.{metric} {problem}")]
+    Unclassified {
+        path: String,
+        scenario: String,
+        metric: String,
+        problem: Classification,
+    },
+}
+
+/// What a budget row failed to say about itself, or said in the wrong place.
+///
+/// One error variant carries all of these rather than one variant each,
+/// because the answer to every one of them is the same edit in the same
+/// file, and a `Result`'s error is paid for on the success path too.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum Classification {
+    #[error(
+        "declares no kind. Every bound says what a person gets out of it: felt (a moment they \
+         live through), diagnostic (a segment that explains one) or resource (a footprint)"
+    )]
+    MissingKind,
+    #[error("declares kind {0:?}, which is not felt, diagnostic or resource")]
+    UnknownKind(String),
+    #[error(
+        "declares no config. A bound is stated under the config it was measured on: real (a \
+         plugin config a person runs) or fixture (a bench config)"
+    )]
+    MissingConfig,
+    #[error("declares config {0:?}, which is not real or fixture")]
+    UnknownConfig(String),
+    #[error(
+        "is felt and says no felt moment. The moment goes in the row, in the words a person \
+         would use for it, or nothing downstream can tell this bound from a number that was \
+         easy to measure"
+    )]
+    MissingFelt,
+    #[error(
+        "is a diagnostic and decomposes nothing. A diagnostic explains a felt row's number and \
+         never stands alone, so it names that row"
+    )]
+    MissingDecomposition,
+    #[error(
+        "decomposes {0:?}, which no felt [[budget]] row declares; a segment pointed at nothing \
+         has no reason to be measured"
+    )]
+    DanglingDecomposition(String),
+    #[error("is {0} and states a felt moment, which reads as a claim only a felt row may make")]
+    FeltOnAnotherKind(String),
+    #[error("is {0} and decomposes a row, which only a diagnostic does")]
+    DecomposesOnAnotherKind(String),
+    #[error(
+        "is felt under config {0:?}. A felt bound is stated under a config a person runs; a row \
+         that honestly cannot be -- no bare-nvim counterpart to pair against -- is listed in \
+         budgets::UNPAIRED_FELT with its grounds"
+    )]
+    FeltUnderAFixture(String),
 }
 
 /// Loads and validates the budget file.
@@ -302,7 +417,8 @@ pub enum BudgetError {
 /// # Errors
 ///
 /// Returns [`BudgetError`] if the file cannot be read or parsed, carries an
-/// unsupported schema, or lists a shortfall against a budget that does not
+/// unsupported schema, holds a budget row whose classification is missing
+/// or inconsistent, or lists a shortfall against a budget that does not
 /// exist for that class.
 pub fn load(path: &Path) -> Result<BudgetFile, BudgetError> {
     let display = path.display().to_string();
@@ -320,7 +436,8 @@ pub fn load(path: &Path) -> Result<BudgetFile, BudgetError> {
 /// # Errors
 ///
 /// Returns [`BudgetError`] if the text does not parse, carries an
-/// unsupported schema, or lists a shortfall against a budget that does not
+/// unsupported schema, holds a budget row whose classification is missing
+/// or inconsistent, or lists a shortfall against a budget that does not
 /// exist for that class.
 pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
     let display = display.to_string();
@@ -358,6 +475,7 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
             });
         }
     }
+    classify(&file, &display)?;
     // a shortfall against no budget is dead weight that reads as an accepted
     // gap: it would sit in the file forever describing a bound nobody checks
     for shortfall in &file.shortfall {
@@ -379,6 +497,77 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
         }
     }
     Ok(file)
+}
+
+/// Refuses a budget row whose human meaning is unwritten.
+///
+/// A number with no stated moment behind it is the defect this whole
+/// vocabulary exists to stop: the file cannot tell a bound a person waits
+/// through from one that was cheap to instrument, and the docs then quote
+/// whichever reads best.
+fn classify(file: &BudgetFile, display: &str) -> Result<(), BudgetError> {
+    let felt_rows: Vec<String> = file
+        .budget
+        .iter()
+        .filter(|b| b.kind.as_deref() == Some("felt"))
+        .map(|b| format!("{}.{}", b.scenario, b.metric))
+        .collect();
+    for budget in &file.budget {
+        let raise = |problem: Classification| BudgetError::Unclassified {
+            path: display.to_string(),
+            scenario: budget.scenario.clone(),
+            metric: budget.metric.clone(),
+            problem,
+        };
+        let kind = budget
+            .kind
+            .as_deref()
+            .ok_or_else(|| raise(Classification::MissingKind))?;
+        if !KINDS.contains(&kind) {
+            return Err(raise(Classification::UnknownKind(kind.to_string())));
+        }
+        let config = budget
+            .config
+            .as_deref()
+            .ok_or_else(|| raise(Classification::MissingConfig))?;
+        if !CONFIGS.contains(&config) {
+            return Err(raise(Classification::UnknownConfig(config.to_string())));
+        }
+        if kind != "felt" && budget.felt.is_some() {
+            return Err(raise(Classification::FeltOnAnotherKind(kind.to_string())));
+        }
+        if kind != "diagnostic" && budget.decomposes.is_some() {
+            return Err(raise(Classification::DecomposesOnAnotherKind(
+                kind.to_string(),
+            )));
+        }
+        match kind {
+            "felt" => {
+                if budget.felt.is_none() {
+                    return Err(raise(Classification::MissingFelt));
+                }
+                let listed = UNPAIRED_FELT.iter().any(|(scenario, metric, _)| {
+                    *scenario == budget.scenario && *metric == budget.metric
+                });
+                if config != "real" && !listed {
+                    return Err(raise(Classification::FeltUnderAFixture(config.to_string())));
+                }
+            }
+            "diagnostic" => {
+                let names = budget
+                    .decomposes
+                    .as_deref()
+                    .ok_or_else(|| raise(Classification::MissingDecomposition))?;
+                if !felt_rows.iter().any(|row| row == names) {
+                    return Err(raise(Classification::DanglingDecomposition(
+                        names.to_string(),
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn find_budget<'a>(
@@ -817,6 +1006,9 @@ spec_row = "row"
 scenario = "echo"
 metric = "view_p99_ms"
 max = 8.0
+kind = "felt"
+felt = "a test row"
+config = "real"
 "#;
 
     #[test]
@@ -940,6 +1132,9 @@ spec_row = "row"
 scenario = "first_paint"
 metric = "marker_cold_ms"
 max = 30.0
+kind = "felt"
+felt = "a test row"
+config = "real"
 "#;
 
     const COLD_START_RECORDED: f64 = 25.151;
@@ -1042,6 +1237,9 @@ spec_row = "row"
 scenario = "echo"
 metric = "paired_delta_p99_ms"
 max = 0.10
+kind = "felt"
+felt = "a test row"
+config = "real"
 "#,
         );
         let table: crate::baselines::HeadroomTable = [("paired_delta_p99_ms".to_string(), 1.01)]
@@ -1304,6 +1502,9 @@ spec_row = "row"
 scenario = "echo"
 metric = "ratio_p50"
 max = 1.1
+kind = "felt"
+felt = "a test row"
+config = "real"
 [[shortfall]]
 scenario = "echo"
 fixture = "minimal"
@@ -1343,6 +1544,9 @@ spec_row = "row"
 scenario = "echo"
 metric = "ratio_p99"
 max = 1.1
+kind = "felt"
+felt = "a test row"
+config = "real"
 [[shortfall]]
 scenario = "echo"
 fixture = "minimal"
@@ -1415,6 +1619,9 @@ spec_row = "row"
 scenario = "input_path"
 metric = "key_to_rpc_p99_us"
 max = 232.0
+kind = "felt"
+felt = "a test row"
+config = "real"
 classes = ["dev-linux"]
 "#,
         );
@@ -1477,6 +1684,9 @@ spec_row = \"row\"
 scenario = \"echo\"
 metric = \"veiw_p99_ms\"
 max = 8.0
+kind = \"felt\"
+felt = \"a test row\"
+config = \"real\"
 ";
         assert!(
             matches!(
@@ -1726,11 +1936,17 @@ spec_row = "row"
 scenario = "output_path"
 metric = "p99_ms"
 max = 1.0
+kind = "felt"
+felt = "a test row"
+config = "real"
 [[budget]]
 spec_row = "row"
 scenario = "echo"
 metric = "pss_mb"
 max = 150.0
+kind = "felt"
+felt = "a test row"
+config = "real"
 "#,
         );
         let measured = vec![
@@ -1762,6 +1978,9 @@ spec_row = "row"
 scenario = "output_path"
 metric = "pss_mb"
 max = 150.0
+kind = "felt"
+felt = "a test row"
+config = "real"
 "#,
         );
         let measured = vec![
@@ -1801,6 +2020,9 @@ spec_row = "row"
 scenario = "memory"
 metric = "phys_footprint_mb"
 max = 150.0
+kind = "felt"
+felt = "a test row"
+config = "real"
 classes = ["dev-macos"]
 "#,
         );
@@ -2040,6 +2262,9 @@ spec_row = "row"
 scenario = "first_paint"
 metric = "marker_ratio_p50"
 max = 0.30
+kind = "felt"
+felt = "a test row"
+config = "real"
 "#,
         );
         let mut seated = baseline_with(
@@ -2102,5 +2327,168 @@ max = 0.30
                 }
             })
             .collect()
+    }
+    /// A row measured for no stated reason is the defect the vocabulary
+    /// exists to stop, so the loader refuses one rather than reporting a
+    /// bound whose meaning nobody wrote down.
+    #[test]
+    fn a_row_that_states_no_human_meaning_is_refused() {
+        let row = |extra: &str| {
+            format!(
+                r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "view_p99_ms"
+max = 8.0
+{extra}
+"#
+            )
+        };
+        for (extra, missing) in [
+            ("", Classification::MissingKind),
+            (
+                "kind = \"felt\"\nfelt = \"you type\"",
+                Classification::MissingConfig,
+            ),
+            (
+                "kind = \"felt\"\nconfig = \"real\"",
+                Classification::MissingFelt,
+            ),
+            (
+                "kind = \"diagnostic\"\nconfig = \"real\"",
+                Classification::MissingDecomposition,
+            ),
+        ] {
+            let err = parse(&row(extra), "test").expect_err("must refuse");
+            assert!(
+                matches!(&err, BudgetError::Unclassified { problem, .. } if *problem == missing),
+                "{missing}: {err}"
+            );
+        }
+        for (extra, expected) in [
+            (
+                "kind = \"vibes\"\nconfig = \"real\"",
+                Classification::UnknownKind("vibes".to_string()),
+            ),
+            (
+                "kind = \"felt\"\nfelt = \"you type\"\nconfig = \"whatever\"",
+                Classification::UnknownConfig("whatever".to_string()),
+            ),
+        ] {
+            let err = parse(&row(extra), "test").expect_err("must refuse");
+            assert!(
+                matches!(&err, BudgetError::Unclassified { problem, .. } if *problem == expected),
+                "{expected}: {err}"
+            );
+        }
+    }
+
+    /// A diagnostic that states a felt moment reads as a claim, and one
+    /// pointed at a row the file does not declare explains nothing.
+    #[test]
+    fn a_diagnostic_answers_to_a_felt_row_and_never_speaks_for_itself() {
+        let text = |decomposes: &str| {
+            format!(
+                r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "view_p99_ms"
+max = 8.0
+kind = "felt"
+felt = "you type and the character is there"
+config = "real"
+[[budget]]
+spec_row = "row"
+scenario = "input_path"
+metric = "key_to_rpc_p99_us"
+max = 100.0
+kind = "diagnostic"
+config = "fixture"
+decomposes = "{decomposes}"
+"#
+            )
+        };
+        parse(&text("echo.view_p99_ms"), "test").expect("a live felt row is a live decomposition");
+        assert!(matches!(
+            parse(&text("echo.ratio_p50"), "test"),
+            Err(BudgetError::Unclassified {
+                problem: Classification::DanglingDecomposition(_),
+                ..
+            })
+        ));
+
+        let claiming = text("echo.view_p99_ms").replace(
+            "kind = \"diagnostic\"",
+            "kind = \"diagnostic\"\nfelt = \"you type\"",
+        );
+        assert!(matches!(
+            parse(&claiming, "test"),
+            Err(BudgetError::Unclassified {
+                problem: Classification::FeltOnAnotherKind(_),
+                ..
+            })
+        ));
+    }
+
+    /// A felt bound is stated under a config a person runs. The exemptions
+    /// are the rows with no bare-nvim counterpart to pair against, and
+    /// they are listed one by one with grounds rather than inferred.
+    #[test]
+    fn a_felt_bound_under_a_bench_fixture_is_refused_unless_it_is_listed() {
+        let row = |scenario: &str, metric: &str| {
+            format!(
+                r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "{scenario}"
+metric = "{metric}"
+max = 16.0
+kind = "felt"
+felt = "a moment"
+config = "fixture"
+"#
+            )
+        };
+        assert!(matches!(
+            parse(&row("scroll", "staleness_p99_ms"), "test"),
+            Err(BudgetError::Unclassified {
+                problem: Classification::FeltUnderAFixture(_),
+                ..
+            })
+        ));
+        let (scenario, metric, _) = UNPAIRED_FELT[0];
+        parse(&row(scenario, metric), "test").expect("a listed row is measured where it is");
+    }
+
+    /// The shipped table is the population this vocabulary was written
+    /// for: a row added to it without a classification fails here rather
+    /// than at the next bench run.
+    #[test]
+    fn every_shipped_budget_row_states_what_a_person_gets() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("view-bench")
+            .join("budgets.toml");
+        let file = load(&path).expect("the shipped budget table must load");
+        for budget in &file.budget {
+            let kind = budget.kind.as_deref().unwrap_or_default();
+            assert!(
+                KINDS.contains(&kind),
+                "{}.{} declares kind {kind:?}",
+                budget.scenario,
+                budget.metric
+            );
+        }
+        assert!(
+            file.budget
+                .iter()
+                .any(|budget| budget.kind.as_deref() == Some("felt")),
+            "a table of nothing but diagnostics measures nothing anyone feels"
+        );
     }
 }
