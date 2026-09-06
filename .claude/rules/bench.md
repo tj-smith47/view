@@ -138,3 +138,35 @@ it: the gate then reports it (`GATE COVERAGE FAIL`) instead of passing over
 it quietly, and `docs/performance.md` says "not yet recorded" in words.
 Filling such a row from the plugin-free fixture's number is the exact
 substitution this whole vocabulary exists to refuse.
+
+## A driver's own setup paints nothing
+
+Only the measured action is allowed to put anything on screen. Nvim
+announces a delete of more lines than `'report'` ("10 fewer lines"), and a
+login-shaped config routes that announcement into a float at the top-right
+-- over row 1, which is the row `echo`'s driver types its samples into. The
+driver refuses the occluded cell, which is correct and leaves the cell
+recordable on the plugin-free fixtures and never on the config a person
+runs. The fix belongs to the harness, never to the fixture: `'report'`,
+`shortmess` and the message routing are part of the moment being measured.
+
+So every `:` command a driver under `crates/view-bench/src/` types is
+`silent`-prefixed unless it is the measured action:
+
+```rust
+self.session.send(b"\x1b:silent %d _\r")?;   // setup, between trials
+session.send(submitted(&wedge_command(bound)).as_bytes())?;  // the action
+```
+
+`silent` and never `silent!` -- an error still reaches the screen, which is
+what a setup step that failed is worth. The exemptions carry grounds in
+`view-bench/tests/driver_commands.rs`'s `UNSILENCED` table, and
+`every_typed_command_is_silenced_or_declared_the_measured_action` walks
+every literal each source writes above its `#[cfg(test)]` boundary, so a
+new send site fails by name. Its stated limit: a command built in another
+crate is no literal here, so such a member is declared with the function
+that builds it (`wedge_command`) and pinned by that name instead.
+
+The rule is scoped to the drivers, not to every session the tree types at:
+`view-oracle`'s tests make messages their subject (`:echo`, `:echomsg`,
+`:echoerr`), and silencing there would delete what they assert.
