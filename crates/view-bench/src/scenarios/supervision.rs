@@ -34,8 +34,6 @@
 //! bounded number of times per session, so reusing one session across
 //! samples would measure a different thing each time.
 
-use std::ffi::OsString;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use view_core::native::supervision::WedgeKind;
@@ -120,13 +118,6 @@ const PID_MARKER: &str = "VIEWENGINEPID=";
 /// overlay is painted by the same frame and is visible in it.
 const PID_LINE: usize = 21;
 
-/// The environment variable holding the state directory nvim keeps its swap
-/// files under.
-const STATE_HOME_VAR: &str = "XDG_STATE_HOME";
-
-/// Distinguishes one sample's state directory from the last one's.
-static SAMPLE_SERIAL: AtomicU64 = AtomicU64::new(0);
-
 /// What one supervision run observed.
 #[derive(Debug)]
 pub struct SupervisionOutcome {
@@ -163,15 +154,11 @@ pub fn run(
         let mut detect = Vec::with_capacity(SAMPLES);
         let mut rehydrate = Vec::with_capacity(SAMPLES);
         for sample in 0..SAMPLES {
-            detect.push(detect_sample(
-                &own_state_home(view.0),
-                settle,
-                wedge_phase(sample),
-            )?);
+            detect.push(detect_sample(view.0, settle, wedge_phase(sample))?);
             // no phase of its own: a closed connection is noticed on the
             // spot rather than at the next probe, so nothing this boundary
             // times is a function of where the heartbeat's cadence stood
-            rehydrate.push(rehydrate_sample(&own_state_home(view.0), settle)?);
+            rehydrate.push(rehydrate_sample(view.0, settle)?);
         }
         detect_trials.push(Distribution::from_samples(&detect, 0)?);
         rehydrate_trials.push(Distribution::from_samples(&rehydrate, 0)?);
@@ -297,28 +284,6 @@ fn spawn_settled(view: &SpawnSpec, settle: SettleBound) -> Result<BenchSession, 
         settle.deadline,
     )?;
     Ok(session)
-}
-
-/// `base` with a state directory of this sample's own.
-///
-/// Every sample here ends with an engine that was killed rather than asked
-/// to leave, so every sample leaves a swap file behind. Sharing one state
-/// directory across samples would hand each spawn its predecessor's
-/// leftovers to recover -- observed as `E309: Unable to read block 1` on
-/// the second sample of a run, with the recovery prompt on screen where the
-/// buffer should have been. A directory per sample makes the swap this row
-/// cares about the only one any spawn can find.
-fn own_state_home(base: &SpawnSpec) -> SpawnSpec {
-    let serial = SAMPLE_SERIAL.fetch_add(1, Ordering::Relaxed);
-    let mut spec = base.clone();
-    for (key, value) in &mut spec.env {
-        if key == STATE_HOME_VAR {
-            let mut own = value.clone();
-            own.push(OsString::from(format!(".{serial}")));
-            *value = own;
-        }
-    }
-    spec
 }
 
 /// Asks the engine to write its own pid into the top of the buffer and
@@ -449,8 +414,6 @@ fn elapsed_ms(start: Instant, at: Instant) -> f64 {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use std::path::PathBuf;
-
     use view_oracle::hang::DETECTION_BOUND;
 
     use super::*;
@@ -506,40 +469,6 @@ mod tests {
             uncovered <= stride + Duration::from_nanos(u64::from(strata)),
             "{uncovered:?} of the interval sits further than one stratum from any sample"
         );
-    }
-
-    /// A sample recovers the swap it left itself and no other, so the one
-    /// environment entry that decides where swap files land is the one
-    /// entry a sample may rewrite.
-    ///
-    /// Shaped like a wrapped spawn, where the program spawned and the
-    /// program measured differ: a derivation that rebuilt the spec field
-    /// by field would drop the second and leave the sample's session
-    /// unrecognisable as view.
-    #[test]
-    fn each_sample_gets_its_own_state_directory_and_nothing_else_moves() {
-        let base = SpawnSpec {
-            program: PathBuf::from("sh"),
-            args: vec![OsString::from("scratch.txt")],
-            env: vec![
-                (OsString::from("XDG_CONFIG_HOME"), OsString::from("/cfg")),
-                (OsString::from(STATE_HOME_VAR), OsString::from("/state")),
-                (OsString::from("TERM"), OsString::from("xterm-256color")),
-            ],
-            cwd: None,
-            measured_program: Some(PathBuf::from("view")),
-        };
-        let first = own_state_home(&base);
-        let second = own_state_home(&base);
-        assert_ne!(first.env[1].1, second.env[1].1);
-        assert!(first.env[1]
-            .1
-            .to_string_lossy()
-            .starts_with(&*base.env[1].1.to_string_lossy()));
-        assert_eq!(first.env[0], base.env[0]);
-        assert_eq!(first.env[2], base.env[2]);
-        assert_eq!(first.args, base.args);
-        assert_eq!(first.measured_program, base.measured_program);
     }
 
     #[test]

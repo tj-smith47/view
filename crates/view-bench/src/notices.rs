@@ -612,12 +612,6 @@ mod tests {
             "a test spec whose program is the one it measures",
         ),
         (
-            "view-bench/src/scenarios/supervision.rs",
-            "Some(PathBuf::from(\"view\"))",
-            "a test base shaped like a wrapped spawn, so a derivation that dropped the record \
-             fails there",
-        ),
-        (
             "view-bench/src/scenarios/taps/mod.rs",
             "Some(measured_program)",
             "the one wrapper in the tree: it spawns a shell and measures the binary that \

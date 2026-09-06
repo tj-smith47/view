@@ -80,14 +80,6 @@ pub struct BenchSession {
 /// The environment variable the compat fixtures read their probe-channel
 /// address from. Every bench row reuses those fixtures, so every bench
 /// spawn inherits the `serverstart` call whether or not it wants one.
-const PROBE_SOCKET_VAR: &str = "VIEW_COMPAT_SOCK";
-
-/// Distinguishes the probe-socket path of each spawn from the last one's.
-static SPAWN_SERIAL: AtomicU64 = AtomicU64::new(0);
-
-/// Returns `env` with the probe-socket address made unique to `serial`,
-/// leaving every other entry untouched and adding nothing when the
-/// variable is absent.
 ///
 /// The fixtures bind that address as their first statement. A sample
 /// killed at its first painted frame -- which is exactly what the
@@ -96,14 +88,45 @@ static SPAWN_SERIAL: AtomicU64 = AtomicU64::new(0);
 /// side directory dies on `EADDRINUSE` before painting anything. Observed:
 /// a `first_paint` cell timing out at 30 seconds against nvim's "Press
 /// ENTER" prompt, with `E5113: Failed to start server: address already in
-/// use` behind it. Unlinking the stale socket first would work only while
-/// no two spawns share a side directory; a per-spawn address does not
-/// depend on that holding. No bench row ever connects to the channel, so
-/// the address has only to be unique and writable.
-fn probe_socket_env(env: &[(OsString, OsString)], serial: u64) -> Vec<(OsString, OsString)> {
+/// use` behind it. No bench row ever connects to the channel, so the
+/// address has only to be unique and writable.
+const PROBE_SOCKET_VAR: &str = "VIEW_COMPAT_SOCK";
+
+/// The environment variable deciding where the editor under measurement
+/// keeps its swap files.
+///
+/// Made unique per spawn for the reason [`PROBE_SOCKET_VAR`] is. A sample
+/// killed at its first painted frame never runs an exit path, so the swap
+/// file its engine opened outlives it, and the next spawn in the same side
+/// directory finds it: one stale swap is answered by view's own recovery
+/// autocommand, two or more put nvim's "Enter number of swap file to use"
+/// on screen, where a harness with nothing to type parks until the wait
+/// gives up. Observed on the `startup` row, whose fourth cold spawn was
+/// still at that prompt 30 s later. It is one-sided, so the pair was not
+/// even facing the same startup: bare nvim in a pty writes no swap file
+/// for the buffer it opens, while view's engine -- which always has an RPC
+/// client attached to it -- writes one within the first second.
+const STATE_HOME_VAR: &str = "XDG_STATE_HOME";
+
+/// The environment entries no spawn may inherit from the spawn before it,
+/// each for the reason its own constant records.
+const PER_SPAWN_VARS: [&str; 2] = [PROBE_SOCKET_VAR, STATE_HOME_VAR];
+
+/// Distinguishes the per-spawn paths of each spawn from the last one's.
+static SPAWN_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// Returns `env` with every [`PER_SPAWN_VARS`] path made unique to
+/// `serial`, leaving every other entry untouched and adding nothing for a
+/// variable that is absent.
+///
+/// Suffixing rather than sweeping what the last spawn left: unlinking the
+/// stale socket, or emptying the swap directory, would work only while no
+/// two spawns ever share a side directory, and a per-spawn path does not
+/// depend on that holding.
+fn per_spawn_env(env: &[(OsString, OsString)], serial: u64) -> Vec<(OsString, OsString)> {
     env.iter()
         .map(|(key, value)| {
-            if key == PROBE_SOCKET_VAR {
+            if PER_SPAWN_VARS.iter().any(|var| key == *var) {
                 let mut unique = value.clone();
                 unique.push(format!(".{serial}"));
                 (key.clone(), unique)
@@ -127,7 +150,7 @@ impl BenchSession {
             cmd.arg(arg);
         }
         let serial = SPAWN_SERIAL.fetch_add(1, Ordering::Relaxed);
-        for (key, value) in probe_socket_env(&spec.env, serial) {
+        for (key, value) in per_spawn_env(&spec.env, serial) {
             cmd.env(key, value);
         }
         if let Some(cwd) = &spec.cwd {
@@ -272,12 +295,27 @@ mod tests {
     #[test]
     fn two_spawns_never_share_a_probe_socket_address() {
         let env = env_of(&[(PROBE_SOCKET_VAR, "/scratch/nvim/compat.sock")]);
-        let first = probe_socket_env(&env, 0);
-        let second = probe_socket_env(&env, 1);
+        let first = per_spawn_env(&env, 0);
+        let second = per_spawn_env(&env, 1);
         assert_ne!(
             first[0].1, second[0].1,
             "a killed sample leaves its socket bound, so a shared address is a spawn the next \
              sample cannot make"
+        );
+    }
+
+    /// The same claim for the other leftover a killed sample has: the swap
+    /// file its engine never closed, which the next spawn in the same
+    /// state directory is offered to recover instead of painting.
+    #[test]
+    fn two_spawns_never_share_a_state_directory() {
+        let env = env_of(&[(STATE_HOME_VAR, "/scratch/nvim/xdg_state_home")]);
+        let first = per_spawn_env(&env, 0);
+        let second = per_spawn_env(&env, 1);
+        assert_ne!(
+            first[0].1, second[0].1,
+            "a killed sample leaves its swap file behind, so a shared state directory is a \
+             swap prompt the next sample cannot answer"
         );
     }
 
@@ -288,7 +326,7 @@ mod tests {
             (PROBE_SOCKET_VAR, "/scratch/nvim/compat.sock"),
             ("TERM", "xterm-256color"),
         ]);
-        let rewritten = probe_socket_env(&env, 7);
+        let rewritten = per_spawn_env(&env, 7);
         assert_eq!(rewritten.len(), env.len());
         assert_eq!(rewritten[0], env[0]);
         assert_eq!(rewritten[2], env[2]);
@@ -301,6 +339,6 @@ mod tests {
     #[test]
     fn an_environment_without_a_probe_socket_is_unchanged() {
         let env = env_of(&[("TERM", "xterm-256color")]);
-        assert_eq!(probe_socket_env(&env, 3), env);
+        assert_eq!(per_spawn_env(&env, 3), env);
     }
 }
