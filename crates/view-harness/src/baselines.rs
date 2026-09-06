@@ -528,6 +528,18 @@ fn is_host_regime_absolute(metric: &str) -> bool {
 /// Metric values for one `[scenario.fixture]` cell.
 pub type CellMetrics = BTreeMap<String, f64>;
 
+/// Withdrawn metrics of one `[scenario.fixture]` cell: metric name -> why
+/// its recorded bar was pulled.
+///
+/// A bar taken under a measurement fault has to leave the file, but
+/// deleting the key alone erases the difference between a number that was
+/// pulled and one that was never armed -- and the two are gated
+/// differently ([`Unbarred`]) and read differently by the shipped-budget
+/// walk, which calls a metric no class records for its scenario a dead
+/// bound. The reason string is what a re-seat cites, so it names the
+/// fault and where the replacement number comes from.
+pub type WithdrawnMetrics = BTreeMap<String, String>;
+
 /// Every metric name a row may record, and so the vocabulary
 /// [`gate_headroom`] is proven exhaustive over.
 ///
@@ -701,6 +713,17 @@ pub enum BaselineError {
         class: String,
         named: String,
         host: String,
+    },
+    #[error(
+        "{path}: [{scenario}.{fixture}] both records {metric} and withdraws it; a withdrawal is \
+         the absence of a bar, so a seated value beside a reason means the re-seat left the \
+         reason behind and the next reader cannot tell which of the two is true"
+    )]
+    MetricRecordedAndWithdrawn {
+        path: String,
+        scenario: String,
+        fixture: String,
+        metric: String,
     },
     #[error("baseline {path} has no [{scenario}.{fixture}] cell to gate against")]
     MissingCell {
@@ -961,6 +984,12 @@ pub struct BaselineFile {
     /// letting the next record silently destroy it.
     #[serde(default, skip_serializing)]
     headroom: HeadroomTable,
+    /// scenario -> fixture -> metric -> why the bar was withdrawn (see
+    /// [`WithdrawnMetrics`]). Serialized, unlike `headroom`: a record run
+    /// must carry a reason forward across the rewrite for every metric it
+    /// did not re-seat.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub withdrawn: BTreeMap<String, BTreeMap<String, WithdrawnMetrics>>,
     /// scenario -> fixture -> metric -> recorded value.
     #[serde(flatten)]
     pub cells: BTreeMap<String, BTreeMap<String, CellMetrics>>,
@@ -975,6 +1004,7 @@ impl BaselineFile {
             engine_pin: pin.to_string(),
             machine_class: class.to_string(),
             headroom: HeadroomTable::new(),
+            withdrawn: BTreeMap::new(),
             cells: BTreeMap::new(),
         }
     }
@@ -997,6 +1027,29 @@ impl BaselineFile {
     #[must_use]
     pub fn cell(&self, id: &CellId) -> Option<&CellMetrics> {
         self.cells.get(&id.scenario)?.get(&id.fixture)
+    }
+
+    /// The withdrawal reasons recorded for one cell, if any.
+    #[must_use]
+    pub fn withdrawn_cell(&self, id: &CellId) -> Option<&WithdrawnMetrics> {
+        self.withdrawn.get(&id.scenario)?.get(&id.fixture)
+    }
+
+    /// Drops the withdrawal reasons for the metrics `seated` now holds,
+    /// pruning the cell and scenario tables they leave empty.
+    fn clear_withdrawn(&mut self, id: &CellId, seated: &CellMetrics) {
+        let Some(fixtures) = self.withdrawn.get_mut(&id.scenario) else {
+            return;
+        };
+        if let Some(cell) = fixtures.get_mut(&id.fixture) {
+            cell.retain(|metric, _| !seated.contains_key(metric));
+            if cell.is_empty() {
+                fixtures.remove(&id.fixture);
+            }
+        }
+        if fixtures.is_empty() {
+            self.withdrawn.remove(&id.scenario);
+        }
     }
 }
 
@@ -1207,12 +1260,19 @@ pub enum Unbarred {
 /// level down. The tag is the whole cell's, not the metric's: an empty
 /// recorded cell is unseated for every metric the row produces, and a cell
 /// with any bar at all is a cell whose missing keys were lost.
+///
+/// `withdrawn` is the cell's [`WithdrawnMetrics`], which counts as a bar
+/// for the seating question and nowhere else: a cell emptied by a
+/// withdrawal held bars once, so its numbers were lost rather than never
+/// taken, and the gate must say so loudly until the re-seat lands.
 #[must_use]
 pub fn unbarred_metrics(
     measured: &MeasuredCell,
     recorded: &CellMetrics,
+    withdrawn: Option<&WithdrawnMetrics>,
 ) -> (Unbarred, Vec<(String, f64)>) {
-    let seating = if recorded.is_empty() {
+    let withheld = withdrawn.is_some_and(|cell| !cell.is_empty());
+    let seating = if recorded.is_empty() && !withheld {
         Unbarred::Unseated
     } else {
         Unbarred::Unrecorded
@@ -1257,6 +1317,25 @@ pub fn load(path: &Path) -> Result<BaselineFile, BaselineError> {
             sidecar: headroom_path(path).display().to_string(),
             path: display,
         });
+    }
+    // the record flow drops a reason as it seats the value (plan_record),
+    // so a file holding both was hand-edited: refusing here is what keeps
+    // the two states -- withdrawn and recorded -- mutually exclusive for
+    // every reader downstream
+    for (scenario, fixtures) in &file.withdrawn {
+        for (fixture, withdrawn) in fixtures {
+            let recorded = file.cell(&CellId::new(scenario, fixture));
+            for metric in withdrawn.keys() {
+                if recorded.is_some_and(|cell| cell.contains_key(metric)) {
+                    return Err(BaselineError::MetricRecordedAndWithdrawn {
+                        path: display,
+                        scenario: scenario.clone(),
+                        fixture: fixture.clone(),
+                        metric: metric.clone(),
+                    });
+                }
+            }
+        }
     }
     Ok(file)
 }
@@ -1567,11 +1646,18 @@ pub fn plan_record(
     // gate policy and are not a bar this run's numbers may be held to.
     let reference = comparable.then_some(existing.as_ref()).flatten();
 
+    // a full-matrix record rebuilds the file, and a reason for a metric
+    // this run does not re-seat is still the truth about that cell
+    if let (true, Some(existing)) = (comparable, &existing) {
+        file.withdrawn.clone_from(&existing.withdrawn);
+    }
+
     let mut cells = Vec::new();
     for cell in measured {
         let existing_cell = reference.and_then(|file| file.cell(&cell.id));
         let (ratcheted, outcomes) =
             ratchet_cell(existing_cell, &cell.metrics, &cell.id, controlled, headroom);
+        file.clear_withdrawn(&cell.id, &ratcheted);
         file.upsert_cell(&cell.id, ratcheted);
         cells.push(CellRatchet {
             scenario: cell.id.scenario.clone(),
@@ -1951,6 +2037,79 @@ mod tests {
     /// that had orphaned or dropped a shipped characterization would
     /// otherwise only surface one full bench run later. This is the shipped
     /// counterpart of [`a_record_pass_preserves_the_headroom_characterization`].
+    /// A withdrawal names a metric the scenario produces, so a typo cannot
+    /// sit in a shipped file forever pretending a bar is owed: the reason
+    /// suppresses the dead-spec-bounds pin, and a name no row measures
+    /// would suppress it for a metric that will never be re-seated. The
+    /// evidence that the name is real is a sibling class still recording
+    /// it for the same scenario -- the same union the budget walk reads.
+    #[test]
+    fn every_shipped_withdrawal_names_a_metric_its_scenario_records() {
+        let dir = crate::fixture::workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("baselines");
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the baselines directory must exist") {
+            let path = entry.expect("readable directory entry").path();
+            let named = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(baseline_class)
+                .is_some();
+            if named {
+                files.push((
+                    path.display().to_string(),
+                    load(&path).expect("every shipped baseline must load"),
+                ));
+            }
+        }
+        assert!(!files.is_empty(), "no baseline under {}", dir.display());
+        let recorded_somewhere: std::collections::BTreeSet<(&str, &str)> = files
+            .iter()
+            .flat_map(|(_, file)| {
+                file.cells.iter().flat_map(|(scenario, fixtures)| {
+                    fixtures.values().flat_map(move |cell| {
+                        cell.keys()
+                            .map(move |metric| (scenario.as_str(), metric.as_str()))
+                    })
+                })
+            })
+            .collect();
+        let mut unreal = Vec::new();
+        let mut checked = 0usize;
+        for (path, file) in &files {
+            for (scenario, fixtures) in &file.withdrawn {
+                for (fixture, withdrawn) in fixtures {
+                    for (metric, why) in withdrawn {
+                        checked += 1;
+                        assert!(
+                            !why.trim().is_empty(),
+                            "{path}: [{scenario}.{fixture}] {metric} is withdrawn without a \
+                             reason, so nothing tells the re-seat what to cite"
+                        );
+                        if !recorded_somewhere.contains(&(scenario.as_str(), metric.as_str())) {
+                            unreal.push(format!(
+                                "{path}: [{scenario}.{fixture}] withdraws {metric}, which no \
+                                 shipped class records for this scenario"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            unreal.is_empty(),
+            "unreal withdrawals:\n{}",
+            unreal.join("\n")
+        );
+        assert!(
+            checked > 0,
+            "the gh classes still owe their first-paint re-seat, so this walk must find \
+             withdrawals to check"
+        );
+    }
+
     #[test]
     fn every_shipped_headroom_sidecar_binds_to_its_baseline() {
         let dir = crate::fixture::workspace_root()
@@ -2883,7 +3042,8 @@ mod tests {
                     "minimal",
                     &[("ratio_p50", 0.9), ("new_metric", 99.0)]
                 ),
-                &recorded
+                &recorded,
+                None
             ),
             (Unbarred::Unrecorded, vec![("new_metric".to_string(), 99.0)])
         );
@@ -2902,7 +3062,7 @@ mod tests {
     fn a_cell_seated_empty_by_a_refusal_is_unseated_not_unrecorded() {
         let cell = measured_cell("input_path", "minimal", &[("key_to_rpc_p99_us", 191.0)]);
         assert_eq!(
-            unbarred_metrics(&cell, &CellMetrics::new()),
+            unbarred_metrics(&cell, &CellMetrics::new(), None),
             (
                 Unbarred::Unseated,
                 vec![("key_to_rpc_p99_us".to_string(), 191.0)]
@@ -2910,12 +3070,45 @@ mod tests {
             "an empty recorded cell has no bar to have lost"
         );
         assert_eq!(
-            unbarred_metrics(&cell, &metrics(&[("some_other_metric", 1.0)])),
+            unbarred_metrics(&cell, &metrics(&[("some_other_metric", 1.0)]), None),
             (
                 Unbarred::Unrecorded,
                 vec![("key_to_rpc_p99_us".to_string(), 191.0)]
             ),
             "a cell holding any bar at all lost the one it does not hold"
+        );
+    }
+
+    fn withdrawal(pairs: &[(&str, &str)]) -> WithdrawnMetrics {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// A cell emptied by a withdrawal is the opposite case to the one
+    /// above: bars were taken here and pulled, so the first number a later
+    /// run measures is a bar to re-seat by hand from an attributed run,
+    /// not one the gate may report as merely unseated and pass.
+    #[test]
+    fn a_cell_emptied_by_a_withdrawal_is_unrecorded_not_unseated() {
+        let cell = measured_cell("first_paint", "minimal", &[("marker_ratio_p50", 1.09)]);
+        let reasons = withdrawal(&[(
+            "marker_ratio_p50",
+            "measured on a pty that answered nothing",
+        )]);
+        assert_eq!(
+            unbarred_metrics(&cell, &CellMetrics::new(), Some(&reasons)),
+            (
+                Unbarred::Unrecorded,
+                vec![("marker_ratio_p50".to_string(), 1.09)]
+            ),
+            "a withdrawn metric gates exactly as a lost one"
+        );
+        assert_eq!(
+            unbarred_metrics(&cell, &CellMetrics::new(), Some(&WithdrawnMetrics::new())).0,
+            Unbarred::Unseated,
+            "an empty withdrawal table withholds nothing"
         );
     }
 
@@ -2932,7 +3125,7 @@ mod tests {
         ];
         let full = metrics(MEASURED);
         let cell = measured_cell("picker", "minimal", MEASURED);
-        assert!(unbarred_metrics(&cell, &full).1.is_empty());
+        assert!(unbarred_metrics(&cell, &full, None).1.is_empty());
         let mut one_deleted = full;
         one_deleted.remove("match_paint_p99_ms");
         assert!(
@@ -2947,7 +3140,7 @@ mod tests {
             "the deleted bar cannot breach, which is why coverage must catch it"
         );
         assert_eq!(
-            unbarred_metrics(&cell, &one_deleted),
+            unbarred_metrics(&cell, &one_deleted, None),
             (
                 Unbarred::Unrecorded,
                 vec![("match_paint_p99_ms".to_string(), 5.1)]
@@ -3029,6 +3222,105 @@ mod tests {
             }]
         )
         .is_empty());
+    }
+
+    #[test]
+    fn a_withdrawal_survives_the_round_trip_beside_the_cell_it_empties() {
+        let dir = ScratchDir::new("baselines-withdrawn").unwrap();
+        let path = dir.join("gh-linux.toml");
+        let mut file = BaselineFile::new("gh-linux", "v0.12.4");
+        let id = CellId::new("first_paint", "minimal");
+        file.upsert_cell(&id, metrics(&[("marker_cold_ms", 26.5)]));
+        file.withdrawn.insert(
+            id.scenario.clone(),
+            [(
+                id.fixture.clone(),
+                withdrawal(&[("marker_ratio_p50", "taken on a pty that answered nothing")]),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        save(&path, &file).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[withdrawn.first_paint.minimal]"),
+            "actual TOML:\n{text}"
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.withdrawn_cell(&id).unwrap()["marker_ratio_p50"],
+            "taken on a pty that answered nothing"
+        );
+        assert_eq!(loaded.cell(&id).unwrap()["marker_cold_ms"], 26.5);
+    }
+
+    #[test]
+    fn a_metric_both_recorded_and_withdrawn_is_a_load_error() {
+        let dir = ScratchDir::new("baselines-both").unwrap();
+        let path = dir.join("gh-linux.toml");
+        let mut file = BaselineFile::new("gh-linux", "v0.12.4");
+        let id = CellId::new("first_paint", "minimal");
+        file.upsert_cell(&id, metrics(&[("marker_ratio_p50", 1.09)]));
+        file.withdrawn.insert(
+            id.scenario.clone(),
+            [(
+                id.fixture.clone(),
+                withdrawal(&[("marker_ratio_p50", "a reason the re-seat left behind")]),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        save(&path, &file).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(BaselineError::MetricRecordedAndWithdrawn { metric, .. })
+                if metric == "marker_ratio_p50"
+        ));
+    }
+
+    #[test]
+    fn a_record_drops_the_reason_for_the_metric_it_seats_and_keeps_the_rest() {
+        let mut existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[("first_paint", "minimal", &[("marker_cold_ms", 26.0)])],
+        );
+        existing.withdrawn.insert(
+            "first_paint".to_string(),
+            [(
+                "minimal".to_string(),
+                withdrawal(&[
+                    ("marker_ratio_p50", "a pty that answered nothing"),
+                    ("marker_ratio_p99", "a pty that answered nothing"),
+                ]),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let measured = vec![measured_cell(
+            "first_paint",
+            "minimal",
+            &[("marker_cold_ms", 25.0), ("marker_ratio_p50", 1.09)],
+        )];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+            &HeadroomTable::new(),
+        );
+        let id = CellId::new("first_paint", "minimal");
+        assert_eq!(plan.file.cell(&id).unwrap()["marker_ratio_p50"], 1.09);
+        let left = plan.file.withdrawn_cell(&id).unwrap();
+        assert!(
+            !left.contains_key("marker_ratio_p50"),
+            "the seated metric keeps no stale reason: {left:?}"
+        );
+        assert!(
+            left.contains_key("marker_ratio_p99"),
+            "a metric this run did not re-seat is still withdrawn: {left:?}"
+        );
     }
 
     fn outcome_for<'a>(outcomes: &'a [RatchetOutcome], name: &str) -> &'a RatchetOutcome {

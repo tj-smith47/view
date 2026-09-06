@@ -2,6 +2,22 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "gh-macos"
 
+[withdrawn.first_paint.heavy]
+marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+
+[withdrawn.first_paint.minimal]
+marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+
+[withdrawn.first_paint.user]
+marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+marker_ratio_p99 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+
+[withdrawn.startup.minimal]
+server_delta_ms = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+settled_ratio_p50 = "taken on a harness pty that never answered nvim's DSR; re-seat from the artifact of the first gate run after the responder fix"
+
 [echo.heavy]
 paired_delta_p99_ms = 4.27
 ratio_p50 = 1.148999015425008

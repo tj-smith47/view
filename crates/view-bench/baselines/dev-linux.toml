@@ -44,14 +44,20 @@ speculated_ratio_p50 = 0.3943397109890326
 
 [first_paint.heavy]
 marker_cold_ms = 79.267231
+marker_ratio_p50 = 1.1007776687309356
+marker_ratio_p99 = 1.0454034775236194
 shell_visible_cold_ms = 3.788316
 
 [first_paint.minimal]
 marker_cold_ms = 25.150733000000002
+marker_ratio_p50 = 1.0936971456650568
+marker_ratio_p99 = 1.0761561258391104
 shell_visible_cold_ms = 4.094983
 
 [first_paint.user]
 marker_cold_ms = 80.511921
+marker_ratio_p50 = 1.0842888118747391
+marker_ratio_p99 = 1.0459755652851106
 shell_visible_cold_ms = 4.542766
 
 [flood.minimal]
@@ -90,6 +96,10 @@ ratio_p99 = 1.50580910298798
 staleness_p99_ms = 1.069328
 
 [startup.minimal]
+first_frame_cold_ms = 25.920186
+first_frame_ratio_p99 = 1.0521978111195078
+server_delta_ms = 0.6820000000000004
+settled_ratio_p50 = 1.0955247620066972
 
 [supervision.minimal]
 restart_rehydrate_p99_ms = 20.980584999999998

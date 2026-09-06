@@ -1944,17 +1944,34 @@ classes = ["dev-macos"]
             "no baseline under {} would make this assert nothing",
             dir.display()
         );
-        let loaded: Vec<crate::baselines::BaselineFile> = paths
+        let loaded: Vec<(String, crate::baselines::BaselineFile)> = paths
             .iter()
-            .map(|path| crate::baselines::load(path).expect("every shipped baseline must load"))
+            .map(|path| {
+                (
+                    path.display().to_string(),
+                    crate::baselines::load(path).expect("every shipped baseline must load"),
+                )
+            })
             .collect();
+        let dead = dead_spec_bounds(&file, &loaded);
+        assert!(dead.is_empty(), "dead spec bounds:\n{}", dead.join("\n"));
+    }
+
+    /// The classification the pin above asserts is empty, over any set of
+    /// baselines: a budget row whose metric a sibling class recorded for
+    /// the same scenario but this class's file does not hold, and does not
+    /// name as withdrawn.
+    fn dead_spec_bounds(
+        file: &BudgetFile,
+        loaded: &[(String, crate::baselines::BaselineFile)],
+    ) -> Vec<String> {
         // every (scenario, metric) pair any shipped class has ever recorded,
         // across every class -- a pair absent from this union has never
         // been measured and committed anywhere yet, which is the
         // staged-ship-then-record state this test tolerates
         let ever_recorded: std::collections::BTreeSet<(&str, &str)> = loaded
             .iter()
-            .flat_map(|recorded| {
+            .flat_map(|(_, recorded)| {
                 recorded.cells.iter().flat_map(|(scenario, fixtures)| {
                     fixtures.values().flat_map(move |metrics| {
                         metrics
@@ -1965,7 +1982,7 @@ classes = ["dev-macos"]
             })
             .collect();
         let mut dead = Vec::new();
-        for (path, recorded) in paths.iter().zip(&loaded) {
+        for (path, recorded) in loaded {
             let measured: Vec<crate::baselines::MeasuredCell> = recorded
                 .cells
                 .iter()
@@ -1978,22 +1995,112 @@ classes = ["dev-macos"]
                         })
                 })
                 .collect();
-            for budget in unreached_budgets(&file, &recorded.machine_class, &measured) {
-                let recorded_elsewhere =
-                    ever_recorded.contains(&(budget.scenario.as_str(), budget.metric.as_str()));
-                if !recorded_elsewhere {
+            // a metric this class withdrew was recorded here once and
+            // pulled with its reason attached, which is the opposite of the
+            // rename this test hunts: the bound is alive and owed a re-seat,
+            // and the gate already fails the class loudly until it lands
+            let withdrawn: std::collections::BTreeSet<(&str, &str)> = recorded
+                .withdrawn
+                .iter()
+                .flat_map(|(scenario, fixtures)| {
+                    fixtures.values().flat_map(move |metrics| {
+                        metrics
+                            .keys()
+                            .map(move |metric| (scenario.as_str(), metric.as_str()))
+                    })
+                })
+                .collect();
+            for budget in unreached_budgets(file, &recorded.machine_class, &measured) {
+                let pair = (budget.scenario.as_str(), budget.metric.as_str());
+                if !ever_recorded.contains(&pair) || withdrawn.contains(&pair) {
                     continue;
                 }
                 dead.push(format!(
-                    "{}: [{}] {} bounds a metric another shipped class already recorded for \
+                    "{path}: [{}] {} bounds a metric another shipped class already recorded for \
                      this scenario, but this class's baseline does not -- a rename or a \
                      partial re-record, not a first ship",
-                    path.display(),
-                    budget.scenario,
-                    budget.metric
+                    budget.scenario, budget.metric
                 ));
             }
         }
-        assert!(dead.is_empty(), "dead spec bounds:\n{}", dead.join("\n"));
+        dead
+    }
+
+    /// A withdrawal is the one way a class may hold no bar for a metric a
+    /// sibling class records without the bound reading as dead: the file
+    /// says the number was pulled and why, so the row survives the wait for
+    /// its re-seat.
+    #[test]
+    fn a_withdrawn_metric_keeps_its_spec_bound_alive_where_a_bare_absence_kills_it() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "first_paint"
+metric = "marker_ratio_p50"
+max = 0.30
+"#,
+        );
+        let mut seated = baseline_with(
+            "first_paint",
+            "minimal",
+            Some(
+                &[("marker_ratio_p50".to_string(), 1.09)]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
+        seated.machine_class = "dev-linux".to_string();
+        let mut absent = baseline_with(
+            "first_paint",
+            "minimal",
+            Some(&[("marker_cold_ms".to_string(), 26.5)].into_iter().collect()),
+        );
+        absent.machine_class = "gh-linux".to_string();
+        let loaded = vec![
+            ("dev-linux.toml".to_string(), seated),
+            ("gh-linux.toml".to_string(), absent.clone()),
+        ];
+        let dead = dead_spec_bounds(&file, &loaded);
+        assert_eq!(dead.len(), 1, "a bare absence is a dead bound: {dead:?}");
+        assert!(dead[0].contains("gh-linux.toml"), "{dead:?}");
+
+        let mut withdrawn = absent;
+        withdrawn.withdrawn.insert(
+            "first_paint".to_string(),
+            [(
+                "minimal".to_string(),
+                [(
+                    "marker_ratio_p50".to_string(),
+                    "taken on a pty that answered nothing".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(
+            dead_spec_bounds(&file, &loaded_with(&loaded, withdrawn)).is_empty(),
+            "a withdrawn metric is recorded-then-pulled, not dead"
+        );
+    }
+
+    /// `loaded` with its gh-linux entry replaced.
+    fn loaded_with(
+        loaded: &[(String, crate::baselines::BaselineFile)],
+        replacement: crate::baselines::BaselineFile,
+    ) -> Vec<(String, crate::baselines::BaselineFile)> {
+        loaded
+            .iter()
+            .map(|(path, file)| {
+                if file.machine_class == replacement.machine_class {
+                    (path.clone(), replacement.clone())
+                } else {
+                    (path.clone(), file.clone())
+                }
+            })
+            .collect()
     }
 }

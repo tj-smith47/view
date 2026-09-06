@@ -1380,7 +1380,8 @@ fn main() -> Result<()> {
                     unmeasured.push((cell.id.clone(), metric));
                 }
             }
-            let (seating, unbarred) = baselines::unbarred_metrics(cell, recorded);
+            let (seating, unbarred) =
+                baselines::unbarred_metrics(cell, recorded, file.withdrawn_cell(&cell.id));
             for (metric, value) in unbarred {
                 match seating {
                     baselines::Unbarred::Unseated => {
@@ -2794,7 +2795,8 @@ mod tests {
         assert_eq!(
             baselines::unbarred_metrics(
                 &probe_cell(&seated_by_refusal),
-                &baselines::CellMetrics::new()
+                &baselines::CellMetrics::new(),
+                None
             ),
             (
                 baselines::Unbarred::Unseated,
@@ -2807,14 +2809,16 @@ mod tests {
                 baselines::load(&baseline_path(class)).expect("the class baseline must load");
             for (scenario, fixtures) in &baseline.cells {
                 for (fixture, recorded) in fixtures {
-                    let measured = probe_cell(&baselines::CellId::new(scenario, fixture));
-                    let expected = if recorded.is_empty() {
+                    let id = baselines::CellId::new(scenario, fixture);
+                    let measured = probe_cell(&id);
+                    let withdrawn = baseline.withdrawn_cell(&id);
+                    let expected = if recorded.is_empty() && withdrawn.is_none() {
                         baselines::Unbarred::Unseated
                     } else {
                         baselines::Unbarred::Unrecorded
                     };
                     assert_eq!(
-                        baselines::unbarred_metrics(&measured, recorded),
+                        baselines::unbarred_metrics(&measured, recorded, withdrawn),
                         (expected, vec![(PROBE.to_string(), 1.0)]),
                         "{class} {scenario}.{fixture} must classify as {expected:?}"
                     );
