@@ -134,6 +134,7 @@ pub fn started_times_ms(log: &str) -> Vec<f64> {
 /// than the warmup it is asked to drop.
 pub fn server_delta_ms(view_log: &Path, nvim_log: &Path, warmup: usize) -> Result<f64, BenchError> {
     let mut sides = Vec::new();
+    let mut counts = Vec::new();
     for (side, path) in [("view", view_log), ("nvim", nvim_log)] {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let times = started_times_ms(&text);
@@ -146,7 +147,29 @@ pub fn server_delta_ms(view_log: &Path, nvim_log: &Path, warmup: usize) -> Resul
                 ),
             });
         }
+        counts.push(times.len());
         sides.push(Distribution::from_samples(&times, warmup)?.p50());
+    }
+    // the loop that spawns these takes the same number of samples per
+    // side, so unequal series mean one side's log was read wrong rather
+    // than measured differently -- and the way that happens is the 8 KiB
+    // flush boundary this module's parser doc names: a report past it
+    // splits, the tty side's UI-client section can land inside the
+    // editor's, and the editor figure after the split is skipped. Silent
+    // where it matters most (a config large enough to cross the boundary
+    // is exactly the real one), so it fails instead
+    if counts[0] != counts[1] {
+        return Err(BenchError::Desync {
+            context: format!(
+                "the view side wrote {} {STARTED_LINE} lines to {} and the nvim side {} to {}; \
+                 both sides take the same samples, so a report crossing the engine's 8 KiB \
+                 --startuptime buffer interleaved with the tty side's UI-client section",
+                counts[0],
+                view_log.display(),
+                counts[1],
+                nvim_log.display(),
+            ),
+        });
     }
     Ok(sides[0] - sides[1])
 }
@@ -203,6 +226,27 @@ times in msec\n\
         let nvim_log = dir.join("nvim.log");
         std::fs::write(&view_log, "090.000  000.010: --- NVIM STARTED ---\n").unwrap();
         std::fs::write(&nvim_log, "times in msec\n").unwrap();
+        assert!(matches!(
+            server_delta_ms(&view_log, &nvim_log, 0),
+            Err(BenchError::Desync { .. })
+        ));
+    }
+
+    /// A side whose log lost a figure to an interleaved flush has fewer
+    /// samples than its partner, and a median over what survived is a
+    /// number neither run took.
+    #[test]
+    fn unequal_series_fail_rather_than_publish_a_median_of_what_survived() {
+        let dir = view_test_support::ScratchDir::new("startup-server-delta-counts").unwrap();
+        let view_log = dir.join("view.log");
+        let nvim_log = dir.join("nvim.log");
+        std::fs::write(
+            &view_log,
+            "110.000  000.010: --- NVIM STARTED ---\n\
+             112.000  000.010: --- NVIM STARTED ---\n",
+        )
+        .unwrap();
+        std::fs::write(&nvim_log, "100.000  000.010: --- NVIM STARTED ---\n").unwrap();
         assert!(matches!(
             server_delta_ms(&view_log, &nvim_log, 0),
             Err(BenchError::Desync { .. })
