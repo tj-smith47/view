@@ -1033,10 +1033,19 @@ fn main() -> Result<()> {
     // then have externalized a surface the rest of the session believes it
     // declined
     let surfaces = view_native::config::ext_surfaces(&resolved);
+    // the size the attach will ask for, never the terminal's own: the child
+    // lays every window out against what this `--cmd` tells it, so a spawn
+    // seeded a row taller than `Model::grid_target` makes the attach a
+    // relayout of every window on screen
+    let spawn_size = view_core::model::grid_target_for(
+        (width, height),
+        0,
+        resolved.tables.native.enabled("statusline"),
+    );
     // read before the config is consumed: `update()` builds the attach and
     // has no config left to ask which descriptor the child's piped stdin is
     // on, nor whether the child was already attached on its way up
-    let cfg = cfg.with_late_attach(width, height);
+    let cfg = cfg.with_late_attach(spawn_size.0, spawn_size.1);
     let stdin_relay = cfg.stdin_relay_requested();
     let attaches_late = cfg.attaches_late();
     let mut attach = startup::attach_in_background(cfg);
@@ -1884,6 +1893,12 @@ mod tests {
     /// folded in before the loop exists. It reads nothing further -- the
     /// config chain above has already been resolved, and this walks the
     /// `[native]` table it produced.
+    ///
+    /// The grid the spawn is seeded with is the fourth, and rides the size
+    /// read above: the rows view's own chrome takes are not the child's to
+    /// lay windows out in, so the spawn is handed the grid the attach will
+    /// ask for rather than the terminal's own. Both calls are arithmetic
+    /// over values already in hand.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1913,6 +1928,8 @@ mod tests {
                 "view_tui::terminal::size_now",
                 "context",
                 "view_native::config::ext_surfaces",
+                "view_core::model::grid_target_for",
+                "enabled",
                 "with_late_attach",
                 "stdin_relay_requested",
                 "attaches_late",

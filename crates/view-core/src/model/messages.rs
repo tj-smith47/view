@@ -334,6 +334,32 @@ impl Messages {
         id
     }
 
+    /// One entry for the history ring alone: stamped with an id from the
+    /// same counter every other entry gets one from, and never put on the
+    /// stack or in the hold.
+    ///
+    /// The one shape [`Self::push`] cannot express. A startup message
+    /// ([`crate::msg::Msg::StartupMessages`]) is a record of something the
+    /// user has already been shown -- or would have been, under nvim's own
+    /// UI -- so toasting it would replay a whole launch's messages at the
+    /// moment the screen settles, and routing it through the startup hold
+    /// would do the same one release later.
+    pub(crate) fn history_only_entry(
+        &mut self,
+        kind: String,
+        content: Vec<(u64, String)>,
+    ) -> MessageEntry {
+        let id = MessageId(self.next_message_id);
+        self.next_message_id = self.next_message_id.saturating_add(1);
+        MessageEntry {
+            kind,
+            content,
+            condition: false,
+            id,
+            family: None,
+        }
+    }
+
     /// The entry occupying the top slot of the toast stack -- the oldest
     /// entry still standing that takes a slot at all -- or `None` when
     /// nothing does.

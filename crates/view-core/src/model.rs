@@ -2,6 +2,14 @@
 
 use std::path::PathBuf;
 
+/// The `kind` a startup message carries in the notification history.
+///
+/// Not one of nvim's own wire kinds and not one of view's native ones: it
+/// says where the line came from -- a message raised before this session
+/// had a UI -- which is the one thing a reader of the history cannot
+/// otherwise tell about it.
+pub const STARTUP_MESSAGE_KIND: &str = "startup";
+
 use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
 use crate::grid::registry::{self, GridEvent, GridId, GridRegistry};
 use crate::grid::{Grid, GridOp};
@@ -1159,12 +1167,31 @@ impl Model {
     /// or the chrome reservation changes.
     #[must_use]
     pub fn grid_target(&self) -> (u16, u16) {
-        (
-            self.term_width,
-            self.term_height
-                .saturating_sub(self.chrome_rows() + self.statusline_rows()),
+        grid_target_for(
+            (self.term_width, self.term_height),
+            self.chrome_rows(),
+            self.statusline_enabled,
         )
     }
+}
+
+/// The `(width, height)` an engine grid takes on a terminal of `size` with
+/// `chrome_rows` reserved at the top and, when `statusline` is on, view's
+/// own bottom bar.
+///
+/// A free function because the spawn needs the answer before there is a
+/// [`Model`] to ask. The child is started `--headless` with this size on a
+/// `--cmd`, sources the user's config against it, and is then attached at
+/// [`Model::grid_target`]: the two have to be the same arithmetic or every
+/// launch relayouts every window at the attach, which is the resize the
+/// geometry `--cmd` exists to avoid. No tabline exists at spawn, so that
+/// caller passes `0` chrome rows.
+#[must_use]
+pub fn grid_target_for(size: (u16, u16), chrome_rows: u16, statusline: bool) -> (u16, u16) {
+    (
+        size.0,
+        size.1.saturating_sub(chrome_rows + u16::from(statusline)),
+    )
 }
 
 impl Default for Model {
@@ -1515,6 +1542,31 @@ impl EngineModel {
         // already standing arms nothing, and a parked one that took its
         // predecessor's place before being held hands the slot back here
         self.messages.arm_top_slot().into_iter().collect()
+    }
+
+    /// Seeds the notification history with what nvim said while it was
+    /// starting, answering [`crate::msg::Msg::StartupMessages`].
+    ///
+    /// The history and nothing else: these lines are already spent. Under
+    /// nvim's own UI the user watched them scroll past during startup, and
+    /// under view they were raised before there was a UI at all -- so the
+    /// obligation is that `<leader>fm` can show them, which is exactly what
+    /// view's claimant notice promises. Toasting them would replay a whole
+    /// launch at the moment the screen settles.
+    ///
+    /// Answers whether anything was seeded, so a caller can leave the
+    /// screen alone for the ordinary launch that said nothing.
+    pub fn seed_startup_history(&mut self, text: &str) -> bool {
+        let mut seeded = false;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let entry = self.messages.history_only_entry(
+                STARTUP_MESSAGE_KIND.to_string(),
+                vec![(0, line.to_string())],
+            );
+            self.toast_history.push(&entry);
+            seeded = true;
+        }
+        seeded
     }
 
     /// A locally-synthesized notice -- never from nvim's own `msg_show` --
@@ -2601,6 +2653,24 @@ mod tests {
     fn grid_target_matches_term_size_with_no_chrome_reserved() {
         let m = Model::with_term_size(80, 24);
         assert_eq!(m.grid_target(), (80, 24));
+    }
+
+    /// The size the child is spawned with and the size it is attached at
+    /// are one arithmetic, so the attach is never a relayout of windows
+    /// the config already placed. `main.rs` seeds the geometry `--cmd`
+    /// from `grid_target_for` with no tabline; the attach reads
+    /// `grid_target` on a model that has one only once nvim reports it.
+    #[test]
+    fn the_size_a_spawn_is_seeded_with_is_the_size_the_attach_asks_for() {
+        for statusline in [false, true] {
+            let mut m = Model::with_term_size(263, 88);
+            m.statusline_enabled = statusline;
+            assert_eq!(
+                m.grid_target(),
+                grid_target_for((263, 88), 0, statusline),
+                "statusline = {statusline}"
+            );
+        }
     }
 
     /// A full-height side panel takes its share of the rows an overlay may
