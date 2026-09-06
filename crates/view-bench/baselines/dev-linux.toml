@@ -2,16 +2,6 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "dev-linux"
 
-[withdrawn.echo.user]
-paired_delta_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-view_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.echo_speculated.user]
-speculated_paint_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-speculated_ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
 [ai_composer.heavy]
 p99_ms = 0.171286
 
@@ -37,6 +27,10 @@ ratio_p99 = 1.0916525318862538
 view_p99_ms = 0.726575
 
 [echo.user]
+paired_delta_p99_ms = 0.726127
+ratio_p50 = 1.1097269280826585
+ratio_p99 = 1.1076770542009724
+view_p99_ms = 1.583071
 
 [echo_control.heavy]
 control_delta_p99_ms = 0.5941500000000001
@@ -55,6 +49,8 @@ speculated_paint_p99_ms = 0.301
 speculated_ratio_p50 = 0.3943397109890326
 
 [echo_speculated.user]
+speculated_paint_p99_ms = 0.317623
+speculated_ratio_p50 = 0.33177052820600483
 
 [first_paint.heavy]
 marker_cold_ms = 79.267231
