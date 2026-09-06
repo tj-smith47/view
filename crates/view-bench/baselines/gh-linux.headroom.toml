@@ -149,6 +149,16 @@ machine_class = "gh-linux"
 # rests on neither count: a tighter estimator can only narrow the band,
 # and both halves above already clear the compiled default.
 
+# Withdrawn 2026-09-06, the first_paint.marker_ratio_p50 characterization
+# below only. Every draw in it was taken on a harness pty that never
+# answered the DSR the engine's tty startup blocks on, so the bare-nvim arm
+# of each carries a fixed ~100 ms that view's arm never paid -- which is
+# what "nvim's holds 121..128 ms across all thirteen legs" is reading. The
+# recorded 0.1733 it reasons about is gone from gh-linux.toml with the rest
+# of the withdrawn seats. The row's absence stands; its grounds are
+# re-earned from draws taken after the fix. Every other entry in this file
+# reads a steady-state statistic and is untouched.
+#
 # first_paint.marker_ratio_p50 is deliberately absent. Its pooled draws
 # (minimal 0.147 0.173 0.126 0.140 on 2026-08-03/04, then 0.211 0.214
 # 0.211 0.216 0.204 0.202 on 08-21/24, then 0.189 0.181 0.160 on

@@ -105,17 +105,17 @@ came out of that wait rather than out of view
 ([Performance](docs/performance.md#current-numbers) has the whole account).
 The no-plugins memory row above is view's own process only (the embedded
 Neovim engine is a separate process this budget excludes) and has no
-bare-Neovim comparison. Under the 15-plugin lazy.nvim stack, a diagnostic (not CI-gated) reading does have one: bare Neovim's
-whole process is 4.39 MB, view's own process is 5.00 MB, and view's own
-process plus its embedded Neovim engine child -- the honest comparison,
-since view can never be smaller than the Neovim it embeds -- is 27.96 MB,
-about 6.4x bare Neovim. See [Performance](#performance) for the full
-equivalence matrix. Typing and sustained scrolling are
-currently a bit slower than bare Neovim (about 13% and 1.9x, on paths that
-are sub-millisecond either way, so neither is something you can feel). We
-are actively closing those gaps rather than explaining them away: profiling
-already cut the typing overhead roughly in half, and what remains is
-itemized down to the microsecond.
+bare-Neovim comparison. Under the 15-plugin lazy.nvim stack, a diagnostic
+(not CI-gated) reading does have one: bare Neovim's whole process is
+4.39 MB, view's own process is 5.00 MB, and view's own process plus its
+embedded Neovim engine child -- the honest comparison, since view can never
+be smaller than the Neovim it embeds -- is 27.96 MB, about 6.4x bare
+Neovim. See [Performance](#performance) for the full equivalence matrix.
+Typing and sustained scrolling are currently a bit slower than bare Neovim
+(about 13% and 1.9x, on paths that are sub-millisecond either way, so
+neither is something you can feel). We are actively closing those gaps
+rather than explaining them away: profiling already cut the typing overhead
+roughly in half, and what remains is itemized down to the microsecond.
 
 The full story, including methodology, the per-stage breakdown of a
 keystroke, and how budgets are enforced in CI, lives in

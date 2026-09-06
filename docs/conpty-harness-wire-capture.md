@@ -9,9 +9,17 @@ survive, what clock the host offers, and what a per-child kill leaves
 behind.
 
 The headline is not a subtlety. Through ConPTY, **nothing whatsoever
-reaches the master until the master answers a cursor-position request**,
-and this tree's own pty responder does not answer it. Every figure below
-sits downstream of that.
+reaches the master until the master answers a cursor-position request**.
+Every figure below sits downstream of that.
+
+> Answered since 2026-09-06: `QueryPolicy`'s responder replies `\x1b[1;1R`
+> to a bare `\x1b[6n` under every answering policy. The unix arm's stream
+> below was captured before that (and before 6b89c29, which answered the
+> OSC 11 background query and the DSR behind it), so a re-capture that
+> differs from the bytes published here is expected rather than a finding:
+> the `E1568` warning is gone from the unix stream, and the ConPTY arm is
+> expected to stop hanging to its deadline. Neither re-capture has been
+> run -- the Windows half is a winserver run and the host is unreachable.
 
 ## Hosts and engine identity
 
@@ -121,11 +129,13 @@ produces 4 bytes (`hi` and a line break), carries no request, and exits 0.
 So this is a property of the pseudoconsole, not of nvim, and it applies to
 **every** child a Windows leg spawns.
 
-`QueryPolicy`'s responder answers the device-attributes fence and the
-three optional capability queries (`\x1b[?2026$p`, `\x1b[?u`, the SGR
-readback). Nothing in this tree answers `\x1b[6n`. A Windows pty leg
-therefore does not fail: it hangs until whatever deadline it was given,
-and reports an empty screen.
+`QueryPolicy`'s responder answers eight queries: the device-attributes
+fence, four optional capability queries (`\x1b[?2026$p`, `\x1b[?u`, the SGR
+readback, the box-glyph probe), and three a real terminal answers whatever
+its capabilities are -- the OSC 11 background query, the DSR behind it, and
+since 2026-09-06 a bare `\x1b[6n`. The capture above was taken while that
+last one went unanswered, which is what left a Windows pty leg hanging
+until whatever deadline it was given and reporting an empty screen.
 
 ## 2. What the parser resolves from each stream
 
@@ -316,7 +326,7 @@ recorder's contract all the same.
 | Concern | Unix behavior | Required on Windows |
 |---|---|---|
 | Startup handshake | child paints unprompted | master must answer `\x1b[6n` with `\x1b[<row>;<col>R` before any child output arrives, for **every** child, editor or not |
-| Query responder | `QueryPolicy` answers DA1, `?2026$p`, `?u`, SGR | needs a cursor-position answer, or every ConPTY leg hangs to its deadline and reports an empty screen |
+| Query responder | `QueryPolicy` answers DA1, `?2026$p`, `?u`, SGR, the box-glyph probe, OSC 11, DSR and a bare `\x1b[6n` | the cursor-position answer is what a ConPTY leg needs; without it every leg hangs to its deadline and reports an empty screen |
 | Screen assertions | `contents()` is row-structured | read cells (`with_screen`, `cell(row, col)`); `contents()` collapses full-width rows into one wrapped line |
 | Row structure | rows end `\x0d\x0a` | rows are padded through the final column by absolute positioning |
 | Resize detection | no size report on the wire | `\x1b[8;<rows>;<cols>t` prefixes the resize repaint and marks it apart from an engine redraw |
