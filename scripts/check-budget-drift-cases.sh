@@ -292,6 +292,14 @@ expect 1 'claim:docs/benchmarking.md:12' \
   'a row naming the engine through words no determiner list foresaw'
 
 new_case
+printf '\n| first paint (`echo.view_p99_ms`) | 5.2x faster than `nvim` |\n' >> "$CASE/$BENCH"
+expect 1 'claim:docs/benchmarking.md:12' 'a row naming the engine in backticks'
+
+new_case
+printf '\n| first paint (`echo.view_p99_ms`) | 5.2x faster than **bare Neovim** |\n' >> "$CASE/$BENCH"
+expect 1 'claim:docs/benchmarking.md:12' 'a row naming the engine in bold, the pages'"'"' house style'
+
+new_case
 printf '\n| settled screen (`echo.view_p99_ms`) | ahead of that boundary, a cost paid identically by bare nvim |\n' \
   >> "$CASE/$BENCH"
 expect 0 '' 'a comparative whose object is a boundary, with the engine in a later clause'
@@ -457,9 +465,12 @@ expect 1 'marker:view_p99_ms no-felt' \
 # Taskfile.yml names: the release path runs scripts/package-bundle.sh from a
 # workflow and scripts/mbp-build-leg.sh runs on the macOS host the contract
 # is about, so a Taskfile-derived list left the five scripts no task names
-# ungraded. The walk also keeps a new script graded without an edit here.
+# ungraded. Selected by shebang, not extension: the remote-test fixtures
+# under scripts/test-fixtures/ are #!/bin/sh with no suffix and run on the
+# macOS host too. The walk also keeps a new script graded without an edit
+# here.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GUARDED=$(cd "$ROOT" && find scripts -name '*.sh' | LC_ALL=C sort) || true
+GUARDED=$(cd "$ROOT" && find scripts -type f -exec grep -lE '^#!.*(bash|/sh)$' {} + | LC_ALL=C sort) || true
 
 report() {
   n=$((n + 1))

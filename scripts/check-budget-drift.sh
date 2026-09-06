@@ -168,8 +168,10 @@ export CLAIM='[0-9](\.[0-9]+)?[ ]*(x|\xc3\x97)([^0-9]|$)|(faster|sooner|quicker|
 # list of determiners lets "plain old Neovim" through, and reaching to the
 # end of the sentence refuses "ahead of that boundary ... paid identically
 # by bare nvim", where the comparative names no engine and the engine is
-# another clause's subject.
-export ENGINE='(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([ ]+[A-Za-z'"'"'-]+){0,3}[ -]+([Nn]vim|NVIM|[Nn]eovim)'
+# another clause's subject. A window word is any non-space token and
+# markup may sit before the engine: the pages write `**bare Neovim**` and
+# `` `nvim` ``, and a letters-only class let both through.
+export ENGINE='(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([ ]+[^ ]+){0,3}[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)'
 
 claims_in() {
   local page="$1" first="${2:-1}" last="${3:-}"
@@ -251,7 +253,7 @@ done <<SECTIONS
 ### 3.1 Budgets (CI-gated once the harness lands, P3)|^#{2,3} 
 SECTIONS
 if [[ -n "${claimed//[$'\n' ]/}" ]]; then
-  echo "BUDGET DRIFT FAIL: a comparative claim stands in a paragraph that names no felt metric. A win is stated by the cell that earns it -- name that cell's metric beside the claim, or state the moment and its paired numbers in words:" >&2
+  echo "BUDGET DRIFT FAIL: a comparative claim stands in a paragraph that names no felt metric. A win is stated by the cell that earns it -- name that cell's metric beside the claim, or state the moment and its paired numbers in words. A row that names the engine it beats is refused whatever anchors it: a row states a win by publishing the paired numbers:" >&2
   printf '%s' "$claimed" | grep -v '^$' | sed 's/^/  /' >&2
   fail=1
 fi
