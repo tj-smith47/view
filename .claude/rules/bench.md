@@ -65,15 +65,33 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
 
 - a `[[budget]]` number stops appearing in the spec row it names;
 - a diagnostic or resource row's spec text does not say which it is;
-- `README.md` or `docs/performance.md` names any metric identifier.
+- `README.md` or `docs/performance.md` names any metric identifier;
+- a paragraph on `README.md`, `docs/performance.md`, `docs/benchmarking.md`,
+  spec section 1 or spec section 3.1 states a comparative -- a multiplier
+  (`5.2x`, `1.10x`) or a comparison naming what it beats ("faster than bare
+  Neovim", "ahead of") -- while naming no `kind = "felt"` cell id.
 
-That last rule is the strict form, and it is the one with no false
+The last rule is the one the vocabulary needs, because the claim it refuses
+was published in words: "First paint 25.2 ms vs 130.3 ms, 5.2x faster" cites
+a diagnostic as a win and carries no identifier for the identifier rule to
+catch. A claim is anchored by the whole cell id (`echo.ratio_p50`), never
+the bare metric name, since `ratio_p50` is felt on one row and diagnostic on
+another and is a substring of `marker_ratio_p50` besides. The two
+user-facing pages therefore carry no comparative at all -- naming the cell
+that would anchor one is what the identifier rule refuses there -- so they
+state moments and paired numbers, and the comparisons live in
+`docs/benchmarking.md` beside the cell that earns them.
+`scripts/check-budget-drift-cases.sh` grades all four rules and is what
+stops the check regressing to the identifier-only form.
+
+The identifier rule is the strict form, and it is the one with no false
 positives: the user-facing pages state moments in words ("the key reaches
 nvim in under a tenth of a millisecond"), so an identifier on either page is
 a number quoted outside the vocabulary that decides what it may claim.
 Identifiers, statistics, classes, headroom and re-seating live in
-`docs/benchmarking.md`, which nothing checks because nobody reads it for a
-claim.
+`docs/benchmarking.md`, which carries identifiers freely and is read for
+comparatives all the same: it is where a ratio is allowed to be stated, so
+it is where a ratio has to name its cell.
 
 ## A moment nobody has measured says so
 

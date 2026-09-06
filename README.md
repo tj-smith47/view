@@ -102,7 +102,9 @@ config, not yet recorded. Plugin-free, view's worst keystroke in a thousand
 takes 0.73 ms against Neovim's 0.67 ms, and at the median view is about 13%
 behind -- both a fraction of the ~10 ms where a person starts to notice a
 key lagging their finger. With the engine on the far side of a network, view
-paints a predicted character at 0.39x the time bare Neovim takes locally.
+paints a predicted character in 0.30 ms at that same worst case, without
+waiting for the round trip: the glyph is corrected the moment the engine
+answers.
 
 Scrolling, the picker, what happens when the engine hangs, memory, and what
 contributes to each of the numbers above:
@@ -142,7 +144,8 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 - [x] ★ **Engine supervision.** A hung or crashed Neovim is interrupted or
       restarted with buffers rehydrated from swap; the UI never blanks.
 - [x] ★ **Remote editing.** `view --remote host:path`: engine over SSH,
-      paint and input local, keystrokes echoed ahead of the round trip,
+      paint and input local, keystrokes echoed without waiting for the
+      round trip,
       OSC 52 clipboard.
 
 ### Landing before v0.1

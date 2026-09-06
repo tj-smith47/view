@@ -56,9 +56,11 @@ their finger, which is why the gap is tracked rather than felt.
 
 When the engine runs on another machine, view can show the character before
 the round trip is back -- a predicted glyph, corrected the moment the engine
-answers. Measured plugin-free, that puts the character on screen at 0.39x
-the time bare Neovim takes locally, and it is the one place view is
-decisively ahead rather than close.
+answers. Measured plugin-free, that puts the predicted glyph on screen in
+0.30 ms at the worst of a thousand keystrokes, with the engine on another
+machine and the round trip still in flight. The paired reading against a
+local Neovim on the same run, and the cell that carries it, are in
+[docs/benchmarking.md](benchmarking.md).
 
 What makes it that number: the key leaves your terminal and reaches Neovim
 in under a tenth of a millisecond, and the redraw that comes back reaches
@@ -76,9 +78,10 @@ You hold a key down in a 100,000-line file and watch the text keep up.
 
 Plugin-free, the screen is never more than 1.07 ms behind your input, and
 with the 15-plugin bench stack never more than 1.23 ms -- against a 16 ms
-budget, which is one frame at 60 Hz. Paired, view is 1.6 to 1.9x Neovim's
-figure on the same run: both numbers are a fraction of a frame, so the ratio
-is a bar view has not met rather than a lag you can see.
+budget, which is one frame at 60 Hz. Paired on the same run, view's
+staleness is the larger of the two figures: both are a fraction of a frame,
+so the gap is a bar view has not met rather than a lag you can see. The
+paired reading is in [docs/benchmarking.md](benchmarking.md).
 
 A plugin storm or a `:terminal` flood pouring output into the screen is the
 same moment under load, and there the screen answers on a 14.6 ms cadence --

@@ -8,7 +8,9 @@
 # and its max must appear in that same row's text.
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A tree handed in as the single argument replaces the one this script lives
+# in, which is how the case matrix points it at a fixture tree.
+root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 budgets="$root/crates/view-bench/budgets.toml"
 spec="$root/.claude/specs/2026-07-17-view-design.md"
 
@@ -107,6 +109,115 @@ while IFS= read -r metric; do
     fi
   done
 done < <(grep -E '^metric = ' "$budgets" | sed 's/^metric = "//; s/"$//' | sort -u)
+
+# Third cross-check: a win claim names the cell that earns it. The
+# identifier rule above is the strict form and it only reaches the two
+# user-facing pages; the claim this whole vocabulary exists to refuse -- a
+# diagnostic quoted as a win -- was written in words and carried no
+# identifier at all ("First paint ... 25.2 ms vs 130.3 ms, 5.2x faster").
+# So every surface that states a claim is read for the shape of one: a
+# multiplier, or a comparative naming what it beats. A paragraph carrying
+# one passes only if it also names a felt metric -- which is why the two
+# user-facing pages carry no comparative at all, since naming an
+# identifier there breaks the rule above: they state moments and paired
+# numbers, and the comparisons live where the cell that earns them can be
+# named beside them.
+#
+# Paragraph rather than line, because a markdown table is one claim spread
+# over its rows and the identifier that anchors it sits in whichever row
+# names the cell.
+# Whole cell ids (scenario.metric), never the bare metric name: `ratio_p50`
+# is felt on the echo row and diagnostic on the fixture rows, and it is a
+# substring of the diagnostic `marker_ratio_p50` besides -- so a bare name
+# would let the very cell this rule refuses anchor the claim it was quoted
+# for.
+felt_ids="$(awk '
+  # every table header, not just [[budget]]: a [[shortfall]] carries a
+  # scenario and a metric of its own, and a block that only reset on
+  # [[budget]] read the felt kind of the row above straight into them.
+  /^\[/ { kind=""; metric=""; scenario=""; next }
+  /^scenario = / { scenario=$0; sub(/^scenario = "/, "", scenario); sub(/"$/, "", scenario) }
+  /^metric = / { metric=$0; sub(/^metric = "/, "", metric); sub(/"$/, "", metric) }
+  /^kind = / { kind=$0; sub(/^kind = "/, "", kind); sub(/"$/, "", kind) }
+  { if (kind == "felt" && metric != "" && scenario != "") { print scenario "." metric; metric="" } }
+' "$budgets" | sort -u | tr '\n' ' ')"
+if [[ -z "${felt_ids// /}" ]]; then
+  echo "BUDGET DRIFT FAIL: $budgets declares no felt metric, so no claim anywhere could name one" >&2
+  exit 1
+fi
+
+# a multiplier ("5.2x", "1.10x"), or a comparative that names what it beats
+# ("faster than bare Neovim", "ahead of the round trip"). The multiplier
+# stops short of a digit so that a terminal size (120x40) is a size and not
+# a claim. Exported rather than passed with -v, because awk expands escape
+# sequences inside a -v assignment and would eat the regex's backslashes.
+export CLAIM='[0-9](\.[0-9]+)?[ ]*(x|\xc3\x97)([^0-9]|$)|(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([^a-z]|$)'
+
+claims_in() {
+  local page="$1" first="${2:-1}" last="${3:-}"
+  local shown="${page#"$root"/}"
+  [[ -f "$page" ]] || return 0
+  sed -n "${first},${last:-\$}p" "$page" | awk -v ids="$felt_ids" -v page="$shown" -v off="$((first - 1))" '
+    function verdict(   i, j, anchored) {
+      if (hits == 0) { return }
+      anchored = 0
+      for (i = 1; i <= lines; i++) {
+        for (j = 1; j <= names; j++) {
+          if (index(para[i], id[j]) > 0) { anchored = 1 }
+        }
+      }
+      if (anchored) { return }
+      for (i = 1; i <= lines; i++) {
+        if (para[i] ~ claim) { print page ":" (no[i] + off) ": " para[i] }
+      }
+    }
+    BEGIN { names = split(ids, id, " "); claim = ENVIRON["CLAIM"] }
+    /^[[:space:]]*$/ { verdict(); lines = 0; hits = 0; next }
+    {
+      lines++
+      para[lines] = $0
+      no[lines] = NR
+      if ($0 ~ claim) { hits++ }
+    }
+    END { verdict() }
+  '
+}
+
+# The spec is read at its two claim-bearing sections rather than whole: the
+# rest of it is a design document whose measurements stand in their own
+# context, and section 1 and section 3.1 are where a reader takes a claim
+# from.
+section_bounds() {
+  awk -v heading="$1" -v closer="$2" '
+    $0 == heading { start = NR; next }
+    start && $0 ~ closer { print start ":" (NR - 1); found = 1; exit }
+    END { if (start && !found) { print start ":" NR } }
+  ' "$spec"
+}
+
+claimed=""
+for page in "$root/README.md" "$root/docs/performance.md" "$root/docs/benchmarking.md"; do
+  claimed+="$(claims_in "$page")"$'\n'
+done
+# heading|closing-pattern; a pipe, because a tab inside a here-doc is one
+# editor away from becoming spaces and neither heading carries one.
+while IFS='|' read -r heading closer; do
+  bounds="$(section_bounds "$heading" "$closer")"
+  if [[ -z "$bounds" ]]; then
+    echo "BUDGET DRIFT FAIL: the spec carries no section headed \"$heading\", so the claims a reader takes from it go unread" >&2
+    fail=1
+    continue
+  fi
+  claimed+="$(claims_in "$spec" "${bounds%:*}" "${bounds#*:}")"$'\n'
+done <<SECTIONS
+## 1. Product definition|^## 
+### 3.1 Budgets (CI-gated once the harness lands, P3)|^#{2,3} 
+SECTIONS
+if [[ -n "${claimed//[$'\n' ]/}" ]]; then
+  echo "BUDGET DRIFT FAIL: a comparative claim stands in a paragraph that names no felt metric. A win is stated by the cell that earns it -- name that cell's metric beside the claim, or state the moment and its paired numbers in words:" >&2
+  printf '%s' "$claimed" | grep -v '^$' | sed 's/^/  /' >&2
+  fail=1
+fi
 
 if [[ $entries -eq 0 ]]; then
   echo "BUDGET DRIFT FAIL: no [[budget]] entries found in $budgets" >&2

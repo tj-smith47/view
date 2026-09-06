@@ -111,15 +111,16 @@ Recorded baselines on a shared Linux dev host:
 | What | view | bare Neovim | |
 |---|---|---|---|
 | UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower |
-| First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded | |
+| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower (`first_paint.marker_ratio_p99`) |
+| First paint, cold, full login, `user` (p99) | 80.5 ms | not recorded on its own | `first_paint.marker_cold_ms`, seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`marker_ratio_p50` 1.084, `marker_ratio_p99` 1.046) |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower |
+| Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower (`echo.view_p99_ms`, `echo.ratio_p50`) |
+| Keystroke to predicted glyph, engine over a network (p99) | **0.30 ms** | n/a | `echo_speculated.speculated_paint_p99_ms`; `echo_speculated.speculated_ratio_p50` reads 0.394 against a local bare Neovim in the same run |
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
 | Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
-| Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
+| Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower (the paired ratio beside the felt `scroll.staleness_p99_ms`) |
 
 The two bare-Neovim first-paint figures are the 2026-09-06 dev-linux
 retake. The figures they replace were withdrawn: both sides are spawned on
@@ -146,9 +147,13 @@ reason attached, so a gate run on those classes fails loudly on the missing
 bars rather than attesting to them, until each is re-seated from a run
 under the answering pty.
 
-The `user` row is measured by the same code as the two above it and lands
-with the next recorded baseline; it is listed empty rather than omitted so
-its absence is visible.
+The `user` row is recorded. dev-linux holds `first_paint.marker_cold_ms`
+80.512 ms and `shell_visible_cold_ms` 4.543 ms, seated at `e9087db`, and its
+two ratios come from the 2026-09-06 retake above (1.084 p50, 1.046 p99).
+The other three classes hold the absolute and owe the ratio: `dev-macos`
+(87.563 ms), `gh-linux` (96.326 ms) and `gh-macos` (169.099 ms) each carry
+`marker_ratio_p50` and `marker_ratio_p99` on that cell as `withdrawn`, the
+same DSR re-seat they owe on `minimal` and `heavy`.
 
 Until a class records that cell, a gate run against that class reports it
 as uncovered and exits on it -- the designed signal for a measured row
@@ -188,6 +193,21 @@ $ task user-fixture     # after task compat has filled the plugin cache
 $ CLASS=controlled-linux task bench -- --scenario startup --fixture user --record
 ```
 
+What the five cost a gate leg, per class, from the harness's own sample
+counts (`--warmup 100 --samples 1000 --trials 3`): `startup.user` is a cold
+scenario, so it spawns both editors once per sample -- 2200 process spawns,
+the same shape and cost as one `first_paint` cell. The other four spawn a
+session and drive it: `echo.user`, `echo_speculated.user` and `scroll.user`
+spawn one session per side (2 spawns) and drive `trials x (warmup +
+samples)` = 3300 samples per side, paced by the driver's own inter-sample
+sleep (5 ms on echo), so roughly 30 s each; `flood.user` spawns a session
+per side per trial (6 spawns) and runs the fixed 15 s flood window in each,
+so 1.5 min. The floor for a spawn is the class's own recorded
+`first_paint.marker_cold_ms`, which puts `startup.user` alone at >= 3.5 min
+on `gh-linux` (2200 spawns of 96.3 ms) and >= 6.2 min on `gh-macos`
+(169.1 ms each); the four session cells add ~3 min on top of that, both
+legs.
+
 ### Memory equivalence, 15-plugin lazy.nvim stack
 
 view embeds Neovim, so it can never be smaller than the Neovim it embeds --
@@ -205,8 +225,9 @@ The first two rows are not a fair comparison: view's own-process number
 deliberately excludes the Neovim child it spawns, the same exclusion the
 no-plugins row above documents. The tree row is the honest one, summing
 view's process and its embedded engine's, and it is what a bare-Neovim
-comparison must be read against: view's real footprint here is about 6.4x
-bare Neovim's. Neither side changes much between this reading and the
+comparison must be read against: 27.96 MB of resident memory for view and
+its engine together, where bare Neovim's whole process reads 4.39 MB. A
+footprint is a resource row and states no speed. Neither side changes much between this reading and the
 no-plugins one for view's own-process number (4.96 MB vs 5.00 MB) because
 lazy.nvim defers most of the 15 plugins until their trigger event fires,
 and the standard workload (opening and paging through plain text buffers)
@@ -215,8 +236,9 @@ not a ceiling on what a plugin stack can cost once its triggers do fire.
 
 ## The typing gap
 
-Steady typing is currently about 13% slower than bare Neovim, and sustained
-scrolling about 1.6 to 1.9x. Both are sub-millisecond and far inside their budgets,
+Steady typing is currently about 13% slower than bare Neovim
+(`echo.ratio_p50`), and sustained scrolling about 1.6 to 1.9x the paired
+figure beside the felt `scroll.staleness_p99_ms`. Both are sub-millisecond and far inside their budgets,
 so neither is perceptible. The goal is to beat Neovim, though, not to tie
 it, so the gap gets tracked down rather than shrugged off.
 
@@ -225,7 +247,7 @@ speaking Neovim's RPC protocol just costs this much. Neovim ships its own
 out-of-process TUI, which makes that theory testable. Measured under the
 identical protocol on the same host:
 
-| steady typing, dev-linux (no plugins / 15-plugin stack) | vs bare Neovim |
+| steady typing, dev-linux (no plugins / 15-plugin stack) | vs bare Neovim (`echo.ratio_p50`) |
 |---|---|
 | Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** |
 | view, at the time of that measurement | 1.22x / 1.24x |
@@ -249,7 +271,7 @@ waking an idle core accounts for most of the improvement:
 |---|---|---|
 | RPC handoff to bytes written | 42.5 µs | **10.5 µs** |
 | Keystroke to RPC bytes written (p99) | 154.7 µs | **117.7 µs** |
-| Steady typing vs Neovim, no plugins | 1.354x | **1.172x** |
+| Steady typing vs Neovim, no plugins (`echo.ratio_p50`) | 1.354x | **1.172x** |
 | Steady typing vs Neovim, 15 plugins | 1.244x | **1.184x** |
 | Tail (p99) typing ratio, 15 plugins | 1.142x | **1.010x** |
 
