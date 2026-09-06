@@ -1405,7 +1405,7 @@ impl EngineModel {
     /// `mouse_off` when its own view of the mouse state changes, and that
     /// view is per-process: the replacement is always a freshly spawned
     /// child ([`crate::model::Model`]'s only caller of this restarts through
-    /// `Engine::spawn_recovering`), so it starts from mouse-off and
+    /// `Engine::restart`), so it starts from mouse-off and
     /// announces `mouse_on` only if it wants one. A stale `true` left here
     /// would swallow the host terminal's own selection gestures for the rest
     /// of the session with nothing ever to correct it.

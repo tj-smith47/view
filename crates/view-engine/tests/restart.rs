@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use view_engine::process::{Engine, EngineConfig, SWAP_RECOVERY_PROBE};
+use view_engine::process::{Engine, EngineConfig, RemoteSpec, SWAP_RECOVERY_PROBE};
 
 mod common;
 
@@ -72,6 +72,35 @@ fn session(dir: &Path) -> EngineConfig {
 /// [`session`], plus the `file` it opens as an argument.
 fn editing(dir: &Path, file: &Path) -> EngineConfig {
     session(dir).with_arg(file)
+}
+
+/// [`editing`], reached through `scripts/test-fixtures/fake-ssh` rather than
+/// by starting a local editor.
+///
+/// The stand-in reproduces the one client behaviour this path turns on --
+/// everything trailing the destination is joined into a single string and
+/// handed to a shell to re-parse -- and runs the result on this host, so a
+/// swap file the far side writes is one this test can also see. That is what
+/// makes the two answers below observable at all: a real far side is a disk
+/// no test host can arrange.
+#[cfg(unix)]
+fn editing_over_ssh(dir: &Path, file: &Path) -> EngineConfig {
+    let ssh = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/test-fixtures/fake-ssh")
+        .canonicalize()
+        .expect("the stand-in client is committed alongside the crate");
+    editing(dir, file).with_remote(RemoteSpec::new("view-test-host").with_ssh_bin(ssh))
+}
+
+/// The process id of the editor this engine is talking to, asked of that
+/// editor rather than recognised off the process table.
+///
+/// A remote spawn's own [`Engine::pid`] is the client's, and the editor it
+/// reaches sits behind however many processes that client made on the way.
+/// Only the editor can say which pid is its own, and killing anything else
+/// on this shared host is not this test's to do.
+fn engine_pid(engine: &Engine) -> u32 {
+    u32::try_from(number(engine, "getpid()")).expect("a pid fits in u32")
 }
 
 /// The swap files nvim has written under `dir` so far.
@@ -347,10 +376,11 @@ fn a_restart_after_a_crash_yields_a_live_engine() {
     );
 }
 
-/// The whole point of the flag, end to end: an edit that was never written
-/// to disk comes back from nvim's own swap file, and nothing else does. This
-/// is the recovery guarantee the restart claims, stated as a test -- no
-/// view-side copy of the text exists to produce it from.
+/// The whole point of the recovery, end to end: an edit that was never
+/// written to disk comes back from nvim's own swap file, and nothing else
+/// does. This is the recovery guarantee the restart claims, stated as a test
+/// -- no view-side copy of the text exists to produce it from, and no
+/// recovery flag on the replacement's command line either.
 #[test]
 fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
     let dir = scratch("recovers-swap");
@@ -364,18 +394,12 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
         .handle
         .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
         .unwrap();
-    // the bridge is what tells the connection which swap files this session
-    // holds, and a restart passes nvim's recovery flag only for one it was
-    // told about: a session that registered nothing has nothing to recover
-    engine
-        .handle
-        .register_bridge(engine.api_info.channel_id)
-        .unwrap();
     write_unsaved_edit(&engine, "never written to disk");
-    assert!(
-        !engine.handle.recorded_swaps().is_empty(),
-        "the session holds a swap file and must have reported it: {:?}",
-        engine.handle.recorded_swaps()
+    assert_eq!(
+        swap_files(&dir).len(),
+        1,
+        "the session must be holding a swap file before it is killed: {:?}",
+        swap_files(&dir)
     );
     kill_out_of_band(engine.pid());
 
@@ -398,14 +422,15 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
     );
 
     assert!(
-        spawned_with(&engine, "-r"),
-        "the recovering child carries no -r: {:?}",
+        !spawned_with(&engine, "-r"),
+        "the recovery is the --cmd's SwapExists answer, not a flag view \
+         decided from this host's disk: {:?}",
         engine.command_line()
     );
     assert_os_agrees(&engine);
 }
 
-/// The other side of the same flag, and the shape the user's own
+/// The other side of the same recovery, and the shape the user's own
 /// configuration takes: `swapfile = false` means there is no swap file for
 /// a restart to replay, and a restart that passed `-r` anyway handed nvim a
 /// recovery that produces no buffer. `create_windows` then leaves through
@@ -428,19 +453,15 @@ fn a_restart_with_no_swap_to_recover_comes_up_editable() {
         .handle
         .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
         .unwrap();
-    engine
-        .handle
-        .register_bridge(engine.api_info.channel_id)
-        .unwrap();
     assert_eq!(
         first_line(&engine),
         "what is on disk",
         "the session must be on the file before its swap is asked about"
     );
     assert!(
-        engine.handle.recorded_swaps().is_empty(),
+        swap_files(&dir).is_empty(),
         "a session with swap files off holds none: {:?}",
-        engine.handle.recorded_swaps()
+        swap_files(&dir)
     );
     kill_out_of_band(engine.pid());
 
@@ -457,6 +478,11 @@ fn a_restart_with_no_swap_to_recover_comes_up_editable() {
         "there was no swap file to recover and the flag ends the child: {:?}",
         engine.command_line()
     );
+    assert!(
+        swap_files(&dir).is_empty(),
+        "the replacement wrote a swap file its predecessor never had: {:?}",
+        swap_files(&dir)
+    );
     engine.handle.input("ihello-after-restart<Esc>").unwrap();
     assert_eq!(
         first_line(&engine),
@@ -468,6 +494,121 @@ fn a_restart_with_no_swap_to_recover_comes_up_editable() {
         "the replacement is parked at a prompt nobody can answer"
     );
     assert_os_agrees(&engine);
+}
+
+/// The far side's own disk answers, on the spawn where this host's cannot.
+///
+/// A remote engine's swap file sits on the machine the editor runs on, and
+/// nothing this host can stat says whether it is there. Both answers are
+/// pinned here because only one of them used to be reachable: an earlier
+/// build read "remote" as "assume the swap is there", so the absent case
+/// handed the far replacement `-r` for a swap that was gone and parked it at
+/// nvim's hit-enter prompt, where the user's first keystroke ends the
+/// session with exit code 1 -- over ssh, where no capture harness reaches.
+#[cfg(unix)]
+#[test]
+fn a_remote_restart_recovers_the_far_sides_swap_and_never_guesses_at_it() {
+    let dir = scratch("remote-recovers-swap");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+
+    let engine = Engine::spawn(editing_over_ssh(&dir, &file)).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    write_unsaved_edit(&engine, "never written to disk");
+    assert_eq!(
+        swap_files(&dir).len(),
+        1,
+        "the far session must be holding a swap file before it is killed: {:?}",
+        swap_files(&dir)
+    );
+    let far = engine_pid(&engine);
+    kill_out_of_band(far);
+    wait_until_gone(far);
+
+    let engine = engine
+        .restart(editing_over_ssh(&dir, &file))
+        .expect("a crashed remote engine must restart");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+
+    assert!(
+        !spawned_recovering(&engine),
+        "the flag would be this host's guess about the far side's disk: {:?}",
+        short_command_line(&engine)
+    );
+    assert_eq!(
+        first_line(&engine),
+        "never written to disk",
+        "the far replacement did not recover the swap file its predecessor left"
+    );
+    assert_eq!(
+        swap_events(&engine),
+        1,
+        "the recovery must be the one the injected window counted, not a \
+         buffer that merely looks right"
+    );
+    assert_not_parked(&engine);
+}
+
+/// The answer the old reading could not give: a remote session whose swap is
+/// gone -- `swapfile = false`, the user's own configuration, and what `-n`
+/// leaves here -- comes up on the file and takes the user's keys.
+///
+/// The keystroke is the assertion. A replacement parked in `wait_return`
+/// answers `nvim_get_mode` no differently from a live one until something
+/// satisfies the prompt, and what satisfies it is the first key the user
+/// sends.
+#[cfg(unix)]
+#[test]
+fn a_remote_restart_with_no_swap_left_comes_up_on_the_file_and_takes_the_users_keys() {
+    let dir = scratch("remote-no-swap");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+
+    let engine = Engine::spawn(editing_over_ssh(&dir, &file).with_arg("-n")).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    assert_eq!(
+        first_line(&engine),
+        "what is on disk",
+        "the far session must be on the file before its swap is asked about"
+    );
+    assert!(
+        swap_files(&dir).is_empty(),
+        "a session with swap files off holds none: {:?}",
+        swap_files(&dir)
+    );
+    let far = engine_pid(&engine);
+    kill_out_of_band(far);
+    wait_until_gone(far);
+
+    let engine = engine
+        .restart(editing_over_ssh(&dir, &file).with_arg("-n"))
+        .expect("a crashed remote engine must restart");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+
+    assert!(
+        !spawned_recovering(&engine),
+        "there was no swap file on the far side and the flag ends the child: {:?}",
+        short_command_line(&engine)
+    );
+    engine.handle.input("ihello-after-restart<Esc>").unwrap();
+    assert_eq!(
+        first_line(&engine),
+        "hello-after-restartwhat is on disk",
+        "the far replacement took the user's keys instead of leaving on them"
+    );
+    assert_not_parked(&engine);
 }
 
 /// The surfaces left attached by a `[native]` table that turns
@@ -1255,6 +1396,38 @@ fn a_restart_never_inherits_the_dead_engines_wedge() {
 /// rule re-derived from the config a second time.
 fn spawned_with(engine: &Engine, flag: &str) -> bool {
     engine.command_line().iter().any(|arg| arg == flag)
+}
+
+/// Whether nvim was handed its recovery flag, asked in the one shape that
+/// answers for both kinds of spawn: a local child's argument vector carries
+/// the flag as a token of its own, and a remote child's whole invocation is
+/// one shell-quoted string joined with spaces.
+///
+/// The remote half splits rather than searching for the quoted flag, because
+/// `SWAP_RECOVERY_CMD` carries `'-r'` in its own text -- it is the argv test
+/// that opens the recovery window -- and a substring match reads every spawn
+/// as recovering.
+fn spawned_recovering(engine: &Engine) -> bool {
+    engine.command_line().iter().any(|arg| {
+        let text = arg.to_string_lossy();
+        text == "-r" || text.split(' ').any(|token| token == "'-r'")
+    })
+}
+
+/// The command line with every `--cmd` chunk elided, so a failure names the
+/// arguments it is about instead of republishing two kilobytes of Lua.
+fn short_command_line(engine: &Engine) -> Vec<String> {
+    engine
+        .command_line()
+        .iter()
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            match text.char_indices().nth(120) {
+                Some((at, _)) => format!("{}...", &text[..at]),
+                None => text.into_owned(),
+            }
+        })
+        .collect()
 }
 
 /// Cross-checks the recorded command line against the one the OS reports for

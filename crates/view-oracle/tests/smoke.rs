@@ -1339,25 +1339,33 @@ fn a_restart_whose_file_moved_under_the_swap_recovers_the_work_and_keeps_the_war
     );
 }
 
-/// The silent failure: a recovery that cannot make a swap file of its own,
-/// which nvim refuses to start and never says a word about on screen.
+/// A swap directory that has stopped accepting new files still gives the
+/// user their work back.
 ///
 /// `'directory'` refusing a new file is not exotic -- a read-only mount, a
 /// full or quota-bound filesystem, a swap directory owned by another user --
-/// and the restart that meets it is unattended, so nobody opted into it. The
-/// recovery does not happen: the buffer comes up **empty** where the file's
-/// contents should be, exactly as the no-swap case does, and one `:w`
-/// truncates the file on disk.
+/// and the restart that meets it is unattended, so nobody opted into it.
+/// Which is why this used to be the worst failure of the set: under nvim's
+/// own recovery flag `ml_recover` gives up on the `E303` it raises for the
+/// swap file it cannot create, `create_windows` leaves through `getout(1)`,
+/// and the buffer comes up **empty** where the file's contents should be --
+/// with nvim painting nothing about it, so view's own line was the only
+/// account there was.
 ///
-/// What makes this one worse than every other failure here is that nvim
-/// paints nothing. The other failures leave their own error on screen and
-/// view's line is the framing beside it; here view's line is the **only**
-/// account there is, and a reading that dropped this error left the user an
-/// empty buffer, a swap banner naming a recovery that did not happen, and
-/// nothing else.
+/// The recovery a replacement takes now is nvim's own `SwapExists` answer,
+/// and that path raises the same `E303` for the same reason and replays the
+/// swap anyway. Measured on the pinned engine against a `chattr +i` swap
+/// directory holding a killed session's swap: `--cmd <the guard> -r <file>`
+/// answers `E303` with `Recovery completed` and the recovered line, and
+/// `--cmd <the guard> <file>` answers the same, so the user keeps the work
+/// either way once the flag is not what opens the recovery. What the flag
+/// still decides is the case with no swap at all, which is why it is gone.
+///
+/// So the guarantee this pins is the one that is left: the work comes back,
+/// view says so, and it never says a recovery failed that did not.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
+fn a_restart_whose_swap_directory_refuses_a_new_file_still_recovers_the_work() {
     let paths = common::ScratchPaths::new("smoke");
     std::fs::write(&paths.scratch, "on disk\n").expect("scratch fixture must be writable");
     let swaps = paths.isolated_home.join("swap");
@@ -1371,6 +1379,11 @@ fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
         swaps.display()
     );
     let wrapper = write_swap_dir_locking_nvim_wrapper(&swaps);
+    let locked_marker = wrapper
+        .path()
+        .parent()
+        .expect("the wrapper lives in a directory of its own")
+        .join("locked");
 
     let directory = std::ffi::OsString::from(format!("set directory={}", swaps.display()));
     let mut session = spawn_view_pty_at(
@@ -1417,36 +1430,30 @@ fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
     assert!(kill_status.success(), "kill -KILL {killed} failed");
 
     let named = said_part(&view_core::native::supervision::swap_recovery_failure_notice("", true));
-    let (settled, claimed) = watch_screen(
-        &mut session,
-        Duration::from_secs(45),
-        &[RECOVERED_WORK],
-        |text| text.contains(&named) && text.contains(NO_SWAP_TO_MAKE),
-    );
+    let (settled, blamed) =
+        watch_screen(&mut session, Duration::from_secs(45), &[&named], |text| {
+            text.contains(UNSAVED) && text.contains(RECOVERED_WORK)
+        });
     assert!(
-        !claimed,
-        "view told the user their unsaved work came back from a recovery \
-         that never ran; screen:\n{}",
+        !blamed,
+        "view announced {named:?} for a recovery that brought the work \
+         back; screen:\n{}",
         session.screen()
     );
     assert!(
         settled,
-        "a recovery that could not make a swap file left the user an empty \
-         buffer with no account of it anywhere -- expected view's own \
-         {named:?} carrying the engine's {NO_SWAP_TO_MAKE:?}, which nothing \
-         else on this screen says; screen:\n{}",
+        "a swap directory that refuses new files cost the user the work \
+         their predecessor left in it -- expected {UNSAVED:?} back with \
+         view's own {RECOVERED_WORK:?} beside it; screen:\n{}",
         session.screen()
     );
+    assert!(
+        locked_marker.exists(),
+        "the replacement never met an unwritable swap directory, so this \
+         run proves nothing about one: {} is missing",
+        locked_marker.display()
+    );
 }
-
-/// nvim's own error for a swap file it cannot create, which it raises for
-/// the file it was told to recover and then gives up on the recovery.
-///
-/// The same code an ordinary session raises for its own swap file, which is
-/// why the reading that admits it is keyed on the file the message names
-/// rather than on the code (see `SWAP_RECOVERY_PROBE`).
-#[cfg(target_os = "linux")]
-const NO_SWAP_TO_MAKE: &str = "E303";
 
 /// A swap directory that refuses new files, and puts itself back however it
 /// was refused.
@@ -1590,21 +1597,29 @@ impl Drop for WrapperScript {
 }
 
 /// A `--nvim-bin` wrapper that makes `swaps` refuse new files on its way to
-/// a recovering engine, and leaves every other spawn alone.
+/// the second engine of a session, and leaves the first alone.
 ///
 /// The refusal has to arrive between the death and the replacement -- before
 /// it, the session under test could never write the swap this recovery is
-/// supposed to read. The `-r` the restart carries is what tells the two
-/// spawns apart, and it is the engine's own flag rather than anything this
-/// test invents.
+/// supposed to read. A count of the `--embed` spawns is what tells the two
+/// apart: view shapes a restart exactly like a first launch, so there is
+/// nothing on the replacement's own command line to key on, and `--embed`
+/// keeps a capability probe from being counted as an engine. The wrapper
+/// leaves the marker `locked` beside itself when it has locked, so a test
+/// can assert the replacement really met an unwritable directory rather
+/// than infer it.
 #[cfg(target_os = "linux")]
 fn write_swap_dir_locking_nvim_wrapper(swaps: &std::path::Path) -> WrapperScript {
     let real_nvim = real_nvim_path();
-    WrapperScript::new("locking-nvim", |_| {
+    WrapperScript::new("locking-nvim", |dir| {
         format!(
-            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-r\" ]; then\n    \
-             chattr +i {swaps} 2>/dev/null || chmod 0500 {swaps}\n    break\n  fi\ndone\n\
-             exec {real_nvim} \"$@\"\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--embed\" ]; then\n    \
+             n=$(cat {counter} 2>/dev/null || echo 0)\n    n=$((n + 1))\n    \
+             echo \"$n\" > {counter}\n    if [ \"$n\" -gt 1 ]; then\n      \
+             chattr +i {swaps} 2>/dev/null || chmod 0500 {swaps}\n      : > {locked}\n    \
+             fi\n    break\n  fi\ndone\nexec {real_nvim} \"$@\"\n",
+            counter = dir.join("count").display(),
+            locked = dir.join("locked").display(),
             swaps = swaps.display(),
         )
     })

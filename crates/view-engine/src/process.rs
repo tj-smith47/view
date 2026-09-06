@@ -571,7 +571,7 @@ impl EngineConfig {
     /// ui-startup-stdin`) -- so a child that did not wait for that UI reads
     /// its own RPC descriptor instead and opens an empty buffer.
     ///
-    /// A swap recovery ([`RECOVERY_ARG`]) is the second, and it is the
+    /// A caller's own [`RECOVERY_ARG`] is the second, and it is the
     /// destructive one. `create_windows` runs the recovery and leaves
     /// through `getout(1)` when it produced no buffer, and the prompt that
     /// stands between those two on an interactive startup is a prompt only
@@ -580,7 +580,9 @@ impl EngineConfig {
     /// `VimEnter`, where the same spawn without `--headless` parks and lets
     /// its caller read what the recovery raised. A recovery that ends the
     /// child has nobody left to tell the user their buffer came up empty,
-    /// which is the whole account view owes on that path.
+    /// which is the whole account view owes on that path. view adds the
+    /// flag to no spawn of its own ([`RECOVERY_ARG`]), so what reaches here
+    /// is what the user typed.
     #[must_use]
     pub fn attaches_late(&self) -> bool {
         self.late_attach.is_some() && !self.stdin_relay_requested() && !self.recovers_a_swap()
@@ -591,24 +593,6 @@ impl EngineConfig {
     #[must_use]
     fn recovers_a_swap(&self) -> bool {
         self.extra_args.iter().any(|arg| arg == RECOVERY_ARG)
-    }
-
-    /// This config with nvim's recovery flag on it, where the operand nvim
-    /// would recover has a swap file `swaps` names and that file is still
-    /// there ([`with_recovery`]).
-    ///
-    /// `swaps` is what the dead engine reported over its own bridge
-    /// ([`crate::EngineHandle::recorded_swaps`]): buffer name paired with
-    /// swap file name. A restart that knows of none passes no flag, which
-    /// is the reading that keeps a replacement alive.
-    ///
-    /// Public because the flag decides how the spawn is shaped, not only
-    /// what it is passed: a caller that has to know whether its
-    /// replacement attaches late ([`attaches_late`](Self::attaches_late))
-    /// has to ask a config that already carries the flag.
-    #[must_use]
-    pub fn recovering_recorded(self, swaps: &[(String, String)]) -> Self {
-        with_recovery(self, swaps)
     }
 
     /// The remote target a caller armed with [`with_remote`](Self::with_remote),
@@ -1284,9 +1268,10 @@ impl Engine {
     }
 
     /// Tears the current child down and brings a fresh one up from `cfg`,
-    /// with nvim's own recovery flag applied whenever `cfg` names a file for
-    /// it to act on (see [`with_recovery`]), so the replacement opens what
-    /// its predecessor left in a swap file rather than what is on disk.
+    /// which opens what its predecessor left in a swap file rather than what
+    /// is on disk: the replacement carries [`SWAP_RECOVERY_CMD`] like every
+    /// other spawn, and that answers the swap prompt with "recover" the
+    /// moment nvim opens a file that still has one.
     ///
     /// The teardown is the existing `Drop` sequence, unchanged and not
     /// duplicated: `qa!`, a bounded wait, then `SIGKILL` and a reap. The old
@@ -1318,31 +1303,8 @@ impl Engine {
         // forced sequence on every drop path, so re-implementing it here
         // would be a second copy free to drift from the one every other
         // shutdown takes
-        let swaps = self.handle.recorded_swaps();
         drop(self);
-        Self::spawn_recovering(cfg, &swaps)
-    }
-
-    /// The replacement half of [`restart`](Self::restart) on its own: a
-    /// fresh engine carrying nvim's own recovery flag, with nothing torn
-    /// down here.
-    ///
-    /// For the caller that has already resolved its own teardown and must
-    /// keep holding the connection it is replacing while the replacement is
-    /// attempted -- a reconnect over a transport that may refuse the
-    /// attempt, where the alternative is a session left with no engine at
-    /// all and nothing to report the failure through. The ownership rule
-    /// [`restart`](Self::restart) enforces is the caller's to keep here:
-    /// nothing may be brought up alongside a connection that is still live.
-    ///
-    /// # Errors
-    ///
-    /// The same shapes [`spawn`](Self::spawn) returns, for the same reasons.
-    pub fn spawn_recovering(
-        cfg: EngineConfig,
-        swaps: &[(String, String)],
-    ) -> Result<Self, EngineError> {
-        Self::spawn(cfg.recovering_recorded(swaps))
+        Self::spawn(cfg)
     }
 
     /// Whether this engine's child is the ssh client of a remote spawn
@@ -1551,8 +1513,8 @@ impl Engine {
     /// name first: read off the `Command` at spawn time, never re-derived
     /// from the config.
     ///
-    /// The one place the argument-shaping rules in [`with_recovery`] can be
-    /// asserted for what they actually delivered on every platform. Reading
+    /// The one place [`build_command`]'s argument shaping can be asserted
+    /// for what it actually delivered on every platform. Reading
     /// it back out of the OS process table instead is a Linux-only luxury
     /// (`/proc/<pid>/cmdline`), and a test written against that alone proves
     /// nothing anywhere else.
@@ -1610,7 +1572,15 @@ impl Drop for Engine {
 /// later file open turns into, which then never returns. `v:swapchoice` is
 /// nvim's own documented way for an autocommand to answer on the user's
 /// behalf (`:help SwapExists`), and `r` is the answer that keeps the work --
-/// recover from the swap, the same outcome [`RECOVERY_ARG`] gives a restart.
+/// recover from the swap.
+///
+/// It is also the whole of how a restart gets its predecessor's unsaved work
+/// back. nvim's own [`RECOVERY_ARG`] would do the same thing where a swap
+/// file is there and end the child where one is not, and only the host
+/// holding the file can tell those apart -- which is this host for a local
+/// engine and the far side for a remote one. This runs on whichever host
+/// that is, so neither spawn has to guess (see [`RECOVERY_ARG`] for the
+/// measurement).
 ///
 /// # Only the swap nobody still owns
 ///
@@ -2071,96 +2041,39 @@ pub const SWAP_RECOVERY_PROBE: &str = "[\
      ? v:errmsg : ''), \
      get(g:, 'view_swap_empty', line('$') == 1 && getline(1) == '')]";
 
-/// nvim's own crash-recovery flag: the replacement engine opens each file it
-/// was given from that file's swap file instead of from disk.
+/// nvim's own crash-recovery flag, which view recognises on a caller's
+/// argument list and never adds to one.
 ///
-/// Passed through [`EngineConfig::extra_args`] like any other engine
-/// passthrough argument, so [`build_command`] needs no notion of recovery at
-/// all.
+/// The flag reads the swap file on the machine nvim runs on, and the machine
+/// that decides whether to pass it is this one -- the same host for a local
+/// engine and the wrong host for a remote one, which cannot stat the far
+/// side's disk and would be passing the flag on a guess. What the flag does
+/// on a guess that is wrong is end the replacement: `create_windows` runs
+/// the recovery, leaves through `getout(1)` because it produced no buffer,
+/// and parks in `wait_return` on the `E305` it raised, so a child with a UI
+/// attached looks alive until the user's first keystroke answers the prompt
+/// and takes the session out with exit code 1.
+///
+/// [`SWAP_RECOVERY_CMD`] answers the same question where the disk is, on
+/// both kinds of spawn, and needs no guess to do it -- so view passes no
+/// recovery flag at all and lets nvim's own swap lookup find what is there.
+/// Measured on the pinned engine, hermetic home, one operand holding an
+/// unsaved edit a killed session left in its swap file:
+///
+/// | spawn | swap present | swap gone |
+/// | --- | --- | --- |
+/// | `--cmd <this> -r <file>` | exit 0, recovered text, `view_swap_recovered = 1` | exit 1, `E305`, nothing ran |
+/// | `--cmd <this> <file>` | exit 0, recovered text, `view_swap_recovered = 1` | exit 0, the file as it is on disk |
+///
+/// The recovered buffer, nvim's own multi-line recovery report and all four
+/// readings [`SWAP_RECOVERY_PROBE`] takes are identical across the top row;
+/// the bottom row is the whole difference, and it is the one a restart under
+/// `swapfile = false` takes on every operand.
+///
+/// It stays named here because a caller's own argument list may still carry
+/// it -- view forwards what the user typed -- and a spawn that does changes
+/// shape ([`EngineConfig::attaches_late`]).
 const RECOVERY_ARG: &str = "-r";
-
-/// Applies [`RECOVERY_ARG`] to a restart's config, but only for a spawn
-/// whose recovered operand has a swap file to recover.
-///
-/// The condition is nvim's own, measured against the pinned engine rather
-/// than assumed, and it has two halves.
-///
-/// `-r` with a file recovers that file's swap and leaves an ordinary
-/// editable session behind (mode `n`, and nothing blocking once
-/// [`SWAP_RECOVERY_CMD`] has dealt with the report nvim writes), while `-r`
-/// with no file at all means "list every swap file you can find", which
-/// prints that list to a UI that has just attached, parks the engine at the
-/// prompt acknowledging it, and then exits.
-///
-/// `-r` with a file that has *no* swap left ends the replacement just as
-/// surely, and that is the half a session with `swapfile` off meets on
-/// every restart: `create_windows` runs the recovery, leaves through
-/// `getout(1)` because it produced no buffer, and `getout` parks in
-/// `wait_return` on the way out because the recovery raised `E305`. With a
-/// UI attached the child then sits at a hit-enter prompt looking alive
-/// until the user's first keystroke answers it, and the session ends with
-/// the engine's exit code 1 before `VimEnter` was ever reached. Measured on
-/// the pinned engine: `nvim --headless -r <file with no swap>` exits 1
-/// having printed `E305` and run none of its `-c` commands, while the same
-/// spawn without the flag exits 0.
-///
-/// So the flag goes on only where [`recovers_something`] says there is a
-/// swap file to read, and every other restart opens its operands plainly --
-/// which loses nothing, because the `SwapExists` autocommand every spawn
-/// carries ([`SWAP_RECOVERY_CMD`]) recovers a swap the moment nvim opens a
-/// file that has one.
-///
-/// Position is irrelevant to nvim, which reads options wherever they appear
-/// ahead of `--`, so this appends rather than splicing ahead of the file
-/// arguments a caller already put in `extra_args`.
-fn with_recovery(mut cfg: EngineConfig, swaps: &[(String, String)]) -> EngineConfig {
-    // never twice: a session that restarts twice would otherwise hand nvim
-    // `-r -r`, and a config a caller built with the flag already on it is a
-    // config that means it once
-    let already = cfg.extra_args.iter().any(|arg| arg == RECOVERY_ARG);
-    if !already && recovers_something(&cfg, swaps) {
-        cfg.extra_args.push(OsString::from(RECOVERY_ARG));
-    }
-    cfg
-}
-
-/// Whether [`RECOVERY_ARG`] on `cfg` would replay a swap file that is
-/// actually there.
-///
-/// Only the *first* file operand is asked, because only the first is
-/// recovered: nvim's `create_windows` runs its recovery against the buffer
-/// that startup made current and opens the rest normally, so a second
-/// operand's swap is the `SwapExists` autocommand's to answer and a second
-/// operand's *missing* swap costs the spawn nothing. Measured on the pinned
-/// engine: `-r <no swap> <has swap>` exits 1 on the first operand's `E305`,
-/// and `-r <has swap> <no swap>` recovers and reaches `VimEnter`.
-///
-/// The operand is matched against the recorded buffer names as an absolute
-/// path -- nvim reports the names it opened, and a caller's own operand can
-/// be relative -- without resolving symlinks, which is the same resolution
-/// nvim's own `:p` applies to the name it reported.
-fn recovers_something(cfg: &EngineConfig, swaps: &[(String, String)]) -> bool {
-    let Some((_, operand)) = file_operands(&cfg.extra_args).into_iter().next() else {
-        return false;
-    };
-    let Ok(operand) = std::path::absolute(operand) else {
-        return false;
-    };
-    swaps
-        .iter()
-        .any(|(buffer, swap)| Path::new(buffer) == operand && swap_is_there(cfg, Path::new(swap)))
-}
-
-/// Whether the swap file `swap` names is on the disk the replacement will
-/// run against.
-///
-/// A remote child's swap sits on the far side's, which this host cannot
-/// stat and must not read a local path of the same name as: the name the
-/// engine reported is the whole of what is knowable there, and it was
-/// reported by a session that had the file open.
-fn swap_is_there(cfg: &EngineConfig, swap: &Path) -> bool {
-    cfg.remote.is_some() || swap.exists()
-}
 
 /// nvim options that take no value of their own, so an ordinary word
 /// following one of them is a file name rather than that option's argument.
@@ -2217,10 +2130,9 @@ pub fn stdin_operands(args: &[OsString]) -> Vec<usize> {
 ///
 /// Errs towards naming fewer in every case this build cannot read
 /// confidently, and each caller's use of the answer is what makes that the
-/// safe direction: a missed file costs a restart the recovery flag, and the
-/// `SwapExists` autocommand every spawn carries ([`SWAP_RECOVERY_CMD`]) still
-/// recovers the swap when the file is opened, while a value mistaken for a
-/// file costs the replacement engine its life.
+/// safe direction: a missed `-` leaves a stdin relay unarmed for a session
+/// that reads no stdin, while a value mistaken for one arms a relay against
+/// an argument the engine still needs.
 fn file_operands(args: &[OsString]) -> Vec<(usize, &OsStr)> {
     let mut operands: Vec<(usize, &OsStr)> = Vec::new();
     let mut expect_value = false;
@@ -3562,14 +3474,8 @@ mod config_tests {
         let recovering = EngineConfig::default()
             .with_remote(remote)
             .with_late_attach(120, 40)
-            .with_arg("notes.txt")
-            .recovering_recorded(&[(
-                std::path::absolute("notes.txt")
-                    .expect("a relative operand resolves")
-                    .to_string_lossy()
-                    .into_owned(),
-                "/far/side/notes.txt.swp".to_owned(),
-            )]);
+            .with_arg(RECOVERY_ARG)
+            .with_arg("notes.txt");
         let line = remote_line(&recovering);
         assert!(
             !line.contains("'--headless'"),
@@ -4109,8 +4015,8 @@ mod tests {
 
         let recovering = EngineConfig::default()
             .with_late_attach(80, 24)
-            .with_arg("notes.txt")
-            .recovering_recorded(&recorded_swap("notes.txt"));
+            .with_arg(RECOVERY_ARG)
+            .with_arg("notes.txt");
         assert!(
             !recovering.attaches_late(),
             "a swap recovery has to be attached before nvim can park at its prompt"
@@ -4118,9 +4024,9 @@ mod tests {
         assert!(
             EngineConfig::default()
                 .with_late_attach(80, 24)
-                .recovering_recorded(&[])
+                .with_arg("notes.txt")
                 .attaches_late(),
-            "a restart with no file to recover carries no recovery flag and runs headless"
+            "a spawn view shaped itself carries no recovery flag and runs headless"
         );
     }
 
@@ -4242,21 +4148,10 @@ mod tests {
         args.iter().map(OsString::from).collect()
     }
 
-    /// The operand reading the recovery flag is gated on, asked the way
-    /// [`recovers_something`] asks it.
+    /// Whether [`file_operands`] reads a file out of `args` at all, which is
+    /// the reading a relayed stdin is armed and stripped by.
     fn names_a_file(args: &[OsString]) -> bool {
         !file_operands(args).is_empty()
-    }
-
-    /// One engine-reported pair for `operand`, resolved the way the engine
-    /// resolves the buffer names it reports, naming a swap file that is
-    /// there -- this crate's own manifest, which every checkout has.
-    fn recorded_swap(operand: &str) -> Vec<(String, String)> {
-        let buffer = std::path::absolute(operand).expect("a relative operand resolves");
-        vec![(
-            buffer.to_string_lossy().into_owned(),
-            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").to_owned(),
-        )]
     }
 
     /// The outcome of a spawn, as text, so a refusal can be asserted on
@@ -4309,103 +4204,58 @@ mod tests {
         );
     }
 
-    /// The whole reading the recovery flag now rides on: nvim recovers its
-    /// *first* operand and nothing else, so that operand is the only one
-    /// whose swap file decides the flag -- and the flag goes on only while
-    /// that file is still there. A restart that passed `-r` for an operand
-    /// with no swap left hands nvim a recovery that produces no buffer;
-    /// `create_windows` leaves through `getout(1)`, parks at the hit-enter
-    /// prompt the `E305` raised, and the user's first keystroke ends the
-    /// session with exit code 1 before `VimEnter` ever ran.
+    /// The flag view never passes, on either kind of spawn.
+    ///
+    /// Deciding it here means deciding it from this host's disk, which is
+    /// the far side's for a remote spawn and a guess for it -- and a guess
+    /// that goes the wrong way ends the replacement at nvim's hit-enter
+    /// prompt on the `E305` its recovery raised. Every configuration below
+    /// is one an earlier build handed `-r`; what recovers them now is
+    /// [`SWAP_RECOVERY_CMD`], on the host that holds the file.
     #[test]
-    fn the_recovery_flag_rides_only_a_first_operand_whose_swap_is_still_there() {
-        let flags = |cfg: &EngineConfig| {
-            cfg.extra_args
-                .iter()
-                .filter(|arg| *arg == RECOVERY_ARG)
-                .count()
+    fn no_spawn_view_shapes_carries_nvims_recovery_flag() {
+        // read off the built command rather than off `extra_args`, so the
+        // remote branch is asked about the one string its far-side shell
+        // re-parses rather than about a list that never crosses. The remote
+        // half splits on the join rather than searching for the quoted flag,
+        // because `SWAP_RECOVERY_CMD` carries `'-r'` in its own text
+        let carries = |cfg: &EngineConfig| {
+            build_command(cfg)
+                .expect("these configs all build a command")
+                .get_args()
+                .any(|arg| {
+                    let text = arg.to_string_lossy();
+                    text == RECOVERY_ARG || text.split(' ').any(|token| token == "'-r'")
+                })
         };
-        let one_file = || EngineConfig::default().with_arg("notes.md");
+        let editing = |cfg: EngineConfig| cfg.with_arg("--clean").with_arg("notes.md");
 
-        assert_eq!(
-            one_file()
-                .recovering_recorded(&recorded_swap("notes.md"))
-                .extra_args,
-            args(&["notes.md", RECOVERY_ARG]),
-            "an operand the dead engine held a swap file for is recoverable, \
-             and the flag appends rather than splicing"
-        );
-        assert_eq!(
-            flags(&one_file().recovering_recorded(&[])),
-            0,
-            "an engine that reported no swap files -- `swapfile` off, the \
-             user's own configuration -- leaves nothing to recover"
-        );
-
-        let gone = vec![(
-            std::path::absolute("notes.md")
-                .expect("a relative operand resolves")
-                .to_string_lossy()
-                .into_owned(),
-            concat!(env!("CARGO_MANIFEST_DIR"), "/no-such-swap.swp").to_owned(),
-        )];
-        assert_eq!(
-            flags(&one_file().recovering_recorded(&gone)),
-            0,
-            "a swap file the engine named and the disk no longer has is not \
-             one nvim can replay"
-        );
-        assert_eq!(
-            flags(&one_file().recovering_recorded(&recorded_swap("other.md"))),
-            0,
-            "a swap belonging to some other buffer is not this operand's"
-        );
-
-        let two = EngineConfig::default()
-            .with_arg("notes.md")
-            .with_arg("other.md");
-        assert_eq!(
-            flags(&two.recovering_recorded(&recorded_swap("other.md"))),
-            0,
-            "nvim recovers the operand startup made current and opens the \
-             rest normally, so a later operand's swap cannot justify the flag"
-        );
-        assert_eq!(
-            flags(&EngineConfig::default().recovering_recorded(&recorded_swap("notes.md"))),
-            0,
-            "`-r` with no file at all lists every swap it can find and exits"
-        );
-
-        let once = one_file().recovering_recorded(&recorded_swap("notes.md"));
-        assert_eq!(
-            flags(&once.recovering_recorded(&recorded_swap("notes.md"))),
-            1,
-            "a second restart must not hand nvim `-r -r`"
-        );
-    }
-
-    /// A remote replacement's swap sits on the far side's disk. This host
-    /// cannot stat it, and a local path of the same name says nothing about
-    /// it either way, so the name the far engine reported is the answer.
-    #[test]
-    fn a_remote_recovery_trusts_the_name_the_far_engine_reported() {
-        let far = vec![(
-            "/home/somebody/notes.md".to_owned(),
-            "/home/somebody/.local/state/nvim/swap/notes.md.swp".to_owned(),
-        )];
-        let cfg = EngineConfig::default()
-            .with_remote(RemoteSpec::new("host"))
-            .with_arg("/home/somebody/notes.md")
-            .recovering_recorded(&far);
         assert!(
-            cfg.extra_args.iter().any(|arg| arg == RECOVERY_ARG),
-            "a swap this host cannot see is still the far side's to replay"
+            !carries(&editing(EngineConfig::default())),
+            "a local spawn on a file whose swap is right here still asks \
+             nvim's own SwapExists answer for it"
+        );
+        assert!(
+            !carries(&editing(
+                EngineConfig::default().with_remote(RemoteSpec::new("host"))
+            )),
+            "a remote spawn's swap sits on a disk this host cannot stat, and \
+             the flag on a guess is what ends the far replacement"
+        );
+        assert!(
+            !carries(&editing(EngineConfig::default().with_late_attach(80, 24))),
+            "a late-attaching restart is the spawn the flag used to ride"
+        );
+        assert!(
+            carries(&editing(EngineConfig::default()).with_arg(RECOVERY_ARG)),
+            "a caller's own -r is forwarded like any other passthrough \
+             argument, and is the only way one reaches nvim"
         );
     }
 
-    /// The reading the recovery flag turns on: a plain word nvim would open.
+    /// The reading that names a file: a plain word nvim would open.
     #[test]
-    fn a_plain_argument_is_the_file_that_makes_recovery_meaningful() {
+    fn a_plain_argument_is_the_file_nvim_opens() {
         assert!(names_a_file(&args(&["notes.md"])));
         assert!(names_a_file(&args(&["--clean", "-n", "notes.md"])));
         assert!(names_a_file(&args(&["-R", "notes.md", "other.md"])));
@@ -4419,9 +4269,9 @@ mod tests {
         assert!(names_a_file(&args(&["--clean", "-"])));
     }
 
-    /// Every reading that must withhold it. The value cases are the ones
-    /// that matter: a restart that mistook `NONE` for a file would hand nvim
-    /// `-r` with nothing to recover, which lists swap files and exits.
+    /// Every reading that must name nothing. The value cases are the ones
+    /// that matter: a scan that mistook `NONE` for an operand would strip an
+    /// argument the engine still needs back out of a restart's own list.
     #[test]
     fn an_option_value_is_never_mistaken_for_a_file() {
         assert!(!names_a_file(&args(&[])));
