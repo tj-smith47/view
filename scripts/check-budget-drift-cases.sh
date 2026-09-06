@@ -285,6 +285,17 @@ printf '\n| settled screen (`echo.view_p99_ms`) | never faster than the server t
   >> "$CASE/$BENCH"
 expect 0 '' 'a comparative on an anchored row that names no engine'
 
+new_case
+printf '\n| first paint (`echo.view_p99_ms`) | 5.2x faster than plain old Neovim |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'claim:docs/benchmarking.md:12' \
+  'a row naming the engine through words no determiner list foresaw'
+
+new_case
+printf '\n| settled screen (`echo.view_p99_ms`) | ahead of that boundary, a cost paid identically by bare nvim |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a comparative whose object is a boundary, with the engine in a later clause'
+
 # ---------------------------------------------------------------------------
 # the same claim, anchored by nothing, by a diagnostic, and by an id the
 # budgets file never declared -- the three ways the shipped bug read as fine

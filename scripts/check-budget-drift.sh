@@ -164,11 +164,12 @@ export CLAIM='[0-9](\.[0-9]+)?[ ]*(x|\xc3\x97)([^0-9]|$)|(faster|sooner|quicker|
 # the paired bare-nvim run") from a win, so on a row the anchor bought the
 # writer permission to state either. A row states a win by publishing the
 # paired numbers; the adjective is the part a rule can refuse. The engine has
-# to be the comparative's own object, with only a determiner or an adjective
-# standing between them: reaching to the end of the sentence instead refuses
-# "ahead of that boundary ... paid identically by bare nvim", where the
-# comparative names no engine and the engine is another clause's subject.
-export ENGINE='(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([ ]+(a|an|the|bare|stock|plain|vanilla|its|our|same|paired))*[ -]+([Nn]vim|NVIM|[Nn]eovim)'
+# to be the comparative's own object, at most three words away: a fixed
+# list of determiners lets "plain old Neovim" through, and reaching to the
+# end of the sentence refuses "ahead of that boundary ... paid identically
+# by bare nvim", where the comparative names no engine and the engine is
+# another clause's subject.
+export ENGINE='(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([ ]+[A-Za-z'"'"'-]+){0,3}[ -]+([Nn]vim|NVIM|[Nn]eovim)'
 
 claims_in() {
   local page="$1" first="${2:-1}" last="${3:-}"
