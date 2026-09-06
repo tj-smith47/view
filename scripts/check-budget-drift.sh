@@ -219,6 +219,49 @@ if [[ -n "${claimed//[$'\n' ]/}" ]]; then
   fail=1
 fi
 
+# Fourth cross-check: a re-seat moves the baseline, the ledger and the prose
+# together. docs/benchmarking.md is where a reader learns which classes still
+# owe the DSR re-seat, and the failure this rule exists for is silent in both
+# directions: a commit that deletes a class's withdrawal and leaves the
+# sentence standing publishes a measurement as never taken, and a class that
+# withdraws a ratio without joining the sentence is a missing bar nobody is
+# told about. Sentence scope rather than paragraph, because the same
+# paragraph names the classes that have been re-seated beside the ones that
+# have not.
+baselines_dir="$root/crates/view-bench/baselines"
+bench_page="$root/docs/benchmarking.md"
+if [[ -d "$baselines_dir" && -f "$bench_page" ]]; then
+  owing="$(awk '
+    { buf = buf $0 " " }
+    END {
+      n = split(buf, sentence, /\. /)
+      for (i = 1; i <= n; i++) {
+        if (sentence[i] ~ /withdrawn/ && (sentence[i] ~ /first.paint/ || sentence[i] ~ /marker_ratio/)) {
+          print sentence[i]
+        }
+      }
+    }' "$bench_page")"
+  for class_file in "$baselines_dir"/*.toml; do
+    [[ -f "$class_file" ]] || continue
+    class="$(basename "$class_file" .toml)"
+    # a sidecar (dev-linux.headroom, dev-linux.measured) is not a class: it
+    # keeps its class's name and a suffix, and records no ratio of its own.
+    case "$class" in *.*) continue ;; esac
+    seated=0
+    grep -q '^\[withdrawn\.first_paint\.' "$class_file" && seated=1
+    listed=0
+    grep -qF "$class" <<<"$owing" && listed=1
+    if [[ $listed -eq 1 && $seated -eq 0 ]]; then
+      echo "BUDGET DRIFT FAIL: reseat-named $class: docs/benchmarking.md names it as carrying a withdrawn first-paint ratio, and baselines/$class.toml carries none -- a re-seat rewrites the prose and the ledger in the commit that lands it" >&2
+      fail=1
+    fi
+    if [[ $listed -eq 0 && $seated -eq 1 ]]; then
+      echo "BUDGET DRIFT FAIL: reseat-unnamed $class: baselines/$class.toml withdraws a first-paint ratio that docs/benchmarking.md names no class as owing, so the missing bar is one nobody reading the page is told about" >&2
+      fail=1
+    fi
+  done
+fi
+
 if [[ $entries -eq 0 ]]; then
   echo "BUDGET DRIFT FAIL: no [[budget]] entries found in $budgets" >&2
   exit 1

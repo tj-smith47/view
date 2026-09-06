@@ -493,11 +493,15 @@ config = "real"
 # Writing such a reading down as an accepted shortfall would put ambient
 # load in this file as though it were a property of view.
 #
-# Every entry below (five dev-linux, six dev-macos) was ratified by the user
-# on 2026-08-03 as accepted-and-gated debt, together with the spec §3.1
-# echo-row amendment. The four echo ratio_p50 entries carry a pinned closure
-# path in the P4 plan: input-thread/runtime-loop unification first,
-# incremental rendering second.
+# The 2026-08-03 ratification by the user covered eleven entries as
+# accepted-and-gated debt, together with the spec §3.1 echo-row amendment;
+# seven of them are still listed (three dev-linux, four dev-macos), the rest
+# spent and deleted with a note in their place. The three echo ratio_p50
+# entries carry a pinned closure path in the P4 plan: input-thread/runtime-loop
+# unification first, incremental rendering second. The two first_paint
+# marker_ratio_p50 minimal entries postdate it: they are what the 2026-09-06
+# retake under the answering pty made visible, an entry each rather than a
+# widened bar.
 #
 # Improving past the budget does not need an edit here to pass; deleting the
 # entry is the housekeeping that follows.
@@ -548,6 +552,14 @@ metric = "marker_cold_ms"
 class = "dev-linux"
 accepted = 120.464107
 why = "the 15-plugin fixture's cold start, against a bar set from the minimal fixture's 24.9 ms. Most of the gap is plugin init the engine child must finish before the file can be on screen. It is not a reason to widen the bar: the 30 ms promise is about the cold start of a config that is not paying for 15 plugins. The accepted value is view's own cold absolute and carries no comparison to bare nvim; the paired statement of this cell is the marker_ratio_p50 entry below."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "minimal"
+metric = "marker_ratio_p50"
+class = "dev-linux"
+accepted = 1.0936971456650568
+why = "the plugin-free half of the same 2026-09-06 retake the heavy entry below records, and the same attribution: view reaches the file at 1.094x bare nvim's p50 here, about 1.4 ms, which is the size of the serial post-VimEnter attach-plus-takeover round trip the late-attach design pays while nvim's own TUI attaches before init runs. This fixture has no plugin init to hide that cost behind, so it is the cleanest reading of it on this class. The cell was inside the 0.30 bar before the retake only because the bare arm it divided by was waiting out its own background-query timeout on a pty that never answered the DSR; the bar is not widened for the true reading, the deficit is ledgered until the pre-v0.1.0 performance session root-causes it."
 
 [[shortfall]]
 scenario = "first_paint"
@@ -617,9 +629,11 @@ why = "1.3% over the 1.1 bar at the median of a statistic this class cannot pin 
 # dev-macos first_paint, from the 2026-08-02 quiet-host re-record (the
 # class's first recording of this row was taken on a host with a busy login
 # stack and both marker_cold_ms cells shrank hard once it was cleaned:
-# 42.5 -> 32.9 minimal, 220.0 -> 84.0 heavy). Both fixtures still miss the
-# 30 ms marker_cold_ms bar and the heavy fixture still misses the 0.30
-# marker_ratio_p50 bar; the three entries below are the quiet-host reading.
+# 42.5 -> 32.9 minimal, 220.0 -> 84.0 heavy). Both fixtures miss the 30 ms
+# marker_cold_ms bar, and both miss the 0.30 marker_ratio_p50 bar once the
+# 2026-09-06 retake under the answering pty replaced the two ratios; the two
+# marker_cold_ms entries below are the 2026-08-02 quiet-host reading and the
+# two marker_ratio_p50 entries are that retake's.
 
 [[shortfall]]
 scenario = "first_paint"
@@ -639,8 +653,16 @@ why = "the 15-plugin fixture's cold start, against a bar set from the minimal fi
 
 [[shortfall]]
 scenario = "first_paint"
+fixture = "minimal"
+metric = "marker_ratio_p50"
+class = "dev-macos"
+accepted = 0.9857855380865984
+why = "the plugin-free half of the same 2026-09-06 retake the heavy entry below records. view reaches the file at 0.986x bare nvim's p50 here -- level with it rather than inside the 0.30 bar, which the pre-fix reading only cleared because the bare arm it divided by was waiting out its own background-query timeout on a pty that never answered the DSR. The residual is the serial post-VimEnter attach and takeover the dev-linux entries name, smaller here as a share of this class's larger cold start. The bar is not widened for the true reading; the deficit is ledgered until the pre-v0.1.0 performance session root-causes it."
+
+[[shortfall]]
+scenario = "first_paint"
 fixture = "heavy"
 metric = "marker_ratio_p50"
 class = "dev-macos"
-accepted = 0.39563655534133746
-why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired. The 0.30x bar was set against the minimal fixture, which records 0.188 on this class. Under the heavy fixture view's own cold start grows more in absolute ms with plugin count than nvim's does (view p50 29.9 -> 77.9), and the ratio degrades with it. Clean-host observations of this one-shot cell span 0.3785-0.3956 across three same-commit runs; the record landed at the top of that spread and the accepted value follows the record rather than picking a flattering draw. The 0.3818 it replaces sits inside the clean spread, so the superseded contaminated record carried no information about this cell that the clean runs do not. Withdrawn 2026-09-06 and not yet replaced: this cell is a ratio against a bare-nvim arm that was waiting out its own background-query timeout on a harness pty that never answered the DSR, so every figure here -- the accepted value included -- is pre-fix, and dev-macos has not been retaken under the answering pty (dev-linux, which has, re-seated the same cell from 0.460 to 1.101). The accepted value stays because it is the ceiling the gate compares against: a retake near 1.1 must breach loudly rather than seat itself quietly. The class's baseline names both first-paint ratios as withdrawn until that retake lands."
+accepted = 1.0452704108959787
+why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired, re-seated 2026-09-06 from this class's own retake under a pty that answers the queries nvim's tty startup asks. It replaces 0.3956, which was a ratio against a bare-nvim arm waiting out its own background-query timeout; every pre-fix figure this entry used to carry (the 0.3785-0.3956 clean-host spread, the 0.188 minimal reading the 0.30x bar was set against) was measured the same way and is inadmissible. Measured now: view reaches the file at 1.045x bare nvim's p50 on this fixture, and the whole paired row reads the same way -- 0.986 minimal, 1.045 heavy, 1.061 user -- so on this class view trails bare nvim on the plugin-heavy and real-config cells and is level with it on the plugin-free one. The residual is the same serial post-VimEnter attach and takeover the dev-linux entry names, since nvim's own TUI attaches before init runs; attribution past that outline is owed to the pre-v0.1.0 performance session. The 0.30 bar is untouched: it is the promise the user stated, and this entry records the gap rather than retiring it."

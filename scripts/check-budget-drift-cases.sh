@@ -57,6 +57,7 @@ SPEC='.claude/specs/2026-07-17-view-design.md'
 README='README.md'
 PERF='docs/performance.md'
 BENCH='docs/benchmarking.md'
+BASELINES='crates/view-bench/baselines'
 
 # One felt row and one diagnostic that decomposes it, plus a [[shortfall]]
 # whose own scenario/metric pair is nowhere near either: a reader of this
@@ -139,16 +140,38 @@ The harness pins the terminal at 120x40 for every cell.
 | what | view | bare Neovim |
 |---|---|---|
 | steady typing (`echo.view_p99_ms`) | 0.73 ms | 0.67 ms |
+
+`gh-linux` carries its first-paint ratios as `withdrawn` until it is
+re-seated from a run under the answering pty. dev-linux is re-seated.
 MD
+}
+
+# One class that owes the re-seat and one that has taken it. The page names
+# the first and not the second, which is the state the fourth rule passes.
+plant_baselines() {
+  cat > "$CASE/$BASELINES/gh-linux.toml" <<'TOML'
+machine_class = "gh-linux"
+
+[withdrawn.first_paint.minimal]
+marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR"
+TOML
+  cat > "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+machine_class = "dev-linux"
+
+[first_paint.minimal]
+marker_ratio_p50 = 1.0936971456650568
+TOML
 }
 
 new_case() {
   n=$((n + 1))
   CASE="$WORK/case$n"
-  mkdir -p "$CASE/crates/view-bench" "$CASE/.claude/specs" "$CASE/docs"
+  mkdir -p "$CASE/crates/view-bench" "$CASE/.claude/specs" "$CASE/docs" \
+    "$CASE/$BASELINES"
   plant_budgets
   plant_spec
   plant_pages
+  plant_baselines
 }
 
 # Each failure the check can raise collapses to one token. Headers collapse
@@ -173,6 +196,9 @@ findings() {
       print "section-missing"; next
     }
     /^BUDGET DRIFT FAIL: .* declares no felt metric/ { print "no-felt"; next }
+    /^BUDGET DRIFT FAIL: reseat-(named|unnamed) / {
+      c = $5; sub(/:$/, "", c); print $4 ":" c; next
+    }
     claims && /^  [^ ]+:[0-9]+: / {
       where = $1; sub(/:$/, "", where); print "claim:" where; next
     }
@@ -229,16 +255,16 @@ expect 0 '' 'a claim standing beside the felt cell that earns it'
 # ---------------------------------------------------------------------------
 new_case
 printf '\n| speculative echo | 5.2x faster than bare Neovim |\n' >> "$CASE/$BENCH"
-expect 1 'claim:docs/benchmarking.md:9' 'a claim in a paragraph that names no cell at all'
+expect 1 'claim:docs/benchmarking.md:12' 'a claim in a paragraph that names no cell at all'
 
 new_case
 printf '\n| engine startup (`startup.server_delta_ms`) | 5.2x faster |\n' >> "$CASE/$BENCH"
-expect 1 'claim:docs/benchmarking.md:9' 'a diagnostic cell quoted as the thing that won'
+expect 1 'claim:docs/benchmarking.md:12' 'a diagnostic cell quoted as the thing that won'
 
 new_case
 printf '\n| cold start (`first_paint.marker_cold_ms`) | 2.1 to 5.2x sooner |\n' \
   >> "$CASE/$BENCH"
-expect 1 'claim:docs/benchmarking.md:9' 'a claim anchored by a shortfall row, which declares no kind'
+expect 1 'claim:docs/benchmarking.md:12' 'a claim anchored by a shortfall row, which declares no kind'
 
 # ---------------------------------------------------------------------------
 # the comparative without a number, and the number that is not a comparative
@@ -246,7 +272,7 @@ expect 1 'claim:docs/benchmarking.md:9' 'a claim anchored by a shortfall row, wh
 new_case
 printf '\nEvery cell here lands ahead of the same cell under bare Neovim.\n' \
   >> "$CASE/$BENCH"
-expect 1 'claim:docs/benchmarking.md:9' 'a comparative naming what it beats, with no multiplier'
+expect 1 'claim:docs/benchmarking.md:12' 'a comparative naming what it beats, with no multiplier'
 
 new_case
 printf '\nThe picker fixture is a 120x40 terminal holding 100000 entries.\n' \
@@ -272,6 +298,27 @@ new_case
 sed 's/^## 1\. Product definition$/## 1. What view is/' "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
 mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
 expect 1 'section-missing' 'a renamed spec section, whose claims would otherwise go unread'
+
+# ---------------------------------------------------------------------------
+# a re-seat that moved the baseline and left the page behind, and its converse
+# ---------------------------------------------------------------------------
+new_case
+cat > "$CASE/$BASELINES/gh-linux.toml" <<'TOML'
+machine_class = "gh-linux"
+
+[first_paint.minimal]
+marker_ratio_p50 = 1.0936971456650568
+TOML
+expect 1 'reseat-named:gh-linux' 'a class re-seated in its baseline and still named as owing the ratio'
+
+new_case
+cat > "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+machine_class = "dev-linux"
+
+[withdrawn.first_paint.minimal]
+marker_ratio_p50 = "taken on a harness pty that never answered nvim's DSR"
+TOML
+expect 1 'reseat-unnamed:dev-linux' 'a class that withdrew a ratio the page tells no reader about'
 
 # ---------------------------------------------------------------------------
 # the two cross-checks that shipped before this one

@@ -141,17 +141,19 @@ of the post-VimEnter attach-plus-takeover round trip the late-attach design
 pays serially, since Neovim's own TUI attaches before init runs.
 Attribution past that outline is open work, not a claim this page makes.
 
-dev-linux is the only class re-seated. `dev-macos`, `gh-linux` and
-`gh-macos` carry their first-paint ratios as `withdrawn` entries with the
-reason attached, so a gate run on those classes fails loudly on the missing
-bars rather than attesting to them, until each is re-seated from a run
-under the answering pty.
+Both dev classes are re-seated: dev-linux from the retake above, dev-macos
+from its own on mbp the same day. `gh-linux` and `gh-macos` carry their
+first-paint ratios as `withdrawn` entries with the reason attached, so a
+gate run on those classes fails loudly on the missing bars rather than
+attesting to them, until each is re-seated from a run under the answering
+pty.
 
 The `user` row is recorded. dev-linux holds `first_paint.marker_cold_ms`
 80.512 ms and `shell_visible_cold_ms` 4.543 ms, seated at `e9087db`, and its
-two ratios come from the 2026-09-06 retake above (1.084 p50, 1.046 p99).
-The other three classes hold the absolute and owe the ratio: `dev-macos`
-(87.563 ms), `gh-linux` (96.326 ms) and `gh-macos` (169.099 ms) each carry
+two ratios come from the 2026-09-06 retake above (1.084 p50, 1.046 p99);
+dev-macos holds 87.563 ms and 12.504 ms with both ratios at 1.061 from its
+own retake. The other two classes hold the absolute and owe the ratio:
+`gh-linux` (96.326 ms) and `gh-macos` (169.099 ms) each carry
 `marker_ratio_p50` and `marker_ratio_p99` on that cell as `withdrawn`, the
 same DSR re-seat they owe on `minimal` and `heavy`.
 
