@@ -5,7 +5,8 @@
 //! so growing the surface never grows the loop's own file.
 
 use view_core::msg::{
-    BufferHandle, HunkMark, OptionValue, ReplyToken, ReplyValue, ReviewOpenTarget, TextEdit,
+    BufferHandle, HunkMark, OptionValue, ReplyToken, ReplyValue, ReviewOpenTarget, TakeoverStep,
+    TextEdit,
 };
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
@@ -91,6 +92,10 @@ pub trait EngineOps {
     /// chunk; never blocks, and never itself returns the claims (see
     /// `Msg::MappingsClaimed`).
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError>;
+    /// Runs every step of the takeover in one chunk and asks nvim what it
+    /// said while starting; never blocks, and never itself returns either
+    /// answer (see `Msg::MappingsClaimed` and `Msg::StartupMessages`).
+    fn takeover(&self, steps: &[TakeoverStep]) -> Result<(), EngineError>;
     /// Registers the one `view_bridge` autocmd group carrying every editor
     /// state change view reacts to; never blocks, and never itself returns an
     /// event (see `RpcCall::RegisterBridge`).
@@ -333,6 +338,9 @@ impl EngineOps for EngineHandle {
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         self.register_mappings(specs, channel_id)
     }
+    fn takeover(&self, steps: &[TakeoverStep]) -> Result<(), EngineError> {
+        self.takeover(steps)
+    }
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         self.register_bridge(channel_id)
     }
@@ -523,6 +531,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         (**self).register_mappings(specs, channel_id)
+    }
+    fn takeover(&self, steps: &[TakeoverStep]) -> Result<(), EngineError> {
+        (**self).takeover(steps)
     }
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_bridge(channel_id)
@@ -717,6 +728,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         (**self).register_mappings(specs, channel_id)
+    }
+    fn takeover(&self, steps: &[TakeoverStep]) -> Result<(), EngineError> {
+        (**self).takeover(steps)
     }
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_bridge(channel_id)
@@ -937,6 +951,28 @@ impl EngineOps for FakeOps {
     }
     fn ui_term_event(&self, sequence: &str) -> Result<(), EngineError> {
         self.record(format!("ui_term_event({sequence:?})"))
+    }
+    fn takeover(&self, steps: &[TakeoverStep]) -> Result<(), EngineError> {
+        // recorded step by step under the names the unbatched calls
+        // recorded, so an assertion about what the takeover performs reads
+        // the same whether or not it travelled as one message
+        for step in steps {
+            match step {
+                TakeoverStep::DisableClaimants { modules } => {
+                    self.disable_claimants(modules)?;
+                }
+                TakeoverStep::HoldOption { name, value } => self.hold_option(name, value)?,
+                TakeoverStep::HoldNotify => self.hold_notify()?,
+                TakeoverStep::SetOption { name, value } => self.set_option(name, value)?,
+                TakeoverStep::RegisterClipboard { channel_id } => {
+                    self.register_clipboard(*channel_id)?;
+                }
+                TakeoverStep::RegisterMappings { specs, channel_id } => {
+                    self.register_mappings(specs, *channel_id)?;
+                }
+            }
+        }
+        Ok(())
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();
@@ -1189,6 +1225,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn ui_term_event(&self, _sequence: &str) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn takeover(&self, _steps: &[TakeoverStep]) -> Result<(), EngineError> {
         Ok(())
     }
     fn register_mappings(

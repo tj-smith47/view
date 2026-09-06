@@ -33,18 +33,36 @@ use view_test_support::ScratchDir;
 /// one is standing, rather than inferring it from a side effect: `orig` is
 /// what a restore puts back, `claimed` is the claimant's own.
 fn config_home(name: &str) -> ScratchDir {
+    write_config(name, "")
+}
+
+/// [`config_home`] plus a loaded `notify` module, the shape a lazy.nvim
+/// config leaves behind: nvim-notify is on `package.loaded` because the
+/// claimant pulled it in, and nothing ever assigned `vim.notify` to it.
+fn config_home_with_notify(name: &str) -> ScratchDir {
+    write_config(
+        name,
+        "_G.view_pin.notify = function(...) end\n\
+         package.loaded['notify'] = _G.view_pin.notify\n",
+    )
+}
+
+fn write_config(name: &str, extra: &str) -> ScratchDir {
     let dir = ScratchDir::new(&format!("claimant-takeover-{name}")).unwrap();
     std::fs::write(
         dir.join("init.lua"),
-        "_G.view_pin = { orig = vim.notify, disables = 0 }\n\
-         _G.view_pin.claimed = function(...) end\n\
-         vim.notify = _G.view_pin.claimed\n\
-         package.loaded['noice'] = {\n\
-           disable = function()\n\
-             _G.view_pin.disables = _G.view_pin.disables + 1\n\
-             vim.notify = _G.view_pin.orig\n\
-           end,\n\
-         }\n",
+        format!(
+            "_G.view_pin = {{ orig = vim.notify, disables = 0 }}\n\
+             _G.view_pin.claimed = function(...) end\n\
+             vim.notify = _G.view_pin.claimed\n\
+             package.loaded['noice'] = {{\n\
+               disable = function()\n\
+                 _G.view_pin.disables = _G.view_pin.disables + 1\n\
+                 vim.notify = _G.view_pin.orig\n\
+               end,\n\
+             }}\n\
+             {extra}"
+        ),
     )
     .unwrap();
     dir
@@ -83,6 +101,7 @@ fn notify_owner(engine: &Engine) -> String {
                     "local pin = _G.view_pin \
                      if vim.notify == pin.claimed then return 'claimed' end \
                      if vim.notify == pin.orig then return 'orig' end \
+                     if vim.notify == pin.notify then return 'notify' end \
                      return 'other'",
                 ),
                 Value::Array(vec![]),
@@ -183,4 +202,58 @@ fn a_claimant_that_never_loaded_is_left_alone() {
         "an absent module must not take the takeover down with it"
     );
     assert_eq!(disables(&engine), 0);
+}
+
+/// A session that handed the messages back still leaves a notify sink: the
+/// claimant's restore puts nvim's own echo back, and where the config
+/// loaded nvim-notify that is not where its notifications went before view
+/// existed. Left alone it is a hit-enter prompt on the first multi-line
+/// message of the launch.
+///
+/// No `hold_notify` here, deliberately: this is the
+/// `[native] notifications = false` session, the one shape where nothing
+/// of view's follows the hand-back.
+#[test]
+fn a_hand_back_with_no_hold_behind_it_ends_at_the_configs_own_notify() {
+    let dir = config_home_with_notify("sink");
+    let engine = engine(&dir);
+    assert_eq!(
+        notify_owner(&engine),
+        "claimed",
+        "the fixture never took vim.notify, so this pin proves nothing"
+    );
+
+    engine
+        .handle
+        .disable_claimants(&["noice".to_string()])
+        .unwrap();
+
+    assert_eq!(disables(&engine), 1);
+    assert_eq!(
+        notify_owner(&engine),
+        "notify",
+        "a hand-back must end in the sink the config would have used \
+         without the claimant, never in nvim's echo area"
+    );
+}
+
+/// And view's own hold still wins when it is issued, so the sink above is
+/// never the state a `notifications = true` session ends in.
+#[test]
+fn view_own_hold_still_outranks_the_sink_the_hand_back_leaves() {
+    let dir = config_home_with_notify("sink-held");
+    let engine = engine(&dir);
+
+    engine
+        .handle
+        .disable_claimants(&["noice".to_string()])
+        .unwrap();
+    engine.handle.hold_notify().unwrap();
+
+    assert_eq!(
+        notify_owner(&engine),
+        "other",
+        "the takeover's own notify is issued behind the hand-back and is \
+         the one left standing"
+    );
 }

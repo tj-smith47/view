@@ -335,6 +335,13 @@ struct Route {
     /// sent once per session), so one shared slot would let a probe reply
     /// arriving a moment later evict the report for good.
     deferred_claims: Option<Msg>,
+    /// The `Msg::StartupMessages` an attached-but-full sink refused, held
+    /// for the next routing attempt to retry.
+    ///
+    /// Its own slot for the reason [`Route::route_startup_messages`] gives:
+    /// it and the claim report arrive from one reply, and nvim is asked for
+    /// the startup messages exactly once.
+    deferred_startup_messages: Option<Msg>,
     /// The newest `Msg::PickerBufferList` an attached-but-full sink refused,
     /// held for the next routing attempt to retry.
     ///
@@ -431,6 +438,7 @@ enum Held {
     Probe,
     Heartbeat,
     Claims,
+    StartupMessages,
     BufferList,
     HiddenBufferLoaded,
     Preview,
@@ -448,6 +456,7 @@ impl Route {
             Held::Probe => &mut self.deferred_probe,
             Held::Heartbeat => &mut self.deferred_heartbeat,
             Held::Claims => &mut self.deferred_claims,
+            Held::StartupMessages => &mut self.deferred_startup_messages,
             Held::BufferList => &mut self.deferred_buffer_list,
             Held::HiddenBufferLoaded => &mut self.deferred_hidden_buffer_loaded,
             Held::Preview => &mut self.deferred_preview,
@@ -468,6 +477,7 @@ impl Route {
             Held::Probe,
             Held::Heartbeat,
             Held::Claims,
+            Held::StartupMessages,
             Held::BufferList,
             Held::HiddenBufferLoaded,
             Held::Preview,
@@ -722,6 +732,19 @@ impl PumpShared {
     /// switch gives it back.
     pub(crate) fn route_claims(&self, msg: Msg) {
         self.route_held(msg, Held::Claims);
+    }
+
+    /// Routes a `Msg::StartupMessages` without ever dropping it on a full
+    /// sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// Its own slot rather than sharing the claim report's: they arrive
+    /// from one reply, so a shared slot would hold the first and then have
+    /// the second write over it. A dropped startup dump is silent and
+    /// permanent -- nvim is asked once, at `VimEnter` -- and the standing
+    /// notice would go on promising a history that never got them.
+    pub(crate) fn route_startup_messages(&self, msg: Msg) {
+        self.route_held(msg, Held::StartupMessages);
     }
 
     /// Routes a `Msg::PickerBufferList` without ever dropping it on a full

@@ -254,6 +254,13 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // ever starts, so that arm is unreachable in practice but kept for
         // the same defensive-totality reason
         Msg::RedrawReady | Msg::EngineStopped { .. } | Msg::EngineReady => Vec::new(),
+        // the history alone, never a toast: these lines were raised before
+        // this session had a UI, and the notice that promises them is the
+        // history's own (`EngineModel::seed_startup_history`)
+        Msg::StartupMessages { text } => {
+            model.dirty |= model.engine.seed_startup_history(&text);
+            Vec::new()
+        }
         // whichever of the two attach paths arrives first performs it, and
         // the other finds it done (see `Model::takes_attach`)
         Msg::AttachDeadline => model.takes_attach().map(Effect::Rpc).into_iter().collect(),
@@ -266,10 +273,10 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Effect::Rpc(RpcCall::ProbeSwapRecovery {
                 generation: model.supervision.begin_swap_probe(),
             }),
-            // the deadline on the startup hold, armed from the first moment
-            // there is a connection at all. Nothing else guarantees the hold
-            // ends: the probe that normally resolves it rides on `VimEnter`,
-            // and a config that parks nvim on an error never reaches one
+            // armed from the attach rather than from the connection, which
+            // exists a config's whole sourcing earlier: the hold is what
+            // withholds a claimant's startup messages from the screen, and
+            // there is no screen to withhold them from until this arrives
             Effect::ScheduleStartupHold {
                 after: STARTUP_HOLD_DEADLINE,
                 generation: model.surface_conflicts.engine_generation(),

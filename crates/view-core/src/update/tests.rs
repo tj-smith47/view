@@ -9521,6 +9521,50 @@ fn the_hold_deadline_releases_what_the_probe_never_answered_for() {
     assert!(m.dirty, "a line arriving on screen is a repaint");
 }
 
+/// What nvim said before view had a UI is history, never a toast -- not
+/// when it arrives, and not when the startup hold lets go of what it
+/// parked.
+///
+/// The lines are already spent: under nvim's own UI they scrolled past
+/// during startup, and the promise view's own notice makes about them is
+/// that `<leader>fm` can still show them. Routing them through the message
+/// stack would replay a whole launch onto the first settled frame.
+#[test]
+fn what_nvim_said_before_the_attach_reaches_the_history_and_never_the_stack() {
+    let mut m = model();
+    let hold = armed_hold_generation(&update(&mut m, Msg::EngineAttached));
+    let _ = update(
+        &mut m,
+        Msg::StartupMessages {
+            text: "PRE-ATTACH-MARKER\nsecond line\n\n".to_string(),
+        },
+    );
+    assert_eq!(
+        m.engine
+            .toast_history
+            .entries()
+            .map(|e| e.lines().join(""))
+            .collect::<Vec<_>>(),
+        vec!["second line".to_string(), "PRE-ATTACH-MARKER".to_string()],
+        "every non-blank line the child said belongs to the history, in \
+         the newest-first order the overlay reads every other entry in"
+    );
+    assert!(
+        m.engine.messages.entries.is_empty(),
+        "a startup line must never take the toast slot: {:?}",
+        m.engine.messages.entries
+    );
+    assert!(m.dirty, "the history overlay's own contents changed");
+
+    let _ = update(&mut m, Msg::StartupHoldExpired { generation: hold });
+    assert!(
+        m.engine.messages.entries.is_empty(),
+        "the release drains what the hold parked, and a seeded line was \
+         never parked: {:?}",
+        m.engine.messages.entries
+    );
+}
+
 /// The generation the one hold deadline `effects` arms carries.
 fn armed_hold_generation(effects: &[Effect]) -> u64 {
     let generations: Vec<u64> = effects

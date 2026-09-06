@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use view_core::model::Model;
-use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall};
+use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall, TakeoverStep};
 use view_core::native::ext::Ext;
 use view_core::native::registry;
 use view_native::config::{NativeConfig, ViewConfig};
@@ -190,7 +190,14 @@ impl NativeSession {
                 crate::vlog::log("startup", "vim_enter received");
                 let effects = self.take_over(model);
                 crate::vlog::log_with("startup", || {
-                    format!("takeover sent calls={}", effects.len())
+                    let batched: usize = effects
+                        .iter()
+                        .filter_map(|effect| match effect {
+                            Effect::Rpc(RpcCall::Takeover { steps }) => Some(steps.len()),
+                            _ => None,
+                        })
+                        .sum();
+                    format!("takeover sent messages={} steps={batched}", effects.len())
                 });
                 effects
             }
@@ -228,7 +235,7 @@ impl NativeSession {
             return Vec::new();
         }
         self.handed_over = true;
-        let mut effects: Vec<Effect> = Vec::new();
+        let mut effects: Vec<RpcCall> = Vec::new();
         // ahead of every hold below, `HoldNotify` above all: a claimant's
         // own `disable` restores the `vim.notify` it saved when it took the
         // function, so a hold installed first is undone by the call that
@@ -237,18 +244,14 @@ impl NativeSession {
             .map(|claimant| claimant.module.to_string())
             .collect();
         if !superseded.is_empty() {
-            effects.push(Effect::Rpc(RpcCall::DisableClaimants {
+            effects.push(RpcCall::DisableClaimants {
                 modules: superseded,
-            }));
+            });
         }
         // a plan entry with no call is a surface the attach already took
         // (`Supersession::rpc`); it is in the plan to be reported, not to be
         // performed
-        effects.extend(
-            self.plan
-                .iter()
-                .filter_map(|entry| entry.rpc.clone().map(Effect::Rpc)),
-        );
+        effects.extend(self.plan.iter().filter_map(|entry| entry.rpc.clone()));
         let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
         // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
         // has no `[native]` switch by design, so `register_plan` alone would
@@ -261,15 +264,15 @@ impl NativeSession {
                 specs.retain(|spec| spec.feature != "ai");
             }
         }
-        effects.push(Effect::Rpc(mapping_call));
-        effects.push(Effect::Rpc(RpcCall::RegisterClipboard {
+        effects.push(mapping_call);
+        effects.push(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
-        }));
+        });
         if model.owns(Ext::Cmdline) && model.owns(Ext::Messages) {
-            effects.push(Effect::Rpc(RpcCall::SetOption {
+            effects.push(RpcCall::SetOption {
                 name: "cmdheight".to_string(),
                 value: OptionValue::Int(0),
-            }));
+            });
         }
         crate::vlog::log_with("native", || {
             let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
@@ -284,6 +287,7 @@ impl NativeSession {
         // inside the request it answers, and a redraw asked for while it is
         // blocked is deferred to a flush carrying nothing
         // ([`Model::takes_attach`]).
+        let mut effects = batched(effects);
         effects.extend(model.takes_attach().map(Effect::Rpc));
         // and last of all: `nvim_ui_set_option` is about a UI on this
         // channel and is refused where there is none. The claim is worth
@@ -345,6 +349,36 @@ impl NativeSession {
     }
 }
 
+/// Folds `calls` into as few round trips as the vocabulary allows, keeping
+/// the order they were built in.
+///
+/// A call [`TakeoverStep::from_call`] has no step for cannot ride the batch,
+/// so it closes whatever has accumulated and travels on its own: the engine
+/// applies one connection's traffic in arrival order, and a call hoisted past
+/// its neighbours would land against a session they had not configured yet.
+fn batched(calls: Vec<RpcCall>) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    let mut steps = Vec::new();
+    let flush = |steps: &mut Vec<TakeoverStep>, effects: &mut Vec<Effect>| {
+        if !steps.is_empty() {
+            effects.push(Effect::Rpc(RpcCall::Takeover {
+                steps: std::mem::take(steps),
+            }));
+        }
+    };
+    for call in calls {
+        match TakeoverStep::from_call(&call) {
+            Some(step) => steps.push(step),
+            None => {
+                flush(&mut steps, &mut effects);
+                effects.push(Effect::Rpc(call));
+            }
+        }
+    }
+    flush(&mut steps, &mut effects);
+    effects
+}
+
 #[cfg(test)]
 impl NativeSession {
     /// A session that hands nothing over, for the tests whose subject is the
@@ -383,6 +417,24 @@ mod tests {
     use super::*;
     use view_core::msg::ReplyToken;
     use view_core::native::mappings::MappingClaim;
+
+    /// `effects` with the takeover expanded back into one effect per call
+    /// it batches, so an assertion about what a takeover performs reads the
+    /// same whether or not those calls travelled as one message. The batch
+    /// itself is pinned by
+    /// `the_takeover_travels_as_one_round_trip_ahead_of_the_attach`.
+    fn unbatched(effects: Vec<Effect>) -> Vec<Effect> {
+        effects
+            .into_iter()
+            .flat_map(|effect| match effect {
+                Effect::Rpc(RpcCall::Takeover { steps }) => steps
+                    .into_iter()
+                    .map(|step| Effect::Rpc(step.into_call()))
+                    .collect(),
+                other => vec![other],
+            })
+            .collect()
+    }
 
     fn model() -> Model {
         Model::with_term_size(80, 24)
@@ -436,11 +488,56 @@ mod tests {
         assert!(stage(&Msg::RedrawReady) == Stage::None);
     }
 
+    /// `VimEnter` blocks nvim's own startup until view answers it, so what
+    /// the takeover costs the user is the round trips it spends there, not
+    /// the calls it performs. Every call the batch can carry rides one
+    /// request; the attach and the tty claim cannot ride it (neither has a
+    /// lua entry point) and follow it as their own notifications.
+    #[test]
+    fn the_takeover_travels_as_one_round_trip_ahead_of_the_attach() {
+        let mut session = NativeSession::all_enabled(7, None);
+        let mut m = model();
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let batches: Vec<&Vec<TakeoverStep>> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Rpc(RpcCall::Takeover { steps }) => Some(steps),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            batches.len(),
+            1,
+            "one request, not one per call: {effects:?}"
+        );
+        assert!(
+            matches!(effects.first(), Some(Effect::Rpc(RpcCall::Takeover { .. }))),
+            "the takeover leads, so the attach draws its first frame with \
+             the surfaces already view's: {effects:?}"
+        );
+        let loose: Vec<&Effect> = effects
+            .iter()
+            .filter(|e| !matches!(e, Effect::Rpc(RpcCall::Takeover { .. })))
+            .collect();
+        assert!(
+            loose.iter().all(|e| matches!(
+                e,
+                Effect::Rpc(RpcCall::UiAttach { .. } | RpcCall::ClaimStdoutTty)
+            )),
+            "only the two calls with no lua behind them travel alone: {loose:?}"
+        );
+        assert_eq!(
+            unbatched(effects.clone()).len(),
+            batches[0].len() + loose.len(),
+            "the batch performs every call it swallowed: {effects:?}"
+        );
+    }
+
     #[test]
     fn the_takeover_holds_every_planned_surface_and_registers_the_keys_once() {
         let mut session = NativeSession::all_enabled(7, None);
         let mut m = model();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         // the plan's own calls, compared as a list rather than counted: a
         // count matches whenever a hold of the wrong surface replaces the
         // right one, and the plan carries two kinds of hold now
@@ -508,7 +605,7 @@ mod tests {
     fn the_claimant_hand_back_leads_the_takeover_and_only_for_the_surfaces_taken() {
         let mut session = NativeSession::all_enabled(7, None);
         let mut m = model();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         let Some(Effect::Rpc(RpcCall::DisableClaimants { modules })) = effects.first() else {
             unreachable!("the hand-back must lead the takeover, got {effects:?}")
         };
@@ -533,8 +630,7 @@ mod tests {
         let mut quiet = model();
         quiet.attach_surfaces(vec![view_core::native::ext::Ext::LineGrid]);
         assert!(
-            !handed_back
-                .follow_up(&mut quiet, Stage::VimEnter)
+            !unbatched(handed_back.follow_up(&mut quiet, Stage::VimEnter))
                 .iter()
                 .any(|e| matches!(e, Effect::Rpc(RpcCall::DisableClaimants { .. }))),
             "a session that externalized no claimed surface turns nothing off"
@@ -549,7 +645,7 @@ mod tests {
     fn the_attach_closes_the_takeover_and_the_stdout_claim_closes_the_attach() {
         let mut session = NativeSession::all_enabled(7, None);
         let mut m = model();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         let tail: Vec<&Effect> = effects.iter().rev().take(2).collect();
         assert!(
             matches!(tail[0], Effect::Rpc(RpcCall::ClaimStdoutTty)),
@@ -574,7 +670,7 @@ mod tests {
         let mut session = NativeSession::all_enabled(7, None);
         let mut m = model();
         let _ = m.takes_attach();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         assert!(
             !effects
                 .iter()
@@ -606,7 +702,7 @@ mod tests {
             let mut session = NativeSession::all_enabled(7, None);
             let mut m = model();
             m.attach_surfaces(surfaces.clone());
-            let effects = session.follow_up(&mut m, Stage::VimEnter);
+            let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
             let sets_cmdheight = effects.iter().any(|e| {
                 matches!(
                     e,
@@ -635,7 +731,7 @@ mod tests {
             ai_enabled: false,
         };
         let mut m = model();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         let specs = effects
             .iter()
             .find_map(|e| match e {
@@ -657,7 +753,7 @@ mod tests {
     fn an_enabled_ai_feature_still_registers_its_key() {
         let mut session = NativeSession::all_enabled(14, None);
         let mut m = model();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         let specs = effects
             .iter()
             .find_map(|e| match e {
@@ -676,7 +772,7 @@ mod tests {
         let mut m = model();
         m.ai_enabled = false;
         let (mut session, _effects) = load_from(None, 21, &mut m);
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         let specs = effects
             .iter()
             .find_map(|e| match e {
@@ -702,7 +798,7 @@ mod tests {
             ai_enabled: true,
         };
         let mut m = model();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         assert!(
             effects.iter().any(|e| matches!(
                 e,
@@ -720,7 +816,7 @@ mod tests {
     fn a_rebound_session_hands_over_again_and_to_the_new_channel() {
         let mut session = NativeSession::all_enabled(7, None);
         let mut m = model();
-        let first = session.follow_up(&mut m, Stage::VimEnter);
+        let first = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         assert!(
             !first.is_empty(),
             "the first takeover registered nothing at all"
@@ -731,7 +827,7 @@ mod tests {
         );
 
         session.rebind(21);
-        let again = session.follow_up(&mut m, Stage::VimEnter);
+        let again = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         assert!(
             again.iter().any(|e| matches!(
                 e,
@@ -763,7 +859,7 @@ mod tests {
             ai_enabled: true,
         };
         let mut m = model();
-        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let effects = unbatched(session.follow_up(&mut m, Stage::VimEnter));
         let cmdheight = effects.iter().find_map(|e| match e {
             Effect::Rpc(RpcCall::SetOption { name, value }) if name == "cmdheight" => Some(value),
             _ => None,

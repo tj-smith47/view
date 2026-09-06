@@ -16,7 +16,8 @@ use decode::{
     decode_bridge_event, decode_buf_lines_event, decode_buffer_list_reply, decode_clipboard_get,
     decode_clipboard_set, decode_delete_confirm_reply, decode_feature_invoke,
     decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_claims, decode_preview_reply,
-    decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, SwapRecoveryReading,
+    decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
+    SwapRecoveryReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -103,6 +104,14 @@ enum Waiter {
     /// `msgid` either, and its `Response` carries every key the chunk
     /// claimed, routed to `pump` as `Msg::MappingsClaimed`.
     MappingClaims,
+    /// The takeover's own request (see [`EngineHandle::request_takeover`]):
+    /// one reply carrying two answers, routed to `pump` as
+    /// `Msg::StartupMessages` and then `Msg::MappingsClaimed`.
+    ///
+    /// Messages first, deliberately: they are the record of a launch that
+    /// happened before this one, and the claim report is the first thing
+    /// this session says about itself.
+    Takeover,
     /// The arming of the surface-claimant probe (see
     /// [`EngineHandle::probe_claimants`]): a request rather than a notify
     /// only so that a chunk that fails to arm is heard. Its success reply
@@ -606,6 +615,28 @@ impl EngineHandle {
                                     } else {
                                         Vec::new()
                                     };
+                                    pump.route_claims(Msg::MappingsClaimed { claimed });
+                                }
+                            }
+                            Some(Waiter::Takeover) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "claimed
+                                    // nothing, said nothing", on the same
+                                    // terms the mapping reply beside it
+                                    // does: every step is a constant chunk
+                                    // run under its own `pcall`, so the
+                                    // only way an error reaches here is a
+                                    // takeover that did not run at all
+                                    let (claimed, messages) = if error == Value::Nil {
+                                        decode_takeover_reply(&result)
+                                    } else {
+                                        (Vec::new(), String::new())
+                                    };
+                                    if !messages.is_empty() {
+                                        pump.route_startup_messages(Msg::StartupMessages {
+                                            text: messages,
+                                        });
+                                    }
                                     pump.route_claims(Msg::MappingsClaimed { claimed });
                                 }
                             }
@@ -1502,6 +1533,20 @@ impl EngineHandle {
     /// either case.
     pub fn request_mappings(&self, method: &str, params: Vec<Value>) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::MappingClaims)
+    }
+
+    /// Issues `method`/`params` as the takeover's one request, whose
+    /// `Response` is decoded into `Msg::StartupMessages` and
+    /// `Msg::MappingsClaimed` (see [`Waiter::Takeover`]). Async on the same
+    /// terms as [`request_probe`](Self::request_probe).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_takeover(&self, method: &str, params: Vec<Value>) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::Takeover)
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded into

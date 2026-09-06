@@ -306,6 +306,27 @@ pub(super) fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
         .collect()
 }
 
+/// Decodes the takeover's one reply: the mapping registration's claims
+/// under `claims`, and nvim's own `:messages` at `VimEnter` under
+/// `messages`.
+///
+/// Either key absent is the honest answer for that half alone -- a session
+/// that registered no mappings, or a startup that said nothing -- so
+/// neither can take the other down with it.
+pub(super) fn decode_takeover_reply(result: &Value) -> (Vec<MappingClaim>, String) {
+    let Some(pairs) = result.as_map() else {
+        return (Vec::new(), String::new());
+    };
+    let claims = crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_CLAIMS_KEY)
+        .map(decode_mapping_claims)
+        .unwrap_or_default();
+    let messages = crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_MESSAGES_KEY)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    (claims, messages)
+}
+
 /// Decodes a buffer-list reply into each listed buffer's `name`, dropping
 /// `bufnr`/`modified` (the picker's `Source::Buffers` corpus is a plain path
 /// list; nothing here orders or annotates by either field -- see

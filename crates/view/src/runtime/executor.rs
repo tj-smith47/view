@@ -316,6 +316,7 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
                     RpcCall::HoldNotify => self.ops.hold_notify(),
                     RpcCall::DisableClaimants { modules } => self.ops.disable_claimants(&modules),
+                    RpcCall::Takeover { steps } => self.ops.takeover(&steps),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
                     RpcCall::ProbeSwapRecovery { generation } => {
                         self.ops.probe_swap_recovery(generation)

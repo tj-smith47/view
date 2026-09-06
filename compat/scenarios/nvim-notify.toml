@@ -56,7 +56,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # An explicit dwell rather than nvim-notify's own five-second default:
@@ -70,7 +70,7 @@ steps = [
   # startup notice did, before anything reads those cells.
   { wait_for = "view: notify is drawing over", timeout_ms = 15000 },
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # The notification's body text rendered in the grid by nvim-notify's own
@@ -128,7 +128,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # An explicit dwell rather than nvim-notify's own five-second default:
@@ -145,7 +145,7 @@ steps = [
   # the seconds it then stands still.
   { wait_for = "view: notify is drawing over", timeout_ms = 15000 },
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # The notification's body text rendered in the grid by nvim-notify's own
@@ -198,7 +198,7 @@ steps = [
   # whatever the config turns off, and one of these states turns the
   # notifications feature (and with it that key) off.
   { send = ":View notifications<CR>" },
-  { wait_for = "Messages", timeout_ms = 30000 },
+  { wait_for = "Messages", timeout_ms = 15000 },
   { send = "djdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjdjd" },
   { send = "<Esc>" },
   # One switch takes one surface: the message area goes back to nvim while
@@ -211,20 +211,17 @@ steps = [
   { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
   # The other half of the takeover pair: with the notification feature off
   # view installs no hold of its own, so the message goes wherever the
-  # session's own chain leaves `vim.notify` -- and here that is nvim's
-  # engine default, not nvim-notify. The command line is still view's, so
-  # noice is a superseded claimant and the takeover turns it off; noice's
-  # `disable` restores the `vim.notify` it saved at `enable`, and what it
-  # saved was the default, because this fixture loads nvim-notify with
-  # `opts = {}` and nvim-notify never assigns the function itself -- noice
-  # is the only link between the two. The message is drawn (by the native
-  # message area this state hands back) and nvim-notify never sees it.
-  # The direct `require('notify')` marker above is still in that history,
-  # which is what keeps this an assertion about the routing rather than
-  # about a plugin that failed to load.
+  # session's own chain leaves `vim.notify`. The command line is still
+  # view's, so noice is a superseded claimant and the takeover turns it
+  # off -- and the hand-back leaves the sink this config would have used
+  # without noice, which is the nvim-notify it loaded. Anything else is a
+  # surface handed back to nobody: this fixture loads nvim-notify with
+  # `opts = {}` and never assigns `vim.notify` itself, so the function
+  # noice's own `disable` restores is nvim's echo area, where a multi-line
+  # message is a blocking "Press ENTER" prompt.
   { send = ":lua vim.notify('vim-notify-marker')<CR>" },
   { wait_for = "vim-notify-marker", timeout_ms = 15000 },
-  { probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "absent" },
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"vim%-notify%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
   # native.notifications = false hands `<leader>fm` back unclaimed; the
   # fixture never binds it either, so the send below is a genuine no-op --
   # the assert below is the negative half of the pair the superseded

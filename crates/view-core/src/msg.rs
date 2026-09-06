@@ -256,6 +256,25 @@ pub enum Msg {
     MappingsClaimed {
         claimed: Vec<MappingClaim>,
     },
+    /// nvim's own `:messages` as it stood at `VimEnter`, read once by the
+    /// takeover ([`RpcCall::Takeover`]).
+    ///
+    /// Everything the child said before view had a UI to draw it on: a
+    /// `vim.notify` a plugin raised while it was setting itself up, a lua
+    /// error in the user's config, a swap notice. The child starts
+    /// `--headless` and view attaches after `VimEnter`, so none of it
+    /// crosses as `ext_messages` traffic and its stderr goes nowhere --
+    /// without this it exists only inside nvim's own `:messages`, while
+    /// view's notice tells the user the startup messages are in the
+    /// history.
+    ///
+    /// One string, nvim's own rendering, split into lines by the model:
+    /// what a `msg_show` would have carried per message is not recoverable
+    /// after the fact, and the text a user reads back is the text nvim
+    /// would have shown them.
+    StartupMessages {
+        text: String,
+    },
     /// nvim applied a new colorscheme: the `ColorScheme` autocmd registered
     /// by [`RpcCall::RegisterBridge`] fired, carrying the scheme's name (or
     /// an empty string when nvim reported none).
@@ -1879,6 +1898,29 @@ pub enum RpcCall {
     /// what every session did prior to this claim existing, so the trade runs
     /// one way.
     ClaimStdoutTty,
+    /// Every takeover call this session owes nvim, as one `nvim_exec_lua`
+    /// request answering once.
+    ///
+    /// The calls in `steps` are each a chunk nvim can run on its own, and
+    /// were each their own message until the cost of that showed up where
+    /// it hurts: they are issued from inside the `view_vim_enter`
+    /// rpcrequest handler, so every one of them is a message nvim services
+    /// before it can produce the frame the user is waiting for, and the
+    /// attach rides behind all of them. One request carries the same work
+    /// with one parse, one dispatch and one reply.
+    ///
+    /// The reply is the takeover's own answer: the keys the mapping step
+    /// claimed ([`Msg::MappingsClaimed`]) and what nvim said while it was
+    /// starting ([`Msg::StartupMessages`]), which is the one moment view
+    /// can read messages raised before it had a UI to draw them on.
+    ///
+    /// Not the whole takeover: `nvim_ui_attach` and `nvim_ui_set_option`
+    /// are remote-only (absent from `vim.api` -- verified against the
+    /// pinned engine), because both are about the UI on the *calling*
+    /// channel, so they stay their own messages behind this one.
+    Takeover {
+        steps: Vec<TakeoverStep>,
+    },
     /// Registers `specs` as real nvim mappings and the `:View` command, in
     /// one chunk, and answers with every claim as [`Msg::MappingsClaimed`].
     /// `channel_id` is view's own RPC channel: the registered right-hand
@@ -2368,4 +2410,141 @@ pub enum RpcCall {
         paths: Vec<String>,
         force: bool,
     },
+}
+
+/// The calls a takeover can batch into one `nvim_exec_lua`
+/// ([`RpcCall::Takeover`]).
+///
+/// A second, narrower vocabulary rather than a `Vec<RpcCall>`, and
+/// deliberately not `#[non_exhaustive]`: what makes a call batchable is
+/// that `view-engine` has a lua chunk for it, and a variant added here
+/// without one must fail to compile in the mapper rather than travel as a
+/// step nobody runs. [`Self::from_call`] is the one way in, so a caller
+/// assembling `RpcCall`s keeps assembling them and the batch takes what it
+/// can carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TakeoverStep {
+    /// [`RpcCall::DisableClaimants`].
+    DisableClaimants { modules: Vec<String> },
+    /// [`RpcCall::HoldOption`].
+    HoldOption { name: String, value: OptionValue },
+    /// [`RpcCall::HoldNotify`].
+    HoldNotify,
+    /// [`RpcCall::SetOption`].
+    SetOption { name: String, value: OptionValue },
+    /// [`RpcCall::RegisterClipboard`].
+    RegisterClipboard { channel_id: u64 },
+    /// [`RpcCall::RegisterMappings`], the one step whose answer the reply
+    /// carries.
+    RegisterMappings {
+        specs: Vec<MappingSpec>,
+        channel_id: u64,
+    },
+}
+
+impl TakeoverStep {
+    /// `call` as a batchable step, or `None` for a call that has to travel
+    /// as its own message.
+    ///
+    /// The `None` answer is not a failure and is not silent: the caller
+    /// that batches flushes what it has and emits the call on its own, so
+    /// order across the whole takeover is what it was.
+    #[must_use]
+    pub fn from_call(call: &RpcCall) -> Option<Self> {
+        match call {
+            RpcCall::DisableClaimants { modules } => Some(Self::DisableClaimants {
+                modules: modules.clone(),
+            }),
+            RpcCall::HoldOption { name, value } => Some(Self::HoldOption {
+                name: name.clone(),
+                value: value.clone(),
+            }),
+            RpcCall::HoldNotify => Some(Self::HoldNotify),
+            RpcCall::SetOption { name, value } => Some(Self::SetOption {
+                name: name.clone(),
+                value: value.clone(),
+            }),
+            RpcCall::RegisterClipboard { channel_id } => Some(Self::RegisterClipboard {
+                channel_id: *channel_id,
+            }),
+            RpcCall::RegisterMappings { specs, channel_id } => Some(Self::RegisterMappings {
+                specs: specs.clone(),
+                channel_id: *channel_id,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The call this step stands for.
+    ///
+    /// The inverse of [`Self::from_call`], so a batch is a transport
+    /// decision and never a change of what the takeover performs: a test or
+    /// a recorder can read a batched takeover as the call sequence it was
+    /// assembled from.
+    #[must_use]
+    pub fn into_call(self) -> RpcCall {
+        match self {
+            Self::DisableClaimants { modules } => RpcCall::DisableClaimants { modules },
+            Self::HoldOption { name, value } => RpcCall::HoldOption { name, value },
+            Self::HoldNotify => RpcCall::HoldNotify,
+            Self::SetOption { name, value } => RpcCall::SetOption { name, value },
+            Self::RegisterClipboard { channel_id } => RpcCall::RegisterClipboard { channel_id },
+            Self::RegisterMappings { specs, channel_id } => {
+                RpcCall::RegisterMappings { specs, channel_id }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// Batching is a transport decision and nothing else: a step has to
+    /// name back the call it was made from, or a takeover performs
+    /// something other than what its caller assembled. A variant added
+    /// without a mapping cannot reach this test -- `into_call`'s match is
+    /// exhaustive -- so this covers the mapping being right, not its
+    /// existing.
+    #[test]
+    fn every_batchable_call_names_itself_back_from_its_step() {
+        let calls = vec![
+            RpcCall::DisableClaimants {
+                modules: vec!["noice".to_string()],
+            },
+            RpcCall::HoldOption {
+                name: "laststatus".to_string(),
+                value: OptionValue::Int(0),
+            },
+            RpcCall::HoldNotify,
+            RpcCall::SetOption {
+                name: "cmdheight".to_string(),
+                value: OptionValue::Int(0),
+            },
+            RpcCall::RegisterClipboard { channel_id: 7 },
+            RpcCall::RegisterMappings {
+                specs: vec![MappingSpec {
+                    feature: "picker",
+                    lhs: "<leader>ff",
+                    verb: "files",
+                }],
+                channel_id: 7,
+            },
+        ];
+        for call in calls {
+            let step =
+                TakeoverStep::from_call(&call).expect("every call here is one the batch carries");
+            assert_eq!(step.into_call(), call);
+        }
+    }
+
+    /// The carve-out the batch rests on: a call with no lua chunk behind it
+    /// travels as its own message rather than as a step nobody runs.
+    #[test]
+    fn a_call_the_batch_has_no_chunk_for_is_refused() {
+        assert!(TakeoverStep::from_call(&RpcCall::ClaimStdoutTty).is_none());
+        assert!(TakeoverStep::from_call(&RpcCall::Redraw).is_none());
+    }
 }

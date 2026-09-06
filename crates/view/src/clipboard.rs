@@ -860,6 +860,12 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn takeover(
+            &self,
+            _steps: &[view_core::msg::TakeoverStep],
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn hold_option(
             &self,
             _name: &str,

@@ -11,7 +11,9 @@ use crate::process::SWAP_RECOVERY_PROBE;
 use crate::rpc::RpcError;
 use rmpv::Value;
 use std::time::Duration;
-use view_core::msg::{BufferHandle, HunkMark, OptionValue, ReviewOpenTarget, TextEdit};
+use view_core::msg::{
+    BufferHandle, HunkMark, OptionValue, ReviewOpenTarget, TakeoverStep, TextEdit,
+};
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
 };
@@ -208,14 +210,40 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// half-configured plugin, are the same outcome for view -- the surface
 /// stays contested and the notice that names the conflict is still raised.
 /// Neither may take down the takeover the rest of this sequence performs.
+///
+/// # The sink a hand-back lands in
+///
+/// A claimant's `disable` restores the `vim.notify` it saved when it took
+/// the function, and what it saved is nvim's own echo whenever the user's
+/// config never assigned one itself -- the ordinary lazy.nvim setup, where
+/// nvim-notify is loaded but only ever reached through the claimant. Left
+/// there, a session that handed the messages back
+/// (`[native] notifications = false`) turns every later `vim.notify` into
+/// an echo, and lazy.nvim's own multi-line checker line into a blocking
+/// "Press ENTER" at startup -- worse than either renderer. So a hand-back
+/// that actually turned something off ends in the sink the config would
+/// have used without the claimant: nvim-notify where it is loaded,
+/// otherwise nvim's default, which is what it already is.
+///
+/// Unconditional rather than gated on whether view is about to install its
+/// own hold: [`HOLD_NOTIFY_CHUNK`] is issued behind this one by every
+/// session that owns the messages and overwrites this assignment in the
+/// same takeover, so the two never disagree and neither has to know about
+/// the other.
 const DISABLE_CLAIMANTS_CHUNK: &str = "\
 local modules = ...
+local handed_back = false
 for _, name in ipairs(modules) do
   if package.loaded[name] ~= nil then
-    pcall(function()
+    if pcall(function()
       require(name).disable()
-    end)
+    end) then
+      handed_back = true
+    end
   end
+end
+if handed_back and package.loaded.notify ~= nil then
+  vim.notify = package.loaded.notify
 end";
 
 /// [`HOLD_OPTION_CHUNK`] itself, for the cross-crate pin that reads the
@@ -720,6 +748,63 @@ if vim.g.clipboard == nil then
     cache_enabled = 0,
   }
 end";
+
+/// The lua chunk [`EngineHandle::takeover`] runs inside nvim: every step of
+/// the takeover, in order, and one reading of what nvim said while it was
+/// starting, answering once.
+///
+/// The steps are the chunks the individual calls already send, carried as
+/// data and `load`ed here, rather than a rewrite of what each of them does
+/// -- each keeps its own doc, its own pin and its own wire capture, and a
+/// call gains a batched form by being listed rather than by being written
+/// twice.
+///
+/// `pcall` per step: eight independent notifications degraded independently
+/// -- a claimant whose `disable` raised never took the mapping
+/// registration down with it -- and one message must not be the thing that
+/// changes that. A step that raises leaves the rest of the takeover done.
+///
+/// `answer[step.out]` rather than the whole result list: exactly one step
+/// (the mapping registration) has an answer anyone reads, and naming the
+/// key here means the reply's decoder does not have to know which index the
+/// caller put it at.
+///
+/// The `:messages` read is the one moment view can have it. The child runs
+/// its whole startup `--headless`, so every message raised before this
+/// point went to nvim's own history and nowhere else -- not to
+/// `ext_messages`, which nothing was attached for, and not to stderr, which
+/// the spawn nulls.
+const TAKEOVER_CHUNK: &str = "\
+local steps = ...
+local unpack = unpack or table.unpack
+local answer = {}
+for _, step in ipairs(steps) do
+  local ok, result = pcall(function()
+    return assert(load(step.src))(unpack(step.args))
+  end)
+  if ok and step.out ~= nil then
+    answer[step.out] = result
+  end
+end
+answer.messages = vim.api.nvim_exec2(
+  'messages', { output = true }).output
+return answer";
+
+/// The key [`TAKEOVER_CHUNK`] returns the mapping registration's own answer
+/// under, and the key it returns nvim's startup messages under.
+pub(crate) const TAKEOVER_CLAIMS_KEY: &str = "claims";
+pub(crate) const TAKEOVER_MESSAGES_KEY: &str = "messages";
+
+/// [`EngineHandle::set_option`] as a chunk, for the one caller that batches
+/// it ([`TAKEOVER_CHUNK`]): `nvim_set_option_value` is an API call rather
+/// than a chunk everywhere else, and a batch carries lua or it carries
+/// nothing.
+///
+/// The empty `opts` map is the whole of why the wrapper exists at all --
+/// see [`EngineHandle::set_option`] for what a scopeless set means.
+const SET_OPTION_CHUNK: &str = "\
+local name, value = ...
+vim.api.nvim_set_option_value(name, value, {})";
 
 /// Applies the colorscheme `[ui] theme` named, and answers on the
 /// `view_bridge` method when nvim cannot find it.
@@ -3217,42 +3302,41 @@ impl EngineHandle {
         specs: &[MappingSpec],
         channel_id: u64,
     ) -> Result<(), EngineError> {
-        let specs = specs
-            .iter()
-            .filter(|spec| is_spellable(spec))
-            .map(|spec| {
-                Value::Map(vec![
-                    (Value::from("feature"), Value::from(spec.feature)),
-                    (Value::from("lhs"), Value::from(spec.lhs)),
-                    (Value::from("verb"), Value::from(spec.verb)),
-                ])
-            })
-            .collect();
-        let entries = default_maps()
-            .iter()
-            .map(|spec| (spec.feature, spec.verb))
-            .chain(
-                command_only_forms()
-                    .iter()
-                    .map(|form| (form.feature, form.verb)),
-            )
-            .map(|(feature, verb)| {
-                Value::Map(vec![
-                    (Value::from("feature"), Value::from(feature)),
-                    (Value::from("verb"), Value::from(verb)),
-                ])
-            })
-            .collect();
         self.request_mappings(
             "nvim_exec_lua",
             vec![
                 Value::from(REGISTER_MAPPINGS_CHUNK),
-                Value::Array(vec![
-                    Value::from(channel_id),
-                    Value::Array(specs),
-                    Value::Array(entries),
-                    Value::from(COMMAND),
-                ]),
+                Value::Array(mapping_args(specs, channel_id)),
+            ],
+        )
+    }
+
+    /// Every takeover call in `steps` as one `nvim_exec_lua` request
+    /// ([`TAKEOVER_CHUNK`]), answering with the mapping claims and nvim's
+    /// own startup messages.
+    ///
+    /// One message rather than one per step because of where the takeover
+    /// is issued from: the `view_vim_enter` rpcrequest handler, with nvim
+    /// blocked inside `VimEnter` and the user waiting on the frame the
+    /// attach behind this will produce. What each step *does* is unchanged
+    /// -- the chunks are the same constants the individual calls send.
+    ///
+    /// Async on the same terms as
+    /// [`register_mappings`](Self::register_mappings), which it replaces on
+    /// the startup path: the caller is the runtime loop, which never awaits
+    /// a reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn takeover(&self, steps: &[TakeoverStep]) -> Result<(), EngineError> {
+        let steps: Vec<Value> = steps.iter().map(takeover_step).collect();
+        self.request_takeover(
+            "nvim_exec_lua",
+            vec![
+                Value::from(TAKEOVER_CHUNK),
+                Value::Array(vec![Value::Array(steps)]),
             ],
         )
     }
@@ -4076,6 +4160,83 @@ impl EngineHandle {
         )?;
         decode_quickfix_entries_reply(&value)
     }
+}
+
+/// [`REGISTER_MAPPINGS_CHUNK`]'s four arguments, shared by the call that
+/// sends it alone and the takeover that batches it.
+fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value> {
+    let specs = specs
+        .iter()
+        .filter(|spec| is_spellable(spec))
+        .map(|spec| {
+            Value::Map(vec![
+                (Value::from("feature"), Value::from(spec.feature)),
+                (Value::from("lhs"), Value::from(spec.lhs)),
+                (Value::from("verb"), Value::from(spec.verb)),
+            ])
+        })
+        .collect();
+    let entries = default_maps()
+        .iter()
+        .map(|spec| (spec.feature, spec.verb))
+        .chain(
+            command_only_forms()
+                .iter()
+                .map(|form| (form.feature, form.verb)),
+        )
+        .map(|(feature, verb)| {
+            Value::Map(vec![
+                (Value::from("feature"), Value::from(feature)),
+                (Value::from("verb"), Value::from(verb)),
+            ])
+        })
+        .collect();
+    vec![
+        Value::from(channel_id),
+        Value::Array(specs),
+        Value::Array(entries),
+        Value::from(COMMAND),
+    ]
+}
+
+/// One [`TakeoverStep`] as the `{ src, args, out }` table
+/// [`TAKEOVER_CHUNK`] runs.
+///
+/// Exhaustive by construction: `TakeoverStep` is a closed vocabulary
+/// precisely so that a step added without a chunk fails to compile here
+/// rather than travelling as a step nvim never runs.
+fn takeover_step(step: &TakeoverStep) -> Value {
+    let (src, args) = match step {
+        TakeoverStep::DisableClaimants { modules } => (
+            DISABLE_CLAIMANTS_CHUNK,
+            vec![Value::Array(
+                modules.iter().map(|m| Value::from(&m[..])).collect(),
+            )],
+        ),
+        TakeoverStep::HoldOption { name, value } => (
+            HOLD_OPTION_CHUNK,
+            vec![Value::from(&name[..]), option_value(value)],
+        ),
+        TakeoverStep::HoldNotify => (HOLD_NOTIFY_CHUNK, Vec::new()),
+        TakeoverStep::SetOption { name, value } => (
+            SET_OPTION_CHUNK,
+            vec![Value::from(&name[..]), option_value(value)],
+        ),
+        TakeoverStep::RegisterClipboard { channel_id } => {
+            (REGISTER_CLIPBOARD_CHUNK, vec![Value::from(*channel_id)])
+        }
+        TakeoverStep::RegisterMappings { specs, channel_id } => {
+            (REGISTER_MAPPINGS_CHUNK, mapping_args(specs, *channel_id))
+        }
+    };
+    let mut table = vec![
+        (Value::from("src"), Value::from(src)),
+        (Value::from("args"), Value::Array(args)),
+    ];
+    if matches!(step, TakeoverStep::RegisterMappings { .. }) {
+        table.push((Value::from("out"), Value::from(TAKEOVER_CLAIMS_KEY)));
+    }
+    Value::Map(table)
 }
 
 #[cfg(test)]
