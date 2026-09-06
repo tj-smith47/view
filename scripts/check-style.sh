@@ -455,7 +455,7 @@ crates/view-harness/src/bin/bench/replicates.rs 1 a git read, waited on to compl
 crates/view-harness/src/bin/oracle/compat.rs 3 a cargo build and a reference nvim, both waited on to completion, and a pty-hosted view ended by its master closing
 crates/view-harness/src/fixture.rs 1 an nvim --version probe, waited on to completion
 crates/view-native/src/tree/git.rs 2 a git status, bounded by its own deadline and killed on it
-crates/view-oracle/src/compat.rs 3 probe subprocesses, each bounded by wait_with_timeout and killed on it
+crates/view-oracle/src/compat.rs 4 probe subprocesses and the plugin-cache bootstrap, each bounded by wait_with_timeout and killed on it
 crates/view-oracle/src/hang.rs 1 a taskkill, waited on to completion
 crates/view-oracle/src/pty.rs 2 the pty funnel: setsid and TIOCSCTTY make the child a session leader, so the master closing delivers SIGHUP
 crates/view-oracle/src/remote.rs 1 a stub ssh client, waited on to completion

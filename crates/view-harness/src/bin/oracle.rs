@@ -196,6 +196,10 @@ enum Command {
     /// Drives `compat/scenarios/*.toml` (or a single scenario file) through
     /// the real `view` binary over a pty, per the compat harness's own
     /// scenario schema (`view_harness::scenario`).
+    ///
+    /// Fills every shared plugin cache the run will read before timing any
+    /// scenario. Set VIEW_COMPAT_CACHE_ROOT to run against a cache
+    /// directory of your own instead of the shared compat/.cache/.
     Compat {
         /// Scenario file or directory.
         #[arg(default_value = "compat/scenarios")]

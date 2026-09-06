@@ -385,6 +385,12 @@ pub enum CompatError {
     /// involved at all.
     #[error("engine reference run did not exit within {timeout:?}")]
     EngineReferenceTimedOut { timeout: Duration },
+    /// The plugin bootstrap did not exit within its own bound and was
+    /// killed -- the install is wedged (an unreachable remote, a stalled
+    /// transfer), which is a different report from one that merely ran
+    /// long.
+    #[error("plugin bootstrap did not exit within {timeout:?}")]
+    PluginBootstrapTimedOut { timeout: Duration },
     /// The implicit zero-error epilogue found an E-numbered error or a Lua
     /// traceback in `:messages` or `v:errmsg`.
     #[error("zero-error epilogue violated ({origin}): {detail:?}")]
@@ -1076,6 +1082,38 @@ fn run_engine_reference(mut cmd: Command, timeout: Duration) -> Result<ErrorBase
     Ok(ErrorBaseline {
         messages: settled.messages.clone(),
         errmsg: settled.errmsg.clone(),
+    })
+}
+
+/// Runs `cmd` -- a headless `nvim` whose whole job is to populate a plugin
+/// cache -- to completion under `timeout`, hermetically, and hands back its
+/// exit status and output for the caller to judge.
+///
+/// Separate from [`engine_error_reference`] rather than reusing it: that
+/// function's contract is a *settled* error reading, so a config that
+/// raises something between its two captures fails as unsettled. A cache
+/// bootstrap is the one run where that is expected -- a first install
+/// prints and echoes as it clones -- and reporting it as an error baseline
+/// disagreement would name the wrong thing entirely.
+///
+/// # Errors
+///
+/// Returns [`CompatError::Io`] if the engine cannot be spawned, and
+/// [`CompatError::PluginBootstrapTimedOut`] if it does not exit within
+/// `timeout`.
+pub fn run_plugin_bootstrap(
+    mut cmd: Command,
+    timeout: Duration,
+) -> Result<std::process::Output, CompatError> {
+    crate::pty::make_hermetic(&mut cmd)?;
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    wait_with_timeout(cmd.spawn()?, timeout).map_err(|err| match err {
+        CompatError::ProbeTimedOut { timeout, .. } => {
+            CompatError::PluginBootstrapTimedOut { timeout }
+        }
+        other => other,
     })
 }
 

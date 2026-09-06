@@ -8,7 +8,7 @@
 //! share -- the engine pin, the workspace roots, the report-then-exit-code
 //! contract -- comes from `view_harness` rather than from each other.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -24,8 +24,8 @@ use view_harness::results::{
 };
 use view_harness::scenario::{self, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
-    engine_error_reference, reset_hermetic_home, state_name, CompatSession, ErrorBaseline,
-    PluginClass, ScenarioState,
+    engine_error_reference, reset_hermetic_home, run_plugin_bootstrap, state_name, CompatSession,
+    ErrorBaseline, PluginClass, ScenarioState,
 };
 
 /// Terminal size every compat scenario runs at: roomier than the
@@ -151,6 +151,61 @@ enum FixtureResolution {
     Skipped { notice: String },
 }
 
+/// The shared plugin cache key `fixture` reads, or `None` when it ships no
+/// `lazy-lock.json` and so installs nothing worth sharing.
+///
+/// One function for both the scenario loop's own resolution and the warm
+/// step ahead of it: two spellings of the same hash would let a fixture be
+/// warmed into a directory no scenario ever reads, which looks exactly like
+/// a warm step that works.
+///
+/// # Errors
+///
+/// Returns an error if the fixture's lockfile exists but cannot be read.
+fn fixture_cache_key(fixture: &str) -> Result<Option<String>> {
+    let path = fixtures_root()
+        .join(fixture)
+        .join("nvim")
+        .join("lazy-lock.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some(lockfile_cache_key(&bytes)))
+}
+
+/// The plugin directory names `fixture`'s `lazy-lock.json` pins.
+///
+/// lazy.nvim installs each plugin into a directory named by the lockfile's
+/// own key (its `name`, defaulted to the repository name -- the fixture's
+/// own comment on why it declares no `name =` aliases is the other half of
+/// that), so this set is exactly what a fully populated cache holds.
+///
+/// # Errors
+///
+/// Returns an error if the lockfile cannot be read or is not a JSON object.
+fn fixture_lockfile_plugins(fixture: &str) -> Result<BTreeSet<String>> {
+    let path = fixtures_root()
+        .join(fixture)
+        .join("nvim")
+        .join("lazy-lock.json");
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let pinned: BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(pinned.into_keys().collect())
+}
+
+/// Whether `cache_dir` already holds every plugin `plugins` names.
+///
+/// Read from the directories themselves rather than from a stamp file a
+/// previous run wrote: a cache half-populated by an interrupted run then
+/// reads as cold and is filled, where a stamp would report it warm and hand
+/// the remaining clone straight back to a scenario's timed wait.
+fn cache_is_warm(cache_dir: &Path, plugins: &BTreeSet<String>) -> bool {
+    let installed = cache_dir.join("nvim").join("lazy");
+    plugins.iter().all(|name| installed.join(name).is_dir())
+}
+
 /// Resolves an effective `fixture` name (a state's own override, or the
 /// scenario's default, or `None` for a fixture-less scenario) into a
 /// [`FixtureResolution`]: XDG homes to spawn `view` against, plus a
@@ -206,18 +261,10 @@ fn resolve_fixture(
                     init_lua.display()
                 );
             }
-            let lockfile_path = fixture_dir.join("nvim").join("lazy-lock.json");
-            let xdg_data_home = if lockfile_path.exists() {
-                let bytes = std::fs::read(&lockfile_path)
-                    .with_context(|| format!("reading {}", lockfile_path.display()))?;
-                let key = if cold_bootstrap {
-                    format!("cold-{scratch_id}")
-                } else {
-                    lockfile_cache_key(&bytes)
-                };
-                cache_root().join(key)
-            } else {
-                hermetic_dir.join("xdg_data_home")
+            let xdg_data_home = match fixture_cache_key(name)? {
+                Some(_) if cold_bootstrap => cache_root().join(format!("cold-{scratch_id}")),
+                Some(key) => cache_root().join(key),
+                None => hermetic_dir.join("xdg_data_home"),
             };
             let cold_cache_dir = cold_bootstrap.then(|| xdg_data_home.clone());
 
@@ -519,27 +566,168 @@ fn epilogue_reference(
     if state.accommodations {
         return Ok(None);
     }
-    let NvimBin(nvim_bin) = nvim_bin;
-    let mut cmd = std::process::Command::new(nvim_bin);
-    cmd.env("XDG_CONFIG_HOME", &ready.xdg_config_home);
+    // the fixture's first statement is a serverstart on this name; the
+    // reference run is never a probe client, but the call must still have
+    // somewhere to land, and a name of its own keeps it off the socket the
+    // session under test is about to open
+    let mut cmd = fixture_nvim_command(
+        nvim_bin,
+        ready,
+        &sock_path.with_extension("reference"),
+        accommodations_env(state),
+    );
     // The same config and the same plugin cache the session under test
     // reads, so the two legs answer the same question -- but its own state
     // and cache homes: the reference runs first, and a shared state home
     // would let it write the shada and plugin-manager state that make the
     // session's own launch no longer the first one this config ever had.
-    cmd.env("XDG_DATA_HOME", &ready.xdg_data_home);
     cmd.env("XDG_STATE_HOME", reference_sibling(&ready.xdg_state_home));
     cmd.env("XDG_CACHE_HOME", reference_sibling(&ready.xdg_cache_home));
-    // the fixture's first statement is a serverstart on this name; the
-    // reference run is never a probe client, but the call must still have
-    // somewhere to land, and a name of its own keeps it off the socket the
-    // session under test is about to open
-    cmd.env("VIEW_COMPAT_SOCK", sock_path.with_extension("reference"));
-    if let Some(value) = accommodations_env(state) {
+    engine_error_reference(cmd).map(Some)
+}
+
+/// One `nvim` invocation against a resolved fixture: the config and plugin
+/// homes `ready` names, the socket the fixture's own first statement calls
+/// `serverstart` on, and the accommodation switch.
+///
+/// The one place this file starts an engine of its own, so the epilogue's
+/// reference leg and the cache warm-up below it cannot drift into two
+/// different environments for the same fixture.
+fn fixture_nvim_command(
+    nvim_bin: NvimBin<'_>,
+    ready: &ReadyFixture,
+    sock_path: &Path,
+    accommodations: Option<&'static str>,
+) -> std::process::Command {
+    let NvimBin(nvim_bin) = nvim_bin;
+    let mut cmd = std::process::Command::new(nvim_bin);
+    cmd.env("XDG_CONFIG_HOME", &ready.xdg_config_home);
+    cmd.env("XDG_DATA_HOME", &ready.xdg_data_home);
+    cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
+    cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
+    cmd.env("VIEW_COMPAT_SOCK", sock_path);
+    if let Some(value) = accommodations {
         cmd.env(ACCOMMODATIONS_VAR, value);
     }
     cmd.current_dir(ready.xdg_config_home.join("nvim"));
-    engine_error_reference(cmd).map(Some)
+    cmd
+}
+
+/// Bound on one cache key's warm run: generous, because it covers a
+/// from-nothing clone of every plugin a fixture pins -- the same work the
+/// cold-bootstrap scenario bounds from inside a session with three 60 s
+/// waits of its own -- and finite, so an unreachable remote fails the run
+/// instead of hanging it before the first scenario.
+const WARM_CACHE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Every shared plugin cache key the scenario loop will read, mapped to the
+/// fixture names that key it.
+///
+/// A `cold_bootstrap` scenario is deliberately absent: its cache key is
+/// run-unique, and paying the clone inside its own waits is the whole
+/// measurement that scenario exists to take.
+///
+/// # Errors
+///
+/// Returns an error if a named fixture's lockfile cannot be read.
+fn warm_cache_targets(
+    scenarios: &[(PathBuf, ScenarioFile)],
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut targets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (_, scenario) in scenarios {
+        if scenario.cold_bootstrap {
+            continue;
+        }
+        for state in &scenario.states {
+            let Some(name) = state.fixture.as_deref().or(scenario.fixture.as_deref()) else {
+                continue;
+            };
+            if let Some(key) = fixture_cache_key(name)? {
+                targets.entry(key).or_default().insert(name.to_string());
+            }
+        }
+    }
+    Ok(targets)
+}
+
+/// Populates every shared plugin cache the scenario loop will read, before
+/// that loop starts timing anything.
+///
+/// A scenario's `wait_for` is sized for a plugin doing its work, never for
+/// git fetching that plugin: the first scenario to reach a cold shared
+/// cache otherwise pays the whole install inside its own timed wait and
+/// fails on a deadline that has nothing to say about the plugin under test
+/// (43.8 s at a 15 s wait, observed).
+///
+/// # Errors
+///
+/// Returns an error if a fixture cannot be resolved or its lockfile read,
+/// the bootstrap engine cannot be spawned, it exits nonzero or outlives
+/// [`WARM_CACHE_TIMEOUT`], or the cache is still incomplete afterwards.
+fn warm_plugin_caches(scenarios: &[(PathBuf, ScenarioFile)], nvim_bin: NvimBin<'_>) -> Result<()> {
+    for (key, fixtures) in warm_cache_targets(scenarios)? {
+        let named = fixtures.iter().cloned().collect::<Vec<_>>().join(", ");
+        // every fixture sharing a key hashed the same lockfile bytes, so
+        // any one of them names the same plugin set
+        let Some(fixture) = fixtures.iter().next() else {
+            continue;
+        };
+        let plugins = fixture_lockfile_plugins(fixture)?;
+        let cache_dir = cache_root().join(&key);
+        if cache_is_warm(&cache_dir, &plugins) {
+            println!("compat: plugin cache {key} for {named} ... already warm");
+            continue;
+        }
+        println!("compat: warming plugin cache {key} for {named} ...");
+        let start = Instant::now();
+        warm_one_cache(fixture, nvim_bin)?;
+        if !cache_is_warm(&cache_dir, &plugins) {
+            bail!(
+                "the plugin bootstrap for fixture {fixture:?} reported success but \
+                 {} still does not hold every plugin its lockfile pins",
+                cache_dir.display()
+            );
+        }
+        println!(
+            "compat: warming plugin cache {key} for {named} ... done ({:.1}s)",
+            start.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
+/// Runs one fixture's plugin install headless, into the shared cache
+/// directory its own lockfile keys.
+///
+/// `Lazy! restore` rather than a bare startup: lazy.nvim installs what is
+/// missing during startup either way, but the bang makes this run wait for
+/// that install and for the lockfile checkout behind it, instead of
+/// quitting out from under a clone still in flight.
+fn warm_one_cache(fixture: &str, nvim_bin: NvimBin<'_>) -> Result<()> {
+    let sock_path = compat_scratch_root().join(format!(
+        "view-compat-warm-{}-{}.sock",
+        std::process::id(),
+        SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let FixtureResolution::Ready(ready) = resolve_fixture(Some(fixture), false, &sock_path)? else {
+        bail!("fixture {fixture:?} did not resolve for its own cache warm-up");
+    };
+    let mut cmd = fixture_nvim_command(nvim_bin, &ready, &sock_path, None);
+    cmd.arg("--headless")
+        .arg("-c")
+        .arg("Lazy! restore")
+        .arg("-c")
+        .arg("qa!");
+    let output = run_plugin_bootstrap(cmd, WARM_CACHE_TIMEOUT)
+        .with_context(|| format!("warming the plugin cache for fixture {fixture:?}"))?;
+    if !output.status.success() {
+        bail!(
+            "the plugin bootstrap for fixture {fixture:?} exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Drives one `(scenario, state)` pair end to end: resolves the state's
@@ -1028,6 +1216,13 @@ fn print_scenario_result(result: &ScenarioResult) {
 /// The `compat [PATH]` subcommand: every scenario under `path` (default
 /// `compat/scenarios`), reported per [`print_scenario_result`] and written
 /// to `compat/results.json` for the `page` subcommand to render.
+///
+/// Every shared plugin cache the run will read is filled by
+/// [`warm_plugin_caches`] first, so no scenario's timed wait carries a
+/// clone. The cache lives at `compat/.cache/` unless
+/// `view_harness::fixture::CACHE_ROOT_ENV` (`VIEW_COMPAT_CACHE_ROOT`)
+/// names another directory -- which is how a run observes a cold cache
+/// without emptying the one every other session on this tree shares.
 /// Exit code: 0 unless at least one scenario reports
 /// [`ScenarioStatus::Failed`] -- a SKIPPED scenario (no daily config on
 /// this host, the expected state in CI) does not fail the run, since there
@@ -1064,6 +1259,8 @@ pub(crate) fn command(path: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(compat_scratch_root());
     std::fs::create_dir_all(compat_scratch_root())
         .with_context(|| format!("creating scratch root {}", compat_scratch_root().display()))?;
+
+    warm_plugin_caches(&scenarios, NvimBin(&nvim_bin))?;
 
     let mut results = ResultsFile::default();
     let mut any_failed = false;
@@ -1302,6 +1499,71 @@ mod tests {
                  file does not declare"
             );
         }
+    }
+
+    /// The warm step fills exactly the shared cache keys the scenario loop
+    /// goes on to read, so a fixture added to a scenario cannot arrive
+    /// unwarmed and pay its clone inside a timed wait.
+    ///
+    /// The expected set is derived from each scenario's own effective
+    /// fixture and that fixture's lockfile bytes rather than from
+    /// `fixture_cache_key`, so this is a second reading of the same
+    /// question and not a restatement of the first.
+    #[test]
+    fn the_warm_step_fills_every_shared_cache_key_the_scenario_loop_reads() {
+        let dir = workspace_root().join("compat").join("scenarios");
+        let scenarios = collect_scenarios(&dir).expect("the committed scenarios must load");
+
+        let mut expected: BTreeSet<String> = BTreeSet::new();
+        for (_, scenario) in &scenarios {
+            if scenario.cold_bootstrap {
+                continue;
+            }
+            for state in &scenario.states {
+                let Some(name) = state.fixture.as_deref().or(scenario.fixture.as_deref()) else {
+                    continue;
+                };
+                let lockfile = fixtures_root()
+                    .join(name)
+                    .join("nvim")
+                    .join("lazy-lock.json");
+                if let Ok(bytes) = std::fs::read(&lockfile) {
+                    expected.insert(lockfile_cache_key(&bytes));
+                }
+            }
+        }
+
+        let warmed: BTreeSet<String> = warm_cache_targets(&scenarios)
+            .expect("every committed fixture's lockfile must be readable")
+            .into_keys()
+            .collect();
+
+        assert!(
+            !expected.is_empty(),
+            "the committed scenarios must name at least one lockfile-keyed fixture, or this \
+             pin proves nothing"
+        );
+        assert_eq!(
+            warmed, expected,
+            "a shared plugin cache key the scenario loop resolves is not one the warm step fills"
+        );
+
+        let cold: Vec<(PathBuf, ScenarioFile)> = collect_scenarios(&dir)
+            .expect("the committed scenarios must load")
+            .into_iter()
+            .filter(|(_, scenario)| scenario.cold_bootstrap)
+            .collect();
+        assert!(
+            !cold.is_empty(),
+            "the mandatory cold-bootstrap scenario must exist for its exclusion to mean anything"
+        );
+        assert!(
+            warm_cache_targets(&cold)
+                .expect("the cold scenario's fixture lockfile must be readable")
+                .is_empty(),
+            "a cold-bootstrap scenario must contribute no warm key: its cache is run-unique and \
+             paying the clone is the measurement"
+        );
     }
 
     #[test]

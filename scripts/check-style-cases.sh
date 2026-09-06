@@ -425,7 +425,7 @@ new_tied_case() {
   plant_spawns 'crates/view-harness/src/bin/oracle/compat.rs' 3
   plant_spawns 'crates/view-harness/src/fixture.rs' 1
   plant_spawns 'crates/view-native/src/tree/git.rs' 2
-  plant_spawns 'crates/view-oracle/src/compat.rs' 3
+  plant_spawns 'crates/view-oracle/src/compat.rs' 4
   plant_spawns 'crates/view-oracle/src/hang.rs' 1
   plant_spawns 'crates/view-oracle/src/pty.rs' 2
   plant_spawns 'crates/view-oracle/src/remote.rs' 1

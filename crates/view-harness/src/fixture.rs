@@ -157,14 +157,32 @@ pub fn fixtures_root() -> PathBuf {
     workspace_root().join("compat").join("fixtures")
 }
 
+/// Environment override for [`cache_root`]: an absolute path to use in
+/// place of `compat/.cache/`.
+///
+/// The tree's own cache is shared by every session working on this
+/// checkout, so a run that wants to observe a genuinely cold cache cannot
+/// empty it -- a concurrent `task compat` would then pay the clone this
+/// tree keeps precisely to avoid. Pointing one run at a scratch root of
+/// its own is the way to watch the cold path without taking the warm one
+/// away from anybody.
+pub const CACHE_ROOT_ENV: &str = "VIEW_COMPAT_CACHE_ROOT";
+
 /// `compat/.cache/`, the shared, persistent (never per-run-hermetic)
 /// plugin install cache a heavy-style fixture's `XDG_DATA_HOME` is pointed
 /// at, keyed by its own `lazy-lock.json` hash. Gitignored: this is a
 /// build/test cache, not a durable artifact the way `corpus/quarantine/`
 /// is.
+///
+/// [`CACHE_ROOT_ENV`] overrides it wholesale.
 #[must_use]
 pub fn cache_root() -> PathBuf {
-    workspace_root().join("compat").join(".cache")
+    match std::env::var_os(CACHE_ROOT_ENV) {
+        // an empty value is nobody's deliberate choice of directory, and
+        // honouring it would key every cache off the current directory
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => workspace_root().join("compat").join(".cache"),
+    }
 }
 
 /// Hashes `bytes` (a fixture's `lazy-lock.json` content) into a stable,
