@@ -92,13 +92,13 @@ The pty answers it now (`view_oracle::pty`, pinned by
 
 Both first-paint columns are the retake's own interleaved pair; view's
 recorded gate bar (25.2 and 79.3 ms) ratchets separately and came from a
-quieter run. The pair at p50: `minimal` view 16.88 ms against bare nvim's 15.43 ms
-(ratio_p50 1.094, p99 1.076), `heavy` 55.08 against 50.04 (1.101, 1.045),
-`user` 58.73 against 54.16 (1.084, 1.046). view trails bare Neovim by 8-10%
-on every paired cold cell -- on `minimal` about 1.4 ms, the size of the
-post-VimEnter attach-plus-takeover round trip the late-attach design pays
-serially, since Neovim's own TUI attaches before init runs. Attribution
-past that outline is open work, not a claim this page makes.
+quieter run. The pair at p50: `minimal` view 16.88 ms against bare nvim's
+15.43 ms (ratio_p50 1.094, p99 1.076), `heavy` 55.08 against 50.04 (1.101,
+1.045), `user` 58.73 against 54.16 (1.084, 1.046). view trails bare Neovim
+by 8-10% on every paired cold cell -- on `minimal` about 1.4 ms, the size
+of the post-VimEnter attach-plus-takeover round trip the late-attach design
+pays serially, since Neovim's own TUI attaches before init runs.
+Attribution past that outline is open work, not a claim this page makes.
 
 dev-linux is the only class re-seated. `dev-macos`, `gh-linux` and
 `gh-macos` carry their first-paint ratios as `withdrawn` entries with the
@@ -113,9 +113,10 @@ its absence is visible.
 Until a class records that cell, a gate run against that class reports it
 as uncovered and exits on it -- the designed signal for a measured row
 with nothing to compare against, not a fault to work around. Every class
-has to record it before its gate is green again: the two dev classes in
-one batched quiet-host session, the CI classes on their own next
-recording legs, which already run under `--record`.
+has to record it before its gate is green again: the dev classes in a
+quiet-host session each, the CI classes by re-seating from the
+`bench-measured-<class>.toml` artifact their gate leg uploads (CI runs no
+`--record` leg).
 
 The first row is unpaired on purpose: view paints its shell before it has
 even started the Neovim child, so bare Neovim has no comparable event. It

@@ -106,9 +106,8 @@ that retake's own interleaved pair (view's recorded gate bar, 25.2 and
 79.3 ms, comes from a quieter run and ratchets separately): view reaches
 the opened file 1.4 ms after bare Neovim on the plugin-free config (16.9 ms
 against 15.4 ms p50) and 5 ms after it on the 15-plugin one (55.1 ms
-against 50.0 ms), neither of them a difference a
-person can feel ([Performance](docs/performance.md#current-numbers) has the
-whole account).
+against 50.0 ms), neither of them a difference a person can feel
+([Performance](docs/performance.md#current-numbers) has the whole account).
 The no-plugins memory row above is view's own process only (the embedded
 Neovim engine is a separate process this budget excludes) and has no
 bare-Neovim comparison. Under the 15-plugin lazy.nvim stack, a diagnostic
