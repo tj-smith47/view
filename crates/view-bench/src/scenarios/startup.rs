@@ -58,22 +58,55 @@ pub const SETTLED_RATIO_METRIC: &str = "settled_ratio_p50";
 pub const SERVER_DELTA_METRIC: &str = "server_delta_ms";
 
 /// The `--startuptime` line whose figure is the engine's whole startup.
-const STARTED_LINE: &str = "--- NVIM STARTED ---";
+pub const STARTED_LINE: &str = "--- NVIM STARTED ---";
 
-/// Every `NVIM STARTED` time in one `--startuptime` log, in milliseconds.
+/// What a `--startuptime` section header reads up to the process it names.
+const SECTION_PREFIX: &str = "--- Startup times for process: ";
+
+/// The process whose section holds the editor's own startup.
+///
+/// A tty nvim is two processes and writes a section for each: the UI client
+/// that owns the terminal, and the embedded server that is the editor. Only
+/// the second is the same thing view's own engine writes, and the two are
+/// nothing like each other -- the client reaches its own `NVIM STARTED` in a
+/// couple of milliseconds while the server is still loading a config.
+const EDITOR_PROCESS: &str = "Embedded";
+
+/// Every `NVIM STARTED` time the editor process wrote in one
+/// `--startuptime` log, in milliseconds.
 ///
 /// nvim appends a whole timing section per run to the file it is given, so
 /// one log per side holds one figure per sample of that side's series, in
-/// sample order.
+/// sample order -- and one figure per *process*, which is what
+/// [`EDITOR_PROCESS`] selects between: reading both would give a tty side
+/// twice the samples of an embedded one, alternating two figures an order
+/// of magnitude apart, and a median over the pair is a number neither
+/// process ever took.
+///
+/// A log with no section header at all is one process throughout, which is
+/// what an engine that writes no header wrote.
 ///
 /// The figure is the first field of the line carrying [`STARTED_LINE`]:
 /// `clock` in `--startuptime`'s own `clock  self+sourced self` header,
 /// which for this line is the elapsed milliseconds since the process began.
-fn started_times_ms(log: &str) -> Vec<f64> {
-    log.lines()
-        .filter(|line| line.contains(STARTED_LINE))
-        .filter_map(|line| line.split_whitespace().next()?.parse::<f64>().ok())
-        .collect()
+#[must_use]
+pub fn started_times_ms(log: &str) -> Vec<f64> {
+    let mut editor_section = true;
+    let mut times = Vec::new();
+    for line in log.lines() {
+        if let Some(process) = line.trim().strip_prefix(SECTION_PREFIX) {
+            editor_section = process.starts_with(EDITOR_PROCESS);
+        } else if editor_section && line.contains(STARTED_LINE) {
+            if let Some(clock) = line
+                .split_whitespace()
+                .next()
+                .and_then(|field| field.parse::<f64>().ok())
+            {
+                times.push(clock);
+            }
+        }
+    }
+    times
 }
 
 /// The engine-startup delta between the two sides of a run, in
@@ -130,6 +163,25 @@ times in msec\n\
 004.900  001.900 001.900: sourcing /etc/vimrc\n\
 098.760  000.011: --- NVIM STARTED ---\n";
         assert_eq!(started_times_ms(log), vec![112.345, 98.760]);
+    }
+
+    /// A tty side writes a UI-client section beside the editor's, and the
+    /// client's own figure is not a startup any editor took: reading it
+    /// would double that side's sample count and drag its median toward a
+    /// process that loads no config.
+    #[test]
+    fn a_ui_clients_own_section_is_not_the_editors() {
+        let log = "\
+--- Startup times for process: Primary (or UI client) ---\n\
+\n\
+times in msec\n\
+003.195  000.002: --- NVIM STARTED ---\n\
+\n\
+--- Startup times for process: Embedded ---\n\
+\n\
+times in msec\n\
+112.148  000.028: --- NVIM STARTED ---\n";
+        assert_eq!(started_times_ms(log), vec![112.148]);
     }
 
     /// A log with no timing section at all is the shape a side that never
