@@ -276,9 +276,11 @@ pub enum Msg {
         text: String,
     },
     /// Whether a notifier other than nvim's own stands at `vim.notify`,
-    /// read once by the takeover ([`RpcCall::Takeover`]) after every step
-    /// has run -- so it reports the sink the hand-back actually left, not
-    /// the one the session started with.
+    /// read by the takeover ([`RpcCall::Takeover`]) after every step has
+    /// run -- so it reports the sink the hand-back actually left, not the
+    /// one the session started with -- and re-read at every idle
+    /// transition by the claimant probe, which is what sees a notifier a
+    /// config installs on `UIEnter`, after the takeover has answered.
     ///
     /// What it decides: whether view's own notices are spoken through that
     /// sink ([`RpcCall::Notify`]) or painted as toasts. A plugin notifier

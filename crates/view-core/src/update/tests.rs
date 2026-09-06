@@ -6651,6 +6651,38 @@ fn handed_back_model_with_a_plugin_notifier() -> Model {
     m
 }
 
+/// The reading names a `vim.notify` inside a process, and a restart ends
+/// that process. Kept across one, the flag sends the restart window's own
+/// notices -- the engine-down condition, the recovery report -- through a
+/// notifier that is not there any more, and view paints nothing in their
+/// place. The replacement's takeover answers again.
+#[test]
+fn a_restart_forgets_the_notifier_the_dead_engine_was_speaking_to() {
+    let mut m = handed_back_model_with_a_plugin_notifier();
+    assert!(
+        m.engine.messages.speaks_notices(),
+        "the fixture must be the speaking session for this to prove anything"
+    );
+
+    m.engine.forget_overlays();
+
+    assert!(
+        !m.engine.messages.speaks_notices(),
+        "a notice raised in the restart window has nowhere to be spoken, so \
+         view paints it"
+    );
+    let effects = m
+        .engine
+        .record_native_notice("view: the editor process stopped".to_string(), false);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Notify { .. }))),
+        "nothing may be handed to a vim.notify inside a process that is \
+         gone: {effects:?}"
+    );
+}
+
 /// The session that kept its own notifier hears view's notices through it,
 /// and sees no toast: two notifiers anchored to the same corner is the
 /// occlusion the hand-back exists to avoid.
@@ -6783,7 +6815,7 @@ fn the_notifier_reading_settles_a_notice_raised_before_it_arrived() {
     );
 
     m.dirty = false;
-    let _ = update(&mut m, Msg::NotifySinkRead { foreign: true });
+    let effects = update(&mut m, Msg::NotifySinkRead { foreign: true });
     assert!(
         m.dirty,
         "the frame drawn before the reading is not the frame after it"
@@ -6792,6 +6824,24 @@ fn the_notifier_reading_settles_a_notice_raised_before_it_arrived() {
         visible_texts(&m).is_empty(),
         "the notifier is drawing now, so view is not: {:?}",
         visible_texts(&m)
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Rpc(RpcCall::Notify { text })
+                if text == "view: theme cache rebuilt"
+        )),
+        "a line the reading takes off the stack goes to the notifier that \
+         is drawing now, or the user never sees it: {effects:?}"
+    );
+
+    let again = update(&mut m, Msg::NotifySinkRead { foreign: true });
+    assert!(
+        !again
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Notify { .. }))),
+        "the probe re-reads the same notifier the takeover found, and the \
+         user hears each line once: {again:?}"
     );
 }
 

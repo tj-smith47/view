@@ -265,9 +265,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // the stack paints at all, so a frame drawn before it and one drawn
         // after are different frames whichever way it lands
         Msg::NotifySinkRead { foreign } => {
-            model.engine.messages.set_foreign_notifier(foreign);
+            let settled = model.engine.messages.set_foreign_notifier(foreign);
             model.dirty = true;
-            Vec::new()
+            settled
+                .into_iter()
+                .map(|text| Effect::Rpc(RpcCall::Notify { text }))
+                .collect()
         }
         // whichever of the two attach paths arrives first performs it, and
         // the other finds it done (see `Model::takes_attach`)

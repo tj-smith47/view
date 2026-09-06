@@ -382,10 +382,32 @@ impl Messages {
     }
 
     /// Records whether a notifier other than nvim's own echo stands at
-    /// `vim.notify`, as the takeover read it
-    /// ([`crate::msg::Msg::NotifySinkRead`]).
-    pub(crate) fn set_foreign_notifier(&mut self, foreign: bool) {
+    /// `vim.notify`, as the takeover read it and as the claimant probe
+    /// re-reads it ([`crate::msg::Msg::NotifySinkRead`]), answering with
+    /// the notices this reading takes off the toast stack.
+    ///
+    /// A reading that turns the session into a speaking one
+    /// ([`Self::speaks_notices`]) stops painting every native notice
+    /// already standing, and those lines were raised before any of this
+    /// was knowable -- the user's notifier loads a whole config's sourcing
+    /// after view's first notice can be raised. Dropping them silently
+    /// would take a notice off the screen the user was reading, so they
+    /// are handed to the notifier that is drawing now instead, in arrival
+    /// order, and the caller sends each one. Only the crossing answers:
+    /// a repeat reading of the same notifier says nothing, or the probe's
+    /// re-read would tell the user everything a second time.
+    #[must_use]
+    pub(crate) fn set_foreign_notifier(&mut self, foreign: bool) -> Vec<String> {
+        let spoke = self.speaks_notices();
         self.foreign_notifier = foreign;
+        if spoke || !self.speaks_notices() {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| !self.paints(entry))
+            .map(|entry| entry.content.iter().map(|(_, t)| t.as_str()).collect())
+            .collect()
     }
 
     /// Whether view's own notices are spoken through the user's
@@ -714,12 +736,14 @@ impl Messages {
     /// | `startup_hold` | back to `Pending`: the replacement's first redraw batch is the one the hold exists to catch |
     /// | `held` | drained or discarded as the dead engine's deadline would have, never carried into a hold whose outcome a different engine's probe decides |
     /// | `entries`, `next_message_id`, `armed_slot`, `armed_lines`, `paused` | kept: the toast stack and the scrollback outlive the connection, and an id stamped once is never reissued |
-    /// | `handed_back`, `foreign_notifier` | kept: the first is the session's `[native]` answer and the replacement attaches with the same `ext_*` set; the second is a reading of the user's config, which a new connection re-reads and re-answers |
+    /// | `handed_back` | kept: it is the session's `[native]` answer, and the replacement attaches with the same `ext_*` set |
+    /// | `foreign_notifier` | cleared: it named a `vim.notify` inside a process that is gone, and a notice raised in the restart window would be spoken to it |
     pub(crate) fn forget_engine(&mut self) {
         // the restart marks the model dirty on either outcome of the attach
         // that follows, and `update()` arms the top slot on the next fold
         let _ = self.resolve_startup_hold(crate::native::toast::HoldOutcome::Release);
         self.startup_hold = crate::native::toast::StartupHold::Pending;
+        self.foreign_notifier = false;
     }
 
     /// Drops every message nvim showed, per `msg_clear`, and keeps every
