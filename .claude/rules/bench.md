@@ -69,7 +69,28 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
 - a paragraph on `README.md`, `docs/performance.md`, `docs/benchmarking.md`,
   spec section 1 or spec section 3.1 states a comparative -- a multiplier
   (`5.2x`, `1.10x`) or a comparison naming what it beats ("faster than bare
-  Neovim", "ahead of") -- while naming no `kind = "felt"` cell id.
+  Neovim", "ahead of") -- while naming no `kind = "felt"` cell id;
+- a class `docs/benchmarking.md` names, in one sentence, as carrying a
+  withdrawn first-paint ratio carries none in `baselines/<class>.toml`, or
+  a class carrying one is named by no such sentence;
+- a backticked token in a spec 3.1 table row resolves to no scenario,
+  metric or fixture that `budgets.toml` or a shipped class baseline
+  declares.
+
+A table row is its own anchor unit and prose keeps the paragraph scope: a
+line whose first non-space character is `|` is graded alone. An 18-row
+table read as one paragraph let the felt ids on the `echo` and `startup`
+rows anchor every diagnostic row under them, which is the refused claim's
+own shape surviving on the surface the rule was written for. So a
+diagnostic row that states a multiplier names the felt cell it decomposes
+on that row, and a resource row -- which decomposes nothing -- states its
+bound and its footprint without a comparative's grammar.
+
+The re-seat rule is what keeps three files telling the same story: a
+commit that deletes a `withdrawn` entry re-seats the shortfall ledger and
+rewrites the prose in the same commit, because the two halves fail
+silently in opposite directions -- a page saying a measurement never
+happened after it did, and a missing bar no reader is told about.
 
 The last rule is the one the vocabulary needs, because the claim it refuses
 was published in words: "First paint 25.2 ms vs 130.3 ms, 5.2x faster" cites
@@ -81,7 +102,7 @@ user-facing pages therefore carry no comparative at all -- naming the cell
 that would anchor one is what the identifier rule refuses there -- so they
 state moments and paired numbers, and the comparisons live in
 `docs/benchmarking.md` beside the cell that earns them.
-`scripts/check-budget-drift-cases.sh` grades all four rules and is what
+`scripts/check-budget-drift-cases.sh` grades all six rules and is what
 stops the check regressing to the identifier-only form.
 
 The identifier rule is the strict form, and it is the one with no false
