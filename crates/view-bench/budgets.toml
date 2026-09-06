@@ -502,7 +502,7 @@ config = "real"
 # what the 2026-09-06 retake under the answering pty made visible, an entry
 # each rather than a widened bar.
 #
-# Listed below: 11 entries -- 4 dev-linux, 7 dev-macos.
+# Listed below: 14 entries -- 7 dev-linux, 7 dev-macos.
 #
 # A count stated in prose about the file's own contents is a fact the file
 # can check, so the line above is pinned against the parsed entries; the
@@ -574,6 +574,36 @@ metric = "marker_ratio_p50"
 class = "dev-linux"
 accepted = 1.1007776687309356
 why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired, re-seated 2026-09-06 from the dev-linux retake under a pty that answers the queries nvim's tty startup asks. It replaces 0.460, which was a ratio against a bare-nvim arm waiting out its own background-query timeout. Measured now: view reaches the file at 1.101x bare nvim's p50 on this fixture (55.079 ms against 50.037 ms), and the whole paired row reads the same way -- 1.094 minimal, 1.101 heavy, 1.084 user, so view trails bare nvim by 8-10% on every cold cell rather than beating it. On minimal that is about 1.4 ms p50, the size of the post-VimEnter attach-plus-takeover round trip the late-attach design pays serially, since nvim's own TUI attaches before init runs; attribution past that outline is owed to the pre-v0.1.0 performance session and to the settled-screen cell's own work. The 0.30 bar is untouched: it is the promise the user stated, and this entry records the gap rather than retiring it."
+
+# The three real-config seats recorded on 2026-09-06, in the quiet windows
+# the S1.11 report logs. Each is the felt row measured where its own
+# statement seats it -- the login-shaped user fixture, paired against bare
+# nvim in the same interleaved run -- so the gap each records is the moment
+# a person lives through and not a bench leg standing in for it.
+
+[[shortfall]]
+scenario = "startup"
+fixture = "user"
+metric = "settled_ratio_p50"
+class = "dev-linux"
+accepted = 1.0897897644234942
+why = "the felt launch on the config it claims: view reaches the settled screen at a p50 of 56.031 ms against bare nvim's 51.415 ms in the same run under lazy.nvim, noice and nvim-notify, which is 9.0 percent over the 1.0 bar. What the gap is not: the diagnostic that decomposes this cell, server_delta_ms, reads -0.076 ms on the same run, so the embedded engine's own startup costs nothing here. What is measured of the cause: view attaches and takes over serially after the config's VimEnter has run, where nvim's own TUI is attached before init starts, and the first_paint entries above record the same event at 1.09 to 1.10 of the paired run on the bench fixtures. Root-causing it past that outline is an open task; the bar is untouched, and this entry records the gap rather than retiring it."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "user"
+metric = "ratio_p50"
+class = "dev-linux"
+accepted = 1.1097269280826585
+why = "the felt typing row on the config it claims: view p50 0.920 ms against bare nvim's 0.829 ms in the same interleaved run, 0.9 percent over the 1.10 bar, while the same cell's view-side tail (1.583 ms) sits well inside its own 8 ms bound. Attribution is the echo.minimal entry above, reproduced under a real plugin config: the residual is the rpc-written to redraw-parsed leg of the round trip, which no view-side input or paint lever addresses, and the plugin stack moves this cell only from 1.1719 to 1.1097 rather than changing its shape. The pinned closure path is unchanged and is now measured on this same config: the speculated paint reads 0.332 of the paired bare-nvim run, which removes the engine round trip from perceived echo instead of shrinking view's share of the measured one. This entry keeps measuring the honest unspeculated round trip."
+
+[[shortfall]]
+scenario = "flood"
+fixture = "user"
+metric = "cadence_p99_ms"
+class = "dev-linux"
+accepted = 16.914409
+why = "the redraw cadence under a terminal flood on the login-shaped fixture: 16.914 ms at the p99 against the 16 ms frame, 0.9 ms over. What is measured of the cause: both sides miss the frame under this plugin stack -- bare nvim's own cadence p99 in the same run is 17.480 ms, the recorded cadence_p99_ratio is 0.981 and pace_ratio 1.018, so view answers on the engine's own redraw cadence under the stack and drains within 2 percent of the lines nvim drains in the same fixed window. The same run's worst no-paint gap, reported and not gated, is 48.9 ms. Attribution past that -- what the stack makes the engine spend per redraw -- is an open task; the bar is untouched."
 
 # input_path.minimal key_to_rpc_p99_us dev-linux is no longer listed. The
 # entry accepted 112.647 against the 100.0 bound and named its own
