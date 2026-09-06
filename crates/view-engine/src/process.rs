@@ -588,8 +588,8 @@ impl EngineConfig {
         self.late_attach.is_some() && !self.stdin_relay_requested() && !self.recovers_a_swap()
     }
 
-    /// Whether this spawn carries nvim's own recovery flag, from a caller
-    /// that put it there or from [`recovering`](Self::recovering).
+    /// Whether this spawn carries nvim's own recovery flag, which only a
+    /// caller's own arguments can put there.
     #[must_use]
     fn recovers_a_swap(&self) -> bool {
         self.extra_args.iter().any(|arg| arg == RECOVERY_ARG)
