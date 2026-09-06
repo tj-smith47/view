@@ -6,6 +6,9 @@
 #
 # So every [[budget]] entry must name a spec_row that appears in the spec,
 # and its max must appear in that same row's text.
+#
+# Written to stock POSIX-ish bash: macOS ships /bin/bash 3.2, and a gate that
+# needs a newer one is a gate that silently does not run for whoever has it.
 set -euo pipefail
 
 # A tree handed in as the single argument replaces the one this script lives
@@ -80,10 +83,12 @@ done < <(awk '
 # any identifier on those pages is a number quoted out of the gate's
 # vocabulary. Identifiers belong in docs/benchmarking.md, which is written
 # for whoever runs the harness and is not checked here.
-declare -A marker=([diagnostic]="Diagnostic" [resource]="Resource")
 while IFS=$'\t' read -r spec_row kind metric; do
-  want="${marker[$kind]:-}"
-  [[ -n "$want" ]] || continue
+  case "$kind" in
+    diagnostic) want="Diagnostic" ;;
+    resource) want="Resource" ;;
+    *) continue ;;
+  esac
   row="$(sed "s/$arrow/->/g; s/\`//g" "$spec" | grep -F "$spec_row" | head -1 || true)"
   if ! grep -qF "$want" <<<"$row"; then
     echo "BUDGET DRIFT FAIL: $metric is a $kind budget, and its spec row does not say \"$want\". A row that cannot carry a claim has to say so where a person reads it:" >&2
@@ -284,12 +289,15 @@ fi
 # itself declares -- budgets.toml's scenarios, metrics and fixtures, plus
 # the names the shipped class baselines record, since a row may cite a cell
 # that is measured and reported without being bounded.
-declare -A vocab_scenario=() vocab_leaf=()
+# Newline-joined and matched whole with grep -Fqx rather than keyed in a map:
+# an identifier is a whole word here, and a set of them is a set either way.
+vocab_scenario=""
+vocab_leaf=""
 while IFS=$'\t' read -r kind name; do
   [[ -n "$name" ]] || continue
   case "$kind" in
-    s) vocab_scenario["$name"]=1 ;;
-    *) vocab_leaf["$name"]=1 ;;
+    s) vocab_scenario="$vocab_scenario$name"$'\n' ;;
+    *) vocab_leaf="$vocab_leaf$name"$'\n' ;;
   esac
 done < <(
   awk '
@@ -302,11 +310,14 @@ done < <(
     }
   ' "$budgets"
   # A class baseline is the record of what a row actually publishes; a
-  # sidecar (dev-linux.headroom, dev-linux.measured) keeps its class's name
-  # with a suffix and adds no name of its own.
+  # sidecar (dev-linux.headroom, dev-linux.measured) keeps the class name it
+  # suffixes and adds no name of its own. No apostrophe in a comment inside
+  # this substitution: bash 3.2 reads one as a quote and never finds the end.
   for class_file in "$root/crates/view-bench/baselines"/*.toml; do
     [[ -f "$class_file" ]] || continue
-    case "$(basename "$class_file" .toml)" in *.*) continue ;; esac
+    # The pattern carries a leading paren: bash 3.2 counts the closing one of
+    # a bare pattern as the end of the enclosing substitution and dies parsing.
+    case "$(basename "$class_file" .toml)" in (*.*) continue ;; esac
     awk '
       /^\[/ {
         h=$0; gsub(/[][]/, "", h); n=split(h, part, ".")
@@ -319,25 +330,29 @@ done < <(
   done
 )
 
-# Identifiers §3.1 names because they no longer exist. Each is spelled out
-# rather than pattern-matched, so a typo cannot hide behind one.
-declare -A retired=(
-  [cold_ms]="withdrawn from the content-marker row in 2026-07-27's amendment, and named there as the defect that withdrew it"
-  [ratio_vs_nvim]="withdrawn from the content-marker row by the same amendment"
-  [echo_path]="a decomposition row of the diagnostic matrix; it publishes no baseline and carries no budget, so no file declares its name"
-)
-
 bounds="$(section_bounds '### 3.1 Budgets (CI-gated once the harness lands, P3)' '^#{2,3} ')"
 if [[ -n "$bounds" ]]; then
   while IFS= read -r token; do
     [[ -n "$token" ]] || continue
-    [[ -n "${retired[$token]:-}" ]] && continue
+    # Identifiers §3.1 names because they no longer exist, spelled out rather
+    # than pattern-matched so a typo cannot hide behind one: cold_ms and
+    # ratio_vs_nvim were withdrawn from the content-marker row by 2026-07-27's
+    # amendment, which names the defect that withdrew them, and echo_path is a
+    # decomposition row of the diagnostic matrix that publishes no baseline and
+    # carries no budget.
+    case "$token" in
+      cold_ms | ratio_vs_nvim | echo_path) continue ;;
+    esac
     if [[ "$token" == *.* ]]; then
       left="${token%%.*}"
       right="${token#*.}"
-      [[ -n "${vocab_scenario[$left]:-}" && -n "${vocab_leaf[$right]:-}" ]] && continue
-    else
-      [[ -n "${vocab_scenario[$token]:-}" || -n "${vocab_leaf[$token]:-}" ]] && continue
+      if grep -Fqx "$left" <<<"$vocab_scenario" &&
+        grep -Fqx "$right" <<<"$vocab_leaf"; then
+        continue
+      fi
+    elif grep -Fqx "$token" <<<"$vocab_scenario" ||
+      grep -Fqx "$token" <<<"$vocab_leaf"; then
+      continue
     fi
     echo "BUDGET DRIFT FAIL: spec-id $token: a spec 3.1 row names it, and neither budgets.toml nor the shipped class baselines declare a scenario, metric or fixture by that name" >&2
     fail=1

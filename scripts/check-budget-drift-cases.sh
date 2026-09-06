@@ -212,7 +212,10 @@ expect() {
   want_rc="$1"
   want="$2"
   desc="$3"
-  out=$(bash "$CHECKER" "$CASE" 2>&1)
+  # $BASH, not a PATH-resolved `bash`: a matrix run under stock 3.2 that
+  # graded the checker under a homebrew 5 would report a portability the
+  # contributor running it does not have.
+  out=$("$BASH" "$CHECKER" "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" | findings)
   if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
@@ -368,6 +371,63 @@ sed 's/^kind = "felt"$/kind = "diagnostic"/' "$CASE/$BUDGETS" > "$CASE/$BUDGETS.
 mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
 expect 1 'marker:view_p99_ms no-felt' \
   'a budgets file with no felt row, which would anchor every claim by having none'
+
+# ---------------------------------------------------------------------------
+# the gate runs under the bash macOS ships
+# ---------------------------------------------------------------------------
+# Taskfile.yml runs each of these as `bash scripts/...`, so whichever bash is
+# first on PATH decides whether the gate runs at all. A bash-4 construct is
+# not a syntax error under 3.2, it is a gate that dies mid-run with a message
+# reading as a script bug -- so the population is graded, not just the two
+# scripts this matrix is about, and the list comes from the Taskfile so a
+# script added to a task is graded without anyone remembering to add it here.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+GUARDED=$(grep -oE 'scripts/[A-Za-z0-9_/-]+\.sh' "$ROOT/Taskfile.yml" | sort -u) || true
+
+report() {
+  n=$((n + 1))
+  if [ -z "$2" ]; then
+    printf 'ok %s - %s\n' "$n" "$1"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n' "$n" "$1"
+  printf '%s\n' "$2" | sed 's/^/  | /'
+}
+
+# The tokens whose spelling would otherwise match this line are written with
+# their first character bracketed: same language, and the scan grades this
+# file by the same rule as every other without matching its own pattern.
+# An empty list is a finding, not a pass: grep with no file argument would
+# read stdin and the matrix would sit there having graded nothing.
+if [ -z "$GUARDED" ]; then
+  modern="Taskfile.yml names no scripts/*.sh, so nothing was graded"
+else
+  modern=$(cd "$ROOT" && grep -nE \
+    'declare[[:space:]]+-[a-zA-Z]*[An]|local[[:space:]]+-[a-zA-Z]*[An]|typeset[[:space:]]+-[a-zA-Z]*[An]|\b[m]apfile\b|\b[r]eadarray\b|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,|\^\^)|\|[&]|[&]>>|;;[&]' \
+    $GUARDED) || true
+fi
+report 'no bash-4-only construct in the scripts Taskfile.yml runs as bash' "$modern"
+
+# The grep above reads constructs; it cannot see the two shapes that made 3.2
+# refuse this very checker -- a case pattern and an apostrophe in a comment,
+# both inside a process substitution, whose closing paren 3.2 miscounts. Only
+# a parse under a pre-4 bash catches those, and the host that has one is the
+# host the contract is about, so the leg runs where /bin/bash is old and says
+# so where it is not.
+stock=/bin/bash
+stock_major=$("$stock" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 9)
+if [ "${stock_major:-9}" -ge 4 ]; then
+  n=$((n + 1))
+  printf 'ok %s - %s # skip %s is bash %s, nothing pre-4 to parse under\n' \
+    "$n" 'the scripts parse under stock bash' "$stock" "$stock_major"
+else
+  stale=$(cd "$ROOT" && for f in $GUARDED; do
+    out=$("$stock" -n "$f" 2>&1) || true
+    [ -n "$out" ] && printf '%s\n' "$out"
+  done) || true
+  report "the scripts parse under $stock (bash $stock_major)" "$stale"
+fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

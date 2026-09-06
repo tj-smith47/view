@@ -103,7 +103,11 @@ that would anchor one is what the identifier rule refuses there -- so they
 state moments and paired numbers, and the comparisons live in
 `docs/benchmarking.md` beside the cell that earns them.
 `scripts/check-budget-drift-cases.sh` grades all six rules and is what
-stops the check regressing to the identifier-only form.
+stops the check regressing to the identifier-only form. It runs the checker
+under its own interpreter, and two of its cases grade every script
+`Taskfile.yml` runs for bash 3.2 portability (`.claude/rules/shell.md`),
+because a gate that does not run on the bash macOS ships is a gate whose
+verdict a contributor never sees.
 
 The identifier rule is the strict form, and it is the one with no false
 positives: the user-facing pages state moments in words ("the key reaches
