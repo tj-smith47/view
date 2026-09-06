@@ -163,12 +163,13 @@ pub fn started_times_ms(log: &str) -> Result<Vec<f64>, BenchError> {
 ///
 /// [`BenchError::Desync`] if either log holds no `NVIM STARTED` line at
 /// all, which means the side never wrote one -- an editor that failed to
-/// start, or a `--startuptime` argument that never reached it -- or if
-/// [`started_times_ms`] refuses a side's log. Otherwise whatever
+/// start, or a `--startuptime` argument that never reached it -- if the two
+/// sides timed different numbers of startups, or if [`started_times_ms`]
+/// refuses a side's log. Otherwise whatever
 /// [`Distribution::from_samples`] returns for a series shorter than the
 /// warmup it is asked to drop.
 pub fn server_delta_ms(view_log: &Path, nvim_log: &Path, warmup: usize) -> Result<f64, BenchError> {
-    let mut sides = Vec::new();
+    let mut series = Vec::new();
     for (side, path) in [("view", view_log), ("nvim", nvim_log)] {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let times = started_times_ms(&text)?;
@@ -181,7 +182,28 @@ pub fn server_delta_ms(view_log: &Path, nvim_log: &Path, warmup: usize) -> Resul
                 ),
             });
         }
-        sides.push(Distribution::from_samples(&times, warmup)?.p50());
+        series.push((side, times));
+    }
+    // The structural rule above grades a report against its own header, so
+    // a sample whose whole report never reached the file leaves nothing to
+    // grade -- and view's side writes no header at all, having one process
+    // to report. What is left of it is the count the other side still has.
+    if series[0].1.len() != series[1].1.len() {
+        return Err(BenchError::Desync {
+            context: format!(
+                "the {} side timed {} engine startups and the {} side timed {}, so at least one \
+                 sample's whole report is missing and the two medians would be taken over \
+                 different runs",
+                series[0].0,
+                series[0].1.len(),
+                series[1].0,
+                series[1].1.len()
+            ),
+        });
+    }
+    let mut sides = Vec::new();
+    for (_, times) in &series {
+        sides.push(Distribution::from_samples(times, warmup)?.p50());
     }
     Ok(sides[0] - sides[1])
 }
@@ -283,6 +305,28 @@ times in msec\n\
              100.000  000.010: --- NVIM STARTED ---\n",
         )
         .unwrap();
+        assert!(matches!(
+            server_delta_ms(&view_log, &nvim_log, 0),
+            Err(BenchError::Desync { .. })
+        ));
+    }
+
+    /// A spawn whose whole report never reached the file leaves no section
+    /// for the structural rule to grade, and view's own side writes no
+    /// header to grade against at all, so the only witness left is that
+    /// one side timed fewer startups than the other.
+    #[test]
+    fn a_side_missing_a_whole_report_fails_the_run() {
+        let dir = view_test_support::ScratchDir::new("startup-server-delta-lost").unwrap();
+        let view_log = dir.join("view.log");
+        let nvim_log = dir.join("nvim.log");
+        std::fs::write(
+            &view_log,
+            "110.000  000.010: --- NVIM STARTED ---\n\
+             112.000  000.010: --- NVIM STARTED ---\n",
+        )
+        .unwrap();
+        std::fs::write(&nvim_log, "100.000  000.010: --- NVIM STARTED ---\n").unwrap();
         assert!(matches!(
             server_delta_ms(&view_log, &nvim_log, 0),
             Err(BenchError::Desync { .. })
