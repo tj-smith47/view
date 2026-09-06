@@ -1033,7 +1033,7 @@ mod tests {
         let cfg = EngineConfig::isolated()
             .with_arg("-")
             .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap())
-            .with_late_attach(80, 24, view_engine::UI_EXT_OPTIONS);
+            .with_late_attach(80, 24);
         assert!(
             !cfg.attaches_late(),
             "a relayed stdin must keep the wait-for-attach barrier, or nvim \

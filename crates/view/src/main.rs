@@ -1031,19 +1031,12 @@ fn main() -> Result<()> {
     // handed to `NativeSession` afterwards rather than read again there --
     // two reads of one file can answer differently, and the attach would
     // then have externalized a surface the rest of the session believes it
-    // declined. Ahead of the spawn because the child answers `nvim_list_uis()`
-    // with them all through a startup no UI is present for
-    // ([`EngineConfig::with_late_attach`])
+    // declined
     let surfaces = view_native::config::ext_surfaces(&resolved);
-    let names: Vec<&str> = surfaces
-        .iter()
-        .copied()
-        .map(view_core::native::ext::Ext::as_str)
-        .collect();
     // read before the config is consumed: `update()` builds the attach and
     // has no config left to ask which descriptor the child's piped stdin is
     // on, nor whether the child was already attached on its way up
-    let cfg = cfg.with_late_attach(width, height, &names);
+    let cfg = cfg.with_late_attach(width, height);
     let stdin_relay = cfg.stdin_relay_requested();
     let attaches_late = cfg.attaches_late();
     let mut attach = startup::attach_in_background(cfg);
@@ -1886,12 +1879,11 @@ mod tests {
     /// config never saw. It is one `ioctl` on a descriptor this process
     /// already holds.
     ///
-    /// The `ext_*` set is the third, and the same shape again: the child
-    /// answers `nvim_list_uis()` with those surfaces for the whole of a
-    /// startup no UI is attached for, which is when a plugin decides what
-    /// to claim ([`view_engine::EngineConfig::with_late_attach`]). It reads
-    /// nothing further -- the config chain above has already been resolved,
-    /// and this walks the `[native]` table it produced.
+    /// The `ext_*` set is the third: the attach that carries it is built
+    /// from the model rather than from the config, so the set has to be
+    /// folded in before the loop exists. It reads nothing further -- the
+    /// config chain above has already been resolved, and this walks the
+    /// `[native]` table it produced.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1921,10 +1913,6 @@ mod tests {
                 "view_tui::terminal::size_now",
                 "context",
                 "view_native::config::ext_surfaces",
-                "iter",
-                "copied",
-                "map",
-                "collect",
                 "with_late_attach",
                 "stdin_relay_requested",
                 "attaches_late",

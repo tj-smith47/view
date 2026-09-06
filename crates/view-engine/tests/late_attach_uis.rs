@@ -3,17 +3,19 @@
 //!
 //! The question is not academic and the empty answer is not harmless: a
 //! plugin decides which surfaces to claim at the moment it sets itself up,
-//! which on this spawn shape is entirely inside that window. noice reads
-//! this list and, told the session externalizes nothing, claims the
-//! cmdline, the message area and the popup menu through `vim.ui_attach` --
-//! and keeps routing them after view's own attach lands, which is how a
-//! `vim.notify` view holds ends up in nvim-notify's history
-//! (`compat/scenarios/noice.toml`, the unaccommodated state). lazy.nvim
-//! reads the same list to decide whether it is running headless.
+//! which on this spawn shape is entirely inside that window. lazy.nvim
+//! reads this list to decide whether it is running headless, and noice
+//! reads it to decide whether the session it is starting under has taken
+//! the cmdline, the message area and the popup menu away from it.
+//!
+//! The answer is nvim's own terminal UI: the real size, `ext_linegrid` and
+//! nothing else externalized. Startup then produces exactly the state
+//! `nvim` itself produces, and what view externalizes is settled at the
+//! attach instead, by taking the surfaces back off whoever claimed them.
 //!
 //! So a live child is asked directly, before anything attaches, rather than
 //! the chunk being read for the strings it contains: what has to be true is
-//! that nvim answers for the UI on its way, and only nvim can be asked that.
+//! that nvim answers for a UI at all, and only nvim can be asked that.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use rmpv::Value;
@@ -30,13 +32,8 @@ fn flag(ui: &Value, name: &str) -> Option<bool> {
 }
 
 #[test]
-fn a_startup_with_no_ui_yet_answers_for_the_one_that_will_attach() {
-    let engine = Engine::spawn(EngineConfig::isolated().with_late_attach(
-        120,
-        40,
-        &["ext_linegrid", "ext_messages"],
-    ))
-    .unwrap();
+fn a_startup_with_no_ui_yet_answers_as_nvims_own_terminal_ui_would() {
+    let engine = Engine::spawn(EngineConfig::isolated().with_late_attach(120, 40)).unwrap();
 
     let uis = engine
         .handle
@@ -55,13 +52,18 @@ fn a_startup_with_no_ui_yet_answers_for_the_one_that_will_attach() {
         "a startup nobody has attached to must still name the UI on its way, got {uis:?}"
     );
     let ui = &uis[0];
-    assert_eq!(flag(ui, "ext_messages"), Some(true), "got {ui:?}");
     assert_eq!(flag(ui, "ext_linegrid"), Some(true), "got {ui:?}");
+    assert_eq!(flag(ui, "rgb"), Some(true), "got {ui:?}");
     // spelled `false` rather than left absent: a plugin comparing against
-    // `false` reads what nvim itself would have answered for a surface the
-    // attach does not ask for
-    assert_eq!(flag(ui, "ext_cmdline"), Some(false), "got {ui:?}");
-    assert_eq!(flag(ui, "ext_popupmenu"), Some(false), "got {ui:?}");
+    // `false` reads what nvim itself would have answered
+    for surface in [
+        "ext_cmdline",
+        "ext_popupmenu",
+        "ext_messages",
+        "ext_tabline",
+    ] {
+        assert_eq!(flag(ui, surface), Some(false), "{surface}, got {ui:?}");
+    }
 
     // and the geometry the config was armed with, which is what a plugin
     // laying itself out at setup reads
@@ -82,12 +84,7 @@ fn a_startup_with_no_ui_yet_answers_for_the_one_that_will_attach() {
 
 #[test]
 fn a_real_ui_replaces_the_answer_the_startup_stood_in_with() {
-    let engine = Engine::spawn(EngineConfig::isolated().with_late_attach(
-        120,
-        40,
-        &["ext_linegrid", "ext_messages"],
-    ))
-    .unwrap();
+    let engine = Engine::spawn(EngineConfig::isolated().with_late_attach(120, 40)).unwrap();
     engine
         .handle
         .ui_attach(80, 24, &["ext_linegrid", "ext_cmdline"])
@@ -111,5 +108,4 @@ fn a_real_ui_replaces_the_answer_the_startup_stood_in_with() {
         Some(true),
         "the attached UI's own answer, not the stand-in's; got {ui:?}"
     );
-    assert_eq!(flag(ui, "ext_messages"), Some(false), "got {ui:?}");
 }

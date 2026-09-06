@@ -368,17 +368,10 @@ pub(crate) fn restart_engine(
     // its own account, and would leave the dropped overlays painted and the
     // released startup lines unpainted until something else dirtied the model
     model.dirty = true;
-    let names: Vec<&str> = model
-        .attached_surfaces()
-        .iter()
-        .copied()
-        .map(view_core::native::ext::Ext::as_str)
-        .collect();
-    let mut engine = crate::startup::respawn_engine(
-        engine,
-        respawn().with_late_attach(width, height, &names),
-        || model.takes_attach(),
-    )?;
+    let mut engine =
+        crate::startup::respawn_engine(engine, respawn().with_late_attach(width, height), || {
+            model.takes_attach()
+        })?;
     let (pump, cutover) = engine.start_pump(channels.msg.clone());
     let pending_redraw = if cutover.redraw_pending {
         pump.take_damage()

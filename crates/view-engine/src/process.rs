@@ -360,13 +360,6 @@ pub struct EngineConfig {
     /// and a caller that could set the size alone would describe a child
     /// nobody ever hooked.
     late_attach: Option<(u16, u16)>,
-    /// The `ext_*` names the UI that eventually attaches will externalize,
-    /// which the startup chunk answers `nvim_list_uis()` with while there
-    /// is no UI yet (see [`late_attach_cmd`]). Beside the geometry rather
-    /// than inside it because they arrive together and mean nothing apart:
-    /// a size with no surfaces describes a session that externalizes
-    /// nothing.
-    late_attach_exts: Vec<String>,
     /// The remote target [`build_command`] routes the spawn through, or
     /// `None` for a local child. Private for the same reason `hermetic` is:
     /// where the child runs decides what its whole environment plan means,
@@ -387,7 +380,6 @@ impl Default for EngineConfig {
             shutdown_timeout: Duration::from_millis(500),
             hermetic: false,
             late_attach: None,
-            late_attach_exts: Vec::new(),
             #[cfg(unix)]
             stdin_relay: None,
             bundled: None,
@@ -545,20 +537,13 @@ impl EngineConfig {
     /// against while it sources, and the attach that follows names whatever
     /// the session has reserved for its own chrome by then.
     ///
-    /// `surfaces` are the `ext_*` names the attach will carry, and they
-    /// are needed here rather than only at the attach because a plugin
-    /// decides what to claim from `nvim_list_uis()` while it is setting
-    /// itself up -- long before any UI exists on this spawn (see
-    /// [`late_attach_cmd`]).
-    ///
     /// For the editor a user launched, and for the replacement a restart
     /// brings up. Never for a harness that spawns an engine and drives it
     /// without attaching: startup no longer waits, so a command such a
     /// caller sends races the config it means to run against.
     #[must_use]
-    pub fn with_late_attach(mut self, width: u16, height: u16, surfaces: &[&str]) -> Self {
+    pub fn with_late_attach(mut self, width: u16, height: u16) -> Self {
         self.late_attach = Some((width, height));
-        self.late_attach_exts = surfaces.iter().map(|&name| name.to_string()).collect();
         self
     }
 
@@ -1863,27 +1848,34 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// still ends up in nvim-notify's history. lazy.nvim reads the same list to
 /// decide it is running headless.
 ///
-/// So the list answers for the UI that is on its way: view's own, at the
-/// terminal's size, externalizing exactly what the attach will ask for. The
-/// shim delegates the moment a real UI exists, which makes it correct for
-/// the rest of the session rather than only until `VimEnter`, and it is the
-/// Lua binding alone -- a vimscript `nvim_list_uis()` still answers for what
-/// has attached.
+/// So the list answers for a UI, and the one it answers for is nvim's own
+/// terminal UI: the real size, `ext_linegrid` alone, `rgb` as the attach
+/// carries it. Startup then configures every plugin exactly as `nvim`
+/// itself does -- noice's health check passes silently instead of raising
+/// three errors into nvim-notify, and nothing drags a markdown float and
+/// its `FileType` chain into `init.lua`. What view externalizes is settled
+/// afterwards, at the attach, by taking the surfaces off whoever claimed
+/// them (`view_core::msg::RpcCall::DisableClaimants`), because a plugin
+/// that configured for a plain UI cannot be asked to re-decide when
+/// `ext_*` appears mid-session.
 ///
-/// Every surface view can externalize is spelled out `false` before the
-/// requested ones are set `true`, so a plugin comparing against `false`
-/// reads what nvim would have answered. The three nvim externalizes that
-/// view has no vocabulary for (`ext_hlstate`, `ext_termcolors`,
-/// `ext_wildmenu`) are absent rather than `false`, which every Lua test of
-/// the form `if ui.ext_x then` reads identically.
-fn late_attach_cmd(width: u16, height: u16, surfaces: &[String]) -> String {
+/// The shim delegates the moment a real UI exists, which makes it correct
+/// for the rest of the session rather than only until `VimEnter`, and it is
+/// the Lua binding alone -- a vimscript `nvim_list_uis()` still answers for
+/// what has attached.
+///
+/// Every surface view can externalize is spelled out `false` rather than
+/// left absent, so a plugin comparing against `false` reads what nvim would
+/// have answered. The three nvim externalizes that view has no vocabulary
+/// for (`ext_hlstate`, `ext_termcolors`, `ext_wildmenu`) are absent rather
+/// than `false`, which every Lua test of the form `if ui.ext_x then` reads
+/// identically.
+fn late_attach_cmd(width: u16, height: u16) -> String {
     let modules: Vec<String> = view_core::native::surfaces::SURFACE_CLAIMANTS
         .iter()
         .map(|claimant| format!("'{}'", claimant.module))
         .collect();
     let modules = modules.join(", ");
-    let exts: Vec<String> = surfaces.iter().map(|name| format!("'{name}'")).collect();
-    let exts = exts.join(", ");
     let vocabulary: Vec<String> = crate::nvim_api::UI_EXT_OPTIONS_MULTIGRID
         .iter()
         .map(|name| format!("'{name}'"))
@@ -1908,7 +1900,7 @@ fn late_attach_cmd(width: u16, height: u16, surfaces: &[String]) -> String {
          stdout_tty = false,\n\
          }}\n\
          for _, ext in ipairs({{ {vocabulary} }}) do pending[ext] = false end\n\
-         for _, ext in ipairs({{ {exts} }}) do pending[ext] = true end\n\
+         pending.ext_linegrid = true\n\
          local attached = vim.api.nvim_list_uis\n\
          vim.api.nvim_list_uis = function()\n\
          local uis = attached()\n\
@@ -2333,9 +2325,7 @@ fn local_command(cfg: &EngineConfig) -> Command {
         if cfg.attaches_late() {
             command.arg("--headless");
         }
-        command
-            .arg("--cmd")
-            .arg(late_attach_cmd(width, height, &cfg.late_attach_exts));
+        command.arg("--cmd").arg(late_attach_cmd(width, height));
     }
     command.args(&cfg.extra_args);
     for (name, value) in cfg.env_plan() {
@@ -2444,7 +2434,7 @@ fn remote_command_line(remote: &RemoteSpec, cfg: &EngineConfig) -> Result<OsStri
             tokens.push(b"--headless".to_vec());
         }
         tokens.push(b"--cmd".to_vec());
-        tokens.push(late_attach_cmd(width, height, &cfg.late_attach_exts).into_bytes());
+        tokens.push(late_attach_cmd(width, height).into_bytes());
     }
     for arg in &cfg.extra_args {
         tokens.push(token_bytes(arg)?);
@@ -3991,8 +3981,7 @@ mod tests {
     /// `--headless` from the default branch.
     #[test]
     fn a_relayed_stdin_and_a_swap_recovery_each_keep_the_attach_barrier() {
-        let plain =
-            EngineConfig::default().with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS);
+        let plain = EngineConfig::default().with_late_attach(80, 24);
         assert!(
             plain.attaches_late(),
             "an ordinary late attach runs headless"
@@ -4000,7 +3989,7 @@ mod tests {
 
         let dev_null = std::fs::File::open("/dev/null").expect("/dev/null always opens");
         let relaying = EngineConfig::default()
-            .with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS)
+            .with_late_attach(80, 24)
             .with_stdin_relay(dev_null.into());
         assert!(
             !relaying.attaches_late(),
@@ -4008,7 +3997,7 @@ mod tests {
         );
 
         let recovering = EngineConfig::default()
-            .with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS)
+            .with_late_attach(80, 24)
             .with_arg("notes.txt")
             .recovering();
         assert!(
@@ -4017,7 +4006,7 @@ mod tests {
         );
         assert!(
             EngineConfig::default()
-                .with_late_attach(80, 24, crate::nvim_api::UI_EXT_OPTIONS)
+                .with_late_attach(80, 24)
                 .recovering()
                 .attaches_late(),
             "a restart with no file to recover carries no recovery flag and runs headless"
