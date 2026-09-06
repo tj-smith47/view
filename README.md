@@ -92,8 +92,8 @@ stays fixed at that value even after `.engine-pin` moves on.
 | | view | bare Neovim |
 |---|---|---|
 | Shell painted, config still loading (p99) | **3.8-4.1 ms** | n/a |
-| First paint, cold, no plugins, `minimal` (p99) | **25.2 ms** | 25.4 ms |
-| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | **79.3 ms** | 99.7 ms |
+| First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** |
+| First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** |
 | First paint, cold, full login, `user` (p99) | not yet recorded | not yet recorded |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a |
 | Keystroke to cell change, steady typing (p99) | 0.73 ms | **0.67 ms** |
@@ -101,9 +101,9 @@ stays fixed at that value even after `.engine-pin` moves on.
 The bare-Neovim cold-start figures are the 2026-09-06 retake, measured on a
 pty that answers the startup queries a real terminal answers; the figures
 they replace were withdrawn because the harness's own pty left Neovim's tty
-startup waiting on a query it never answered. view's column is its recorded
-gate bar, taken on a quieter run than the retake, so read the comparison off
-the retake's own pair: view reaches the opened file 1.4 ms after bare Neovim
+startup waiting on a query it never answered. Both first-paint columns are
+that retake's own interleaved pair (view's recorded gate bar, 25.2 and
+79.3 ms, comes from a quieter run and ratchets separately): view reaches the opened file 1.4 ms after bare Neovim
 on the plugin-free config (16.9 ms against 15.4 ms p50) and 5 ms after it on
 the 15-plugin one (55.1 ms against 50.0 ms), neither of them a difference a
 person can feel ([Performance](docs/performance.md#current-numbers) has the
