@@ -207,7 +207,11 @@ impl SideState {
     /// reset; keeps a trial's screen state identical to the first
     /// trial's.
     pub(crate) fn reset_buffer(&mut self, probe_timeout: Duration) -> Result<(), BenchError> {
-        self.session.send(b"\x1b:%d _\r")?;
+        // silenced because a delete of more lines than `'report'` announces
+        // its own line count, and a config that routes messages into a
+        // float paints that announcement over the cells the next trial
+        // types into
+        self.session.send(b"\x1b:silent %d _\r")?;
         std::thread::sleep(Duration::from_millis(200));
         self.session.send(b"i")?;
         std::thread::sleep(Duration::from_millis(100));

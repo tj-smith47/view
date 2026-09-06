@@ -252,11 +252,11 @@ fn rehydrate_sample(view: &SpawnSpec, settle: SettleBound) -> Result<f64, BenchE
     // programmatic edit: without asking for the flush, the replacement would
     // recover a swap that never held the line, which reads as a rehydration
     // that never happened rather than as the setup fault it is
-    session.send(submitted(":preserve").as_bytes())?;
+    session.send(submitted(":silent preserve").as_bytes())?;
     // an empty buffer in front of the modified one, never a write: the line
     // has to leave the screen without leaving the swap, so that the screen
     // holding it again cannot be the frame that was already there
-    session.send(submitted(":enew").as_bytes())?;
+    session.send(submitted(":silent enew").as_bytes())?;
     wait_for_absence(&mut session, Absent(&marker), STEP_TIMEOUT)?;
     let start = Instant::now();
     kill_out_of_band(pid).map_err(BenchError::Session)?;
@@ -326,7 +326,7 @@ fn engine_pid(session: &mut BenchSession) -> Result<u32, BenchError> {
 fn pid_command() -> String {
     let above = PID_LINE - 1;
     format!(
-        ":lua local l={{}} for i=1,{above} do l[i]='' end l[{PID_LINE}]='{PID_MARKER}'..\
+        ":silent lua local l={{}} for i=1,{above} do l[i]='' end l[{PID_LINE}]='{PID_MARKER}'..\
          vim.uv.os_getpid() vim.api.nvim_buf_set_lines(0, 0, 0, false, l)"
     )
 }

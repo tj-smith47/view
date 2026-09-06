@@ -350,7 +350,7 @@ pub(crate) fn prepare_workload_session(
     };
 
     for file in workload_files() {
-        session.send(format!(":e {file}\r").as_bytes())?;
+        session.send(format!(":silent e {file}\r").as_bytes())?;
         // bottom-then-top visit forces the whole buffer through the grid
         // at least once rather than leaving unread file content unmapped
         session.send(b"G")?;

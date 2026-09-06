@@ -302,7 +302,7 @@ impl BenchSession {
     /// wait kill and reap the child if it does not comply. A hung
     /// measurement target must never hang the harness.
     pub fn shutdown(&mut self) {
-        let _ = self.pty.send(b"\x1b:qa!\r");
+        let _ = self.pty.send(b"\x1b:silent qa!\r");
         if self.pty.wait_for_exit(Duration::from_secs(2)).is_none() {
             self.pty.kill();
             let _ = self.pty.wait_for_exit(Duration::from_secs(2));

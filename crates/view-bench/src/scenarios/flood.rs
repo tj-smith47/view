@@ -30,7 +30,7 @@ use crate::BenchError;
 /// The counter doubles as the drain-progress meter (see [`max_screen_line`]).
 #[must_use]
 pub fn flood_command() -> String {
-    String::from(":terminal sh -c 'yes | cat -n'\r")
+    String::from(":silent terminal sh -c 'yes | cat -n'\r")
 }
 
 /// The largest line number visible on the terminal, i.e. how many lines the
@@ -1071,8 +1071,8 @@ mod tests {
              changing (a bare `yes` freezes the frame hash): {command}"
         );
         assert!(
-            command.starts_with(":terminal ") && command.ends_with('\r'),
-            "the command must be a single :terminal line submitted with CR: {command}"
+            command.starts_with(":silent terminal ") && command.ends_with('\r'),
+            "the command must be a single silenced :terminal line submitted with CR: {command}"
         );
     }
 
