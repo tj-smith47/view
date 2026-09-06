@@ -169,9 +169,19 @@ The chunk that asks it, verbatim `PROBE_CLAIMANTS_CHUNK`:
 
 ```lua
 local channel, modules = ...
+local function is_engine_notify(fn)
+  if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
+    return false
+  end
+  local ok, sink = pcall(debug.getinfo, fn, 'S')
+  local fine, own = pcall(debug.getinfo, vim.notify_once, 'S')
+  return ok and fine and sink ~= nil and own ~= nil
+    and sink.source == own.source
+end
 local group = vim.api.nvim_create_augroup(
   'view_bridge_claimants', { clear = true })
 local reported, first = {}, true
+local sink = nil
 local deadline = vim.uv.now() + 60000
 vim.api.nvim_create_autocmd('SafeState', {
   group = group,
@@ -190,7 +200,13 @@ vim.api.nvim_create_autocmd('SafeState', {
       first = false
       pcall(vim.rpcnotify, channel, 'view_bridge', 'claimants', loaded)
     end
-    if #loaded == #modules or vim.uv.now() > deadline then
+    local foreign = vim.notify ~= nil
+      and not is_engine_notify(vim.notify)
+    if sink ~= foreign then
+      sink = foreign
+      pcall(vim.rpcnotify, channel, 'view_bridge', 'notify_sink', foreign)
+    end
+    if (#loaded == #modules and sink) or vim.uv.now() > deadline then
       pcall(vim.api.nvim_del_augroup_by_id, group)
     end
   end,
@@ -203,7 +219,8 @@ finishes its own deferred loading on a timer after `VimEnter` (lazy.nvim's
 `once`, because a cold first launch clones the whole stack over the network
 and idles many times before the plugin it is about to load exists -- the
 notify goes out only on the first answer or a changed one, and the group
-deletes itself once every module is found or the session is a minute old. The live proof
+deletes itself once every module is found, a notifier of the user's has
+been seen at `vim.notify`, or the session is a minute old. The live proof
 that the chunk answers, and answers differently for a session that loaded
 the module and one that did not, is
 `crates/view/tests/bridge_live.rs`'s

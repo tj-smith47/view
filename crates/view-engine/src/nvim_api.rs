@@ -194,6 +194,32 @@ vim.api.nvim_create_autocmd('SafeState', {
   callback = hold,
 })";
 
+/// The predicate every reading of `vim.notify` asks, as one literal rather
+/// than a copy per chunk: three chunks decide whether the function standing
+/// there is the engine's own, and three copies of a `debug.getinfo` guard
+/// would let them answer differently for the same session. A macro rather
+/// than a `const` because `concat!` composes literals, not constants.
+///
+/// The type check and the `pcall` are both load-bearing: nvim-notify's
+/// module is a table with a `__call` metamethod, and LuaJIT's `getinfo`
+/// raises on one. A value this cannot place is not the engine's default,
+/// which is the answer every caller needs from it.
+macro_rules! notify_predicate_lua {
+    () => {
+        "\
+local function is_engine_notify(fn)
+  if type(fn) ~= 'function' or type(vim.notify_once) ~= 'function' then
+    return false
+  end
+  local ok, sink = pcall(debug.getinfo, fn, 'S')
+  local fine, own = pcall(debug.getinfo, vim.notify_once, 'S')
+  return ok and fine and sink ~= nil and own ~= nil
+    and sink.source == own.source
+end
+"
+    };
+}
+
 /// The lua chunk [`EngineHandle::disable_claimants`] runs inside nvim,
 /// taking the module names to turn off as its single vararg. Constant by
 /// construction for the same reason as [`FEED_KEYS_CHUNK`]: the names
@@ -241,8 +267,14 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// in the engine's own runtime (`vim/_core/editor` on the pinned engine),
 /// and a function assigned by a config or a plugin reports that file
 /// instead.
-const DISABLE_CLAIMANTS_CHUNK: &str = "\
-local modules = ...
+///
+/// The reading itself is [`notify_predicate_lua`]'s, shared with the
+/// takeover's own and with the probe's later ones, so a session cannot be
+/// told two different things about the function standing at `vim.notify`.
+const DISABLE_CLAIMANTS_CHUNK: &str = concat!(
+    "local modules = ...\n",
+    notify_predicate_lua!(),
+    "\
 local handed_back = false
 for _, name in ipairs(modules) do
   if package.loaded[name] ~= nil then
@@ -253,18 +285,13 @@ for _, name in ipairs(modules) do
     end
   end
 end
-local function is_engine_default(fn)
-  local restored = debug.getinfo(fn, 'S')
-  local sibling = debug.getinfo(vim.notify_once, 'S')
-  return restored ~= nil and sibling ~= nil
-    and restored.source == sibling.source
-end
 if handed_back
   and package.loaded.notify ~= nil
-  and is_engine_default(vim.notify)
+  and is_engine_notify(vim.notify)
 then
   vim.notify = package.loaded.notify
-end";
+end"
+);
 
 /// The lua chunk [`EngineHandle::raise_notice`] runs inside nvim, taking
 /// the notice text as its single vararg. Constant by construction for the
@@ -677,11 +704,30 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
 /// The notify is wrapped in a `pcall` for the reason the float sweep's is:
 /// it is timer-driven, so it is one of the few that can land after a channel
 /// teardown.
-pub(crate) const PROBE_CLAIMANTS_CHUNK: &str = "\
-local channel, modules = ...
+///
+/// # The `vim.notify` reading it carries
+///
+/// The takeover reads `vim.notify` once, at `VimEnter`, which is before
+/// the UI attaches -- so a notifier a config installs on `UIEnter`
+/// (nvim-notify's own documented lazy spec) is never the one that reading
+/// saw, and view goes on painting toasts over the float that plugin draws.
+/// This idle transition is the place that already re-asks a question whose
+/// answer moves, so it re-takes the reading too and reports it on its own
+/// `notify_sink` event, change-detected like the claimant list beside it.
+///
+/// The retirement waits for a foreign notifier for the same reason: an
+/// answer of "nvim's own echo" is the one that can still change into the
+/// float this reading exists to find, so a session that has not seen one
+/// keeps looking until the deadline, exactly as it does for a claimant it
+/// has not seen.
+pub(crate) const PROBE_CLAIMANTS_CHUNK: &str = concat!(
+    "local channel, modules = ...\n",
+    notify_predicate_lua!(),
+    "\
 local group = vim.api.nvim_create_augroup(
   'view_bridge_claimants', { clear = true })
 local reported, first = {}, true
+local sink = nil
 local deadline = vim.uv.now() + 60000
 vim.api.nvim_create_autocmd('SafeState', {
   group = group,
@@ -700,11 +746,18 @@ vim.api.nvim_create_autocmd('SafeState', {
       first = false
       pcall(vim.rpcnotify, channel, 'view_bridge', 'claimants', loaded)
     end
-    if #loaded == #modules or vim.uv.now() > deadline then
+    local foreign = vim.notify ~= nil
+      and not is_engine_notify(vim.notify)
+    if sink ~= foreign then
+      sink = foreign
+      pcall(vim.rpcnotify, channel, 'view_bridge', 'notify_sink', foreign)
+    end
+    if (#loaded == #modules and sink) or vim.uv.now() > deadline then
       pcall(vim.api.nvim_del_augroup_by_id, group)
     end
   end,
-})";
+})"
+);
 
 /// `VimLeavePre` gets its own method rather than another `view_bridge`
 /// event: every other hook in the group is editor state a later frame
@@ -819,8 +872,14 @@ end";
 /// default, recognised by the source file it shares with `vim.notify_once`
 /// -- and reports the opposite polarity, since what view needs to know is
 /// whether a notifier of the user's is drawing.
-const TAKEOVER_CHUNK: &str = "\
-local steps = ...
+///
+/// The reading is [`notify_predicate_lua`]'s, the same one the hand-back
+/// and the probe ask, so no two of them can answer differently about the
+/// same function.
+const TAKEOVER_CHUNK: &str = concat!(
+    "local steps = ...\n",
+    notify_predicate_lua!(),
+    "\
 local unpack = unpack or table.unpack
 local answer = {}
 for _, step in ipairs(steps) do
@@ -833,11 +892,10 @@ for _, step in ipairs(steps) do
 end
 answer.messages = vim.api.nvim_exec2(
   'messages', { output = true }).output
-local sink = debug.getinfo(vim.notify, 'S')
-local engine = debug.getinfo(vim.notify_once, 'S')
-answer.foreign_notifier = sink ~= nil and engine ~= nil
-  and sink.source ~= engine.source
-return answer";
+answer.foreign_notifier = vim.notify ~= nil
+  and not is_engine_notify(vim.notify)
+return answer"
+);
 
 /// The key [`TAKEOVER_CHUNK`] returns the mapping registration's own answer
 /// under, the key it returns nvim's startup messages under, and the key it
@@ -4696,8 +4754,8 @@ mod tests {
     ///
     /// The three that keep a repeating autocmd from becoming a per-idle
     /// scan: it answers only on a first or changed reading, and it deletes
-    /// its own group once every module is found or the session is a minute
-    /// old.
+    /// its own group once every module is found -- and a notifier of the
+    /// user's has been seen -- or the session is a minute old.
     #[test]
     fn the_claimant_probe_asks_package_loaded_at_every_idle_until_it_knows() {
         assert!(PROBE_CLAIMANTS_CHUNK.contains("package.loaded[name]"));
@@ -4707,8 +4765,8 @@ mod tests {
             PROBE_CLAIMANTS_CHUNK
                 .matches("channel, 'view_bridge'")
                 .count(),
-            1,
-            "one answer, and it rides the bridge every other reading already does"
+            2,
+            "two answers, both riding the bridge every other reading already uses"
         );
         assert!(PROBE_CLAIMANTS_CHUNK.contains("pcall(vim.rpcnotify"));
         assert!(
@@ -4724,10 +4782,52 @@ mod tests {
             "a steady state must send nothing at all"
         );
         assert!(
-            PROBE_CLAIMANTS_CHUNK.contains("#loaded == #modules or vim.uv.now() > deadline"),
-            "the group must stop itself once it knows, and again on a deadline"
+            PROBE_CLAIMANTS_CHUNK
+                .contains("(#loaded == #modules and sink) or vim.uv.now() > deadline"),
+            "the group must stop itself once it knows both answers, and again on a deadline"
         );
         assert!(PROBE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_augroup_by_id"));
+        assert!(
+            PROBE_CLAIMANTS_CHUNK.contains("'notify_sink', foreign"),
+            "a notifier installed after the takeover is one only this reading reports"
+        );
+        assert!(
+            PROBE_CLAIMANTS_CHUNK.contains("if sink ~= foreign then"),
+            "an unchanged sink must send nothing at all"
+        );
+    }
+
+    /// Every chunk that decides where a notice belongs asks one predicate,
+    /// carried as one literal: three copies of a `debug.getinfo` guard
+    /// would let a session be told two different things about the function
+    /// standing at `vim.notify`. The guard itself is the fix for a callable
+    /// table -- nvim-notify's real shape -- raising inside a batch whose
+    /// whole reply was then lost.
+    #[test]
+    fn every_reading_of_vim_notify_asks_the_one_guarded_predicate() {
+        for (name, chunk) in [
+            ("DISABLE_CLAIMANTS_CHUNK", DISABLE_CLAIMANTS_CHUNK),
+            ("TAKEOVER_CHUNK", TAKEOVER_CHUNK),
+            ("PROBE_CLAIMANTS_CHUNK", PROBE_CLAIMANTS_CHUNK),
+        ] {
+            assert!(
+                chunk.contains(notify_predicate_lua!()),
+                "{name} must carry the shared predicate verbatim"
+            );
+            assert_eq!(
+                chunk.matches("debug.getinfo").count(),
+                2,
+                "{name} must ask debug.getinfo nowhere but inside the predicate"
+            );
+        }
+        assert!(
+            notify_predicate_lua!().contains("pcall(debug.getinfo"),
+            "getinfo raises on a callable table, which is nvim-notify's own shape"
+        );
+        assert!(
+            notify_predicate_lua!().contains("type(fn) ~= 'function'"),
+            "a value getinfo cannot be asked about is not the engine's default"
+        );
     }
 
     /// The question asked and the answer's use come from one table, so a

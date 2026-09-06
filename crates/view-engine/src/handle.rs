@@ -17,7 +17,7 @@ use decode::{
     decode_clipboard_set, decode_delete_confirm_reply, decode_feature_invoke,
     decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_claims, decode_preview_reply,
     decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
-    SwapRecoveryReading, TakeoverReading,
+    takeover_error_text, SwapRecoveryReading, TakeoverReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -621,16 +621,23 @@ impl EngineHandle {
                             Some(Waiter::Takeover) => {
                                 if let Some(pump) = &reader_pump {
                                     // an error reply degrades to "claimed
-                                    // nothing, said nothing", on the same
-                                    // terms the mapping reply beside it
-                                    // does: every step is a constant chunk
-                                    // run under its own `pcall`, so the
-                                    // only way an error reaches here is a
-                                    // takeover that did not run at all
+                                    // nothing", on the same terms the
+                                    // mapping reply beside it does, and
+                                    // says so: a takeover whose own batch
+                                    // raised is a diagnostic about this
+                                    // launch, and the history the standing
+                                    // notice points at is where a launch's
+                                    // diagnostics already land. Swallowed,
+                                    // it left a session quietly placing its
+                                    // notices on the wrong surface with
+                                    // nothing to read afterwards
                                     let reading = if error == Value::Nil {
                                         decode_takeover_reply(&result)
                                     } else {
-                                        TakeoverReading::default()
+                                        TakeoverReading {
+                                            messages: takeover_error_text(&error),
+                                            ..TakeoverReading::default()
+                                        }
                                     };
                                     if !reading.messages.is_empty() {
                                         pump.route_startup_messages(Msg::StartupMessages {
@@ -935,8 +942,21 @@ impl EngineHandle {
                                 // autocommand's notification, and every
                                 // consumer of one recomputes from live state
                                 // on the next frame anyway
-                                if let Some(msg) = decode_bridge_event(&params) {
-                                    let _ = pump.route_msg(msg);
+                                match decode_bridge_event(&params) {
+                                    // the exception, and the reason it takes
+                                    // the never-drop slot the takeover's own
+                                    // reading uses: the probe sends this only
+                                    // when the answer changed, so a refused
+                                    // one is not recomputed by anything -- it
+                                    // is the session's last word on where its
+                                    // notices belong
+                                    Some(msg @ Msg::NotifySinkRead { .. }) => {
+                                        pump.route_notify_sink(msg);
+                                    }
+                                    Some(msg) => {
+                                        let _ = pump.route_msg(msg);
+                                    }
+                                    None => {}
                                 }
                             } else if method == "nvim_buf_lines_event" {
                                 // nvim is never blocked on this notification

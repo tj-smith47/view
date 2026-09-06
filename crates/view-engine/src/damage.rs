@@ -762,9 +762,11 @@ impl PumpShared {
     /// sink, and without blocking, on the same terms as
     /// [`route_probe_reply`](Self::route_probe_reply).
     ///
-    /// A dropped reading is silent and permanent: `vim.notify` is read once
-    /// per connection, and the safe default it would fall back to paints a
-    /// toast over the notifier the session handed the surface to.
+    /// A dropped reading is silent: the takeover reads `vim.notify` once
+    /// per connection and the probe re-sends only when the answer changes,
+    /// so nothing re-issues a refused one, and the safe default it would
+    /// fall back to paints a toast over the notifier the session handed the
+    /// surface to.
     pub(crate) fn route_notify_sink(&self, msg: Msg) {
         self.route_held(msg, Held::NotifySink);
     }

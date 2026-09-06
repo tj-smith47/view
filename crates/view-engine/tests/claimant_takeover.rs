@@ -20,13 +20,25 @@ mod common;
 use rmpv::Value;
 use std::sync::mpsc;
 use std::time::Instant;
-use view_core::msg::{Msg, TakeoverStep};
+use view_core::msg::{EngineRequest, Msg, ReplyValue, TakeoverStep};
 use view_engine::process::{Engine, EngineConfig};
 use view_test_support::ScratchDir;
 
-/// Whether the takeover's reply says a notifier other than nvim's own is
-/// standing at `vim.notify`, run as the real batch against `dir`'s config.
-fn takeover_reads_a_foreign_notifier(dir: &ScratchDir) -> bool {
+/// What the takeover's one reply delivered, as the messages a real pump
+/// routes out of it: its reading of `vim.notify` and whatever nvim said
+/// while it was starting.
+///
+/// Both, rather than the reading alone, because they arrive from the same
+/// reply and a raise inside the batch loses all of it -- a pin that watched
+/// only the reading could not tell a wrong answer from a lost one.
+struct TakeoverReply {
+    foreign: Option<bool>,
+    startup: Option<String>,
+}
+
+/// Runs the real takeover batch against `dir`'s config and collects what
+/// its reply routed.
+fn takeover_reply(dir: &ScratchDir) -> TakeoverReply {
     let mut engine = engine(dir);
     let (tx, rx) = mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(tx);
@@ -38,16 +50,28 @@ fn takeover_reads_a_foreign_notifier(dir: &ScratchDir) -> bool {
         .unwrap();
 
     let deadline = Instant::now() + common::rpc_deadline();
-    let mut read = None;
-    while Instant::now() < deadline && read.is_none() {
+    let mut reply = TakeoverReply {
+        foreign: None,
+        startup: None,
+    };
+    while Instant::now() < deadline && (reply.foreign.is_none() || reply.startup.is_none()) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {
-            Ok(Msg::NotifySinkRead { foreign }) => read = Some(foreign),
+            Ok(Msg::NotifySinkRead { foreign }) => reply.foreign = Some(foreign),
+            Ok(Msg::StartupMessages { text }) => reply.startup = Some(text),
             Ok(_) => {}
             Err(_) => break,
         }
     }
-    read.expect("the takeover reply must carry a reading of vim.notify")
+    reply
+}
+
+/// Whether the takeover's reply says a notifier other than nvim's own is
+/// standing at `vim.notify`, run as the real batch against `dir`'s config.
+fn takeover_reads_a_foreign_notifier(dir: &ScratchDir) -> bool {
+    takeover_reply(dir)
+        .foreign
+        .expect("the takeover reply must carry a reading of vim.notify")
 }
 
 /// A config that installs a stand-in for the claimant view supersedes: a
@@ -90,10 +114,29 @@ fn config_home_with_custom_sink(name: &str) -> ScratchDir {
 /// A loaded nvim-notify, as the claimant's own `require` leaves it. It
 /// records what it was told so a notice raised through the standing sink
 /// can be read back by the one that received it.
-const NOTIFY_MODULE: &str = "_G.view_pin.notify = function(msg)\n\
-       _G.view_pin.seen = msg\n\
-     end\n\
+///
+/// A callable table rather than a plain function, because that is what
+/// nvim-notify's module actually is: `debug.getinfo` raises on one, and a
+/// stub that was a plain function let five green pins ride over a reading
+/// that could not be taken at all against the real plugin.
+const NOTIFY_MODULE: &str = "_G.view_pin.notify = setmetatable({}, {\n\
+       __call = function(_, msg)\n\
+         _G.view_pin.seen = msg\n\
+       end,\n\
+     })\n\
      package.loaded['notify'] = _G.view_pin.notify\n";
+
+/// The same callable table, never placed on `package.loaded` and assigned
+/// only once the UI is there: nvim-notify's own documented lazy spec is
+/// `event = "UIEnter"`, which is after the takeover has already answered.
+const LATE_NOTIFY_SINK: &str = "_G.view_pin.late = setmetatable({}, {\n\
+       __call = function() end,\n\
+     })\n\
+     vim.api.nvim_create_autocmd('UIEnter', {\n\
+       callback = function()\n\
+         vim.notify = _G.view_pin.late\n\
+       end,\n\
+     })\n";
 
 fn write_config(name: &str, prologue: &str, extra: &str) -> ScratchDir {
     let dir = ScratchDir::new(&format!("claimant-takeover-{name}")).unwrap();
@@ -101,6 +144,7 @@ fn write_config(name: &str, prologue: &str, extra: &str) -> ScratchDir {
         dir.join("init.lua"),
         format!(
             "{prologue}\
+             vim.api.nvim_echo({{ {{ 'view-pin-startup' }} }}, true, {{}})\n\
              _G.view_pin = {{ orig = vim.notify, disables = 0 }}\n\
              _G.view_pin.claimed = function(...) end\n\
              vim.notify = _G.view_pin.claimed\n\
@@ -388,4 +432,113 @@ fn the_takeover_reads_which_notifier_its_own_hand_back_left_standing() {
         takeover_reads_a_foreign_notifier(&config_home_with_notify("sink-notify")),
         "the re-point put nvim-notify there, and a float drawing the          messages is exactly what view must not paint over"
     );
+}
+
+/// nvim-notify's module is a table with a `__call` metamethod, and LuaJIT's
+/// `debug.getinfo` raises on one. Raised inside the takeover's single
+/// batch, that error degraded the whole reply -- the reading, the claims
+/// and the startup messages together -- so a session under the shape the
+/// hand-back most often leaves went on painting toasts over the float the
+/// plugin was already drawing, with nothing in the history to say why.
+#[test]
+fn a_callable_table_notifier_leaves_the_rest_of_the_takeover_reply_standing() {
+    let reply = takeover_reply(&config_home_with_notify("sink-table"));
+    assert_eq!(
+        reply.foreign,
+        Some(true),
+        "the re-point put nvim-notify's own callable table at vim.notify, \
+         and a reading that cannot place a value must not call it nvim's own"
+    );
+    assert!(
+        reply
+            .startup
+            .as_deref()
+            .unwrap_or_default()
+            .contains("view-pin-startup"),
+        "what nvim said at startup rides the same reply, and a raise inside \
+         the batch took it down with the reading: {:?}",
+        reply.startup
+    );
+}
+
+/// The reading the takeover takes is taken before any UI exists, so a
+/// notifier a config installs on `UIEnter` -- nvim-notify's own documented
+/// lazy spec, and the shape the user's config uses -- is never the one it
+/// saw. The claimant probe already re-asks a question whose answer moves at
+/// every idle transition, and this is the other one.
+///
+/// The probe here is the one production arms, from the startup `--cmd`
+/// chunk, rather than a second one this test installs: what is being
+/// pinned is the reading a shipped session takes.
+#[test]
+fn a_notifier_installed_at_the_attach_is_read_after_the_takeover() {
+    let dir = write_config("late-sink", "", LATE_NOTIFY_SINK);
+    let mut engine = engine(&dir);
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .takeover(&[TakeoverStep::DisableClaimants {
+            modules: vec!["noice".to_string()],
+        }])
+        .unwrap();
+
+    // nvim parks inside `VimEnter` until this is answered, which is what
+    // orders the readings below: the takeover restores `vim.notify` before
+    // any idle transition can read it. The request is staged when it lands
+    // ahead of the sink, so the presink is read for it first -- a test that
+    // waited only on the channel left nvim parked for its own lifetime
+    let mut entered = cutover.presink.into_iter().find_map(|msg| match msg {
+        Msg::EngineRequest(EngineRequest::VimEnter { token }) => Some(token),
+        _ => None,
+    });
+    let mut first = None;
+    let deadline = Instant::now() + common::rpc_deadline_for(3);
+    while Instant::now() < deadline && (entered.is_none() || first.is_none()) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Msg::NotifySinkRead { foreign }) if first.is_none() => first = Some(foreign),
+            Ok(Msg::EngineRequest(EngineRequest::VimEnter { token })) => entered = Some(token),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        first,
+        Some(false),
+        "the takeover's own reading must land on nvim's echo first, or the \
+         reading below is not the second one"
+    );
+    if let Some(token) = entered.take() {
+        engine.handle.reply(token, ReplyValue::Nil).unwrap();
+    }
+
+    engine
+        .handle
+        .ui_attach(120, 40, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    // the probe answers at an idle transition, which a reply to a request
+    // is not: this puts nvim back through its own main loop
+    engine.handle.eval_str("execute('sleep 100m')").unwrap();
+    assert_eq!(
+        wait_for_sink_read(&rx, |foreign| foreign),
+        Some(true),
+        "the notifier UIEnter installed is one only a reading taken after \
+         the attach can see"
+    );
+}
+
+/// The first `Msg::NotifySinkRead` `want` accepts, within three engine
+/// round trips, with everything else the pump delivers drained past.
+fn wait_for_sink_read(rx: &mpsc::Receiver<Msg>, want: impl Fn(bool) -> bool) -> Option<bool> {
+    let deadline = Instant::now() + common::rpc_deadline_for(3);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Msg::NotifySinkRead { foreign }) if want(foreign) => return Some(foreign),
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }

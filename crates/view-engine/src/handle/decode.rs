@@ -147,6 +147,13 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
                 .filter_map(|name| name.as_str().map(str::to_owned))
                 .collect(),
         )),
+        // the probe's re-reading of `vim.notify`, sent only when the answer
+        // changed: the takeover's own reading is taken before the UI
+        // attaches, so a notifier a config installs on `UIEnter` is one
+        // only this event can report
+        "notify_sink" => Some(Msg::NotifySinkRead {
+            foreign: first.as_bool()?,
+        }),
         _ => None,
     }
 }
@@ -340,6 +347,23 @@ pub(super) fn decode_takeover_reply(result: &Value) -> TakeoverReading {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     }
+}
+
+/// What a takeover's error reply says, as one line for view's history.
+///
+/// nvim answers an erroring `nvim_exec_lua` with a `[kind, message]` pair,
+/// and the message is the whole of what a reader needs; the pair's shape is
+/// the engine's own and is not worth reproducing in a message a user reads.
+/// A reply of any other shape is rendered as it arrived rather than
+/// dropped, since a shape nothing here expects is exactly the case a
+/// triage log has to be able to see.
+pub(super) fn takeover_error_text(error: &Value) -> String {
+    let said = match error {
+        Value::Array(parts) => parts.iter().find_map(Value::as_str).map(str::to_owned),
+        other => other.as_str().map(str::to_owned),
+    };
+    let said = said.unwrap_or_else(|| format!("{error:?}"));
+    format!("view: the editor takeover did not run: {said}")
 }
 
 /// Decodes a buffer-list reply into each listed buffer's `name`, dropping

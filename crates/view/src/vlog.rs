@@ -128,8 +128,9 @@ fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
 /// dispatch seam: theme events nested in a `Redraw` batch (`view-core` is
 /// pure and cannot log these itself -- see the module docs), the async
 /// `nvim_get_hl` default-colors probe's reply, an engine-down transition,
-/// a native feature invocation, the mappings the engine claimed, and every
-/// AI event, plus the toast stack's own clock (an expiry and each frame of
+/// a native feature invocation, the mappings the engine claimed, what the
+/// launch said before its UI existed, which sink its notices go to, and
+/// every AI event, plus the toast stack's own clock (an expiry and each frame of
 /// the motion it starts), which is what a read of this log answers "did
 /// anything wake the loop while the editor was idle" from. Every other
 /// `Msg` variant (`Key`, `Paste`, `Mouse`, `Resized`, loop plumbing)
@@ -229,6 +230,16 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::AnimTick => log("toast", "anim-tick"),
         Msg::AnimDropped => log("toast", "anim-dropped"),
         Msg::ToastExpired { .. } => log("toast", "expired"),
+        // the two halves of the takeover's one reply that a triage read
+        // asks about: what the launch said before any UI existed (a
+        // takeover that raised says so here, and nowhere else), and where
+        // this session decided its own notices belong
+        Msg::StartupMessages { text } => {
+            log_with("native", || format!("startup-messages {}", capped(text)));
+        }
+        Msg::NotifySinkRead { foreign } => {
+            log_with("native", || format!("notify-sink foreign={foreign}"));
+        }
         Msg::MappingsClaimed { claimed } => {
             log_with("native", || {
                 let keys: Vec<String> = claimed
