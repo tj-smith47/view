@@ -1864,12 +1864,18 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// the Lua binding alone -- a vimscript `nvim_list_uis()` still answers for
 /// what has attached.
 ///
-/// Every surface view can externalize is spelled out `false` rather than
-/// left absent, so a plugin comparing against `false` reads what nvim would
-/// have answered. The three nvim externalizes that view has no vocabulary
-/// for (`ext_hlstate`, `ext_termcolors`, `ext_wildmenu`) are absent rather
-/// than `false`, which every Lua test of the form `if ui.ext_x then` reads
-/// identically.
+/// Every key nvim's own `nvim_list_uis()` reports is spelled out, with the
+/// value the terminal UI answers: the three externalizations view has no
+/// vocabulary for (`ext_hlstate` and `ext_wildmenu` off, `ext_termcolors`
+/// on), the tty flags true, and `term_name` read out of the child's own
+/// `$TERM` rather than guessed here, because the child's environment is
+/// what a plugin asking would have seen. A missing key is not the same
+/// answer as a false one for a plugin that iterates the table or reads
+/// `term_name` to decide what its terminal can draw.
+///
+/// `term_colors` is derived from that same `$TERM` (and `$COLORTERM`)
+/// rather than from terminfo: nothing has opened a terminal on this side,
+/// and 256-vs-8 is the whole of what a plugin branches on.
 fn late_attach_cmd(width: u16, height: u16) -> String {
     let modules: Vec<String> = view_core::native::surfaces::SURFACE_CLAIMANTS
         .iter()
@@ -1890,14 +1896,22 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          for _, chan in ipairs(vim.api.nvim_list_chans()) do\n\
          if chan.stream == 'stdio' then channel = chan.id end\n\
          end\n\
+         local term = vim.env.TERM or ''\n\
          local pending = {{\n\
          chan = channel,\n\
          width = {width},\n\
          height = {height},\n\
          rgb = true,\n\
          override = false,\n\
-         stdin_tty = false,\n\
-         stdout_tty = false,\n\
+         stdin_tty = true,\n\
+         stdout_tty = true,\n\
+         term_name = term,\n\
+         term_background = '',\n\
+         term_colors = (term:find('256', 1, true) or\n\
+         vim.env.COLORTERM) and 256 or 8,\n\
+         ext_hlstate = false,\n\
+         ext_wildmenu = false,\n\
+         ext_termcolors = true,\n\
          }}\n\
          for _, ext in ipairs({{ {vocabulary} }}) do pending[ext] = false end\n\
          pending.ext_linegrid = true\n\
@@ -3463,6 +3477,43 @@ mod config_tests {
             "every env implementation measured reads an operand after the \
              assignments as the program to run, and refuses this one with \
              `--: No such file or directory`; line {line}"
+        );
+    }
+
+    /// The remote command line carries the same startup shape the local
+    /// spawn does, `--headless` included, and drops it on exactly the
+    /// shapes that keep nvim's attach barrier.
+    ///
+    /// Read off the joined line rather than off `attaches_late()`: the
+    /// predicate answering `true` proves nothing about a token nobody
+    /// appended, and the far side re-parses this string and nothing else.
+    #[test]
+    fn a_late_attaching_remote_line_runs_the_editor_headless() {
+        let remote = RemoteSpec::new("host");
+        let cfg = EngineConfig::default()
+            .with_remote(remote.clone())
+            .with_late_attach(120, 40);
+        let line = remote_line(&cfg);
+        let headless = line
+            .find("'--headless'")
+            .expect("a late-attaching remote editor must not wait for a UI");
+        let geometry = line
+            .find("vim.o.columns = 120")
+            .expect("the geometry --cmd must ride the remote command line");
+        assert!(
+            headless < geometry,
+            "nvim reads its own options before the --cmd chunks; line {line}"
+        );
+
+        let recovering = EngineConfig::default()
+            .with_remote(remote)
+            .with_late_attach(120, 40)
+            .with_arg("notes.txt")
+            .recovering();
+        let line = remote_line(&recovering);
+        assert!(
+            !line.contains("'--headless'"),
+            "a recovery parks at a prompt only a UI can answer; line {line}"
         );
     }
 
