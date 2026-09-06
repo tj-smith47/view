@@ -82,6 +82,13 @@
 //! `view-harness/src/bin/bench.rs`'s own pin fails a `real`-config row
 //! whose scenario has no seat on the real-config fixture.
 //!
+//! `config` also decides which measurements the bound is *judged* on
+//! ([`Budget::seats`]): a `real` row against [`REAL_CONFIG_SEATS`], a
+//! `fixture` row against the legs it names. Stating the config and then
+//! checking every leg is the same substitution the field exists to refuse,
+//! one layer down -- the plugin-free leg reads inside a bar the file says
+//! is about a config a person runs, and the gate attests to it.
+//!
 //! A felt row is measured under a real config, because the bar is what a
 //! person feels in the editor they actually run. The exceptions are
 //! written down one by one in [`UNPAIRED_FELT`] with their grounds, and a
@@ -106,6 +113,19 @@ pub const KINDS: &[&str] = &["felt", "diagnostic", "resource"];
 /// The `config` values a row may declare: a plugin config a person would
 /// actually run, or a bench fixture built for the measurement.
 pub const CONFIGS: &[&str] = &["real", "fixture"];
+
+/// The matrix seats a `config = "real"` row is judged on.
+///
+/// A bound is checked against the cells its own `config` names and no
+/// others. The login-shaped fixture `task user-fixture` generates is the
+/// real config the matrix carries today; a class that seats the
+/// maintainer's own `$VIEW_DAILY_CONFIG` instead adds that fixture's name
+/// here, and a bench fixture never joins it -- a felt bound reaching a
+/// plugin-free leg is the substitution the whole vocabulary exists to
+/// refuse, and it is silent in the direction that matters: the fixture leg
+/// reads inside the bar and the gate attests to the moment under a config
+/// nobody runs.
+pub const REAL_CONFIG_SEATS: &[&str] = &[crate::fixture::USER_FIXTURE];
 
 /// Felt rows measured under a bench fixture rather than a real config, and
 /// why each one is honest that way.
@@ -160,6 +180,10 @@ pub struct Budget {
     pub felt: Option<String>,
     /// The configuration the bound is stated under, one of [`CONFIGS`].
     pub config: Option<String>,
+    /// The bench fixtures a `config = "fixture"` row is judged on, which
+    /// that row names for itself. Refused on a `config = "real"` row,
+    /// whose seats are [`REAL_CONFIG_SEATS`].
+    pub fixtures: Option<Vec<String>>,
     /// The `scenario.metric` a `diagnostic` decomposes: required there,
     /// refused elsewhere, and checked against the felt rows the file
     /// declares.
@@ -167,12 +191,32 @@ pub struct Budget {
 }
 
 impl Budget {
+    /// The matrix seats this bound is judged on: the fixtures it names, or
+    /// [`REAL_CONFIG_SEATS`] when it is stated under a real config.
+    #[must_use]
+    pub fn seats(&self) -> Vec<&str> {
+        if self.config.as_deref() == Some("real") {
+            return REAL_CONFIG_SEATS.to_vec();
+        }
+        self.fixtures.iter().flatten().map(String::as_str).collect()
+    }
+
     /// Whether this bound applies to `class`.
     #[must_use]
     pub fn covers(&self, class: &str) -> bool {
         self.classes
             .as_ref()
             .is_none_or(|classes| classes.iter().any(|c| c == class))
+    }
+
+    /// Whether this bound applies to a cell of `fixture` on `class`.
+    ///
+    /// Both halves, because a bound is a statement about one measurement:
+    /// the class says which host can witness it and the seat says which
+    /// config it was stated under.
+    #[must_use]
+    pub fn binds(&self, class: &str, fixture: &str) -> bool {
+        self.covers(class) && self.seats().contains(&fixture)
     }
 }
 
@@ -410,6 +454,24 @@ pub enum Classification {
          budgets::UNPAIRED_FELT with its grounds"
     )]
     FeltUnderAFixture(String),
+    #[error(
+        "is stated under a bench fixture and names none. A bound is judged on the seats its \
+         config names, so a fixture row says which (fixtures = [\"minimal\"]) or it would be \
+         judged on every leg the matrix runs, this row's own config included"
+    )]
+    MissingFixtures,
+    #[error(
+        "is stated under a real config and names bench fixtures. A real-config row is judged \
+         on budgets::REAL_CONFIG_SEATS, and a fixture leg beside them is the substitution the \
+         config field exists to refuse"
+    )]
+    FixturesUnderARealConfig,
+    #[error(
+        "names {0:?} among its bench fixtures, which is a real-config seat. A row measured \
+         there says config = \"real\"; naming the seat under a fixture config states one \
+         measurement and takes another"
+    )]
+    ARealSeatAmongTheFixtures(String),
 }
 
 /// Loads and validates the budget file.
@@ -482,6 +544,7 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
         if find_budget(
             &file,
             &shortfall.scenario,
+            &shortfall.fixture,
             &shortfall.metric,
             &shortfall.class,
         )
@@ -566,19 +629,41 @@ fn classify(file: &BudgetFile, display: &str) -> Result<(), BudgetError> {
             }
             _ => {}
         }
+        if config == "real" {
+            if budget.fixtures.is_some() {
+                return Err(raise(Classification::FixturesUnderARealConfig));
+            }
+        } else {
+            let seats = budget.seats();
+            if seats.is_empty() {
+                return Err(raise(Classification::MissingFixtures));
+            }
+            if let Some(real) = seats.iter().find(|seat| REAL_CONFIG_SEATS.contains(seat)) {
+                return Err(raise(Classification::ARealSeatAmongTheFixtures(
+                    (*real).to_string(),
+                )));
+            }
+        }
     }
     Ok(())
 }
 
+/// The bound covering one measured cell's metric, if the file states one.
+///
+/// The fixture is part of the match, not a detail of the cell it came
+/// from: a bound says what one measurement means, and the measurement it
+/// means is the one taken on the seat its `config` names
+/// ([`Budget::seats`]).
 fn find_budget<'a>(
     file: &'a BudgetFile,
     scenario: &str,
+    fixture: &str,
     metric: &str,
     class: &str,
 ) -> Option<&'a Budget> {
     file.budget
         .iter()
-        .find(|b| b.scenario == scenario && b.metric == metric && b.covers(class))
+        .find(|b| b.scenario == scenario && b.metric == metric && b.binds(class, fixture))
 }
 
 fn find_shortfall<'a>(
@@ -743,7 +828,7 @@ pub fn check_cell(
     let recorded = baseline.cell(&cell.id);
     let mut findings = Vec::new();
     for (metric, &measured) in &cell.metrics {
-        let Some(budget) = find_budget(file, scenario, metric, class) else {
+        let Some(budget) = find_budget(file, scenario, fixture, metric, class) else {
             continue;
         };
         let verdict = if measured <= budget.max {
@@ -866,6 +951,11 @@ pub fn unreached_shortfalls<'a>(
 /// A scenario that did not run at all this invocation is not reported: a
 /// platform that skips a row, or a single-cell invocation, is a coverage
 /// question the caller already answers elsewhere, not a dead bound.
+///
+/// "Ran" means the seat the bound is stated on ran, not the scenario: a
+/// felt bound whose real-config leg is unrecorded would otherwise be dead
+/// on every run that measured only the fixture legs beside it, which is a
+/// bound waiting for a measurement rather than one nothing measures.
 #[must_use]
 pub fn unreached_budgets<'a>(
     file: &'a BudgetFile,
@@ -877,12 +967,14 @@ pub fn unreached_budgets<'a>(
         .iter()
         .filter(|budget| budget.covers(class))
         .filter(|budget| {
-            let ran = measured
+            let seated = |cell: &crate::baselines::MeasuredCell| {
+                cell.id.scenario == budget.scenario
+                    && budget.seats().contains(&cell.id.fixture.as_str())
+            };
+            let ran = measured.iter().any(seated);
+            let produced = measured
                 .iter()
-                .any(|cell| cell.id.scenario == budget.scenario);
-            let produced = measured.iter().any(|cell| {
-                cell.id.scenario == budget.scenario && cell.metrics.contains_key(&budget.metric)
-            });
+                .any(|cell| seated(cell) && cell.metrics.contains_key(&budget.metric));
             ran && !produced
         })
         .collect();
@@ -999,16 +1091,30 @@ why = \"because\"
         }
     }
 
+    /// A bench-fixture row and the felt row it answers to, because a
+    /// fixture leg of a paired scenario is exactly that: the cases below
+    /// measure the fixture legs, and the felt row's own seat is never
+    /// among the cells they hand in.
     const ONE_BUDGET: &str = r#"
 schema = 1
+[[budget]]
+spec_row = "the moment"
+scenario = "startup"
+metric = "settled_ratio_p50"
+max = 1.0
+kind = "felt"
+felt = "a test moment"
+config = "real"
+
 [[budget]]
 spec_row = "row"
 scenario = "echo"
 metric = "view_p99_ms"
 max = 8.0
-kind = "felt"
-felt = "a test row"
-config = "real"
+kind = "diagnostic"
+decomposes = "startup.settled_ratio_p50"
+config = "fixture"
+fixtures = ["minimal", "heavy"]
 "#;
 
     #[test]
@@ -1128,13 +1234,23 @@ config = "real"
     const COLD_START_BUDGET: &str = r#"
 schema = 1
 [[budget]]
+spec_row = "the moment"
+scenario = "startup"
+metric = "settled_ratio_p50"
+max = 1.0
+kind = "felt"
+felt = "a test moment"
+config = "real"
+
+[[budget]]
 spec_row = "row"
 scenario = "first_paint"
 metric = "marker_cold_ms"
 max = 30.0
-kind = "felt"
-felt = "a test row"
-config = "real"
+kind = "diagnostic"
+decomposes = "startup.settled_ratio_p50"
+config = "fixture"
+fixtures = ["minimal", "heavy"]
 "#;
 
     const COLD_START_RECORDED: f64 = 25.151;
@@ -1247,12 +1363,12 @@ config = "real"
             .collect();
         let baseline = baseline_with(
             "echo",
-            "minimal",
+            "user",
             Some(&metrics(&[("paired_delta_p99_ms", 0.10)])),
         );
         let findings = super::check_cell(
             &file,
-            &measured_cell("echo", "minimal", &[("paired_delta_p99_ms", 0.12)]),
+            &measured_cell("echo", "user", &[("paired_delta_p99_ms", 0.12)]),
             &baseline,
             "controlled-linux",
             &table,
@@ -1507,7 +1623,7 @@ felt = "a test row"
 config = "real"
 [[shortfall]]
 scenario = "echo"
-fixture = "minimal"
+fixture = "user"
 metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.2
@@ -1518,7 +1634,7 @@ why = "because"
             check_cell(
                 &file,
                 "echo",
-                "minimal",
+                "user",
                 &metrics(&[("ratio_p50", measured)]),
                 "dev-linux",
             )[0]
@@ -1549,14 +1665,14 @@ felt = "a test row"
 config = "real"
 [[shortfall]]
 scenario = "echo"
-fixture = "minimal"
+fixture = "user"
 metric = "ratio_p99"
 class = "dev-linux"
 accepted = 1.2
 why = "because"
 [[shortfall]]
 scenario = "echo"
-fixture = "minimal"
+fixture = "user"
 metric = "ratio_p99"
 class = "controlled-linux"
 accepted = 1.2
@@ -1566,7 +1682,7 @@ why = "the same entry on a class that gates this statistic"
         let found = check_cell(
             &file,
             "echo",
-            "minimal",
+            "user",
             &metrics(&[("ratio_p99", 99.0)]),
             "dev-linux",
         );
@@ -1576,7 +1692,7 @@ why = "the same entry on a class that gates this statistic"
         let gated = check_cell(
             &file,
             "echo",
-            "minimal",
+            "user",
             &metrics(&[("ratio_p99", 99.0)]),
             "controlled-linux",
         );
@@ -1627,11 +1743,11 @@ classes = ["dev-linux"]
         );
         let over = metrics(&[("key_to_rpc_p99_us", 400.0)]);
         assert_eq!(
-            check_cell(&file, "input_path", "minimal", &over, "dev-linux")[0].verdict,
+            check_cell(&file, "input_path", "user", &over, "dev-linux")[0].verdict,
             Verdict::New
         );
         assert!(
-            check_cell(&file, "input_path", "minimal", &over, "dev-macos").is_empty(),
+            check_cell(&file, "input_path", "user", &over, "dev-macos").is_empty(),
             "a class the budget does not name has no bound to breach"
         );
     }
@@ -1950,8 +2066,8 @@ config = "real"
 "#,
         );
         let measured = vec![
-            measured_cell("output_path", "minimal", &[("p99_ms", 0.5)]),
-            measured_cell("echo", "minimal", &[("ratio_p50", 1.0)]),
+            measured_cell("output_path", "user", &[("p99_ms", 0.5)]),
+            measured_cell("echo", "user", &[("ratio_p50", 1.0)]),
         ];
         let unreached = unreached_budgets(&file, "dev-linux", &measured);
         assert_eq!(
@@ -1984,8 +2100,8 @@ config = "real"
 "#,
         );
         let measured = vec![
-            measured_cell("output_path", "minimal", &[("p99_ms", 0.5)]),
-            measured_cell("memory", "minimal", &[("pss_mb", 3.4)]),
+            measured_cell("output_path", "user", &[("p99_ms", 0.5)]),
+            measured_cell("memory", "user", &[("pss_mb", 3.4)]),
         ];
         let unreached = unreached_budgets(&file, "dev-linux", &measured);
         assert_eq!(
@@ -2026,7 +2142,7 @@ config = "real"
 classes = ["dev-macos"]
 "#,
         );
-        let measured = vec![measured_cell("memory", "minimal", &[("pss_mb", 3.4)])];
+        let measured = vec![measured_cell("memory", "user", &[("pss_mb", 3.4)])];
         assert!(unreached_budgets(&file, "dev-linux", &measured).is_empty());
         assert_eq!(unreached_budgets(&file, "dev-macos", &measured).len(), 1);
     }
@@ -2048,6 +2164,7 @@ classes = ["dev-macos"]
                 find_budget(
                     &file,
                     &shortfall.scenario,
+                    &shortfall.fixture,
                     &shortfall.metric,
                     &shortfall.class
                 )
@@ -2269,7 +2386,7 @@ config = "real"
         );
         let mut seated = baseline_with(
             "first_paint",
-            "minimal",
+            "user",
             Some(
                 &[("marker_ratio_p50".to_string(), 1.09)]
                     .into_iter()
@@ -2279,7 +2396,7 @@ config = "real"
         seated.machine_class = "dev-linux".to_string();
         let mut absent = baseline_with(
             "first_paint",
-            "minimal",
+            "user",
             Some(&[("marker_cold_ms".to_string(), 26.5)].into_iter().collect()),
         );
         absent.machine_class = "gh-linux".to_string();
@@ -2295,7 +2412,7 @@ config = "real"
         withdrawn.withdrawn.insert(
             "first_paint".to_string(),
             [(
-                "minimal".to_string(),
+                "user".to_string(),
                 [(
                     "marker_ratio_p50".to_string(),
                     "taken on a pty that answered nothing".to_string(),
@@ -2360,6 +2477,18 @@ max = 8.0
                 "kind = \"diagnostic\"\nconfig = \"real\"",
                 Classification::MissingDecomposition,
             ),
+            (
+                "kind = \"resource\"\nconfig = \"fixture\"",
+                Classification::MissingFixtures,
+            ),
+            (
+                "kind = \"resource\"\nconfig = \"fixture\"\nfixtures = []",
+                Classification::MissingFixtures,
+            ),
+            (
+                "kind = \"resource\"\nconfig = \"real\"\nfixtures = [\"minimal\"]",
+                Classification::FixturesUnderARealConfig,
+            ),
         ] {
             let err = parse(&row(extra), "test").expect_err("must refuse");
             assert!(
@@ -2375,6 +2504,10 @@ max = 8.0
             (
                 "kind = \"felt\"\nfelt = \"you type\"\nconfig = \"whatever\"",
                 Classification::UnknownConfig("whatever".to_string()),
+            ),
+            (
+                "kind = \"resource\"\nconfig = \"fixture\"\nfixtures = [\"minimal\", \"user\"]",
+                Classification::ARealSeatAmongTheFixtures("user".to_string()),
             ),
         ] {
             let err = parse(&row(extra), "test").expect_err("must refuse");
@@ -2408,6 +2541,7 @@ metric = "key_to_rpc_p99_us"
 max = 100.0
 kind = "diagnostic"
 config = "fixture"
+fixtures = ["minimal"]
 decomposes = "{decomposes}"
 "#
             )
@@ -2434,6 +2568,58 @@ decomposes = "{decomposes}"
         ));
     }
 
+    /// A bound is judged on the seat its own config names, and the
+    /// direction that matters is silent: a felt row reaching the
+    /// plugin-free leg reads `Inside` there long before the real-config
+    /// leg exists, and the gate then attests to a moment under a config
+    /// nobody runs. The fixture leg keeps its recorded ratchet; what it
+    /// never earns is the spec bar's verdict.
+    #[test]
+    fn a_felt_bound_is_judged_on_its_real_config_seat_and_never_a_bench_leg() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "ratio_p50"
+max = 1.1
+kind = "felt"
+felt = "you type and the character is there"
+config = "real"
+
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "view_p99_ms"
+max = 8.0
+kind = "diagnostic"
+decomposes = "echo.ratio_p50"
+config = "fixture"
+fixtures = ["minimal"]
+"#,
+        );
+        let breach = metrics(&[("ratio_p50", 1.4), ("view_p99_ms", 9.0)]);
+        let bench = check_cell(&file, "echo", "minimal", &breach, "controlled-linux");
+        assert_eq!(
+            bench
+                .iter()
+                .map(|finding| finding.metric.as_str())
+                .collect::<Vec<_>>(),
+            vec!["view_p99_ms"],
+            "the plugin-free leg answers to the diagnostic seated on it and to nothing else"
+        );
+        let real = check_cell(&file, "echo", "user", &breach, "controlled-linux");
+        assert_eq!(
+            real.iter()
+                .map(|finding| finding.metric.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ratio_p50"],
+            "the felt bound is judged where it is stated"
+        );
+        assert_eq!(real[0].verdict, Verdict::New);
+    }
+
     /// A felt bound is stated under a config a person runs. The exemptions
     /// are the rows with no bare-nvim counterpart to pair against, and
     /// they are listed one by one with grounds rather than inferred.
@@ -2451,6 +2637,7 @@ max = 16.0
 kind = "felt"
 felt = "a moment"
 config = "fixture"
+fixtures = ["minimal"]
 "#
             )
         };

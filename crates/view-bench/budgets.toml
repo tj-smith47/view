@@ -14,6 +14,14 @@ schema = 1
 # A metric with no entry here has no spec budget. That is a real state, not
 # an oversight: dev-macos's input path sits there deliberately, and the spec
 # row says so.
+#
+# A row is judged on the seat its `config` names and on no other: `real`
+# binds the login-shaped `user` fixture (budgets::REAL_CONFIG_SEATS), and a
+# `fixture` row names the bench legs it bounds in `fixtures`. The fixture
+# legs of a paired scenario keep their recorded ratchet either way -- that
+# is where regression tripwiring belongs -- but a felt bound reaching one
+# would attest to a moment under a config nobody runs, which is the whole
+# substitution this vocabulary exists to refuse.
 
 # 100, not the 232 this row carried until 2026-07-27. That 232 was the
 # then-recorded 154.749 times ABSOLUTE_HEADROOM 1.5: a bound computed from
@@ -53,6 +61,7 @@ classes = ["controlled-linux"]
 kind = "diagnostic"
 decomposes = "echo.view_p99_ms"
 config = "fixture"
+fixtures = ["minimal"]
 
 [[budget]]
 spec_row = "view output path: redraw event parsed -> terminal write"
@@ -62,6 +71,7 @@ max = 1.0
 kind = "diagnostic"
 decomposes = "echo.view_p99_ms"
 config = "fixture"
+fixtures = ["minimal"]
 
 # Both AI rows inherit their session-absent counterpart's bar rather than
 # carrying one computed from the recording that seeded them.
@@ -95,6 +105,7 @@ classes = ["controlled-linux"]
 kind = "diagnostic"
 decomposes = "echo.view_p99_ms"
 config = "fixture"
+fixtures = ["minimal"]
 
 [[budget]]
 spec_row = "view output path, agent response streaming: redraw event parsed -> terminal write"
@@ -105,6 +116,7 @@ classes = ["controlled-linux"]
 kind = "diagnostic"
 decomposes = "echo.view_p99_ms"
 config = "fixture"
+fixtures = ["minimal"]
 
 [[budget]]
 spec_row = "Keypress -> cell change end-to-end, steady typing"
@@ -124,6 +136,32 @@ kind = "felt"
 felt = "you type and the character is on screen -- keypress to the changed cell, paired with nvim on the same host in the same run"
 config = "real"
 
+# The two bench legs of the same moment, bounded at the same numbers. They
+# are what the [[shortfall]] ledger below is written against: the felt row
+# above is stated under a config a person runs and is judged there alone,
+# while these hold the plugin set constant so the gap the ledger records is
+# attributable at all. A diagnostic never carries the claim -- spec 3.1's
+# own row for these says so.
+[[budget]]
+spec_row = "Keypress -> cell change, bench fixtures"
+scenario = "echo"
+metric = "view_p99_ms"
+max = 8.0
+kind = "diagnostic"
+decomposes = "echo.view_p99_ms"
+config = "fixture"
+fixtures = ["minimal", "heavy"]
+
+[[budget]]
+spec_row = "Keypress -> cell change, bench fixtures"
+scenario = "echo"
+metric = "ratio_p50"
+max = 1.1
+kind = "diagnostic"
+decomposes = "echo.ratio_p50"
+config = "fixture"
+fixtures = ["minimal", "heavy"]
+
 [[budget]]
 spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "scroll"
@@ -133,6 +171,12 @@ kind = "felt"
 felt = "you hold a scroll key down through a 100k-line file and the text under your eyes keeps up, paired with nvim on the same host in the same run"
 config = "real"
 
+# The three first-paint rows bound the two bench legs and not the `user`
+# one: their bars were set from a config that pays for no plugins ("the
+# 30 ms promise is about the cold start of a config that is not paying for
+# 15 plugins"), and the login-shaped leg is a real-config measurement no
+# fixture row can state. That leg keeps its recorded ratchet, and the felt
+# bound over the same launch is startup's settled-screen row.
 [[budget]]
 spec_row = "Shell painted before content: view's own UI shell visible, engine still loading"
 scenario = "first_paint"
@@ -141,6 +185,7 @@ max = 50.0
 kind = "diagnostic"
 decomposes = "startup.settled_ratio_p50"
 config = "fixture"
+fixtures = ["minimal", "heavy"]
 
 # 30 ms, not a rounder number, because the ratchet already bounds this
 # metric above it on a class where both gates run (the recorded 25.151
@@ -177,6 +222,7 @@ max = 30.0
 kind = "diagnostic"
 decomposes = "startup.settled_ratio_p50"
 config = "fixture"
+fixtures = ["minimal", "heavy"]
 
 [[budget]]
 spec_row = "Content marker on screen: the opened file's first line painted"
@@ -186,6 +232,7 @@ max = 0.30
 kind = "diagnostic"
 decomposes = "startup.settled_ratio_p50"
 config = "fixture"
+fixtures = ["minimal", "heavy"]
 
 # The two startup cells, in the vocabulary spec 3.1 states them in: what a
 # person waits through, and the one diagnostic that decomposes it. Neither
@@ -268,6 +315,7 @@ max = 150.0
 classes = ["controlled-linux"]
 kind = "resource"
 config = "fixture"
+fixtures = ["minimal"]
 
 [[budget]]
 spec_row = "view-side memory (PSS), 10 buffers, post-workload"
@@ -277,6 +325,7 @@ max = 150.0
 classes = ["controlled-macos"]
 kind = "resource"
 config = "fixture"
+fixtures = ["minimal"]
 
 # Superseded 2026-08-17: this row used to bound pss_mb at 6.0, "headroom over the recorded 4.962
 # local-spawn figure this class inherits from memory.minimal", scoped to
@@ -320,6 +369,7 @@ metric = "remote_local_ratio"
 max = 1.10
 kind = "resource"
 config = "fixture"
+fixtures = ["minimal"]
 
 # Both picker rows bound the tail (p99) of the row's own statistic, so the
 # spec bar holds at the worst measured open/keystroke rather than at a
@@ -337,6 +387,7 @@ max = 16.0
 kind = "felt"
 felt = "you type in the picker over 100k entries and the matching results are on screen under your fingers"
 config = "fixture"
+fixtures = ["minimal"]
 
 [[budget]]
 spec_row = "Picker scan: 1M-file tree"
@@ -346,6 +397,7 @@ max = 100.0
 kind = "felt"
 felt = "you open the picker on a million-file tree and the first page of results is already there"
 config = "fixture"
+fixtures = ["minimal"]
 
 # 12500 is not a chosen round number: it is what the heartbeat's own two
 # constants add up to, plus what reading the result costs. The sum is
@@ -388,6 +440,7 @@ max = 12500.0
 kind = "felt"
 felt = "the engine stops answering and the banner naming the wedge is on screen instead of a frozen editor"
 config = "fixture"
+fixtures = ["minimal"]
 
 # 1.0 is the ceiling the speculated-echo row exists to beat, stated before
 # anything measured it: at 1.0 view shows the typed glyph exactly as fast as

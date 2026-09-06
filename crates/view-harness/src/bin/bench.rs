@@ -2628,7 +2628,7 @@ mod tests {
             match budget.config.as_deref() {
                 Some("real") => {
                     if !MATRIX.iter().any(|(scenario, fixture)| {
-                        *scenario == budget.scenario && *fixture == USER_FIXTURE
+                        *scenario == budget.scenario && budget.seats().contains(fixture)
                     }) {
                         unseated.push(format!(
                             "{}.{} is felt under a real config and the matrix seats it on no \
@@ -2656,6 +2656,96 @@ mod tests {
         );
     }
 
+    /// A bound is judged on the seats its config names, so a seat the
+    /// matrix does not run is a bound nothing ever reaches -- the same
+    /// silence a dead metric name buys, one field over.
+    #[test]
+    fn every_budget_seat_is_a_cell_the_matrix_runs() {
+        let file = budgets::load(&budgets_path()).expect("the shipped budget table must load");
+        let mut unrun = Vec::new();
+        for budget in &file.budget {
+            for seat in budget.seats() {
+                if !MATRIX
+                    .iter()
+                    .any(|(scenario, fixture)| *scenario == budget.scenario && *fixture == seat)
+                {
+                    unrun.push(format!(
+                        "{}.{} is judged on {seat:?}, which the matrix does not run for that \
+                         scenario",
+                        budget.scenario, budget.metric
+                    ));
+                }
+            }
+        }
+        assert!(
+            unrun.is_empty(),
+            "a bound is judged on a seat the matrix runs:\n  {}",
+            unrun.join("\n  ")
+        );
+    }
+
+    /// A class that measures a scenario measures every leg the matrix
+    /// seats for it, so the real-config leg is either recorded there or
+    /// withdrawn with its reason. Missing outright, the gate calls the
+    /// cell `Unseated` -- "no bar was ever taken here" -- which reads as a
+    /// class that does not run the row rather than one owing a
+    /// measurement, and dev-macos held exactly that state for the five
+    /// legs its siblings withdrew.
+    #[test]
+    fn every_class_that_measures_a_scenario_seats_its_real_config_leg() {
+        let dir = workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("baselines");
+        let mut checked = 0usize;
+        let mut unseated = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the baselines directory must exist") {
+            let path = entry.expect("readable directory entry").path();
+            let named = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(baselines::baseline_class)
+                .is_some();
+            if !named {
+                continue;
+            }
+            let file = baselines::load(&path).expect("every shipped baseline must load");
+            checked += 1;
+            let held = |scenario: &str, fixture: &str| {
+                file.cells
+                    .get(scenario)
+                    .is_some_and(|fixtures| fixtures.contains_key(fixture))
+                    || file
+                        .withdrawn
+                        .get(scenario)
+                        .is_some_and(|fixtures| fixtures.contains_key(fixture))
+            };
+            for (scenario, fixture) in MATRIX {
+                if *fixture != USER_FIXTURE {
+                    continue;
+                }
+                let measures = file
+                    .cells
+                    .get(*scenario)
+                    .is_some_and(|fixtures| !fixtures.is_empty())
+                    || file.withdrawn.contains_key(*scenario);
+                if measures && !held(scenario, fixture) {
+                    unseated.push(format!(
+                        "{}: measures {scenario} and seats no {fixture:?} leg, which the matrix \
+                         carries",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        assert!(checked > 0, "no baseline under {}", dir.display());
+        assert!(
+            unseated.is_empty(),
+            "a class measuring a scenario seats every leg of it:\n  {}",
+            unseated.join("\n  ")
+        );
+    }
+
     /// Every row named in the exemption list is still a row: an entry left
     /// behind after its budget row was renamed or deleted would silently
     /// hold the exemption open for nothing.
@@ -2677,6 +2767,70 @@ mod tests {
                  [[budget]] row"
             );
         }
+    }
+
+    /// The exemption's grounds are a claim about the harness, not a
+    /// sentence: an exempt row is one whose scenario runs no bare-nvim arm
+    /// to pair against. Nothing else in the tree asks whether that is
+    /// true, so a future row could be exempted by writing three strings in
+    /// the commit that adds it. A paired arm is visible in what the
+    /// scenario records -- every pairing publishes a quotient or a
+    /// difference against the other side -- so the recorded population is
+    /// the witness.
+    #[test]
+    fn every_unpaired_felt_exemption_runs_no_arm_to_pair_against() {
+        let dir = workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("baselines");
+        let mut records: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(&dir).expect("the baselines directory must exist") {
+            let path = entry.expect("readable directory entry").path();
+            let named = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(baselines::baseline_class)
+                .is_some();
+            if !named {
+                continue;
+            }
+            let file = baselines::load(&path).expect("every shipped baseline must load");
+            for (scenario, fixtures) in &file.cells {
+                let seen = records.entry(scenario.clone()).or_default();
+                for metrics in fixtures.values() {
+                    seen.extend(metrics.keys().cloned());
+                }
+            }
+        }
+        // a pairing states itself as a quotient or a difference between the
+        // two sides; an unpaired row has only its own absolutes to publish
+        let paired = |scenario: &str| {
+            records.get(scenario).is_some_and(|metrics| {
+                metrics.iter().any(|metric| {
+                    metric
+                        .split('_')
+                        .any(|component| component == "ratio" || component == "delta")
+                })
+            })
+        };
+        for (scenario, metric, _) in budgets::UNPAIRED_FELT {
+            assert!(
+                records.contains_key(*scenario),
+                "budgets::UNPAIRED_FELT exempts {scenario}.{metric} on grounds no shipped class \
+                 has measured, so nothing here can agree or disagree with them"
+            );
+            assert!(
+                !paired(scenario),
+                "budgets::UNPAIRED_FELT exempts {scenario}.{metric} for having no bare-nvim arm \
+                 to pair against, and {scenario} records a paired statistic: {:?}",
+                records.get(*scenario)
+            );
+        }
+        assert!(
+            paired("echo"),
+            "a predicate that calls the paired rows unpaired would agree with any grounds at all"
+        );
     }
 
     #[test]

@@ -83,7 +83,7 @@ fn args_timed_into(log: &Path) -> Vec<OsString> {
 /// The editor process's own `NVIM STARTED` figure out of `log`.
 fn started_ms(log: &Path) -> f64 {
     let text = std::fs::read_to_string(log).unwrap_or_default();
-    let times = started_times_ms(&text);
+    let times = started_times_ms(&text).expect("the log must attribute every startup figure");
     assert_eq!(
         times.len(),
         1,
@@ -173,8 +173,13 @@ fn started_under_tmux(log: &Path) -> Option<f64> {
     let mut figure = None;
     while Instant::now() < deadline {
         let text = std::fs::read_to_string(log).unwrap_or_default();
-        if let Some(time) = started_times_ms(&text).first() {
-            figure = Some(*time);
+        // a report still being written is a section without its figure
+        // yet, which the parser refuses; that is a not-done-yet here
+        if let Some(time) = started_times_ms(&text)
+            .ok()
+            .and_then(|t| t.first().copied())
+        {
+            figure = Some(time);
             break;
         }
         std::thread::sleep(Duration::from_millis(25));

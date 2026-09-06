@@ -92,18 +92,48 @@ const EDITOR_PROCESS: &str = "Embedded";
 /// "big enough for the entire --startuptime report". A report past that
 /// auto-flushes mid-write, and a `Primary` line can then land under an
 /// `Embedded` header and be read as the editor's -- a cell whose fixture
-/// sources enough scripts to cross 8 KiB (`heavy`, `user`) needs a section
-/// boundary this parser does not have.
+/// sources enough scripts to cross 8 KiB (`heavy`, `user`) is where that
+/// happens. The structure says so on its own: one editor section is one
+/// run and writes exactly one [`STARTED_LINE`], so a section that yields
+/// two figures has taken one from the process interleaved into it and a
+/// section that yields none has lost its own to a split. Both are refused
+/// here, where the attribution is made, rather than inferred downstream
+/// from two sides disagreeing about how many samples survived -- an
+/// interleave that swaps one figure for another leaves those counts equal
+/// and the published median mixing a ~2 ms UI-client figure into ~50 ms
+/// editor ones.
 ///
 /// The figure is the first field of the line carrying [`STARTED_LINE`]:
 /// `clock` in `--startuptime`'s own `clock  self+sourced self` header,
 /// which for this line is the elapsed milliseconds since the process began.
-#[must_use]
-pub fn started_times_ms(log: &str) -> Vec<f64> {
+///
+/// # Errors
+///
+/// [`BenchError::Desync`] if an editor section holds anything other than
+/// exactly one [`STARTED_LINE`].
+pub fn started_times_ms(log: &str) -> Result<Vec<f64>, BenchError> {
     let mut editor_section = true;
+    let mut headed = false;
+    let mut in_section = 0usize;
     let mut times = Vec::new();
+    let close = |editor_section: bool, in_section: usize| {
+        (!editor_section || in_section == 1)
+            .then_some(())
+            .ok_or_else(|| BenchError::Desync {
+                context: format!(
+                    "a {EDITOR_PROCESS} --startuptime section holds {in_section} \
+                     {STARTED_LINE} lines instead of one, so the report crossed the engine's \
+                     8 KiB buffer and interleaved with the tty side's UI-client section"
+                ),
+            })
+    };
     for line in log.lines() {
         if let Some(process) = line.trim().strip_prefix(SECTION_PREFIX) {
+            if headed {
+                close(editor_section, in_section)?;
+            }
+            headed = true;
+            in_section = 0;
             editor_section = process.starts_with(EDITOR_PROCESS);
         } else if editor_section && line.contains(STARTED_LINE) {
             if let Some(clock) = line
@@ -111,11 +141,15 @@ pub fn started_times_ms(log: &str) -> Vec<f64> {
                 .next()
                 .and_then(|field| field.parse::<f64>().ok())
             {
+                in_section += 1;
                 times.push(clock);
             }
         }
     }
-    times
+    if headed {
+        close(editor_section, in_section)?;
+    }
+    Ok(times)
 }
 
 /// The engine-startup delta between the two sides of a run, in
@@ -129,15 +163,15 @@ pub fn started_times_ms(log: &str) -> Vec<f64> {
 ///
 /// [`BenchError::Desync`] if either log holds no `NVIM STARTED` line at
 /// all, which means the side never wrote one -- an editor that failed to
-/// start, or a `--startuptime` argument that never reached it. Otherwise
-/// whatever [`Distribution::from_samples`] returns for a series shorter
-/// than the warmup it is asked to drop.
+/// start, or a `--startuptime` argument that never reached it -- or if
+/// [`started_times_ms`] refuses a side's log. Otherwise whatever
+/// [`Distribution::from_samples`] returns for a series shorter than the
+/// warmup it is asked to drop.
 pub fn server_delta_ms(view_log: &Path, nvim_log: &Path, warmup: usize) -> Result<f64, BenchError> {
     let mut sides = Vec::new();
-    let mut counts = Vec::new();
     for (side, path) in [("view", view_log), ("nvim", nvim_log)] {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        let times = started_times_ms(&text);
+        let times = started_times_ms(&text)?;
         if times.is_empty() {
             return Err(BenchError::Desync {
                 context: format!(
@@ -147,29 +181,7 @@ pub fn server_delta_ms(view_log: &Path, nvim_log: &Path, warmup: usize) -> Resul
                 ),
             });
         }
-        counts.push(times.len());
         sides.push(Distribution::from_samples(&times, warmup)?.p50());
-    }
-    // the loop that spawns these takes the same number of samples per
-    // side, so unequal series mean one side's log was read wrong rather
-    // than measured differently -- and the way that happens is the 8 KiB
-    // flush boundary this module's parser doc names: a report past it
-    // splits, the tty side's UI-client section can land inside the
-    // editor's, and the editor figure after the split is skipped. Silent
-    // where it matters most (a config large enough to cross the boundary
-    // is exactly the real one), so it fails instead
-    if counts[0] != counts[1] {
-        return Err(BenchError::Desync {
-            context: format!(
-                "the view side wrote {} {STARTED_LINE} lines to {} and the nvim side {} to {}; \
-                 both sides take the same samples, so a report crossing the engine's 8 KiB \
-                 --startuptime buffer interleaved with the tty side's UI-client section",
-                counts[0],
-                view_log.display(),
-                counts[1],
-                nvim_log.display(),
-            ),
-        });
     }
     Ok(sides[0] - sides[1])
 }
@@ -194,7 +206,7 @@ clock   self+sourced   self:  sourced script\n\
 times in msec\n\
 004.900  001.900 001.900: sourcing /etc/vimrc\n\
 098.760  000.011: --- NVIM STARTED ---\n";
-        assert_eq!(started_times_ms(log), vec![112.345, 98.760]);
+        assert_eq!(started_times_ms(log).unwrap(), vec![112.345, 98.760]);
     }
 
     /// A tty side writes a UI-client section beside the editor's, and the
@@ -213,7 +225,31 @@ times in msec\n\
 \n\
 times in msec\n\
 112.148  000.028: --- NVIM STARTED ---\n";
-        assert_eq!(started_times_ms(log), vec![112.148]);
+        assert_eq!(started_times_ms(log).unwrap(), vec![112.148]);
+    }
+
+    /// The interleave the 8 KiB flush boundary produces, in the shape that
+    /// survives a count check: the first editor section holds the UI
+    /// client's own figure as well as its own, and a later one holds none,
+    /// so both sides still report the same number of samples while the
+    /// median mixes a process that loads no config into one that does.
+    #[test]
+    fn a_client_figure_read_under_an_editor_header_is_refused() {
+        let log = "\
+--- Startup times for process: Embedded ---\n\
+\n\
+times in msec\n\
+003.195  000.002: --- NVIM STARTED ---\n\
+112.148  000.028: --- NVIM STARTED ---\n\
+\n\
+--- Startup times for process: Embedded ---\n\
+\n\
+times in msec\n\
+005.100  002.000 002.000: sourcing /etc/vimrc\n";
+        assert!(matches!(
+            started_times_ms(log),
+            Err(BenchError::Desync { .. })
+        ));
     }
 
     /// A log with no timing section at all is the shape a side that never
@@ -232,21 +268,21 @@ times in msec\n\
         ));
     }
 
-    /// A side whose log lost a figure to an interleaved flush has fewer
-    /// samples than its partner, and a median over what survived is a
-    /// number neither run took.
+    /// The refusal a misattributed figure earns reaches the row that
+    /// publishes the delta, rather than stopping at the parser.
     #[test]
-    fn unequal_series_fail_rather_than_publish_a_median_of_what_survived() {
+    fn an_interleaved_log_fails_the_run_it_was_measured_for() {
         let dir = view_test_support::ScratchDir::new("startup-server-delta-counts").unwrap();
         let view_log = dir.join("view.log");
         let nvim_log = dir.join("nvim.log");
+        std::fs::write(&view_log, "110.000  000.010: --- NVIM STARTED ---\n").unwrap();
         std::fs::write(
-            &view_log,
-            "110.000  000.010: --- NVIM STARTED ---\n\
-             112.000  000.010: --- NVIM STARTED ---\n",
+            &nvim_log,
+            "--- Startup times for process: Embedded ---\n\
+             003.195  000.002: --- NVIM STARTED ---\n\
+             100.000  000.010: --- NVIM STARTED ---\n",
         )
         .unwrap();
-        std::fs::write(&nvim_log, "100.000  000.010: --- NVIM STARTED ---\n").unwrap();
         assert!(matches!(
             server_delta_ms(&view_log, &nvim_log, 0),
             Err(BenchError::Desync { .. })
