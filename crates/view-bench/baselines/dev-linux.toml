@@ -12,22 +12,6 @@ view_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated
 speculated_paint_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
 speculated_ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
 
-[withdrawn.scroll.user]
-ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-staleness_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.flood.user]
-cadence_p99_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-cadence_p99_ratio = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-pace_ratio = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
-[withdrawn.startup.user]
-first_frame_cold_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-first_frame_ratio_p99 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-server_delta_ms = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-settled_ratio_p50 = "seated 2026-09-06 as the real-config leg the felt bound is stated on; no quiet-host run has recorded it yet, so the gate reports it rather than attesting to a bar nobody took"
-
 [ai_composer.heavy]
 p99_ms = 0.171286
 
@@ -52,6 +36,8 @@ ratio_p50 = 1.1301046068104472
 ratio_p99 = 1.0916525318862538
 view_p99_ms = 0.726575
 
+[echo.user]
+
 [echo_control.heavy]
 control_delta_p99_ms = 0.5941500000000001
 control_p99_ms = 1.145126
@@ -67,6 +53,8 @@ control_ratio_p99 = 1.035776855693868
 [echo_speculated.minimal]
 speculated_paint_p99_ms = 0.301
 speculated_ratio_p50 = 0.3943397109890326
+
+[echo_speculated.user]
 
 [first_paint.heavy]
 marker_cold_ms = 79.267231
@@ -90,6 +78,11 @@ shell_visible_cold_ms = 4.542766
 cadence_p99_ms = 14.565679999999999
 cadence_p99_ratio = 0.9792970117228196
 pace_ratio = 1.000040416926719
+
+[flood.user]
+cadence_p99_ms = 16.914409
+cadence_p99_ratio = 0.9809471542433376
+pace_ratio = 1.0184579367365834
 
 [input_path.minimal]
 key_to_rpc_p99_us = 70.077
@@ -121,22 +114,23 @@ ratio_p50 = 1.604844360957922
 ratio_p99 = 1.50580910298798
 staleness_p99_ms = 1.069328
 
+[scroll.user]
+ratio_p50 = 1.7169213659427847
+ratio_p99 = 1.6643705784788272
+staleness_p99_ms = 1.571703
+
 [startup.minimal]
 first_frame_cold_ms = 25.920186
 first_frame_ratio_p99 = 1.0521978111195078
 server_delta_ms = 0.6820000000000004
 settled_ratio_p50 = 1.0955247620066972
 
+[startup.user]
+first_frame_cold_ms = 78.19404
+first_frame_ratio_p99 = 1.0124123969947239
+server_delta_ms = -0.07600000000000051
+settled_ratio_p50 = 1.0897897644234942
+
 [supervision.minimal]
 restart_rehydrate_p99_ms = 20.980584999999998
 wedge_detect_p99_ms = 11582.432190000001
-
-[echo.user]
-
-[echo_speculated.user]
-
-[scroll.user]
-
-[flood.user]
-
-[startup.user]
