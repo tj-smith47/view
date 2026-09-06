@@ -871,24 +871,30 @@ fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
 #[cfg(target_os = "linux")]
 const NO_SWAP_TO_RECOVER: &str = "E305";
 
-/// The other half of the recovery chain, and the destructive one: a session
-/// whose engine dies having written no swap file at all.
+/// The other half of the recovery chain, and the one the user's own
+/// configuration takes: a session whose engine dies having written no swap
+/// file at all.
 ///
 /// `-n` is nvim's own switch for that, and it is not exotic -- `set
 /// noswapfile` in a user's config, or an unwritable `'directory'`, reach the
 /// same place, and supervision restarts the first few deaths without asking,
-/// so nobody opts into it. The restart still asks for a recovery, nvim
-/// answers `E305`, and the buffer comes up **empty** where the file's
-/// contents should be: one `:w` from truncating the file.
+/// so nobody opts into it.
 ///
-/// So the assertions are the inverse of the success path's. The error must
-/// still be on screen -- view neither raised it nor can attribute it, so it
-/// is not view's to redraw away -- and view must say, in its own words, what
-/// state the buffer is in. Nothing is typed here either: this is what the
-/// session paints on its own.
+/// A restart that asked for a recovery anyway got `E305` and a child that
+/// never reached `VimEnter`: `create_windows` produced no buffer, left
+/// through `getout(1)`, and parked at the hit-enter prompt that error
+/// raised, so the replacement looked alive on screen and ended the session
+/// with exit code 1 at the user's first keystroke. So both halves are
+/// asserted here -- the buffer comes up on the file rather than empty (one
+/// `:w` from truncating it), and the keys the parked child died on are
+/// taken by this one.
+///
+/// The unsaved line is the discriminator: it is in the dead engine's buffer
+/// and in no swap file, so a screen still carrying it is the frame that
+/// engine painted rather than the replacement's.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empty() {
+fn a_restart_with_no_swap_left_comes_up_on_the_file_and_takes_the_users_keys() {
     let mut session = build_view_pty_with_content(
         &[std::ffi::OsStr::new("-n")],
         Some("on disk\n"),
@@ -899,6 +905,14 @@ fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empt
     assert!(
         session.wait_for("on disk", Duration::from_secs(15)),
         "the session never painted the file it was given; screen:\n{}",
+        session.screen()
+    );
+
+    const UNSAVED: &str = "zzgonezz";
+    session.send(format!("o{UNSAVED}\x1b").as_bytes()).unwrap();
+    assert!(
+        session.wait_for(UNSAVED, Duration::from_secs(15)),
+        "the unsaved line never reached the buffer; screen:\n{}",
         session.screen()
     );
 
@@ -924,21 +938,41 @@ fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empt
         session.screen()
     );
 
+    let settled = session.wait_for_screen(Duration::from_secs(30), |screen| {
+        let text = screen.contents();
+        text.contains("on disk") && !text.contains(UNSAVED)
+    });
+    assert!(
+        settled,
+        "the replacement never painted the file -- expected \"on disk\" with \
+         the dead engine's {UNSAVED:?} gone; screen:\n{}",
+        session.screen()
+    );
+
+    const AFTER: &str = "zzafterzz";
+    session.send(format!("o{AFTER}\x1b").as_bytes()).unwrap();
+    assert!(
+        session.wait_for(AFTER, Duration::from_secs(30)),
+        "the replacement took no keys -- a child parked at nvim's hit-enter \
+         prompt leaves on the first one; screen:\n{}",
+        session.screen()
+    );
+
+    let screen = session.screen();
+    assert!(
+        !screen.contains(NO_SWAP_TO_RECOVER),
+        "nothing asked nvim to recover a swap file that was never written, \
+         so {NO_SWAP_TO_RECOVER:?} must be nowhere on screen:\n{screen}"
+    );
     let notice = view_core::native::supervision::swap_recovery_failure_notice("", true);
     let named = notice
         .split_once(" --")
         .map(|(said, _)| said.to_string())
         .unwrap_or(notice);
-    let settled = session.wait_for_screen(Duration::from_secs(30), |screen| {
-        let text = screen.contents();
-        text.contains(NO_SWAP_TO_RECOVER) && text.contains(&named)
-    });
     assert!(
-        settled,
-        "a recovery that could not happen left the user an empty buffer with \
-         no account of itself -- expected nvim's {NO_SWAP_TO_RECOVER:?} still \
-         standing and view's own {named:?} beside it; screen:\n{}",
-        session.screen()
+        !screen.contains(&named),
+        "a recovery that was never attempted must not be reported as failed \
+         ({named:?}); screen:\n{screen}"
     );
 }
 

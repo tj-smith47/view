@@ -274,8 +274,10 @@ pub(crate) fn respawn_engine(
     attach: impl FnOnce() -> Option<RpcCall>,
 ) -> Result<Engine, AttachFailure> {
     // the recovery flag goes on before anything is asked of the config: it
-    // is what decides whether this replacement can run headless at all
-    let cfg = cfg.recovering();
+    // is what decides whether this replacement can run headless at all --
+    // and it is asked of the dying engine, which is the only thing that
+    // knows whether there is a swap file to recover at all
+    let cfg = cfg.recovering_recorded(&engine.handle.recorded_swaps());
     let stdin_relay = cfg.stdin_relay_requested();
     let attaches_late = cfg.attaches_late();
     let grid = cfg.late_attach();

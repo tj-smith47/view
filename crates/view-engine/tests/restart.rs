@@ -364,7 +364,19 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
         .handle
         .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
         .unwrap();
+    // the bridge is what tells the connection which swap files this session
+    // holds, and a restart passes nvim's recovery flag only for one it was
+    // told about: a session that registered nothing has nothing to recover
+    engine
+        .handle
+        .register_bridge(engine.api_info.channel_id)
+        .unwrap();
     write_unsaved_edit(&engine, "never written to disk");
+    assert!(
+        !engine.handle.recorded_swaps().is_empty(),
+        "the session holds a swap file and must have reported it: {:?}",
+        engine.handle.recorded_swaps()
+    );
     kill_out_of_band(engine.pid());
 
     let engine = engine
@@ -389,6 +401,71 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
         spawned_with(&engine, "-r"),
         "the recovering child carries no -r: {:?}",
         engine.command_line()
+    );
+    assert_os_agrees(&engine);
+}
+
+/// The other side of the same flag, and the shape the user's own
+/// configuration takes: `swapfile = false` means there is no swap file for
+/// a restart to replay, and a restart that passed `-r` anyway handed nvim a
+/// recovery that produces no buffer. `create_windows` then leaves through
+/// `getout(1)`, which parks at the hit-enter prompt the `E305` raised
+/// because a UI is attached -- so the replacement looks alive, answers
+/// nothing, and ends the session with exit code 1 at the user's first
+/// keystroke, before `VimEnter` ever ran.
+///
+/// The keystroke is the assertion, not decoration: a replacement parked in
+/// `wait_return` answers `nvim_get_mode` no differently from a live one
+/// until something satisfies the prompt.
+#[test]
+fn a_restart_with_no_swap_to_recover_comes_up_editable() {
+    let dir = scratch("no-swap");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+
+    let engine = Engine::spawn(editing(&dir, &file).with_arg("-n")).unwrap();
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    engine
+        .handle
+        .register_bridge(engine.api_info.channel_id)
+        .unwrap();
+    assert_eq!(
+        first_line(&engine),
+        "what is on disk",
+        "the session must be on the file before its swap is asked about"
+    );
+    assert!(
+        engine.handle.recorded_swaps().is_empty(),
+        "a session with swap files off holds none: {:?}",
+        engine.handle.recorded_swaps()
+    );
+    kill_out_of_band(engine.pid());
+
+    let engine = engine
+        .restart(editing(&dir, &file).with_arg("-n"))
+        .expect("a crashed engine must restart");
+    engine
+        .handle
+        .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+
+    assert!(
+        !spawned_with(&engine, "-r"),
+        "there was no swap file to recover and the flag ends the child: {:?}",
+        engine.command_line()
+    );
+    engine.handle.input("ihello-after-restart<Esc>").unwrap();
+    assert_eq!(
+        first_line(&engine),
+        "hello-after-restartwhat is on disk",
+        "the replacement took the user's keys instead of leaving on them"
+    );
+    assert!(
+        !blocking(&engine),
+        "the replacement is parked at a prompt nobody can answer"
     );
     assert_os_agrees(&engine);
 }

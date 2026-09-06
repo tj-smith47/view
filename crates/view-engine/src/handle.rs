@@ -16,8 +16,8 @@ use decode::{
     decode_bridge_event, decode_buf_lines_event, decode_buffer_list_reply, decode_clipboard_get,
     decode_clipboard_set, decode_delete_confirm_reply, decode_feature_invoke,
     decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_claims, decode_preview_reply,
-    decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
-    takeover_error_text, SwapRecoveryReading, TakeoverReading,
+    decode_prompt_reply, decode_rename_reply, decode_swap_names, decode_swap_recovery_reply,
+    decode_takeover_reply, takeover_error_text, SwapRecoveryReading, TakeoverReading,
 };
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -356,6 +356,18 @@ pub struct EngineHandle {
     /// this file's production line count under the crate's god-file
     /// ceiling.
     pub(crate) hidden_bufs: Arc<Mutex<HashMap<String, HiddenHold>>>,
+    /// Every listed buffer's swap file, paired with that buffer's own
+    /// absolute name, as the engine last reported them over the
+    /// `view_bridge` `swaps` event.
+    ///
+    /// Connection state rather than a model field because the one thing
+    /// that reads it is the restart that replaces this connection
+    /// ([`crate::process::EngineConfig::recovering_recorded`]): a
+    /// replacement is handed nvim's recovery flag only for an operand this
+    /// engine actually had a swap file for, and the engine that knew is the
+    /// dead one. Empty until the first report, which is the reading that
+    /// withholds the flag.
+    swap_names: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 /// One live-attached buffer's connection-side state: the generation
@@ -385,6 +397,7 @@ impl Clone for EngineHandle {
             outbox: Arc::clone(&self.outbox),
             attached_bufs: Arc::clone(&self.attached_bufs),
             hidden_bufs: Arc::clone(&self.hidden_bufs),
+            swap_names: Arc::clone(&self.swap_names),
         }
     }
 }
@@ -507,6 +520,7 @@ impl EngineHandle {
             Arc::new(Mutex::new(HashMap::new()));
         let hidden_bufs: Arc<Mutex<HashMap<String, HiddenHold>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let swap_names: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let pending: Pending = Arc::new(Mutex::new(PendingState {
             waiters: HashMap::new(),
             closed: Arc::clone(&closed),
@@ -539,6 +553,7 @@ impl EngineHandle {
         let reader_outbox = Arc::clone(&outbox);
         let reader_attached_bufs = Arc::clone(&attached_bufs);
         let reader_hidden_bufs = Arc::clone(&hidden_bufs);
+        let reader_swap_names = Arc::clone(&swap_names);
         let reader_pump = pump;
         let reader_announced_exit = Arc::clone(&announced_exit);
         let reader_settled = Arc::clone(&settled);
@@ -942,21 +957,34 @@ impl EngineHandle {
                                 // autocommand's notification, and every
                                 // consumer of one recomputes from live state
                                 // on the next frame anyway
-                                match decode_bridge_event(&params) {
-                                    // the exception, and the reason it takes
-                                    // the never-drop slot the takeover's own
-                                    // reading uses: the probe sends this only
-                                    // when the answer changed, so a refused
-                                    // one is not recomputed by anything -- it
-                                    // is the session's last word on where its
-                                    // notices belong
-                                    Some(msg @ Msg::NotifySinkRead { .. }) => {
-                                        pump.route_notify_sink(msg);
+                                //
+                                // the swap-file names are the one event
+                                // that ends here rather than at the model:
+                                // what reads them is the restart that
+                                // replaces this connection, so they are
+                                // kept beside it
+                                if let Some(named) = decode_swap_names(&params) {
+                                    if let Ok(mut swaps) = reader_swap_names.lock() {
+                                        *swaps = named;
                                     }
-                                    Some(msg) => {
-                                        let _ = pump.route_msg(msg);
+                                } else {
+                                    match decode_bridge_event(&params) {
+                                        // the exception, and the reason it
+                                        // takes the never-drop slot the
+                                        // takeover's own reading uses: the
+                                        // probe sends this only when the
+                                        // answer changed, so a refused one is
+                                        // not recomputed by anything -- it is
+                                        // the session's last word on where
+                                        // its notices belong
+                                        Some(msg @ Msg::NotifySinkRead { .. }) => {
+                                            pump.route_notify_sink(msg);
+                                        }
+                                        Some(msg) => {
+                                            let _ = pump.route_msg(msg);
+                                        }
+                                        None => {}
                                     }
-                                    None => {}
                                 }
                             } else if method == "nvim_buf_lines_event" {
                                 // nvim is never blocked on this notification
@@ -1161,6 +1189,7 @@ impl EngineHandle {
             outbox,
             attached_bufs,
             hidden_bufs,
+            swap_names,
         }
     }
 
@@ -1370,6 +1399,23 @@ impl EngineHandle {
         } else {
             Err(EngineError::Closed)
         }
+    }
+
+    /// Every swap file this connection last reported, paired with the
+    /// absolute name of the buffer holding it.
+    ///
+    /// The reading a restart takes off the engine it is replacing, so it
+    /// hands the replacement nvim's recovery flag only where there is a
+    /// swap to recover
+    /// ([`crate::process::EngineConfig::recovering_recorded`]). Empty is a
+    /// real answer -- a session whose `swapfile` is off has no swap files
+    /// at all -- and it is the one that withholds the flag.
+    #[must_use]
+    pub fn recorded_swaps(&self) -> Vec<(String, String)> {
+        self.swap_names
+            .lock()
+            .map(|swaps| swaps.clone())
+            .unwrap_or_default()
     }
 
     /// Records `buf`'s attach generation for the reader thread's
@@ -3629,6 +3675,55 @@ mod tests {
                 std::path::PathBuf::from("conflict.rs"),
                 view_core::msg::CheckTimeOutcome::Conflict
             )]
+        );
+    }
+
+    /// The swap-file report is the one bridge event that never becomes a
+    /// `Msg`: it is connection state a restart reads, so it is taken out of
+    /// the stream ahead of the model's own decode and must not be routed as
+    /// anything.
+    #[test]
+    fn the_swap_report_decodes_to_pairs_and_never_to_a_message() {
+        let named = Value::Array(vec![
+            Value::from("/tmp/notes.md"),
+            Value::from("/tmp/swap/notes.md.swp"),
+            Value::from("/tmp/other.md"),
+            Value::from("/tmp/swap/other.md.swp"),
+        ]);
+        assert_eq!(
+            decode_swap_names(&[Value::from("swaps"), named.clone()]),
+            Some(vec![
+                (
+                    "/tmp/notes.md".to_string(),
+                    "/tmp/swap/notes.md.swp".to_string()
+                ),
+                (
+                    "/tmp/other.md".to_string(),
+                    "/tmp/swap/other.md.swp".to_string()
+                ),
+            ])
+        );
+        assert_eq!(
+            decode_swap_names(&[Value::from("swaps"), Value::Array(Vec::new())]),
+            Some(Vec::new()),
+            "a session that holds no swap file at all reports an empty list, \
+             and that is the answer that withholds nvim's recovery flag"
+        );
+        assert!(
+            decode_bridge_event(&[Value::from("swaps"), named]).is_none(),
+            "the model has no consumer for a swap report"
+        );
+        assert!(
+            decode_swap_names(&[Value::from("git"), Value::from("main")]).is_none(),
+            "another event's payload is not a swap report"
+        );
+        assert_eq!(
+            decode_swap_names(&[
+                Value::from("swaps"),
+                Value::Array(vec![Value::from("/tmp/notes.md")]),
+            ]),
+            Some(Vec::new()),
+            "a name with no swap beside it is half a pair and names nothing"
         );
     }
 

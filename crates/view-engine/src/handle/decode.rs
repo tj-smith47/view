@@ -82,6 +82,39 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
     }))
 }
 
+/// Decodes the `swaps` bridge event -- the swap file each listed buffer of
+/// the running engine holds, paired with that buffer's own absolute name --
+/// or `None` for any other event.
+///
+/// Read out of the `view_bridge` stream ahead of [`decode_bridge_event`]
+/// rather than through it: the answer is connection state a restart reads
+/// off the engine it is replacing ([`crate::EngineHandle::recorded_swaps`]),
+/// not a message the model has anything to do with.
+///
+/// The payload is one flat array of alternating name and swap path because
+/// that is what the chunk builds; an odd trailing element is a shape this
+/// build cannot read and is dropped with the rest of the tail.
+pub(super) fn decode_swap_names(params: &[Value]) -> Option<Vec<(String, String)>> {
+    let [event, payload] = params else {
+        return None;
+    };
+    if event.as_str()? != "swaps" {
+        return None;
+    }
+    let flat: Vec<&str> = payload
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    Some(
+        flat.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[buffer, swap]| ((*buffer).to_owned(), (*swap).to_owned()))
+            .collect(),
+    )
+}
+
 /// Decodes a `view_bridge` notification's `(event, ...payload)` positional
 /// params into the message its consumer reads, or `None` when this build
 /// has no consumer for the event. Each event names its own payload shape

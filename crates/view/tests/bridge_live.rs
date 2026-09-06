@@ -547,3 +547,70 @@ fn the_colors_a_painter_reads_change_when_the_scheme_does() {
         "no chrome group's colors moved across a real colorscheme change: before={before:?} after={after:?}"
     );
 }
+
+/// The reading a restart takes off the engine it is replacing, proven
+/// against a real session on both settings of the option that decides it.
+///
+/// A session holding a swap file reports it, paired with the buffer's own
+/// name, and the path it reports is on disk -- which is the exact condition
+/// `EngineConfig::recovering_recorded` gates nvim's `-r` on. A session with
+/// no swap file, which is what the user's own `swapfile = false` leaves and
+/// what `-n` leaves here, reports none: a restart that passed `-r` anyway
+/// would hand its replacement a recovery that produces no buffer, and
+/// `create_windows` ends the child through `getout(1)` before `VimEnter`.
+///
+/// `updatecount` rather than `swapfile` is what the on-case sets, and it is
+/// set from `-c` rather than from the init: `-n` zeroes the option after
+/// the config has been sourced, and nvim decides a buffer's swap from that
+/// number at `ml_open`.
+///
+/// The `eval` barrier is the ordering: nvim writes its reply after the
+/// autocommand that sent the notification, and the reader thread takes the
+/// stream in order, so a reply in hand means the report ahead of it is
+/// already recorded.
+#[test]
+fn the_swap_file_a_session_holds_is_recorded_only_while_there_is_one() {
+    for (name, swapping) in [("swaps-on", true), ("swaps-off", false)] {
+        let dir = common::fixture(&format!("bridge-live-{name}"), "");
+        let mut cfg = common::isolated_reading(&dir.join("init.lua"));
+        if swapping {
+            cfg = cfg.with_arg("-c").with_arg("set updatecount=200");
+        }
+        let (engine, _pump, _rx) = common::spawn_with_pump(cfg, 1024);
+        engine
+            .handle
+            .register_bridge(engine.api_info.channel_id)
+            .unwrap();
+        engine
+            .handle
+            .ui_attach(80, 24, view_engine::UI_EXT_OPTIONS)
+            .unwrap();
+
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "one\ntwo\n").unwrap();
+        engine
+            .handle
+            .eval_str(&format!(
+                "execute('edit {}')",
+                notes.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        let recorded = engine.handle.recorded_swaps();
+        if !swapping {
+            assert!(
+                recorded.is_empty(),
+                "{name}: a session with no swap files must name none, got {recorded:?}"
+            );
+            continue;
+        }
+        let (buffer, swap) = recorded
+            .iter()
+            .find(|(buffer, _)| std::path::Path::new(buffer) == notes)
+            .unwrap_or_else(|| panic!("{name}: the open buffer is missing from {recorded:?}"));
+        assert!(
+            std::path::Path::new(swap).exists(),
+            "{name}: {buffer} reported the swap file {swap}, which is not on disk"
+        );
+    }
+}

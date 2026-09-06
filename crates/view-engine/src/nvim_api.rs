@@ -602,6 +602,31 @@ vim.api.nvim_create_autocmd(
       vim.bo.modified)
   end,
 })
+local swaps = ''
+local function relay_swaps()
+  local named = {}
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.fn.buflisted(buf) == 1 then
+      local name = vim.api.nvim_buf_get_name(buf)
+      local swap = vim.fn.swapname(buf)
+      if name ~= '' and swap ~= '' then
+        named[#named + 1] = name
+        named[#named + 1] = swap
+      end
+    end
+  end
+  local joined = table.concat(named, '\\n')
+  if joined ~= swaps then
+    swaps = joined
+    vim.rpcnotify(channel, 'view_bridge', 'swaps', named)
+  end
+end
+relay_swaps()
+vim.api.nvim_create_autocmd(
+  { 'BufReadPost', 'BufNewFile', 'BufFilePost', 'BufDelete' }, {
+  group = group,
+  callback = relay_swaps,
+})
 local float_armed, float_pending = false, false
 local function report_float(win)
   local cfg = vim.api.nvim_win_get_config(win)
@@ -4884,6 +4909,9 @@ mod tests {
             "'WinNew'",
             "'ViewScanFloats'",
             "'OptionSet'",
+            "'BufReadPost'",
+            "'BufNewFile'",
+            "'BufDelete'",
         ] {
             assert!(
                 REGISTER_BRIDGE_CHUNK.contains(event),
@@ -4902,11 +4930,11 @@ mod tests {
             REGISTER_BRIDGE_CHUNK
                 .matches("channel, 'view_bridge'")
                 .count(),
-            7,
+            8,
             "colorscheme through the shared relay, plus diagnostics, git, \
-             buffer, float and the escape timing each sending their own \
-             richer payload instead of a bare match, and the marker that \
-             closes a float scan"
+             buffer, float, the escape timing and the swap-file names each \
+             sending their own richer payload instead of a bare match, and \
+             the marker that closes a float scan"
         );
     }
 
