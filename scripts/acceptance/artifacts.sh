@@ -270,14 +270,16 @@ check_view_reaping() {
     # Ctrl-C in the ten-attempt wait below walks neither. The path is baked
     # into the trap rather than named, because the variable holding it is a
     # local and `set -u` would abort the exit path on a name that is gone.
-    # Cleared once the rm has run, so it never outlives this frame: every
-    # caller sources this file before installing its own EXIT trap.
+    # Cleared once the rm has run, so it never outlives this frame. The
+    # clear takes no caller's trap with it because this function runs at
+    # source time, from the block at the foot of this file, while the
+    # sourcing script is still on its `.` line and has installed none.
     trap "rm -rf '$SELFCHECK_TMP'" EXIT
     SELFCHECK_SESSION="view-acc-selfcheck-$$"
     # a shell under the name the recorder looks for. The trailing `:` is
     # what keeps that name: given one command, a shell execs it and becomes
     # `sleep` instead of staying the `view` this has to find
-    ln -s /bin/sh "$SELFCHECK_TMP/view"
+    ln -sn /bin/sh "$SELFCHECK_TMP/view"
     VIEW_PID=""
     tmux new-session -d -s "$SELFCHECK_SESSION" "$SELFCHECK_TMP/view -c 'sleep 300; :'" ||
         selfcheck_abort 'tmux could not start the session the self-check reaps'

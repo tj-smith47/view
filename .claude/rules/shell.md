@@ -145,6 +145,23 @@ guard under `set -e`. When the test fails the whole `&&` list fails, and the
 run aborts on the line that was meant to skip. Write it `if [ -d docs ]; then
 ... fi`.
 
+## A symbolic link a script makes is written `ln -sn`
+
+`ln -s` whose destination already exists as a symlink to a directory does
+not fail. It follows the link and creates the new one *inside* the target,
+which is how a checker-copy helper in `scripts/check-style-cases.sh` --
+whose `$dir/lib` points at the graded tree's own `scripts/lib/` -- wrote
+`scripts/lib/lib` into the tree the gates read when two copies shared one
+case number. The next population read then could not open it and all three
+gates over that population reddened, on a tree nobody had edited. The
+sibling `ln` beside it, pointing at a file, failed loudly in the same
+situation; this one succeeded silently. `-n` is in both BSD and GNU `ln`
+and refuses rather than writing through, and it is a no-op where the
+destination cannot pre-exist, so the whole population uses it rather than
+the sites where someone spotted the hazard. Pinned by a case at the end of
+`scripts/check-style-cases.sh` that walks the population for the flagless
+spelling at the start of a command.
+
 ## A comment wraps at 80 characters
 
 `scripts/check-style.sh` grades every comment line under `scripts/` at the

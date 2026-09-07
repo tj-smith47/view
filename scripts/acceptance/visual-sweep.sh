@@ -1008,7 +1008,7 @@ if [ -n "$SWEEP_DATA" ]; then
         exit 1
     }
     mkdir -p "$DATA_HOME/nvim"
-    ln -s "$SWEEP_DATA/nvim/lazy" "$DATA_HOME/nvim/lazy"
+    ln -sn "$SWEEP_DATA/nvim/lazy" "$DATA_HOME/nvim/lazy"
 fi
 # What the engine is told before a borrowed config runs.
 #

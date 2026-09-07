@@ -54,11 +54,15 @@ CASE=""
 
 # The scan set is `.claude/hooks` plus `scripts` plus Taskfile.yml, so every
 # scratch tree carries all three whether or not the case populates them.
+# scripts/ carries one clean script rather than nothing, because an empty
+# population is its own refusal: a case about a hook would otherwise meet
+# that refusal instead of the finding it was written for.
 new_case() {
   n=$((n + 1))
   CASE="$WORK/case$n"
   mkdir -p "$CASE/.claude/hooks" "$CASE/scripts"
   : > "$CASE/Taskfile.yml"
+  printf '#!/bin/sh\n:\n' > "$CASE/scripts/aa-clean.sh"
 }
 
 write() { cat > "$CASE/$1"; }
@@ -500,6 +504,33 @@ fi
 exit 0
 HISTORIC_GUARD
 expect 1 '.claude/hooks/validate-commands.sh:73:var .claude/hooks/validate-commands.sh:78:var .claude/hooks/validate-commands.sh:90:var .claude/hooks/validate-commands.sh:92:util' 'the guard revision this scan was written for, reporting its four spellings and nothing else'
+
+# ---------------------------------------------------------------------------
+# a scan root whose scripts/ holds nothing to grade. The hooks and the
+# Taskfile alone still answer `1 files clean`, which is word for word what a
+# scan that read every script says, and both sibling gates over this same
+# population redden on that tree.
+# ---------------------------------------------------------------------------
+new_case
+rm -f "$CASE/scripts/aa-clean.sh"
+desc='an empty scripts/, which the two sibling gates over this population refuse'
+out=$(bash "$SCANNER" "$CASE" 2>&1)
+rc=$?
+got=no
+# resolved, because the scanner names the root by pwd and macOS hands a
+# mktemp path out through two symlinked parents
+root=$(cd "$CASE" && pwd)
+case "$out" in
+  *"no file under $root whose first line names bash or sh"*) got=named ;;
+esac
+if [ "$rc" = 1 ] && [ "$got" = named ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want rc=1 and the root named\n  got  rc=%s\n' \
+    "$n" "$desc" "$rc"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

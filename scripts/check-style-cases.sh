@@ -781,7 +781,7 @@ expect_width 1 'docs/adir.md:unreadable' \
   'a directory named like a page, which awk skips with a warning and a zero status'
 
 new_width_case
-ln -s missing.md "$CASE/docs/dangling.md"
+ln -sn missing.md "$CASE/docs/dangling.md"
 expect_width 1 'docs/dangling.md:unreadable' \
   'a page the walk cannot read, which a discarded status would pass as clean'
 
@@ -922,7 +922,7 @@ expect_script_comments 1 'plan-ban scripts/relay:2' \
   'a planning-document citation in a suffix-less fixture'
 
 new_script_case
-ln -s missing.sh "$CASE/scripts/gone.sh"
+ln -sn missing.sh "$CASE/scripts/gone.sh"
 expect_script_comments 1 'scripts/gone.sh:unreadable' \
   'a script the rules cannot read, which a dropped selection would pass as clean'
 
@@ -937,7 +937,7 @@ expect_script_comments 0 'scripts/pipe:skipped' \
 
 new_script_case
 mkdir "$CASE/scripts/sub"
-ln -s sub "$CASE/scripts/dirlink"
+ln -sn sub "$CASE/scripts/dirlink"
 expect_script_comments 1 'scripts/dirlink:unreadable' \
   'a symlink to a directory, which is a symlink that was meant to name a file'
 
@@ -979,12 +979,18 @@ expect_geometry 1 'crates/view/src/native.rs=2 geometry-sites' \
 # a counter of its own would be incremented inside the command substitution
 # that captures the path, so it would never leave the subshell and every
 # copy would land in the same directory as the last one
+# -n on every link here, and in scannerless_checker below: a plain `ln -s`
+# whose destination is already a symlink to a directory follows it and
+# writes the new link INSIDE the target -- for `$dir/lib` that target is the
+# graded tree's own scripts/lib/, so a second copy under one case number
+# would leave scripts/lib/lib behind and redden every gate that reads the
+# population. With -n the second call refuses instead.
 broken_checker() {
   dir="$WORK/broken$n"
   mkdir -p "$dir"
-  ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/audit-god-files.sh" \
+  ln -sn "$(cd "$(dirname "$CHECKER")" && pwd)/audit-god-files.sh" \
     "$dir/audit-god-files.sh"
-  ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/lib" "$dir/lib"
+  ln -sn "$(cd "$(dirname "$CHECKER")" && pwd)/lib" "$dir/lib"
   # substituted by index and read out of the environment: the text being
   # broken is itself a regex, and both a sed script and an awk -v value
   # would take a second pass at its backslashes
@@ -1071,7 +1077,7 @@ RUN=""
 scannerless_checker() {
   dir="$WORK/broken$n"
   mkdir -p "$dir"
-  ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/lib" "$dir/lib"
+  ln -sn "$(cd "$(dirname "$CHECKER")" && pwd)/lib" "$dir/lib"
   cp "$CHECKER" "$dir/check-style.sh"
   printf '%s\n' "$dir/check-style.sh"
 }
@@ -1256,6 +1262,13 @@ expect_pin() {
 # line, so every line kept says what it is about. The pattern here spells its
 # first character bracketed: same language, and the pin grades this file by
 # the rule it states.
+#
+# Scope is the four paths named below and nothing wider: the rules pages,
+# plus the three files that state the limit. A discriminator this shape is a
+# proximity heuristic rather than the property, and the rest of the shebang
+# population carries 15 legitimate plural mentions of the word with no
+# painting verb beside them -- a table's cells, a terminal's width -- so
+# widening the walk would redden lines that are right.
 new_pin_case
 UNIT_WORD='\b[c]olumns\b'
 unit=$(cd "$TREE" && grep -rnE "$UNIT_WORD" \
@@ -1286,6 +1299,44 @@ if [ -s "$WORK/copy.err" ]; then
 }" "$(cat "$WORK/copy.err")")
 fi
 expect_pin 'a broken checker copy taking a directory of its own, silently' "$isolation"
+
+# A second copy asked for under one case number, which is what an added call
+# with no new_*_case above it makes. A link made without -n whose
+# destination is already a link to a directory follows it and lands inside
+# the target -- here the graded tree's own scripts/lib/, whose next
+# population read then cannot open scripts/lib/lib. That read is what this
+# asserts, because all three gates over the population make it.
+new_pin_case
+GRADED="$(cd "$(dirname "$CHECKER")/.." && pwd)"
+broken_checker 'release\(' 'release[' > /dev/null 2> "$WORK/reuse.err"
+broken_checker 'release\(' 'release[' > /dev/null 2>> "$WORK/reuse.err"
+reuse=""
+if ! script_population_read "$GRADED" > /dev/null; then
+  reuse="the population read the three gates share refuses the tree"
+fi
+# removed before the verdict is reported, so a red case leaves the tree it
+# grades as it found it
+if [ -e "$GRADED/scripts/lib/lib" ]; then
+  reuse=$(printf '%sthe reused directory wrote a link into %s\n' \
+    "${reuse:+$reuse
+}" "$GRADED/scripts/lib")
+  rm -f "$GRADED/scripts/lib/lib"
+fi
+expect_pin 'a checker directory reused, which writes no link into the graded tree' "$reuse"
+
+# The same property over every link the population makes, because the two
+# helpers above are not the last place one gets written and the failure is
+# silent where it happens.
+new_pin_case
+if ! script_population_read "$TREE" > /dev/null || [ -z "$SCRIPT_POPULATION" ]; then
+  deref="the population read answered nothing, so no link was graded"
+else
+  # anchored at the start of a command, so prose naming the flagless
+  # spelling is not a finding
+  deref=$(cd "$TREE" && grep -nE '^[[:space:]]*ln[[:space:]]+-s([^n]|$)' \
+    $SCRIPT_POPULATION) || deref=""
+fi
+expect_pin 'every link the population makes written -n, so none writes through one' "$deref"
 
 # A file with no suffix carrying a shebang, counted by every consumer of
 # scripts/lib/script-population.sh. Two of them take a scan root and are run
@@ -1334,17 +1385,20 @@ guarded=$( {
 } | LC_ALL=C sort -u)
 required=$(sed -n 's/^for required in \(.*\); do$/\1/p' "$CHECKER" | tr ' ' '\n' \
   | LC_ALL=C sort -u)
+# Defined out here rather than written inline below, and delimited by
+# blanks rather than by newlines: the closing paren of a case pattern
+# inside a command substitution is one of the two shapes bash 3.2
+# miscounts, and there it ended the substitution rather than the pattern,
+# so the whole file stopped parsing on the host the 3.2 contract is about.
+# Blanks are safe here because a guarded directory is matched out of the
+# checker as [A-Za-z0-9_/.-]+ and can hold none.
+required_holds() { case " $2 " in (*" $1 "*) return 0 ;; esac; return 1; }
+required_line=$(printf '%s\n' "$required" | tr '\n' ' ')
 unrequired=$(printf '%s\n' "$guarded" \
   | while IFS= read -r d; do
     [ -n "$d" ] || continue
-    case "
-$required
-" in
-      *"
-$d
-"*) ;;
-      *) printf '%s is guarded on but not required\n' "$d" ;;
-    esac
+    required_holds "$d" "$required_line" ||
+      printf '%s is guarded on but not required\n' "$d"
   done)
 if [ -z "$required" ]; then
   unrequired=$(printf '%s\nthe run requires no directory at all\n' "$unrequired")

@@ -165,6 +165,12 @@ report() {
 if ! script_population_read; then
   echo "PORTABILITY FAIL: scripts -- a file under scripts/ cannot be read" >&2
   exit 1
+# the hooks and the Taskfile alone would still report `1 files clean`, which
+# is what a scan that reached every script also says; the two sibling gates
+# over this population both redden here
+elif [ -z "$SCRIPT_POPULATION" ]; then
+  echo "PORTABILITY FAIL: scripts -- no file under $(pwd) whose first line names bash or sh" >&2
+  exit 1
 fi
 targets=()
 while IFS= read -r file; do
