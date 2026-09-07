@@ -968,10 +968,12 @@ expect_geometry 1 'crates/view/src/native.rs=2 geometry-sites' \
 # the scanner a checker resolves from its own directory, or the case fails
 # for want of production lines instead of grading the filter.
 # ---------------------------------------------------------------------------
-copies=0
+# keyed on the case number, which the new_*_case helpers bump in this shell:
+# a counter of its own would be incremented inside the command substitution
+# that captures the path, so it would never leave the subshell and every
+# copy would land in the same directory as the last one
 broken_checker() {
-  copies=$((copies + 1))
-  dir="$WORK/broken$copies"
+  dir="$WORK/broken$n"
   mkdir -p "$dir"
   ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/audit-god-files.sh" \
     "$dir/audit-god-files.sh"
@@ -1056,12 +1058,10 @@ RUN=""
 # the checker copied with no scanner beside it: `read_prod_lines` resolves
 # the classifier from the checker's own directory, so this is what a
 # renamed or missing one looks like to the ownership pin
-# its own directory name rather than the counter broken_checker uses: that
-# counter is incremented inside a command substitution, so it never leaves
-# the subshell, and a second name would land this copy beside the scanner
-# the first one linked
+# the same shape as broken_checker, minus the scanner symlink: what it makes
+# is the checker with no classifier beside it
 scannerless_checker() {
-  dir="$WORK/scannerless"
+  dir="$WORK/broken$n"
   mkdir -p "$dir"
   cp "$CHECKER" "$dir/check-style.sh"
   printf '%s\n' "$dir/check-style.sh"
