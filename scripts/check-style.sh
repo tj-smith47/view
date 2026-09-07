@@ -220,8 +220,8 @@ fi
 # The measure every width walk in this file takes, in one place because a
 # tree graded in two units is a tree where a narrower line reddens while a
 # wider one passes: a run longer than the limit exempts itself in whatever
-# unit the walk counts, so bytes redden a 68-column comment beside a
-# 77-column one whose long token is subtracted whole.
+# unit the walk counts, so bytes redden a 68-character comment beside a
+# 77-character one whose long token is subtracted whole.
 #
 # Characters, counted without a UTF-8 awk: under LC_ALL=C a character is a
 # lead byte plus its continuation bytes, so dropping the continuations
@@ -230,10 +230,18 @@ fi
 # Every awk this feeds is run under LC_ALL=C, which the range needs to be a
 # range of bytes at all: gawk in a UTF-8 locale refuses it as a collation
 # character.
+#
+# A character is not a terminal column, and every message this feeds says
+# characters because that is what it counts: a double-width glyph counts
+# one and paints two, a combining mark counts one and paints none, so the
+# same measure passes a comment of 61 characters that fills 91 columns and
+# reddens a decomposed one of 92 that fills 62. Both limits are stated in
+# .claude/rules/shell.md and cased beside the width cases; a number carrying
+# a unit it is not in is worse than no number at all.
 AWK_COLS='function cols(s,   t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
 '
 
-# Every embedded Lua chunk wraps at 80 columns. The chunks are read beside
+# Every embedded Lua chunk wraps at 80 characters. The chunks are read beside
 # rustfmt-held Rust and rustfmt does not reach inside a string literal, so
 # nothing else in the toolchain catches a line past that width, and every
 # chunk a docs/*-wire-capture.md fence publishes verbatim -- pinned
@@ -267,7 +275,7 @@ check_lua_chunk_width() {
   report=$(LC_ALL=C awk "$AWK_COLS"'
     function check_width(line) {
       if (cols(line) > 80) {
-        printf "%s:%d: %d columns\n", FILENAME, FNR, cols(line)
+        printf "%s:%d: %d characters\n", FILENAME, FNR, cols(line)
         over++
       }
     }
@@ -297,7 +305,7 @@ check_lua_chunk_width() {
   fi
   if [ "$status" -ne 0 ]; then
     printf '%s\n' "$report" | grep -v '^CHUNKS '
-    echo "STYLE FAIL: a Lua chunk line is over 80 columns"
+    echo "STYLE FAIL: a Lua chunk line is over 80 characters"
     echo "  Wrap it the way the rest of nvim_api.rs's chunks are: break at"
     echo "  an operator or after a comma, keep the chunk's indentation."
     return 1
@@ -308,7 +316,7 @@ check_lua_chunk_width() {
 # The other shape: a multi-line string literal, which is how every live test
 # hands Lua to nvim and how the crate carries its longer messages. rustfmt
 # holds the line it opens on and nothing else about it, so the same 80
-# columns apply to every line of one -- no test of what the literal holds,
+# characters apply to every line of one -- no test of what the literal holds,
 # which is what let a Lua chunk broken with a trailing backslash
 # (checktime_live.rs) and a fixture row (inline_review_live.rs) read as
 # prose and go unchecked.
@@ -343,7 +351,7 @@ check_string_literal_width() {
     }
     function check_width(line) {
       if (cols(line) > 80) {
-        printf "%s:%d: %d columns\n", FILENAME, FNR, cols(line)
+        printf "%s:%d: %d characters\n", FILENAME, FNR, cols(line)
         over++
       }
     }
@@ -372,7 +380,7 @@ check_string_literal_width() {
   fi
   if [ "$status" -ne 0 ]; then
     printf '%s\n' "$report" | grep -v '^LITERALS '
-    echo "STYLE FAIL: a line inside a string literal is over 80 columns"
+    echo "STYLE FAIL: a line inside a string literal is over 80 characters"
     echo "  Wrap it the way nvim_api.rs's chunks are: break at an operator or"
     echo "  after a comma, keep the literal's own indentation."
     return 1
@@ -648,7 +656,7 @@ check_written_programs() {
   return 1
 }
 
-# A doc line wraps at 80 columns, which is the width the pages are already
+# A doc line wraps at 80 characters, which is the width the pages are
 # written to. A line that cannot wrap is exempt and says which shape it is:
 # a fenced block is a sample of a file rather than prose, a table row is one
 # row, a heading is one line by construction, and a line that is one link or
@@ -715,7 +723,7 @@ check_prose_width() {
         if (cols(word[i]) > limit) { rest -= cols(word[i]) }
       }
       if (rest <= limit) { next }
-      printf "%s:%d: %d columns\n", FILENAME, FNR, cols($0)
+      printf "%s:%d: %d characters\n", FILENAME, FNR, cols($0)
     }') || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$wide"
@@ -727,7 +735,7 @@ check_prose_width() {
     return 0
   fi
   printf '%s\n' "$wide"
-  echo "STYLE FAIL: a doc line runs past $PROSE_WIDTH columns"
+  echo "STYLE FAIL: a doc line runs past $PROSE_WIDTH characters"
   echo "  Re-wrap the paragraph. A line that cannot wrap -- fenced, a table"
   echo "  row, a heading, or one link -- is already exempt, and a run longer"
   echo "  than the limit is taken out before the line is measured, so a line"
@@ -743,32 +751,47 @@ check_prose_width() {
 # all of them.
 SCRIPT_POPULATION=""
 read_script_population() {
-  local entries unreadable
+  local entries skipped graded unreadable first
   if [ -n "$SCRIPT_POPULATION" ]; then
     return 0
   fi
-  # listed without -type f so a dangling symlink is named by the loop below
-  # rather than dropped by the selection: a selection that skips what it
-  # cannot open leaves the population short, and a short population grades
-  # its survivors and reads exactly like a tree with nothing to report
-  entries=$(find scripts ! -type d | LC_ALL=C sort)
-  unreadable=$(printf '%s\n' "$entries" | while IFS= read -r entry; do
-    [ -z "$entry" ] ||
-      { [ -f "$entry" ] && [ -r "$entry" ]; } ||
-      printf '%s: the comment rules cannot read it\n' "$entry"
+  # symlinks are listed beside regular files so a dangling one is named by
+  # the loop below rather than dropped by the selection: a selection that
+  # skips what it cannot open leaves the population short, and a short
+  # population grades its survivors and reads exactly like a tree with
+  # nothing to report
+  entries=$(find scripts \( -type f -o -type l \) | LC_ALL=C sort)
+  # a fifo, socket or device node is readable and could never carry a
+  # shebang, so it is named and passed over: reddening a gate for an entry
+  # nobody can rewrap is a false red nobody can act on
+  skipped=$(find scripts ! -type d ! -type f ! -type l | LC_ALL=C sort)
+  if [ -n "$skipped" ]; then
+    printf '%s\n' "$skipped" |
+      sed 's/$/: not a regular file or a symlink, the comment rules skip it/'
+  fi
+  # selected by a loop rather than by an xargs awk: xargs splits a path on a
+  # blank and awk takes a fatal on the fragment, which drops the file from
+  # all three rules with the run still green. Read and select in the one
+  # pass, so no entry can pass the readability vet and then be lost by the
+  # selection below it
+  graded=$(printf '%s\n' "$entries" | while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if { [ -f "$entry" ] && [ -r "$entry" ]; } &&
+      first=$(head -n 1 "$entry"); then
+      case "$first" in ('#!'*bash | '#!'*/sh) printf 'take %s\n' "$entry" ;; esac
+    else
+      printf 'drop %s\n' "$entry"
+    fi
   done)
+  unreadable=$(printf '%s\n' "$graded" | sed -n 's/^drop //p')
   if [ -n "$unreadable" ]; then
-    printf '%s\n' "$unreadable"
+    printf '%s\n' "$unreadable" | sed 's/$/: the comment rules cannot read it/'
     echo "STYLE FAIL: a file under scripts/ cannot be read"
     return 1
   fi
-  # awk rather than grep -l for the selection: xargs answers 123 both for a
-  # batch that matched nothing and for one it could not read, so a grep
-  # here would have no status left to tell the two apart
-  SCRIPT_POPULATION=$(printf '%s\n' "$entries" | LC_ALL=C xargs awk '
-    FNR == 1 && /^#!.*(bash|\/sh)$/ { print FILENAME }')
+  SCRIPT_POPULATION=$(printf '%s\n' "$graded" | sed -n 's/^take //p')
   if [ -z "$SCRIPT_POPULATION" ]; then
-    echo "STYLE FAIL: no script found to grade for comment width"
+    echo "STYLE FAIL: no script found to grade for comment width under $(pwd)"
     echo "  A walk handed an empty list reports nothing and reads like a"
     echo "  tree whose comments are inside the limit."
     return 1
@@ -780,8 +803,9 @@ read_script_population() {
 # grep answers 1 for a tree with no hits and 2 for a file it could not read,
 # and a walk that reads both as clean passes a tree it never finished
 # grading. The list is split into operands rather than piped through xargs,
-# which folds those two statuses into one 123; no path under scripts/
-# carries a space.
+# which folds those two statuses into one 123; a path carrying a blank
+# splits into operands that do not exist, so grep answers 2 and the ban
+# reddens naming them rather than grading a list one file short.
 script_comment_ban() {
   local verdict="$1" files="$2" hits rc
   shift 2
@@ -814,20 +838,28 @@ check_script_comment_rules() {
   # removes every line exits non-zero, which set -e reads as a failed walk
   other=$(printf '%s\n' "$SCRIPT_POPULATION" \
     | awk -v self="scripts/$(basename "$0")" '$0 != self')
-  if [ -n "$other" ]; then
-    script_comment_ban 'review-finding reference' "$other" \
-      -E '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' || rulefail=1
-    # the charter ban elsewhere reaches sources and docs; scripts carry the
-    # same comments and are walked here instead
-    script_comment_ban 'planning-charter reference' "$other" -iE '\bcharter' || rulefail=1
+  # net of this file the population can be empty, and both bans then report
+  # ok having graded nothing -- the shape a pipeline stage reading an empty
+  # list has, and the one the guard above cannot see because the population
+  # it checked was not empty
+  if [ -z "$other" ]; then
+    echo "STYLE FAIL: scripts/ under $(pwd) holds no script but this one"
+    echo "  Both citation bans and the width walk would report ok having"
+    echo "  graded nothing."
+    return 1
   fi
+  script_comment_ban 'review-finding reference' "$other" \
+    -E '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' || rulefail=1
+  # the charter ban elsewhere reaches sources and docs; scripts carry the
+  # same comments and are walked here instead
+  script_comment_ban 'planning-charter reference' "$other" -iE '\bcharter' || rulefail=1
   check_script_comment_width || rulefail=1
   return $rulefail
 }
 
-# A script comment wraps at the column a page does, over that population,
-# because a rule kept by hand over the five gate scripts left an 85-column
-# comment standing in a sixth.
+# A script comment wraps at the width a page does, over that population,
+# because a rule kept by hand over the five gate scripts left an
+# 85-character comment standing in a sixth.
 check_script_comment_width() {
   local wide rc
   if ! read_script_population; then
@@ -847,7 +879,7 @@ check_script_comment_width() {
         if (cols(word[i]) > limit) { rest -= cols(word[i]) }
       }
       if (rest <= limit) { next }
-      printf "%s:%d: %d columns\n", FILENAME, FNR, cols($0)
+      printf "%s:%d: %d characters\n", FILENAME, FNR, cols($0)
     }') || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$wide"
@@ -859,7 +891,7 @@ check_script_comment_width() {
     return 0
   fi
   printf '%s\n' "$wide"
-  echo "STYLE FAIL: a script comment runs past $PROSE_WIDTH columns"
+  echo "STYLE FAIL: a script comment runs past $PROSE_WIDTH characters"
   echo "  Re-wrap it. A run longer than the limit is taken out before the"
   echo "  line is measured, so a line reported here has a space in it."
   return 1
@@ -1001,10 +1033,25 @@ else
   # any non-identifier char before the name, so UFCS calls
   # (`Messages::set_native_condition(...)`) cannot walk past the pin; the
   # definition itself is the one legitimate non-call mention
-  sites=$(printf '%s\n' "$PROD_LINES_CACHE" | grep -E '[^A-Za-z0-9_]set_native_condition\(' | grep -v 'fn set_native_condition' || true)
-  found=$(printf '%s' "$sites" | grep -c . || true)
-  strangers=$(printf '%s' "$sites" | grep -v "^$CONDITION_OWNER:" || true)
-  if [ -n "$strangers" ]; then
+  src=0
+  sites=$(printf '%s\n' "$PROD_LINES_CACHE" \
+    | grep -E '[^A-Za-z0-9_]set_native_condition\(' \
+    | grep -v 'fn set_native_condition') || src=$?
+  # counted with awk rather than grep -c, which answers 1 for an empty list
+  # and would need a status thrown away to be read at all
+  found=$(printf '%s' "$sites" | awk 'END { print NR }')
+  strangers=""
+  if [ "$src" -le 1 ]; then
+    strangers=$(printf '%s' "$sites" | grep -v "^$CONDITION_OWNER:") || src=$?
+  fi
+  # an errored filter reports no stranger, which is what a clean tree
+  # reports, and the pin still matches -- so the status is the verdict
+  if [ "$src" -gt 1 ]; then
+    echo "STYLE FAIL: the condition-notice filter exited $src instead of grading"
+    echo "  A filter that could not run reports no stranger, which is what a"
+    echo "  tree that owns its condition notice reports."
+    fail=1
+  elif [ -n "$strangers" ]; then
     printf '%s\n' "$strangers"
     echo "STYLE FAIL: set_native_condition called outside $CONDITION_OWNER"
     echo "  The one visible condition notice is owned by a single fold that"

@@ -66,10 +66,10 @@ new_case() {
   mkdir -p "$CASE/$SRC" "$CASE/$TESTS"
 }
 
-# A line of exactly WIDTH columns, opened by PREFIX and closed by SUFFIX,
-# padded between them. The widths are computed rather than written out: a
-# fixture whose 81st column came from a hand-counted string is one editor
-# reflow away from testing 79.
+# A line of exactly WIDTH characters, opened by PREFIX and closed by
+# SUFFIX, padded between them. The widths are computed rather than written
+# out: a fixture whose 81st character came from a hand-counted string is one
+# editor reflow away from testing 79.
 pad() {
   fill=$(($1 - ${#2} - ${#3}))
   printf '%s%s%s\n' "$2" "$(printf "%${fill}s" '' | tr ' ' 'a')" "$3"
@@ -110,7 +110,7 @@ plant_literals() {
 }
 
 # Both walks report the same two ways: `STYLE FAIL:` headers, each of which
-# names one guard, and `file:line: N columns` lines naming an over-width
+# names one guard, and `file:line: N characters` lines naming an over-width
 # line. Headers collapse to a guard token so that rewording a diagnostic is
 # not a regression, while the two mismatch guards keep both of their counts
 # (walked/declared) -- a mismatch reporting the wrong pair is the bug those
@@ -125,7 +125,7 @@ findings() {
     /^STYLE FAIL: the width check walked [0-9]+ Lua chunks/ {
       walked = $7; guard = "chunk-walk"; next
     }
-    /^STYLE FAIL: a Lua chunk line is over 80 columns$/ {
+    /^STYLE FAIL: a Lua chunk line is over 80 characters$/ {
       print "chunk-width"; next
     }
     /^STYLE FAIL: no view-engine sources found/ { print "lit-missing"; next }
@@ -135,14 +135,14 @@ findings() {
     /^STYLE FAIL: the width check walked [0-9]+ multi-line string literals/ {
       walked = $7; guard = "lit-walk"; next
     }
-    /^STYLE FAIL: a line inside a string literal is over 80 columns$/ {
+    /^STYLE FAIL: a line inside a string literal is over 80 characters$/ {
       print "lit-width"; next
     }
     /^ +but grep counts [0-9]+ / {
       if (guard != "") { print guard ":" walked "/" $4; guard = "" }
       next
     }
-    /:[0-9]+: [0-9]+ columns$/ {
+    /:[0-9]+: [0-9]+ characters$/ {
       loc = $1; sub(/:$/, "", loc); print loc ":" $2; next
     }
   ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//'
@@ -176,25 +176,25 @@ expect 0 '' 'a tree whose chunk and both literal shapes are inside the width'
 new_case
 plant_chunk 80
 plant_literals 80 80
-expect 0 '' 'exactly 80 columns in each of the three shapes is inside the width'
+expect 0 '' 'exactly 80 characters in each of the three shapes is inside the width'
 
 # ---------------------------------------------------------------------------
-# one column past, in each shape: the finding is the line, and only it
+# one character past, in each shape: the finding is the line, and only it
 # ---------------------------------------------------------------------------
 new_case
 plant_chunk 81
 plant_literals 60 60
-expect 1 "chunk-width $NVIM:2:81" 'a chunk body line one column over'
+expect 1 "chunk-width $NVIM:2:81" 'a chunk body line one character over'
 
 new_case
 plant_chunk 60
 plant_literals 81 60
-expect 1 "$LIT:3:81 lit-width" 'a literal opening on its own line, one column over'
+expect 1 "$LIT:3:81 lit-width" 'a literal opening on its own line, one character over'
 
 new_case
 plant_chunk 60
 plant_literals 60 81
-expect 1 "$LIT:7:81 lit-width" 'a literal opened by an assignment, its body one column over'
+expect 1 "$LIT:7:81 lit-width" 'a literal opened by an assignment, its body one character over'
 
 # ---------------------------------------------------------------------------
 # the same shapes written in a character wider than a byte: the walks count
@@ -210,12 +210,12 @@ expect 0 '' 'the three shapes inside the width in characters and past it in byte
 new_case
 plant_chunk 81 pad_wide
 plant_literals 60 60
-expect 1 "chunk-width $NVIM:2:81" 'a chunk body line of wide characters one column over'
+expect 1 "chunk-width $NVIM:2:81" 'a chunk body line of wide characters one character over'
 
 new_case
 plant_chunk 60
 plant_literals 81 60 pad_wide
-expect 1 "$LIT:3:81 lit-width" 'a literal of wide characters one column over'
+expect 1 "$LIT:3:81 lit-width" 'a literal of wide characters one character over'
 
 # ---------------------------------------------------------------------------
 # a declaration shape that drifts out of a walk's own match: the walk reaches
@@ -600,7 +600,7 @@ expect_geometry() {
   want="$2"
   desc="$3"
   git -C "$CASE" add -A
-  out=$(bash "$CHECKER" --geometry-sites "$CASE" 2>&1)
+  out=$(bash "${RUN:-$CHECKER}" --geometry-sites "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" | awk '
     /^pinned:$/ { inpinned = 1; next }
@@ -640,7 +640,7 @@ plant_release 'crates/view-harness/src/fixture.rs' 1
 expect_geometry 0 '' 'a lock release in a crate that owns no engine attach'
 
 # ---------------------------------------------------------------------------
-# the prose width gate: a page wraps at 80 columns, and what cannot wrap is
+# the prose width gate: a page wraps at 80 characters, and what cannot wrap
 # exempt by shape rather than by a list of files -- a fence is a sample of a
 # file, a row is a row, a heading is one line by construction, a link has
 # nowhere to break, and a token longer than the limit cannot be helped by
@@ -656,7 +656,7 @@ new_width_case() {
   printf '# page\n\nAnother line inside the limit.\n' > "$CASE/docs/page.md"
 }
 
-# 81 columns, built rather than written out: a case that counts its own
+# 81 characters, built rather than written out: a case that counts its own
 # width by hand is a case that stops meaning 81 the moment someone edits it.
 over() {
   awk -v n="$1" 'BEGIN { line = "x"; while (length(line) < n - 5) { line = line "x" }; printf "%s %s\n", line, "tail" }'
@@ -669,7 +669,7 @@ expect_width() {
   out=$(bash "$CHECKER" --prose-width "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" | awk '
-    /^[^ ].*:[0-9]+: [0-9]+ columns$/ { c = $1; sub(/:$/, "", c); print c; next }
+    /^[^ ].*:[0-9]+: [0-9]+ characters$/ { c = $1; sub(/:$/, "", c); print c; next }
     /^[^ ].*: the width walk cannot read it$/ { c = $1; sub(/:$/, "", c); print c ":unreadable"; next }
     /^STYLE FAIL: no markdown page found/ { print "empty"; next }
   ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
@@ -691,7 +691,7 @@ expect_width 0 '' 'a prose line at exactly the width'
 
 new_width_case
 over 81 >> "$CASE/docs/page.md"
-expect_width 1 'docs/page.md:4' 'a prose line one column over'
+expect_width 1 'docs/page.md:4' 'a prose line one character over'
 
 new_width_case
 { printf '## '; over 81; } >> "$CASE/docs/page.md"
@@ -754,11 +754,11 @@ new_width_case
 printf 'A rule of box characters %s ends the section\n' \
   '── ── ── ── ── ── ── ── ── ── ──' >> "$CASE/docs/page.md"
 expect_width 0 '' \
-  'a prose line of 77 columns and 125 bytes, whose runs are too short to buy the exemption a byte measure would need'
+  'a prose line of 77 characters and 125 bytes, whose runs are too short to buy the exemption a byte measure would need'
 
 new_width_case
 pad_wide 81 'A rule of box characters ' ' ends the section' >> "$CASE/docs/page.md"
-expect_width 1 'docs/page.md:4' 'a prose line of wide characters one column over'
+expect_width 1 'docs/page.md:4' 'a prose line of wide characters one character over'
 
 new_width_case
 mkdir "$CASE/docs/adir.md"
@@ -811,11 +811,18 @@ expect_script_comments() {
   out=$(bash "$CHECKER" --script-comments "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" | awk '
-    /^[^ ].*:[0-9]+: [0-9]+ columns$/ { c = $1; sub(/:$/, "", c); print c; next }
+    /^[^ ].*:[0-9]+: [0-9]+ characters$/ { c = $1; sub(/:$/, "", c); print c; next }
     /^[^ ].*: the comment rules cannot read it$/ {
       c = $1; sub(/:$/, "", c); print c ":unreadable"; next
     }
+    /^[^ ].*: not a regular file or a symlink, the comment rules skip it$/ {
+      c = $1; sub(/:$/, "", c); print c ":skipped"; next
+    }
     /^STYLE FAIL: no script found/ { print "empty"; next }
+    /^STYLE FAIL: scripts\/ under .* holds no script but this one$/ {
+      print "self-only"; next
+    }
+    /^STYLE FAIL: .* exited [0-9]+ instead of grading/ { print "refused"; next }
     /^STYLE FAIL: review-finding reference/ { print "finding-ban"; next }
     /^STYLE FAIL: planning-/ { print "plan-ban"; next }
     /^[^ :]+:[0-9]+:/ { split($0, f, ":"); print f[1] ":" f[2]; next }
@@ -838,7 +845,7 @@ expect_script_comments 0 '' 'a comment at exactly the width'
 
 new_script_case
 pad 85 '# a comment ' ' past the limit' >> "$CASE/scripts/gate.sh"
-expect_script_comments 1 'scripts/gate.sh:4' 'a comment five columns over'
+expect_script_comments 1 'scripts/gate.sh:4' 'a comment five characters over'
 
 new_script_case
 printf '# a path this long %s cannot be wrapped under the limit\n' \
@@ -847,13 +854,31 @@ expect_script_comments 0 '' 'a comment carrying a token longer than the limit it
 
 new_script_case
 pad 81 '# a comment ' ' past the limit' >> "$CASE/scripts/gate.sh"
-expect_script_comments 1 'scripts/gate.sh:4' 'a comment one column over'
+expect_script_comments 1 'scripts/gate.sh:4' 'a comment one character over'
 
 new_script_case
 printf '# ── why the gated item is measured, not truncated at the marker ────────────\n' \
   >> "$CASE/scripts/gate.sh"
 expect_script_comments 0 '' \
-  'a rule drawn in box characters: 77 columns, and 105 bytes a byte measure reddens'
+  'a rule drawn in box characters: 77 characters, and 105 bytes a byte measure reddens'
+
+# The two limits of counting characters, one case each: the measure is the
+# same on every awk and is not what a terminal paints, so the number a
+# contributor is shown is stated in the unit it is actually in.
+new_script_case
+{
+  printf '# '
+  awk 'BEGIN { while (i++ < 29) printf "\344\270\255 "; printf "\344\270\255" }'
+  printf '\n'
+} >> "$CASE/scripts/gate.sh"
+expect_script_comments 0 '' \
+  'a double-width glyph counts one: 61 characters inside the limit, 91 columns painted'
+
+new_script_case
+{ printf '# '; awk 'BEGIN { while (i++ < 30) printf "e\314\201 " }'; printf '\n'; } \
+  >> "$CASE/scripts/gate.sh"
+expect_script_comments 1 'scripts/gate.sh:4' \
+  'a combining mark counts its own character: 92 characters reddened, 62 columns painted'
 
 new_script_case
 pad 85 'true # a comment ' ' past the limit' >> "$CASE/scripts/gate.sh"
@@ -890,6 +915,31 @@ new_script_case
 rm -f "$CASE/scripts/gate.sh"
 expect_script_comments 1 'empty' 'a tree with no script for the walk to read'
 
+new_script_case
+mkfifo "$CASE/scripts/pipe"
+expect_script_comments 0 'scripts/pipe:skipped' \
+  'a fifo under scripts/, which is readable and could never carry a shebang'
+
+new_script_case
+mkdir "$CASE/scripts/sub"
+ln -s sub "$CASE/scripts/dirlink"
+expect_script_comments 1 'scripts/dirlink:unreadable' \
+  'a symlink to a directory, which is a symlink that was meant to name a file'
+
+new_script_case
+{
+  printf '#!/usr/bin/env bash\n'
+  pad 97 '# a comment ' ' past the limit'
+} > "$CASE/scripts/my leg.sh"
+expect_script_comments 1 'refused' \
+  'a script whose path carries a blank, which a split selection would drop while staying green'
+
+new_script_case
+rm -f "$CASE/scripts/gate.sh"
+cp "$CHECKER" "$CASE/scripts/$(basename "$CHECKER")"
+expect_script_comments 1 'self-only' \
+  'a scripts/ holding only the checker, where both bans would report ok having graded nothing'
+
 # The geometry walk's fail-closed trade, pinned so that "fixing" it into a
 # comment-stripping read is a red case rather than a silent narrowing:
 # `--prod-lines` emits the raw line, and eliding comments would take the two
@@ -899,6 +949,101 @@ printf 'let rows = 1; // the row count ui_attach was given\n' \
   >> "$CASE/crates/view/src/native.rs"
 expect_geometry 1 'crates/view/src/native.rs=2 geometry-sites' \
   'a spelling named only by a trailing comment, which the walk counts by design'
+
+# ---------------------------------------------------------------------------
+# the guarded commands that still carry `|| true`. A grep answers 1 for a
+# tree with no hits and 2 for a pattern it could not compile, and the two
+# walks below build their patterns from variables, so the status is not
+# theirs to read: what stands in for reading it is that an errored filter
+# leaves a pinned population unmet. Each case breaks one filter on a copy of
+# the checker and requires the run to redden -- a copy, and beside a link to
+# the scanner a checker resolves from its own directory, or the case fails
+# for want of production lines instead of grading the filter.
+# ---------------------------------------------------------------------------
+copies=0
+broken_checker() {
+  copies=$((copies + 1))
+  dir="$WORK/broken$copies"
+  mkdir -p "$dir"
+  ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/audit-god-files.sh" \
+    "$dir/audit-god-files.sh"
+  # substituted by index and read out of the environment: the text being
+  # broken is itself a regex, and both a sed script and an awk -v value
+  # would take a second pass at its backslashes
+  old="$1" new="$2" awk '{
+    i = index($0, ENVIRON["old"])
+    if (i > 0) {
+      $0 = substr($0, 1, i - 1) ENVIRON["new"] substr($0, i + length(ENVIRON["old"]))
+    }
+    print
+  }' "$CHECKER" > "$dir/check-style.sh"
+  printf '%s\n' "$dir/check-style.sh"
+}
+
+new_geometry_case
+RUN=$(broken_checker 'grep -E "$GEOMETRY_CALLS"' 'grep -E "[unmatched"')
+expect_geometry 1 'geometry-sites' \
+  'the geometry call filter refusing its pattern, which leaves the pinned population unfound'
+RUN=""
+
+new_geometry_case
+RUN=$(broken_checker 'release\(' 'release[')
+expect_geometry 1 'geometry-sites' \
+  'the lock release filter refusing its pattern, which leaves two pinned files unfound'
+RUN=""
+
+# ---------------------------------------------------------------------------
+# the condition-notice ownership pin, which only the whole run grades. Its
+# stranger filter answered 1 both for a tree with no stranger and for a
+# pattern it could not compile, so an errored filter read as a tree that
+# owns its notice. Both cases run the whole checker on a scratch root
+# carrying the owner and nothing else, so both exit 1 whatever the filter
+# does -- what they grade is the condition verdict alone.
+# ---------------------------------------------------------------------------
+new_condition_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/crates/view-core/src/update"
+  git -C "$CASE" init -q
+  {
+    printf 'fn a(m: &mut Messages) { m.set_native_condition(x); }\n'
+    printf 'fn b(m: &mut Messages) { m.set_native_condition(y); }\n'
+  } > "$CASE/crates/view-core/src/update/supervision.rs"
+  git -C "$CASE" add -A
+}
+
+expect_condition() {
+  want="$1"
+  desc="$2"
+  out=$(cd "$CASE" && bash "${RUN:-$CHECKER}" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^STYLE FAIL: the condition-notice filter exited [0-9]+ instead of grading$/ {
+      print "filter-refused"; next
+    }
+    /^STYLE FAIL: could not read production lines to check condition-notice/ {
+      print "no-prod-lines"; next
+    }
+    /^STYLE FAIL: set_native_condition called outside/ { print "stranger"; next }
+    /set_native_condition calls, pinned at/ { print "count"; next }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = 1 ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=1 [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want" "$rc" "$got" "$out"
+}
+
+new_condition_case
+expect_condition '' 'the owner making both of its pinned calls, which the pin passes over'
+
+new_condition_case
+RUN=$(broken_checker 'grep -v "^$CONDITION_OWNER:"' 'grep -v "[unmatched"')
+expect_condition 'filter-refused' \
+  'the stranger filter refusing its pattern, which reports no stranger against a met count'
+RUN=""
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

@@ -100,13 +100,13 @@ trailing comment naming a spelling and requires the count to rise, so the
 next attempt to "fix" the over-count into a comment-stripping read is a red
 case rather than a silent narrowing.
 
-## A comment wraps at 80 columns, counted in characters
+## A comment wraps at 80 characters
 
 `scripts/check-style.sh` grades every comment line under `scripts/` at the
 width its markdown pages are held to, and a contributor meets the rule for
 the first time when it reddens a line. What the message says has to be what
 an editor shows, so the walks count characters and not bytes: a rule drawn
-in box characters is 77 columns and 105 bytes, and a gate measuring bytes
+in box characters is 77 characters and 105 bytes, and a gate measuring bytes
 reddens it while passing a wider line whose long token it subtracts whole.
 
 Counted without a UTF-8 awk, because the same verdict has to come back from
@@ -115,6 +115,18 @@ continuation bytes, so the walks drop the continuations
 (`gsub(/[\200-\277]/, "")`) and take the length of what is left. The
 `LC_ALL=C` is not decoration -- gawk in a UTF-8 locale refuses that range as
 a collation character and the walk dies rather than grading.
+
+A character is not a terminal column, and the measure has two stated limits
+because of it. A double-width glyph counts one and paints two, so a comment
+of 61 characters can fill 91 columns and pass. A decomposed sequence counts
+its marks, so `e` followed by a combining acute counts two and paints one,
+and a comment of 92 characters reddens at 62 columns painted. Both are the
+price of one verdict on every awk, both are cased beside the width cases,
+and both are why every message here says `characters`: a number carrying a
+unit it is not in is worse than no number at all. Nothing shipped sits near
+either limit -- the only non-ASCII in the graded population is box drawing,
+which is East-Asian-Width *ambiguous* and paints one column in a Latin
+locale.
 
 What cannot wrap is exempt by shape rather than by a list of files:
 
@@ -129,7 +141,20 @@ The population is every file under `scripts/` whose first line names bash or
 remote-test fixtures that carry no suffix are graded. All three comment
 rules (the width walk and the two citation bans) read that one list: a rule
 spelled over `*.sh` grades a subset of its sibling's, and the difference is
-where a finding sits unread. The list is vetted for readability before it is
-handed on, because a `grep -l` over a file it cannot open drops that file
-and grades the survivors -- which reads exactly like a tree with nothing to
-report.
+where a finding sits unread.
+
+Four shapes decide what the list holds, and each of them is there because a
+short list reads exactly like a tree with nothing to report:
+
+| shape | what the list does |
+|---|---|
+| a file the rules cannot open | red verdict naming it -- a `grep -l` or an `xargs awk` would drop it and grade the survivors |
+| a symlink | listed (`find scripts \( -type f -o -type l \)`), so a dangling one and one pointing at a directory are both that red verdict |
+| a fifo, socket or device node | named and passed over: it is readable, it could never carry a shebang, and reddening a gate for it is a false red nobody can act on |
+| a path carrying a blank | selected by a loop rather than by `xargs`, so it stays in the population; the bans' `grep` and the walk's `xargs` then refuse it loudly rather than grading a list one file short |
+
+Net of `check-style.sh` itself the population must still hold something. The
+two citation bans skip that one file -- it spells the banned phrases in
+order to define them -- and a `scripts/` holding nothing else leaves both of
+them reporting `ok` having graded nothing, which is the shape the rule above
+bans. That is its own red verdict, and it names the root it was run against.
