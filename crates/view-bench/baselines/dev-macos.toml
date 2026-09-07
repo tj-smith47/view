@@ -94,7 +94,7 @@ p99_ms = 0.208
 first_page_p50_ms = 1.4233749999999998
 first_page_p99_ms = 1.5416670000000001
 match_paint_p50_ms = 7.1591249999999995
-match_paint_p99_ms = 32.347958000000006
+match_paint_p99_ms = 19.478667
 
 [scroll.heavy]
 ratio_p50 = 2.3192445972478118

@@ -502,7 +502,7 @@ config = "real"
 # what the 2026-09-06 retake under the answering pty made visible, an entry
 # each rather than a widened bar.
 #
-# Listed below: 14 entries -- 7 dev-linux, 7 dev-macos.
+# Listed below: 15 entries -- 7 dev-linux, 8 dev-macos.
 #
 # A count stated in prose about the file's own contents is a fact the file
 # can check, so the line above is pinned against the parsed entries; the
@@ -702,3 +702,14 @@ metric = "marker_ratio_p50"
 class = "dev-macos"
 accepted = 1.0452704108959787
 why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired, re-seated 2026-09-06 from this class's own retake under a pty that answers the queries nvim's tty startup asks. It replaces 0.3956, which was a ratio against a bare-nvim arm waiting out its own background-query timeout; every pre-fix figure this entry used to carry (the 0.3785-0.3956 clean-host spread, the 0.188 minimal reading the 0.30x bar was set against) was measured the same way and is inadmissible. Measured now: view reaches the file at 1.045x bare nvim's p50 on this fixture, and the whole paired row reads the same way -- 0.986 minimal, 1.045 heavy, 1.061 user -- so on this class view trails bare nvim on the plugin-heavy and real-config cells and is level with it on the plugin-free one. The residual is the same serial post-VimEnter attach and takeover the dev-linux entry names, since nvim's own TUI attaches before init runs; attribution past that outline is owed to the pre-v0.1.0 performance session. The 0.30 bar is untouched: it is the promise the user stated, and this entry records the gap rather than retiring it."
+
+# dev-macos picker, re-recorded 2026-09-06: the seat this replaces (32.348)
+# was the class's first recording of the cell, and the retake halved it
+# while the ratchet kept the other three picker values.
+[[shortfall]]
+scenario = "picker"
+fixture = "minimal"
+metric = "match_paint_p99_ms"
+class = "dev-macos"
+accepted = 19.4787
+why = "the felt picker keystroke on this class, 21.7 percent over the 16 ms bar and the bar untouched. What was measured: three trials read 20.05, 19.08 and 19.82 ms at the p99, the same run's match_paint p50 is 7.04 ms and its first_page p99 1.66 ms, and the seat this replaces was 32.35 ms. The same cell on dev-linux is 4.7 ms on the same fixture, and gh-macos reads 30.797 ms on its own runner, so the gap is the platform rather than one host. Spotlight indexing held one core through the run, which is a condition of the measurement and not an attribution. The cause is open and a root-cause task is open for it."
