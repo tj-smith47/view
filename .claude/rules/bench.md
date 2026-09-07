@@ -81,27 +81,40 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
   sentence it stands in withdraws it in words -- `withdraw` is the marker,
   so the exemption dies with the retraction that earned it rather than
   outliving it in a hand-kept list;
-- a ratio, multiplier or percentage quoted on `docs/benchmarking.md` equals
-  no value its own row or paragraph's cell ids record on the one class and
-  the one fixture that unit names, rounded to the digits printed -- or the
-  unit names more than one of either, which is reported as ambiguous;
-- a figure in a `[[shortfall]]`'s `why` that stands in a sentence naming a
-  cell of that entry equals no value that cell records, resolved on the
-  entry's own class and fixture unless the sentence names another;
-- a unit that names an `echo_speculated` cell -- or, on the two user-facing
-  pages, the predicted glyph in words, or a table row stating a transport
-  condition at all -- also says `remote`, `network`, `far side`, `round
-  trip` or `RTT` while naming neither `scripts/acceptance/remote-rtt.sh` nor
-  the `remote_memory` row.
+- a ratio, multiplier, percentage or millisecond absolute quoted on
+  `docs/benchmarking.md` equals no value the one cell it resolves to
+  records on the one class and the one fixture that unit names, rounded to
+  the digits printed -- or the unit names more than one of either, which is
+  reported as ambiguous;
+- a figure in a `[[shortfall]]`'s `why` stands in a sentence that names no
+  cell at all, or equals no value the cell it resolves to records;
+- a unit that names an `echo_speculated` cell, or the predicted glyph in
+  the words the pages write it in, also says `remote`, `network`, `far
+  side`, `another machine` or `RTT` while naming neither
+  `scripts/acceptance/remote-rtt.sh` nor the `remote_memory` row.
 
 The ratio rule is what naming a cell beside a number is for: the anchor rule
 is satisfied by any felt id, so a stale draw beside the right cell reads as
 current, which is what a re-record leaves behind at every site that quoted
-the old one. Only a dimensionless number is graded -- a multiplier, a
-decimal with no unit behind it, or a percentage, which states the same ratio
-as its distance from 1 -- because an absolute carries its unit and a bound
+the old one. A dimensionless number is graded wherever it stands -- a
+multiplier, a decimal with no unit behind it, or a percentage, which states
+the same ratio as its distance from 1 -- and a bound is not one, because it
 carries the word `bar`; a percentage *of* something is a share of a
-population and is graded as nothing. A table whose header row says
+population and is graded as nothing. A millisecond absolute is graded too,
+but only where a `_ms` cell id stands before it in its own sentence: the
+page publishes paired numbers, and the bare-engine column beside view's own
+is an absolute this tree records no cell for. The row that carried
+`gh-linux`'s 0.08 ms under the page's declared default class for months
+passed on exactly that exemption.
+
+One number resolves to one cell, never to the union of every cell its unit
+names: the nearest cell id before it in its own sentence, and the unit's
+first id where its sentence names none. A table cell is a sentence, since a
+row states one column at a time. The union passed a sibling metric's draw
+(`ratio_p99`'s number quoted where `ratio_p50` was named) and a sibling
+scenario's alike (`echo.ratio_p50`'s where `scroll.ratio_p50` was named),
+which is the identifier and the words disagreeing on the axis the class and
+fixture rules were minted for. A table whose header row says
 `superseded` is read for nothing: a before/after record exists to hold the
 readings a fix replaced, and the marker sits in the header because a reader
 takes what a table is from there.
@@ -119,14 +132,30 @@ leg per row or paragraph because of it. The words a fixture is named in are
 the page's own (`plugin-free`, `15-plugin`, `login-shaped`, or the fixture
 in backticks).
 
-The ledger is read the same way, and more exactly: a `[[shortfall]]` names
-its own class, scenario, fixture and metric, so a sentence in its `why` that
-names one of that entry's metrics has its figures graded against what that
-cell records. A sentence reporting a reading something replaced is read for
-nothing (`replace`, `superseded`, `withdraw`, `pre-fix`, `probe`,
-`contaminat`), because holding the number a re-record retired is half of
-what a `why` is for. The stale ratio that survived a round lived there, not
-on the page.
+The ledger is read the same way, and more exactly. A `[[shortfall]]` names
+its own class, scenario, fixture and metric, so a bare metric name in its
+`why` resolves against that entry and a written-out `scenario.metric`
+against its own -- a `why` settles a question with a cell from a scenario
+the entry does not measure, and `echo_control.control_ratio_p50` is the
+shipped case. Every ratio-shaped decimal, millisecond figure and percentage
+is then graded against the cell it resolves to, by the same nearest-id rule
+the page uses, and one standing in a sentence that names no cell fails as
+an unattributed figure. That is the population, not a subset of it: nine
+recorded values were written in words across six entries, every one of them
+ungraded and every one of them due to go stale at the next `--record`.
+
+A percentage in a `why` states the distance from the bar its own sentence
+names ("9.0 percent over the 1.0 bar"), where the page writes the distance
+from 1; the sentence decides which by naming a bar or not.
+
+Two sentences are read for nothing. One reporting a reading something
+replaced (`replace`, `superseded`, `withdraw`, `pre-fix`, `probe`,
+`contaminat`, `inadmissible`), because holding the number a re-record
+retired is half of what a `why` is for -- the stale ratio that survived a
+round lived there, not on the page. And one reporting the `trial`s a record
+run drew, because those are the run's own observations and no cell holds
+them: the bare-engine arm of a paired run has no seat of its own, and a
+`why` that states its reading states it as a trial.
 
 The transport rule is the one with no number in it. A page saying the
 speculated cell was measured with its engine across a network states a
@@ -134,6 +163,15 @@ condition that recording never had, and it carries no identifier, no
 multiplier and no comparative for any other rule to catch. The acceptance
 RTT leg is the only surface that injects a round trip, so a unit that
 reaches for a transport word names it.
+
+The scope is the speculated moment and nothing wider. `round trip` is this
+tree's own phrase for the local post-VimEnter attach, so it is not a
+transport word: a rule that fired on it told the author of a local row to
+rest the row on the acceptance leg, which is advice about a claim that row
+never made. And a table is one subject spread over its rows, so the
+speculated test reads the table while the finding names the row -- the
+shipped defect was a row carrying no speculated word of its own, standing
+in the table whose subject is the predicted glyph.
 
 A table row is its own anchor unit and prose keeps the paragraph scope: a
 line whose first non-space character is `|` is graded alone. An 18-row
@@ -169,10 +207,11 @@ state moments and paired numbers, and the comparisons live in
 `docs/benchmarking.md` beside the cell that earns them.
 `scripts/check-budget-drift-cases.sh` grades all ten rules and is what
 stops the check regressing to the identifier-only form. It runs the checker
-under its own interpreter, and two of its cases grade every script under
-`scripts/` for bash 3.2 portability (`.claude/rules/shell.md`),
-because a gate that does not run on the bash macOS ships is a gate whose
-verdict a contributor never sees.
+under its own interpreter, and three of its cases grade the scripts under
+`scripts/` for bash 3.2 portability (`.claude/rules/shell.md`) -- two that
+read them and one that runs the whole check on the shipped tree under an
+alarm -- because a gate that does not run on the bash macOS ships is a gate
+whose verdict a contributor never sees.
 
 The identifier rule is the strict form, and it is the one with no false
 positives: the user-facing pages state moments in words ("the key reaches
@@ -229,8 +268,8 @@ written here, so
 `every_command_built_outside_this_crate_is_declared_by_its_builder` pins
 the population of send sites instead: every call inside a
 `send`/`submitted` argument is read off -- the argument taken to the paren
-that closes it however many lines that takes, and a path-qualified call
-read as its last segment -- and one whose builder this crate does not
+that closes it however many lines that takes, counting no paren a string or
+char literal carries, and a path-qualified call read as its last segment -- and one whose builder this crate does not
 define is a command built elsewhere -- `wedge_command`, today's
 only one -- which fails unless a row declares it by that builder's name.
 A builder defined beside the send site needs no row, because its own

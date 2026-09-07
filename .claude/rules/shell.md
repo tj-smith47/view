@@ -12,24 +12,38 @@ with a message reading as a script bug — CI's macos leg only passes because
 the runner image puts a newer bash ahead of it. So the whole population is
 written to 3.2, not just the scripts whose header says so.
 
-Three shapes break it, and only the first is a construct you can name:
+Four shapes break it, and only the first and the last are constructs you
+can name:
 
 | shape | 3.2 says | write instead |
 |---|---|---|
 | `declare -A m=([k]=v)` | `k: unbound variable` under `set -u` | a `case`, or newline-joined strings matched with `grep -Fqx` |
 | `case "$x" in *.*) … ;; esac` inside `$( )` or `<( )` | `syntax error near unexpected token` | `case "$x" in (*.*) … ;; esac` — the leading paren keeps the count |
 | an apostrophe in a comment inside `$( )` or `<( )` | ``bad substitution: no closing `)' `` | reword the comment; 3.2 reads the quote, not the `#` |
+| `${x//a/b}` on anything longer than a word | nothing — it rescans the string per match and runs unbounded | `sed`/`tr` for a rewrite; `[[ $x == *[![:space:]]* ]]` (or its negation) for an emptiness test |
+
+The last one is the only shape that fails as a hang rather than a message.
+The drift check's five emptiness tests were written as "delete every blank
+and see what is left" and the largest of them spun in bash itself, state
+R with no child, on a 12 kB variable the shipped baselines build — still
+running at 283 s under an alarm, where the glob test answered in 0 s.
 
 The same ban covers `mapfile`, `readarray`, `[[ -v x ]]`, `${x,,}`,
 `${x^^}`, `\|&`, `&>>` and `;;&`.
 
-Two cases in `scripts/check-budget-drift-cases.sh` enforce it over every
+Three cases in `scripts/check-budget-drift-cases.sh` enforce it over every
 file under `scripts/` whose shebang names bash or `sh` -- the remote-test
 fixtures carry no suffix -- so a script is graded without anyone
-remembering to add it here: one greps the construct list, and one parses
-each script under `/bin/bash` when that is a pre-4 bash — which is the
-only leg that sees the two paren-counting shapes, and it runs on the host
-the contract is about. The population is the directory rather than the
+remembering to add it here: one greps the construct list (and is itself
+graded against a planted construct), one parses each script under
+`/bin/bash` when that is a pre-4 bash — which is the only leg that sees the
+two paren-counting shapes, and it runs on the host the contract is about —
+and one runs the drift check over the shipped tree, read-only, inside
+`perl -e 'alarm 120; exec @ARGV'`, because a cost this size is invisible to
+both of the reading legs and to every case tree, whose planted files are
+orders of magnitude smaller than the baselines that ship.
+
+The population is the directory rather than the
 scripts `Taskfile.yml` names, because the release path runs
 `scripts/package-bundle.sh` from a workflow and `scripts/mbp-build-leg.sh`
 runs on the macOS host the contract is about — five scripts no task names,
