@@ -18,7 +18,9 @@
 //!
 //! Literals alone would pin only the commands written here, so a second
 //! walk pins the population of send sites instead: every call expression
-//! inside a `send`/`submitted` argument is read off, and one whose builder
+//! inside a `send`/`submitted` argument is read off -- the argument taken
+//! to the paren that closes it however many lines that takes, and a
+//! path-qualified call read as its last segment -- and one whose builder
 //! this crate does not define is a command built elsewhere -- no literal
 //! for the first walk to grade -- so it fails unless a row declares it by
 //! that builder's name. A builder defined here needs no row: its own
@@ -138,10 +140,13 @@ fn typed_commands(source: &str) -> Vec<String> {
 }
 
 /// The argument text of a call whose opening paren is at `open`, to the
-/// paren that closes it or to the end of the line when the call spans
-/// more than one.
-fn argument(line: &str, open: usize) -> &str {
-    let rest = &line[open + 1..];
+/// paren that closes it however many lines that takes.
+///
+/// Reading to the end of the line instead would drop the argument of a
+/// send site rustfmt wrapped, which is a command reaching the session
+/// with nothing read off it.
+fn argument(text: &str, open: usize) -> &str {
+    let rest = &text[open + 1..];
     let mut depth = 1usize;
     for (at, c) in rest.char_indices() {
         match c {
@@ -158,12 +163,14 @@ fn argument(line: &str, open: usize) -> &str {
     rest
 }
 
-/// The functions `text` calls, ignoring method calls, macros and
-/// associated functions.
+/// The functions `text` calls, ignoring method calls and macros.
 ///
 /// The character in front of the name is what parts them: `.` opens a
-/// method call, `:` the tail of a path, and a macro's `!` leaves no name
-/// character in front of the paren at all.
+/// method call and a macro's `!` leaves no name character in front of the
+/// paren at all. A path-qualified call keeps its last segment, which is
+/// the function's own name: an imported builder is the shape this walk
+/// exists for, and skipping it read `hang::wedge_command(...)` as
+/// something the session was never handed.
 fn call_names(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut found = Vec::new();
@@ -175,7 +182,7 @@ fn call_names(text: &str) -> Vec<String> {
         if start == end {
             continue;
         }
-        if start > 0 && matches!(bytes[start - 1], b'.' | b':' | b'!') {
+        if start > 0 && matches!(bytes[start - 1], b'.' | b'!') {
             continue;
         }
         found.push(text[start..end].to_string());
@@ -191,7 +198,7 @@ fn call_names(text: &str) -> Vec<String> {
 /// instead of the strings. A builder is listed once however many sites
 /// hand it a command -- the question each one asks is the same one.
 fn command_builders(source: &str) -> Vec<String> {
-    let mut found = Vec::new();
+    let mut body = String::new();
     for line in source.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("#[cfg(test)]") {
@@ -200,18 +207,21 @@ fn command_builders(source: &str) -> Vec<String> {
         if trimmed.starts_with("//") {
             continue;
         }
-        for call in ["send(", "submitted("] {
-            for (at, _) in line.match_indices(call) {
-                if at > 0 {
-                    let prev = line.as_bytes()[at - 1];
-                    if prev.is_ascii_alphanumeric() || prev == b'_' {
-                        continue;
-                    }
+        body.push_str(line);
+        body.push('\n');
+    }
+    let mut found = Vec::new();
+    for call in ["send(", "submitted("] {
+        for (at, _) in body.match_indices(call) {
+            if at > 0 {
+                let prev = body.as_bytes()[at - 1];
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    continue;
                 }
-                for builder in call_names(argument(line, at + call.len() - 1)) {
-                    if !found.contains(&builder) {
-                        found.push(builder);
-                    }
+            }
+            for builder in call_names(argument(&body, at + call.len() - 1)) {
+                if !found.contains(&builder) {
+                    found.push(builder);
                 }
             }
         }
@@ -277,13 +287,19 @@ fn every_typed_command_is_silenced_or_declared_the_measured_action() {
 }
 
 // What the send-site walk reads: a builder defined beside the send site,
-// one imported from elsewhere, and the three call shapes that build no
-// command.
+// one imported from elsewhere, one reached through its module path, one
+// whose send site rustfmt wrapped, and the three call shapes that build no
+// command. The two spellings in the middle are the ones a line-at-a-time
+// walk that skipped a path-qualified name read as nothing at all.
 #[test]
 fn the_walk_reads_every_function_a_send_site_hands_a_command() {
     let source = concat!(
         "    session.send(flood_command().as_bytes())?;\n",
         "    session.send(submitted(&wedge_command(BOUND)).as_bytes())?;\n",
+        "    session.send(submitted(&hang::wedge_release(BOUND)).as_bytes())?;\n",
+        "    session.send(\n",
+        "        history_command(SAMPLE).as_bytes(),\n",
+        "    )?;\n",
         "    session.send(format!(\":silent e {file}\\r\").as_bytes())?;\n",
         "    session.send(&WALK_STEP.repeat(DEFAULT_CAPACITY))?;\n",
         "    session.send(OPEN_COMMAND)?;\n",
@@ -296,9 +312,12 @@ fn the_walk_reads_every_function_a_send_site_hands_a_command() {
             "flood_command".to_string(),
             "submitted".to_string(),
             "wedge_command".to_string(),
+            "wedge_release".to_string(),
+            "history_command".to_string(),
         ],
-        "a builder is read wherever a send site hands it a command, and a method \
-         call, a macro or a constant builds none"
+        "a builder is read wherever a send site hands it a command -- through a \
+         module path or across the line the argument wrapped onto included -- and \
+         a method call, a macro or a constant builds none"
     );
 }
 
