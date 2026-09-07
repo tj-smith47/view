@@ -173,6 +173,18 @@ speculated test reads the table while the finding names the row -- the
 shipped defect was a row carrying no speculated word of its own, standing
 in the table whose subject is the predicted glyph.
 
+A list item is its own unit, its continuation lines included, so a bullet
+is graded by what it says and not by its neighbours: read as one paragraph,
+a roadmap let a speculated word in one bullet indict a transport word in an
+unrelated sibling, and named the whole block rather than a sentence anyone
+wrote. Naming the acceptance RTT leg by its script name is the licensed
+surface: a unit that says `scripts/acceptance/remote-rtt.sh` (or the
+`remote_memory` row) may describe the predicted glyph and a transport
+condition together, because the leg it names is where the round trip is
+injected. So the true sentence about remote editing -- keystrokes echoed
+without waiting for the round trip, view drawing the character it expects
+-- passes where it names that leg and fails where it names none.
+
 A table row is its own anchor unit and prose keeps the paragraph scope: a
 line whose first non-space character is `|` is graded alone. An 18-row
 table read as one paragraph let the felt ids on the `echo` and `startup`
@@ -268,10 +280,12 @@ written here, so
 `every_command_built_outside_this_crate_is_declared_by_its_builder` pins
 the population of send sites instead: every call inside a
 `send`/`submitted` argument is read off -- the argument taken to the paren
-that closes it however many lines that takes, counting no paren a string or
-char literal carries, and a path-qualified call read as its last segment -- and one whose builder this crate does not
-define is a command built elsewhere -- `wedge_command`, today's
-only one -- which fails unless a row declares it by that builder's name.
+that closes it however many lines that takes, counting no paren a string,
+a raw string in either spelling (`r"..."` and `r#"..."#`), a char literal
+or the quote of a lifetime carries, and a path-qualified call read as its
+last segment -- and one whose builder this crate does not define is a
+command built elsewhere -- `wedge_command`, today's only one -- which
+fails unless a row declares it by that builder's name.
 A builder defined beside the send site needs no row, because its own
 literal is a line the first walk already reads.
 
