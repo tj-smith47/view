@@ -491,5 +491,102 @@ rm -f "$CASE/crates/view-oracle/src/hang.rs"
 expect_tied 1 'tied-spawns' \
   'a pinned site that no longer exists, which the pin would otherwise vouch for'
 
+# ---------------------------------------------------------------------------
+# the prose width gate: a page wraps at 80 columns, and what cannot wrap is
+# exempt by shape rather than by a list of files -- a fence is a sample of a
+# file, a row is a row, a heading is one line by construction, a link has
+# nowhere to break, and a token longer than the limit cannot be helped by
+# wrapping. Counted in bytes so an awk that decodes UTF-8 and one that does
+# not return the same verdict
+# ---------------------------------------------------------------------------
+new_width_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/docs"
+  printf '# view\n\nA line inside the limit.\n' > "$CASE/README.md"
+  printf '# page\n\nAnother line inside the limit.\n' > "$CASE/docs/page.md"
+}
+
+# 81 columns, built rather than written out: a case that counts its own
+# width by hand is a case that stops meaning 81 the moment someone edits it.
+over() {
+  awk -v n="$1" 'BEGIN { line = "x"; while (length(line) < n - 5) { line = line "x" }; printf "%s %s\n", line, "tail" }'
+}
+
+expect_width() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --prose-width "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^[^ ].*:[0-9]+: [0-9]+ columns$/ { c = $1; sub(/:$/, "", c); print c; next }
+    /^STYLE FAIL: no markdown page found/ { print "empty"; next }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got" "$out"
+}
+
+new_width_case
+expect_width 0 '' 'a tree whose pages are inside the width'
+
+new_width_case
+over 80 >> "$CASE/docs/page.md"
+expect_width 0 '' 'a prose line at exactly the width'
+
+new_width_case
+over 81 >> "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:4' 'a prose line one column over'
+
+new_width_case
+{ printf '## '; over 81; } >> "$CASE/docs/page.md"
+expect_width 0 '' 'a heading over the width, which carries no newline to wrap at'
+
+new_width_case
+{ printf '| '; over 81; } >> "$CASE/docs/page.md"
+expect_width 0 '' 'a table row over the width'
+
+new_width_case
+{ printf '```\n'; over 81; printf '```\n'; } >> "$CASE/docs/page.md"
+expect_width 0 '' 'a fenced sample of a file over the width'
+
+new_width_case
+{ printf '```\n'; over 81; } >> "$CASE/docs/page.md"
+printf '\n' >> "$CASE/README.md"
+over 81 >> "$CASE/README.md"
+expect_width 1 'README.md:5' 'a fence left open on one page, which does not silence the next'
+
+new_width_case
+printf 'https://example.com/%s\n' "$(over 81 | tr -d ' ')" >> "$CASE/docs/page.md"
+expect_width 0 '' 'a line that is one URL'
+
+new_width_case
+printf '[![CI](https://example.com/a/very/long/badge/path/%s)](https://example.com/b)\n' \
+  "$(over 81 | tr -d ' ')" >> "$CASE/docs/page.md"
+expect_width 0 '' 'a badge, which is a link wrapping an image'
+
+new_width_case
+printf 'A path this long %s cannot be wrapped under the limit.\n' \
+  "$(over 90 | tr -d ' ')" >> "$CASE/docs/page.md"
+expect_width 0 '' 'a line carrying a token longer than the limit itself'
+
+new_width_case
+{ printf '<!-- generated from SURFACES -->\n'; over 81; } >> "$CASE/docs/page.md"
+expect_width 0 '' 'a stamped block, which the program that writes it decides the width of'
+
+new_width_case
+{ printf '<!-- generated from SURFACES -->\n'; over 81; printf '\n'; over 81; } \
+  >> "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:7' 'the prose after that block, which the marker does not reach'
+
+new_width_case
+rm -f "$CASE/README.md" "$CASE/docs/page.md"
+expect_width 1 'empty' 'a tree with no page for the walk to read'
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
