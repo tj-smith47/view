@@ -48,7 +48,7 @@ You press a key and the character appears.
 | | view | Neovim | on |
 |---|---|---|---|
 | keypress to glyph, worst case in a thousand | 1.58 ms | 1.43 ms | your config, same host, same run |
-| with the engine on the far side of a network | 0.32 ms | 1.25 ms | your config, same host, same run -- view's engine is remote, Neovim's is local |
+| the same keypress, with view drawing the glyph it expects | 0.32 ms | 1.25 ms | your config, same host, same run |
 
 At the median view is 11% behind on the first row, against a bar of 10%:
 another bar view has not met, and by 1% of the round trip. Both sides are
@@ -56,14 +56,21 @@ far under the ~10 ms where a person begins to notice a key lagging their
 finger, which is why the gap is tracked rather than felt. Plugin-free, the
 same worst keystroke is 0.73 ms against 0.67 ms.
 
-When the engine runs on another machine, view can show the character before
-the round trip is back -- a predicted glyph, corrected the moment the engine
-answers. Under your config that puts the predicted glyph on screen in
-0.32 ms at the worst of a thousand keystrokes, with the engine on another
-machine and the round trip still in flight, while the local Neovim it is
-paired against takes 1.25 ms to paint the same character. A prediction
-answered 99.9% of the keystrokes measured; the rest waited out the engine
-and can only understate the row.
+view does not have to wait for the engine to answer before it draws. It
+puts the character it expects on screen and corrects it the moment the
+engine's redraw arrives, so under your config the glyph is there in 0.32 ms
+at the worst of a thousand keystrokes, where the Neovim it is paired
+against in the same run takes 1.25 ms to paint the same character. A
+prediction answered 99.9% of the keystrokes measured; the rest waited out
+the engine and can only understate the row. Both editors ran on this
+machine, engines included -- that is the reading, not a network.
+
+The network is what the prediction is for, and it is measured on its own:
+an acceptance leg puts 0, 25, 100 and 300 ms of round trip in front of
+view's engine on a plugin-free fixture and holds the predicted glyph to the
+same bound at every tier (`scripts/acceptance/remote-rtt.sh`, which runs
+only on a host declared quiet enough for it). That leg is where a remote
+engine is measured; the row above is not.
 
 What makes it that number: the key leaves your terminal and reaches Neovim
 in under a tenth of a millisecond, and the redraw that comes back reaches

@@ -101,11 +101,14 @@ slower: under that same config the embedded engine's started mark lands
 config, view's worst keystroke in a thousand takes 1.58 ms against Neovim's
 1.43 ms, and at the median view is 11% behind against a bar of 10% -- a
 second bar missed, by 1% of the round trip, and both a fraction of the
-~10 ms where a person starts to notice a key lagging their finger. With the
-engine on the far side of a network, view paints a predicted character in
-0.32 ms at that same worst case, without waiting for the round trip, where
-the local Neovim it is paired against takes 1.25 ms: the glyph is corrected
-the moment the engine answers.
+~10 ms where a person starts to notice a key lagging their finger. view can
+also draw the character it expects instead of waiting for the engine to
+confirm it: under that same config the predicted glyph is on screen in
+0.32 ms at that same worst case, where the Neovim it is paired against in
+the same run takes 1.25 ms, and the glyph is corrected the moment the engine
+answers. Both ran on this machine; what the prediction is for is an engine a
+network away, which a separate acceptance leg measures by injecting the
+round trip at four tiers.
 
 Scrolling, the picker, what happens when the engine hangs, memory, and what
 contributes to each of the numbers above:

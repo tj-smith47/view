@@ -117,7 +117,7 @@ Recorded baselines on a shared Linux dev host:
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower (`echo.view_p99_ms`, `echo.ratio_p50`) |
-| Keystroke to predicted glyph, engine over a network (p99) | **0.30 ms** | n/a | `echo_speculated.speculated_paint_p99_ms`; `echo_speculated.speculated_ratio_p50` reads 0.394 against a local bare Neovim in the same run |
+| Keystroke to predicted glyph, no plugins, engine local (p99) | **0.30 ms** | n/a | `echo_speculated.speculated_paint_p99_ms`; `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim paired with it in the same run. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
 | Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower (the paired ratio beside the felt `scroll.staleness_p99_ms`) |
