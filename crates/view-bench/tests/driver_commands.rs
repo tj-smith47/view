@@ -14,9 +14,15 @@
 //! The walk reads each source down to its `#[cfg(test)]` boundary and
 //! finds the literal the command is written in, whether it is typed
 //! through an `<Esc>` escape, built by `format!` or declared as a byte
-//! string. Its stated limit: a command a driver *imports* is not a literal
-//! here, so such a member is declared with the function that builds it
-//! and pinned by that name instead.
+//! string.
+//!
+//! Literals alone would pin only the commands written here, so a second
+//! walk pins the population of send sites instead: every call expression
+//! inside a `send`/`submitted` argument is read off, and one whose builder
+//! this crate does not define is a command built elsewhere -- no literal
+//! for the first walk to grade -- so it fails unless a row declares it by
+//! that builder's name. A builder defined here needs no row: its own
+//! literal stands on a line the first walk already reads.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -31,7 +37,8 @@ struct TypedCommand {
     /// The function that builds the command, for a member the literal
     /// walk cannot see; empty for one written here.
     built_by: &'static str,
-    /// Why it is the measured action rather than setup.
+    /// Why the command is exempt: the measured action itself, or a view
+    /// command that emits no message for a config to route.
     grounds: &'static str,
 }
 
@@ -48,16 +55,18 @@ const UNSILENCED: &[TypedCommand] = &[
         file: "ai_session.rs",
         command: "View ai open",
         built_by: "",
-        grounds: "the panel the AI rows sample keys against, opened by the same \
-                  message-free `rpcnotify` command",
+        grounds: "setup, exempt on message-freeness rather than on being the \
+                  action: it opens the panel the AI rows sample keys against, \
+                  through the same message-free `rpcnotify` command",
     },
     TypedCommand {
         file: "notices.rs",
         command: "View",
         built_by: "",
-        grounds: "the takedown asks for view's own message history and waits for it \
-                  on screen, so a prefix that suppressed what it waits for would \
-                  turn every takedown into a timeout",
+        grounds: "view's own history command, reaching the editor as an \
+                  `rpcnotify` that emits no message for any config to route; \
+                  the takedown waits on view's history surface, which no \
+                  ex-command prefix reaches either way",
     },
     TypedCommand {
         file: "supervision.rs",
@@ -128,6 +137,88 @@ fn typed_commands(source: &str) -> Vec<String> {
     found
 }
 
+/// The argument text of a call whose opening paren is at `open`, to the
+/// paren that closes it or to the end of the line when the call spans
+/// more than one.
+fn argument(line: &str, open: usize) -> &str {
+    let rest = &line[open + 1..];
+    let mut depth = 1usize;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[..at];
+                }
+            }
+            _ => {}
+        }
+    }
+    rest
+}
+
+/// The functions `text` calls, ignoring method calls, macros and
+/// associated functions.
+///
+/// The character in front of the name is what parts them: `.` opens a
+/// method call, `:` the tail of a path, and a macro's `!` leaves no name
+/// character in front of the paren at all.
+fn call_names(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    for (end, _) in text.match_indices('(') {
+        let mut start = end;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+        if start == end {
+            continue;
+        }
+        if start > 0 && matches!(bytes[start - 1], b'.' | b':' | b'!') {
+            continue;
+        }
+        found.push(text[start..end].to_string());
+    }
+    found
+}
+
+/// Every function a file's `send`/`submitted` arguments call, above its
+/// test module.
+///
+/// This is the population the literal walk cannot see: a command built by
+/// a call carries no literal at the send site, so the send sites are read
+/// instead of the strings. A builder is listed once however many sites
+/// hand it a command -- the question each one asks is the same one.
+fn command_builders(source: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[cfg(test)]") {
+            break;
+        }
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        for call in ["send(", "submitted("] {
+            for (at, _) in line.match_indices(call) {
+                if at > 0 {
+                    let prev = line.as_bytes()[at - 1];
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        continue;
+                    }
+                }
+                for builder in call_names(argument(line, at + call.len() - 1)) {
+                    if !found.contains(&builder) {
+                        found.push(builder);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 // What the walk reads and what it does not, on a source it holds whole:
 // the three spellings a typed command is written in, the three colons that
 // open no command, a comment quoting one, and the test boundary.
@@ -179,7 +270,64 @@ fn every_typed_command_is_silenced_or_declared_the_measured_action() {
         "a driver's own setup paints nothing, because the message it would print is \
          routed into a float by the configs these rows are recorded on and stands \
          over the cells the next sample types into:\n  {}\nPrefix the command with \
-         `silent`, or declare it here as the measured action with grounds.",
+         `silent`, or declare it here -- as the measured action, or as a view \
+         command that emits no message -- with grounds.",
+        undeclared.join("\n  ")
+    );
+}
+
+// What the send-site walk reads: a builder defined beside the send site,
+// one imported from elsewhere, and the three call shapes that build no
+// command.
+#[test]
+fn the_walk_reads_every_function_a_send_site_hands_a_command() {
+    let source = concat!(
+        "    session.send(flood_command().as_bytes())?;\n",
+        "    session.send(submitted(&wedge_command(BOUND)).as_bytes())?;\n",
+        "    session.send(format!(\":silent e {file}\\r\").as_bytes())?;\n",
+        "    session.send(&WALK_STEP.repeat(DEFAULT_CAPACITY))?;\n",
+        "    session.send(OPEN_COMMAND)?;\n",
+        "    #[cfg(test)]\n",
+        "    session.send(only_in_tests())?;\n",
+    );
+    assert_eq!(
+        command_builders(source),
+        vec![
+            "flood_command".to_string(),
+            "submitted".to_string(),
+            "wedge_command".to_string(),
+        ],
+        "a builder is read wherever a send site hands it a command, and a method \
+         call, a macro or a constant builds none"
+    );
+}
+
+#[test]
+fn every_command_built_outside_this_crate_is_declared_by_its_builder() {
+    let sources = driver_sources(&source_dir());
+    let mut undeclared = Vec::new();
+    for (file, source) in &sources {
+        for builder in command_builders(source) {
+            let written_here = sources
+                .iter()
+                .any(|(_, body)| body.contains(&format!("fn {builder}(")));
+            if written_here {
+                continue;
+            }
+            let declared = UNSILENCED
+                .iter()
+                .any(|entry| entry.file == *file && entry.built_by == builder);
+            if !declared {
+                undeclared.push(format!("{file}: {builder}()"));
+            }
+        }
+    }
+    assert!(
+        undeclared.is_empty(),
+        "a command built outside this crate reaches the session with no literal \
+         for the silence walk to grade:\n  {}\nDeclare it here with the function \
+         that builds it in `built_by` and its grounds, or build it beside the send \
+         site so its literal is read.",
         undeclared.join("\n  ")
     );
 }

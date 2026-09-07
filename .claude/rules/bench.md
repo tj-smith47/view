@@ -151,7 +151,8 @@ runs. The fix belongs to the harness, never to the fixture: `'report'`,
 `shortmess` and the message routing are part of the moment being measured.
 
 So every `:` command a driver under `crates/view-bench/src/` types is
-`silent`-prefixed unless it is the measured action:
+`silent`-prefixed unless it is the measured action, or a view command that
+emits no message for a config to route:
 
 ```rust
 self.session.send(b"\x1b:silent %d _\r")?;   // setup, between trials
@@ -160,12 +161,25 @@ session.send(submitted(&wedge_command(bound)).as_bytes())?;  // the action
 
 `silent` and never `silent!` -- an error still reaches the screen, which is
 what a setup step that failed is worth. The exemptions carry grounds in
-`view-bench/tests/driver_commands.rs`'s `UNSILENCED` table, and
-`every_typed_command_is_silenced_or_declared_the_measured_action` walks
+`view-bench/tests/driver_commands.rs`'s `UNSILENCED` table, and each row's
+grounds state which of the two it is: the measured action (`picker.rs`,
+`supervision.rs`) or a message-free view command (`ai_session.rs`,
+`notices.rs`). A prefix cannot be claimed to do what it does not:
+`:silent` suppresses nvim's messages and reaches nothing view paints of
+its own.
+
+Two walks hold the table.
+`every_typed_command_is_silenced_or_declared_the_measured_action` reads
 every literal each source writes above its `#[cfg(test)]` boundary, so a
-new send site fails by name. Its stated limit: a command built in another
-crate is no literal here, so such a member is declared with the function
-that builds it (`wedge_command`) and pinned by that name instead.
+new send site fails by name. Literals alone would pin only the commands
+written here, so
+`every_command_built_outside_this_crate_is_declared_by_its_builder` pins
+the population of send sites instead: every call inside a
+`send`/`submitted` argument is read off, and one whose builder this crate
+does not define is a command built elsewhere -- `wedge_command`, today's
+only one -- which fails unless a row declares it by that builder's name.
+A builder defined beside the send site needs no row, because its own
+literal is a line the first walk already reads.
 
 The rule is scoped to the drivers, not to every session the tree types at:
 `view-oracle`'s tests make messages their subject (`:echo`, `:echomsg`,
