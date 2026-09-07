@@ -1042,6 +1042,18 @@ fn main() -> Result<()> {
         0,
         resolved.tables.native.enabled("statusline"),
     );
+    if width == 0 || height == 0 {
+        // a zero would abort the spawn's geometry `--cmd` outright
+        // (`view_core::model::SIZE_FLOOR`), so the reading the floor stood
+        // in for is what a report of a session that started tiny needs
+        vlog::log_with("startup", || {
+            format!(
+                "terminal reported {width}x{height}; engine spawned at the {}x{} floor",
+                view_core::model::SIZE_FLOOR.0,
+                view_core::model::SIZE_FLOOR.1
+            )
+        });
+    }
     // read before the config is consumed: `update()` builds the attach and
     // has no config left to ask which descriptor the child's piped stdin is
     // on, nor whether the child was already attached on its way up
@@ -1899,6 +1911,12 @@ mod tests {
     /// lay windows out in, so the spawn is handed the grid the attach will
     /// ask for rather than the terminal's own. Both calls are arithmetic
     /// over values already in hand.
+    ///
+    /// The floor notice is the fifth, and it is not a read at all: it
+    /// reports the reading the line above stood a floor in for
+    /// (`view_core::model::SIZE_FLOOR`), on the branch where the terminal
+    /// answered with a zero, and there is nothing left to name it by once
+    /// the spawn has consumed the geometry.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1930,6 +1948,7 @@ mod tests {
                 "view_native::config::ext_surfaces",
                 "view_core::model::grid_target_for",
                 "enabled",
+                "vlog::log_with",
                 "with_late_attach",
                 "stdin_relay_requested",
                 "attaches_late",

@@ -1191,13 +1191,37 @@ impl Model {
 /// launch relayouts every window at the attach, which is the resize the
 /// geometry `--cmd` exists to avoid. No tabline exists at spawn, so that
 /// caller passes `0` chrome rows.
+///
+/// A terminal reporting a zero on either axis is answered with
+/// [`SIZE_FLOOR`] before the chrome is taken off it.
 #[must_use]
 pub fn grid_target_for(size: (u16, u16), chrome_rows: u16, statusline: bool) -> (u16, u16) {
+    let size = if size.0 == 0 || size.1 == 0 {
+        SIZE_FLOOR
+    } else {
+        size
+    };
     (
         size.0,
         size.1.saturating_sub(chrome_rows + u16::from(statusline)),
     )
 }
+
+/// The terminal size [`grid_target_for`] answers a zero-axis reading with,
+/// and nvim's own answer to the same reading: `tui_guess_size` takes both
+/// defaults the moment either axis comes back non-positive, so a `nvim`
+/// started on a pty whose size was never set lays out at 80x24 (measured
+/// against the pinned engine, for 0x0, 0x40 and 100x0 alike).
+///
+/// A zero is not a hypothetical: a pty nothing has sized reports 0x0, and
+/// so does a real terminal for the first instant of a session still
+/// negotiating its size. Carrying one into the spawn is what makes it fatal
+/// rather than merely small -- the geometry `--cmd` opens with
+/// `vim.o.columns`, whose minimum is 12, and the `E594` that raises aborts
+/// the whole chunk, taking the `VimEnter` hook the attach waits on with it.
+/// The session then paints its shell frame and waits out the attach
+/// deadline against a child that is alive and never says it started.
+pub const SIZE_FLOOR: (u16, u16) = (80, 24);
 
 impl Default for Model {
     fn default() -> Self {
@@ -2701,6 +2725,36 @@ mod tests {
                 "statusline = {statusline}"
             );
         }
+    }
+
+    /// A zero on either axis is a size no child can be started at: the
+    /// geometry `--cmd` opens with `vim.o.columns`, nvim refuses anything
+    /// below 12 with `E594`, and the aborted chunk never registers the
+    /// `VimEnter` hook the attach waits on -- so the session paints its
+    /// shell frame and waits out the attach deadline against a live child.
+    /// The floor is nvim's own for the same reading, and it is taken before
+    /// the chrome, so the spawn and the attach still share one arithmetic.
+    #[test]
+    fn a_zero_on_either_axis_is_answered_with_the_floor_before_the_chrome() {
+        assert_eq!(grid_target_for((0, 0), 0, false), SIZE_FLOOR);
+        assert_eq!(grid_target_for((0, 88), 0, false), SIZE_FLOOR);
+        assert_eq!(grid_target_for((263, 0), 0, false), SIZE_FLOOR);
+        assert_eq!(
+            grid_target_for((0, 0), 1, true),
+            (SIZE_FLOOR.0, SIZE_FLOOR.1 - 2)
+        );
+        assert!(
+            SIZE_FLOOR.0 >= 12 && SIZE_FLOOR.1 >= 2,
+            "the floor has to clear the minimums nvim raises E594/E593 below"
+        );
+
+        // and the floor stands in only until a size arrives: the first
+        // reading with no zero in it is what the grid reflows to
+        let mut m = Model::with_term_size(0, 0);
+        assert_eq!(m.grid_target(), SIZE_FLOOR);
+        m.term_width = 263;
+        m.term_height = 88;
+        assert_eq!(m.grid_target(), (263, 88));
     }
 
     /// A full-height side panel takes its share of the rows an overlay may

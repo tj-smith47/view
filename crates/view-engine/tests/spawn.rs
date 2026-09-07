@@ -105,3 +105,49 @@ fn marker_path() -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(format!("hang-marker-{}", std::process::id()))
 }
+
+/// A terminal reporting zero on either axis is a startup path a user
+/// reaches -- a pty nothing has sized, and a real terminal for the first
+/// instant of a session still negotiating its size -- and the geometry
+/// `--cmd` is where that zero would be fatal rather than merely small: it
+/// opens with `vim.o.columns`, nvim refuses anything under 12 with `E594`,
+/// and the aborted chunk registers none of what follows it, the `VimEnter`
+/// hook the attach waits on included. The child then stays alive and never
+/// says it started, which is what the session's attach deadline expires
+/// against.
+///
+/// The size is taken through `grid_target_for` rather than written down
+/// here, because that is the one arithmetic both the spawn and the attach
+/// read: a floor that lived only at this call site would leave the attach
+/// asking for the zero instead.
+#[test]
+fn a_spawn_sized_from_a_zero_axis_terminal_runs_its_whole_startup_chunk() {
+    let (width, height) = view_core::model::grid_target_for((0, 0), 0, false);
+    let engine = Engine::spawn(EngineConfig::isolated().with_late_attach(width, height)).unwrap();
+
+    let read = |lua: &str| {
+        engine
+            .handle
+            .request(
+                "nvim_exec_lua",
+                vec![rmpv::Value::from(lua), rmpv::Value::Array(vec![])],
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        read("return { vim.o.columns, vim.o.lines }")
+            .as_array()
+            .and_then(|size| Some((size.first()?.as_u64()?, size.get(1)?.as_u64()?))),
+        Some((u64::from(width), u64::from(height))),
+        "the child lays out at the floor the spawn named"
+    );
+    // the statement after the geometry line, and the hook the attach waits
+    // on is the chunk's last: together they say the whole chunk ran
+    assert_eq!(read("return vim.g.view").as_u64(), Some(1));
+    assert!(
+        read("return #vim.api.nvim_get_autocmds({ event = 'VimEnter' })")
+            .as_u64()
+            .is_some_and(|hooks| hooks >= 1),
+        "the VimEnter hook the attach waits on was never registered"
+    );
+}
