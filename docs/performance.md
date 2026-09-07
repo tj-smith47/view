@@ -30,11 +30,11 @@ the tree, the tabline and the statusline present and still.
 | screen ready | 56.0 ms | 51.4 ms | your config (lazy.nvim, noice, nvim-notify), same host, same run |
 
 view is 4.6 ms behind on that screen, and the bar view holds itself to for
-this moment is level with Neovim -- so this row is a bar view has not met,
-by 9%. At the worst launch in a thousand under your config the two are within a
-millisecond of each other (78.2 ms against 77.2 ms). With no plugins at all the same
-screen arrives in 16.1 ms against 14.7 ms, which is a bench fixture and not
-this row.
+this moment is level with Neovim -- so this row is a bar view has not met, by
+9%. At the worst launch in a thousand under your config the two are within a
+millisecond of each other (78.2 ms against 77.2 ms). With no plugins at all
+the same screen arrives in 16.1 ms against 14.7 ms, which is a bench fixture
+and not this row.
 
 What makes it that number: view paints its own shell -- the chrome you see
 before anything has loaded -- in about 4 ms, and that frame is on screen
@@ -143,4 +143,5 @@ otherwise.
 ---
 
 How these were measured, what each cell is called, which of them are
-diagnostics, and how a bar is re-seated: [docs/benchmarking.md](benchmarking.md).
+diagnostics, and how a bar is re-seated:
+[docs/benchmarking.md](benchmarking.md).

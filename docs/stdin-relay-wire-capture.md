@@ -16,7 +16,8 @@ Matches `.engine-pin` (`v0.12.4`) exactly.
 
 ## `:help ui-startup-stdin` (verbatim, from `api-ui-events.txt`)
 
-Captured via `nvim --headless -c "help ui-startup-stdin" -c "write! <out>" -c "qa!"`.
+Captured via
+`nvim --headless -c "help ui-startup-stdin" -c "write! <out>" -c "qa!"`.
 
 ```
 						   *ui-startup-stdin*

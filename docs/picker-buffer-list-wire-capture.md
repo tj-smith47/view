@@ -83,17 +83,17 @@ err: [1, 'Lua: [string "<nvim>"]:1: \'=\' expected near \'is\'']
 res: None
 ```
 
-`error` is a two-element array `[error_type, message]` (the same
-`(Value, Value)` shape every other `nvim_exec_lua`/generic-request error on
-this engine takes -- matching `decode_hl_probe_reply`'s and
-`decode_mapping_claims`'s existing "error reply degrades to empty/default"
-handling). Since the Lua chunk here is fixed, constant source (no
-interpolated caller data, same discipline as `REGISTER_MAPPINGS_CHUNK`), a
-non-nil error on this call can only mean something is wrong with the engine
-connection itself, not with the request's arguments -- `decode_buffer_list_reply`
-degrades an error reply to an empty list, the same "confirmed nothing"
-default `decode_mapping_claims` uses, rather than leaving a picker session
-stuck with no items and no explanation.
+`error` is a two-element array `[error_type, message]` (the same `(Value,
+Value)` shape every other `nvim_exec_lua`/generic-request error on this engine
+takes -- matching `decode_hl_probe_reply`'s and `decode_mapping_claims`'s
+existing "error reply degrades to empty/default" handling). Since the Lua
+chunk here is fixed, constant source (no interpolated caller data, same
+discipline as `REGISTER_MAPPINGS_CHUNK`), a non-nil error on this call can
+only mean something is wrong with the engine connection itself, not with the
+request's arguments -- `decode_buffer_list_reply` degrades an error reply to
+an empty list, the same "confirmed nothing" default `decode_mapping_claims`
+uses, rather than leaving a picker session stuck with no items and no
+explanation.
 
 ## Conclusions for the implementation
 

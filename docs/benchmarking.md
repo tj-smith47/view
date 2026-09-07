@@ -23,12 +23,12 @@ config   = "real"            # real (a plugin config a person runs) | fixture
 
 - **felt** is a moment somebody lives through. It is measured under a real
   config -- the login-shaped `user` fixture -- paired against bare Neovim in
-  the same run, and `bench.rs`'s `every_felt_bound_is_seated_on_the_config_it_claims`
-  fails the build if the matrix seats it anywhere else. The exceptions are
-  the rows with no bare-Neovim counterpart to pair against (view's own
-  picker, the engine-wedge banner); each is listed in
-  `view_harness::budgets::UNPAIRED_FELT` with its grounds, and a felt row
-  that is neither is refused at load.
+  the same run, and `bench.rs`'s
+  `every_felt_bound_is_seated_on_the_config_it_claims` fails the build if the
+  matrix seats it anywhere else. The exceptions are the rows with no
+  bare-Neovim counterpart to pair against (view's own picker, the engine-wedge
+  banner); each is listed in `view_harness::budgets::UNPAIRED_FELT` with its
+  grounds, and a felt row that is neither is refused at load.
 - **diagnostic** explains a felt row's number and never stands alone. It
   names the row it decomposes (`decomposes = "startup.settled_ratio_p50"`),
   the spec row says "Diagnostic", and it is never quoted as a win. A
@@ -156,9 +156,9 @@ On `user` the retake pair reads 58.73 ms p50 against 54.16 ms, which is
 `first_paint.marker_ratio_p50` 1.084 and `first_paint.marker_ratio_p99`
 1.046.
 
-view trails bare Neovim by 8-10% on every paired cold cell -- on `minimal`
-about 1.4 ms, the size of the post-VimEnter attach-plus-takeover round trip
-the late-attach design pays serially, since Neovim's own TUI attaches
+view trails bare Neovim by 8-10% on every paired cold cell, and on
+`minimal` what it trails by is the post-VimEnter attach-plus-takeover round
+trip the late-attach design pays serially, since Neovim's own TUI attaches
 before init runs. Attribution past that outline is open work, not a claim
 this page makes.
 
@@ -324,16 +324,17 @@ it, so the gap gets tracked down rather than shrugged off.
 
 An obvious suspect was the architecture itself: maybe an out-of-process UI
 speaking Neovim's RPC protocol just costs this much. Neovim ships its own
-out-of-process TUI, which makes that theory testable. Measured under the
-identical protocol on the same host:
+out-of-process TUI, which makes that theory testable, and the control leg
+measures it under the identical protocol on the same host, in the same
+interleaved run as the typing cell above:
 
-| steady typing, dev-linux, superseded readings (no plugins / 15-plugin stack) | vs bare Neovim (`echo.ratio_p50`) |
+| leg | Neovim's own TUI driving a headless Neovim |
 |---|---|
-| Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** (`echo.ratio_p50`) |
-| view, at the time of that measurement | 1.22x / 1.24x (`echo.ratio_p50`) |
+| plugin-free (`minimal`) | `echo_control.control_ratio_p50` 0.994 |
+| 15-plugin stack (`heavy`) | `echo_control.control_ratio_p50` 1.009 |
 
-Speaking the protocol from another process costs about 2-4%. Roughly nine
-tenths of the gap was view's own code. (Three earlier theories, a
+Speaking the protocol from another process costs nothing this class can
+measure, so the gap is view's own code. (Three earlier theories, a
 thread-hop cost floor, the pty transport, and the measurement
 instrumentation itself, also failed to survive measurement; each retraction
 is recorded in the design spec.)
@@ -345,15 +346,9 @@ wedged Neovim stalls a background thread instead of the screen, but the
 goal only requires the write to never *block*, not to always *defer*. The
 main loop now writes the bytes itself whenever the pipe has signalled it
 can accept them and nothing is queued ahead. Skipping the ~40 µs cost of
-waking an idle core accounts for most of the improvement:
-
-| superseded readings, kept as the record of the fix | before | after |
-|---|---|---|
-| RPC handoff to bytes written | 42.5 µs | **10.5 µs** |
-| Keystroke to RPC bytes written (p99) | 154.7 µs | **117.7 µs** |
-| Steady typing vs Neovim, no plugins (`echo.ratio_p50`) | 1.354x | **1.172x** |
-| Steady typing vs Neovim, 15 plugins (`echo.ratio_p50`) | 1.244x | **1.184x** |
-| Tail (p99) typing ratio, 15 plugins (the paired tail beside the felt `echo.view_p99_ms`) | 1.142x | **1.010x** |
+waking an idle core accounts for most of the improvement; the paired
+before-and-after readings that recorded it are in the commit that landed
+the change, where no re-record can leave them standing as current.
 
 What remains is measured, not guessed. Of the ~644 µs from keypress to
 glyph, 366 are spent inside Neovim itself, 80 in the OS's terminal plumbing
@@ -366,8 +361,8 @@ key belongs to Neovim or to view's own UI. No other stage on either path
 exceeds 21 µs.
 
 *Measured 2026-08-03 (`df411f19`). The largest item above, the
-key-decoded->loop-wake hop (49.1 µs p50 in this table; 52.4 µs p50 in
-the reading taken immediately before the change), has since collapsed
+key-decoded->loop-wake hop (49.1 µs p50 in this decomposition; 52.4 µs
+p50 in the reading taken immediately before the change), has since collapsed
 to 13.9 µs p50 with the input-thread/runtime-loop unification
 (spec:97-99's 2026-08-09 adjudication) -- this decomposition's ~644 µs
 total predates that change and reads high.*
@@ -445,7 +440,8 @@ Each replicate is a full `--record`-grade measurement, null-pair
 calibration brackets included -- those brackets are printed and recorded
 per replicate, so an included draw that sat just under the floor is
 visible rather than indistinguishable from a clean one. A replicate whose
-pre-run load exceeds `--max-load` (2.0 by default) is published as an
+pre-run load exceeds `--max-load` (2 by default, the value its own help
+prints) is published as an
 excluded draw and replaced, and one that refuses its own measurement is
 replaced too. Past twice the wanted replicates the campaign refuses,
 naming every load it saw.

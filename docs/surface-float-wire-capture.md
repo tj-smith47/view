@@ -370,9 +370,10 @@ once:
 | 1013 | (empty) | nofile | 24 | 10 | 80 | 3 | 50 | false |
 
 The two windows with no filetype are drawn border chrome: their buffer
-lines are the box-drawing characters themselves, an 80-cell top rule with a
-centered title (shortened here, the artifact carries the full 80 columns:
-`"╭─── Results ───╮"`, `"╭─── Help ───╮"`), and they are
+lines are the box-drawing characters themselves, an 80-cell top rule with
+a centered title (shortened here, the artifact carries the full 80
+columns: `"╭─── Results ───╮"`,
+`"╭─── Help ───╮"`), and they are
 `focusable = false, mouse = false`.
 
 Selection, before and after one `<C-n>`:
@@ -485,18 +486,18 @@ on the editing window.
 | mode while captured | **`c`** | `n` | `n` | `i` |
 | survives view's `hide` | **yes** | not measured | not measured | not measured |
 
-Three of these rows need their derivation stated rather than assumed. The row and
-column spans are computed from each window's own `row`/`col`/`width`/
+Three of these rows need their derivation stated rather than assumed. The row
+and column spans are computed from each window's own `row`/`col`/`width`/
 `height`, and the two `NE`-anchored floats need the anchor read with them:
-`col = 100, width = 50` on a 100-column grid is a **right** edge, so the
-toast and the error float occupy columns 50..99, not 51..100. And three
-cells are observations of an absence rather than measurements: `mode while
-captured` is what stood at the snapshot, not a mode the float requires (the
-toast and the error float were both captured in normal mode and were never
-exercised in another), and `selection carrier: none observed` means no
-selection mark was present and no `<C-n>` was sent to either -- the
-per-subject selection walk was exercised on cmp and telescope, the two
-subjects that have a selection to move.
+`col = 100, width = 50` on a 100-column grid is a **right** edge, so the toast
+and the error float occupy columns 50..99, not 51..100. And three cells are
+observations of an absence rather than measurements: `mode while captured` is
+what stood at the snapshot, not a mode the float requires (the toast and the
+error float were both captured in normal mode and were never exercised in
+another), and `selection carrier: none observed` means no selection mark was
+present and no `<C-n>` was sent to either -- the per-subject selection walk
+was exercised on cmp and telescope, the two subjects that have a selection to
+move.
 
 **The falsifiable check is met, four times over.** A claiming float is
 distinguishable from the negative control by `zindex` (1001 against 50),

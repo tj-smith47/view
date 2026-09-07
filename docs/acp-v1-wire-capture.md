@@ -1160,17 +1160,24 @@ The framing rule the transport layer is built on, verbatim from
 $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/transports.mdx" | sed -n '6,27p'
 ```
 
-> ACP uses JSON-RPC to encode messages. JSON-RPC messages **MUST** be UTF-8 encoded.
+> ACP uses JSON-RPC to encode messages. JSON-RPC messages **MUST** be
+> UTF-8 encoded.
 >
 > In the **stdio** transport:
 >
 > - The client launches the agent as a subprocess.
-> - The agent reads JSON-RPC messages from its standard input (`stdin`) and sends messages to its standard output (`stdout`).
+> - The agent reads JSON-RPC messages from its standard input (`stdin`)
+>   and sends messages to its standard output (`stdout`).
 > - Messages are individual JSON-RPC requests, notifications, or responses.
-> - Messages are delimited by newlines (`\n`), and **MUST NOT** contain embedded newlines.
-> - The agent **MAY** write UTF-8 strings to its standard error (`stderr`) for logging purposes. Clients **MAY** capture, forward, or ignore this logging.
-> - The agent **MUST NOT** write anything to its `stdout` that is not a valid ACP message.
-> - The client **MUST NOT** write anything to the agent's `stdin` that is not a valid ACP message.
+> - Messages are delimited by newlines (`\n`), and **MUST NOT** contain
+>   embedded newlines.
+> - The agent **MAY** write UTF-8 strings to its standard error (`stderr`)
+>   for logging purposes. Clients **MAY** capture, forward, or ignore this
+>   logging.
+> - The agent **MUST NOT** write anything to its `stdout` that is not a
+>   valid ACP message.
+> - The client **MUST NOT** write anything to the agent's `stdin` that is
+>   not a valid ACP message.
 
 Pinned: newline-delimited JSON-RPC 2.0, UTF-8, no embedded newline, no
 length header. `stderr` carries agent logging only and never a frame.

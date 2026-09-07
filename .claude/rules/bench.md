@@ -93,7 +93,7 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
   side`, `another machine` or `RTT` while naming neither
   `scripts/acceptance/remote-rtt.sh` nor the `remote_memory` row, and
   without denying the transport word within the five tokens before it or
-  saying the reading is `local`;
+  saying, in the clause that word stands in, that the reading is `local`;
 - a figure on `README.md` or `docs/performance.md` states a moment the
   vocabulary names and equals no value that cell records on the class the
   page declares, or stands on a page that declares no class at all.
@@ -126,10 +126,11 @@ row states one column at a time. The union passed a sibling metric's draw
 (`ratio_p99`'s number quoted where `ratio_p50` was named) and a sibling
 scenario's alike (`echo.ratio_p50`'s where `scroll.ratio_p50` was named),
 which is the identifier and the words disagreeing on the axis the class and
-fixture rules were minted for. A table whose header row says
-`superseded` is read for nothing: a before/after record exists to hold the
-readings a fix replaced, and the marker sits in the header because a reader
-takes what a table is from there.
+fixture rules were minted for. Every table is read, whatever its header
+says: a word in a heading cell took every figure under it out of this check
+and out of the sweep that grades the population at once, which is a bypass
+one edit wide. A reading a fix replaced belongs in the commit that replaced
+it, where git keeps it, or in a `why`, which has its own escape list.
 
 A cell id carries no class and no fixture, so the unit around it has to.
 Resolving instead against every class and every fixture a unit mentioned
@@ -168,13 +169,20 @@ round lived there, not on the page.
 
 The draws a record run took are not a sentence at all. They are a field on
 the entry -- `trials = [19.57, 19.48, 19.35]`, an optional array of floats
-`view_harness::budgets` loads beside `accepted` and the gate reads for
-nothing -- because no cell holds them (the bare-engine arm of a paired run
+`view_harness::budgets` loads beside `accepted` -- because no cell holds
+them (the bare-engine arm of a paired run
 has no seat of its own) and a spread written into the prose is a figure
 nothing can grade. It was written as prose twice, once behind a one-word
 `trial` escape and once behind a slash-joined list, and each spelling
 carried a stale seat through the exemption it bought: the shipped list at
 `budgets.toml:663` held the entry's own `accepted`.
+
+That member is why the field is graded rather than skipped. A record run
+draws the seat as one of its trials, so the array states `accepted` --
+rounded to the digits the member itself prints -- or the loader refuses the
+file naming the entry, and the check refuses the line. It is the one figure
+in the array a re-record retires; the draws beside it are readings no cell
+holds and nothing can stale.
 
 The transport rule is the one with no number in it. A page saying the
 speculated cell was measured with its engine across a network states a
@@ -207,10 +215,20 @@ without waiting for the round trip, view drawing the character it expects
 The test also reads polarity, because a page denying the condition is the
 sentence the rule most wants written. A transport word preceded within
 five tokens by `not`, `no`, `never`, `without` or `nor`, or standing in a
-unit that says the reading is `local`, is the page stating what it was
+clause that says the reading is `local`, is the page stating what it was
 recorded under and passes. The window looks backwards only: a row reading
 `on the far side of a network | not yet recorded` carries a later `not`
 that denies the recording and licenses nothing about the transport.
+
+Three things scope that window, and each of them was a sentence the check
+read wrong. It runs from the phrase's own match position rather than over
+whole tokens, because no token ever equals `far side` or `another machine`
+and every true denial written around either was refused. `local` licenses
+the clause that carries it -- the unit split at `,;:` and the em dash --
+and nothing wider, because a clause reporting a local picker cache
+licensed the transport claim beside it. And `local` is itself read for
+polarity, because `not local ... another machine` licensed its own
+inversion.
 
 A table row is its own anchor unit and prose keeps the paragraph scope: a
 line whose first non-space character is `|` is graded alone. An 18-row
@@ -254,12 +272,16 @@ whose verdict a contributor never sees.
 
 The cases file grades the rules; `scripts/check-budget-drift-sweep.sh`
 grades the population. It copies the tracked tree, builds the seat table,
-takes every figure on the three pages and in every `why` that equals a
-recorded seat of its own unit on the class its page or entry resolves
-against -- outside fenced blocks, `superseded` tables, the sentences a
-`why` is read for nothing in, and the deltas a sentence states as
-differences -- perturbs each by one digit and requires the check to fail
-naming that file and line. A figure that survives is a recorded value
+takes every figure on the three pages, in every `why` and in every
+`trials` array that equals a recorded seat of any class -- outside fenced
+blocks, the sentences a `why` is read for nothing in, and the deltas a
+sentence states as differences -- perturbs each by one digit and requires
+the check to fail naming that file and line. The class a page declares is
+the default a unit falls back to, never a filter on what is graded: a
+population scoped to it left the gh-linux, gh-macos, dev-macos and
+controlled-linux figures the pages quote ungraded, and the sweep shared
+that blind spot with nothing, since the check resolves each of them where
+its own unit names it. A figure that survives is a recorded value
 nothing grades, which is what two rounds of hand-listed sites left behind.
 It runs as `task drift:sweep` and as its own CI step rather than inside
 `task ci`, because it re-runs the whole check once per figure: two minutes

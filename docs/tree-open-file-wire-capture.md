@@ -7,11 +7,11 @@ through.
 
 An earlier revision of this capture recorded the previous chunk shape,
 `vim.cmd.edit(vim.fn.fnameescape(path))`, and concluded `fnameescape` was
-load-bearing. That shape did not survive Windows: `fnameescape` escapes
-`\`, which is Windows' own path separator, so every Windows path failed to
-open (disconfirmed on a real Windows host -- `open_file_opens_hostile_character_filenames`
-failed there before the chunk below replaced it). This capture records the
-shipped replacement.
+load-bearing. That shape did not survive Windows: `fnameescape` escapes `\`,
+which is Windows' own path separator, so every Windows path failed to open
+(disconfirmed on a real Windows host --
+`open_file_opens_hostile_character_filenames` failed there before the chunk
+below replaced it). This capture records the shipped replacement.
 
 ## Engine identity
 

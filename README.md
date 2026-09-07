@@ -30,13 +30,13 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 
 view is a terminal editor that embeds a real Neovim as its engine, so your
 existing config, plugins, LSP servers, and treesitter setup work on day one:
-the same Neovim you already run is running them. Around that engine, view draws its
-own UI in native Rust: one design system for the editor chrome instead of a
-patchwork of plugins, a process that paints before your config has finished
-loading, and AI agents as a first-class part of the editor rather than a
-bolt-on: an agent panel (`<leader>ai`) speaks [ACP](https://agentclientprotocol.com)
-to real agents, with in-editor review of every proposed change. See
-[docs/ai.md](docs/ai.md).
+the same Neovim you already run is running them. Around that engine, view
+draws its own UI in native Rust: one design system for the editor chrome
+instead of a patchwork of plugins, a process that paints before your config
+has finished loading, and AI agents as a first-class part of the editor rather
+than a bolt-on: an agent panel (`<leader>ai`) speaks
+[ACP](https://agentclientprotocol.com) to real agents, with in-editor review
+of every proposed change. See [docs/ai.md](docs/ai.md).
 
 ## Features
 
@@ -99,17 +99,17 @@ slower: under that same config the embedded engine's started mark lands
 0.08 ms earlier than the same engine under Neovim's terminal UI.
 
 **You type.** You press a key and the character appears. Under that same
-login-shaped config, view's worst keystroke in a thousand takes 1.58 ms against Neovim's
-1.43 ms, and at the median view is 11% behind against a bar of 10% -- a
-second bar missed, by 1% of the round trip, and both a fraction of the
-~10 ms where a person starts to notice a key lagging their finger. view can
-also draw the character it expects instead of waiting for the engine to
-confirm it: under that same config the predicted glyph is on screen in
-0.32 ms at that same worst case, where the Neovim it is paired against in
-the same run takes 1.25 ms, and the glyph is corrected the moment the engine
-answers. Both ran on this machine; what the prediction is for is an engine a
-network away, which a separate acceptance leg measures by injecting the
-round trip at four tiers (`scripts/acceptance/remote-rtt.sh`).
+login-shaped config, view's worst keystroke in a thousand takes 1.58 ms
+against Neovim's 1.43 ms, and at the median view is 11% behind against a bar
+of 10% -- a second bar missed, by 1% of the round trip, and both a fraction of
+the ~10 ms where a person starts to notice a key lagging their finger. view
+can also draw the character it expects instead of waiting for the engine to
+confirm it: under that same config the predicted glyph is on screen in 0.32 ms
+at that same worst case, where the Neovim it is paired against in the same run
+takes 1.25 ms, and the glyph is corrected the moment the engine answers. Both
+ran on this machine; what the prediction is for is an engine a network away,
+which a separate acceptance leg measures by injecting the round trip at four
+tiers (`scripts/acceptance/remote-rtt.sh`).
 
 Scrolling, the picker, what happens when the engine hangs, memory, and what
 contributes to each of the numbers above:
