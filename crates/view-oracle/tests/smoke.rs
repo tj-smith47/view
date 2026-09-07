@@ -2812,10 +2812,15 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
 /// to the same slave, and the defining property of `ls | view -` is a pipe
 /// on fd 0.
 ///
-/// The reflow is the other half, and the same claim the `PtySession` leg
+/// The reflow is the second half, and the same claim the `PtySession` leg
 /// makes for a session with no pipe on it: the floor the spawn stood in for
 /// the reading is temporary, so the first real `SIGWINCH` lays the child
 /// out past the 24 rows it started with.
+///
+/// The relayed payload is the third, asserted the way the 80x24 sibling
+/// asserts it: an attach that succeeds says nothing about what reached the
+/// buffer, so a relay that dropped its content on a terminal it could not
+/// size would pass both halves above.
 #[test]
 fn piped_stdin_on_an_unsized_terminal_starts_and_reflows() {
     use std::io::Write;
@@ -2832,8 +2837,9 @@ fn piped_stdin_on_an_unsized_terminal_starts_and_reflows() {
             cmd.arg("-").arg(&paths.scratch).env("VIEW_LOG", &view_log);
         });
     let mut child = session.child;
+    let piped_content = "piped stdin on an unsized terminal";
     stdin_write
-        .write_all(b"piped stdin on an unsized terminal\n")
+        .write_all(format!("{piped_content}\n").as_bytes())
         .expect("write piped content to the child's stdin");
     drop(stdin_write);
 
@@ -2852,21 +2858,33 @@ fn piped_stdin_on_an_unsized_terminal_starts_and_reflows() {
         pty_dump(&raw)
     );
 
+    // the same explicit write the 80x24 leg performs, and for the same
+    // reason: `nvim - <scratch>` leaves the piped content in an unnamed
+    // buffer 1, which a bare `:wq` refuses with `E32: No file name`
+    let write_cmd = format!("\x1b:w {}\r:qa!\r", paths.scratch.display());
     master
-        .write_all(b"\x1b:qa!\r")
-        .expect("write :qa! to the pty master");
+        .write_all(write_cmd.as_bytes())
+        .expect("write the explicit :w + :qa! sequence to the pty master");
     let Some(status) = wait_bounded(&mut child, Duration::from_secs(15)) else {
         panic!(
-            "view never exited within 15s of :qa! on a relayed 0x0 session; \
-             last pty bytes:\n{:?}",
+            "view never exited within 15s of the :w + :qa! sequence on a \
+             relayed 0x0 session; last pty bytes:\n{:?}",
             pty_dump(&raw)
         );
     };
     assert!(
         status.success(),
-        "view did not exit cleanly after :qa!; status={status:?}; last pty \
-         bytes:\n{:?}",
+        "view did not exit cleanly after :w + :qa!; status={status:?}; last \
+         pty bytes:\n{:?}",
         pty_dump(&raw)
+    );
+
+    let saved =
+        std::fs::read_to_string(&paths.scratch).expect("saved file should exist and be readable");
+    assert!(
+        saved.contains(piped_content),
+        "the relay on a 0x0 terminal dropped its payload: the saved file \
+         does not hold the piped content; contents:\n{saved:?}"
     );
 }
 
@@ -3138,20 +3156,34 @@ fn view_started_on_an_unsized_terminal_reflows_to_the_first_real_size() {
 /// `--cmd` take nothing under `view_core::model::ENGINE_MIN_SIZE`, so a
 /// 5-column terminal lays the child out at 12 columns and paints clipped
 /// against a screen that cannot hold it -- a session the user can see is
-/// wrong and nothing else on screen explains. The notice is the only report
-/// of it, and it is written before the terminal is entered, so `VIEW_LOG`
-/// is where it can be read.
+/// wrong and nothing else on screen explains.
 ///
-/// Both sizes are named because neither is derivable from the other at read
-/// time: the reading is gone by the time the spawn is armed, and the
-/// geometry is the arithmetic's answer rather than a constant.
+/// The report has two halves and this leg asserts both. The `VIEW_LOG` line
+/// is written before the terminal is entered, which is the only sink a
+/// session has that early and the only record a session started with no
+/// `VIEW_LOG` at all still leaves in the one place it can be collected. The
+/// notice is what the user actually reads, raised with the other startup
+/// notices once the attach has landed and a model exists to carry one.
+///
+/// Both sizes are named in each because neither is derivable from the other
+/// at read time: the reading is gone by the time the spawn is armed, and
+/// the geometry is the arithmetic's answer rather than a constant.
+///
+/// The history overlay rather than the toast, and after a resize: five
+/// columns cannot hold a line anybody could read, and a transient toast
+/// expires on the idle timer while this leg is still widening the terminal.
+/// `resize_until` re-issues the resize for a lost `SIGWINCH`, so the wait
+/// is on the entry becoming legible rather than on the stimulus landing.
 #[test]
 fn a_terminal_under_the_engines_minimum_reports_the_geometry_it_was_clamped_to() {
     let paths = common::ScratchPaths::new("smoke");
     let view_log = paths.isolated_home.join("view.log");
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.arg(&paths.scratch);
-    common::isolate_xdg_native_off_except(&mut cmd, &paths.isolated_home, &[]);
+    // the statusline stays off, so the spawn geometry below is the clamp
+    // alone; notifications is what leaves view owning the message surface
+    // the notice is read back through
+    common::isolate_xdg_native_off_except(&mut cmd, &paths.isolated_home, &["notifications"]);
     cmd.env("VIEW_LOG", &view_log);
     let mut session = ViewPtySession {
         session: PtySession::spawn_configured(cmd, 5, 40).unwrap(),
@@ -3160,6 +3192,21 @@ fn a_terminal_under_the_engines_minimum_reports_the_geometry_it_was_clamped_to()
     };
 
     common::wait_for_log_line(&view_log, "terminal reported 5x40; engine spawned at 12x40");
+
+    let notice = "terminal 5x40 below the minimum";
+    session.send(b"\x1b:View notifications history\r").unwrap();
+    let shown = session
+        .resize_until(120, 30, Duration::from_secs(15), |s| {
+            s.wait_for(notice, Duration::from_millis(400))
+        })
+        .unwrap();
+    assert!(
+        shown,
+        "the clamped-geometry notice never reached the message history, so \
+         the user of a 5-column terminal has nothing on screen saying why \
+         the grid is clipped; last screen:\n{}",
+        session.screen()
+    );
 
     session.send(b"\x1b:q!\r").unwrap();
     let _ = session.wait();

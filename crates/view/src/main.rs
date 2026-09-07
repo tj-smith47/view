@@ -1039,13 +1039,18 @@ fn main() -> Result<()> {
     // relayout of every window on screen
     let statusline = resolved.tables.native.enabled("statusline");
     let spawn_size = view_core::model::grid_target_for((width, height), 0, statusline);
-    // what the chrome alone would have left, so the notice fires for every
+    // what the chrome alone would have left, so this is true for every
     // geometry the engine would have refused -- a zero floored to
     // `view_core::model::SIZE_FLOOR`, an axis clamped to
     // `view_core::model::ENGINE_MIN_SIZE` -- and for none it accepted. A
     // session clamped on either axis paints clipped against a terminal
     // smaller than its grid, and nothing else on screen says why
-    if spawn_size != (width, height.saturating_sub(u16::from(statusline))) {
+    let clamped_geometry = spawn_size != (width, height.saturating_sub(u16::from(statusline)));
+    // the log line here and the notice below are the same report at the two
+    // points it can be made: this runs before the terminal is entered, where
+    // `VIEW_LOG` is the only sink a session has, and the notice needs a
+    // model and an executor that do not exist until the attach has landed
+    if clamped_geometry {
         vlog::log_with("startup", || {
             format!(
                 "terminal reported {width}x{height}; engine spawned at {}x{}",
@@ -1125,6 +1130,20 @@ fn main() -> Result<()> {
     // place there is a model to say so on
     for notice in resolved.notices() {
         pre_executor_effects.extend(model.engine.record_native_notice(notice.clone(), false));
+    }
+    // the on-screen half of the geometry report above, raised here for the
+    // same reason: the clamp was decided before the spawn, where the
+    // terminal was not yet view's to write on. Both readings are named
+    // because a user with a 5-column terminal sees a 12-column grid clipped
+    // against it and has nothing else on screen to explain the mismatch
+    if clamped_geometry {
+        pre_executor_effects.extend(model.engine.record_native_notice(
+            format!(
+                "view: terminal {width}x{height} below the minimum; grid {}x{} paints clipped",
+                spawn_size.0, spawn_size.1
+            ),
+            false,
+        ));
     }
 
     // the same set the attach is given: `Model::owns` answers about the
@@ -1925,7 +1944,10 @@ mod tests {
     /// `view_core::model::ENGINE_MIN_SIZE` -- and there is nothing left to
     /// name either pair by once the spawn has consumed the geometry. Its
     /// own comparison is the arithmetic the chrome takes, which the line
-    /// above has already performed on values in hand.
+    /// above has already performed on values in hand. Only the log line
+    /// runs here: the notice the user reads is raised with the other
+    /// startup notices, below the spawn, where a model and an executor
+    /// exist to carry it.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
