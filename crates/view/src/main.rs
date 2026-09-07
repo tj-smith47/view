@@ -1135,11 +1135,14 @@ fn main() -> Result<()> {
     // same reason: the clamp was decided before the spawn, where the
     // terminal was not yet view's to write on. Both readings are named
     // because a user with a 5-column terminal sees a 12-column grid clipped
-    // against it and has nothing else on screen to explain the mismatch
+    // against it and has nothing else on screen to explain the mismatch.
+    // Worded as the startup fact the `VIEW_LOG` line above states, never as
+    // a present-tense claim about the grid: the entry stays in the history
+    // after the user widens the terminal, where "paints clipped" is false
     if clamped_geometry {
         pre_executor_effects.extend(model.engine.record_native_notice(
             format!(
-                "view: terminal {width}x{height} below the minimum; grid {}x{} paints clipped",
+                "view: terminal reported {width}x{height} at start, below the minimum; grid laid out at {}x{}",
                 spawn_size.0, spawn_size.1
             ),
             false,

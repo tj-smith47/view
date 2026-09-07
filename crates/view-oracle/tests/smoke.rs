@@ -3193,7 +3193,10 @@ fn a_terminal_under_the_engines_minimum_reports_the_geometry_it_was_clamped_to()
 
     common::wait_for_log_line(&view_log, "terminal reported 5x40; engine spawned at 12x40");
 
-    let notice = "terminal 5x40 below the minimum";
+    // the whole notice, both readings and its tense: the entry is read back
+    // after the widen, where a present-tense claim about how the grid paints
+    // would have stopped being true
+    let notice = "terminal reported 5x40 at start, below the minimum; grid laid out at 12x40";
     session.send(b"\x1b:View notifications history\r").unwrap();
     let shown = session
         .resize_until(120, 30, Duration::from_secs(15), |s| {
