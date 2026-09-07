@@ -26,19 +26,21 @@
 # Inside a file that is not wholly test code, a test region is a test-only
 # #[cfg(…)] attribute plus the item it gates. Test-only means the predicate
 # cannot hold outside `cargo test`:
-#   #[cfg(test)]                                → test-only
-#   #[cfg(all(test, unix))]                     → test-only  (all ⇒ test)
-#   #[cfg(any(windows, test))]                  → NOT: builds on windows
-#   #[cfg(feature = "…")]                       → NOT: no bare test predicate
-# A scan that only matches the literal #[cfg(test)] misses #[cfg(all(test, …))],
-# which view uses to gate unix-only fixtures off the Windows build.
+#   #[cfg(test)]                              → test-only
+#   #[cfg(all(test, unix))]                   → test-only  (all ⇒ test)
+#   #[cfg(any(windows, test))]                → NOT: builds on windows
+#   #[cfg(feature = "…")]                     → NOT: no bare test predicate
+# A scan that only matches the literal #[cfg(test)] misses
+# #[cfg(all(test, …))], which view uses to gate unix-only fixtures off the
+# Windows build.
 #
-# ── why the gated item is measured, not truncated at the marker ────────────
+# ── why the gated item is measured, not truncated at the marker ───
 # Truncating production at the first #[cfg(test)] is wrong for a module-dir
-# mod.rs, where #[cfg(test)] mod tests; sits mid-file with a pub use re-export
-# block below it. So the gated ITEM is measured and subtracted — a `mod tests;`
-# declaration costs its statement, an inline `mod tests { … }` costs its whole
-# brace body — and scanning resumes afterward.
+# mod.rs, where #[cfg(test)] mod tests; sits mid-file with a pub use
+# re-export block below it. So the gated ITEM is measured and subtracted
+# — a `mod tests;` declaration costs its statement, an inline
+# `mod tests { … }` costs its whole brace body — and scanning resumes
+# afterward.
 set -euo pipefail
 
 # --counts: emit "<count>\t<path>" for exactly the production files the
@@ -78,16 +80,16 @@ GOD_FILE_LIMIT=1000
 # Pinned ceilings, never blank cheques: a file may shrink freely, but a commit
 # that grows a pinned file fails, so each entry is a ratchet that only moves
 # down and then out. EXEMPT — a size that is a deliberate design outcome.
-# DEBT — a real violation predating this guard, pinned and printed until split.
+# DEBT — a violation predating this guard, pinned and printed until split.
 # Format: "<path>:<pinned ceiling>:<why>".
 GOD_FILE_EXEMPT=()
 GOD_FILE_DEBT=()
 
 # Per-file production CODE line count. Emits "<count>\t<path>" per input file.
 # The gated test region's extent is found by brace depth over code with string
-# and comment content elided first (strip_code), so every brace, semicolon and
-# // the scanner sees is real code — a naive trailing-// strip cuts the line at
-# the // inside "https://…" and swallows the rest of the file, and an
+# and comment content elided first (strip_code), so every brace, semicolon
+# and // the scanner sees is real code — a naive trailing-// strip cuts the
+# line at the // inside "https://…" and swallows the rest of the file, and an
 # indent-anchored close ends early on a } at column 0 inside a raw string.
 count_prod_lines() {
     awk -v emit="${PROD_LINE_EMIT:-}" '

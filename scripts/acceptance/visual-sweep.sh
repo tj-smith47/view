@@ -112,8 +112,9 @@ SESSIONS=()
 ROOTS=()
 SESSION=""
 ROOT=""
-# The stub agent's hold-and-release gate (crates/view-ai/tests/fixtures/stub_agent.rs):
-# named here so `cleanup` can remove it whichever leg created it.
+# The stub agent's hold-and-release gate
+# (crates/view-ai/tests/fixtures/stub_agent.rs): named here so `cleanup` can
+# remove it whichever leg created it.
 RESUME_FILE=""
 CURRENT_LEG=startup
 DUMP_DIR=$(dump_dir view-visual-sweep)
@@ -1380,8 +1381,9 @@ REVIEW_KEYS=$(review_keys_of "$MAPPINGS_RS") || exit 1
 # The features in registration order with the verb a bare `:View <feature>`
 # resolves to. That form is a separate entry point from the key, and the
 # only one that reaches a feature without naming what to do: the resolution
-# is the feature's first `default_maps()` entry (crates/view-core/src/update/mod.rs),
-# which is this table's first row for it.
+# is the feature's first `default_maps()` entry
+# (crates/view-core/src/update/mod.rs), which is this table's first row for
+# it.
 DEFAULT_VERBS=$(printf '%s\n' "$ENTRY_POINTS" | awk '!seen[$1]++ { print $1, $3 }')
 
 printf 'view acceptance: visual sweep (%s, %s, %sx%s)\n' \

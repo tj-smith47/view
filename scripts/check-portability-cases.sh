@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Case matrix for check-portability.sh. Every case builds a scratch tree,
 # points the scanner at it, and asserts BOTH the exit status and the exact
-# set of file:line:category tokens reported: a case expecting one finding has to fail
-# when a second one is reported, and a case expecting silence has to fail
+# set of file:line:category tokens reported: a case expecting one finding
+# has to fail when a second one is reported, and a case expecting silence
+# has to fail
 # when the scan narrows itself and reports nothing for the wrong reason.
 #
 #   bash scripts/check-portability-cases.sh

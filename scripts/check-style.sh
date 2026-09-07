@@ -537,9 +537,12 @@ check_prose_width() {
   fi
   # A page the walk cannot open is a red verdict naming it: awk reports its
   # own fatal on stderr and stops, and a walk whose status is discarded
-  # reads exactly like a tree whose prose is inside the limit.
+  # reads exactly like a tree whose prose is inside the limit. A directory
+  # named like a page passes -r and is one of those: awk warns on stderr
+  # that it skipped it and exits 0, so the shape is refused here.
   unreadable=$(printf '%s\n' "$pages" | while IFS= read -r page; do
-    [ -r "$page" ] || printf '%s: the width walk cannot read it\n' "$page"
+    { [ -f "$page" ] && [ -r "$page" ]; } ||
+      printf '%s: the width walk cannot read it\n' "$page"
   done)
   if [ -n "$unreadable" ]; then
     printf '%s\n' "$unreadable"
@@ -549,7 +552,18 @@ check_prose_width() {
   rc=0
   wide=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" '
     FNR == 1 { fenced = 0 }
-    /^[[:space:]]*(```|~~~)/ { fenced = !fenced; next }
+    # CommonMark closes a fence only with the character that opened it, and
+    # with a run at least as long. One toggle for both spellings read a
+    # sample containing the other as a close: the block ended early, the
+    # closing fence opened a new one, and every line after it went ungraded.
+    /^[[:space:]]*(```|~~~)/ {
+      match($0, /`+|~+/)
+      ch = substr($0, RSTART, 1)
+      run = RLENGTH
+      if (!fenced) { fenced = 1; fence_ch = ch; fence_run = run }
+      else if (ch == fence_ch && run >= fence_run) { fenced = 0 }
+      next
+    }
     fenced { next }
     /^[[:space:]]*[|#]/ { next }
     length($0) <= limit { next }
@@ -582,6 +596,55 @@ check_prose_width() {
   echo "  row, a heading, or one link -- is already exempt, and a run longer"
   echo "  than the limit is taken out before the line is measured, so a line"
   echo "  reported here is prose with a space in it."
+  return 1
+}
+
+# A script comment wraps at the column a page does, and the population is
+# every script under scripts/ selected by shebang -- the same list the
+# portability legs grade -- because a rule kept by hand over the five gate
+# scripts left an 85-column comment standing in a sixth.
+check_script_comment_width() {
+  local scripts wide rc
+  # the empty guard below is the diagnosis, so the capture cannot take the
+  # script down with it: grep exits non-zero when nothing under scripts/
+  # carries a shebang, which is the case the guard is for
+  scripts=$(find scripts -type f -exec grep -lE '^#!.*(bash|/sh)$' {} + \
+    | LC_ALL=C sort) || true
+  if [ -z "$scripts" ]; then
+    echo "STYLE FAIL: no script found to grade for comment width"
+    echo "  A walk handed an empty list reports nothing and reads like a"
+    echo "  tree whose comments are inside the limit."
+    return 1
+  fi
+  rc=0
+  wide=$(printf '%s\n' "$scripts" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" '
+    FNR == 1 { next }
+    $0 !~ /^[[:space:]]*#/ { next }
+    length($0) <= limit { next }
+    {
+      # the run longer than the limit is what cannot wrap, so the comment is
+      # measured without it, the way the page walk measures prose
+      rest = length($0)
+      n = split($0, word, /[ \t]+/)
+      for (i = 1; i <= n; i++) {
+        if (length(word[i]) > limit) { rest -= length(word[i]) }
+      }
+      if (rest <= limit) { next }
+      printf "%s:%d: %d columns\n", FILENAME, FNR, length($0)
+    }') || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$wide"
+    echo "STYLE FAIL: the comment width walk exited $rc instead of grading"
+    echo "  awk names the script it could not read on stderr above."
+    return 1
+  fi
+  if [ -z "$wide" ]; then
+    return 0
+  fi
+  printf '%s\n' "$wide"
+  echo "STYLE FAIL: a script comment runs past $PROSE_WIDTH columns"
+  echo "  Re-wrap it. A run longer than the limit is taken out before the"
+  echo "  line is measured, so a line reported here has a space in it."
   return 1
 }
 
@@ -620,6 +683,18 @@ if [ "${1:-}" = "--prose-width" ]; then
   fi
   # shellcheck disable=SC2086
   check_prose_width $targets
+  exit $?
+fi
+# The script comment walk alone, graded the same way: a walk that stops
+# reporting reads exactly like a tree whose comments are inside the limit.
+if [ "${1:-}" = "--script-comments" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --script-comments ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_script_comment_width
   exit $?
 fi
 # The acceptance-expectation ban alone, graded the same way and for the same
@@ -814,6 +889,7 @@ if [ -d scripts ]; then
   if [ -n "$other_scripts" ] && echo "$other_scripts" | xargs grep -niE '\bcharter'; then
     echo "STYLE FAIL: planning-charter reference in script comment"; fail=1
   fi
+  check_script_comment_width || fail=1
 fi
 check_acceptance_expectations || fail=1
 if [ -f README.md ]; then

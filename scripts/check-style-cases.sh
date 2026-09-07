@@ -597,6 +597,17 @@ expect_width 1 'docs/page.md:4' \
   'the same token with a sentence beside it, whose prose alone runs past the limit'
 
 new_width_case
+{ printf '```\n~~~\n'; over 81; printf '```\n'; } >> "$CASE/docs/page.md"
+pad 90 'A line of prose ' ' past the limit' >> "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:8' \
+  'a backtick block holding a tilde line, which closes neither the block nor the grading after it'
+
+new_width_case
+mkdir "$CASE/docs/adir.md"
+expect_width 1 'docs/adir.md:unreadable' \
+  'a directory named like a page, which awk skips with a warning and a zero status'
+
+new_width_case
 ln -s missing.md "$CASE/docs/dangling.md"
 expect_width 1 'docs/dangling.md:unreadable' \
   'a page the walk cannot read, which a discarded status would pass as clean'
@@ -604,6 +615,76 @@ expect_width 1 'docs/dangling.md:unreadable' \
 new_width_case
 rm -f "$CASE/README.md" "$CASE/docs/page.md"
 expect_width 1 'empty' 'a tree with no page for the walk to read'
+
+# ---------------------------------------------------------------------------
+# the script comment width gate: a comment under scripts/ wraps at the same
+# column a page does, over the same shebang-selected population the
+# portability legs grade. Counted in bytes, as the page walk counts, so an
+# awk that decodes UTF-8 and one that does not return the same verdict --
+# which is why a comment inside the limit in columns can still be over
+# ---------------------------------------------------------------------------
+new_script_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/scripts"
+  printf '#!/usr/bin/env bash\n# a comment inside the limit\ntrue\n' \
+    > "$CASE/scripts/gate.sh"
+}
+
+expect_script_comments() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --script-comments "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^[^ ].*:[0-9]+: [0-9]+ columns$/ { c = $1; sub(/:$/, "", c); print c; next }
+    /^STYLE FAIL: no script found/ { print "empty"; next }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got" "$out"
+}
+
+new_script_case
+expect_script_comments 0 '' 'a script whose comments are inside the limit'
+
+new_script_case
+pad 80 '# a comment ' ' at the limit' >> "$CASE/scripts/gate.sh"
+expect_script_comments 0 '' 'a comment at exactly the width'
+
+new_script_case
+pad 85 '# a comment ' ' past the limit' >> "$CASE/scripts/gate.sh"
+expect_script_comments 1 'scripts/gate.sh:4' 'a comment five columns over'
+
+new_script_case
+printf '# a path this long %s cannot be wrapped under the limit\n' \
+  "$(pad 90 '' '' | tr -d ' ')" >> "$CASE/scripts/gate.sh"
+expect_script_comments 0 '' 'a comment carrying a token longer than the limit itself'
+
+new_script_case
+printf '# an em dash costs three bytes and one column %s and this line has\n' \
+  '— — — — — — — — — — — —' >> "$CASE/scripts/gate.sh"
+expect_script_comments 1 'scripts/gate.sh:4' \
+  'a comment inside the width in columns and past it in bytes, the measure both walks take'
+
+new_script_case
+pad 85 'true # a comment ' ' past the limit' >> "$CASE/scripts/gate.sh"
+expect_script_comments 0 '' \
+  'an over-wide comment beside code, which has nowhere to wrap without moving the code'
+
+new_script_case
+pad 85 '# a comment ' ' past the limit' > "$CASE/scripts/notes.txt"
+expect_script_comments 0 '' \
+  'an over-wide line in a file under scripts/ that no shebang makes a script'
+
+new_script_case
+rm -f "$CASE/scripts/gate.sh"
+expect_script_comments 1 'empty' 'a tree with no script for the walk to read'
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
