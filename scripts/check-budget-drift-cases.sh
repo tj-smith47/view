@@ -216,6 +216,9 @@ findings() {
     /^BUDGET DRIFT FAIL: spec-id / {
       c = $5; sub(/:$/, "", c); print "spec-id:" c; next
     }
+    /^BUDGET DRIFT FAIL: ratio-drift / {
+      c = $5; sub(/:$/, "", c); print "ratio:" c; next
+    }
     claims && /^  [^ ]+:[0-9]+: / {
       where = $1; sub(/:$/, "", where); print "claim:" where; next
     }
@@ -453,6 +456,32 @@ sed 's/^kind = "felt"$/kind = "diagnostic"/' "$CASE/$BUDGETS" > "$CASE/$BUDGETS.
 mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
 expect 1 'marker:view_p99_ms no-felt' \
   'a budgets file with no felt row, which would anchor every claim by having none'
+
+# ---------------------------------------------------------------------------
+# a ratio quoted beside a cell id is that cell's own recorded value: the
+# anchor rule is satisfied by naming a cell, and a stale number beside the
+# right cell is what a re-record leaves behind everywhere it was quoted
+# ---------------------------------------------------------------------------
+seat_echo_ratio() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[echo.minimal]
+ratio_p50 = 1.1301046068104472
+TOML
+}
+
+new_case
+seat_echo_ratio
+printf '\n| steady typing (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.17x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a multiplier beside the cell it names, quoting the draw a re-record replaced'
+
+new_case
+seat_echo_ratio
+printf '\n| steady typing (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.13x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'the same multiplier, equal to what that cell records at the digits printed'
 
 # ---------------------------------------------------------------------------
 # the gate runs under the bash macOS ships

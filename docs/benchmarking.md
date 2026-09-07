@@ -113,14 +113,14 @@ Recorded baselines on a shared Linux dev host:
 | UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
 | First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, full login, `user` (p99) | 80.5 ms | not recorded on its own | `first_paint.marker_cold_ms`, seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`marker_ratio_p50` 1.084, `marker_ratio_p99` 1.046) |
+| First paint, cold, full login, `user` (p99) | 80.5 ms | not recorded on its own | `first_paint.marker_cold_ms`, seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046) |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower (`echo.view_p99_ms`, `echo.ratio_p50`) |
+| Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower at the tail (`echo.view_p99_ms`, `echo.ratio_p99`); at the median `echo.ratio_p50` reads 1.130 |
 | Keystroke to predicted glyph, no plugins, engine local (p99) | **0.30 ms** | n/a | `echo_speculated.speculated_paint_p99_ms`; `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim paired with it in the same run. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
 | Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
-| Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower (the paired ratio beside the felt `scroll.staleness_p99_ms`) |
+| Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
 
 The two bare-Neovim first-paint figures are the 2026-09-06 dev-linux
 retake. The figures they replace were withdrawn: both sides are spawned on
@@ -150,9 +150,10 @@ pty.
 
 The `user` row is recorded. dev-linux holds `first_paint.marker_cold_ms`
 80.512 ms and `shell_visible_cold_ms` 4.543 ms, seated at `e9087db`, and its
-two ratios come from the 2026-09-06 retake above (1.084 p50, 1.046 p99);
-dev-macos holds 87.563 ms and 12.504 ms with both ratios at 1.061 from its
-own retake. The other two classes hold the absolute and owe the ratio:
+two ratios come from the 2026-09-06 retake above
+(`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99`
+1.046); dev-macos holds 87.563 ms and 12.504 ms with both of its own at
+1.061 from its own retake. The other two classes hold the absolute and owe the ratio:
 `gh-linux` (96.326 ms) and `gh-macos` (169.099 ms) each carry
 `marker_ratio_p50` and `marker_ratio_p99` on that cell as `withdrawn`, the
 same DSR re-seat they owe on `minimal` and `heavy`.
@@ -201,13 +202,15 @@ its bar untouched. Which class holds the five:
 | `dev-macos` | all five owed | a quiet-window session on mbp, `task user-fixture` first |
 | `gh-linux` | all five owed | re-seat from the `bench-measured-gh-linux.toml` artifact its gate leg uploads |
 | `gh-macos` | all five owed | the same re-seat from `bench-measured-gh-macos.toml` |
-| `controlled-linux` | none owed | it measures none of the five scenarios |
+| `controlled-linux` | all five unseated | the matrix runs all five there and nothing scopes them away; its baseline holds no cell for any of them today, and it is the one class that loads the budget table, so a quiet-window recording there is what would attest the felt bars instead of ratcheting against a recorded value |
 
 An owed cell is committed empty with a `[withdrawn.<scenario>.user]` reason
 beside it, which is the state a gate run reports loudly (`GATE COVERAGE
 FAIL`) rather than the state it passes over quietly. Filling one from the
 plugin-free leg's number is the substitution this whole vocabulary exists to
-refuse.
+refuse. `controlled-linux` carries no withdrawal for them because it
+carries no cell either: it is recorded on demand rather than gated, and a
+run of `--all` there selects the same five.
 
 Recording them is one quiet-host session per class:
 
@@ -260,9 +263,10 @@ not a ceiling on what a plugin stack can cost once its triggers do fire.
 ## The typing gap
 
 Steady typing is currently about 13% slower than bare Neovim on the
-plugin-free leg and 11% on the login-shaped one (`echo.ratio_p50` 1.172 and
-1.110), and sustained scrolling about 1.6 to 1.9x the paired
-figure beside the felt `scroll.staleness_p99_ms`. Both are sub-millisecond and far inside their budgets,
+plugin-free leg and 11% on the login-shaped one (`echo.ratio_p50` 1.130 and
+1.110), and sustained scrolling about 1.6 to 1.9x the paired figure beside
+the felt `scroll.staleness_p99_ms` (`scroll.ratio_p50` 1.605 plugin-free
+and 1.891 on the 15-plugin stack). Both are sub-millisecond and far inside their budgets,
 so neither is perceptible. The goal is to beat Neovim, though, not to tie
 it, so the gap gets tracked down rather than shrugged off.
 
@@ -271,7 +275,7 @@ speaking Neovim's RPC protocol just costs this much. Neovim ships its own
 out-of-process TUI, which makes that theory testable. Measured under the
 identical protocol on the same host:
 
-| steady typing, dev-linux (no plugins / 15-plugin stack) | vs bare Neovim (`echo.ratio_p50`) |
+| steady typing, dev-linux, superseded readings (no plugins / 15-plugin stack) | vs bare Neovim (`echo.ratio_p50`) |
 |---|---|
 | Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** (`echo.ratio_p50`) |
 | view, at the time of that measurement | 1.22x / 1.24x (`echo.ratio_p50`) |
@@ -291,7 +295,7 @@ main loop now writes the bytes itself whenever the pipe has signalled it
 can accept them and nothing is queued ahead. Skipping the ~40 µs cost of
 waking an idle core accounts for most of the improvement:
 
-| | before | after |
+| superseded readings, kept as the record of the fix | before | after |
 |---|---|---|
 | RPC handoff to bytes written | 42.5 µs | **10.5 µs** |
 | Keystroke to RPC bytes written (p99) | 154.7 µs | **117.7 µs** |

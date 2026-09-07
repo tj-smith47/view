@@ -80,7 +80,20 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
   harness row table (`view-harness/src/builds.rs`) declares, unless the
   sentence it stands in withdraws it in words -- `withdraw` is the marker,
   so the exemption dies with the retraction that earned it rather than
-  outliving it in a hand-kept list.
+  outliving it in a hand-kept list;
+- a ratio or multiplier quoted on `docs/benchmarking.md` equals no value
+  its own row or paragraph's cell ids record, on any class that unit names
+  (`dev-linux` where it names none), rounded to the digits printed.
+
+That last one is what naming a cell beside a number is for: the anchor rule
+is satisfied by any felt id, so a stale draw beside the right cell reads as
+current, which is what a re-record leaves behind at every site that quoted
+the old one. Only a dimensionless number is graded -- a multiplier, or a
+decimal with no unit behind it -- because an absolute carries its unit and a
+bound carries the word `bar`. A table whose header row says `superseded`
+is read for nothing: a before/after record exists to hold the readings a
+fix replaced, and the marker sits in the header because a reader takes what
+a table is from there.
 
 A table row is its own anchor unit and prose keeps the paragraph scope: a
 line whose first non-space character is `|` is graded alone. An 18-row
@@ -114,7 +127,7 @@ user-facing pages therefore carry no comparative at all -- naming the cell
 that would anchor one is what the identifier rule refuses there -- so they
 state moments and paired numbers, and the comparisons live in
 `docs/benchmarking.md` beside the cell that earns them.
-`scripts/check-budget-drift-cases.sh` grades all seven rules and is what
+`scripts/check-budget-drift-cases.sh` grades all eight rules and is what
 stops the check regressing to the identifier-only form. It runs the checker
 under its own interpreter, and two of its cases grade every script under
 `scripts/` for bash 3.2 portability (`.claude/rules/shell.md`),

@@ -410,6 +410,125 @@ if [[ -n "$bounds" ]]; then
   )
 fi
 
+# Sixth cross-check: a ratio quoted beside a cell id is that cell's own
+# recorded value. docs/benchmarking.md is where the vocabulary allows a
+# comparative, on the condition that it names the cell that earns it -- and
+# a named cell whose baseline holds a different number is the anchor rule
+# passing a claim no measurement supports. The failure is silent by
+# construction: a re-record moves the baseline and leaves every sentence
+# quoting the old draw standing, reading as current.
+#
+# Only a dimensionless number is graded -- a multiplier, or a bare decimal
+# with no unit behind it -- because that is the shape a ratio is written in;
+# an absolute carries its unit, and a bound carries the word bar. A table
+# whose header says superseded is a historical A/B record and is read for
+# nothing: its numbers are the readings a fix replaced, which is what that
+# kind of table is for.
+seats=""
+for class_file in "$baselines_dir"/*.toml; do
+  [[ -f "$class_file" ]] || continue
+  class="$(basename "$class_file" .toml)"
+  # The pattern carries a leading paren: bash 3.2 counts the closing one of
+  # a bare pattern as the end of the enclosing substitution and dies parsing.
+  case "$class" in (*.*) continue ;; esac
+  seats="$seats$(awk -v class="$class" '
+    /^\[/ {
+      h=$0; gsub(/[][]/, "", h); n=split(h, part, ".")
+      scenario = (part[1] == "withdrawn" || n < 2) ? "" : part[1]
+      next
+    }
+    scenario != "" && /^[a-z_0-9]+ = [0-9.]+$/ { print class "\t" scenario "." $1 "\t" $3 }
+  ' "$class_file")"$'\n'
+done
+if [[ -f "$bench_page" && -n "${seats//[$'\n' ]/}" ]]; then
+  quoted="$(awk -v page="${bench_page#"$root"/}" '
+    FNR == NR {
+      split($0, f, "\t")
+      if (f[2] == "") { next }
+      seat[f[1] SUBSEP f[2]] = seat[f[1] SUBSEP f[2]] " " f[3]
+      next
+    }
+    # Every class the unit names, since a sentence comparing two classes
+    # quotes a value from each; dev-linux where it names none, which is the
+    # class the page states its recorded numbers on.
+    function classes_of(text,   i, n, name, named) {
+      n = split("controlled-linux dev-macos dev-linux gh-macos gh-linux", name, " ")
+      named = ""
+      for (i = 1; i <= n; i++) {
+        if (index(text, name[i]) > 0) { named = named " " name[i] }
+      }
+      return named == "" ? " dev-linux" : named
+    }
+    function clean(t) {
+      gsub(/[`*~()>]/, "", t)
+      sub(/[,;:.]+$/, "", t)
+      return t
+    }
+    function seated(num, vals,   n, v, i, dec, fmt) {
+      dec = length(num) - index(num, ".")
+      fmt = "%." dec "f"
+      n = split(vals, v, " ")
+      for (i = 1; i <= n; i++) {
+        if (sprintf(fmt, v[i]) + 0 == num + 0) { return 1 }
+      }
+      return 0
+    }
+    function grade(   i, j, k, m, nc, hit, klass, w, text, cls, vals, n, part, num, nxt, ntok) {
+      if (uc == 0) { return }
+      text = ""
+      for (i = 1; i <= uc; i++) { text = text " " ul[i] }
+      cls = classes_of(text)
+      nc = split(cls, klass, " ")
+      named = ""
+      vals = ""
+      n = split(text, part, "`")
+      for (i = 2; i <= n; i += 2) {
+        if (part[i] !~ /^[a-z_]+\.[a-z_0-9]+$/) { continue }
+        hit = 0
+        for (k = 1; k <= nc; k++) {
+          if ((klass[k] SUBSEP part[i]) in seat) {
+            vals = vals seat[klass[k] SUBSEP part[i]]
+            hit = 1
+          }
+        }
+        if (hit && index(named, " " part[i] " ") == 0) { named = named " " part[i] " " }
+      }
+      if (vals == "") { uc = 0; return }
+      ntok = 0
+      for (i = 1; i <= uc; i++) {
+        m = split(ul[i], w, /[ \t]+/)
+        for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
+      }
+      for (i = 1; i <= ntok; i++) {
+        num = clean(tk[i])
+        if (num !~ /^[0-9]+\.[0-9]+x?$/) { continue }
+        nxt = clean(tk[i + 1])
+        if (nxt ~ /^(ms|us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame)$/) { continue }
+        sub(/x$/, "", num)
+        if (!seated(num, vals)) {
+          sub(/ +$/, "", named)
+          printf "BUDGET DRIFT FAIL: ratio-drift %s:%d: %s is quoted beside%s, and no value%s records for those cells rounds to it at the digits printed\n",
+            page, tl[i], num, named, cls
+        }
+      }
+      uc = 0
+    }
+    /^[[:space:]]*\|/ {
+      grade()
+      if (!intable) { intable = 1; skip = ($0 ~ /superseded/) }
+      if (!skip) { ul[1] = $0; uno[1] = FNR; uc = 1; grade() }
+      next
+    }
+    /^[[:space:]]*$/ { grade(); intable = 0; next }
+    { intable = 0; uc++; ul[uc] = $0; uno[uc] = FNR }
+    END { grade() }
+  ' <(printf '%s' "$seats") "$bench_page")"
+  if [[ -n "$quoted" ]]; then
+    printf '%s\n' "$quoted" >&2
+    fail=1
+  fi
+fi
+
 if [[ $entries -eq 0 ]]; then
   echo "BUDGET DRIFT FAIL: no [[budget]] entries found in $budgets" >&2
   exit 1
