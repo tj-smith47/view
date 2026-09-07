@@ -434,10 +434,9 @@ fi
 # Only a dimensionless number is graded -- a multiplier, a bare decimal with
 # no unit behind it, or a percentage, which states the same ratio as its
 # distance from 1 -- because that is the shape a ratio is written in; an
-# absolute carries its unit, and a bound carries the word bar. A table whose
-# header says superseded is a historical A/B record and is read for nothing:
-# its numbers are the readings a fix replaced, which is what that kind of
-# table is for.
+# absolute carries its unit, and a bound carries the word bar. Every table is
+# read: a header word bought a whole table out of this check and out of the
+# sweep that grades its population at once, which is a bypass one edit wide.
 seats=""
 for class_file in "$baselines_dir"/*.toml; do
   [[ -f "$class_file" ]] || continue
@@ -674,12 +673,11 @@ if [[ -f "$bench_page" && $seats == *[![:space:]]* ]]; then
     }
     /^[[:space:]]*\|/ {
       grade()
-      if (!intable) { intable = 1; skip = ($0 ~ /superseded/) }
-      if (!skip) { ul[1] = $0; uno[1] = FNR; uc = 1; grade() }
+      ul[1] = $0; uno[1] = FNR; uc = 1; grade()
       next
     }
-    /^[[:space:]]*$/ { grade(); intable = 0; next }
-    { intable = 0; uc++; ul[uc] = $0; uno[uc] = FNR }
+    /^[[:space:]]*$/ { grade(); next }
+    { uc++; ul[uc] = $0; uno[uc] = FNR }
     END { grade() }
   ' <(printf '%s' "$seats") "$bench_page")"
   if [[ -n "$quoted" ]]; then
@@ -843,13 +841,42 @@ if [[ $seats == *[![:space:]]* ]]; then
       for (i = 1; i <= n; i++) { sentence_verdict(sent[i], whyat) }
       why = ""
     }
+    # The draws a record run took are a field rather than a sentence, and
+    # the member stating the entry own seat is the one figure in it a
+    # re-record retires. An array that no longer states that seat is the
+    # stale copy the field was minted to end, so the array names it or the
+    # entry is refused -- the same rule the loader holds.
+    function check_trials(line, at,   body, n, t, i, num, ok) {
+      body = line
+      sub(/^trials = /, "", body)
+      gsub(/[][]/, "", body)
+      if (acc == "") {
+        printf "BUDGET DRIFT FAIL: trials-seat %s/%s.%s: %s:%d lists the draws of an entry that states no accepted value, so the array is anchored to nothing\n",
+          class, scen, fixt, file, at
+        return
+      }
+      n = split(body, t, /,/)
+      ok = 0
+      for (i = 1; i <= n; i++) {
+        num = t[i]
+        gsub(/[ \t]/, "", num)
+        if (num !~ /^-?[0-9]+(\.[0-9]+)?$/) { continue }
+        if (sprintf("%." decimals(num) "f", acc) + 0 == num + 0) { ok = 1 }
+      }
+      if (!ok) {
+        printf "BUDGET DRIFT FAIL: trials-seat %s/%s.%s: %s:%d lists the draws a record run took and none of them rounds to the accepted %s, so the array states a seat this entry does not hold\n",
+          class, scen, fixt, file, at, acc
+      }
+    }
     /^\[\[/ {
       flush()
       block = ($0 ~ /shortfall/)
-      scen = ""; fixt = ""; metr = ""; class = ""; why = ""
+      scen = ""; fixt = ""; metr = ""; class = ""; why = ""; acc = ""
       next
     }
     !block { next }
+    /^accepted = / { acc = value($0); next }
+    /^trials = / { check_trials($0, FNR); next }
     /^scenario = / { scen = value($0); next }
     /^fixture = / { fixt = value($0); next }
     /^metric = / { metr = value($0); next }
@@ -890,28 +917,61 @@ export RTT_LEG='remote-rtt\.sh|remote_memory'
 # far side of a network | not yet recorded` carries a later `not` that
 # denies the recording rather than the transport.
 export TRANSPORT_NOT='not|no|never|without|nor'
+# The clause a licence is confined to. This tree writes its em dash as two
+# hyphens and the pages carry both spellings.
+export TRANSPORT_CLAUSE='[,;:]|--|—'
+
+# The window, written once and pasted into the three awk programs that read
+# it: three copies of it drifted for one round already, and a window pinned
+# in one copy is a window unpinned in the other two.
+NEGATED_AWK='
+    # The five tokens before the phrase own match position in the rejoined
+    # text, never over whitespace tokens: no token ever equals `far side` or
+    # `another machine`, so a token walk could not reach either phrase and
+    # every true denial written around one was refused.
+    function denied_before(text, phrase,   rest, before, n, w, j, lo) {
+      rest = text
+      while (match(rest, phrase) > 0) {
+        before = substr(rest, 1, RSTART - 1)
+        sub(/[ \t]+$/, "", before)
+        n = split(before, w, /[ \t]+/)
+        lo = (n - 4 < 1) ? 1 : n - 4
+        for (j = lo; j <= n; j++) {
+          if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
+        }
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      return 0
+    }
+    # `local` licenses the clause that carries it and nothing wider, and only
+    # where it is not itself denied: an unrelated clause reporting a local
+    # picker cache licensed the transport claim beside it, and a clause
+    # saying the reading is not local licensed its own inversion.
+    function local_licenses(text,   n, cl, i) {
+      n = split(text, cl, ENVIRON["TRANSPORT_CLAUSE"])
+      for (i = 1; i <= n; i++) {
+        if (cl[i] !~ /(^|[^a-z])local([^a-z]|$)/) { continue }
+        if (cl[i] !~ transport) { continue }
+        if (denied_before(cl[i], "(^|[^a-z])local([^a-z]|$)")) { continue }
+        return 1
+      }
+      return 0
+    }
+    # The negation has to sit beside the transport word rather than anywhere
+    # in the unit: a bullet is one unit and a paragraph is several sentences,
+    # and a `no` at the far end of either says nothing about the clause the
+    # transport word stands in.
+    function negated(text) {
+      if (local_licenses(text)) { return 1 }
+      return denied_before(text, transport)
+    }
+'
 
 transport_in() {
   local page="$1"
   local shown="${page#"$root"/}"
   [[ -f "$page" ]] || return 0
-  awk -v page="$shown" '
-    # The negation has to sit beside the transport word rather than anywhere
-    # in the unit: a bullet is one unit and a paragraph is several sentences,
-    # and a `no` at the far end of either says nothing about the clause the
-    # transport word stands in.
-    function negated(text,   i, j, n, w, lo) {
-      if (text ~ /(^|[^a-z])local([^a-z]|$)/) { return 1 }
-      n = split(text, w, /[ \t]+/)
-      for (i = 1; i <= n; i++) {
-        if (w[i] !~ transport) { continue }
-        lo = (i - 5 < 1) ? 1 : i - 5
-        for (j = lo; j < i; j++) {
-          if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
-        }
-      }
-      return 0
-    }
+  awk -v page="$shown" "$NEGATED_AWK"'
     function verdict(text, at) {
       if (text !~ transport) { return }
       if (text ~ leg) { return }
@@ -973,19 +1033,7 @@ transported+="$(transport_in "$bench_page")"$'\n'
 bounds="$(section_bounds '### 3.1 Budgets (CI-gated once the harness lands, P3)' '^#{2,3} ')"
 if [[ -n "$bounds" ]]; then
   transported+="$(sed -n "${bounds%:*},${bounds#*:}p" "$spec" |
-    awk -v page="${spec#"$root"/}" -v off="$((${bounds%:*} - 1))" '
-      function negated(text,   i, j, n, w, lo) {
-        if (text ~ /(^|[^a-z])local([^a-z]|$)/) { return 1 }
-        n = split(text, w, /[ \t]+/)
-        for (i = 1; i <= n; i++) {
-          if (w[i] !~ transport) { continue }
-          lo = (i - 5 < 1) ? 1 : i - 5
-          for (j = lo; j < i; j++) {
-            if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
-          }
-        }
-        return 0
-      }
+    awk -v page="${spec#"$root"/}" -v off="$((${bounds%:*} - 1))" "$NEGATED_AWK"'
       BEGIN {
         transport = ENVIRON["TRANSPORT"]
         speculated = ENVIRON["SPECULATED"]
@@ -1001,19 +1049,7 @@ fi
 # is read the same way the pages are: the entry names the scenario, and a
 # speculated row that reaches for a transport word states a condition its
 # own recording never had.
-transported+="$(awk -v file="${budgets#"$root"/}" '
-  function negated(text,   i, j, n, w, lo) {
-    if (text ~ /(^|[^a-z])local([^a-z]|$)/) { return 1 }
-    n = split(text, w, /[ \t]+/)
-    for (i = 1; i <= n; i++) {
-      if (w[i] !~ transport) { continue }
-      lo = (i - 5 < 1) ? 1 : i - 5
-      for (j = lo; j < i; j++) {
-        if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
-      }
-    }
-    return 0
-  }
+transported+="$(awk -v file="${budgets#"$root"/}" "$NEGATED_AWK"'
   BEGIN {
     transport = ENVIRON["TRANSPORT"]
     leg = ENVIRON["RTT_LEG"]

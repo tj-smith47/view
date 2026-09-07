@@ -193,6 +193,39 @@ new_case() {
   plant_harness
 }
 
+# A row inside the spec's own 3.1 section, which is the second surface the
+# transport window is read on. It lands immediately before the section that
+# closes 3.1, so the line it is reported at is the same in every case.
+add_spec_row() {
+  awk -v row="$1" '/^## 4[.] After the budgets$/ { print row } { print }' \
+    "$CASE/$SPEC" > "$CASE/$SPEC.tmp"
+  mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
+}
+
+# The draws a record run took, on the shortfall the tree plants. They land
+# above its why, so the line the finding names is the same in every case.
+set_trials() {
+  awk -v arr="$1" '/^why = / { print "trials = " arr } { print }' \
+    "$CASE/$BUDGETS" > "$CASE/$BUDGETS.tmp"
+  mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
+}
+
+# A felt statement on the speculated row, which is the third surface: the
+# budgets file states the moment in a person's words the way the pages do.
+add_felt_row() {
+  cat >> "$CASE/$BUDGETS" <<TOML
+
+[[budget]]
+spec_row = "Keypress -> cell change end-to-end, steady typing"
+scenario = "echo_speculated"
+metric = "speculated_ratio_p50"
+max = 8.0
+kind = "felt"
+felt = "$1"
+config = "real"
+TOML
+}
+
 # Each failure the check can raise collapses to one token. Headers collapse
 # to a guard name so that rewording a diagnostic is not a regression, while
 # the two rules that name a place keep it: an identifier finding is only
@@ -236,6 +269,9 @@ findings() {
     }
     /^BUDGET DRIFT FAIL: why-figure / {
       c = $5; sub(/:$/, "", c); print "unattributed:" c; next
+    }
+    /^BUDGET DRIFT FAIL: trials-seat / {
+      c = $5; sub(/:$/, "", c); print "trials:" c; next
     }
     /^BUDGET DRIFT FAIL: a transport condition stands/ { next }
     /^  transport [^ ]+:[0-9]+: / {
@@ -591,6 +627,24 @@ mv "$CASE/$BENCH.tmp" "$CASE/$BENCH"
 expect 1 'default' 'a declared default class no shipped baseline records'
 
 # ---------------------------------------------------------------------------
+# no header word buys a table out of the walk: a word in a heading cell used
+# to take every figure under it out of this check and out of the sweep at
+# once, which is a bypass one edit wide
+# ---------------------------------------------------------------------------
+new_case
+seat_echo_ratio
+printf '\n| measurement (superseded) | reading |\n| --- | --- |\n| steady typing, no plugins (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.107x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:14' \
+  'a drifted figure under a header cell carrying the word superseded'
+
+new_case
+seat_echo_ratio
+printf '\n| measurement (superseded) | reading |\n| --- | --- |\n| steady typing, no plugins (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.130x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'the same table where the figure states the seat it names'
+
+# ---------------------------------------------------------------------------
 # a percentage states the same ratio as its distance from 1, and a percentage
 # of a population states a share of it
 # ---------------------------------------------------------------------------
@@ -923,6 +977,25 @@ expect 1 'why:dev-linux/first_paint.minimal' \
   'a percentage no distance from that bar rounds to'
 
 # ---------------------------------------------------------------------------
+# the draws a record run took are a field, and the member stating the entry
+# own seat is the one figure in it a re-record retires: the array names that
+# seat or the entry is refused, in the file check and in the loader alike
+# ---------------------------------------------------------------------------
+new_case
+set_trials '[31.0, 30.2, 31.4]'
+expect 0 '' 'an array of draws that states the accepted value it stands beside'
+
+new_case
+set_trials '[31.2, 30.2, 31.4]'
+expect 1 'trials:dev-linux/first_paint.minimal' \
+  'the same array after a re-record moved the seat out from under it'
+
+new_case
+set_trials '[31.05, 30.2]'
+expect 1 'trials:dev-linux/first_paint.minimal' \
+  'a member that states the seat at more digits than the seat holds'
+
+# ---------------------------------------------------------------------------
 # the predicted glyph is a local reading, and the acceptance RTT leg is the
 # only surface a transport claim may rest on. A table is one subject spread
 # over its rows, so the scope is the table and the finding is the row: the
@@ -1007,9 +1080,90 @@ printf '\nview speaks to a remote engine over SSH; no prediction is involved in 
 expect 0 '' 'a page saying the numbers rest on no prediction at all'
 
 new_case
-printf '\nEvery number here is local: nothing on this page was measured with the engine on another machine, and the predicted glyph is no exception.\n' \
+printf '\nEvery number here was measured with the engine local to the terminal rather than on another machine, and the predicted glyph is no exception.\n' \
   >> "$CASE/$README"
 expect 0 '' 'a page stating the condition its readings were taken under, which is local'
+
+# the licence belongs to the clause that carries `local` and to no other: an
+# unrelated clause reporting a local picker cache licensed the transport
+# claim beside it, and a clause denying localness licensed its own inversion
+new_case
+printf '\nThe predicted glyph here is not local: it was measured with the engine on another machine.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'a unit denying localness in one clause and asserting the transport in the next'
+
+new_case
+printf '\nThe picker cache is local, and the predicted glyph was measured on another machine.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'a local reported in a clause the transport claim does not stand in'
+
+new_case
+printf '\nThe predicted glyph is not local when the engine happens to sit on another machine.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'one clause carrying both, with the local itself denied and the transport word out of the window'
+
+new_case
+printf '\nThe predicted glyph was measured on another machine -- the reading this page publishes is local.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'a local behind the em dash this tree writes as two hyphens, which ends the clause'
+
+# the window itself, on each of the three surfaces that read it: a denial
+# beside the transport word licenses the unit and the same denial six tokens
+# ahead of it licenses nothing, so removing the scan reddens every surface
+new_case
+printf '\nNo network stands between the two engines when the predicted glyph is drawn.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'a denial one token before the transport word on the page'
+
+new_case
+printf '\nNo engine anywhere near this page was measured with the predicted glyph drawn across a network.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'the same denial six tokens ahead of the transport word, which denies nothing about it'
+
+new_case
+add_spec_row '| Keystroke to predicted glyph | never measured across a network | bench suite |'
+expect 0 '' 'a denial beside the transport word in a spec 3.1 row'
+
+new_case
+add_spec_row '| Keystroke to predicted glyph | no bench leg has ever put the engine across a network | bench suite |'
+expect 1 'transport:.claude/specs/2026-07-17-view-design.md:16' \
+  'the same denial six tokens ahead of it in a spec 3.1 row'
+
+new_case
+add_felt_row 'the glyph view expects, never drawn across a network'
+expect 0 '' 'a denial beside the transport word in a felt statement'
+
+new_case
+add_felt_row 'the glyph view expects, drawn with no engine this bench leg ever put across a network'
+expect 1 'transport:crates/view-bench/budgets.toml:33' \
+  'the same denial six tokens ahead of it in a felt statement'
+
+# the two multi-word transport phrases are reachable only from the phrase own
+# match position: no whitespace token ever equals `another machine`, so a
+# token walk refused every true denial written around one
+new_case
+printf '\nThe predicted glyph was never measured on another machine.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'a denial before a two-word transport phrase'
+
+new_case
+printf '\nThe predicted glyph was drawn on the far side of a network.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'the same phrase with no denial anywhere before it'
+
+# the rules file own example of a licensed unit, planted exactly as it is
+# written there, so the page teaching the rule and the check reading it
+# cannot drift apart
+new_case
+printf '\nNaming the acceptance RTT leg by its script name is the licensed\nsurface: a unit that says `scripts/acceptance/remote-rtt.sh` (or the\n`remote_memory` row) may describe the predicted glyph and a transport\ncondition together, because the leg it names is where the round trip is\ninjected. So the true sentence about remote editing -- keystrokes echoed\nwithout waiting for the round trip, view drawing the character it expects\n-- passes where it names that leg and fails where it names none.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'the licensed-surface paragraph, exactly as the rules file writes it'
 
 new_case
 printf '\nEvery number here was measured with the engine on another machine, and the predicted glyph is no exception.\n' \

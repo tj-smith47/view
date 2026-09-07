@@ -233,11 +233,13 @@ pub struct Shortfall {
     /// The measured value when this shortfall was accepted. A later run may
     /// match or improve on it; anything worse fails.
     pub accepted: f64,
-    /// The draws the record run took for this cell, in the order it took
-    /// them. No cell holds a trial -- the bare-engine arm of a paired run
-    /// has no seat of its own -- so a spread written into `why` as prose is
-    /// a figure nothing can grade; it belongs here instead. The gate reads
-    /// it for nothing.
+    /// The readings the record run took for this cell, in the order it took
+    /// them, `accepted` among them. No cell holds a draw -- the bare-engine
+    /// arm of a paired run has no seat of its own -- so a spread written
+    /// into `why` as prose is a figure nothing can grade; it belongs here
+    /// instead. The gate reads the draws for nothing and the seat for one
+    /// thing: an array that no longer states `accepted` is refused at load,
+    /// so a re-record cannot leave the retired value standing here.
     #[serde(default)]
     pub trials: Option<Vec<f64>>,
     pub why: String,
@@ -395,6 +397,19 @@ pub enum BudgetError {
         class: String,
     },
     #[error(
+        "{path}: [[shortfall]] {entry} lists trials that state no seat: none of them rounds to \
+         the accepted {accepted} at the digits it prints, so a re-record retires the value the \
+         array names and nothing reddens"
+    )]
+    // the entry is one preformatted field rather than the four its sibling
+    // above carries: four strings and a float put the enum past the size
+    // clippy lets a Result error hold, and every caller prints it whole
+    TrialsWithoutSeat {
+        path: String,
+        entry: String,
+        accepted: f64,
+    },
+    #[error(
         "{path}: [[{table}]] for {scenario} names metric {metric}, which \
          baselines::RECORDED_METRICS does not declare; no row produces it, so the bound would \
          never be checked against anything"
@@ -546,6 +561,28 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
         }
     }
     classify(&file, &display)?;
+    // the array holds the readings no cell holds, and the one reading a cell
+    // does hold: a member equal to the entry's own accepted. That member is
+    // the only figure in it a re-record retires, so the array has to state
+    // it -- the same rule scripts/check-budget-drift.sh holds over the file
+    for shortfall in &file.shortfall {
+        let Some(trials) = shortfall.trials.as_deref() else {
+            continue;
+        };
+        if !trials
+            .iter()
+            .any(|trial| states_seat(shortfall.accepted, *trial))
+        {
+            return Err(BudgetError::TrialsWithoutSeat {
+                path: display,
+                entry: format!(
+                    "{}.{} {} on {}",
+                    shortfall.scenario, shortfall.fixture, shortfall.metric, shortfall.class
+                ),
+                accepted: shortfall.accepted,
+            });
+        }
+    }
     // a shortfall against no budget is dead weight that reads as an accepted
     // gap: it would sit in the file forever describing a bound nobody checks
     for shortfall in &file.shortfall {
@@ -568,6 +605,20 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
         }
     }
     Ok(file)
+}
+
+/// Whether `trial` is `accepted` written at the digits the trial prints.
+///
+/// A draw is written to the digits the run reported, and `accepted` carries
+/// every digit the statistic had, so the two are equal only at the shorter
+/// spelling: 1.172 states an accepted 1.1719342968313597 and 1.169 does not.
+/// A trailing zero does not survive the parse, so `1.170` reaches this as
+/// two digits; `scripts/check-budget-drift.sh` reads the file as text and
+/// holds the same rule at the digits the array was written in.
+fn states_seat(accepted: f64, trial: f64) -> bool {
+    let printed = format!("{trial}");
+    let digits = printed.split_once('.').map_or(0, |(_, frac)| frac.len());
+    format!("{accepted:.digits$}") == format!("{trial:.digits$}")
 }
 
 /// Refuses a budget row whose human meaning is unwritten.
@@ -1061,6 +1112,35 @@ mod tests {
             "{head}{entry}trials = [1.21, 1.19, 1.20]\nwhy = \"unattributed\"\n"
         ));
         assert_eq!(with.shortfall[0].trials, Some(vec![1.21, 1.19, 1.20]));
+    }
+
+    /// The array states the entry's own seat or it is refused: that member
+    /// is the one figure in it a re-record retires, and the round it was
+    /// minted in shipped three arrays holding a value nothing graded.
+    #[test]
+    fn a_trials_array_states_the_accepted_it_stands_beside() {
+        let entry = "\n[[shortfall]]\nscenario = \"echo\"\nfixture = \"user\"\n\
+                     metric = \"ratio_p50\"\nclass = \"dev-linux\"\n\
+                     accepted = 1.1719342968313597\n";
+        let head = "schema = 1\n\n[[budget]]\nspec_row = \"r\"\nscenario = \"echo\"\n\
+                    metric = \"ratio_p50\"\nmax = 1.1\nkind = \"felt\"\n\
+                    felt = \"you type and the character is on screen\"\nconfig = \"real\"\n";
+
+        let seated = parse(
+            &format!("{head}{entry}trials = [1.215, 1.172, 1.159]\nwhy = \"w\"\n"),
+            "seated.toml",
+        )
+        .expect("a trials array stating the accepted value at three digits loads");
+        assert_eq!(seated.shortfall[0].trials, Some(vec![1.215, 1.172, 1.159]));
+
+        let err = parse(
+            &format!("{head}{entry}trials = [1.215, 1.169, 1.159]\nwhy = \"w\"\n"),
+            "unseated.toml",
+        )
+        .expect_err("an array stating no accepted value is refused");
+        let text = err.to_string();
+        assert!(text.contains("echo.user"), "{text}");
+        assert!(text.contains("1.1719342968313597"), "{text}");
     }
 
     /// A shortfall ceiling must move with the class's measured headroom, not
