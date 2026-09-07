@@ -574,8 +574,7 @@ fixture = "heavy"
 metric = "marker_ratio_p50"
 class = "dev-linux"
 accepted = 1.1007776687309356
-trials = [1.101, 55.079, 50.037]
-why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired, re-seated 2026-09-06 from the dev-linux retake under a pty that answers the queries nvim's tty startup asks. It replaces 0.460, which was a ratio against a bare-nvim arm waiting out its own background-query timeout. Measured now: marker_ratio_p50 reads 1.101x bare nvim's p50 on this fixture. The whole paired row reads the same way, an entry per fixture, so view trails bare nvim by 8-10% on every cold cell rather than beating it. What it trails by is the post-VimEnter attach-plus-takeover round trip the late-attach design pays serially, since nvim's own TUI attaches before init runs; attribution past that outline is owed to the pre-v0.1.0 performance session and to the settled-screen cell's own work. The 0.30 bar is untouched: it is the promise the user stated, and this entry records the gap rather than retiring it."
+why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired, re-seated 2026-09-06 from the dev-linux retake under a pty that answers the queries nvim's tty startup asks. It replaces a ratio taken against a bare-nvim arm waiting out its own background-query timeout, whose reading is in the commit that re-seated this entry. Measured now: marker_ratio_p50 reads 1.101x bare nvim's p50 on this fixture. The whole paired row reads the same way, an entry per fixture, so view trails bare nvim by 8-10% on every cold cell rather than beating it. What it trails by is the post-VimEnter attach-plus-takeover round trip the late-attach design pays serially, since nvim's own TUI attaches before init runs; attribution past that outline is owed to the pre-v0.1.0 performance session and to the settled-screen cell's own work. The 0.30 bar is untouched: it is the promise the user stated, and this entry records the gap rather than retiring it."
 
 # The three real-config seats recorded on 2026-09-06, in the quiet windows
 # the S1.11 report logs. Each is the felt row measured where its own
@@ -589,7 +588,6 @@ fixture = "user"
 metric = "settled_ratio_p50"
 class = "dev-linux"
 accepted = 1.0897897644234942
-trials = [1.0898, 56.031, 51.415]
 why = "the felt launch on the config it claims: settled_ratio_p50 reads 1.0898, which is 9.0 percent over the 1.0 bar. The record run was taken under lazy.nvim, noice and nvim-notify. What the gap is not: the diagnostic that decomposes this cell, server_delta_ms, reads -0.076 ms on the same run, so the embedded engine's own startup costs nothing here. What is measured of the cause: view attaches and takes over serially after the config's VimEnter has run, where nvim's own TUI is attached before init starts, and the first_paint entries above record the same event on the bench fixtures, each against its own recorded ratio. Root-causing it past that outline is an open task; the bar is untouched, and this entry records the gap rather than retiring it."
 
 [[shortfall]]
@@ -598,7 +596,6 @@ fixture = "user"
 metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.1097269280826585
-trials = [1.1097, 0.920, 0.829]
 why = "the felt typing row on the config it claims: ratio_p50 reads 1.1097, which is 0.9 percent over the 1.10 bar. The same cell's view-side tail, view_p99_ms 1.583 ms, sits well inside its own 8 ms bound. Attribution is the echo.minimal entry above, reproduced under a real plugin config: the residual is the rpc-written to redraw-parsed leg of the round trip, which no view-side input or paint lever addresses. The plugin stack changes the cell's shape hardly at all: ratio_p50 reads 1.1097 on the login-shaped fixture. The plugin-free leg records ratio_p50 1.1301 on the entry above. The pinned closure path is unchanged and is now measured on this same config: echo_speculated.speculated_ratio_p50 reads 0.332 of the paired bare-nvim run, which removes the engine round trip from perceived echo instead of shrinking view's share of the measured one. This entry keeps measuring the honest unspeculated round trip."
 
 [[shortfall]]
@@ -607,7 +604,6 @@ fixture = "user"
 metric = "cadence_p99_ms"
 class = "dev-linux"
 accepted = 16.914409
-trials = [16.914, 17.480, 48.9]
 why = "the redraw cadence under a terminal flood on the login-shaped fixture: cadence_p99_ms reads 16.914 ms at the p99 against the 16 ms frame. What is measured of the cause: both sides miss the frame under this plugin stack, and the recorded cadence_p99_ratio is 0.981 and pace_ratio 1.018, so view answers on the engine's own redraw cadence under the stack and drains within 2 percent of the lines nvim drains in the same fixed window. The same run reported bare nvim's own cadence p99 and its worst no-paint gap, neither of them gated. Attribution past that -- what the stack makes the engine spend per redraw -- is an open task; the bar is untouched."
 
 # input_path.minimal key_to_rpc_p99_us dev-linux is no longer listed. The
@@ -658,7 +654,7 @@ fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-macos"
 accepted = 1.1066140177690031
-why = "ratio_p50 1.1066, 0.6% over the 1.1 bar on the quiet-host re-record. The contaminated-host 1.1125 shrank to that. Same residual as dev-linux's echo.minimal shortfall -- the echo_control row on this class attributes it to view rather than the UI protocol -- but dev-macos has not had the round-trip stage decomposition dev-linux ran to localize the remaining per-hop cost."
+why = "ratio_p50 1.1066, 0.6% over the 1.1 bar on the quiet-host re-record. The contaminated-host reading it replaces, which the commit that re-recorded the cell carries, shrank to that. Same residual as dev-linux's echo.minimal shortfall -- the echo_control row on this class attributes it to view rather than the UI protocol -- but dev-macos has not had the round-trip stage decomposition dev-linux ran to localize the remaining per-hop cost."
 
 [[shortfall]]
 scenario = "echo"
@@ -666,8 +662,8 @@ fixture = "heavy"
 metric = "ratio_p50"
 class = "dev-macos"
 accepted = 1.114
-trials = [1.114, 0.974, 1.2513]
-why = "ratio_p50 1.114, 1.3% over the 1.1 bar at the median of a statistic this class cannot pin tighter. Eight quiet-host replicates span 0.974-1.218, within-replicate trial spread 2-8% against about a quarter between replicates -- both processes' absolute p50 redraw in discrete tiers per spawned pair (core placement), not with ambient load: the lowest and highest clean draws on record both landed at 1-min loads inside the campaign's own cap, the highest from a same-commit gate run. That gate draw and the 2026-08-02 recorded 1.0782 are both ordinary draws from this spread of trials, and the record that replaced them took the median instead. The accepted value and the recorded baseline are the replicate median ratio_p50 1.114 rather than any single draw a below-median record would false-fail against; the two ways of taking that median, all eight against load-included, differ by less than the last digit the bar is stated at. Same own-path residual as echo.minimal on this class."
+trials = [0.974, 1.2513]
+why = "ratio_p50 1.114, 1.3% over the 1.1 bar at the median of a statistic this class cannot pin tighter. Eight quiet-host replicates span 0.974-1.218, within-replicate trial spread 2-8% against about a quarter between replicates -- both processes' absolute p50 redraw in discrete tiers per spawned pair (core placement), not with ambient load: the lowest and highest clean draws on record, which are this entry's trials, both landed at 1-min loads inside the campaign's own cap, the highest from a same-commit gate run. That gate draw and the 2026-08-02 recording it replaced are both ordinary draws from this spread, and the record that replaced them took the median instead. The accepted value and the recorded baseline are the replicate median ratio_p50 1.114 rather than any single draw a below-median record would false-fail against; the two ways of taking that median, all eight against load-included, differ by less than the last digit the bar is stated at. Same own-path residual as echo.minimal on this class."
 
 # dev-macos first_paint, from the 2026-08-02 quiet-host re-record (the
 # class's first recording of this row was taken on a host with a busy login
@@ -708,7 +704,7 @@ fixture = "heavy"
 metric = "marker_ratio_p50"
 class = "dev-macos"
 accepted = 1.0452704108959787
-why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired, re-seated 2026-09-06 from this class's own retake under a pty that answers the queries nvim's tty startup asks. It replaces 0.3956, which was a ratio against a bare-nvim arm waiting out its own background-query timeout; every pre-fix figure this entry used to carry (the 0.3785-0.3956 clean-host spread, the 0.188 minimal reading the 0.30x bar was set against) was measured the same way and is inadmissible. Measured now: marker_ratio_p50 reads 1.045x bare nvim's p50 on this fixture. The whole paired row reads the same way, an entry per fixture, so on this class view trails bare nvim on the 15-plugin and real-config cells and is level with it on the plugin-free one. The residual is the same serial post-VimEnter attach and takeover the dev-linux entry names, since nvim's own TUI attaches before init runs; attribution past that outline is owed to the pre-v0.1.0 performance session. The 0.30 bar is untouched: it is the promise the user stated, and this entry records the gap rather than retiring it."
+why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired, re-seated 2026-09-06 from this class's own retake under a pty that answers the queries nvim's tty startup asks. It replaces a ratio against a bare-nvim arm waiting out its own background-query timeout; every reading this entry used to carry -- the clean-host spread it quoted and the minimal reading the 0.30x bar was set against -- was measured the same way, and the commit that retired them is where they live. Measured now: marker_ratio_p50 reads 1.045x bare nvim's p50 on this fixture. The whole paired row reads the same way, an entry per fixture, so on this class view trails bare nvim on the 15-plugin and real-config cells and is level with it on the plugin-free one. The residual is the same serial post-VimEnter attach and takeover the dev-linux entry names, since nvim's own TUI attaches before init runs; attribution past that outline is owed to the pre-v0.1.0 performance session. The 0.30 bar is untouched: it is the promise the user stated, and this entry records the gap rather than retiring it."
 
 # dev-macos picker, re-recorded 2026-09-06: the seat this replaces (32.348)
 # was the class's first recording of the cell, and the retake halved it
@@ -720,4 +716,4 @@ metric = "match_paint_p99_ms"
 class = "dev-macos"
 accepted = 19.4787
 trials = [19.57, 19.48, 19.35]
-why = "the felt picker keystroke on this class: match_paint_p99_ms 19.4787 ms, 21.7 percent over the 16 ms bar and the bar untouched. What was measured, all of it from the 2026-09-06 record run this seat is the median of: the three p99 draws are this entry's trials, and the same run's match_paint p50 and first_page p99 medians both landed above the seats the ratchet already held, so it declined them in favour of the recorded match_paint_p50_ms 7.159 and first_page_p99_ms 1.542. The seat this run replaces was 32.35 ms. The same cell on dev-linux reads match_paint_p99_ms 4.7 ms on the same fixture. On gh-macos its own runner reads match_paint_p99_ms 30.797 ms, so the gap is the platform rather than one host. Spotlight indexing held one core through the run, which is a condition of the measurement and not an attribution. The cause is open and a root-cause task is open for it."
+why = "the felt picker keystroke on this class: match_paint_p99_ms 19.4787 ms, 21.7 percent over the 16 ms bar and the bar untouched. What was measured, all of it from the 2026-09-06 record run this seat is the median of: the three p99 draws are this entry's trials, and the same run's match_paint p50 and first_page p99 medians both landed above the seats the ratchet already held, so it declined them in favour of the recorded match_paint_p50_ms 7.159 and first_page_p99_ms 1.542. The seat this run replaces was more than half again this value, and the commit that re-recorded the cell carries it. The same cell on dev-linux reads match_paint_p99_ms 4.7 ms on the same fixture. On gh-macos its own runner reads match_paint_p99_ms 30.797 ms, so the gap is the platform rather than one host. Spotlight indexing held one core through the run, which is a condition of the measurement and not an attribution. The cause is open and a root-cause task is open for it."

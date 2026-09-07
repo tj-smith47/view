@@ -130,7 +130,8 @@ fixture rules were minted for. Every table is read, whatever its header
 says: a word in a heading cell took every figure under it out of this check
 and out of the sweep that grades the population at once, which is a bypass
 one edit wide. A reading a fix replaced belongs in the commit that replaced
-it, where git keeps it, or in a `why`, which has its own escape list.
+it, where git keeps it, and not in a `why`: an escape naming the reason a
+sentence should be skipped is a word away from skipping a live figure.
 
 A cell id carries no class and no fixture, so the unit around it has to.
 Resolving instead against every class and every fixture a unit mentioned
@@ -161,11 +162,14 @@ A percentage in a `why` states the distance from the bar its own sentence
 names ("9.0 percent over the 1.0 bar"), where the page writes the distance
 from 1; the sentence decides which by naming a bar or not.
 
-One sentence is read for nothing: one reporting a reading something
-replaced (`replace`, `superseded`, `withdraw`, `pre-fix`, `probe`,
-`contaminat`, `inadmissible`), because holding the number a re-record
-retired is half of what a `why` is for -- the stale ratio that survived a
-round lived there, not on the page.
+No sentence is read for nothing. A one-word escape for the reading
+something replaced (`replace`, `superseded`, `probe` and five siblings)
+stood in both the check and the sweep, and prefixing a live sentence with
+`A probe reading:` took its figure out of the grading and out of the
+population at once -- the same bypass a word in a heading cell bought a
+table, in the half of the tree the ledger lives in. So a retired reading is
+named in prose or left where the change that retired it is recorded, and a
+figure written in a `why` is a figure the check grades.
 
 The draws a record run took are not a sentence at all. They are a field on
 the entry -- `trials = [19.57, 19.48, 19.35]`, an optional array of floats
@@ -177,12 +181,19 @@ nothing can grade. It was written as prose twice, once behind a one-word
 carried a stale seat through the exemption it bought: the shipped list at
 `budgets.toml:663` held the entry's own `accepted`.
 
-That member is why the field is graded rather than skipped. A record run
-draws the seat as one of its trials, so the array states `accepted` --
-rounded to the digits the member itself prints -- or the loader refuses the
-file naming the entry, and the check refuses the line. It is the one figure
-in the array a re-record retires; the draws beside it are readings no cell
-holds and nothing can stale.
+The field holds that metric's own repeated draws and nothing else, so every
+member sits within 25 percent of the `accepted` those draws were reduced to
+or the loader refuses the file naming the entry and the member, and the
+check refuses the line. The band is five times the tightest spread the
+honest arrays show and clear of the noisiest cell, and it is what tells a
+draw from another quantity: a rule satisfied by restating `accepted` was
+not, and four arrays shipped that restatement prepended to the paired
+bare-engine arm's own milliseconds -- figures no cell records, standing
+where nothing could grade them. The paired arm's readings go to the round's
+report beside the arm they belong to, the way a `why` states its A/B pairs.
+An `accepted` restated as a member is not a draw either: an entry whose
+seat is a replicate median no single draw equals carries the draws and not
+the median.
 
 The transport rule is the one with no number in it. A page saying the
 speculated cell was measured with its engine across a network states a
@@ -272,12 +283,15 @@ whose verdict a contributor never sees.
 
 The cases file grades the rules; `scripts/check-budget-drift-sweep.sh`
 grades the population. It copies the tracked tree, builds the seat table,
-takes every figure on the three pages, in every `why` and in every
-`trials` array that equals a recorded seat of any class -- outside fenced
-blocks, the sentences a `why` is read for nothing in, and the deltas a
-sentence states as differences -- perturbs each by one digit and requires
-the check to fail naming that file and line. The class a page declares is
-the default a unit falls back to, never a filter on what is graded: a
+takes every figure on the three pages and in every `why` that equals a
+recorded seat of any class -- outside fenced blocks and the deltas a
+sentence states as differences -- and perturbs each by one digit, and takes
+every member of every `trials` array and moves it outside its entry's band,
+requiring the check to fail naming that file and line either way. The edit
+follows the rule that grades the figure: a quoted reading is graded against
+the seat it equals, where a draw is graded against a band around one. The
+class a page declares is the default a unit falls back to, never a filter
+on what is graded: a
 population scoped to it left the gh-linux, gh-macos, dev-macos and
 controlled-linux figures the pages quote ungraded, and the sweep shared
 that blind spot with nothing, since the check resolves each of them where

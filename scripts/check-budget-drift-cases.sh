@@ -270,7 +270,7 @@ findings() {
     /^BUDGET DRIFT FAIL: why-figure / {
       c = $5; sub(/:$/, "", c); print "unattributed:" c; next
     }
-    /^BUDGET DRIFT FAIL: trials-seat / {
+    /^BUDGET DRIFT FAIL: trials-band / {
       c = $5; sub(/:$/, "", c); print "trials:" c; next
     }
     /^BUDGET DRIFT FAIL: a transport condition stands/ { next }
@@ -976,24 +976,34 @@ rewrite_why 'marker_ratio_p50 1.0937, 9.0 percent over the 1.0 bar'
 expect 1 'why:dev-linux/first_paint.minimal' \
   'a percentage no distance from that bar rounds to'
 
+new_case
+rewrite_why 'A probe reading: the trials put marker_ratio_p50 at 1.17'
+expect 1 'why:dev-linux/first_paint.minimal' \
+  'the same drifted figure behind the word a retired-reading escape read for'
+
 # ---------------------------------------------------------------------------
-# the draws a record run took are a field, and the member stating the entry
-# own seat is the one figure in it a re-record retires: the array names that
-# seat or the entry is refused, in the file check and in the loader alike
+# the draws a record run took are a field, and every member of it is a draw
+# of the metric the entry seats: one further out than the band the statistic
+# draws in is a figure of another quantity, refused in the file check and in
+# the loader alike
 # ---------------------------------------------------------------------------
 new_case
 set_trials '[31.0, 30.2, 31.4]'
-expect 0 '' 'an array of draws that states the accepted value it stands beside'
+expect 0 '' 'an array of draws of the metric the entry seats'
 
 new_case
-set_trials '[31.2, 30.2, 31.4]'
+set_trials '[31.0, 30.2, 39.4]'
 expect 1 'trials:dev-linux/first_paint.minimal' \
-  'the same array after a re-record moved the seat out from under it'
+  'a member further from the accepted value than a draw of that metric goes'
 
 new_case
-set_trials '[31.05, 30.2]'
+set_trials '[31.0, 55.079, 50.037]'
 expect 1 'trials:dev-linux/first_paint.minimal' \
-  'a member that states the seat at more digits than the seat holds'
+  'the accepted value prepended to two readings of the paired bare-engine arm'
+
+new_case
+set_trials '[23.3, 30.2, 38.7]'
+expect 0 '' 'the widest draws the band admits, which a noisy statistic reaches'
 
 # ---------------------------------------------------------------------------
 # the predicted glyph is a local reading, and the acceptance RTT leg is the
@@ -1083,6 +1093,16 @@ new_case
 printf '\nEvery number here was measured with the engine local to the terminal rather than on another machine, and the predicted glyph is no exception.\n' \
   >> "$CASE/$README"
 expect 0 '' 'a page stating the condition its readings were taken under, which is local'
+
+# The same statement as the case above wrote it before the licence was
+# narrowed to the transport word's own clause. It is refused now: the
+# `local` stands in an earlier clause, and `nothing` is neither a denial
+# this check reads nor within the five tokens the window looks back over.
+new_case
+printf '\nEvery number here is local: nothing on this page was measured with the engine on another machine, and the predicted glyph is no exception.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'the same statement with its local in an earlier clause, which the window does not reach'
 
 # the licence belongs to the clause that carries `local` and to no other: an
 # unrelated clause reporting a local picker cache licensed the transport

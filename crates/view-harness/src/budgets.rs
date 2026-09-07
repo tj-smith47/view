@@ -369,6 +369,42 @@ impl std::fmt::Display for Finding {
     }
 }
 
+/// The four identifiers a `[[shortfall]]` is addressed by, carried whole
+/// rather than pre-joined into a message: an error naming one entry is read
+/// by a person and matched on by a caller, and both want the parts.
+///
+/// It is boxed in the variants that carry it because a `Result` error the
+/// size of four `String`s is past the line clippy draws for the type every
+/// caller returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortfallId {
+    pub scenario: String,
+    pub fixture: String,
+    pub metric: String,
+    pub class: String,
+}
+
+impl std::fmt::Display for ShortfallId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{} {} on {}",
+            self.scenario, self.fixture, self.metric, self.class
+        )
+    }
+}
+
+impl ShortfallId {
+    fn of(shortfall: &Shortfall) -> Box<Self> {
+        Box::new(Self {
+            scenario: shortfall.scenario.clone(),
+            fixture: shortfall.fixture.clone(),
+            metric: shortfall.metric.clone(),
+            class: shortfall.class.clone(),
+        })
+    }
+}
+
 /// Errors loading or validating the budget file.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -386,28 +422,21 @@ pub enum BudgetError {
     #[error("{path} is schema {found}, this build understands {SUPPORTED_SCHEMA}")]
     Schema { path: String, found: u32 },
     #[error(
-        "{path}: [[shortfall]] {scenario}.{fixture} {metric} on {class} names no budget; a \
-         shortfall can only stand against a bound that exists"
+        "{path}: [[shortfall]] {id} names no budget; a shortfall can only stand against a bound \
+         that exists"
     )]
-    OrphanShortfall {
-        path: String,
-        scenario: String,
-        fixture: String,
-        metric: String,
-        class: String,
-    },
+    OrphanShortfall { path: String, id: Box<ShortfallId> },
     #[error(
-        "{path}: [[shortfall]] {entry} lists trials that state no seat: none of them rounds to \
-         the accepted {accepted} at the digits it prints, so a re-record retires the value the \
-         array names and nothing reddens"
+        "{path}: [[shortfall]] {id} lists the trial {trial}, which is further than \
+         {band_percent} percent from the accepted {accepted}: trials are the metric's own \
+         repeated draws, so a member that far out states another quantity"
     )]
-    // the entry is one preformatted field rather than the four its sibling
-    // above carries: four strings and a float put the enum past the size
-    // clippy lets a Result error hold, and every caller prints it whole
-    TrialsWithoutSeat {
+    TrialsOutOfBand {
         path: String,
-        entry: String,
+        id: Box<ShortfallId>,
+        trial: f64,
         accepted: f64,
+        band_percent: f64,
     },
     #[error(
         "{path}: [[{table}]] for {scenario} names metric {metric}, which \
@@ -561,26 +590,25 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
         }
     }
     classify(&file, &display)?;
-    // the array holds the readings no cell holds, and the one reading a cell
-    // does hold: a member equal to the entry's own accepted. That member is
-    // the only figure in it a re-record retires, so the array has to state
-    // it -- the same rule scripts/check-budget-drift.sh holds over the file
+    // the array holds the draws of one metric, so every member sits within a
+    // band of the seat those draws were reduced to. A member outside it is a
+    // figure of another quantity parked in the ledger, where no cell can
+    // grade it -- the same rule scripts/check-budget-drift.sh holds over the
+    // file
     for shortfall in &file.shortfall {
         let Some(trials) = shortfall.trials.as_deref() else {
             continue;
         };
-        if !trials
-            .iter()
-            .any(|trial| states_seat(shortfall.accepted, *trial))
-        {
-            return Err(BudgetError::TrialsWithoutSeat {
-                path: display,
-                entry: format!(
-                    "{}.{} {} on {}",
-                    shortfall.scenario, shortfall.fixture, shortfall.metric, shortfall.class
-                ),
-                accepted: shortfall.accepted,
-            });
+        for trial in trials {
+            if !within_band(shortfall.accepted, *trial) {
+                return Err(BudgetError::TrialsOutOfBand {
+                    path: display,
+                    id: ShortfallId::of(shortfall),
+                    trial: *trial,
+                    accepted: shortfall.accepted,
+                    band_percent: TRIALS_BAND * 100.0,
+                });
+            }
         }
     }
     // a shortfall against no budget is dead weight that reads as an accepted
@@ -597,28 +625,26 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
         {
             return Err(BudgetError::OrphanShortfall {
                 path: display,
-                scenario: shortfall.scenario.clone(),
-                fixture: shortfall.fixture.clone(),
-                metric: shortfall.metric.clone(),
-                class: shortfall.class.clone(),
+                id: ShortfallId::of(shortfall),
             });
         }
     }
     Ok(file)
 }
 
-/// Whether `trial` is `accepted` written at the digits the trial prints.
+/// How far a draw of a metric may sit from the seat its draws were reduced
+/// to before it is another quantity rather than a noisy reading.
 ///
-/// A draw is written to the digits the run reported, and `accepted` carries
-/// every digit the statistic had, so the two are equal only at the shorter
-/// spelling: 1.172 states an accepted 1.1719342968313597 and 1.169 does not.
-/// A trailing zero does not survive the parse, so `1.170` reaches this as
-/// two digits; `scripts/check-budget-drift.sh` reads the file as text and
-/// holds the same rule at the digits the array was written in.
-fn states_seat(accepted: f64, trial: f64) -> bool {
-    let printed = format!("{trial}");
-    let digits = printed.split_once('.').map_or(0, |(_, frac)| frac.len());
-    format!("{accepted:.digits$}") == format!("{trial:.digits$}")
+/// The shipped honest arrays span +5.3%/-1.1%, -1.9%, +0.5%/-0.7% and
+/// +12.3%/-12.6%, so this is five times the tightest of them and clear of
+/// the noisiest cell; the ledger has held a ratio prepended to two
+/// millisecond figures of the paired arm, and that pair is what a band this
+/// wide still refuses.
+const TRIALS_BAND: f64 = 0.25;
+
+/// Whether `trial` is a draw of the metric `accepted` seats.
+fn within_band(accepted: f64, trial: f64) -> bool {
+    (trial - accepted).abs() <= accepted.abs() * TRIALS_BAND
 }
 
 /// Refuses a budget row whose human meaning is unwritten.
@@ -1114,11 +1140,13 @@ mod tests {
         assert_eq!(with.shortfall[0].trials, Some(vec![1.21, 1.19, 1.20]));
     }
 
-    /// The array states the entry's own seat or it is refused: that member
-    /// is the one figure in it a re-record retires, and the round it was
-    /// minted in shipped three arrays holding a value nothing graded.
+    /// The array holds the metric's own repeated draws, so every member
+    /// sits within a band of the seat they were reduced to. The round the
+    /// field was minted in shipped four arrays that prepended the seat to
+    /// two millisecond readings of the paired bare-engine arm -- figures of
+    /// another quantity, standing where no cell can grade them.
     #[test]
-    fn a_trials_array_states_the_accepted_it_stands_beside() {
+    fn a_trials_array_holds_draws_of_the_metric_it_stands_beside() {
         let entry = "\n[[shortfall]]\nscenario = \"echo\"\nfixture = \"user\"\n\
                      metric = \"ratio_p50\"\nclass = \"dev-linux\"\n\
                      accepted = 1.1719342968313597\n";
@@ -1126,21 +1154,31 @@ mod tests {
                     metric = \"ratio_p50\"\nmax = 1.1\nkind = \"felt\"\n\
                     felt = \"you type and the character is on screen\"\nconfig = \"real\"\n";
 
-        let seated = parse(
-            &format!("{head}{entry}trials = [1.215, 1.172, 1.159]\nwhy = \"w\"\n"),
-            "seated.toml",
+        let drawn = parse(
+            &format!("{head}{entry}trials = [1.215, 1.169, 1.159]\nwhy = \"w\"\n"),
+            "drawn.toml",
         )
-        .expect("a trials array stating the accepted value at three digits loads");
-        assert_eq!(seated.shortfall[0].trials, Some(vec![1.215, 1.172, 1.159]));
+        .expect("an array of draws of this metric loads");
+        assert_eq!(drawn.shortfall[0].trials, Some(vec![1.215, 1.169, 1.159]));
 
         let err = parse(
-            &format!("{head}{entry}trials = [1.215, 1.169, 1.159]\nwhy = \"w\"\n"),
-            "unseated.toml",
+            &format!("{head}{entry}trials = [1.215, 1.500, 1.159]\nwhy = \"w\"\n"),
+            "wide.toml",
         )
-        .expect_err("an array stating no accepted value is refused");
+        .expect_err("a member outside the band is refused");
         let text = err.to_string();
         assert!(text.contains("echo.user"), "{text}");
+        assert!(text.contains("1.5"), "{text}");
         assert!(text.contains("1.1719342968313597"), "{text}");
+
+        let mixed = parse(
+            &format!("{head}{entry}trials = [1.1719, 55.079, 50.037]\nwhy = \"w\"\n"),
+            "mixed.toml",
+        )
+        .expect_err("a ratio prepended to two milliseconds of the paired arm is refused");
+        let text = mixed.to_string();
+        assert!(text.contains("echo.user"), "{text}");
+        assert!(text.contains("55.079"), "{text}");
     }
 
     /// A shortfall ceiling must move with the class's measured headroom, not

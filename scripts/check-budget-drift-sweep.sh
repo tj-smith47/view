@@ -8,9 +8,11 @@
 #
 # Every figure on the three pages and in every [[shortfall]] why that equals
 # a value some class baseline records is perturbed by one digit in a scratch
-# copy of the tree; the checker must then fail naming that file and line. A
-# figure that survives is a recorded value nothing grades, which goes stale
-# in silence at the next --record run, and it is printed with its site.
+# copy of the tree, and every member of every trials array is moved outside
+# the band its entry's seat allows; the checker must then fail naming that
+# file and line. A figure that survives is a value nothing grades, which
+# goes stale in silence at the next --record run, and it is printed with its
+# site.
 #
 #   bash scripts/check-budget-drift-sweep.sh
 #   bash scripts/check-budget-drift-sweep.sh --checker /path/to/copy
@@ -165,7 +167,7 @@ collect_page() {
             if (sprintf(fmt, v[i]) + 0 == num + 0) { hit = hit " " k }
           }
         }
-        if (hit != "") { printf "%s\t%d\t%d\t%s\t%s\n", file, FNR, idx, num, substr(hit, 2) }
+        if (hit != "") { printf "%s\t%d\t%d\t%s\t%s\t%s\n", file, FNR, idx, num, substr(hit, 2), "digit" }
       }
     }
   ' "$seats" "$TREE/$rel" >> "$population"
@@ -176,9 +178,9 @@ for rel in $PAGES; do
   collect_page "$rel"
 done
 
-# A why is read against its own entry's class, and a sentence reporting a
-# reading something replaced is read for nothing there, so it is outside the
-# population here too.
+# A why is read against its own entry's class, and every sentence of it is
+# read: the checker holds no escape a word buys, so neither does the
+# population.
 awk -v file="$BUDGETS" '
   FNR == NR {
     split($0, f, "\t")
@@ -211,9 +213,11 @@ awk -v file="$BUDGETS" '
   /^\[\[/ { block = ($0 ~ /shortfall/); acc = ""; next }
   !block { next }
   /^accepted = / { acc = $0; sub(/^accepted = /, "", acc); next }
-  # A trials member equal to the entry own accepted is the seat written a
-  # second time, and it is the one figure in the array a re-record retires;
-  # the draws beside it are readings no cell holds and nothing can stale.
+  # Every trials member is a draw of the metric the entry seats, and what
+  # grades it is a band around that seat rather than a value of its own. So
+  # the whole array is in the population and the edit that has to redden is
+  # the one that puts a member outside the band: a member no rule reaches is
+  # a foreign quantity parked in the ledger, which is what four arrays held.
   /^trials = / {
     idx = 0
     m = split($0, w, /[ \t]+/)
@@ -222,8 +226,7 @@ awk -v file="$BUDGETS" '
       if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
       idx++
       if (acc == "") { continue }
-      if (sprintf("%." decimals(num) "f", acc) + 0 != num + 0) { continue }
-      printf "%s\t%d\t%d\t%s\t%s\n", file, FNR, idx, num, "the entry accepted value"
+      printf "%s\t%d\t%d\t%s\t%s\t%s\n", file, FNR, idx, num, "a draw of the accepted " acc, "band"
     }
     next
   }
@@ -231,13 +234,11 @@ awk -v file="$BUDGETS" '
     idx = 0
     n = split($0, sent, /\. /)
     for (s = 1; s <= n; s++) {
-      if (sent[s] ~ /replace|superseded|withdraw|pre-fix|probe|contaminat|inadmissible/) { dead = 1 } else { dead = 0 }
       m = split(sent[s], w, /[ \t]+/)
       for (j = 1; j <= m; j++) {
         num = clean(w[j])
         if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
         idx++
-        if (dead) { continue }
         u = unit_of(clean(w[j + 1]))
         fmt = "%." decimals(num) "f"
         hit = ""
@@ -248,7 +249,7 @@ awk -v file="$BUDGETS" '
             if (sprintf(fmt, v[i]) + 0 == num + 0) { hit = hit " " k }
           }
         }
-        if (hit != "") { printf "%s\t%d\t%d\t%s\t%s\n", file, FNR, idx, num, substr(hit, 2) }
+        if (hit != "") { printf "%s\t%d\t%d\t%s\t%s\t%s\n", file, FNR, idx, num, substr(hit, 2), "digit" }
       }
     }
   }
@@ -260,10 +261,13 @@ if [ "$total" = "0" ]; then
   exit 2
 fi
 
-# One digit changed in the last place printed: the smallest edit that makes
-# the figure a value nothing recorded, and the one a stale quote is.
+# The edit the figure's own rule has to catch. A quoted reading is graded
+# against the seat it equals, so one digit in the last place printed is the
+# smallest edit that makes it a value nothing recorded -- the shape a stale
+# quote has. A draw is graded against a band around its entry's seat, so the
+# edit that retires it is one that lands it outside that band.
 perturb() {
-  awk -v line="$1" -v want="$2" '
+  awk -v line="$1" -v want="$2" -v mode="$3" '
     function clean(t) {
       gsub(/[][`*~()>]/, "", t)
       sub(/[,;:.]+$/, "", t)
@@ -280,11 +284,15 @@ perturb() {
         if (num ~ /^-?[0-9]+\.[0-9]+$/) {
           idx++
           if (idx == want) {
-            last = substr(num, length(num), 1)
-            new = (last == "9") ? "8" : sprintf("%d", last + 1)
             at = index(tok, num)
-            tok = substr(tok, 1, at - 1) substr(num, 1, length(num) - 1) new \
-              substr(tok, at + length(num))
+            if (mode == "band") {
+              edited = sprintf("%." (length(num) - index(num, ".")) "f", num * 2)
+            } else {
+              last = substr(num, length(num), 1)
+              edited = substr(num, 1, length(num) - 1) \
+                ((last == "9") ? "8" : sprintf("%d", last + 1))
+            }
+            tok = substr(tok, 1, at - 1) edited substr(tok, at + length(num))
           }
         }
         out = (j == 1) ? tok : out " " tok
@@ -296,11 +304,11 @@ perturb() {
 
 checked=0
 surviving=""
-while IFS=$'\t' read -r rel lineno idx value cells; do
+while IFS=$'\t' read -r rel lineno idx value cells mode; do
   checked=$((checked + 1))
   file_path="$TREE/$rel"
   cp "$file_path" "$WORK/pristine"
-  perturb "$lineno" "$idx" > "$WORK/perturbed"
+  perturb "$lineno" "$idx" "$mode" > "$WORK/perturbed"
   cp "$WORK/perturbed" "$file_path"
   out=$("$BASH" "$CHECKER" "$TREE" 2>&1)
   rc=$?
@@ -315,7 +323,7 @@ done < "$population"
 
 printf '\n%s figure(s) checked against %s seat(s)\n' "$checked" "$(wc -l < "$seats" | tr -d ' ')"
 if [ -n "$surviving" ] && [ "$surviving" != $'\n' ]; then
-  printf 'BUDGET DRIFT SWEEP FAIL: a figure equal to a recorded value survives a one-digit rewrite, so nothing grades it and a record run leaves it standing:\n' >&2
+  printf 'BUDGET DRIFT SWEEP FAIL: a figure survives the rewrite its own rule has to catch, so nothing grades it and a record run leaves it standing:\n' >&2
   printf '%s' "$surviving" | grep -v '^$' | sed 's/^/  /' >&2
   exit 1
 fi

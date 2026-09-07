@@ -693,14 +693,20 @@ fi
 # out of prose: an entry names its own class, scenario, fixture and metric,
 # so a sentence in its why that names a cell of that entry has its figures
 # graded against what that cell records. A sentence that names another class
-# or another fixture resolves there instead, and one that says it is
-# reporting a reading something replaced is read for nothing -- a why exists
-# partly to hold the number a re-record retired. The draws a run took have a
-# field of their own (`trials`), because they are the one figure a why could
-# state that no cell holds, and an exemption shaped to let them through is an
-# exemption a stale seat buys with one slash.
+# or another fixture resolves there instead. No sentence is read for
+# nothing: a word cannot buy a live figure out of the grading, which is what
+# the retired-reading escape did for every sentence that carried one, so a
+# reading a fix replaced belongs in the commit that replaced it. The draws a
+# run took have a field of their own (`trials`), because they are the one
+# figure a why could state that no cell holds.
+#
+# A draw sits within this fraction of the seat its run reduced them to, or
+# it is a figure of another quantity: the ledger has held a ratio prepended
+# to the paired arm's own milliseconds, which is what the band refuses. The
+# loader states the same number.
+TRIALS_BAND=0.25
 if [[ $seats == *[![:space:]]* ]]; then
-  stale="$(awk -v file="${budgets#"$root"/}" '
+  stale="$(awk -v file="${budgets#"$root"/}" -v TRIALS_BAND="$TRIALS_BAND" '
     FNR == NR {
       split($0, f, "\t")
       if (f[3] == "") { next }
@@ -779,7 +785,6 @@ if [[ $seats == *[![:space:]]* ]]; then
                               fx, nf, fixn, klass_one, fixture, cellid, nids,
                               idname, idat, isid, num, nxt, pct, after, held,
                               ok, bar, want) {
-      if (text ~ /replace|superseded|withdraw|pre-fix|probe|contaminat|inadmissible/) { return }
       cls = classes_of(text)
       nc = split(cls, klass, " ")
       if (nc > 1) { return }
@@ -842,30 +847,31 @@ if [[ $seats == *[![:space:]]* ]]; then
       why = ""
     }
     # The draws a record run took are a field rather than a sentence, and
-    # the member stating the entry own seat is the one figure in it a
-    # re-record retires. An array that no longer states that seat is the
-    # stale copy the field was minted to end, so the array names it or the
-    # entry is refused -- the same rule the loader holds.
-    function check_trials(line, at,   body, n, t, i, num, ok) {
+    # every member is a draw of the metric the entry seats. One further out
+    # than the band is a figure of another quantity -- the paired arm own
+    # milliseconds is the shape the ledger shipped -- parked where no cell
+    # can grade it. The band is the loader own.
+    function check_trials(line, at,   body, n, t, i, num, off, span) {
       body = line
       sub(/^trials = /, "", body)
       gsub(/[][]/, "", body)
       if (acc == "") {
-        printf "BUDGET DRIFT FAIL: trials-seat %s/%s.%s: %s:%d lists the draws of an entry that states no accepted value, so the array is anchored to nothing\n",
+        printf "BUDGET DRIFT FAIL: trials-band %s/%s.%s: %s:%d lists the draws of an entry that states no accepted value, so the array is anchored to nothing\n",
           class, scen, fixt, file, at
         return
       }
+      span = (acc < 0 ? -acc : acc) * TRIALS_BAND
       n = split(body, t, /,/)
-      ok = 0
       for (i = 1; i <= n; i++) {
         num = t[i]
         gsub(/[ \t]/, "", num)
         if (num !~ /^-?[0-9]+(\.[0-9]+)?$/) { continue }
-        if (sprintf("%." decimals(num) "f", acc) + 0 == num + 0) { ok = 1 }
-      }
-      if (!ok) {
-        printf "BUDGET DRIFT FAIL: trials-seat %s/%s.%s: %s:%d lists the draws a record run took and none of them rounds to the accepted %s, so the array states a seat this entry does not hold\n",
-          class, scen, fixt, file, at, acc
+        off = num - acc
+        if (off < 0) { off = -off }
+        if (off > span) {
+          printf "BUDGET DRIFT FAIL: trials-band %s/%s.%s: %s:%d lists the trial %s, further from the accepted %s than a draw of this metric goes, so the array states a quantity this cell does not draw\n",
+            class, scen, fixt, file, at, num, acc
+        }
       }
     }
     /^\[\[/ {
