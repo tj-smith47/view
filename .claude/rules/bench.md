@@ -91,7 +91,12 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
 - a unit that names an `echo_speculated` cell, or the predicted glyph in
   the words the pages write it in, also says `remote`, `network`, `far
   side`, `another machine` or `RTT` while naming neither
-  `scripts/acceptance/remote-rtt.sh` nor the `remote_memory` row.
+  `scripts/acceptance/remote-rtt.sh` nor the `remote_memory` row, and
+  without denying the transport word within the five tokens before it or
+  saying the reading is `local`;
+- a figure on `README.md` or `docs/performance.md` states a moment the
+  vocabulary names and equals no value that cell records on the class the
+  page declares, or stands on a page that declares no class at all.
 
 The ratio rule is what naming a cell beside a number is for: the anchor rule
 is satisfied by any felt id, so a stale draw beside the right cell reads as
@@ -100,12 +105,19 @@ the old one. A dimensionless number is graded wherever it stands -- a
 multiplier, a decimal with no unit behind it, or a percentage, which states
 the same ratio as its distance from 1 -- and a bound is not one, because it
 carries the word `bar`; a percentage *of* something is a share of a
-population and is graded as nothing. A millisecond absolute is graded too,
-but only where a `_ms` cell id stands before it in its own sentence: the
-page publishes paired numbers, and the bare-engine column beside view's own
-is an absolute this tree records no cell for. The row that carried
-`gh-linux`'s 0.08 ms under the page's declared default class for months
-passed on exactly that exemption.
+population and is graded as nothing. An absolute is graded too, whatever
+unit it is written in, but only where a cell id of that unit stands before
+it in its own sentence: the unit picks the suffix the id has to carry
+(`ms` a `_ms` cell, `MB` a `_mb` one, `us` and everything else a `_us`
+one), so the footprint beside `memory.pss_mb` and the input path beside
+`key_to_rpc_p99_us` are graded exactly as the milliseconds are, and a
+figure in `s`, `min` or `GB`, or one carrying `bar`, `budget`, `bound` or
+`frame`, is a bound or a shape and is graded as nothing. Reading `ms`
+alone left the footprint quoted in two places against a seat nothing
+compared it to. The page publishes paired numbers, and the bare-engine
+column beside view's own is an absolute this tree records no cell for. The
+row that carried `gh-linux`'s 0.08 ms under the page's declared default
+class for months passed on exactly that exemption.
 
 One number resolves to one cell, never to the union of every cell its unit
 names: the nearest cell id before it in its own sentence, and the unit's
@@ -148,14 +160,21 @@ A percentage in a `why` states the distance from the bar its own sentence
 names ("9.0 percent over the 1.0 bar"), where the page writes the distance
 from 1; the sentence decides which by naming a bar or not.
 
-Two sentences are read for nothing. One reporting a reading something
+One sentence is read for nothing: one reporting a reading something
 replaced (`replace`, `superseded`, `withdraw`, `pre-fix`, `probe`,
 `contaminat`, `inadmissible`), because holding the number a re-record
 retired is half of what a `why` is for -- the stale ratio that survived a
-round lived there, not on the page. And one reporting the `trial`s a record
-run drew, because those are the run's own observations and no cell holds
-them: the bare-engine arm of a paired run has no seat of its own, and a
-`why` that states its reading states it as a trial.
+round lived there, not on the page.
+
+The draws a record run took are not a sentence at all. They are a field on
+the entry -- `trials = [19.57, 19.48, 19.35]`, an optional array of floats
+`view_harness::budgets` loads beside `accepted` and the gate reads for
+nothing -- because no cell holds them (the bare-engine arm of a paired run
+has no seat of its own) and a spread written into the prose is a figure
+nothing can grade. It was written as prose twice, once behind a one-word
+`trial` escape and once behind a slash-joined list, and each spelling
+carried a stale seat through the exemption it bought: the shipped list at
+`budgets.toml:663` held the entry's own `accepted`.
 
 The transport rule is the one with no number in it. A page saying the
 speculated cell was measured with its engine across a network states a
@@ -184,6 +203,14 @@ condition together, because the leg it names is where the round trip is
 injected. So the true sentence about remote editing -- keystrokes echoed
 without waiting for the round trip, view drawing the character it expects
 -- passes where it names that leg and fails where it names none.
+
+The test also reads polarity, because a page denying the condition is the
+sentence the rule most wants written. A transport word preceded within
+five tokens by `not`, `no`, `never`, `without` or `nor`, or standing in a
+unit that says the reading is `local`, is the page stating what it was
+recorded under and passes. The window looks backwards only: a row reading
+`on the far side of a network | not yet recorded` carries a later `not`
+that denies the recording and licenses nothing about the transport.
 
 A table row is its own anchor unit and prose keeps the paragraph scope: a
 line whose first non-space character is `|` is graded alone. An 18-row
@@ -217,13 +244,41 @@ user-facing pages therefore carry no comparative at all -- naming the cell
 that would anchor one is what the identifier rule refuses there -- so they
 state moments and paired numbers, and the comparisons live in
 `docs/benchmarking.md` beside the cell that earns them.
-`scripts/check-budget-drift-cases.sh` grades all ten rules and is what
+`scripts/check-budget-drift-cases.sh` grades all eleven rules and is what
 stops the check regressing to the identifier-only form. It runs the checker
 under its own interpreter, and three of its cases grade the scripts under
 `scripts/` for bash 3.2 portability (`.claude/rules/shell.md`) -- two that
 read them and one that runs the whole check on the shipped tree under an
 alarm -- because a gate that does not run on the bash macOS ships is a gate
 whose verdict a contributor never sees.
+
+The cases file grades the rules; `scripts/check-budget-drift-sweep.sh`
+grades the population. It copies the tracked tree, builds the seat table,
+takes every figure on the three pages and in every `why` that equals a
+recorded seat of its own unit on the class its page or entry resolves
+against -- outside fenced blocks, `superseded` tables, the sentences a
+`why` is read for nothing in, and the deltas a sentence states as
+differences -- perturbs each by one digit and requires the check to fail
+naming that file and line. A figure that survives is a recorded value
+nothing grades, which is what two rounds of hand-listed sites left behind.
+It runs as `task drift:sweep` and as its own CI step rather than inside
+`task ci`, because it re-runs the whole check once per figure: two minutes
+against the check's own second.
+
+The two user-facing pages are graded by the moment they name, because the
+identifier rule leaves them nothing else to resolve against. The felt
+vocabulary the comparative rule already maps -- the worst keystroke in a
+thousand, the glyph view expects, staleness, cadence, the matching
+results, the first page of them, the worst launch, what the process holds
+-- names the cell, and the figure is graded against that cell's seat on
+the class the page declares in its own words, the way `docs/benchmarking.md`
+declares its own. The first reading in a sentence is view's, since these
+pages publish paired numbers and the bare-engine one beside it is an
+absolute no cell records, and a figure the sentence calls a difference is
+neither side's reading. A page declaring no class states numbers taken on
+a host no reader is told about, so it is refused as ambiguous rather than
+resolved against a guess. Ungraded, seven recorded seats stood on those
+two pages, and perturbing one left the check at rc 0.
 
 The identifier rule is the strict form, and it is the one with no false
 positives: the user-facing pages state moments in words ("the key reaches

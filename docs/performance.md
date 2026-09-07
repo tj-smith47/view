@@ -11,6 +11,9 @@ one, so none of them appears as a headline. Everything they add up to is on
 this page; the identifiers, the statistics and the machinery are in
 [docs/benchmarking.md](benchmarking.md).
 
+Every reading below was recorded on a shared Linux dev host, whose
+`dev-linux` is the default class of this page.
+
 Two rules this page keeps, because breaking either is how benchmark pages
 start lying: a moment measured under a config nobody runs is reported as not
 yet measured, never filled in from a bench fixture; and a comparison is
@@ -28,8 +31,8 @@ the tree, the tabline and the statusline present and still.
 
 view is 4.6 ms behind on that screen, and the bar view holds itself to for
 this moment is level with Neovim -- so this row is a bar view has not met,
-by 9%. At the worst launch in a thousand the two are within a millisecond
-of each other (78.2 ms against 77.2 ms). With no plugins at all the same
+by 9%. At the worst launch in a thousand under your config the two are within a
+millisecond of each other (78.2 ms against 77.2 ms). With no plugins at all the same
 screen arrives in 16.1 ms against 14.7 ms, which is a bench fixture and not
 this row.
 
@@ -90,7 +93,7 @@ You hold a key down in a 100,000-line file and watch the text keep up.
 Both are a fraction of the 16 ms budget, which is one frame at 60 Hz, and
 view's staleness is the larger of the two: 0.6 ms more of it, which is a
 gap this page writes down rather than a lag you can see. Plugin-free the
-same figure is 1.07 ms.
+same staleness is 1.07 ms.
 
 A plugin storm or a `:terminal` flood pouring output into the screen is the
 same moment under load. Under your config the screen answers on a 16.9 ms

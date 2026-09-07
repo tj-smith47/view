@@ -119,7 +119,7 @@ the one fixture that unit names.
 | First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
 | First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
 | First paint, cold, full login, `user` (p99) | `first_paint.marker_cold_ms` 80.5 ms | not recorded on its own | seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046) |
-| Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
+| Resident memory (PSS), view process only, no plugins | `memory.pss_mb` **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | `output_path.p99_ms` **0.11 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing, no plugins (p99) | `echo.view_p99_ms` 0.73 ms | 0.67 ms | `echo.ratio_p99` ~1.09x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.130 |
 | Keystroke to predicted glyph, no plugins, engine local (p99) | `echo_speculated.speculated_paint_p99_ms` **0.30 ms** | n/a | `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim paired with it in the same run. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
@@ -138,14 +138,29 @@ The pty answers it now (`view_oracle::pty`, pinned by
 `view-bench/tests/nvim_arm_startup.rs`).
 
 Both first-paint columns are the retake's own interleaved pair; view's
-recorded gate bar (25.2 and 79.3 ms) ratchets separately and came from a
-quieter run. The pair at p50: `minimal` view 16.88 ms against bare nvim's
-15.43 ms (ratio_p50 1.094, p99 1.076), `heavy` 55.08 against 50.04 (1.101,
-1.045), `user` 58.73 against 54.16 (1.084, 1.046). view trails bare Neovim
-by 8-10% on every paired cold cell -- on `minimal` about 1.4 ms, the size
-of the post-VimEnter attach-plus-takeover round trip the late-attach design
-pays serially, since Neovim's own TUI attaches before init runs.
-Attribution past that outline is open work, not a claim this page makes.
+recorded gate bar ratchets separately and came from a quieter run. One
+paragraph per fixture below, since each of these numbers belongs to one of
+them.
+
+On `minimal` that bar is `first_paint.marker_cold_ms` 25.2 ms. The retake
+pair reads 16.88 ms p50 against bare nvim's 15.43 ms, which is
+`first_paint.marker_ratio_p50` 1.094 and `first_paint.marker_ratio_p99`
+1.076.
+
+On `heavy` the bar is `first_paint.marker_cold_ms` 79.3 ms. The retake pair
+reads 55.08 ms p50 against 50.04 ms, which is
+`first_paint.marker_ratio_p50` 1.101 and `first_paint.marker_ratio_p99`
+1.045.
+
+On `user` the retake pair reads 58.73 ms p50 against 54.16 ms, which is
+`first_paint.marker_ratio_p50` 1.084 and `first_paint.marker_ratio_p99`
+1.046.
+
+view trails bare Neovim by 8-10% on every paired cold cell -- on `minimal`
+about 1.4 ms, the size of the post-VimEnter attach-plus-takeover round trip
+the late-attach design pays serially, since Neovim's own TUI attaches
+before init runs. Attribution past that outline is open work, not a claim
+this page makes.
 
 Both dev classes are re-seated: dev-linux from the retake above, dev-macos
 from its own on mbp the same day. `gh-linux` and `gh-macos` carry their
@@ -167,10 +182,16 @@ dev-macos holds `first_paint.marker_cold_ms` 87.563 ms and
 with `first_paint.marker_ratio_p50` and `first_paint.marker_ratio_p99` both
 reading 1.061 from its own retake.
 
-The other two classes hold the absolute and owe the ratio: `gh-linux`
-(96.326 ms) and `gh-macos` (169.099 ms) each carry `marker_ratio_p50` and
-`marker_ratio_p99` on that cell as `withdrawn`, the same DSR re-seat they owe
-on `minimal` and `heavy`.
+The other two classes hold the absolute and owe the ratio, one paragraph
+each, and both owe the same DSR re-seat on the plugin-free and 15-plugin
+legs.
+
+`gh-linux` holds `first_paint.marker_cold_ms` 96.326 ms on the `user`
+fixture and carries `first_paint.marker_ratio_p50` and
+`first_paint.marker_ratio_p99` on that cell as `withdrawn`.
+
+`gh-macos` holds `first_paint.marker_cold_ms` 169.099 ms on the same `user`
+fixture, with the same two ratios `withdrawn`.
 
 Until a class records that cell, a gate run against that class reports it
 as uncovered and exits on it -- the designed signal for a measured row
@@ -182,9 +203,14 @@ quiet-host session each, the CI classes by re-seating from the
 
 The first two rows are unpaired on purpose: view paints its shell before it has
 even started the Neovim child, so bare Neovim has no comparable event. It
-shows nothing until your config finishes loading. The 3.8-4.1 ms range is
-nearly identical on a bare config (4.1 ms) and on the 15-plugin stack
-(3.8 ms), because none of your config has run yet at that point.
+shows nothing until your config finishes loading.
+
+The shell frame is nearly identical either way, because none of your config
+has run yet at that point: `first_paint.shell_visible_cold_ms` reads 4.1 ms
+on the plugin-free fixture.
+
+On the 15-plugin stack the same `first_paint.shell_visible_cold_ms` reads
+3.8 ms.
 
 The no-plugins memory row is view's own process only: the embedded Neovim
 engine is a separate process this budget deliberately excludes, so the
@@ -271,9 +297,12 @@ no-plugins row above documents. The tree row is the honest one, summing
 view's process and its embedded engine's, and it is what a bare-Neovim
 comparison must be read against: 27.96 MB of resident memory for view and
 its engine together, where bare Neovim's whole process reads 4.39 MB. A
-footprint is a resource row and states no speed. Neither side changes much between this reading and the
-no-plugins one for view's own-process number (4.96 MB vs 5.00 MB) because
-lazy.nvim defers most of the 15 plugins until their trigger event fires,
+footprint is a resource row and states no speed.
+
+Neither side changes much between this reading and the plugin-free one for
+view's own-process number. Plugin-free, `memory.pss_mb` reads 4.96 MB. Under
+this stack the same process reads 5.00 MB, because lazy.nvim
+defers most of the 15 plugins until their trigger event fires,
 and the standard workload (opening and paging through plain text buffers)
 never fires one -- this reading is each side settled after that workload,
 not a ceiling on what a plugin stack can cost once its triggers do fire.

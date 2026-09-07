@@ -85,7 +85,8 @@ later screen is the moment the numbers below are about.
 
 Two moments, measured paired: view and bare Neovim launched in the same run,
 on the same host, with the same config, samples interleaved. Neovim
-`v0.12.4`, a shared Linux dev host.
+`v0.12.4` on a shared Linux dev host, whose `dev-linux` is the default class
+of this page.
 
 **You open a project.** You type `view ~/.config` and wait for the screen you
 can start working in. Under a login-shaped plugin config -- lazy.nvim, noice
@@ -98,7 +99,7 @@ slower: under that same config the embedded engine's started mark lands
 0.08 ms earlier than the same engine under Neovim's terminal UI.
 
 **You type.** You press a key and the character appears. Under that same
-config, view's worst keystroke in a thousand takes 1.58 ms against Neovim's
+login-shaped config, view's worst keystroke in a thousand takes 1.58 ms against Neovim's
 1.43 ms, and at the median view is 11% behind against a bar of 10% -- a
 second bar missed, by 1% of the round trip, and both a fraction of the
 ~10 ms where a person starts to notice a key lagging their finger. view can
