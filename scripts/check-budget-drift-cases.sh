@@ -132,6 +132,11 @@ MD
 
 Under a plugin-free config, view's worst keystroke in a thousand takes
 0.73 ms and Neovim's takes 0.67 ms.
+
+| | view | Neovim | on |
+|---|---|---|---|
+| keypress to glyph, worst case in a thousand | 0.73 ms | 0.67 ms | same host, same run |
+| the same keypress, with view drawing the glyph it expects | 0.32 ms | 1.25 ms | same host, same run |
 MD
   cat > "$CASE/$BENCH" <<'MD'
 # Benchmarking
@@ -225,6 +230,9 @@ findings() {
     /^BUDGET DRIFT FAIL: ratio-default / { print "default"; next }
     /^BUDGET DRIFT FAIL: why-drift / {
       c = $5; sub(/:$/, "", c); print "why:" c; next
+    }
+    /^BUDGET DRIFT FAIL: why-figure / {
+      c = $5; sub(/:$/, "", c); print "unattributed:" c; next
     }
     /^BUDGET DRIFT FAIL: a transport condition stands/ { next }
     /^  transport [^ ]+:[0-9]+: / {
@@ -621,25 +629,177 @@ mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
 expect 0 '' 'the same why, equal to what that cell records at the digits printed'
 
 # ---------------------------------------------------------------------------
-# the predicted glyph is a local reading, and the acceptance RTT leg is the
-# only surface a transport claim may rest on
+# a millisecond absolute resolves like a ratio where a millisecond cell id
+# stands beside it: the page shipped one column of another class's absolute
+# for months, passing because an absolute carries its unit. The paired
+# bare-engine column names no cell of view's own and stays ungraded
 # ---------------------------------------------------------------------------
-new_case
-printf '\n| with the engine on the far side of a network | not yet recorded | your config, same host, same run |\n' \
-  >> "$CASE/$PERF"
-expect 1 'transport:docs/performance.md:6' \
-  'a row on a user page stating a transport condition the cell never had'
+seat_echo_tail() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[echo.minimal]
+view_p99_ms = 0.726575
+TOML
+}
 
 new_case
-printf '\nview draws the character it expects before the round trip is back.\n' \
+seat_echo_tail
+printf '\n| the tail, no plugins (`echo.view_p99_ms` 0.73 ms) | budget 8 ms |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a millisecond absolute equal to what the cell id beside it records'
+
+new_case
+seat_echo_tail
+printf '\n| the tail, no plugins (`echo.view_p99_ms` 0.80 ms) | budget 8 ms |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a millisecond absolute no value that cell records rounds to'
+
+new_case
+seat_echo_tail
+printf '\n| the tail, no plugins (`echo.view_p99_ms`) | 0.73 ms | 0.67 ms |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'the paired bare-engine column, which names no cell of its own'
+
+# ---------------------------------------------------------------------------
+# a number resolves to one cell, not to the union of every cell its unit
+# names: the nearest id before it in its own sentence, and the unit's first
+# id where its sentence names none. A union passed a sibling metric's draw
+# and a sibling scenario's alike
+# ---------------------------------------------------------------------------
+seat_echo_pair() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[echo.minimal]
+ratio_p50 = 1.1301046068104472
+ratio_p99 = 1.0916525318862538
+TOML
+}
+
+seat_scroll_ratio() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[scroll.minimal]
+ratio_p50 = 1.6053
+TOML
+}
+
+new_case
+seat_echo_pair
+printf '\n| steady typing, no plugins | `echo.ratio_p99` 1.09 at the tail; `echo.ratio_p50` reads 1.130 |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'two cells on one row, each number standing beside the id it belongs to'
+
+new_case
+seat_echo_pair
+printf '\n| steady typing, no plugins | `echo.ratio_p99` 1.09 at the tail; `echo.ratio_p50` reads 1.09 |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a sibling metric draw, quoted beside the id that records another'
+
+new_case
+seat_echo_pair
+seat_scroll_ratio
+printf '\n| plugin-free | `echo.ratio_p50` 1.130 | `scroll.ratio_p50` 1.605 |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'two scenarios on one row, each number beside its own id'
+
+new_case
+seat_echo_pair
+seat_scroll_ratio
+printf '\n| plugin-free | `echo.ratio_p50` 1.130 | `scroll.ratio_p50` 1.130 |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a sibling scenario draw, quoted beside the id that records another'
+
+new_case
+seat_echo_pair
+printf '\n| steady typing, no plugins (`echo.ratio_p50`) | 1.09 |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a number whose own sentence names no id, resolved against the unit first id'
+
+# ---------------------------------------------------------------------------
+# every figure a why states is the value of a cell that why names, or an
+# observation of the trials the record run drew. The ledger wrote most of
+# its figures in words, and an unattributed one goes stale in silence
+# ---------------------------------------------------------------------------
+seat_echo_control() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[echo_control.minimal]
+control_ratio_p50 = 0.9937197455771009
+TOML
+}
+
+rewrite_why() {
+  sed "s/why = \"a shortfall carries a scenario and a metric of its own\"/why = \"$1\"/" \
+    "$CASE/$BUDGETS" > "$CASE/$BUDGETS.tmp"
+  mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
+}
+
+new_case
+rewrite_why 'the residual is 1.17 of the paired run'
+expect 1 'unattributed:dev-linux/first_paint.minimal' \
+  'a why figure standing in a sentence that names no cell'
+
+new_case
+rewrite_why 'three trials read 1.17, 1.18 and 1.19 on this cell'
+expect 0 '' 'a why sentence reporting the trials a record run drew'
+
+new_case
+seat_echo_control
+rewrite_why 'the echo_control row costs echo_control.control_ratio_p50 0.994 here'
+expect 0 '' 'a why naming a cell of another scenario in full, at the value it records'
+
+new_case
+seat_echo_control
+rewrite_why 'the echo_control row costs echo_control.control_ratio_p50 1.038 here'
+expect 1 'why:dev-linux/first_paint.minimal' \
+  'the same cell written in full, quoting a figure no baseline records'
+
+new_case
+rewrite_why 'marker_ratio_p50 1.0937, 9.4 percent over the 1.0 bar'
+expect 0 '' 'a percentage stating the distance from the bar its own sentence names'
+
+new_case
+rewrite_why 'marker_ratio_p50 1.0937, 9.0 percent over the 1.0 bar'
+expect 1 'why:dev-linux/first_paint.minimal' \
+  'a percentage no distance from that bar rounds to'
+
+# ---------------------------------------------------------------------------
+# the predicted glyph is a local reading, and the acceptance RTT leg is the
+# only surface a transport claim may rest on. A table is one subject spread
+# over its rows, so the scope is the table and the finding is the row: the
+# shipped defect carried no speculated word of its own and stood in the
+# table whose subject is the predicted glyph
+# ---------------------------------------------------------------------------
+new_case
+printf '| with the engine on the far side of a network | not yet recorded | your config, same host, same run |\n' \
   >> "$CASE/$PERF"
-expect 1 'transport:docs/performance.md:6' \
+expect 1 'transport:docs/performance.md:10' \
+  'a row in the speculated table stating a transport condition the cell never had'
+
+new_case
+printf '\n| attach-plus-takeover round trip after VimEnter | 1.4 ms | n/a | same host, same run |\n' \
+  >> "$CASE/$PERF"
+expect 0 '' 'a local round trip, which is this tree own phrase for the serial attach'
+
+new_case
+printf '\nview draws the character it expects before the network answers.\n' \
+  >> "$CASE/$PERF"
+expect 1 'transport:docs/performance.md:11' \
   'the predicted glyph described beside a transport word, with no leg named'
 
 new_case
-printf '\nview draws the character it expects before the round trip is back; the round trip is the one scripts/acceptance/remote-rtt.sh injects.\n' \
+printf '\nview draws the character it expects before the network answers; the round trip is the one scripts/acceptance/remote-rtt.sh injects.\n' \
   >> "$CASE/$PERF"
 expect 0 '' 'the same sentence, naming the leg that measures the transport'
+
+new_case
+printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      paint and input local, keystrokes echoed without waiting for the\n      round trip.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'a roadmap bullet naming remote editing and no speculated moment'
 
 # ---------------------------------------------------------------------------
 # the gate runs under the bash macOS ships
@@ -681,14 +841,31 @@ fi
 # The tokens whose spelling would otherwise match this line are written with
 # their first character bracketed: same language, and the scan grades this
 # file by the same rule as every other without matching its own pattern.
+#
+# A pattern substitution is on the list for its cost rather than its
+# vintage: bash 3.2 rescans the string per match, so an emptiness test
+# written as "delete every blank and see what is left" never returns on a
+# multi-line variable, and the drift check spun in bash itself on a 12 kB
+# one where a glob test answered at once.
+MODERN='declare[[:space:]]+-[a-zA-Z]*[An]|local[[:space:]]+-[a-zA-Z]*[An]|typeset[[:space:]]+-[a-zA-Z]*[An]|\b[m]apfile\b|\b[r]eadarray\b|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,|\^\^|//)|\|[&]|[&]>>|;;[&]'
 if [ -n "$empty" ]; then
   modern="$empty"
 else
-  modern=$(cd "$ROOT" && grep -nE \
-    'declare[[:space:]]+-[a-zA-Z]*[An]|local[[:space:]]+-[a-zA-Z]*[An]|typeset[[:space:]]+-[a-zA-Z]*[An]|\b[m]apfile\b|\b[r]eadarray\b|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,|\^\^)|\|[&]|[&]>>|;;[&]' \
-    $GUARDED) || true
+  modern=$(cd "$ROOT" && grep -nE "$MODERN" $GUARDED) || true
 fi
 report 'no bash-4-only construct in the scripts under scripts/' "$modern"
+
+# The list is worth what it refuses, so one is planted and the same pattern
+# is asked about it. The construct is assembled through a %s rather than
+# written out, so planting it here does not make this file a hit.
+planted="$WORK/planted.sh"
+printf '#!/usr/bin/env bash\nseats=$1\nprintf %%s "$%s{seats//x/y}"\n' '' > "$planted"
+caught=$(grep -nE "$MODERN" "$planted") || true
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted pattern substitution went unrefused"
+fi
+report 'the construct list refuses a pattern substitution planted in a script' "$missed"
 
 # The grep above reads constructs; it cannot see the two shapes that made 3.2
 # refuse this very checker -- a case pattern and an apostrophe in a comment,
@@ -710,6 +887,29 @@ else
     [ -n "$out" ] && printf '%s\n' "$out"
   done) || true
   report "the scripts parse under $stock (bash $stock_major)" "$stale"
+fi
+
+# The two legs above grade a script by reading it, and neither notices a
+# construct that runs for minutes on a variable this tree actually builds:
+# the shipped baselines make the drift check's seat table 12 kB across 216
+# lines, where every case tree above plants a handful of rows. So the
+# shipped tree is run under an alarm, read-only, on the interpreter the
+# contract is about. perl ships on macOS and on the CI runner images, and
+# the leg says so where it does not.
+if command -v perl > /dev/null 2>&1; then
+  timed=$(cd "$ROOT" && perl -e 'alarm 120; exec @ARGV' "$BASH" "$CHECKER" "$ROOT" 2>&1)
+  timed_rc=$?
+  slow=""
+  if [ "$timed_rc" -ge 128 ]; then
+    slow="the checker did not finish in 120 s on the shipped tree: bash 3.2 rescans the string per match in a pattern substitution, so an emptiness test written as one is unbounded on the seat table the shipped baselines build"
+  elif [ "$timed_rc" -ne 0 ]; then
+    slow="$timed"
+  fi
+  report 'the checker finishes on the shipped tree inside two minutes' "$slow"
+else
+  n=$((n + 1))
+  printf 'ok %s - %s # skip perl is not installed, so no alarm to run it under\n' \
+    "$n" 'the checker finishes on the shipped tree inside two minutes'
 fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"

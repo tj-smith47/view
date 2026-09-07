@@ -146,7 +146,10 @@ felt_ids="$(awk '
   /^kind = / { kind=$0; sub(/^kind = "/, "", kind); sub(/"$/, "", kind) }
   { if (kind == "felt" && metric != "" && scenario != "") { print scenario "." metric; metric="" } }
 ' "$budgets" | sort -u | tr '\n' ' ')"
-if [[ -z "${felt_ids// /}" ]]; then
+# Emptiness by glob, never by deleting every blank and looking at what is
+# left: bash 3.2 rescans the string per match in a pattern substitution, so
+# an emptiness test written as one never returns on a multi-line variable.
+if [[ $felt_ids != *[![:space:]]* ]]; then
   echo "BUDGET DRIFT FAIL: $budgets declares no felt metric, so no claim anywhere could name one" >&2
   exit 1
 fi
@@ -252,7 +255,7 @@ done <<SECTIONS
 ## 1. Product definition|^## 
 ### 3.1 Budgets (CI-gated once the harness lands, P3)|^#{2,3} 
 SECTIONS
-if [[ -n "${claimed//[$'\n' ]/}" ]]; then
+if [[ $claimed == *[![:space:]]* ]]; then
   echo "BUDGET DRIFT FAIL: a comparative claim stands in a paragraph that names no felt metric. A win is stated by the cell that earns it -- name that cell's metric beside the claim, or state the moment and its paired numbers in words. A row that names the engine it beats is refused whatever anchors it: a row states a win by publishing the paired numbers:" >&2
   printf '%s' "$claimed" | grep -v '^$' | sed 's/^/  /' >&2
   fail=1
@@ -480,7 +483,7 @@ if [[ -n "$default_class" && ! -f "$baselines_dir/$default_class.toml" ]]; then
   default_class=""
 fi
 
-if [[ -f "$bench_page" && -n "${seats//[$'\n' ]/}" ]]; then
+if [[ -f "$bench_page" && $seats == *[![:space:]]* ]]; then
   quoted="$(awk -v page="${bench_page#"$root"/}" -v fallback="$default_class" '
     FNR == NR {
       split($0, f, "\t")
@@ -543,9 +546,16 @@ if [[ -f "$bench_page" && -n "${seats//[$'\n' ]/}" ]]; then
       printf "BUDGET DRIFT FAIL: ratio-scope %s:%d: %s is quoted where %s, and a number resolves against one class and one fixture or against neither\n",
         page, at, num, what
     }
-    function grade(   i, j, k, m, n, text, part, w, num, nxt, pct, ntok, ngraded,
+    # One number resolves to one cell, never to the union of every cell the
+    # unit names: a union passed a sibling metric and a sibling scenario as
+    # the number the id beside it stands for, which is the same disagreement
+    # between the identifier and the words the class and fixture rules were
+    # minted for. So a number takes the nearest cell id before it in its own
+    # sentence -- a table cell is a sentence, since a row states one column
+    # at a time -- and the unit first id where its sentence names none.
+    function grade(   i, j, m, n, text, part, w, num, nxt, pct, ntok, ngraded,
                      ncell, cell, namedcells, cls, nc, klass, fx, nf, fixn,
-                     klass_one, fixture, seen, vals, ok, after) {
+                     klass_one, fixture, seen, ok, after, line, tok, cur, held) {
       if (uc == 0) { return }
       text = ""
       for (i = 1; i <= uc; i++) { text = text " " ul[i] }
@@ -563,19 +573,31 @@ if [[ -f "$bench_page" && -n "${seats//[$'\n' ]/}" ]]; then
       if (ncell == 0) { uc = 0; return }
       ntok = 0
       for (i = 1; i <= uc; i++) {
-        m = split(ul[i], w, /[ \t]+/)
+        line = ul[i]
+        gsub(/\|/, " \001 ", line)
+        gsub(/\. /, " \001 ", line)
+        m = split(line, w, /[ \t]+/)
         for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
       }
       ngraded = 0
+      cur = ""
       for (i = 1; i <= ntok; i++) {
-        num = clean(tk[i])
+        if (tk[i] == "\001") { cur = ""; continue }
+        tok = clean(tk[i])
+        if (tok ~ /^[a-z_]+\.[a-z_0-9]+$/ && (tok in cellseen)) { cur = tok; continue }
+        num = tok
         nxt = clean(tk[i + 1])
         pct = 0
         after = nxt
         if (num ~ /^[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
         else if (num ~ /^[0-9]+(\.[0-9]+)?$/ && nxt == "%") { pct = 1; after = clean(tk[i + 2]) }
         else if (num !~ /^[0-9]+\.[0-9]+x?$/) { continue }
-        else if (nxt ~ /^(ms|us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame)$/) { continue }
+        # a millisecond absolute resolves like a ratio where a millisecond
+        # cell id stands beside it, and nowhere else: the column holding the
+        # paired bare-engine reading names no cell of view own and states an
+        # absolute this file records nothing for.
+        else if (nxt == "ms") { if (cur == "" || cur !~ /_ms$/) { continue } }
+        else if (nxt ~ /^(us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame)$/) { continue }
         # a percentage OF something is a share of a population, not a ratio
         # stated as its distance from 1
         if (pct && after == "of") { continue }
@@ -584,6 +606,7 @@ if [[ -f "$bench_page" && -n "${seats//[$'\n' ]/}" ]]; then
         gnum[ngraded] = num
         gpct[ngraded] = pct
         gat[ngraded] = tl[i]
+        gcell[ngraded] = (cur != "") ? cur : cell[1]
       }
       if (ngraded == 0) { uc = 0; return }
       cls = classes_of(text)
@@ -625,18 +648,13 @@ if [[ -f "$bench_page" && -n "${seats//[$'\n' ]/}" ]]; then
         }
         fixture = fixn[1]
       }
-      vals = ""
-      for (k = 1; k <= ncell; k++) {
-        if ((klass_one SUBSEP fixture SUBSEP cell[k]) in seat) {
-          vals = vals " " seat[klass_one SUBSEP fixture SUBSEP cell[k]]
-        }
-      }
-      if (vals == "") { uc = 0; return }
       for (i = 1; i <= ngraded; i++) {
-        ok = gpct[i] ? seated_pct(gnum[i], vals) : seated(gnum[i], vals)
+        if (!((klass_one SUBSEP fixture SUBSEP gcell[i]) in seat)) { continue }
+        held = seat[klass_one SUBSEP fixture SUBSEP gcell[i]]
+        ok = gpct[i] ? seated_pct(gnum[i], held) : seated(gnum[i], held)
         if (!ok) {
-          printf "BUDGET DRIFT FAIL: ratio-drift %s:%d: %s%s is quoted beside%son %s %s, and no value recorded there rounds to it at the digits printed\n",
-            page, gat[i], gnum[i], (gpct[i] ? "%" : ""), namedcells, klass_one, fixture
+          printf "BUDGET DRIFT FAIL: ratio-drift %s:%d: %s%s is quoted beside %s on %s %s, and the value recorded there does not round to it at the digits printed\n",
+            page, gat[i], gnum[i], (gpct[i] ? "%" : ""), gcell[i], klass_one, fixture
         }
       }
       uc = 0
@@ -667,7 +685,7 @@ fi
 # or another fixture resolves there instead, and one that says it is
 # reporting a reading something replaced is read for nothing -- a why exists
 # partly to hold the number a re-record retired.
-if [[ -n "${seats//[$'\n' ]/}" ]]; then
+if [[ $seats == *[![:space:]]* ]]; then
   stale="$(awk -v file="${budgets#"$root"/}" '
     FNR == NR {
       split($0, f, "\t")
@@ -715,44 +733,93 @@ if [[ -n "${seats//[$'\n' ]/}" ]]; then
       }
       return 0
     }
-    function sentence_verdict(text, at,   i, j, n, m, w, tok, cls, nc, klass,
-                              fx, nf, fixn, klass_one, fixture, cell, ncell,
-                              namedcells, vals, num, nxt, has_ms) {
+    # A percentage in a why states the distance from the bar the sentence
+    # names, which is how a ledger entry writes a miss; the pages write the
+    # distance from 1 instead, so both spellings are read and the sentence
+    # decides which by naming a bar or not.
+    function bar_of(w, m,   j, t, nx) {
+      for (j = 1; j <= m; j++) {
+        t = clean(w[j])
+        if (t !~ /^[0-9]+(\.[0-9]+)?$/) { continue }
+        nx = clean(w[j + 1])
+        if (nx ~ /^(bar|bars|budget|bound|frame)$/) { return t }
+        if (nx == "ms" && clean(w[j + 2]) ~ /^(bar|bars|budget|bound|frame)$/) { return t }
+      }
+      return ""
+    }
+    function off_pct(held, bar) {
+      if (bar != "" && bar + 0 != 0) { held = held / bar }
+      return (held > 1 ? held - 1 : 1 - held) * 100
+    }
+    function seated_pct(num, held, bar,   fmt) {
+      fmt = "%." decimals(num) "f"
+      return sprintf(fmt, off_pct(held, bar)) + 0 == num + 0
+    }
+    # Every figure a why states is the value of a cell that why names: an
+    # entry names its own class, scenario, fixture and metric, so a number
+    # written beside an identifier resolves exactly. A figure with no
+    # identifier in its sentence is attributed to nothing and goes stale in
+    # silence at the next record run, which is what the stale ratio did in
+    # both places it stood. The one exception is a sentence reporting the
+    # trials a record run drew: those are observations, not cells.
+    function sentence_verdict(text, at,   j, k, m, w, tok, cls, nc, klass,
+                              fx, nf, fixn, klass_one, fixture, cellid, nids,
+                              idname, idat, isid, num, nxt, pct, after, held,
+                              ok, bar, want) {
       if (text ~ /replace|superseded|withdraw|pre-fix|probe|contaminat|inadmissible/) { return }
+      if (text ~ /trial/) { return }
       cls = classes_of(text)
       nc = split(cls, klass, " ")
-      klass_one = (nc == 1) ? klass[1] : class
       if (nc > 1) { return }
+      klass_one = (nc == 1) ? klass[1] : class
       fx = fixtures_of(text)
       nf = split(fx, fixn, " ")
       if (nf > 1) { return }
       fixture = (nf == 1) ? fixn[1] : fixt
-      ncell = 0
-      namedcells = ""
-      vals = ""
-      has_ms = 0
       m = split(text, w, /[ \t]+/)
+      bar = bar_of(w, m)
+      nids = 0
       for (j = 1; j <= m; j++) {
         tok = clean(w[j])
-        if (tok !~ /^[a-z_0-9]+$/) { continue }
-        if (!((klass_one SUBSEP fixture SUBSEP scen "." tok) in seat)) { continue }
-        if (index(namedcells, " " tok " ") > 0) { continue }
-        ncell++
-        namedcells = namedcells " " tok " "
-        vals = vals " " seat[klass_one SUBSEP fixture SUBSEP scen "." tok]
-        if (tok ~ /_ms$/) { has_ms = 1 }
+        cellid = ""
+        # a bare metric name belongs to the entry own scenario; a written
+        # out scenario.metric names its own, since a why may settle a
+        # question with a cell from a scenario the entry does not measure
+        if (tok ~ /^[a-z_0-9]+$/ && ((klass_one SUBSEP fixture SUBSEP scen "." tok) in seat)) {
+          cellid = scen "." tok
+        } else if (tok ~ /^[a-z_]+\.[a-z_0-9]+$/ && ((klass_one SUBSEP fixture SUBSEP tok) in seat)) {
+          cellid = tok
+        }
+        isid[j] = (cellid != "")
+        if (cellid != "") { nids++; idname[nids] = cellid; idat[nids] = j }
       }
-      if (ncell == 0) { return }
       for (j = 1; j <= m; j++) {
+        if (isid[j]) { continue }
         num = clean(w[j])
         nxt = clean(w[j + 1])
-        if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
-        if (nxt ~ /^(us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame|percent)$/) { continue }
-        if (nxt == "ms" && !has_ms) { continue }
+        pct = 0
+        after = nxt
+        if (num ~ /^-?[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
+        else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && (nxt == "%" || nxt == "percent")) {
+          pct = 1; after = clean(w[j + 2])
+        }
+        else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
+        else if (nxt ~ /^(us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame)$/) { continue }
+        # a percentage OF something is a share of a population
+        if (pct && after == "of") { continue }
         sub(/x$/, "", num)
-        if (!seated(num, vals)) {
-          printf "BUDGET DRIFT FAIL: why-drift %s/%s.%s: %s:%d quotes %s beside%son that cell, and no value recorded there rounds to it at the digits printed\n",
-            klass_one, scen, fixture, file, at, num, namedcells
+        if (nids == 0) {
+          printf "BUDGET DRIFT FAIL: why-figure %s/%s.%s: %s:%d states %s%s in a sentence that names no cell, so the figure is attributed to nothing and a record run leaves it standing\n",
+            klass_one, scen, fixture, file, at, num, (pct ? "%" : "")
+          continue
+        }
+        want = idname[1]
+        for (k = 1; k <= nids; k++) { if (idat[k] < j) { want = idname[k] } }
+        held = seat[klass_one SUBSEP fixture SUBSEP want]
+        ok = pct ? seated_pct(num, held, bar) : seated(num, held)
+        if (!ok) {
+          printf "BUDGET DRIFT FAIL: why-drift %s/%s.%s: %s:%d quotes %s%s beside %s, and the value recorded there does not round to it at the digits printed\n",
+            klass_one, scen, fixture, file, at, num, (pct ? "%" : ""), want
         }
       }
     }
@@ -789,49 +856,63 @@ fi
 # it carries no identifier, no multiplier and no comparative. So a unit that
 # speaks of the predicted glyph -- by cell id here, by the words the user
 # pages write it in there -- and also states a transport condition has to
-# name the leg that injects one, and a table row on either user page states
-# no transport condition at all: its own conditions column is where a reader
-# takes what the number was measured under.
-export TRANSPORT='remote|network|far side|another machine|round trip|round-trip|RTT'
+# name the leg that injects one. The scope is the speculated moment and
+# nothing wider: `round trip` is the tree's own phrase for the local
+# post-VimEnter attach, so a rule that fired on the word alone told the
+# author of a local row to rest it on the acceptance leg, which is advice
+# about a claim that row never made.
+export TRANSPORT='remote|network|far side|another machine|RTT'
 export SPECULATED='echo_speculated|predicted glyph|glyph it expects|character it expects|prediction'
 export RTT_LEG='remote-rtt\.sh|remote_memory'
 
 transport_in() {
-  local page="$1" rows_only="${2:-0}"
+  local page="$1"
   local shown="${page#"$root"/}"
   [[ -f "$page" ]] || return 0
-  awk -v page="$shown" -v rows_only="$rows_only" '
+  awk -v page="$shown" '
     function verdict(text, at) {
       if (text !~ transport) { return }
       if (text ~ leg) { return }
-      if (!rows_only && text !~ speculated) { return }
       printf "transport %s:%d: %s\n", page, at, text
     }
     function para(   i, text) {
       if (lines == 0) { return }
       text = ""
       for (i = 1; i <= lines; i++) { text = text " " para_line[i] }
-      verdict(text, para_no[1])
+      if (text ~ speculated) { verdict(text, para_no[1]) }
       lines = 0
+    }
+    # A table is one subject spread over its rows, so the speculated scope is
+    # the table and the finding is the row. The shipped defect was a row
+    # carrying no speculated word of its own, standing in the table whose
+    # subject is the predicted glyph; scoping the test to the row alone
+    # would read that row as a paragraph about nothing.
+    function table(   i, text) {
+      if (rows == 0) { return }
+      text = ""
+      for (i = 1; i <= rows; i++) { text = text " " row_line[i] }
+      if (text ~ speculated) {
+        for (i = 1; i <= rows; i++) { verdict(row_line[i], row_no[i]) }
+      }
+      rows = 0
     }
     BEGIN {
       transport = ENVIRON["TRANSPORT"]
       speculated = ENVIRON["SPECULATED"]
       leg = ENVIRON["RTT_LEG"]
     }
-    /^[[:space:]]*\|/ { para(); verdict($0, FNR); next }
-    /^[[:space:]]*$/ { para(); next }
-    { if (rows_only) { next } lines++; para_line[lines] = $0; para_no[lines] = FNR }
-    END { para() }
+    /^[[:space:]]*\|/ { para(); rows++; row_line[rows] = $0; row_no[rows] = FNR; next }
+    /^[[:space:]]*$/ { para(); table(); next }
+    { table(); lines++; para_line[lines] = $0; para_no[lines] = FNR }
+    END { para(); table() }
   ' "$page"
 }
 
 transported=""
 for page in "$root/README.md" "$root/docs/performance.md"; do
-  transported+="$(transport_in "$page" 1)"$'\n'
-  transported+="$(transport_in "$page" 0)"$'\n'
+  transported+="$(transport_in "$page")"$'\n'
 done
-transported+="$(transport_in "$bench_page" 0)"$'\n'
+transported+="$(transport_in "$bench_page")"$'\n'
 bounds="$(section_bounds '### 3.1 Budgets (CI-gated once the harness lands, P3)' '^#{2,3} ')"
 if [[ -n "$bounds" ]]; then
   transported+="$(sed -n "${bounds%:*},${bounds#*:}p" "$spec" |
@@ -861,7 +942,7 @@ transported+="$(awk -v file="${budgets#"$root"/}" '
     printf "transport %s:%d: %s\n", file, FNR, $0
   }
 ' "$budgets")"$'\n'
-if [[ -n "${transported//[$'\n' ]/}" ]]; then
+if [[ $transported == *[![:space:]]* ]]; then
   echo "BUDGET DRIFT FAIL: a transport condition stands where the reading is local. The predicted glyph is measured with both engines on one host; the injected round trips are the acceptance RTT leg's (scripts/acceptance/remote-rtt.sh), which is the only surface a transport claim may rest on -- name it in the unit, or state the condition the cell was recorded under:" >&2
   printf '%s' "$transported" | grep -v '^$' | sed 's/^/  /' >&2
   fail=1

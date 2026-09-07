@@ -354,10 +354,10 @@ skip_unless_class() {
             return 0
         fi
     done
-    # joined first: a pattern applied to `$*` directly rewrites each
-    # parameter and never the spaces bash joins them with
-    wanted="$*"
-    printf '%s: SKIPPED (class %s, host is %s)\n' "$leg" "${wanted// /, }" "$CLASS"
+    # joined first: the separators are the spaces bash puts between the
+    # parameters, so the rewrite has to see them as one string
+    wanted=$(printf '%s' "$*" | sed 's/ /, /g')
+    printf '%s: SKIPPED (class %s, host is %s)\n' "$leg" "$wanted" "$CLASS"
     exit 0
 }
 

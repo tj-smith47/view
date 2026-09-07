@@ -269,11 +269,10 @@ fi
 # without it `a-b.rs` and `a_2d_b.rs` would share one slot, and two paths in
 # one slot mark the wrong file test-only and hide a god file with no error.
 map_name() {
-    local s=$2
-    s=${s//_/_5f}
-    s=${s//\//_2f}
-    s=${s//./_2e}
-    s=${s//-/_2d}
+    local s
+    # the four substitutions run in order over one pass, escape character
+    # first, so an underscore a later rule writes is never re-encoded
+    s=$(printf '%s' "$2" | sed 's/_/_5f/g; s|/|_2f|g; s/\./_2e/g; s/-/_2d/g')
     MAP_NAME="GODMAP_$1_$s"
 }
 

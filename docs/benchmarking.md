@@ -119,8 +119,8 @@ the one fixture that unit names.
 | First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
 | First paint, cold, full login, `user` (p99) | 80.5 ms | not recorded on its own | `first_paint.marker_cold_ms`, seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046) |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
-| Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing, no plugins (p99) | 0.73 ms | 0.67 ms | ~1.09x slower at the tail (`echo.view_p99_ms`, `echo.ratio_p99`); at the median `echo.ratio_p50` reads 1.130 |
+| Redraw parsed to terminal write (p99) | `output_path.p99_ms` **0.11 ms** | n/a | budget 1 ms |
+| Keystroke to cell change, steady typing, no plugins (p99) | 0.73 ms | 0.67 ms | `echo.ratio_p99` ~1.09x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.130 |
 | Keystroke to predicted glyph, no plugins, engine local (p99) | **0.30 ms** | n/a | `echo_speculated.speculated_paint_p99_ms`; `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim paired with it in the same run. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
 | Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
 | Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
@@ -242,10 +242,14 @@ samples)` = 3300 samples per side, paced by the driver's own inter-sample
 sleep (5 ms on echo), so roughly 30 s each; `flood.user` spawns a session
 per side per trial (6 spawns) and runs the fixed 15 s flood window in each,
 so 1.5 min. The floor for a spawn is the class's own recorded
-`first_paint.marker_cold_ms`, which puts `startup.user` alone at >= 3.5 min
-on `gh-linux` (2200 spawns of 96.3 ms) and >= 6.2 min on `gh-macos`
-(169.1 ms each); the four session cells add ~3 min on top of that, both
-legs.
+`first_paint.marker_cold_ms`, and `startup.user` alone pays 2200 of them:
+
+| leg | cold spawn | `startup.user` floor |
+|---|---|---|
+| `gh-linux` | `first_paint.marker_cold_ms` on `user` 96.3 ms | >= 3.5 min |
+| `gh-macos` | `first_paint.marker_cold_ms` on `user` 169.1 ms | >= 6.2 min |
+
+The four session cells add ~3 min on top of that, both legs.
 
 ### Memory equivalence, 15-plugin lazy.nvim stack
 
