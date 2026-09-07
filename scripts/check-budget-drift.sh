@@ -589,9 +589,11 @@ if [[ -f "$bench_page" && $seats == *[![:space:]]* ]]; then
         nxt = clean(tk[i + 1])
         pct = 0
         after = nxt
-        if (num ~ /^[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
-        else if (num ~ /^[0-9]+(\.[0-9]+)?$/ && nxt == "%") { pct = 1; after = clean(tk[i + 2]) }
-        else if (num !~ /^[0-9]+\.[0-9]+x?$/) { continue }
+        # a leading minus is part of the number: a diagnostic records one, and
+        # a regex without it left the page ungraded where the ledger was not
+        if (num ~ /^-?[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
+        else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && nxt == "%") { pct = 1; after = clean(tk[i + 2]) }
+        else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
         # a millisecond absolute resolves like a ratio where a millisecond
         # cell id stands beside it, and nowhere else: the column holding the
         # paired bare-engine reading names no cell of view own and states an
@@ -755,19 +757,30 @@ if [[ $seats == *[![:space:]]* ]]; then
       fmt = "%." decimals(num) "f"
       return sprintf(fmt, off_pct(held, bar)) + 0 == num + 0
     }
+    # A run observation is a slash-joined list of two or more figures -- the
+    # trials a record run drew, which no cell holds. It is the one figure a
+    # why states that is not a cell value, and it is recognised by its own
+    # shape: a whole-sentence exemption on the word trial was a bypass any
+    # sentence could buy with one word, and one shipped sentence had already
+    # bought it while quoting the entry own seat.
+    function observation(w, m, j,   prev, nxt) {
+      nxt = clean(w[j + 1])
+      if (nxt == "/" && j + 2 <= m && clean(w[j + 2]) ~ /^-?[0-9]+(\.[0-9]+)?%?$/) { return 1 }
+      if (j < 2) { return 0 }
+      prev = clean(w[j - 1])
+      return (prev == "/" && clean(w[j - 2]) ~ /^-?[0-9]+(\.[0-9]+)?%?$/)
+    }
     # Every figure a why states is the value of a cell that why names: an
     # entry names its own class, scenario, fixture and metric, so a number
     # written beside an identifier resolves exactly. A figure with no
     # identifier in its sentence is attributed to nothing and goes stale in
     # silence at the next record run, which is what the stale ratio did in
-    # both places it stood. The one exception is a sentence reporting the
-    # trials a record run drew: those are observations, not cells.
+    # both places it stood.
     function sentence_verdict(text, at,   j, k, m, w, tok, cls, nc, klass,
                               fx, nf, fixn, klass_one, fixture, cellid, nids,
                               idname, idat, isid, num, nxt, pct, after, held,
                               ok, bar, want) {
       if (text ~ /replace|superseded|withdraw|pre-fix|probe|contaminat|inadmissible/) { return }
-      if (text ~ /trial/) { return }
       cls = classes_of(text)
       nc = split(cls, klass, " ")
       if (nc > 1) { return }
@@ -807,6 +820,7 @@ if [[ $seats == *[![:space:]]* ]]; then
         else if (nxt ~ /^(us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame)$/) { continue }
         # a percentage OF something is a share of a population
         if (pct && after == "of") { continue }
+        if (observation(w, m, j)) { continue }
         sub(/x$/, "", num)
         if (nids == 0) {
           printf "BUDGET DRIFT FAIL: why-figure %s/%s.%s: %s:%d states %s%s in a sentence that names no cell, so the figure is attributed to nothing and a record run leaves it standing\n",
@@ -903,6 +917,11 @@ transport_in() {
     }
     /^[[:space:]]*\|/ { para(); rows++; row_line[rows] = $0; row_no[rows] = FNR; next }
     /^[[:space:]]*$/ { para(); table(); next }
+    # A list item is its own unit, its continuation lines included. A roadmap
+    # read as one paragraph let a speculated word in one bullet indict a
+    # transport word in an unrelated sibling, and the finding then named the
+    # whole block rather than a sentence anyone wrote.
+    /^[[:space:]]*[-*][[:space:]]/ { para() }
     { table(); lines++; para_line[lines] = $0; para_no[lines] = FNR }
     END { para(); table() }
   ' "$page"

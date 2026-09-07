@@ -114,16 +114,17 @@ the one fixture that unit names.
 
 | What | view | bare Neovim | |
 |---|---|---|---|
-| UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
+| UI shell painted, engine still loading, no plugins (p99) | `first_paint.shell_visible_cold_ms` **4.1 ms** | n/a | budget 50 ms |
+| UI shell painted, engine still loading, 15-plugin lazy.nvim stack (p99) | `first_paint.shell_visible_cold_ms` **3.8 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins, `minimal` (p99) | 27.4 ms | **25.4 ms** | ~1.08x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
 | First paint, cold, 15-plugin lazy.nvim stack, `heavy` (p99) | 104.2 ms | **99.7 ms** | ~1.05x slower -- `first_paint.marker_ratio_p99`, a diagnostic of the felt `startup.settled_ratio_p50` |
-| First paint, cold, full login, `user` (p99) | 80.5 ms | not recorded on its own | `first_paint.marker_cold_ms`, seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046) |
+| First paint, cold, full login, `user` (p99) | `first_paint.marker_cold_ms` 80.5 ms | not recorded on its own | seated at `e9087db`; the ratio beside it was retaken 2026-09-06 (`first_paint.marker_ratio_p50` 1.084, `first_paint.marker_ratio_p99` 1.046) |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | `output_path.p99_ms` **0.11 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing, no plugins (p99) | 0.73 ms | 0.67 ms | `echo.ratio_p99` ~1.09x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.130 |
-| Keystroke to predicted glyph, no plugins, engine local (p99) | **0.30 ms** | n/a | `echo_speculated.speculated_paint_p99_ms`; `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim paired with it in the same run. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
-| Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
-| Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
+| Keystroke to cell change, steady typing, no plugins (p99) | `echo.view_p99_ms` 0.73 ms | 0.67 ms | `echo.ratio_p99` ~1.09x slower at the tail, where `echo.view_p99_ms` carries the bound; at the median `echo.ratio_p50` reads 1.130 |
+| Keystroke to predicted glyph, no plugins, engine local (p99) | `echo_speculated.speculated_paint_p99_ms` **0.30 ms** | n/a | `echo_speculated.speculated_ratio_p50` reads 0.394 against the bare Neovim paired with it in the same run. The injected round trips are a separate leg (`scripts/acceptance/remote-rtt.sh`) |
+| Sustained scroll, 100k lines, no plugins (p99 staleness) | `scroll.staleness_p99_ms` 1.07 ms | n/a | budget 16 ms |
+| Sustained scroll, 100k lines, 15-plugin lazy.nvim stack (p99 staleness) | `scroll.staleness_p99_ms` 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, no plugins, versus Neovim | | | ~1.6x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
 | Sustained scroll, 15-plugin lazy.nvim stack, versus Neovim | | | ~1.9x slower (`scroll.ratio_p50`, the paired ratio beside the felt `scroll.staleness_p99_ms`) |
 
@@ -179,7 +180,7 @@ quiet-host session each, the CI classes by re-seating from the
 `bench-measured-<class>.toml` artifact their gate leg uploads (CI runs no
 `--record` leg).
 
-The first row is unpaired on purpose: view paints its shell before it has
+The first two rows are unpaired on purpose: view paints its shell before it has
 even started the Neovim child, so bare Neovim has no comparable event. It
 shows nothing until your config finishes loading. The 3.8-4.1 ms range is
 nearly identical on a bare config (4.1 ms) and on the 15-plugin stack
@@ -200,10 +201,10 @@ inside 1.1%:
 | cell, `user` fixture | view | bare Neovim | reading |
 |---|---|---|---|
 | `startup.settled_ratio_p50` (`user`) | 56.031 ms p50 | 51.415 ms p50 | 1.090 against the 1.0 bar, unmet; the diagnostic `startup.server_delta_ms` reads -0.076 ms, so the engine's own startup is not the cost |
-| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50, 1.583 ms p99 | 0.829 ms p50, 1.429 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, paired delta p99 0.726 ms |
-| `echo_speculated.speculated_ratio_p50` (`user`) | 0.200 ms p50, 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
-| `scroll.staleness_p99_ms` (`user`) | 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |
-| `flood.cadence_p99_ms` (`user`) | 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, unmet on both sides under this stack; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.018, worst no-paint gap 48.9 ms reported and not gated |
+| `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50, `echo.view_p99_ms` 1.583 ms p99 | 0.829 ms p50, 1.429 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.726 ms |
+| `echo_speculated.speculated_ratio_p50` (`user`) | 0.200 ms p50, `echo_speculated.speculated_paint_p99_ms` 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
+| `scroll.staleness_p99_ms` (`user`) | `scroll.staleness_p99_ms` 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |
+| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, unmet on both sides under this stack; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.018, worst no-paint gap 48.9 ms reported and not gated |
 
 The three unmet cells are `[[shortfall]]` entries in
 `crates/view-bench/budgets.toml`, each accepted at its recorded value with

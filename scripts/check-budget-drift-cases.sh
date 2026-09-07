@@ -661,6 +661,50 @@ printf '\n| the tail, no plugins (`echo.view_p99_ms`) | 0.73 ms | 0.67 ms |\n' \
   >> "$CASE/$BENCH"
 expect 0 '' 'the paired bare-engine column, which names no cell of its own'
 
+# the view column resolves against one class like every other number: a
+# figure that is a sibling class's draw is the failure a re-record leaves at
+# every site the page quoted the old one at
+seat_macos_echo_tail() {
+  cat > "$CASE/$BASELINES/dev-macos.toml" <<'TOML'
+machine_class = "dev-macos"
+
+[echo.minimal]
+view_p99_ms = 5.244
+TOML
+}
+
+new_case
+seat_echo_tail
+seat_macos_echo_tail
+printf '\n| the tail, no plugins (`echo.view_p99_ms` 5.24 ms) | budget 8 ms |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'another class millisecond draw, quoted where the page resolves to its default class'
+
+# a diagnostic records a negative, and a page number regex without a sign
+# read one as no number at all -- ungraded on the page while the ledger
+# graded the same figure
+seat_startup_delta() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[startup.minimal]
+server_delta_ms = -0.07600000000000051
+TOML
+}
+
+new_case
+seat_startup_delta
+printf '\n| the engine own startup, no plugins (`startup.server_delta_ms` -0.076 ms) | a diagnostic |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a negative millisecond absolute equal to what the cell id beside it records'
+
+new_case
+seat_startup_delta
+printf '\n| the engine own startup, no plugins (`startup.server_delta_ms` -0.099 ms) | a diagnostic |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a negative millisecond absolute no value that cell records rounds to'
+
 # ---------------------------------------------------------------------------
 # a number resolves to one cell, not to the union of every cell its unit
 # names: the nearest id before it in its own sentence, and the unit's first
@@ -732,8 +776,10 @@ control_ratio_p50 = 0.9937197455771009
 TOML
 }
 
+# the substitution is delimited on a pipe, not a slash: a why that reports
+# the trials a run drew writes them slash-joined
 rewrite_why() {
-  sed "s/why = \"a shortfall carries a scenario and a metric of its own\"/why = \"$1\"/" \
+  sed "s|why = \"a shortfall carries a scenario and a metric of its own\"|why = \"$1\"|" \
     "$CASE/$BUDGETS" > "$CASE/$BUDGETS.tmp"
   mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
 }
@@ -744,8 +790,22 @@ expect 1 'unattributed:dev-linux/first_paint.minimal' \
   'a why figure standing in a sentence that names no cell'
 
 new_case
+rewrite_why 'three trials read 1.17 / 1.18 / 1.19 on this cell'
+expect 0 '' 'a why sentence reporting the trials a record run drew, slash-joined as the observation it is'
+
+new_case
 rewrite_why 'three trials read 1.17, 1.18 and 1.19 on this cell'
-expect 0 '' 'a why sentence reporting the trials a record run drew'
+expect 1 'unattributed:dev-linux/first_paint.minimal' \
+  'the same trials written as lone figures, which stand in no list and name no cell'
+
+new_case
+rewrite_why 'the trials put marker_ratio_p50 at 1.17'
+expect 1 'why:dev-linux/first_paint.minimal' \
+  'a trial sentence quoting the entry own seat at a value it does not record'
+
+new_case
+rewrite_why 'the trials put marker_ratio_p50 at 1.094'
+expect 0 '' 'the same trial sentence at the value that cell records'
 
 new_case
 seat_echo_control
@@ -781,9 +841,9 @@ expect 1 'transport:docs/performance.md:10' \
   'a row in the speculated table stating a transport condition the cell never had'
 
 new_case
-printf '\n| attach-plus-takeover round trip after VimEnter | 1.4 ms | n/a | same host, same run |\n' \
+printf '| attach-plus-takeover round trip after VimEnter | 1.4 ms | n/a | same host, same run |\n' \
   >> "$CASE/$PERF"
-expect 0 '' 'a local round trip, which is this tree own phrase for the serial attach'
+expect 0 '' 'a local round trip, planted in the speculated table, which is this tree own phrase for the serial attach'
 
 new_case
 printf '\nview draws the character it expects before the network answers.\n' \
@@ -800,6 +860,26 @@ new_case
 printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      paint and input local, keystrokes echoed without waiting for the\n      round trip.\n' \
   >> "$CASE/$README"
 expect 0 '' 'a roadmap bullet naming remote editing and no speculated moment'
+
+# a list item is its own unit, and the leg it names is the licensed surface:
+# the true sentence about remote editing says both what the transport is and
+# what view draws while it waits, which passes on the bullet that names the
+# leg injecting the round trip and fails on the one that names none
+new_case
+printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      keystrokes echoed without waiting for the round trip, view drawing\n      the character it expects; the injected round trips are the\n      acceptance leg scripts/acceptance/remote-rtt.sh.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'a roadmap bullet describing the predicted glyph and naming the leg that injects the round trip'
+
+new_case
+printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      keystrokes echoed without waiting for the round trip, view drawing\n      the character it expects.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:8' \
+  'the same bullet with no leg named, which is a transport condition resting on nothing'
+
+new_case
+printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      paint and input local.\n- [ ] **Detach and reconnect.** view keeps drawing the character it expects\n      while the link is down.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'two sibling bullets, one carrying a transport word and one a speculated moment'
 
 # ---------------------------------------------------------------------------
 # the gate runs under the bash macOS ships
@@ -847,7 +927,7 @@ fi
 # written as "delete every blank and see what is left" never returns on a
 # multi-line variable, and the drift check spun in bash itself on a 12 kB
 # one where a glob test answered at once.
-MODERN='declare[[:space:]]+-[a-zA-Z]*[An]|local[[:space:]]+-[a-zA-Z]*[An]|typeset[[:space:]]+-[a-zA-Z]*[An]|\b[m]apfile\b|\b[r]eadarray\b|\[\[[[:space:]]+-v[[:space:]]|\$\{[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,|\^\^|//)|\|[&]|[&]>>|;;[&]'
+MODERN='declare[[:space:]]+-[a-zA-Z]*[An]|local[[:space:]]+-[a-zA-Z]*[An]|typeset[[:space:]]+-[a-zA-Z]*[An]|\b[m]apfile\b|\b[r]eadarray\b|\[\[[[:space:]]+-v[[:space:]]|\$\{!?[A-Za-z_][A-Za-z_0-9]*(\[[^]]*\])?(,,|\^\^|//)|\|[&]|[&]>>|;;[&]'
 if [ -n "$empty" ]; then
   modern="$empty"
 else
@@ -866,6 +946,28 @@ if [ -z "$caught" ]; then
   missed="the planted pattern substitution went unrefused"
 fi
 report 'the construct list refuses a pattern substitution planted in a script' "$missed"
+
+# The indirect spelling costs what the direct one costs -- it rescans the
+# string of whatever the name holds -- so it is in the class and the list is
+# asked about it separately.
+printf '#!/usr/bin/env bash\nname=seats\nprintf %%s "$%s{!name//x/y}"\n' '' > "$planted"
+caught=$(grep -nE "$MODERN" "$planted") || true
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted indirect pattern substitution went unrefused"
+fi
+report 'the construct list refuses an indirect pattern substitution' "$missed"
+
+# The anchored spellings rebuild the string once rather than once per match,
+# so they are siblings in spelling and not in cost: refusing them would ban a
+# construct the rule has no ground to ban.
+printf '#!/usr/bin/env bash\nseats=$1\nprintf %%s "$%s{seats/#x/y}$%s{seats/%%x/y}"\n' '' '' > "$planted"
+caught=$(grep -nE "$MODERN" "$planted") || true
+missed=""
+if [ -n "$caught" ]; then
+  missed="an anchored substitution was refused: $caught"
+fi
+report 'the construct list allows the anchored substitutions, which match once' "$missed"
 
 # The grep above reads constructs; it cannot see the two shapes that made 3.2
 # refuse this very checker -- a case pattern and an apostrophe in a comment,
@@ -896,16 +998,30 @@ fi
 # shipped tree is run under an alarm, read-only, on the interpreter the
 # contract is about. perl ships on macOS and on the CI runner images, and
 # the leg says so where it does not.
+#
+# It runs under the interpreter the sibling leg above resolves, never under
+# whichever bash launched this file: on the host the cost is about, the two
+# differ whenever a newer bash sits ahead of /bin/bash on PATH, and the one
+# leg that can see a 3.2 cost then never met a 3.2. Where the stock bash is
+# newer the leg still runs, because a checker that stops finishing is a cost
+# regression under any interpreter.
+timed_bash="$stock"
+timed_major="$stock_major"
+if [ ! -x "$timed_bash" ]; then
+  timed_bash="$BASH"
+  timed_major=$("$timed_bash" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo unknown)
+fi
 if command -v perl > /dev/null 2>&1; then
-  timed=$(cd "$ROOT" && perl -e 'alarm 120; exec @ARGV' "$BASH" "$CHECKER" "$ROOT" 2>&1)
+  timed=$(cd "$ROOT" && perl -e 'alarm 120; exec @ARGV' "$timed_bash" "$CHECKER" "$ROOT" 2>&1)
   timed_rc=$?
   slow=""
   if [ "$timed_rc" -ge 128 ]; then
-    slow="the checker did not finish in 120 s on the shipped tree: bash 3.2 rescans the string per match in a pattern substitution, so an emptiness test written as one is unbounded on the seat table the shipped baselines build"
+    slow="the checker did not finish in 120 s on the shipped tree, which is a cost regression whatever caused it. The cause to check first is a bash 3.2 pattern substitution: it rescans the string per match, so an emptiness test written as one is unbounded on the seat table the shipped baselines build. What the run printed before the alarm:
+$timed"
   elif [ "$timed_rc" -ne 0 ]; then
     slow="$timed"
   fi
-  report 'the checker finishes on the shipped tree inside two minutes' "$slow"
+  report "the checker finishes on the shipped tree inside two minutes under $timed_bash (bash $timed_major)" "$slow"
 else
   n=$((n + 1))
   printf 'ok %s - %s # skip perl is not installed, so no alarm to run it under\n' \
