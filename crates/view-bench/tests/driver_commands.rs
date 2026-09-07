@@ -19,7 +19,8 @@
 //! Literals alone would pin only the commands written here, so a second
 //! walk pins the population of send sites instead: every call expression
 //! inside a `send`/`submitted` argument is read off -- the argument taken
-//! to the paren that closes it however many lines that takes, and a
+//! to the paren that closes it however many lines that takes, counting no
+//! paren a string or char literal carries, and a
 //! path-qualified call read as its last segment -- and one whose builder
 //! this crate does not define is a command built elsewhere -- no literal
 //! for the first walk to grade -- so it fails unless a row declares it by
@@ -140,18 +141,41 @@ fn typed_commands(source: &str) -> Vec<String> {
 }
 
 /// The argument text of a call whose opening paren is at `open`, to the
-/// paren that closes it however many lines that takes.
+/// paren that closes it however many lines that takes, counting no paren
+/// that stands inside a string or char literal.
 ///
 /// Reading to the end of the line instead would drop the argument of a
 /// send site rustfmt wrapped, which is a command reaching the session
-/// with nothing read off it.
+/// with nothing read off it. A literal paren is the same miss in both
+/// directions: a `)` inside a string closes the argument a paren early
+/// and drops every call written after it, and a `(` runs it to the end
+/// of the file and reads calls no send site made.
 fn argument(text: &str, open: usize) -> &str {
     let rest = &text[open + 1..];
+    let bytes = rest.as_bytes();
     let mut depth = 1usize;
-    for (at, c) in rest.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
+    let mut at = 0usize;
+    while at < rest.len() {
+        match bytes[at] {
+            b'"' => {
+                at += 1;
+                while at < rest.len() && bytes[at] != b'"' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+            }
+            // a char literal closes within three bytes of its opener; a
+            // quote that closes no further along is a lifetime, which
+            // opens nothing to skip past
+            b'\'' => {
+                for width in [2usize, 3] {
+                    if bytes.get(at + width) == Some(&b'\'') {
+                        at += width;
+                        break;
+                    }
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
                 depth -= 1;
                 if depth == 0 {
                     return &rest[..at];
@@ -159,6 +183,7 @@ fn argument(text: &str, open: usize) -> &str {
             }
             _ => {}
         }
+        at += 1;
     }
     rest
 }
@@ -288,9 +313,11 @@ fn every_typed_command_is_silenced_or_declared_the_measured_action() {
 
 // What the send-site walk reads: a builder defined beside the send site,
 // one imported from elsewhere, one reached through its module path, one
-// whose send site rustfmt wrapped, and the three call shapes that build no
-// command. The two spellings in the middle are the ones a line-at-a-time
-// walk that skipped a path-qualified name read as nothing at all.
+// whose send site rustfmt wrapped, two whose literals carry a paren, and
+// the three call shapes that build no command. The two spellings in the
+// middle are the ones a line-at-a-time walk that skipped a path-qualified
+// name read as nothing at all, and the two literal parens are the two
+// directions a paren counted inside a string misreads the argument in.
 #[test]
 fn the_walk_reads_every_function_a_send_site_hands_a_command() {
     let source = concat!(
@@ -303,6 +330,9 @@ fn the_walk_reads_every_function_a_send_site_hands_a_command() {
         "    session.send(format!(\":silent e {file}\\r\").as_bytes())?;\n",
         "    session.send(&WALK_STEP.repeat(DEFAULT_CAPACITY))?;\n",
         "    session.send(OPEN_COMMAND)?;\n",
+        "    session.send(submitted(&paren_command(\")\")).repeat(count_of(SAMPLE)).as_bytes())?;\n",
+        "    session.send(open_command(\"(\").as_bytes())?;\n",
+        "    let bound = wedge_bound(SAMPLE);\n",
         "    #[cfg(test)]\n",
         "    session.send(only_in_tests())?;\n",
     );
@@ -314,10 +344,13 @@ fn the_walk_reads_every_function_a_send_site_hands_a_command() {
             "wedge_command".to_string(),
             "wedge_release".to_string(),
             "history_command".to_string(),
+            "paren_command".to_string(),
+            "count_of".to_string(),
+            "open_command".to_string(),
         ],
         "a builder is read wherever a send site hands it a command -- through a \
-         module path or across the line the argument wrapped onto included -- and \
-         a method call, a macro or a constant builds none"
+         module path, across the line the argument wrapped onto, and past a paren \
+         a literal carries -- and a method call, a macro or a constant builds none"
     );
 }
 
