@@ -20,12 +20,12 @@
 //! walk pins the population of send sites instead: every call expression
 //! inside a `send`/`submitted` argument is read off -- the argument taken
 //! to the paren that closes it however many lines that takes, counting no
-//! paren a string or char literal carries, and a
-//! path-qualified call read as its last segment -- and one whose builder
-//! this crate does not define is a command built elsewhere -- no literal
-//! for the first walk to grade -- so it fails unless a row declares it by
-//! that builder's name. A builder defined here needs no row: its own
-//! literal stands on a line the first walk already reads.
+//! paren a string, a raw string in either spelling, or a char literal
+//! carries, and a path-qualified call read as its last segment -- and one
+//! whose builder this crate does not define is a command built elsewhere
+//! -- no literal for the first walk to grade -- so it fails unless a row
+//! declares it by that builder's name. A builder defined here needs no
+//! row: its own literal stands on a line the first walk already reads.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -140,9 +140,27 @@ fn typed_commands(source: &str) -> Vec<String> {
     found
 }
 
+/// The hash count of the raw string opening at `at`, or `None` where no raw
+/// string opens there.
+fn raw_string_hashes(bytes: &[u8], at: usize) -> Option<usize> {
+    if bytes.get(at) != Some(&b'r') {
+        return None;
+    }
+    let mut hashes = 0usize;
+    while bytes.get(at + 1 + hashes) == Some(&b'#') {
+        hashes += 1;
+    }
+    (bytes.get(at + 1 + hashes) == Some(&b'"')).then_some(hashes)
+}
+
+/// Whether the raw string opened with `hashes` hashes closes at `at`.
+fn raw_string_closes(bytes: &[u8], at: usize, hashes: usize) -> bool {
+    bytes.get(at) == Some(&b'"') && (0..hashes).all(|k| bytes.get(at + 1 + k) == Some(&b'#'))
+}
+
 /// The argument text of a call whose opening paren is at `open`, to the
 /// paren that closes it however many lines that takes, counting no paren
-/// that stands inside a string or char literal.
+/// that stands inside a string, a raw string or a char literal.
 ///
 /// Reading to the end of the line instead would drop the argument of a
 /// send site rustfmt wrapped, which is a command reaching the session
@@ -156,6 +174,17 @@ fn argument(text: &str, open: usize) -> &str {
     let mut depth = 1usize;
     let mut at = 0usize;
     while at < rest.len() {
+        // a raw string reads its own backslashes and hashes: the escape step
+        // below swallows the closing quote of `r"a\"`, and the hash form
+        // carries quotes of its own that close nothing
+        if let Some(hashes) = raw_string_hashes(bytes, at) {
+            at += hashes + 2;
+            while at < rest.len() && !raw_string_closes(bytes, at, hashes) {
+                at += 1;
+            }
+            at += hashes + 1;
+            continue;
+        }
         match bytes[at] {
             b'"' => {
                 at += 1;
@@ -313,11 +342,14 @@ fn every_typed_command_is_silenced_or_declared_the_measured_action() {
 
 // What the send-site walk reads: a builder defined beside the send site,
 // one imported from elsewhere, one reached through its module path, one
-// whose send site rustfmt wrapped, two whose literals carry a paren, and
+// whose send site rustfmt wrapped, five whose literals carry a paren, and
 // the three call shapes that build no command. The two spellings in the
 // middle are the ones a line-at-a-time walk that skipped a path-qualified
-// name read as nothing at all, and the two literal parens are the two
-// directions a paren counted inside a string misreads the argument in.
+// name read as nothing at all, and the literal parens are the two
+// directions a paren counted inside a literal misreads the argument in,
+// one for each shape a literal comes in: a string, a raw string in either
+// spelling, and a char. The lifetime stands in front of them because a
+// quote read as an opener swallows the parens between it and the next one.
 #[test]
 fn the_walk_reads_every_function_a_send_site_hands_a_command() {
     let source = concat!(
@@ -332,6 +364,11 @@ fn the_walk_reads_every_function_a_send_site_hands_a_command() {
         "    session.send(OPEN_COMMAND)?;\n",
         "    session.send(submitted(&paren_command(\")\")).repeat(count_of(SAMPLE)).as_bytes())?;\n",
         "    session.send(open_command(\"(\").as_bytes())?;\n",
+        "    session.send(lifetime_command(SAMPLE as &'a str).as_bytes())?;\n",
+        "    session.send(submitted(&char_command(')')).repeat(char_count(SAMPLE)).as_bytes())?;\n",
+        "    session.send(char_open('(').as_bytes())?;\n",
+        "    session.send(submitted(&raw_command(r\"a\\\")).repeat(raw_count(SAMPLE)).as_bytes())?;\n",
+        "    session.send(submitted(&hash_command(r#\"a \")\"#)).repeat(hash_count(SAMPLE)).as_bytes())?;\n",
         "    let bound = wedge_bound(SAMPLE);\n",
         "    #[cfg(test)]\n",
         "    session.send(only_in_tests())?;\n",
@@ -347,6 +384,14 @@ fn the_walk_reads_every_function_a_send_site_hands_a_command() {
             "paren_command".to_string(),
             "count_of".to_string(),
             "open_command".to_string(),
+            "lifetime_command".to_string(),
+            "char_command".to_string(),
+            "char_count".to_string(),
+            "char_open".to_string(),
+            "raw_command".to_string(),
+            "raw_count".to_string(),
+            "hash_command".to_string(),
+            "hash_count".to_string(),
         ],
         "a builder is read wherever a send site hands it a command -- through a \
          module path, across the line the argument wrapped onto, and past a paren \
