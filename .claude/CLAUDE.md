@@ -72,17 +72,22 @@ Hard rules (in addition to global rules):
   measure, `rm` the lock, tell it "released". The hook denies those targets
   without a fresh lock; the lock is the receipt, not the coordination.
 
-## Subagents: gates run in the FOREGROUND
+## Subagents: one gate per commit, nothing that pins the host
 
-If you are a subagent (implementer/reviewer/fixer): run `task ci`,
-`task compat`, `task commit`, and any other gate in the FOREGROUND with a
-generous timeout (10-15 min), redirecting output to a file under
-`~/.claude/tmp/` on the first run and reading it selectively. Do NOT use
-run_in_background for a gate and then end your turn to "wait for the
+If you are a subagent (implementer/reviewer/fixer): the full gate is
+`task ci` / `task test` — 150 test binaries and live nvims that saturate
+every core and most of memory for minutes, and the peer sessions on this
+host starve when it runs twice (user ruling 2026-09-07). It runs at most
+once per commit, inside `nice -n 15 task commit PATHS="…" -- -m "…"`, and
+never otherwise: no `task ci` or `task test` before the commit, no
+whole-crate or workspace `cargo build`/`cargo test`, and reviewers never
+run the gate at all — they judge from the diff and the focused checks
+their brief names (one test binary or test name, a cases file, a single
+script). Run those in the FOREGROUND with a generous timeout, output to a
+file under `~/.claude/tmp/` on the first run, read selectively. Do NOT
+use run_in_background and then end your turn to "wait for the
 notification" — background-child notifications do not resume a subagent
-whose turn has ended; they go to the coordinator, and you simply stall.
-The global no-polling rule stands (no sleep/until loops, hook-denied);
-foreground-with-timeout is the compliant way for a subagent to wait.
+whose turn has ended.
 
 The tree, the target dir and the process table are shared with peer sessions
 and their tests. Never `pkill`/`killall` by name (`nvim --embed`, `view`) —
