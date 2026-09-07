@@ -75,3 +75,37 @@ list built by a `grep` over another file is checked for emptiness before it
 is passed on, and where two legs read the same list the check sits above
 both: a leg that reports `ok` having graded nothing disagrees with its own
 sibling about what an empty list means.
+
+## A comment wraps at 80 columns, counted in characters
+
+`scripts/check-style.sh` grades every comment line under `scripts/` at the
+width its markdown pages are held to, and a contributor meets the rule for
+the first time when it reddens a line. What the message says has to be what
+an editor shows, so the walks count characters and not bytes: a rule drawn
+in box characters is 77 columns and 105 bytes, and a gate measuring bytes
+reddens it while passing a wider line whose long token it subtracts whole.
+
+Counted without a UTF-8 awk, because the same verdict has to come back from
+gawk, mawk and BSD awk: under `LC_ALL=C` a character is a lead byte plus its
+continuation bytes, so the walks drop the continuations
+(`gsub(/[\200-\277]/, "")`) and take the length of what is left. The
+`LC_ALL=C` is not decoration -- gawk in a UTF-8 locale refuses that range as
+a collation character and the walk dies rather than grading.
+
+What cannot wrap is exempt by shape rather than by a list of files:
+
+| shape | why it is exempt |
+|---|---|
+| a run longer than the limit (a path, a captured declaration) | it has nowhere to break, so the line is measured with it taken out and the prose beside it still wraps |
+| a comment sharing its line with code | wrapping it would move the code |
+| a page's fenced block, table row, heading, or lone link | a sample is a sample, a row is a row, and a heading carries no newline to wrap at |
+
+The population is every file under `scripts/` whose first line names bash or
+`sh` -- the same selection the portability legs make, and the reason the
+remote-test fixtures that carry no suffix are graded. All three comment
+rules (the width walk and the two citation bans) read that one list: a rule
+spelled over `*.sh` grades a subset of its sibling's, and the difference is
+where a finding sits unread. The list is vetted for readability before it is
+handed on, because a `grep -l` over a file it cannot open drops that file
+and grades the survivors -- which reads exactly like a tree with nothing to
+report.

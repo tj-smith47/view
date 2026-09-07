@@ -75,12 +75,22 @@ pad() {
   printf '%s%s%s\n' "$2" "$(printf "%${fill}s" '' | tr ' ' 'a')" "$3"
 }
 
+# The same line padded with a three-byte character rather than an ASCII one:
+# a walk counting bytes calls this three times its width, which is how a
+# 77-column comment reddened beside a wider one whose long token was
+# subtracted whole.
+pad_wide() {
+  fill=$(($1 - ${#2} - ${#3}))
+  printf '%s%s%s\n' "$2" \
+    "$(awk -v n="$fill" 'BEGIN { while (i++ < n) printf "\342\224\200" }')" "$3"
+}
+
 # The chunk walk's one shape: a const declaration opening a concat!, whose
 # body line is padded to the width the case is about.
 plant_chunk() {
   {
     printf 'const A_CHUNK: &str = concat!(\n'
-    pad "$1" '    "' '\n",'
+    "${2:-pad}" "$1" '    "' '\n",'
     printf ');\n'
   } > "$CASE/$NVIM"
 }
@@ -91,10 +101,10 @@ plant_chunk() {
 plant_literals() {
   {
     printf 'fn a() {\n    let s = format!(\n'
-    pad "$1" '        "' ' \'
+    "${3:-pad}" "$1" '        "' ' \'
     printf '        continues here");\n}\n'
     printf 'const M: &str = "\\\n'
-    pad "$2" '' '\'
+    "${3:-pad}" "$2" '' '\'
     printf 'the tail line here";\n'
   } > "$CASE/$LIT"
 }
@@ -185,6 +195,27 @@ new_case
 plant_chunk 60
 plant_literals 60 81
 expect 1 "$LIT:7:81 lit-width" 'a literal opened by an assignment, its body one column over'
+
+# ---------------------------------------------------------------------------
+# the same shapes written in a character wider than a byte: the walks count
+# characters, which is what an editor shows and what the exemption for a
+# long run is counted in, so the two cannot disagree about which of two
+# lines is the wider
+# ---------------------------------------------------------------------------
+new_case
+plant_chunk 77 pad_wide
+plant_literals 77 77 pad_wide
+expect 0 '' 'the three shapes inside the width in characters and past it in bytes'
+
+new_case
+plant_chunk 81 pad_wide
+plant_literals 60 60
+expect 1 "chunk-width $NVIM:2:81" 'a chunk body line of wide characters one column over'
+
+new_case
+plant_chunk 60
+plant_literals 81 60 pad_wide
+expect 1 "$LIT:3:81 lit-width" 'a literal of wide characters one column over'
 
 # ---------------------------------------------------------------------------
 # a declaration shape that drifts out of a walk's own match: the walk reaches
@@ -613,8 +644,8 @@ expect_geometry 0 '' 'a lock release in a crate that owns no engine attach'
 # file, a row is a row, a heading is one line by construction, a link has
 # nowhere to break, and a token longer than the limit cannot be helped by
 # wrapping, which is why the token and not the line it stands in is what the
-# walk takes out. Counted in bytes so an awk that decodes UTF-8 and one that
-# does not return the same verdict
+# walk takes out. Counted in characters, by a measure that gives the same
+# verdict on an awk that decodes UTF-8 and one that does not
 # ---------------------------------------------------------------------------
 new_width_case() {
   n=$((n + 1))
@@ -719,6 +750,16 @@ expect_width 1 'docs/page.md:8' \
   'a backtick block holding a tilde line, which closes neither the block nor the grading after it'
 
 new_width_case
+printf 'A rule of box characters %s ends the section\n' \
+  '── ── ── ── ── ── ── ── ── ── ──' >> "$CASE/docs/page.md"
+expect_width 0 '' \
+  'a prose line of 77 columns and 125 bytes, whose runs are too short to buy the exemption a byte measure would need'
+
+new_width_case
+pad_wide 81 'A rule of box characters ' ' ends the section' >> "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:4' 'a prose line of wide characters one column over'
+
+new_width_case
 mkdir "$CASE/docs/adir.md"
 expect_width 1 'docs/adir.md:unreadable' \
   'a directory named like a page, which awk skips with a warning and a zero status'
@@ -733,11 +774,13 @@ rm -f "$CASE/README.md" "$CASE/docs/page.md"
 expect_width 1 'empty' 'a tree with no page for the walk to read'
 
 # ---------------------------------------------------------------------------
-# the script comment width gate: a comment under scripts/ wraps at the same
-# column a page does, over the same shebang-selected population the
-# portability legs grade. Counted in bytes, as the page walk counts, so an
-# awk that decodes UTF-8 and one that does not return the same verdict --
-# which is why a comment inside the limit in columns can still be over
+# the comment rules over scripts/: a comment wraps at the same column a page
+# does, cites no review finding and no planning document, and all three rules
+# grade the one shebang-selected population the portability legs grade --
+# the remote-test fixtures carry no suffix, so a rule spelled over *.sh
+# grades a subset of its sibling's. Counted in characters, as the page walk
+# counts, so a rule drawn in box characters is judged by what an editor
+# shows rather than by what it costs in bytes
 # ---------------------------------------------------------------------------
 new_script_case() {
   n=$((n + 1))
@@ -745,6 +788,19 @@ new_script_case() {
   mkdir -p "$CASE/scripts"
   printf '#!/usr/bin/env bash\n# a comment inside the limit\ntrue\n' \
     > "$CASE/scripts/gate.sh"
+}
+
+# The two citations the bans below are cased with, assembled rather than
+# written out: this file is inside the population those bans grade, and a
+# case that spells one plants the drift it exists to catch.
+CITE_FINDING='found in'' review'
+CITE_PLAN='char''ter'
+
+# A fixture the remote tests exec by path: no suffix, and a script only
+# because its first line says so.
+plant_fixture() {
+  printf '#!/bin/sh\n# %s\nexit 0\n' "$1" > "$CASE/scripts/relay"
+  chmod +x "$CASE/scripts/relay"
 }
 
 expect_script_comments() {
@@ -755,7 +811,13 @@ expect_script_comments() {
   rc=$?
   got=$(printf '%s\n' "$out" | awk '
     /^[^ ].*:[0-9]+: [0-9]+ columns$/ { c = $1; sub(/:$/, "", c); print c; next }
+    /^[^ ].*: the comment rules cannot read it$/ {
+      c = $1; sub(/:$/, "", c); print c ":unreadable"; next
+    }
     /^STYLE FAIL: no script found/ { print "empty"; next }
+    /^STYLE FAIL: review-finding reference/ { print "finding-ban"; next }
+    /^STYLE FAIL: planning-/ { print "plan-ban"; next }
+    /^[^ :]+:[0-9]+:/ { split($0, f, ":"); print f[1] ":" f[2]; next }
   ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
   if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
     printf 'ok %s - %s\n' "$n" "$desc"
@@ -783,10 +845,14 @@ printf '# a path this long %s cannot be wrapped under the limit\n' \
 expect_script_comments 0 '' 'a comment carrying a token longer than the limit itself'
 
 new_script_case
-printf '# an em dash costs three bytes and one column %s and this line has\n' \
-  '— — — — — — — — — — — —' >> "$CASE/scripts/gate.sh"
-expect_script_comments 1 'scripts/gate.sh:4' \
-  'a comment inside the width in columns and past it in bytes, the measure both walks take'
+pad 81 '# a comment ' ' past the limit' >> "$CASE/scripts/gate.sh"
+expect_script_comments 1 'scripts/gate.sh:4' 'a comment one column over'
+
+new_script_case
+printf '# ── why the gated item is measured, not truncated at the marker ────────────\n' \
+  >> "$CASE/scripts/gate.sh"
+expect_script_comments 0 '' \
+  'a rule drawn in box characters: 77 columns, and 105 bytes a byte measure reddens'
 
 new_script_case
 pad 85 'true # a comment ' ' past the limit' >> "$CASE/scripts/gate.sh"
@@ -797,6 +863,27 @@ new_script_case
 pad 85 '# a comment ' ' past the limit' > "$CASE/scripts/notes.txt"
 expect_script_comments 0 '' \
   'an over-wide line in a file under scripts/ that no shebang makes a script'
+
+new_script_case
+plant_fixture 'a comment inside the limit'
+pad 85 '# a comment ' ' past the limit' >> "$CASE/scripts/relay"
+expect_script_comments 1 'scripts/relay:4' \
+  'an over-wide comment in a suffix-less fixture, which a *.sh population misses'
+
+new_script_case
+plant_fixture "the retry loop, $CITE_FINDING to spin on a closed pipe"
+expect_script_comments 1 'finding-ban scripts/relay:2' \
+  'a review-finding citation in a suffix-less fixture, which the same population reaches'
+
+new_script_case
+plant_fixture "the leg the $CITE_PLAN asks for"
+expect_script_comments 1 'plan-ban scripts/relay:2' \
+  'a planning-document citation in a suffix-less fixture'
+
+new_script_case
+ln -s missing.sh "$CASE/scripts/gone.sh"
+expect_script_comments 1 'scripts/gone.sh:unreadable' \
+  'a script the rules cannot read, which a dropped selection would pass as clean'
 
 new_script_case
 rm -f "$CASE/scripts/gate.sh"

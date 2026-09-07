@@ -217,6 +217,22 @@ if [ "${1:-}" = "--file" ]; then
   exit 0
 fi
 
+# The measure every width walk in this file takes, in one place because a
+# tree graded in two units is a tree where a narrower line reddens while a
+# wider one passes: a run longer than the limit exempts itself in whatever
+# unit the walk counts, so bytes redden a 68-column comment beside a
+# 77-column one whose long token is subtracted whole.
+#
+# Characters, counted without a UTF-8 awk: under LC_ALL=C a character is a
+# lead byte plus its continuation bytes, so dropping the continuations
+# leaves one byte per character on gawk, mawk and BSD awk alike -- the same
+# determinism a byte count was reached for, in the unit an editor shows.
+# Every awk this feeds is run under LC_ALL=C, which the range needs to be a
+# range of bytes at all: gawk in a UTF-8 locale refuses it as a collation
+# character.
+AWK_COLS='function cols(s,   t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
+'
+
 # Every embedded Lua chunk wraps at 80 columns. The chunks are read beside
 # rustfmt-held Rust and rustfmt does not reach inside a string literal, so
 # nothing else in the toolchain catches a line past that width, and every
@@ -248,10 +264,10 @@ check_lua_chunk_width() {
     return 1
   fi
   status=0
-  report=$(awk '
+  report=$(LC_ALL=C awk "$AWK_COLS"'
     function check_width(line) {
-      if (length(line) > 80) {
-        printf "%s:%d: %d columns\n", FILENAME, FNR, length(line)
+      if (cols(line) > 80) {
+        printf "%s:%d: %d columns\n", FILENAME, FNR, cols(line)
         over++
       }
     }
@@ -314,7 +330,7 @@ check_string_literal_width() {
     return 1
   fi
   status=0
-  report=$(awk '
+  report=$(LC_ALL=C awk "$AWK_COLS"'
     function quotes(line,   n, i, len, c) {
       n = 0; i = 1; len = length(line)
       while (i <= len) {
@@ -326,8 +342,8 @@ check_string_literal_width() {
       return n
     }
     function check_width(line) {
-      if (length(line) > 80) {
-        printf "%s:%d: %d columns\n", FILENAME, FNR, length(line)
+      if (cols(line) > 80) {
+        printf "%s:%d: %d columns\n", FILENAME, FNR, cols(line)
         over++
       }
     }
@@ -618,9 +634,7 @@ check_written_programs() {
 # with every such run taken out, so a page still wraps the sentence it
 # writes around one long path. A program that stamps a block wraps its own
 # output at this limit, which is why no marker takes a block out of the
-# walk. Counted in bytes under LC_ALL=C so the verdict is the same on every
-# host: an awk that decodes UTF-8 and one that does not would otherwise
-# disagree about the lines carrying a micro sign.
+# walk. Counted in characters, by the shared measure above.
 PROSE_WIDTH=80
 check_prose_width() {
   local pages wide unreadable rc
@@ -646,7 +660,7 @@ check_prose_width() {
     return 1
   fi
   rc=0
-  wide=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" '
+  wide=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" "$AWK_COLS"'
     FNR == 1 { fenced = 0 }
     # CommonMark closes a fence only with the character that opened it, and
     # with a run at least as long. One toggle for both spellings read a
@@ -662,20 +676,20 @@ check_prose_width() {
     }
     fenced { next }
     /^[[:space:]]*[|#]/ { next }
-    length($0) <= limit { next }
+    cols($0) <= limit { next }
     /^[[:space:]]*(<[^ >]+>|[^ ]+:\/\/[^ ]+)[.,]?[[:space:]]*$/ { next }
     /^[[:space:]]*!?\[[^]]*\](\([^)]*\))?[.,]?[[:space:]]*$/ { next }
     /^[[:space:]]*\[!?\[[^]]*\]\([^)]*\)\]\([^)]*\)[.,]?[[:space:]]*$/ { next }
     {
       # the run longer than the limit is what cannot wrap, so it is what is
       # exempt: the rest of the line is prose and is measured without it
-      rest = length($0)
+      rest = cols($0)
       n = split($0, word, /[ \t]+/)
       for (i = 1; i <= n; i++) {
-        if (length(word[i]) > limit) { rest -= length(word[i]) }
+        if (cols(word[i]) > limit) { rest -= cols(word[i]) }
       }
       if (rest <= limit) { next }
-      printf "%s:%d: %d columns\n", FILENAME, FNR, length($0)
+      printf "%s:%d: %d columns\n", FILENAME, FNR, cols($0)
     }') || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$wide"
@@ -695,38 +709,119 @@ check_prose_width() {
   return 1
 }
 
-# A script comment wraps at the column a page does, and the population is
-# every script under scripts/ selected by shebang -- the same list the
-# portability legs grade -- because a rule kept by hand over the five gate
-# scripts left an 85-column comment standing in a sixth.
-check_script_comment_width() {
-  local scripts wide rc
-  # the empty guard below is the diagnosis, so the capture cannot take the
-  # script down with it: grep exits non-zero when nothing under scripts/
-  # carries a shebang, which is the case the guard is for
-  scripts=$(find scripts -type f -exec grep -lE '^#!.*(bash|/sh)$' {} + \
-    | LC_ALL=C sort) || true
-  if [ -z "$scripts" ]; then
+# The population every comment rule over scripts/ grades: a file whose first
+# line names bash or sh, which is what makes a file a script here and what
+# the portability legs select on. Read once and handed to the width walk and
+# to both bans below, because the eight remote-test fixtures carry no suffix
+# and a rule spelled over *.sh graded 26 of the 35 while its sibling graded
+# all of them.
+SCRIPT_POPULATION=""
+read_script_population() {
+  local entries unreadable
+  if [ -n "$SCRIPT_POPULATION" ]; then
+    return 0
+  fi
+  # listed without -type f so a dangling symlink is named by the loop below
+  # rather than dropped by the selection: a selection that skips what it
+  # cannot open leaves the population short, and a short population grades
+  # its survivors and reads exactly like a tree with nothing to report
+  entries=$(find scripts ! -type d | LC_ALL=C sort)
+  unreadable=$(printf '%s\n' "$entries" | while IFS= read -r entry; do
+    [ -z "$entry" ] ||
+      { [ -f "$entry" ] && [ -r "$entry" ]; } ||
+      printf '%s: the comment rules cannot read it\n' "$entry"
+  done)
+  if [ -n "$unreadable" ]; then
+    printf '%s\n' "$unreadable"
+    echo "STYLE FAIL: a file under scripts/ cannot be read"
+    return 1
+  fi
+  # awk rather than grep -l for the selection: xargs answers 123 both for a
+  # batch that matched nothing and for one it could not read, so a grep
+  # here would have no status left to tell the two apart
+  SCRIPT_POPULATION=$(printf '%s\n' "$entries" | LC_ALL=C xargs awk '
+    FNR == 1 && /^#!.*(bash|\/sh)$/ { print FILENAME }')
+  if [ -z "$SCRIPT_POPULATION" ]; then
     echo "STYLE FAIL: no script found to grade for comment width"
     echo "  A walk handed an empty list reports nothing and reads like a"
     echo "  tree whose comments are inside the limit."
     return 1
   fi
+  return 0
+}
+
+# A ban over that population reports its hits and its own failure apart:
+# grep answers 1 for a tree with no hits and 2 for a file it could not read,
+# and a walk that reads both as clean passes a tree it never finished
+# grading. The list is split into operands rather than piped through xargs,
+# which folds those two statuses into one 123; no path under scripts/
+# carries a space.
+script_comment_ban() {
+  local verdict="$1" files="$2" hits rc
+  shift 2
   rc=0
-  wide=$(printf '%s\n' "$scripts" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" '
+  # shellcheck disable=SC2086
+  hits=$(LC_ALL=C grep -n "$@" $files) || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "STYLE FAIL: the $verdict ban exited $rc instead of grading the scripts"
+    return 1
+  fi
+  if [ -z "$hits" ]; then
+    return 0
+  fi
+  printf '%s\n' "$hits"
+  echo "STYLE FAIL: $verdict in script comment"
+  return 1
+}
+
+# The three comment rules over scripts/, run together because they grade one
+# population: two bans on what a comment may cite, and the width walk.
+check_script_comment_rules() {
+  local other rulefail
+  if ! read_script_population; then
+    return 1
+  fi
+  rulefail=0
+  # this script is out of its own population: it names the banned phrases
+  # literally to define the patterns below, which would otherwise
+  # self-match. Filtered with awk rather than grep -v because a filter that
+  # removes every line exits non-zero, which set -e reads as a failed walk
+  other=$(printf '%s\n' "$SCRIPT_POPULATION" \
+    | awk -v self="scripts/$(basename "$0")" '$0 != self')
+  if [ -n "$other" ]; then
+    script_comment_ban 'review-finding reference' "$other" \
+      -E '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' || rulefail=1
+    # the charter ban elsewhere reaches sources and docs; scripts carry the
+    # same comments and are walked here instead
+    script_comment_ban 'planning-charter reference' "$other" -iE '\bcharter' || rulefail=1
+  fi
+  check_script_comment_width || rulefail=1
+  return $rulefail
+}
+
+# A script comment wraps at the column a page does, over that population,
+# because a rule kept by hand over the five gate scripts left an 85-column
+# comment standing in a sixth.
+check_script_comment_width() {
+  local wide rc
+  if ! read_script_population; then
+    return 1
+  fi
+  rc=0
+  wide=$(printf '%s\n' "$SCRIPT_POPULATION" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" "$AWK_COLS"'
     FNR == 1 { next }
     $0 !~ /^[[:space:]]*#/ { next }
-    length($0) <= limit { next }
+    cols($0) <= limit { next }
     {
       # the run longer than the limit is what cannot wrap, so the comment is
       # measured without it, the way the page walk measures prose
-      rest = length($0)
+      rest = cols($0)
       n = split($0, word, /[ \t]+/)
       for (i = 1; i <= n; i++) {
-        if (length(word[i]) > limit) { rest -= length(word[i]) }
+        if (cols(word[i]) > limit) { rest -= cols(word[i]) }
       }
       if (rest <= limit) { next }
-      printf "%s:%d: %d columns\n", FILENAME, FNR, length($0)
+      printf "%s:%d: %d columns\n", FILENAME, FNR, cols($0)
     }') || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$wide"
@@ -781,8 +876,9 @@ if [ "${1:-}" = "--prose-width" ]; then
   check_prose_width $targets
   exit $?
 fi
-# The script comment walk alone, graded the same way: a walk that stops
-# reporting reads exactly like a tree whose comments are inside the limit.
+# The comment rules over scripts/ alone, graded the same way: a walk that
+# stops reporting reads exactly like a tree whose comments are inside the
+# limit, and a ban handed a short population reads the same.
 if [ "${1:-}" = "--script-comments" ]; then
   ROOT="${2:-}"
   if [ -z "$ROOT" ]; then
@@ -790,7 +886,7 @@ if [ "${1:-}" = "--script-comments" ]; then
     exit 2
   fi
   cd "$ROOT" || exit 2
-  check_script_comment_width
+  check_script_comment_rules
   exit $?
 fi
 # The acceptance-expectation ban alone, graded the same way and for the same
@@ -986,20 +1082,7 @@ for dir in compat corpus; do
   fi
 done
 if [ -d scripts ]; then
-  # file list built via find rather than a `grep --exclude` flag: exclude
-  # syntax and behavior differ across grep implementations, and this script
-  # must exclude itself since it names the banned phrases literally to
-  # define the patterns above, which would otherwise self-match
-  other_scripts=$(find scripts -name '*.sh' ! -name "$(basename "$0")")
-  if [ -n "$other_scripts" ] && echo "$other_scripts" | xargs grep -nE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]'; then
-    echo "STYLE FAIL: review-finding reference in script comment"; fail=1
-  fi
-  # the charter ban above reaches sources and docs; scripts carry the same
-  # comments and are walked here instead
-  if [ -n "$other_scripts" ] && echo "$other_scripts" | xargs grep -niE '\bcharter'; then
-    echo "STYLE FAIL: planning-charter reference in script comment"; fail=1
-  fi
-  check_script_comment_width || fail=1
+  check_script_comment_rules || fail=1
 fi
 check_acceptance_expectations || fail=1
 if [ -f README.md ]; then
