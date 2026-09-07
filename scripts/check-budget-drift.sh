@@ -702,8 +702,13 @@ fi
 #
 # A draw sits within this fraction of the seat its run reduced them to, or
 # it is a figure of another quantity: the ledger has held a ratio prepended
-# to the paired arm's own milliseconds, which is what the band refuses. The
-# loader states the same number.
+# to the paired arm's own milliseconds, which is what the band refuses. What
+# it reaches is a figure of another magnitude and no more -- the paired arm
+# of a near-1 ratio, and the same percentile on the other subject, sit
+# inside it and are told apart by nothing here, so those readings go to the
+# round report and an entry carries one quantity.
+# view-harness/src/budgets.rs states the same fraction as TRIALS_BAND, and
+# the cases pin both sides to the same edges.
 TRIALS_BAND=0.25
 if [[ $seats == *[![:space:]]* ]]; then
   stale="$(awk -v file="${budgets#"$root"/}" -v TRIALS_BAND="$TRIALS_BAND" '

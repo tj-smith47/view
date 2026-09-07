@@ -202,6 +202,15 @@ add_spec_row() {
   mv "$CASE/$SPEC.tmp" "$CASE/$SPEC"
 }
 
+# The seat those draws were reduced to. The band is a fraction of it, so a
+# case about what the band reaches needs a seat of the magnitude the foreign
+# figure has.
+set_accepted() {
+  awk -v v="$1" '/^accepted = / { print "accepted = " v; next } { print }' \
+    "$CASE/$BUDGETS" > "$CASE/$BUDGETS.tmp"
+  mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
+}
+
 # The draws a record run took, on the shortfall the tree plants. They land
 # above its why, so the line the finding names is the same in every case.
 set_trials() {
@@ -1004,6 +1013,16 @@ expect 1 'trials:dev-linux/first_paint.minimal' \
 new_case
 set_trials '[23.3, 30.2, 38.7]'
 expect 0 '' 'the widest draws the band admits, which a noisy statistic reaches'
+
+# What a band on magnitude cannot reach, stated rather than implied: the
+# paired bare-engine arm of a near-1 ratio reads in the same milliseconds
+# the seat does, so it sits inside the band and passes. The rule that keeps
+# it out is the one this round applied by hand -- one quantity per entry,
+# the arm in the round report.
+new_case
+set_accepted 16.914409
+set_trials '[16.914, 17.480]'
+expect 0 '' 'the paired arm cadence beside a seat of its own magnitude, which no band on magnitude refuses'
 
 # ---------------------------------------------------------------------------
 # the predicted glyph is a local reading, and the acceptance RTT leg is the

@@ -186,14 +186,25 @@ member sits within 25 percent of the `accepted` those draws were reduced to
 or the loader refuses the file naming the entry and the member, and the
 check refuses the line. The band is five times the tightest spread the
 honest arrays show and clear of the noisiest cell, and it is what tells a
-draw from another quantity: a rule satisfied by restating `accepted` was
-not, and four arrays shipped that restatement prepended to the paired
-bare-engine arm's own milliseconds -- figures no cell records, standing
-where nothing could grade them. The paired arm's readings go to the round's
-report beside the arm they belong to, the way a `why` states its A/B pairs.
-An `accepted` restated as a member is not a draw either: an entry whose
-seat is a replicate median no single draw equals carries the draws and not
-the median.
+draw of another magnitude from a draw of this one: a rule satisfied by
+restating `accepted` was not, and four arrays shipped that restatement
+prepended to the paired bare-engine arm's own milliseconds -- figures no
+cell records, standing where nothing could grade them. The paired arm's
+readings go to the round's report beside the arm they belong to, the way a
+`why` states its A/B pairs. An `accepted` restated as a member is not a
+draw either: an entry whose seat is a replicate median no single draw
+equals carries the draws and not the median.
+
+The band reaches magnitude and stops there. It refused six of the eight
+foreign figures the field shipped with, and the two it admits are the two
+no magnitude rule can reach: the paired arm of a near-1 ratio, whose
+milliseconds sit beside the ratio they were taken with, and the same
+percentile taken on the other subject, which is the same statistic one
+cadence apart. `trials = [16.914, 17.480]` -- the flood seat beside bare
+nvim's own cadence p99 -- passes both gates, and the case titled for that
+is what keeps the limit stated rather than implied. What holds for those
+two is the rule the field states and not the band: one quantity per entry,
+the arm in the round report.
 
 The transport rule is the one with no number in it. A page saying the
 speculated cell was measured with its engine across a network states a

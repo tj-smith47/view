@@ -639,7 +639,15 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
 /// +12.3%/-12.6%, so this is five times the tightest of them and clear of
 /// the noisiest cell; the ledger has held a ratio prepended to two
 /// millisecond figures of the paired arm, and that pair is what a band this
-/// wide still refuses.
+/// wide refuses.
+///
+/// What it reaches is a foreign figure of another magnitude, and no more: a
+/// band on magnitude cannot tell the paired arm of a near-1 ratio, or the
+/// same percentile taken on the other subject, from a draw -- both sit
+/// inside it. Those readings go to the round report beside the arm they
+/// belong to, and the entry carries one quantity.
+/// `scripts/check-budget-drift.sh` states the same fraction as
+/// `TRIALS_BAND`, and the cases pin both sides to the same edges.
 const TRIALS_BAND: f64 = 0.25;
 
 /// Whether `trial` is a draw of the metric `accepted` seats.
@@ -1145,6 +1153,11 @@ mod tests {
     /// field was minted in shipped four arrays that prepended the seat to
     /// two millisecond readings of the paired bare-engine arm -- figures of
     /// another quantity, standing where no cell can grade them.
+    ///
+    /// The edges below are the ones
+    /// `scripts/check-budget-drift-cases.sh` pins on the shell side, so a
+    /// loader band retuned on its own reddens here instead of leaving the
+    /// two gates disagreeing about every member between them.
     #[test]
     fn a_trials_array_holds_draws_of_the_metric_it_stands_beside() {
         let entry = "\n[[shortfall]]\nscenario = \"echo\"\nfixture = \"user\"\n\
@@ -1179,6 +1192,23 @@ mod tests {
         let text = mixed.to_string();
         assert!(text.contains("echo.user"), "{text}");
         assert!(text.contains("55.079"), "{text}");
+
+        let edges = "\n[[shortfall]]\nscenario = \"echo\"\nfixture = \"user\"\n\
+                     metric = \"ratio_p50\"\nclass = \"dev-linux\"\naccepted = 31.0\n";
+
+        let widest = parse(
+            &format!("{head}{edges}trials = [23.3, 30.2, 38.7]\nwhy = \"w\"\n"),
+            "widest.toml",
+        )
+        .expect("the widest draws the shell case admits load here too");
+        assert_eq!(widest.shortfall[0].trials, Some(vec![23.3, 30.2, 38.7]));
+
+        let past = parse(
+            &format!("{head}{edges}trials = [31.0, 30.2, 39.4]\nwhy = \"w\"\n"),
+            "past.toml",
+        )
+        .expect_err("the member the shell case refuses is refused here too");
+        assert!(past.to_string().contains("39.4"), "{past}");
     }
 
     /// A shortfall ceiling must move with the class's measured headroom, not
