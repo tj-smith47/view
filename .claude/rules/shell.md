@@ -76,6 +76,30 @@ is passed on, and where two legs read the same list the check sits above
 both: a leg that reports `ok` having graded nothing disagrees with its own
 sibling about what an empty list means.
 
+## A `--prod-lines` pin counts a spelling written in a trailing comment
+
+The three pins in `scripts/check-style.sh` that ask
+`scripts/audit-god-files.sh --prod-lines` which lines are production code
+(`check_tied_spawns`, `check_geometry_sites`, the condition-notice
+ownership check) read the raw line the scanner emits. A whole-line comment
+never reaches them -- the classifier drops it -- but a spelling written
+after a `//` on a line of code does, and it counts as a site.
+
+That is the trade, and it is deliberate. The scanner's only eliding
+machinery removes string *contents*, and two of the geometry spellings are
+string literals (`"nvim_ui_attach"`, `"nvim_ui_try_resize"`): an
+elide-based emit would blind the walk to the wire names in the one file
+that sends them. Cutting comments while keeping strings means a second awk
+pass over every consumer, against a defect whose failure mode is a loud
+gate naming the file. So the walks over-count rather than narrow, and the
+answer to a red row whose code holds no geometry is to reword the comment
+or to move the row.
+
+Pinned by a case at the end of `scripts/check-style-cases.sh` that plants a
+trailing comment naming a spelling and requires the count to rise, so the
+next attempt to "fix" the over-count into a comment-stripping read is a red
+case rather than a silent narrowing.
+
 ## A comment wraps at 80 columns, counted in characters
 
 `scripts/check-style.sh` grades every comment line under `scripts/` at the

@@ -484,25 +484,35 @@ crates/view/src/runtime.rs 1 a worker thread, not a process
 '
 # The god-file scanner's own answer to "which lines are production code",
 # read once: the walk costs a second and a half over a tree this size and
-# both pins below ask it the same question.
+# all three pins below ask it the same question.
 #
 # Resolved beside this script rather than under the walked root: the case
 # matrix grades both walks against scratch roots that hold crates/ alone.
+#
+# The scanner's own stderr is kept for the failure path, where it is the
+# whole diagnosis (an untracked tree, a quoted path it cannot name) and a
+# caller without it sends its reader to the wrong file.
 PROD_LINES_CACHE=""
+PROD_LINES_WHY=""
 read_prod_lines() {
-  local scanner
+  local scanner err
   if [ -n "$PROD_LINES_CACHE" ]; then
     return 0
   fi
   scanner="$(cd "$(dirname "$0")" && pwd)/audit-god-files.sh"
-  PROD_LINES_CACHE=$(bash "$scanner" --prod-lines .) || PROD_LINES_CACHE=""
+  err=$(mktemp "${TMPDIR:-/tmp}/check-style-prod-lines.XXXXXX") || return 1
+  PROD_LINES_CACHE=$(bash "$scanner" --prod-lines . 2> "$err") || PROD_LINES_CACHE=""
+  if [ -z "$PROD_LINES_CACHE" ]; then
+    PROD_LINES_WHY=$(head -3 "$err")
+  fi
+  rm -f "$err"
   [ -n "$PROD_LINES_CACHE" ]
 }
 
 check_tied_spawns() {
   local expected actual
   if ! read_prod_lines; then
-    echo "STYLE FAIL: could not read production lines to check tied spawns"
+    echo "STYLE FAIL: could not read production lines to check tied spawns${PROD_LINES_WHY:+ -- $PROD_LINES_WHY}"
     return 1
   fi
   expected=$(printf '%s\n' "$TIED_SPAWN_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
@@ -545,7 +555,20 @@ check_tied_spawns() {
 # the same three ways (`try_resize(`, `TryResize`, `nvim_ui_try_resize`).
 # The variant spelling is what reaches the three folds that build
 # `RpcCall::TryResize` from `Model::grid_target`; a walk keyed on the method
-# alone counted none of them.
+# alone counted none of them. The seventh is the bare `attach(`, bounded on
+# the left so the `ui_attach` spelling above does not answer for it: both
+# public attach methods funnel through a private `fn attach` that is where
+# the pair actually reaches the wire, so a further attach path added inside
+# `nvim_api.rs` under that name would otherwise leave the pinned count
+# untouched in the one file that owns the call.
+#
+# Fail-closed on a trailing comment: `--prod-lines` emits the raw line, so a
+# spelling written only after a `//` counts as a site. Eliding comments
+# would take the two spellings that are string literals (`"nvim_ui_attach"`,
+# `"nvim_ui_try_resize"`) with them, since the scanner's one elide removes
+# string contents -- so the walk over-counts rather than blinds itself, and
+# the answer to a red row whose code holds no geometry is to reword the
+# comment or to move the row.
 #
 # `release(` is the attach guard's own hand-off of the geometry its spawn
 # was seeded with, bounded on the left because `release` ends other names in
@@ -557,7 +580,7 @@ check_tied_spawns() {
 #
 # Each row is a path, its pinned number of production lines, and where the
 # geometry those lines spend came from.
-GEOMETRY_CALLS='ui_attach|UiAttach|ui_try_resize|try_resize\(|TryResize'
+GEOMETRY_CALLS='ui_attach|UiAttach|ui_try_resize|try_resize\(|TryResize|(^|[^A-Za-z0-9_])attach\('
 GEOMETRY_ATTACH_CRATES='^crates/(view|view-core|view-engine|view-oracle)/'
 GEOMETRY_SITES='
 crates/view-core/src/model.rs 1 the one RpcCall::UiAttach production builds, from Model::grid_target -- grid_target_for over the model own terminal size
@@ -565,7 +588,7 @@ crates/view-core/src/msg.rs 2 the UiAttach and TryResize variant declarations; e
 crates/view-core/src/update/ai_fs.rs 4 an AI filesystem lock release and its own helper, no geometry anywhere
 crates/view-core/src/update/mod.rs 1 the fold resizing the grid when the paint area moves, spending Model::grid_target
 crates/view-core/src/update/ui_event.rs 1 the tabline fold resizing the grid when the chrome row count moves, spending Model::grid_target
-crates/view-engine/src/nvim_api.rs 7 the handle own attach and resize entry points plus the nvim_ui_attach and nvim_ui_try_resize method names they send; each spends what its caller hands it
+crates/view-engine/src/nvim_api.rs 10 the handle own attach and resize entry points, the private attach both public ones funnel through, and the nvim_ui_attach and nvim_ui_try_resize method names they send; each spends what its caller hands it
 crates/view-oracle/src/hang.rs 4 the adversarial harness attaching and resizing its own engine at the fixture size it opened the session with, and the TryResize effect it forwards
 crates/view-oracle/src/lib.rs 2 the oracle driver attaching at the size its caller opened the session with, and the TryResize effect it forwards
 crates/view-oracle/src/reference.rs 2 the second applier attaching and resizing at the size the session under comparison is held at
@@ -574,12 +597,12 @@ crates/view/src/engine_ops.rs 14 the EngineOps attach and resize surface: one de
 crates/view/src/main.rs 1 the attach guard release, spending spawn_size -- what grid_target_for answered the terminal reading with, and what the spawn own geometry --cmd already told the child
 crates/view/src/native.rs 1 the native session resizing the grid for the row the statusline claims, spending Model::grid_target
 crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model
-crates/view/src/startup.rs 5 the attach guard release and the attaches it feeds, all spending the pair main released rather than a reading of their own
+crates/view/src/startup.rs 6 the attach guard release and the attaches it feeds, all spending the pair main released rather than a reading of their own, plus the restart own zero-argument attach() closure call, which carries no pair at all
 '
 check_geometry_sites() {
   local expected actual
   if ! read_prod_lines; then
-    echo "STYLE FAIL: could not read production lines to check geometry sites"
+    echo "STYLE FAIL: could not read production lines to check geometry sites${PROD_LINES_WHY:+ -- $PROD_LINES_WHY}"
     return 1
   fi
   expected=$(printf '%s\n' "$GEOMETRY_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
@@ -961,45 +984,37 @@ fi
 # has already had to delete a second caller for exactly this reason.
 CONDITION_OWNER="crates/view-core/src/update/supervision.rs"
 CONDITION_CALLS=2
-if [ -f scripts/audit-god-files.sh ] && [ -d crates ]; then
-  # production call sites only, via the god-file scanner's own classifier:
-  # this must not trip on the doc comments naming the function, nor on the
-  # unit tests that legitimately drive it directly
-  prod_lines=$(bash scripts/audit-god-files.sh --prod-lines) || prod_lines=""
-  if [ -z "$prod_lines" ]; then
-    # the scanner's own reason, re-read only on this path: it is the whole
-    # diagnosis (an untracked tree, a quoted path it cannot name) and
-    # without it this line sends a reader to the wrong file
-    why=$({ bash scripts/audit-god-files.sh --prod-lines 2>&1 >/dev/null || true; } | head -3)
-    echo "STYLE FAIL: could not read production lines to check condition-notice ownership${why:+ -- $why}"
-    fail=1
-  else
-    # any non-identifier char before the name, so UFCS calls
-    # (`Messages::set_native_condition(...)`) cannot walk past the pin; the
-    # definition itself is the one legitimate non-call mention
-    sites=$(printf '%s\n' "$prod_lines" | grep -E '[^A-Za-z0-9_]set_native_condition\(' | grep -v 'fn set_native_condition' || true)
-    found=$(printf '%s' "$sites" | grep -c . || true)
-    strangers=$(printf '%s' "$sites" | grep -v "^$CONDITION_OWNER:" || true)
-    if [ -n "$strangers" ]; then
-      printf '%s\n' "$strangers"
-      echo "STYLE FAIL: set_native_condition called outside $CONDITION_OWNER"
-      echo "  The one visible condition notice is owned by a single fold that"
-      echo "  re-asserts or retracts it every pass. Route the new condition"
-      echo "  through that fold instead of raising it here."
-      fail=1
-    elif [ "$found" != "$CONDITION_CALLS" ]; then
-      printf '%s\n' "$sites"
-      echo "STYLE FAIL: $CONDITION_OWNER makes $found set_native_condition calls, pinned at $CONDITION_CALLS"
-      echo "  The pin is the retract and the assert of one fold. If a third is"
-      echo "  genuinely one fold's business, move the pin and say why here."
-      fail=1
-    fi
-  fi
-else
-  # fail closed: a renamed or missing classifier must not silently drop the
-  # ownership pin while the rest of the style gate stays green
-  echo "STYLE FAIL: scripts/audit-god-files.sh or crates/ missing; cannot check condition-notice ownership"
+# production call sites only, via the god-file scanner's own classifier --
+# the same read the two pins above make, so the gate pays for one scan and
+# keeps one spelling of "which lines are production". It must not trip on
+# the doc comments naming the function, nor on the unit tests that
+# legitimately drive it directly. Fail closed: a renamed or missing
+# classifier must not silently drop the ownership pin while the rest of the
+# style gate stays green.
+if ! read_prod_lines; then
+  echo "STYLE FAIL: could not read production lines to check condition-notice ownership${PROD_LINES_WHY:+ -- $PROD_LINES_WHY}"
   fail=1
+else
+  # any non-identifier char before the name, so UFCS calls
+  # (`Messages::set_native_condition(...)`) cannot walk past the pin; the
+  # definition itself is the one legitimate non-call mention
+  sites=$(printf '%s\n' "$PROD_LINES_CACHE" | grep -E '[^A-Za-z0-9_]set_native_condition\(' | grep -v 'fn set_native_condition' || true)
+  found=$(printf '%s' "$sites" | grep -c . || true)
+  strangers=$(printf '%s' "$sites" | grep -v "^$CONDITION_OWNER:" || true)
+  if [ -n "$strangers" ]; then
+    printf '%s\n' "$strangers"
+    echo "STYLE FAIL: set_native_condition called outside $CONDITION_OWNER"
+    echo "  The one visible condition notice is owned by a single fold that"
+    echo "  re-asserts or retracts it every pass. Route the new condition"
+    echo "  through that fold instead of raising it here."
+    fail=1
+  elif [ "$found" != "$CONDITION_CALLS" ]; then
+    printf '%s\n' "$sites"
+    echo "STYLE FAIL: $CONDITION_OWNER makes $found set_native_condition calls, pinned at $CONDITION_CALLS"
+    echo "  The pin is the retract and the assert of one fold. If a third is"
+    echo "  genuinely one fold's business, move the pin and say why here."
+    fail=1
+  fi
 fi
 # Every path to a binary cargo built goes through `view_oracle::target_root`
 # (re-exported as `view_harness::fixture::target_root`), which honours

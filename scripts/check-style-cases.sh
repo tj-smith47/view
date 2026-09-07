@@ -542,13 +542,14 @@ plant_geometry() {
   printf '/// A doc comment naming ui_attach and try_resize(, neither a call.\n' >> "$CASE/$1"
   i=0
   while [ "$i" -lt "$2" ]; do
-    case $((i % 6)) in
+    case $((i % 7)) in
       (0) printf 'ops.ui_attach(width, height, surfaces)?;\n' >> "$CASE/$1" ;;
       (1) printf 'Effect::Rpc(RpcCall::UiAttach { width, height })\n' >> "$CASE/$1" ;;
       (2) printf 'handle.request("nvim_ui_attach", args)?;\n' >> "$CASE/$1" ;;
       (3) printf 'ops.try_resize(width, height)?;\n' >> "$CASE/$1" ;;
       (4) printf 'Effect::Rpc(RpcCall::TryResize { width, height })\n' >> "$CASE/$1" ;;
-      (*) printf 'handle.request("nvim_ui_try_resize", args)?;\n' >> "$CASE/$1" ;;
+      (5) printf 'handle.request("nvim_ui_try_resize", args)?;\n' >> "$CASE/$1" ;;
+      (*) printf 'self.attach(width, height, surfaces, false)?;\n' >> "$CASE/$1" ;;
     esac
     i=$((i + 1))
   done
@@ -579,7 +580,7 @@ new_geometry_case() {
   plant_release 'crates/view-core/src/update/ai_fs.rs' 4
   plant_geometry 'crates/view-core/src/update/mod.rs' 1
   plant_geometry 'crates/view-core/src/update/ui_event.rs' 1
-  plant_geometry 'crates/view-engine/src/nvim_api.rs' 7
+  plant_geometry 'crates/view-engine/src/nvim_api.rs' 10
   plant_geometry 'crates/view-oracle/src/hang.rs' 4
   plant_geometry 'crates/view-oracle/src/lib.rs' 2
   plant_geometry 'crates/view-oracle/src/reference.rs' 2
@@ -588,7 +589,7 @@ new_geometry_case() {
   plant_release 'crates/view/src/main.rs' 1
   plant_geometry 'crates/view/src/native.rs' 1
   plant_geometry 'crates/view/src/runtime/executor.rs' 3
-  plant_geometry 'crates/view/src/startup.rs' 5
+  plant_geometry 'crates/view/src/startup.rs' 6
 }
 
 # Graded on the rows that differ from the pinned listing, the way the
@@ -621,7 +622,7 @@ expect_geometry() {
 }
 
 new_geometry_case
-expect_geometry 0 '' 'the pinned population, in all six spellings, with a doc comment quoting the call'
+expect_geometry 0 '' 'the pinned population, in all seven spellings, with a doc comment quoting the call'
 
 new_geometry_case
 plant_geometry 'crates/view-scratch/src/lib.rs' 1
@@ -631,7 +632,7 @@ expect_geometry 1 'crates/view-scratch/src/lib.rs=1 geometry-sites' \
 new_geometry_case
 printf 'let doc = "https://example.invalid/x"; ops.try_resize(width, height)?;\n' \
   >> "$CASE/crates/view/src/startup.rs"
-expect_geometry 1 'crates/view/src/startup.rs=6 geometry-sites' \
+expect_geometry 1 'crates/view/src/startup.rs=7 geometry-sites' \
   'a site behind a string holding a // on the same line'
 
 new_geometry_case
@@ -888,6 +889,16 @@ expect_script_comments 1 'scripts/gone.sh:unreadable' \
 new_script_case
 rm -f "$CASE/scripts/gate.sh"
 expect_script_comments 1 'empty' 'a tree with no script for the walk to read'
+
+# The geometry walk's fail-closed trade, pinned so that "fixing" it into a
+# comment-stripping read is a red case rather than a silent narrowing:
+# `--prod-lines` emits the raw line, and eliding comments would take the two
+# spellings that are string literals with them.
+new_geometry_case
+printf 'let rows = 1; // the row count ui_attach was given\n' \
+  >> "$CASE/crates/view/src/native.rs"
+expect_geometry 1 'crates/view/src/native.rs=2 geometry-sites' \
+  'a spelling named only by a trailing comment, which the walk counts by design'
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
