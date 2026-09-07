@@ -277,7 +277,7 @@ fi
 encode_path() {
     local rest="$1" out="" head ch
     if [ "$1" = "${ENC_PATH-}" ]; then
-        MAP_ENC="$ENC_HIT"
+        MAP_ENC="${ENC_HIT-}"
         return
     fi
     while [ -n "$rest" ]; do
@@ -319,17 +319,28 @@ map_name() {
 # Observed across six combinations (bash 3.2 and 5.3, C and UTF-8, both
 # platforms): only the enumerated form refuses in every one. `[[:alnum:]]` is
 # worse -- it admits the accented letter in every UTF-8 locale, on both.
-refuse_unkeyable() {
+refuse_unkeyable() { # usage: refuse_unkeyable <path> <where it came from>
+    # An empty path is outside the alphabet the same way an accented letter
+    # is -- it keys every map to one shared slot -- and the pattern below
+    # cannot see it, so it is refused first and by the list it came from: a
+    # leading colon in a hand-written pin entry is where one comes from, and
+    # a message naming no source names nothing a reader can go and fix.
+    if [ -z "$1" ]; then
+        echo "audit-god-files: $2 holds an entry with an empty path;" >&2
+        echo "  every map would key it to one slot, so fix the entry" >&2
+        exit 1
+    fi
     case "$1" in
         *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/.-]*)
             echo "audit-god-files: $1 has characters this gate cannot key on;" >&2
             echo "  rename it, or widen both the alphabet here and map_name's escapes" >&2
+            echo "  it came from $2" >&2
             exit 1
             ;;
     esac
 }
 for _f in "${ALL_RS[@]}"; do
-    refuse_unkeyable "$_f"
+    refuse_unkeyable "$_f" "the tracked crates/**/*.rs set"
 done
 
 # Resolve `mod NAME;` declared in DECL_FILE to the file that provides it, into
@@ -477,7 +488,7 @@ add_pin() { # usage: add_pin <listname> "<path>:<ceiling>:<why>"
     local listname="$1" entry="$2" _path _rest _seen _dup=""
     _path="${entry%%:*}"
     _rest="${entry#*:}"
-    refuse_unkeyable "$_path"
+    refuse_unkeyable "$_path" "$listname"
     # a path named in both registers keeps one slot, so the staleness sweep
     # below reports it once rather than once per register
     for _seen in ${PIN_PATHS[@]+"${PIN_PATHS[@]}"}; do

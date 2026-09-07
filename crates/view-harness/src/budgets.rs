@@ -37,6 +37,7 @@
 //! metric = "ratio_p50"
 //! class = "dev-linux"
 //! accepted = 1.3537866848241882
+//! trials = [1.354, 1.361, 1.349]   # optional; the draws the record run took
 //! why = "unattributed; investigation pending"
 //! ```
 //!
@@ -232,6 +233,13 @@ pub struct Shortfall {
     /// The measured value when this shortfall was accepted. A later run may
     /// match or improve on it; anything worse fails.
     pub accepted: f64,
+    /// The draws the record run took for this cell, in the order it took
+    /// them. No cell holds a trial -- the bare-engine arm of a paired run
+    /// has no seat of its own -- so a spread written into `why` as prose is
+    /// a figure nothing can grade; it belongs here instead. The gate reads
+    /// it for nothing.
+    #[serde(default)]
+    pub trials: Option<Vec<f64>>,
     pub why: String,
 }
 
@@ -1032,6 +1040,27 @@ mod tests {
             class,
             &crate::baselines::HeadroomTable::new(),
         )
+    }
+
+    /// The draws a record run took are the one figure a `why` could state
+    /// that no cell holds, so they are a field rather than prose the drift
+    /// check has to exempt. Both spellings load: every shipped entry
+    /// predates the field.
+    #[test]
+    fn a_shortfall_loads_with_and_without_its_trials() {
+        let entry = "\n[[shortfall]]\nscenario = \"echo\"\nfixture = \"user\"\n\
+                     metric = \"ratio_p50\"\nclass = \"dev-linux\"\naccepted = 1.2\n";
+        let head = "schema = 1\n\n[[budget]]\nspec_row = \"r\"\nscenario = \"echo\"\n\
+                    metric = \"ratio_p50\"\nmax = 1.1\nkind = \"felt\"\n\
+                    felt = \"you type and the character is on screen\"\nconfig = \"real\"\n";
+
+        let without = file_from(&format!("{head}{entry}why = \"unattributed\"\n"));
+        assert_eq!(without.shortfall[0].trials, None);
+
+        let with = file_from(&format!(
+            "{head}{entry}trials = [1.21, 1.19, 1.20]\nwhy = \"unattributed\"\n"
+        ));
+        assert_eq!(with.shortfall[0].trials, Some(vec![1.21, 1.19, 1.20]));
     }
 
     /// A shortfall ceiling must move with the class's measured headroom, not

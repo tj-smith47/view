@@ -542,6 +542,15 @@ if [[ -f "$bench_page" && $seats == *[![:space:]]* ]]; then
       }
       return 0
     }
+    # The unit a cell is recorded in, read off the metric name rather than a
+    # whitelist of the one unit the rule started with: a page quoting a
+    # megabyte or a microsecond seat was left ungraded by a rule that only
+    # knew about milliseconds, and writing the id beside it did not help.
+    function unit_suffix(u) {
+      if (u == "ms") { return "_ms$" }
+      if (u == "MB") { return "_mb$" }
+      return "_us$"
+    }
     function scope(at, num, what) {
       printf "BUDGET DRIFT FAIL: ratio-scope %s:%d: %s is quoted where %s, and a number resolves against one class and one fixture or against neither\n",
         page, at, num, what
@@ -594,12 +603,14 @@ if [[ -f "$bench_page" && $seats == *[![:space:]]* ]]; then
         if (num ~ /^-?[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
         else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && nxt == "%") { pct = 1; after = clean(tk[i + 2]) }
         else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
-        # a millisecond absolute resolves like a ratio where a millisecond
-        # cell id stands beside it, and nowhere else: the column holding the
-        # paired bare-engine reading names no cell of view own and states an
+        # an absolute resolves like a ratio where a cell of its own unit
+        # stands beside it, and nowhere else: the column holding the paired
+        # bare-engine reading names no cell of view own and states an
         # absolute this file records nothing for.
-        else if (nxt == "ms") { if (cur == "" || cur !~ /_ms$/) { continue } }
-        else if (nxt ~ /^(us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame)$/) { continue }
+        else if (nxt ~ /^(ms|us|\xc2\xb5s|MB)$/) {
+          if (cur == "" || cur !~ unit_suffix(nxt)) { continue }
+        }
+        else if (nxt ~ /^(s|min|GB|bar|bars|budget|bound|frame)$/) { continue }
         # a percentage OF something is a share of a population, not a ratio
         # stated as its distance from 1
         if (pct && after == "of") { continue }
@@ -686,7 +697,10 @@ fi
 # graded against what that cell records. A sentence that names another class
 # or another fixture resolves there instead, and one that says it is
 # reporting a reading something replaced is read for nothing -- a why exists
-# partly to hold the number a re-record retired.
+# partly to hold the number a re-record retired. The draws a run took have a
+# field of their own (`trials`), because they are the one figure a why could
+# state that no cell holds, and an exemption shaped to let them through is an
+# exemption a stale seat buys with one slash.
 if [[ $seats == *[![:space:]]* ]]; then
   stale="$(awk -v file="${budgets#"$root"/}" '
     FNR == NR {
@@ -757,19 +771,6 @@ if [[ $seats == *[![:space:]]* ]]; then
       fmt = "%." decimals(num) "f"
       return sprintf(fmt, off_pct(held, bar)) + 0 == num + 0
     }
-    # A run observation is a slash-joined list of two or more figures -- the
-    # trials a record run drew, which no cell holds. It is the one figure a
-    # why states that is not a cell value, and it is recognised by its own
-    # shape: a whole-sentence exemption on the word trial was a bypass any
-    # sentence could buy with one word, and one shipped sentence had already
-    # bought it while quoting the entry own seat.
-    function observation(w, m, j,   prev, nxt) {
-      nxt = clean(w[j + 1])
-      if (nxt == "/" && j + 2 <= m && clean(w[j + 2]) ~ /^-?[0-9]+(\.[0-9]+)?%?$/) { return 1 }
-      if (j < 2) { return 0 }
-      prev = clean(w[j - 1])
-      return (prev == "/" && clean(w[j - 2]) ~ /^-?[0-9]+(\.[0-9]+)?%?$/)
-    }
     # Every figure a why states is the value of a cell that why names: an
     # entry names its own class, scenario, fixture and metric, so a number
     # written beside an identifier resolves exactly. A figure with no
@@ -817,10 +818,9 @@ if [[ $seats == *[![:space:]]* ]]; then
           pct = 1; after = clean(w[j + 2])
         }
         else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
-        else if (nxt ~ /^(us|\xc2\xb5s|s|min|MB|GB|bar|bars|budget|bound|frame)$/) { continue }
+        else if (nxt ~ /^(s|min|GB|bar|bars|budget|bound|frame)$/) { continue }
         # a percentage OF something is a share of a population
         if (pct && after == "of") { continue }
-        if (observation(w, m, j)) { continue }
         sub(/x$/, "", num)
         if (nids == 0) {
           printf "BUDGET DRIFT FAIL: why-figure %s/%s.%s: %s:%d states %s%s in a sentence that names no cell, so the figure is attributed to nothing and a record run leaves it standing\n",
@@ -876,23 +876,55 @@ fi
 # author of a local row to rest it on the acceptance leg, which is advice
 # about a claim that row never made.
 export TRANSPORT='remote|network|far side|another machine|RTT'
-export SPECULATED='echo_speculated|predicted glyph|glyph it expects|character it expects|prediction'
+# The predicted glyph, named by cell id or in the words the pages write it
+# in. The bare word `prediction` is not one of them: the pages use it for a
+# picker cache and for what a feature is for, and a rule that read it as the
+# speculated moment indicted three true sentences about remote editing that
+# make no claim about the cell at all.
+export SPECULATED='echo_speculated|predicted glyph|glyph it expects|character it expects|predict[a-z]*[ ]+(the[ ]+)?(glyph|character|keystroke)'
 export RTT_LEG='remote-rtt\.sh|remote_memory'
+# A transport word inside a negation is the page denying the condition, which
+# is the sentence this rule most wants written -- and a unit that says the
+# reading is local has stated the condition it was recorded under. The
+# negation comes before the word, within five tokens: a row reading `on the
+# far side of a network | not yet recorded` carries a later `not` that
+# denies the recording rather than the transport.
+export TRANSPORT_NOT='not|no|never|without|nor'
 
 transport_in() {
   local page="$1"
   local shown="${page#"$root"/}"
   [[ -f "$page" ]] || return 0
   awk -v page="$shown" '
+    # The negation has to sit beside the transport word rather than anywhere
+    # in the unit: a bullet is one unit and a paragraph is several sentences,
+    # and a `no` at the far end of either says nothing about the clause the
+    # transport word stands in.
+    function negated(text,   i, j, n, w, lo) {
+      if (text ~ /(^|[^a-z])local([^a-z]|$)/) { return 1 }
+      n = split(text, w, /[ \t]+/)
+      for (i = 1; i <= n; i++) {
+        if (w[i] !~ transport) { continue }
+        lo = (i - 5 < 1) ? 1 : i - 5
+        for (j = lo; j < i; j++) {
+          if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
+        }
+      }
+      return 0
+    }
     function verdict(text, at) {
       if (text !~ transport) { return }
       if (text ~ leg) { return }
+      if (negated(text)) { return }
       printf "transport %s:%d: %s\n", page, at, text
     }
     function para(   i, text) {
       if (lines == 0) { return }
       text = ""
       for (i = 1; i <= lines; i++) { text = text " " para_line[i] }
+      # a phrase the vocabulary spells with single spaces survives the wrap
+      # the page happens to have, and the indent a continuation line carries
+      gsub(/[ \t]+/, " ", text)
       if (text ~ speculated) { verdict(text, para_no[1]) }
       lines = 0
     }
@@ -905,6 +937,7 @@ transport_in() {
       if (rows == 0) { return }
       text = ""
       for (i = 1; i <= rows; i++) { text = text " " row_line[i] }
+      gsub(/[ \t]+/, " ", text)
       if (text ~ speculated) {
         for (i = 1; i <= rows; i++) { verdict(row_line[i], row_no[i]) }
       }
@@ -914,6 +947,7 @@ transport_in() {
       transport = ENVIRON["TRANSPORT"]
       speculated = ENVIRON["SPECULATED"]
       leg = ENVIRON["RTT_LEG"]
+      negation = ENVIRON["TRANSPORT_NOT"]
     }
     /^[[:space:]]*\|/ { para(); rows++; row_line[rows] = $0; row_no[rows] = FNR; next }
     /^[[:space:]]*$/ { para(); table(); next }
@@ -921,7 +955,11 @@ transport_in() {
     # read as one paragraph let a speculated word in one bullet indict a
     # transport word in an unrelated sibling, and the finding then named the
     # whole block rather than a sentence anyone wrote.
-    /^[[:space:]]*[-*][[:space:]]/ { para() }
+    # Every markdown list spelling, ordered ones included: a numbered roadmap
+    # read as one paragraph let a transport item and a speculated item indict
+    # each other, which is the defect the bullet rule was minted for
+    # surviving on the sibling marker.
+    /^[[:space:]]*([-*+][[:space:]]|[0-9]+[.)][[:space:]])/ { para() }
     { table(); lines++; para_line[lines] = $0; para_no[lines] = FNR }
     END { para(); table() }
   ' "$page"
@@ -936,12 +974,25 @@ bounds="$(section_bounds '### 3.1 Budgets (CI-gated once the harness lands, P3)'
 if [[ -n "$bounds" ]]; then
   transported+="$(sed -n "${bounds%:*},${bounds#*:}p" "$spec" |
     awk -v page="${spec#"$root"/}" -v off="$((${bounds%:*} - 1))" '
+      function negated(text,   i, j, n, w, lo) {
+        if (text ~ /(^|[^a-z])local([^a-z]|$)/) { return 1 }
+        n = split(text, w, /[ \t]+/)
+        for (i = 1; i <= n; i++) {
+          if (w[i] !~ transport) { continue }
+          lo = (i - 5 < 1) ? 1 : i - 5
+          for (j = lo; j < i; j++) {
+            if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
+          }
+        }
+        return 0
+      }
       BEGIN {
         transport = ENVIRON["TRANSPORT"]
         speculated = ENVIRON["SPECULATED"]
         leg = ENVIRON["RTT_LEG"]
+        negation = ENVIRON["TRANSPORT_NOT"]
       }
-      $0 ~ transport && $0 ~ speculated && $0 !~ leg {
+      $0 ~ transport && $0 ~ speculated && $0 !~ leg && !negated($0) {
         printf "transport %s:%d: %s\n", page, NR + off, $0
       }
     ')"$'\n'
@@ -951,13 +1002,26 @@ fi
 # speculated row that reaches for a transport word states a condition its
 # own recording never had.
 transported+="$(awk -v file="${budgets#"$root"/}" '
+  function negated(text,   i, j, n, w, lo) {
+    if (text ~ /(^|[^a-z])local([^a-z]|$)/) { return 1 }
+    n = split(text, w, /[ \t]+/)
+    for (i = 1; i <= n; i++) {
+      if (w[i] !~ transport) { continue }
+      lo = (i - 5 < 1) ? 1 : i - 5
+      for (j = lo; j < i; j++) {
+        if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
+      }
+    }
+    return 0
+  }
   BEGIN {
     transport = ENVIRON["TRANSPORT"]
     leg = ENVIRON["RTT_LEG"]
+    negation = ENVIRON["TRANSPORT_NOT"]
   }
   /^\[\[/ { scen = ""; next }
   /^scenario = / { scen = $0; sub(/^scenario = "/, "", scen); sub(/"$/, "", scen); next }
-  /^felt = / && scen == "echo_speculated" && $0 ~ transport && $0 !~ leg {
+  /^felt = / && scen == "echo_speculated" && $0 ~ transport && $0 !~ leg && !negated($0) {
     printf "transport %s:%d: %s\n", file, FNR, $0
   }
 ' "$budgets")"$'\n'
@@ -965,6 +1029,220 @@ if [[ $transported == *[![:space:]]* ]]; then
   echo "BUDGET DRIFT FAIL: a transport condition stands where the reading is local. The predicted glyph is measured with both engines on one host; the injected round trips are the acceptance RTT leg's (scripts/acceptance/remote-rtt.sh), which is the only surface a transport claim may rest on -- name it in the unit, or state the condition the cell was recorded under:" >&2
   printf '%s' "$transported" | grep -v '^$' | sed 's/^/  /' >&2
   fail=1
+fi
+
+# Ninth cross-check: the two user-facing pages quote the same measurement the
+# ledger does. The ratio rule above reads docs/benchmarking.md alone, so the
+# pages a person actually reads carried their figures ungraded -- rewriting
+# view's own worst keystroke from 1.58 ms to 1.51 ms on both of them left the
+# check green. They are graded by the same seat table and the same rounding,
+# and they anchor a figure the only way a page that may name no identifier
+# can: on the moment it states in words. The vocabulary is the pages own, the
+# way `plugin-free` is the word a fixture is named in.
+#
+# A number resolves to the cell its own sentence names a moment for, on the
+# class the page declares and the fixture its sentence or its paragraph names
+# -- and the page declares a class for the same reason docs/benchmarking.md
+# does, because a reader is otherwise never told which host the number came
+# from. The first reading of a sentence is view's: these pages publish paired
+# numbers, and the bare-engine one beside it is an absolute this tree records
+# no cell for. A figure the sentence calls a difference (`0.6 ms more`) is
+# neither side's reading and is passed over.
+moment_in() {
+  local page="$1" fallback="$2"
+  local shown="${page#"$root"/}"
+  [[ -f "$page" ]] || return 0
+  awk -v page="$shown" -v fallback="$fallback" '
+    FNR == NR {
+      split($0, f, "\t")
+      if (f[3] == "") { next }
+      seat[f[1] SUBSEP f[2] SUBSEP f[3]] = f[4]
+      cellseen[f[3]] = 1
+      if (index(fixtures[f[1] SUBSEP f[3]], " " f[2] " ") == 0) {
+        fixtures[f[1] SUBSEP f[3]] = fixtures[f[1] SUBSEP f[3]] " " f[2] " "
+      }
+      next
+    }
+    function classes_of(text,   i, n, name, named) {
+      n = split("controlled-linux dev-macos dev-linux gh-macos gh-linux", name, " ")
+      named = ""
+      for (i = 1; i <= n; i++) {
+        if (index(text, name[i]) > 0 && index(named, " " name[i] " ") == 0) {
+          named = named " " name[i] " "
+        }
+      }
+      return named
+    }
+    # The words these pages name a fixture in, which include the one
+    # docs/benchmarking.md has no use for: a page written for a person says
+    # your config where the maintainer page says login-shaped.
+    function fixtures_of(text,   named) {
+      named = ""
+      if (text ~ /plugin-free|no plugins|Plugin-free/) { named = named " minimal " }
+      if (text ~ /15-plugin/) { named = named " heavy " }
+      if (text ~ /login-shaped|full login|your config/) { named = named " user " }
+      return named
+    }
+    # The moment a sentence states and the cell that records it. These pages
+    # may name no identifier -- the identifier rule refuses one here -- so
+    # the words are the only anchor a figure has.
+    function moment_of(text) {
+      if (text ~ /predicted glyph|glyph it expects|character it expects/) {
+        return "echo_speculated.speculated_paint_p99_ms"
+      }
+      if (text ~ /keypress to glyph|worst keystroke|keystroke in a thousand/) {
+        return "echo.view_p99_ms"
+      }
+      if (text ~ /stale/) { return "scroll.staleness_p99_ms" }
+      if (text ~ /cadence/) { return "flood.cadence_p99_ms" }
+      if (text ~ /matching results/) { return "picker.match_paint_p99_ms" }
+      if (text ~ /first page of results/) { return "picker.first_page_p99_ms" }
+      if (text ~ /worst launch/) { return "startup.first_frame_cold_ms" }
+      if (text ~ /own process holds/) { return "memory.pss_mb" }
+      return ""
+    }
+    function cell_unit(cell) {
+      if (cell ~ /_ms$/) { return "ms" }
+      if (cell ~ /_mb$/) { return "MB" }
+      if (cell ~ /_us$/) { return "us" }
+      return ""
+    }
+    function unit_of(tok) {
+      if (tok == "ms") { return "ms" }
+      if (tok == "MB") { return "MB" }
+      if (tok == "us" || tok == "\xc2\xb5s") { return "us" }
+      return ""
+    }
+    function clean(t) {
+      gsub(/[`*~()>]/, "", t)
+      sub(/[,;:.]+$/, "", t)
+      return t
+    }
+    function decimals(num) {
+      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
+    }
+    function seated(num, vals,   n, v, i, fmt) {
+      fmt = "%." decimals(num) "f"
+      n = split(vals, v, " ")
+      for (i = 1; i <= n; i++) {
+        if (sprintf(fmt, v[i]) + 0 == num + 0) { return 1 }
+      }
+      return 0
+    }
+    function sentence(a, b, ufx,   i, text, cell, cls, nc, klass, klass_one,
+                      fx, nf, fixn, fixture, num, nxt, tail, held, pick) {
+      if (b < a) { return }
+      text = ""
+      for (i = a; i <= b; i++) { text = text " " tk[i] }
+      cell = moment_of(text)
+      if (cell == "" || !(cell in cellseen)) { return }
+      # The first reading of the sentence is view own: these pages publish
+      # paired numbers, and the bare-engine one beside it is an absolute
+      # this tree records no cell for. A figure the sentence calls a
+      # difference is neither side reading.
+      pick = 0
+      for (i = a; i <= b; i++) {
+        num = clean(tk[i])
+        if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
+        nxt = clean(tk[i + 1])
+        tail = (unit_of(nxt) != "") ? clean(tk[i + 2]) : nxt
+        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/) { continue }
+        if (unit_of(nxt) != cell_unit(cell)) { continue }
+        pick = i
+        break
+      }
+      if (pick == 0) { return }
+      num = clean(tk[pick])
+      cls = classes_of(text)
+      nc = split(cls, klass, " ")
+      if (nc > 1) { return }
+      if (nc == 1) { klass_one = klass[1] }
+      else if (fallback != "") { klass_one = fallback }
+      else {
+        printf "BUDGET DRIFT FAIL: moment-default %s:%d: %s is quoted as the %s moment and the page declares no default class, so the host it was measured on is one no reader is told\n",
+          page, tl[pick], num, cell
+        return
+      }
+      fx = fixtures_of(text)
+      nf = split(fx, fixn, " ")
+      if (nf == 0) { nf = split(ufx, fixn, " ") }
+      if (nf == 0) { nf = split(fixtures[klass_one SUBSEP cell], fixn, " ") }
+      if (nf != 1) {
+        if (nf > 1) {
+          printf "BUDGET DRIFT FAIL: moment-scope %s:%d: %s is quoted as the %s moment where the unit names %d fixtures, and a number resolves against one fixture or against none\n",
+            page, tl[pick], num, cell, nf
+        }
+        return
+      }
+      fixture = fixn[1]
+      if (!((klass_one SUBSEP fixture SUBSEP cell) in seat)) { return }
+      held = seat[klass_one SUBSEP fixture SUBSEP cell]
+      if (!seated(num, held)) {
+        printf "BUDGET DRIFT FAIL: moment-drift %s:%d: %s is quoted as the %s moment on %s %s, and the value recorded there does not round to it at the digits printed\n",
+          page, tl[pick], num, cell, klass_one, fixture
+      }
+    }
+    # A table row is one sentence spread over its columns here, not one per
+    # column: the row states its moment in the label column and its reading
+    # in the next, so splitting on the pipe would leave every figure in a
+    # sentence naming no moment at all.
+    function grade(   i, j, m, line, w, text, ufx, s0) {
+      if (uc == 0) { return }
+      text = ""
+      for (i = 1; i <= uc; i++) { text = text " " ul[i] }
+      ntok = 0
+      for (i = 1; i <= uc; i++) {
+        line = ul[i]
+        gsub(/\|/, " ", line)
+        gsub(/\. /, " \001 ", line)
+        m = split(line, w, /[ \t]+/)
+        for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
+      }
+      ufx = fixtures_of(text)
+      s0 = 1
+      for (i = 1; i <= ntok + 1; i++) {
+        if (i == ntok + 1 || tk[i] == "\001") {
+          sentence(s0, i - 1, ufx)
+          s0 = i + 1
+        }
+      }
+      uc = 0
+    }
+    /^[[:space:]]*\|/ { grade(); ul[1] = $0; uno[1] = FNR; uc = 1; grade(); next }
+    /^[[:space:]]*$/ { grade(); next }
+    /^[[:space:]]*([-*+][[:space:]]|[0-9]+[.)][[:space:]])/ { grade() }
+    { uc++; ul[uc] = $0; uno[uc] = FNR }
+    END { grade() }
+  ' <(printf '%s' "$seats") "$page"
+}
+
+if [[ $seats == *[![:space:]]* ]]; then
+  for page in "$root/README.md" "$root/docs/performance.md"; do
+    [[ -f "$page" ]] || continue
+    shown="${page#"$root"/}"
+    page_class="$(awk '
+      { buf = buf $0 " " }
+      END {
+        n = split(buf, sentence, /\. /)
+        for (i = 1; i <= n; i++) {
+          if (sentence[i] !~ /default class/) { continue }
+          m = split(sentence[i], part, "`")
+          for (j = 2; j <= m; j += 2) {
+            if (part[j] ~ /^[a-z0-9]+-[a-z0-9]+$/) { print part[j]; exit }
+          }
+        }
+      }' "$page")"
+    if [[ -n "$page_class" && ! -f "$baselines_dir/$page_class.toml" ]]; then
+      echo "BUDGET DRIFT FAIL: moment-default $shown: it declares $page_class the default class its numbers resolve against, and no class baseline ships under that name" >&2
+      fail=1
+      continue
+    fi
+    moment="$(moment_in "$page" "$page_class")"
+    if [[ -n "$moment" ]]; then
+      printf '%s\n' "$moment" >&2
+      fail=1
+    fi
+  done
 fi
 
 if [[ $entries -eq 0 ]]; then

@@ -124,19 +124,19 @@ plant_pages() {
 # view
 
 You press a key and the character appears. Plugin-free, view's worst
-keystroke in a thousand takes 0.73 ms and Neovim's takes 0.67 ms.
+keystroke in a thousand takes 0.73 ms and Neovim's takes 0.67 ms. Every number here was taken on a shared Linux dev host, whose `dev-linux` is the default class of this page.
 MD
   mkdir -p "$CASE/docs"
   cat > "$CASE/$PERF" <<'MD'
 # Performance
 
 Under a plugin-free config, view's worst keystroke in a thousand takes
-0.73 ms and Neovim's takes 0.67 ms.
+0.73 ms and Neovim's takes 0.67 ms. Every number here was taken on a shared Linux dev host, whose `dev-linux` is the default class of this page.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| keypress to glyph, worst case in a thousand | 0.73 ms | 0.67 ms | same host, same run |
-| the same keypress, with view drawing the glyph it expects | 0.32 ms | 1.25 ms | same host, same run |
+| keypress to glyph, worst case in a thousand | 0.73 ms | 0.67 ms | same host, same run, no plugins |
+| the same keypress, with view drawing the glyph it expects | 0.32 ms | 1.25 ms | same host, same run, no plugins |
 MD
   cat > "$CASE/$BENCH" <<'MD'
 # Benchmarking
@@ -228,6 +228,9 @@ findings() {
       c = $5; sub(/:$/, "", c); print "scope:" c; next
     }
     /^BUDGET DRIFT FAIL: ratio-default / { print "default"; next }
+    /^BUDGET DRIFT FAIL: moment-(drift|scope|default) / {
+      c = $5; sub(/:$/, "", c); print $4 ":" c; next
+    }
     /^BUDGET DRIFT FAIL: why-drift / {
       c = $5; sub(/:$/, "", c); print "why:" c; next
     }
@@ -706,6 +709,102 @@ expect 1 'ratio:docs/benchmarking.md:12' \
   'a negative millisecond absolute no value that cell records rounds to'
 
 # ---------------------------------------------------------------------------
+# an absolute is graded whatever unit it carries, because the cell id beside
+# it says which cell it is and the unit says which cells it can be. Reading
+# milliseconds alone left the footprint and the input path ungraded on the
+# page that publishes both
+# ---------------------------------------------------------------------------
+seat_memory_pss() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[memory.minimal]
+pss_mb = 4.961331
+TOML
+}
+
+new_case
+seat_memory_pss
+printf '\n| the footprint, no plugins (`memory.pss_mb` 4.96 MB) | a resource |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a megabyte absolute equal to what the cell id beside it records'
+
+new_case
+seat_memory_pss
+printf '\n| the footprint, no plugins (`memory.pss_mb` 5.20 MB) | a resource |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a megabyte absolute no value that cell records rounds to'
+
+seat_input_path_us() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[input_path.minimal]
+key_to_rpc_p99_us = 73.295
+TOML
+}
+
+new_case
+seat_input_path_us
+printf '\n| the key to the engine, no plugins (`input_path.key_to_rpc_p99_us` 73.3 us) | a diagnostic |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a microsecond absolute equal to what the cell id beside it records'
+
+new_case
+seat_input_path_us
+printf '\n| the key to the engine, no plugins (`input_path.key_to_rpc_p99_us` 70.1 us) | a diagnostic |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a microsecond absolute no value that cell records rounds to'
+
+# ---------------------------------------------------------------------------
+# the two user-facing pages carry no identifier -- the identifier rule
+# refuses one there -- so the moment they state in words is what a figure
+# resolves against, on the class the page declares. Ungraded, those figures
+# were the only recorded values on the tree a re-record left standing
+# ---------------------------------------------------------------------------
+seat_echo_user_tail() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[echo.user]
+view_p99_ms = 1.5773
+TOML
+}
+
+# the pages are prose, so a case that moves one figure says so with sed
+rewrite_readme() {
+  sed "s|$1|$2|" "$CASE/$README" > "$CASE/$README.tmp"
+  mv "$CASE/$README.tmp" "$CASE/$README"
+}
+
+new_case
+seat_echo_tail
+expect 0 '' 'a moment stated in words, at the value the class the page declares records'
+
+new_case
+seat_echo_tail
+rewrite_readme 'takes 0.73 ms' 'takes 0.83 ms'
+expect 1 'moment-drift:README.md:4' \
+  'the same moment quoting a figure that cell records on no class'
+
+new_case
+seat_echo_tail
+rewrite_readme ' Every number here.*$' ''
+expect 1 'moment-default:README.md:4' \
+  'a moment on a page that declares no class, whose host no reader is told'
+
+new_case
+seat_echo_tail
+seat_echo_user_tail
+rewrite_readme 'Plugin-free, view' 'View'
+expect 1 'moment-scope:README.md:4' \
+  'a moment naming no leg, where the cell is recorded on two of them'
+
+new_case
+rewrite_readme '`dev-linux` is the default' '`dev-solaris` is the default'
+expect 1 'moment-default:README.md' \
+  'a page declaring a default class no baseline in the tree ships under'
+
+# ---------------------------------------------------------------------------
 # a number resolves to one cell, not to the union of every cell its unit
 # names: the nearest id before it in its own sentence, and the unit's first
 # id where its sentence names none. A union passed a sibling metric's draw
@@ -776,8 +875,8 @@ control_ratio_p50 = 0.9937197455771009
 TOML
 }
 
-# the substitution is delimited on a pipe, not a slash: a why that reports
-# the trials a run drew writes them slash-joined
+# the substitution is delimited on a pipe, not a slash: a why the cases
+# rewrite may itself carry slashes
 rewrite_why() {
   sed "s|why = \"a shortfall carries a scenario and a metric of its own\"|why = \"$1\"|" \
     "$CASE/$BUDGETS" > "$CASE/$BUDGETS.tmp"
@@ -791,12 +890,8 @@ expect 1 'unattributed:dev-linux/first_paint.minimal' \
 
 new_case
 rewrite_why 'three trials read 1.17 / 1.18 / 1.19 on this cell'
-expect 0 '' 'a why sentence reporting the trials a record run drew, slash-joined as the observation it is'
-
-new_case
-rewrite_why 'three trials read 1.17, 1.18 and 1.19 on this cell'
 expect 1 'unattributed:dev-linux/first_paint.minimal' \
-  'the same trials written as lone figures, which stand in no list and name no cell'
+  'the draws a record run took, left in the prose, where they are attributed to nothing'
 
 new_case
 rewrite_why 'the trials put marker_ratio_p50 at 1.17'
@@ -871,15 +966,56 @@ printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote ho
 expect 0 '' 'a roadmap bullet describing the predicted glyph and naming the leg that injects the round trip'
 
 new_case
-printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      keystrokes echoed without waiting for the round trip, view drawing\n      the character it expects.\n' \
+printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      keystrokes echoed without waiting for the round trip, view drawing\n      the character it expects; the injected round trips are the\n      acceptance leg scripts/acceptance/remote-rtt.sh.\n- [ ] **Detach and reconnect.** view keeps drawing the character it\n      expects while the engine is on the far side of a network.\n' \
   >> "$CASE/$README"
-expect 1 'transport:README.md:8' \
-  'the same bullet with no leg named, which is a transport condition resting on nothing'
+expect 1 'transport:README.md:12' \
+  'a licensed item beside one naming no leg, where only the second rests on nothing'
 
 new_case
-printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path`: engine over SSH,\n      paint and input local.\n- [ ] **Detach and reconnect.** view keeps drawing the character it expects\n      while the link is down.\n' \
+printf '\n### Landing before v0.1\n\n- [x] **Remote editing.** `view --remote host:path` runs the engine\n      over SSH.\n- [ ] **Detach and reconnect.** view keeps drawing the character it expects\n      while the link is down.\n' \
   >> "$CASE/$README"
 expect 0 '' 'two sibling bullets, one carrying a transport word and one a speculated moment'
+
+new_case
+printf '\n### Landing before v0.1\n\n1. **Remote editing.** `view --remote host:path` runs the engine\n   over SSH.\n2. **Detach and reconnect.** view keeps drawing the character it expects\n   while the link is down.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'two sibling numbered items, one carrying a transport word and one a speculated moment'
+
+new_case
+printf '\n### Landing before v0.1\n\n+ **Remote editing.** `view --remote host:path` runs the engine\n  over SSH.\n+ **Detach and reconnect.** view keeps drawing the character it expects\n  while the link is down.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'the same two items under the third bullet marker markdown allows'
+
+# ---------------------------------------------------------------------------
+# a transport word inside a denial is the page saying the reading was not
+# taken across one, which is the sentence this rule most wants written. The
+# rule read co-occurrence alone, so every true denial failed
+# ---------------------------------------------------------------------------
+new_case
+printf '\nA prediction of when remote editing lands is not something this README makes.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'a sentence predicting a release date, which predicts no glyph'
+
+new_case
+printf '\nThe picker prediction cache is unrelated to the remote engine.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'the picker cache, which is the other thing this tree calls a prediction'
+
+new_case
+printf '\nview speaks to a remote engine over SSH; no prediction is involved in the numbers on this page.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'a page saying the numbers rest on no prediction at all'
+
+new_case
+printf '\nEvery number here is local: nothing on this page was measured with the engine on another machine, and the predicted glyph is no exception.\n' \
+  >> "$CASE/$README"
+expect 0 '' 'a page stating the condition its readings were taken under, which is local'
+
+new_case
+printf '\nEvery number here was measured with the engine on another machine, and the predicted glyph is no exception.\n' \
+  >> "$CASE/$README"
+expect 1 'transport:README.md:6' \
+  'the same sentence asserting the transport the recording never had'
 
 # ---------------------------------------------------------------------------
 # the gate runs under the bash macOS ships
@@ -1025,7 +1161,7 @@ $timed"
 else
   n=$((n + 1))
   printf 'ok %s - %s # skip perl is not installed, so no alarm to run it under\n' \
-    "$n" 'the checker finishes on the shipped tree inside two minutes'
+    "$n" "the checker finishes on the shipped tree inside two minutes under $timed_bash (bash $timed_major)"
 fi
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"

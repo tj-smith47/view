@@ -123,6 +123,12 @@ tasks:
       - bash .claude/hooks/tests/validate-commands-cases.sh
       - bash scripts/reader-cases.sh
 
+  drift:sweep:
+    desc: Perturb every recorded figure on the pages and in the shortfall ledger and require the drift check to catch each one
+    # out of `ci`: it re-runs the whole drift check once per figure, which is
+    # two minutes against the drift check's own second
+    cmd: bash scripts/check-budget-drift-sweep.sh
+
   style:
     desc: Enforce comment and doc style rules, the width-check case matrix, and the compat fixtures' accommodation gating
     cmds:

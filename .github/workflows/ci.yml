@@ -90,6 +90,12 @@ jobs:
       - name: Run CI suite
         run: task ci
 
+      # One host, not three: the sweep reads the same tracked text on every
+      # runner, and it costs two minutes a leg.
+      - name: Sweep the recorded figures
+        if: runner.os == 'Linux'
+        run: task drift:sweep
+
   # crates/view-oracle/tests/clipboard_roundtrip.rs skips itself on any host
   # with no live display -- true of every other job in this workflow, whose
   # pty spawns strip DISPLAY on purpose (see that test's module doc). This
