@@ -268,12 +268,43 @@ fi
 # Encoding the escape character first is what keeps the mapping injective:
 # without it `a-b.rs` and `a_2d_b.rs` would share one slot, and two paths in
 # one slot mark the wrong file test-only and hide a god file with no error.
+#
+# The maps are read a few thousand times over a tree this size, so the encoding
+# runs in the shell rather than in a process: a sed per read cost the gate four
+# seconds where the whole gate takes one and a half. The walk stops at each
+# encoded character and rewrites the run before it, which is the same order the
+# four substitutions ran in and never re-reads what it has written.
+encode_path() {
+    local rest="$1" out="" head ch
+    if [ "$1" = "${ENC_PATH-}" ]; then
+        MAP_ENC="$ENC_HIT"
+        return
+    fi
+    while [ -n "$rest" ]; do
+        head="${rest%%[_/.-]*}"
+        if [ "$head" = "$rest" ]; then
+            out="$out$rest"
+            break
+        fi
+        ch="${rest:${#head}:1}"
+        case "$ch" in
+            (_) out="$out${head}_5f" ;;
+            (/) out="$out${head}_2f" ;;
+            (.) out="$out${head}_2e" ;;
+            (-) out="$out${head}_2d" ;;
+        esac
+        rest="${rest:$((${#head} + 1))}"
+    done
+    MAP_ENC="$out"
+    # the callers read several maps of one file in a row, so one slot answers
+    # most of the walks without repeating them
+    ENC_PATH="$1"
+    ENC_HIT="$out"
+}
+
 map_name() {
-    local s
-    # the four substitutions run in order over one pass, escape character
-    # first, so an underscore a later rule writes is never re-encoded
-    s=$(printf '%s' "$2" | sed 's/_/_5f/g; s|/|_2f|g; s/\./_2e/g; s/-/_2d/g')
-    MAP_NAME="GODMAP_$1_$s"
+    encode_path "$2"
+    MAP_NAME="GODMAP_$1_$MAP_ENC"
 }
 
 # a path outside the encoded alphabet would produce an invalid variable name,
