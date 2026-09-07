@@ -1815,7 +1815,7 @@ mod tests {
             .iter()
             .map(|menu| format!("`{menu}`"))
             .collect();
-        format!(
+        wrapped(&format!(
             "A float whose rows land in the command line's band is taken into the palette \
              instead of being reported, but only when it presents a completion menu's own \
              filetype ({}). That is the completion menu's `{:?}` read at the moment of the \
@@ -1827,7 +1827,37 @@ mod tests {
             row(Surface::Cmdline)
                 .expect("the command line has a row")
                 .policy,
-        )
+        ))
+    }
+
+    /// The width the page's prose is graded at, so a sentence this module
+    /// generates arrives wrapped rather than as one long line a page
+    /// cannot carry: `scripts/check-style.sh` reads the generated block
+    /// like any other prose, and a hand re-wrap of it would be gone at the
+    /// next run of the pin above.
+    const PAGE_WIDTH: usize = 80;
+
+    /// Greedy word wrap at [`PAGE_WIDTH`]. A word longer than the width
+    /// stands on its own line: it cannot be brought under the limit by
+    /// wrapping, which is the same reading the style gate takes.
+    fn wrapped(text: &str) -> String {
+        let mut out = String::new();
+        let mut column = 0;
+        for word in text.split_whitespace() {
+            if column == 0 {
+                out.push_str(word);
+                column = word.chars().count();
+            } else if column + 1 + word.chars().count() <= PAGE_WIDTH {
+                out.push(' ');
+                out.push_str(word);
+                column += 1 + word.chars().count();
+            } else {
+                out.push('\n');
+                out.push_str(word);
+                column = word.chars().count();
+            }
+        }
+        out
     }
 
     /// The page a user reads instead of this module, pinned to what the

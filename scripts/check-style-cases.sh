@@ -496,8 +496,9 @@ expect_tied 1 'tied-spawns' \
 # exempt by shape rather than by a list of files -- a fence is a sample of a
 # file, a row is a row, a heading is one line by construction, a link has
 # nowhere to break, and a token longer than the limit cannot be helped by
-# wrapping. Counted in bytes so an awk that decodes UTF-8 and one that does
-# not return the same verdict
+# wrapping, which is why the token and not the line it stands in is what the
+# walk takes out. Counted in bytes so an awk that decodes UTF-8 and one that
+# does not return the same verdict
 # ---------------------------------------------------------------------------
 new_width_case() {
   n=$((n + 1))
@@ -521,6 +522,7 @@ expect_width() {
   rc=$?
   got=$(printf '%s\n' "$out" | awk '
     /^[^ ].*:[0-9]+: [0-9]+ columns$/ { c = $1; sub(/:$/, "", c); print c; next }
+    /^[^ ].*: the width walk cannot read it$/ { c = $1; sub(/:$/, "", c); print c ":unreadable"; next }
     /^STYLE FAIL: no markdown page found/ { print "empty"; next }
   ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
   if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
@@ -577,12 +579,27 @@ expect_width 0 '' 'a line carrying a token longer than the limit itself'
 
 new_width_case
 { printf '<!-- generated from SURFACES -->\n'; over 81; } >> "$CASE/docs/page.md"
-expect_width 0 '' 'a stamped block, which the program that writes it decides the width of'
+expect_width 1 'docs/page.md:5' \
+  'a block under a generated marker, which the program that writes it wraps'
 
 new_width_case
-{ printf '<!-- generated from SURFACES -->\n'; over 81; printf '\n'; over 81; } \
-  >> "$CASE/docs/page.md"
-expect_width 1 'docs/page.md:7' 'the prose after that block, which the marker does not reach'
+{ printf '~~~\n'; over 81; printf '~~~\n'; } >> "$CASE/docs/page.md"
+expect_width 0 '' 'a tilde-fenced sample of a file, which is a fence CommonMark spells twice'
+
+new_width_case
+printf '%s\n' "$(over 90 | tr -d ' ')" >> "$CASE/docs/page.md"
+expect_width 0 '' 'a token longer than the limit standing alone on its line'
+
+new_width_case
+printf 'This sentence is prose and wraps like prose, and the path %s does not buy it out of the limit.\n' \
+  "$(over 90 | tr -d ' ')" >> "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:4' \
+  'the same token with a sentence beside it, whose prose alone runs past the limit'
+
+new_width_case
+ln -s missing.md "$CASE/docs/dangling.md"
+expect_width 1 'docs/dangling.md:unreadable' \
+  'a page the walk cannot read, which a discarded status would pass as clean'
 
 new_width_case
 rm -f "$CASE/README.md" "$CASE/docs/page.md"

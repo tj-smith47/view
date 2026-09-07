@@ -49,7 +49,10 @@ the tables view actually runs disagree.
 | the buffer grid | -- none -- | `Yield` | -- none -- | -- none -- | -- none -- |
 
 <!-- generated from SURFACES -->
-A float whose rows land in the command line's band is taken into the palette instead of being reported, but only when it presents a completion menu's own filetype (`cmp_menu`). That is the completion menu's `Absorb` read at the moment of the claim; the command line's own policy stays `Own`.
+A float whose rows land in the command line's band is taken into the palette
+instead of being reported, but only when it presents a completion menu's own
+filetype (`cmp_menu`). That is the completion menu's `Absorb` read at the moment
+of the claim; the command line's own policy stays `Own`.
 
 ## Three switches, five surfaces
 

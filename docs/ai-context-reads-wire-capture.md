@@ -236,8 +236,8 @@ Row 1's screen columns 1-3 are `"aéb"` (`a` + the 2-byte `é` + `b`, three
 screen cells, four bytes); row 2's are `"wxy"` (three bytes, screen and byte
 columns coincide with no multi-byte characters present). Live-verified end to
 end through the fixed `CURSOR_CONTEXT_CHUNK` by
-`read_cursor_context_with_a_blockwise_selection_over_a_multibyte_character`
-and `read_cursor_context_with_a_blockwise_selection_anchored_on_a_multibyte_character`.
+`read_cursor_context_with_a_blockwise_selection_over_a_multibyte_character` and
+`read_cursor_context_with_a_blockwise_selection_anchored_on_a_multibyte_character`.
 
 ### The `$`-block case: `curswant == MAXCOL` extends every row to its own end
 

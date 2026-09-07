@@ -203,6 +203,7 @@ fn escape_cell(value: &str) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use view_test_support::ScratchDir;
 
     fn row(scenario_stem: &str, plugin: &str) -> ScenarioResult {
         ScenarioResult {
@@ -375,18 +376,31 @@ mod tests {
 
     /// The prose this generator writes is graded for width like any other
     /// page, and a hand re-wrap of the output would be gone at the next
-    /// run: the wrap lives in the literals here or it does not hold.
+    /// run: the wrap lives in the literals here or it does not hold. The
+    /// verdict comes from the gate itself rather than from a limit and an
+    /// exemption set restated in Rust, so a change to either is graded
+    /// here by the code that grades the shipped pages.
     #[test]
     fn generated_prose_wraps_where_the_style_gate_reads_it() {
         let page = render_page(&sample(), "v0.12.4").expect("render");
-        let wide: Vec<&str> = page
-            .markdown
-            .lines()
-            .filter(|line| !line.starts_with('|') && !line.starts_with('#') && line.len() > 80)
-            .collect();
+        let scratch = ScratchDir::new("compat-page-width").expect("scratch dir");
+        std::fs::create_dir_all(scratch.path().join("docs")).expect("docs dir");
+        std::fs::write(scratch.path().join("docs/compat.md"), &page.markdown)
+            .expect("write the rendered page");
+        let gate =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/check-style.sh");
+        let out = std::process::Command::new("bash")
+            .arg(&gate)
+            .arg("--prose-width")
+            .arg(scratch.path())
+            .output()
+            .expect("the style gate runs");
         assert!(
-            wide.is_empty(),
-            "scripts/check-style.sh grades docs/compat.md at 80 columns: {wide:?}"
+            out.status.success(),
+            "{} --prose-width grades docs/compat.md:\n{}{}",
+            gate.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }

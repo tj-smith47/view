@@ -513,18 +513,21 @@ check_written_programs() {
 # A doc line wraps at 80 columns, which is the width the pages are already
 # written to. A line that cannot wrap is exempt and says which shape it is:
 # a fenced block is a sample of a file rather than prose, a table row is one
-# row, a heading is one line by construction, a block under a `generated`
-# marker is stamped by a program and pinned byte-for-byte by a test, a line
-# that is one link or one URL has nowhere to break, and a line carrying a whitespace-free run longer
-# than the limit (a captured declaration, a path) cannot be brought under it
-# by wrapping at all. A badge is the nested spelling of the link exemption:
-# a link wrapping an image, whose alt text carries the only spaces on the
-# line and cannot be broken without breaking the badge. Counted in bytes under LC_ALL=C so the verdict is the
-# same on every host: an awk that decodes UTF-8 and one that does not would
-# otherwise disagree about the lines carrying a micro sign.
+# row, a heading is one line by construction, and a line that is one link or
+# one URL has nowhere to break. A badge is the nested spelling of the link
+# exemption: a link wrapping an image, whose alt text carries the only
+# spaces on the line and cannot be broken without breaking the badge.
+# A whitespace-free run longer than the limit (a captured declaration, a
+# path) exempts itself and not the prose beside it: the line is measured
+# with every such run taken out, so a page still wraps the sentence it
+# writes around one long path. A program that stamps a block wraps its own
+# output at this limit, which is why no marker takes a block out of the
+# walk. Counted in bytes under LC_ALL=C so the verdict is the same on every
+# host: an awk that decodes UTF-8 and one that does not would otherwise
+# disagree about the lines carrying a micro sign.
 PROSE_WIDTH=80
 check_prose_width() {
-  local pages wide
+  local pages wide unreadable rc
   pages=$(find "$@" -name '*.md' | LC_ALL=C sort)
   if [ -z "$pages" ]; then
     echo "STYLE FAIL: no markdown page found to grade for width"
@@ -532,37 +535,53 @@ check_prose_width() {
     echo "  a tree whose prose is inside the limit."
     return 1
   fi
+  # A page the walk cannot open is a red verdict naming it: awk reports its
+  # own fatal on stderr and stops, and a walk whose status is discarded
+  # reads exactly like a tree whose prose is inside the limit.
+  unreadable=$(printf '%s\n' "$pages" | while IFS= read -r page; do
+    [ -r "$page" ] || printf '%s: the width walk cannot read it\n' "$page"
+  done)
+  if [ -n "$unreadable" ]; then
+    printf '%s\n' "$unreadable"
+    echo "STYLE FAIL: a page handed to the width walk cannot be read"
+    return 1
+  fi
+  rc=0
   wide=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" '
-    FNR == 1 { fenced = 0; stamped = 0 }
-    /^[[:space:]]*```/ { fenced = !fenced; next }
+    FNR == 1 { fenced = 0 }
+    /^[[:space:]]*(```|~~~)/ { fenced = !fenced; next }
     fenced { next }
-    # a block a program stamps is a block no one may re-flow: the page marks
-    # it where it is written, and a test elsewhere pins the same bytes
-    /^[[:space:]]*<!--[[:space:]]*generated/ { stamped = 1; next }
-    /^[[:space:]]*$/ { stamped = 0; next }
-    stamped { next }
     /^[[:space:]]*[|#]/ { next }
     length($0) <= limit { next }
     /^[[:space:]]*(<[^ >]+>|[^ ]+:\/\/[^ ]+)[.,]?[[:space:]]*$/ { next }
     /^[[:space:]]*!?\[[^]]*\](\([^)]*\))?[.,]?[[:space:]]*$/ { next }
     /^[[:space:]]*\[!?\[[^]]*\]\([^)]*\)\]\([^)]*\)[.,]?[[:space:]]*$/ { next }
     {
-      longest = 0
+      # the run longer than the limit is what cannot wrap, so it is what is
+      # exempt: the rest of the line is prose and is measured without it
+      rest = length($0)
       n = split($0, word, /[ \t]+/)
       for (i = 1; i <= n; i++) {
-        if (length(word[i]) > longest) { longest = length(word[i]) }
+        if (length(word[i]) > limit) { rest -= length(word[i]) }
       }
-      if (longest > limit) { next }
+      if (rest <= limit) { next }
       printf "%s:%d: %d columns\n", FILENAME, FNR, length($0)
-    }') || wide=""
+    }') || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$wide"
+    echo "STYLE FAIL: the width walk exited $rc instead of grading the pages"
+    echo "  awk names the page it could not read on stderr above."
+    return 1
+  fi
   if [ -z "$wide" ]; then
     return 0
   fi
   printf '%s\n' "$wide"
   echo "STYLE FAIL: a doc line runs past $PROSE_WIDTH columns"
   echo "  Re-wrap the paragraph. A line that cannot wrap -- fenced, a table"
-  echo "  row, a heading, one link, or one unbreakable token -- is already"
-  echo "  exempt, so a line reported here is prose with a space in it."
+  echo "  row, a heading, or one link -- is already exempt, and a run longer"
+  echo "  than the limit is taken out before the line is measured, so a line"
+  echo "  reported here is prose with a space in it."
   return 1
 }
 

@@ -91,8 +91,8 @@ support detection.
 
 ## Reference implementation cross-check: `lua/vim/ui/clipboard/osc52.lua` (bundled)
 
-Read directly from the pinned install
-(`$(brew --prefix)/Cellar/neovim/0.12.4/share/nvim/runtime/lua/vim/ui/clipboard/osc52.lua`).
+Read directly from the pinned install (`$(brew
+--prefix)/Cellar/neovim/0.12.4/share/nvim/runtime/lua/vim/ui/clipboard/osc52.lua`).
 `M.paste(reg)` returns a *bare* list of lines (`vim.split(contents, '\n')`),
 **not** a `[lines, regtype]` pair: narrower than the documented contract.
 
