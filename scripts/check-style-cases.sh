@@ -492,6 +492,122 @@ expect_tied 1 'tied-spawns' \
   'a pinned site that no longer exists, which the pin would otherwise vouch for'
 
 # ---------------------------------------------------------------------------
+# the geometry pin: every production site that names a (width, height) to
+# the engine is pinned per file with where that pair came from, because a
+# site spending the terminal own reading instead of grid_target_for is
+# refused by the engine below ENGINE_MIN_SIZE and relayouts every window
+# above it. Its blind spots are a spelling the pattern stops matching and a
+# classifier that reads a comment where the code has none, so the population
+# below is planted in all six spellings the tree uses -- the attach as a
+# method, as an effect variant and as the wire method name, and the resize
+# the same three ways -- with a doc comment quoting the call and a string
+# holding a // ahead of one.
+#
+# The rows mirror the checker own GEOMETRY_SITES.
+# ---------------------------------------------------------------------------
+plant_geometry() {
+  mkdir -p "$(dirname "$CASE/$1")"
+  : > "$CASE/$1"
+  printf '/// A doc comment naming ui_attach and try_resize(, neither a call.\n' >> "$CASE/$1"
+  i=0
+  while [ "$i" -lt "$2" ]; do
+    case $((i % 6)) in
+      (0) printf 'ops.ui_attach(width, height, surfaces)?;\n' >> "$CASE/$1" ;;
+      (1) printf 'Effect::Rpc(RpcCall::UiAttach { width, height })\n' >> "$CASE/$1" ;;
+      (2) printf 'handle.request("nvim_ui_attach", args)?;\n' >> "$CASE/$1" ;;
+      (3) printf 'ops.try_resize(width, height)?;\n' >> "$CASE/$1" ;;
+      (4) printf 'Effect::Rpc(RpcCall::TryResize { width, height })\n' >> "$CASE/$1" ;;
+      (*) printf 'handle.request("nvim_ui_try_resize", args)?;\n' >> "$CASE/$1" ;;
+    esac
+    i=$((i + 1))
+  done
+}
+
+# A bare `release(`, the spelling that carries a geometry only in a crate
+# that owns an engine attach.
+plant_release() {
+  mkdir -p "$(dirname "$CASE/$1")"
+  : > "$CASE/$1"
+  i=0
+  while [ "$i" -lt "$2" ]; do
+    printf 'guard.release(size);\n' >> "$CASE/$1"
+    i=$((i + 1))
+  done
+}
+
+new_geometry_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/crates"
+  # the walk asks the god-file scanner which lines are production, and that
+  # scanner reads tracked files: a scratch root has to be a repository for
+  # the classifier to see anything at all
+  git -C "$CASE" init -q
+  plant_geometry 'crates/view-core/src/model.rs' 1
+  plant_geometry 'crates/view-core/src/msg.rs' 2
+  plant_release 'crates/view-core/src/update/ai_fs.rs' 4
+  plant_geometry 'crates/view-core/src/update/mod.rs' 1
+  plant_geometry 'crates/view-core/src/update/ui_event.rs' 1
+  plant_geometry 'crates/view-engine/src/nvim_api.rs' 7
+  plant_geometry 'crates/view-oracle/src/hang.rs' 4
+  plant_geometry 'crates/view-oracle/src/lib.rs' 2
+  plant_geometry 'crates/view-oracle/src/reference.rs' 2
+  plant_geometry 'crates/view-oracle/src/speculate.rs' 2
+  plant_geometry 'crates/view/src/engine_ops.rs' 14
+  plant_release 'crates/view/src/main.rs' 1
+  plant_geometry 'crates/view/src/native.rs' 1
+  plant_geometry 'crates/view/src/runtime/executor.rs' 3
+  plant_geometry 'crates/view/src/startup.rs' 5
+}
+
+# Graded on the rows that differ from the pinned listing, the way the
+# tied-spawn cases above are: what a case proves is that the walk saw the
+# planted change.
+expect_geometry() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  git -C "$CASE" add -A
+  out=$(bash "$CHECKER" --geometry-sites "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^pinned:$/ { inpinned = 1; next }
+    /^found:$/ { inpinned = 0; infound = 1; next }
+    /^STYLE FAIL: a production geometry site outside the pinned set$/ {
+      infound = 0; print "geometry-sites"; next
+    }
+    inpinned && NF == 2 { pinned[$1 "=" $2] = 1; next }
+    infound && NF == 2 { if (!($1 "=" $2 in pinned)) print $1 "=" $2 }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want rc=%s findings [%s]\n  got  rc=%s findings [%s]\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+}
+
+new_geometry_case
+expect_geometry 0 '' 'the pinned population, in all six spellings, with a doc comment quoting the call'
+
+new_geometry_case
+plant_geometry 'crates/view-scratch/src/lib.rs' 1
+expect_geometry 1 'crates/view-scratch/src/lib.rs=1 geometry-sites' \
+  'a production file outside the pinned set naming a geometry of its own'
+
+new_geometry_case
+printf 'let doc = "https://example.invalid/x"; ops.try_resize(width, height)?;\n' \
+  >> "$CASE/crates/view/src/startup.rs"
+expect_geometry 1 'crates/view/src/startup.rs=6 geometry-sites' \
+  'a site behind a string holding a // on the same line'
+
+new_geometry_case
+plant_release 'crates/view-harness/src/fixture.rs' 1
+expect_geometry 0 '' 'a lock release in a crate that owns no engine attach'
+
+# ---------------------------------------------------------------------------
 # the prose width gate: a page wraps at 80 columns, and what cannot wrap is
 # exempt by shape rather than by a list of files -- a fence is a sample of a
 # file, a row is a row, a heading is one line by construction, a link has

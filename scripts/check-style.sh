@@ -466,18 +466,31 @@ crates/view/src/clipboard.rs 2 worker threads, not processes
 crates/view/src/remote_guard.rs 2 an ssh probe, bounded by its own deadline and killed on it
 crates/view/src/runtime.rs 1 a worker thread, not a process
 '
-check_tied_spawns() {
-  local expected actual prod_lines scanner
-  # resolved beside this script rather than under the walked root: the case
-  # matrix grades this walk against scratch roots that hold crates/ alone
+# The god-file scanner's own answer to "which lines are production code",
+# read once: the walk costs a second and a half over a tree this size and
+# both pins below ask it the same question.
+#
+# Resolved beside this script rather than under the walked root: the case
+# matrix grades both walks against scratch roots that hold crates/ alone.
+PROD_LINES_CACHE=""
+read_prod_lines() {
+  local scanner
+  if [ -n "$PROD_LINES_CACHE" ]; then
+    return 0
+  fi
   scanner="$(cd "$(dirname "$0")" && pwd)/audit-god-files.sh"
-  prod_lines=$(bash "$scanner" --prod-lines .) || prod_lines=""
-  if [ -z "$prod_lines" ]; then
+  PROD_LINES_CACHE=$(bash "$scanner" --prod-lines .) || PROD_LINES_CACHE=""
+  [ -n "$PROD_LINES_CACHE" ]
+}
+
+check_tied_spawns() {
+  local expected actual
+  if ! read_prod_lines; then
     echo "STYLE FAIL: could not read production lines to check tied spawns"
     return 1
   fi
   expected=$(printf '%s\n' "$TIED_SPAWN_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
-  actual=$(printf '%s\n' "$prod_lines" \
+  actual=$(printf '%s\n' "$PROD_LINES_CACHE" \
     | grep -E '([^A-Za-z0-9_]Command(Builder)?::new|\.spawn\(|\.spawn_command\()' \
     | sed 's/:.*//' | LC_ALL=C sort | uniq -c | awk '{ print $2, $1 }' | LC_ALL=C sort) || actual=""
   if [ "$expected" = "$actual" ]; then
@@ -490,6 +503,89 @@ check_tied_spawns() {
   echo "  crate declares view-proc to reach it), or add a row to this file"
   echo "  saying how this one cannot outlive its parent. A thread or a task"
   echo "  earns a row that says so."
+  return 1
+}
+
+# Every production site that names a geometry to the engine, pinned per file
+# with the ground the pair it spends came from.
+#
+# An attach is refused outright below `view_core::model::ENGINE_MIN_SIZE`,
+# and a spawn seeded at a size the attach does not repeat relayouts every
+# window on screen, so a `(width, height)` reaching either call has to have
+# come from `view_core::model::grid_target_for` -- and the terminal's own
+# reading, which is what a caller has in hand, is exactly the pair that must
+# not. Nothing at a call site says which one it holds: `startup.rs`
+# legitimately spends a `width, height` bound off a channel, so an
+# identifier walk either accepts the raw reading everywhere or rejects the
+# one correct site. What holds instead is the shape the pin above uses for
+# spawns: the whole population pinned per file with a grounds row each, so a
+# new site fails by name until whoever adds it writes down where its
+# geometry came from.
+#
+# Keyed on every spelling a geometry can reach the engine by, because a site
+# is a site in whichever of them it is written: the attach as a method
+# (`ui_attach`), as an effect variant (`UiAttach`) and as the wire method
+# name (`nvim_ui_attach`, which the method substring covers), and the resize
+# the same three ways (`try_resize(`, `TryResize`, `nvim_ui_try_resize`).
+# The variant spelling is what reaches the three folds that build
+# `RpcCall::TryResize` from `Model::grid_target`; a walk keyed on the method
+# alone counted none of them.
+#
+# `release(` is the attach guard's own hand-off of the geometry its spawn
+# was seeded with, bounded on the left because `release` ends other names in
+# this tree, and counted only in the four crates that own an engine attach
+# (view, view-core, view-engine, view-oracle). Elsewhere the word reaches a
+# lock, a permit or a scan gate: a `release(` added to view-bench or
+# view-harness would otherwise fail this gate in a file whose owner never
+# touches an attach.
+#
+# Each row is a path, its pinned number of production lines, and where the
+# geometry those lines spend came from.
+GEOMETRY_CALLS='ui_attach|UiAttach|ui_try_resize|try_resize\(|TryResize'
+GEOMETRY_ATTACH_CRATES='^crates/(view|view-core|view-engine|view-oracle)/'
+GEOMETRY_SITES='
+crates/view-core/src/model.rs 1 the one RpcCall::UiAttach production builds, from Model::grid_target -- grid_target_for over the model own terminal size
+crates/view-core/src/msg.rs 2 the UiAttach and TryResize variant declarations; each carries the pair its builder put in it
+crates/view-core/src/update/ai_fs.rs 4 an AI filesystem lock release and its own helper, no geometry anywhere
+crates/view-core/src/update/mod.rs 1 the fold resizing the grid when the paint area moves, spending Model::grid_target
+crates/view-core/src/update/ui_event.rs 1 the tabline fold resizing the grid when the chrome row count moves, spending Model::grid_target
+crates/view-engine/src/nvim_api.rs 7 the handle own attach and resize entry points plus the nvim_ui_attach and nvim_ui_try_resize method names they send; each spends what its caller hands it
+crates/view-oracle/src/hang.rs 4 the adversarial harness attaching and resizing its own engine at the fixture size it opened the session with, and the TryResize effect it forwards
+crates/view-oracle/src/lib.rs 2 the oracle driver attaching at the size its caller opened the session with, and the TryResize effect it forwards
+crates/view-oracle/src/reference.rs 2 the second applier attaching and resizing at the size the session under comparison is held at
+crates/view-oracle/src/speculate.rs 2 the speculative-echo battery attaching and resizing at its own fixture geometry
+crates/view/src/engine_ops.rs 14 the EngineOps attach and resize surface: one declaration and the forwarding impls behind it, each spending the pair it was handed
+crates/view/src/main.rs 1 the attach guard release, spending spawn_size -- what grid_target_for answered the terminal reading with, and what the spawn own geometry --cmd already told the child
+crates/view/src/native.rs 1 the native session resizing the grid for the row the statusline claims, spending Model::grid_target
+crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model
+crates/view/src/startup.rs 5 the attach guard release and the attaches it feeds, all spending the pair main released rather than a reading of their own
+'
+check_geometry_sites() {
+  local expected actual
+  if ! read_prod_lines; then
+    echo "STYLE FAIL: could not read production lines to check geometry sites"
+    return 1
+  fi
+  expected=$(printf '%s\n' "$GEOMETRY_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
+  # keyed to the path and line number the scanner emits rather than to the
+  # match, so a line carrying both a call and a release counts once
+  actual=$({
+    printf '%s\n' "$PROD_LINES_CACHE" | grep -E "$GEOMETRY_CALLS" || true
+    printf '%s\n' "$PROD_LINES_CACHE" | grep -E "$GEOMETRY_ATTACH_CRATES" \
+      | grep -E '(^|[^A-Za-z0-9_])release\(' || true
+  } | cut -d: -f1,2 | LC_ALL=C sort -u | sed 's/:[0-9]*$//' | uniq -c \
+    | awk '{ print $2, $1 }' | LC_ALL=C sort) || actual=""
+  if [ "$expected" = "$actual" ]; then
+    return 0
+  fi
+  printf 'pinned:\n%s\nfound:\n%s\n' "$expected" "$actual"
+  echo "STYLE FAIL: a production geometry site outside the pinned set"
+  echo "  A pair that reaches the engine comes from"
+  echo "  view_core::model::grid_target_for, never from the terminal own"
+  echo "  reading: an attach is refused below ENGINE_MIN_SIZE and a spawn"
+  echo "  seeded past its attach relayouts every window on screen. Add a row"
+  echo "  to this file saying where this one geometry came from, or say"
+  echo "  there that it carries none."
   return 1
 }
 
@@ -734,6 +830,19 @@ if [ "${1:-}" = "--tied-spawns" ]; then
   check_tied_spawns
   exit $?
 fi
+# The geometry pin alone, graded the same way: a walk that stops matching
+# the spelling a site uses reads exactly like a tree whose every attach is
+# still sized by grid_target_for.
+if [ "${1:-}" = "--geometry-sites" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --geometry-sites ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_geometry_sites
+  exit $?
+fi
 
 fail=0
 if [ -d crates ]; then
@@ -742,6 +851,7 @@ if [ -d crates ]; then
   check_string_literal_width || fail=1
   check_written_programs || fail=1
   check_tied_spawns || fail=1
+  check_geometry_sites || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi
