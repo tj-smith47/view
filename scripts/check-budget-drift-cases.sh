@@ -1221,12 +1221,15 @@ expect 1 'transport:README.md:6' \
 # Taskfile.yml names: the release path runs scripts/package-bundle.sh from a
 # workflow and scripts/mbp-build-leg.sh runs on the macOS host the contract
 # is about, so a Taskfile-derived list left the five scripts no task names
-# ungraded. Selected by shebang, not extension: the remote-test fixtures
-# under scripts/test-fixtures/ are #!/bin/sh with no suffix and run on the
-# macOS host too. The walk also keeps a new script graded without an edit
-# here.
+# ungraded. Selected through scripts/lib/script-population.sh, the same
+# shebang read check-style.sh and check-portability.sh make: the remote-test
+# fixtures under scripts/test-fixtures/ are #!/bin/sh with no suffix and run
+# on the macOS host too, and a `grep -l` of its own answered a first-line
+# rule with a match anywhere in the file. The walk also keeps a new script
+# graded without an edit here.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GUARDED=$(cd "$ROOT" && find scripts -type f -exec grep -lE '^#!.*(bash|/sh)$' {} + | LC_ALL=C sort) || true
+# shellcheck source=lib/script-population.sh
+. "$ROOT/scripts/lib/script-population.sh"
 
 report() {
   n=$((n + 1))
@@ -1241,10 +1244,17 @@ report() {
 
 # An empty list is a finding on both legs and a pass on neither: grep with no
 # file argument reads stdin, and the parse loop below iterates zero times and
-# reports the scripts parsed having parsed none of them.
+# reports the scripts parsed having parsed none of them. A population the
+# selection could not finish reading is the same finding, for the same
+# reason.
 empty=""
-if [ -z "$GUARDED" ]; then
-  empty="scripts/ holds no *.sh file, so nothing was graded"
+GUARDED=""
+if ! script_population_read "$ROOT"; then
+  empty="a file under scripts/ could not be read, so the population is short"
+elif [ -z "$SCRIPT_POPULATION" ]; then
+  empty="scripts/ holds no file whose first line names bash or sh, so nothing was graded"
+else
+  GUARDED="$SCRIPT_POPULATION"
 fi
 
 # The tokens whose spelling would otherwise match this line are written with

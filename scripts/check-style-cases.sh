@@ -77,7 +77,7 @@ pad() {
 
 # The same line padded with a three-byte character rather than an ASCII one:
 # a walk counting bytes calls this three times its width, which is how a
-# 77-column comment reddened beside a wider one whose long token was
+# 77-character comment reddened beside a wider one whose long token was
 # subtracted whole.
 pad_wide() {
   fill=$(($1 - ${#2} - ${#3}))
@@ -783,12 +783,12 @@ rm -f "$CASE/README.md" "$CASE/docs/page.md"
 expect_width 1 'empty' 'a tree with no page for the walk to read'
 
 # ---------------------------------------------------------------------------
-# the comment rules over scripts/: a comment wraps at the same column a page
+# the comment rules over scripts/: a comment wraps at the same width a page
 # does, cites no review finding and no planning document, and all three rules
-# grade the one shebang-selected population the portability legs grade --
-# the remote-test fixtures carry no suffix, so a rule spelled over *.sh
-# grades a subset of its sibling's. Counted in characters, as the page walk
-# counts, so a rule drawn in box characters is judged by what an editor
+# grade the one shebang-selected population scripts/lib/script-population.sh
+# reads -- the remote-test fixtures carry no suffix, so a rule spelled over
+# *.sh grades a subset of its sibling's. Counted in characters, as the page
+# walk counts, so a rule drawn in box characters is judged by what an editor
 # shows rather than by what it costs in bytes
 # ---------------------------------------------------------------------------
 new_script_case() {
@@ -820,10 +820,10 @@ expect_script_comments() {
   rc=$?
   got=$(printf '%s\n' "$out" | awk '
     /^[^ ].*:[0-9]+: [0-9]+ characters$/ { c = $1; sub(/:$/, "", c); print c; next }
-    /^[^ ].*: the comment rules cannot read it$/ {
+    /^[^ ].*: the shebang selection cannot read it$/ {
       c = $1; sub(/:$/, "", c); print c ":unreadable"; next
     }
-    /^[^ ].*: not a regular file or a symlink, the comment rules skip it$/ {
+    /^[^ ].*: not a regular file or a symlink, the shebang selection passes it over$/ {
       c = $1; sub(/:$/, "", c); print c ":skipped"; next
     }
     /^STYLE FAIL: no script found/ { print "empty"; next }
@@ -977,6 +977,7 @@ broken_checker() {
   mkdir -p "$dir"
   ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/audit-god-files.sh" \
     "$dir/audit-god-files.sh"
+  ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/lib" "$dir/lib"
   # substituted by index and read out of the environment: the text being
   # broken is itself a regex, and both a sed script and an awk -v value
   # would take a second pass at its backslashes
@@ -1063,6 +1064,7 @@ RUN=""
 scannerless_checker() {
   dir="$WORK/broken$n"
   mkdir -p "$dir"
+  ln -s "$(cd "$(dirname "$CHECKER")" && pwd)/lib" "$dir/lib"
   cp "$CHECKER" "$dir/check-style.sh"
   printf '%s\n' "$dir/check-style.sh"
 }
@@ -1091,6 +1093,12 @@ new_temp_trap_case() {
   mkdir -p "$CASE/scripts"
 }
 
+# the walk reads the shebang population, so a fixture states one: a file the
+# selection passes over is a file the trap rule never reaches
+write_temp_trap_script() {
+  { printf '#!/usr/bin/env bash\n'; cat; } > "$CASE/scripts/a.sh"
+}
+
 expect_temp_traps() {
   want_rc="$1"
   want="$2"
@@ -1110,13 +1118,119 @@ expect_temp_traps() {
 }
 
 new_temp_trap_case
-printf 'f=$(mktemp)\ntrap %s EXIT\n' "'rm -f \"\$f\"'" > "$CASE/scripts/a.sh"
+printf 'f=$(mktemp)\ntrap %s EXIT\n' "'rm -f \"\$f\"'" | write_temp_trap_script
 expect_temp_traps 0 '' 'a script removing its temp file under a trap'
 
 new_temp_trap_case
-printf 'f=$(mktemp)\nrm -f "$f"\n' > "$CASE/scripts/a.sh"
+printf 'f=$(mktemp)\nrm -f "$f"\n' | write_temp_trap_script
 expect_temp_traps 1 'scripts/a.sh' \
   'a script removing its temp file in a straight line, which a signal skips'
+
+new_temp_trap_case
+mkdir -p "$CASE/scripts/acceptance"
+printf '#!/bin/sh\nf=$(mktemp)\nrm -f "$f"\n' > "$CASE/scripts/acceptance/leg"
+expect_temp_traps 1 'scripts/acceptance/leg' \
+  'a suffix-less leg under scripts/acceptance/, which a scripts/*.sh glob never reached'
+
+# ---------------------------------------------------------------------------
+# three pins over the tree this file ships in rather than over a scratch
+# root: what each grades is a property of the committed sources themselves,
+# which no fixture can stand in for.
+# ---------------------------------------------------------------------------
+TREE="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=lib/script-population.sh
+. "$TREE/scripts/lib/script-population.sh"
+
+new_pin_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE"
+}
+
+expect_pin() {
+  if [ -z "$2" ]; then
+    printf 'ok %s - %s\n' "$n" "$1"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n' "$n" "$1"
+  printf '%s\n' "$2" | sed 's/^/  | /'
+}
+
+# The unit word over the pages and the gate scripts. A line whose
+# `columns` is what a glyph paints is the two-limit example these pages are
+# written around, and stays. A line whose unit word carries the limit is a
+# number wearing a unit it is not in -- the mismatch a contributor hits when
+# a message reddening a comment at 80 characters cites a rule written in the
+# cells a glyph paints. The discriminator is that painting verb on the same
+# line, so every line kept says what it is about. The pattern here spells its
+# first character bracketed: same language, and the pin grades this file by
+# the rule it states.
+new_pin_case
+UNIT_WORD='\b[c]olumns\b'
+unit=$(cd "$TREE" && grep -rnE "$UNIT_WORD" \
+  .claude/rules scripts/check-style.sh scripts/check-style-cases.sh \
+  scripts/lib/script-population.sh | grep -vE 'paint|fill') || true
+expect_pin 'the plural unit word used only for what a glyph paints, never for the limit' "$unit"
+
+# Each broken checker copy lands in a directory no earlier copy took. The
+# counter that keyed the directory was bumped inside the command
+# substitution that captures the path, so the increment never left the
+# subshell: every copy landed on the last one, `ln` reported `Already
+# exists` on stderr twice a run, and two copies held at once in one case
+# would have been the same file read twice. Keyed on the case number
+# instead, which the parent bumps.
+new_pin_case
+taken=$(ls -d "$WORK/broken$n" 2>/dev/null) || taken=""
+copy=$(broken_checker 'release\(' 'release[' 2> "$WORK/copy.err")
+isolation=""
+if [ -n "$taken" ]; then
+  isolation="$taken already held a copy before this case asked for one"
+fi
+if [ "$copy" != "$WORK/broken$n/check-style.sh" ]; then
+  isolation=$(printf '%sthe copy landed at %s\n' "${isolation:+$isolation
+}" "$copy")
+fi
+if [ -s "$WORK/copy.err" ]; then
+  isolation=$(printf '%s%s\n' "${isolation:+$isolation
+}" "$(cat "$WORK/copy.err")")
+fi
+expect_pin 'a broken checker copy taking a directory of its own, silently' "$isolation"
+
+# A file with no suffix carrying a shebang, counted by every consumer of
+# scripts/lib/script-population.sh. Two of them take a scan root and are run
+# against the fixture; the third, check-budget-drift-cases.sh, grades the
+# tree it ships in and takes none, so what stands for it is the helper
+# answering the same file -- that call is the whole of its population.
+new_pin_case
+mkdir -p "$CASE/scripts" "$CASE/.claude/hooks"
+: > "$CASE/Taskfile.yml"
+# the banned spelling is assembled rather than written out, so planting a
+# real one in the fixture does not put one in this file's own scanned lines
+banned='stat'
+{
+  printf '#!/bin/sh\n'
+  pad 85 '# a comment ' ' past the limit'
+  printf '%s -c %%Y f\n' "$banned"
+} > "$CASE/scripts/leg"
+missed=""
+note() { missed=$(printf '%s%s\n' "${missed:+$missed
+}" "$1"); }
+out=$(bash "$CHECKER" --script-comments "$CASE" 2>&1)
+case "$out" in
+  *"scripts/leg:2: "*) ;;
+  *) note 'check-style.sh did not grade the comment in scripts/leg' ;;
+esac
+out=$(bash "$TREE/scripts/check-portability.sh" "$CASE" 2>&1)
+case "$out" in
+  *scripts/leg*) ;;
+  *) note 'check-portability.sh did not scan scripts/leg' ;;
+esac
+script_population_read "$CASE" > /dev/null
+if [ "$SCRIPT_POPULATION" != "scripts/leg" ]; then
+  note "the helper selected [$SCRIPT_POPULATION] rather than scripts/leg"
+fi
+expect_pin 'a suffix-less shebang file reached by the comment rules, the userland scan and the helper the drift matrix reads' "$missed"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

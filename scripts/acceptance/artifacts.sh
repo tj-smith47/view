@@ -265,6 +265,14 @@ check_view_reaping() {
     # reader either of them has
     local before SELFCHECK_TMP SELFCHECK_SESSION
     SELFCHECK_TMP=$(mktemp -d)
+    # the straight-line rm at the end of this frame, and the one in
+    # `selfcheck_abort`, both cover a path this function walks to its end; a
+    # Ctrl-C in the ten-attempt wait below walks neither. The path is baked
+    # into the trap rather than named, because the variable holding it is a
+    # local and `set -u` would abort the exit path on a name that is gone.
+    # Cleared once the rm has run, so it never outlives this frame: every
+    # caller sources this file before installing its own EXIT trap.
+    trap "rm -rf '$SELFCHECK_TMP'" EXIT
     SELFCHECK_SESSION="view-acc-selfcheck-$$"
     # a shell under the name the recorder looks for. The trailing `:` is
     # what keeps that name: given one command, a shell execs it and becomes
@@ -287,6 +295,7 @@ check_view_reaping() {
     fi
     tmux kill-session -t "$SELFCHECK_SESSION" 2>/dev/null || true
     rm -rf "$SELFCHECK_TMP"
+    trap - EXIT
     VIEW_PIDS=()
     VIEW_PID=""
 }

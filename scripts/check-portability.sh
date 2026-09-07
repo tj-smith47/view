@@ -33,9 +33,15 @@
 # `scripts/check-style.sh` relies on it.
 set -euo pipefail
 
+# Resolved before the cd below, because the helper it sources ships beside
+# this script and not under the scan root.
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=lib/script-population.sh
+. "$HERE/lib/script-population.sh"
+
 # A scan root handed in as the single argument replaces the tree this script
 # lives in, which is how the case matrix points it at a fixture tree.
-ROOT=${1:-$(cd -- "$(dirname -- "$0")/.." && pwd)}
+ROOT=${1:-$(cd -- "$HERE/.." && pwd)}
 cd "$ROOT"
 SELF=$(basename -- "$0")
 
@@ -150,10 +156,27 @@ report() {
   fail=1
 }
 
+# The shebang selection under scripts/, which is what check-style.sh and
+# check-budget-drift-cases.sh grade, plus the hooks and the Taskfile: a
+# `*.sh` spelling of the same set left the eight suffix-less remote-test
+# fixtures unscanned, and they run on the macOS host this scan is about.
+# Taskfile.yml stays last, so a here-doc tag one of the scripts leaves open
+# is reported against the file that opened it.
+if ! script_population_read; then
+  echo "PORTABILITY FAIL: scripts -- a file under scripts/ cannot be read" >&2
+  exit 1
+fi
 targets=()
 while IFS= read -r file; do
+  [ -n "$file" ] || continue
+  # this script names every banned spelling literally in order to define the
+  # patterns above, so it is out of its own scan
+  case "$file" in "scripts/$SELF") continue ;; esac
   targets+=("$file")
-done < <(find .claude/hooks scripts -type f -name '*.sh' ! -name "$SELF" | sort)
+done <<EOF
+$SCRIPT_POPULATION
+$(find .claude/hooks -type f -name '*.sh' ! -name "$SELF" | LC_ALL=C sort)
+EOF
 targets+=(Taskfile.yml)
 
 for file in "${targets[@]}"; do

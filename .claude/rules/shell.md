@@ -113,11 +113,13 @@ and stays for the ordinary path. A trap naming a variable needs that
 variable to still exist when it fires: a `local` is gone by then and `set -u`
 aborts the exit path on it, so the name the trap reads is a script global.
 
-`check_temp_traps` in `scripts/check-style.sh` walks every `scripts/*.sh`
-that calls `mktemp` and requires an `EXIT` trap somewhere in it, graded by
-two cases at the end of `scripts/check-style-cases.sh`. Keyed on the script
-rather than on the statement, because the removal legitimately sits far from
-the `mktemp`.
+`check_temp_traps` in `scripts/check-style.sh` walks the shebang population
+below for a `mktemp` and requires an `EXIT` trap somewhere in the same file,
+graded by three cases at the end of `scripts/check-style-cases.sh`. Keyed on
+the script rather than on the statement, because the removal legitimately
+sits far from the `mktemp`. The population and not `scripts/*.sh`: that glob
+reaches neither `scripts/acceptance/` nor a file with no suffix, and the
+first script it missed was making a temp directory a Ctrl-C stranded.
 
 ## A comment wraps at 80 characters
 
@@ -156,9 +158,11 @@ What cannot wrap is exempt by shape rather than by a list of files:
 | a page's fenced block, table row, heading, or lone link | a sample is a sample, a row is a row, and a heading carries no newline to wrap at |
 
 The population is every file under `scripts/` whose first line names bash or
-`sh` -- the same selection the portability legs make, and the reason the
-remote-test fixtures that carry no suffix are graded. All three comment
-rules (the width walk and the two citation bans) read that one list: a rule
+`sh`, and it is read in one place: `scripts/lib/script-population.sh`, which
+`check-style.sh`, `check-portability.sh` and `check-budget-drift-cases.sh`
+all source. That is why the remote-test fixtures carrying no suffix are
+graded by each of them. Four rules here read that one list -- the width
+walk, the two citation bans and the temp-file trap walk -- because a rule
 spelled over `*.sh` grades a subset of its sibling's, and the difference is
 where a finding sits unread.
 

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The shebang selection under scripts/, shared with check-portability.sh and
+# check-budget-drift-cases.sh. Resolved from this file's own directory, so a
+# copy of the checker graded from a scratch root finds the helper it was
+# copied beside rather than one under the root.
+# shellcheck source=lib/script-population.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib/script-population.sh"
+
 # Session-narrative, spec-task-tag, and SDD-ledger-row markers, shared
 # between source comments (anchored on the language's own comment prefix,
 # `anchor` = "(prefix).*") and doc prose (`anchor` = "", matching anywhere
@@ -665,12 +672,20 @@ check_geometry_sites() {
 # from the `mktemp` -- what matters is that one exists.
 check_temp_traps() {
   local fail=0 f
-  for f in scripts/*.sh; do
+  if ! read_script_population; then
+    return 1
+  fi
+  # fed by a here-doc rather than a pipe, so the loop runs in this shell and
+  # the verdict it sets is the one read below
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
     if grep -q 'mktemp' "$f" && ! grep -qE '^[[:space:]]*trap .*EXIT' "$f"; then
       echo "$f: makes a temp file with no EXIT trap to remove it"
       fail=1
     fi
-  done
+  done <<EOF
+$SCRIPT_POPULATION
+EOF
   if [ "$fail" -eq 0 ]; then
     return 0
   fi
@@ -785,59 +800,30 @@ check_prose_width() {
   return 1
 }
 
-# The population every comment rule over scripts/ grades: a file whose first
-# line names bash or sh, which is what makes a file a script here and what
-# the portability legs select on. Read once and handed to the width walk and
-# to both bans below, because the eight remote-test fixtures carry no suffix
-# and a rule spelled over *.sh graded 26 of the 35 while its sibling graded
-# all of them.
+# The population every rule over scripts/ grades, read through the helper
+# scripts/lib/script-population.sh so that this gate, check-portability.sh
+# and check-budget-drift-cases.sh answer one list rather than three. Read
+# once and handed to the temp-file walk, the width walk and both bans.
 SCRIPT_POPULATION=""
+# the verdict is memoized beside the list because four rules ask for it: a
+# second read would name the same unreadable file a second time
+SCRIPT_POPULATION_RC=""
 read_script_population() {
-  local entries skipped graded unreadable first
-  if [ -n "$SCRIPT_POPULATION" ]; then
-    return 0
+  if [ -n "$SCRIPT_POPULATION_RC" ]; then
+    return "$SCRIPT_POPULATION_RC"
   fi
-  # symlinks are listed beside regular files so a dangling one is named by
-  # the loop below rather than dropped by the selection: a selection that
-  # skips what it cannot open leaves the population short, and a short
-  # population grades its survivors and reads exactly like a tree with
-  # nothing to report
-  entries=$(find scripts \( -type f -o -type l \) | LC_ALL=C sort)
-  # a fifo, socket or device node is readable and could never carry a
-  # shebang, so it is named and passed over: reddening a gate for an entry
-  # nobody can rewrap is a false red nobody can act on
-  skipped=$(find scripts ! -type d ! -type f ! -type l | LC_ALL=C sort)
-  if [ -n "$skipped" ]; then
-    printf '%s\n' "$skipped" |
-      sed 's/$/: not a regular file or a symlink, the comment rules skip it/'
-  fi
-  # selected by a loop rather than by an xargs awk: xargs splits a path on a
-  # blank and awk takes a fatal on the fragment, which drops the file from
-  # all three rules with the run still green. Read and select in the one
-  # pass, so no entry can pass the readability vet and then be lost by the
-  # selection below it
-  graded=$(printf '%s\n' "$entries" | while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    if { [ -f "$entry" ] && [ -r "$entry" ]; } &&
-      first=$(head -n 1 "$entry"); then
-      case "$first" in ('#!'*bash | '#!'*/sh) printf 'take %s\n' "$entry" ;; esac
-    else
-      printf 'drop %s\n' "$entry"
-    fi
-  done)
-  unreadable=$(printf '%s\n' "$graded" | sed -n 's/^drop //p')
-  if [ -n "$unreadable" ]; then
-    printf '%s\n' "$unreadable" | sed 's/$/: the comment rules cannot read it/'
+  SCRIPT_POPULATION_RC=1
+  if ! script_population_read; then
     echo "STYLE FAIL: a file under scripts/ cannot be read"
     return 1
   fi
-  SCRIPT_POPULATION=$(printf '%s\n' "$graded" | sed -n 's/^take //p')
   if [ -z "$SCRIPT_POPULATION" ]; then
-    echo "STYLE FAIL: no script found to grade for comment width under $(pwd)"
+    echo "STYLE FAIL: no script found to grade under $(pwd)"
     echo "  A walk handed an empty list reports nothing and reads like a"
     echo "  tree whose comments are inside the limit."
     return 1
   fi
+  SCRIPT_POPULATION_RC=0
   return 0
 }
 
