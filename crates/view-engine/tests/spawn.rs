@@ -125,12 +125,18 @@ fn marker_path() -> PathBuf {
 /// `vim.g.view` and the `VimEnter` hook are what tell a chunk that ran from
 /// one that aborted -- the statement after the geometry line, and the
 /// chunk's last. The geometry assertion is the pin on the answer's *value*:
-/// it is asked at a reading whose answer is not nvim's own 80x24 default
-/// (5x40 is clamped per axis to 12x40), so a spawn that took the default by
-/// aborting cannot satisfy it either.
+/// it is asked at readings whose answers are not nvim's own 80x24 default
+/// (5x40 is clamped per axis to 12x40, 100x1 to 100x3), so a spawn that took
+/// the default by aborting cannot satisfy it either.
+///
+/// Both axes of `view_core::model::ENGINE_MIN_SIZE` are walked against the
+/// engine itself, and that is the only place either value is proven rather
+/// than compared against itself: 100x1 spawns the child at 3 lines, one
+/// under which the chunk aborts on `E593`, so a rows minimum lowered to 2
+/// fails here and nowhere else.
 #[test]
 fn a_spawn_sized_from_a_refused_geometry_runs_its_whole_startup_chunk() {
-    for reading in [(0, 0), (5, 40)] {
+    for reading in [(0, 0), (5, 40), (100, 1)] {
         let (width, height) = view_core::model::grid_target_for(reading, 0, false);
         let engine =
             Engine::spawn(EngineConfig::isolated().with_late_attach(width, height)).unwrap();

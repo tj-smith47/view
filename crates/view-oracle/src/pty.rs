@@ -522,6 +522,11 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     raw: Option<Vec<u8>>,
     raw_limit: usize,
+    // a pty opened on a zero axis has no screen to model: `vt100` cannot
+    // hold one, so the local parser stands at one cell until a `resize`
+    // gives it the size the child was told about, and every read before
+    // that would report a full frame as an empty one
+    screen_unsized: bool,
     // once the child has been reaped its pid can be recycled by the OS, so a
     // group kill aimed at that pid could hit an unrelated process; before
     // reaping the pid is held (live or zombie) and the group signal is safe
@@ -724,8 +729,8 @@ impl PtySession {
         // the kernel takes the caller's dimensions verbatim -- a pty nothing
         // has sized is 0x0, which is the reading a child under test may be
         // asked to start on -- but `vt100`'s own grid underflows on a zero
-        // axis, so the local screen model opens at one cell and is sized by
-        // the first `resize` any such test has to perform before reading it
+        // axis, so the local screen model opens at one cell and is refused
+        // to every reader until a `resize` sizes it
         let parser = vt100::Parser::new(rows.max(1), cols.max(1), 0);
 
         Ok(Self {
@@ -736,6 +741,7 @@ impl PtySession {
             master: pair.master,
             raw: None,
             raw_limit: RAW_RECORD_LIMIT,
+            screen_unsized: rows == 0 || cols == 0,
             reaped: false,
         })
     }
@@ -802,6 +808,7 @@ impl PtySession {
             })
             .map_err(|e| OracleError::Pty(e.to_string()))?;
         self.parser.screen_mut().set_size(rows, cols);
+        self.screen_unsized = rows == 0 || cols == 0;
         Ok(())
     }
 
@@ -864,13 +871,33 @@ impl PtySession {
         Ok(())
     }
 
+    /// The parsed screen, refused while this session still stands at the
+    /// zero axis it was opened on.
+    ///
+    /// `vt100` cannot model a zero axis, so such a session's parser holds
+    /// one cell and answers every read with an empty frame -- a wrong
+    /// answer that reads exactly like a child that painted nothing. The
+    /// caller that opens a session at 0x0 is testing what a child does on a
+    /// terminal still negotiating its size, and it has a `resize` to
+    /// perform before any of that reaches a screen; this is what makes
+    /// skipping it fail by name instead.
+    fn parsed_screen(&self) -> &vt100::Screen {
+        assert!(
+            !self.screen_unsized,
+            "this pty was opened at a zero axis and its screen read before \
+             any resize: call PtySession::resize (or resize_until) with the \
+             size the child is expected to lay out at first"
+        );
+        self.parser.screen()
+    }
+
     /// Pulls every chunk already buffered on the reader channel into the
     /// parser without blocking, then returns the screen's current text
     /// content.
     #[must_use]
     pub fn screen(&mut self) -> String {
         self.drain_available();
-        self.parser.screen().contents()
+        self.parsed_screen().contents()
     }
 
     /// Same as [`screen`](Self::screen), but returns the parsed [`vt100::Screen`]
@@ -880,7 +907,7 @@ impl PtySession {
     #[must_use]
     pub fn screen_raw(&mut self) -> &vt100::Screen {
         self.drain_available();
-        self.parser.screen()
+        self.parsed_screen()
     }
 
     /// Drains pending pty output into the parser, then hands `f` a borrowed
@@ -892,7 +919,7 @@ impl PtySession {
     /// immediately discards it after inspecting a handful of bytes.
     pub fn with_screen<R>(&mut self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
         self.drain_available();
-        f(self.parser.screen())
+        f(self.parsed_screen())
     }
 
     /// The one place a chunk leaves the reader channel and enters this
@@ -931,7 +958,7 @@ impl PtySession {
         timeout: Duration,
         mut predicate: impl FnMut(&vt100::Screen) -> bool,
     ) -> bool {
-        if predicate(self.parser.screen()) {
+        if predicate(self.parsed_screen()) {
             return true;
         }
         let deadline = Instant::now() + timeout;
@@ -939,7 +966,7 @@ impl PtySession {
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(chunk) => {
                     self.absorb(&chunk);
-                    if predicate(self.parser.screen()) {
+                    if predicate(self.parsed_screen()) {
                         return true;
                     }
                 }
@@ -1476,6 +1503,34 @@ mod tests {
             session.wait_for("hello-pty", Duration::from_secs(5)),
             "screen never showed cat's echoed input; screen:\n{}",
             session.screen()
+        );
+        session.kill();
+        let _ = session.wait_for_exit(Duration::from_secs(2));
+    }
+
+    /// A caller that opens a session at 0x0 is testing what a child does
+    /// on a terminal still negotiating its size, and the local screen
+    /// cannot hold that reading: `vt100` opens at one cell there and
+    /// reports a full frame as an empty one, which reads as a child that
+    /// painted nothing rather than as the harness misuse it is.
+    #[test]
+    #[should_panic(expected = "opened at a zero axis")]
+    fn a_screen_read_before_the_first_resize_of_a_zero_axis_session_is_refused() {
+        let mut session = testenv::spawning(|| PtySession::spawn("/bin/cat", &[], 0, 0)).unwrap();
+        let _ = session.screen();
+    }
+
+    /// The refusal above is the wait for a size, never a session that can
+    /// no longer be read: the resize such a test performs is what hands the
+    /// parser the dimensions the child lays out at.
+    #[test]
+    fn a_zero_axis_session_reads_its_screen_once_it_has_been_resized() {
+        let mut session = testenv::spawning(|| PtySession::spawn("/bin/cat", &[], 0, 0)).unwrap();
+        session.resize(80, 24).unwrap();
+        session.send(b"hello-resized\n").unwrap();
+        assert!(
+            session.wait_for("hello-resized", Duration::from_secs(5)),
+            "screen never showed cat's echoed input after the resize"
         );
         session.kill();
         let _ = session.wait_for_exit(Duration::from_secs(2));

@@ -2459,17 +2459,22 @@ struct HandRolledPty {
     _isolation: Option<RwLockReadGuard<'static, ()>>,
 }
 
-/// Spawns the `view` binary on a fresh pty, hermetic and with native
-/// features off under `paths`, with `configure` adding the arguments and
-/// environment the caller's own session needs.
+/// Spawns the `view` binary on a fresh pty of `size` (`(cols, rows)`),
+/// hermetic and with native features off under `paths`, with `configure`
+/// adding the arguments and environment the caller's own session needs.
 ///
 /// Descriptor 1 is always the pty slave and is the child's controlling
 /// terminal, which crossterm's raw mode and `/dev/tty` input both need;
 /// `stdin` and `stderr` take the same slave when `None`. `configure` runs
 /// after the hermetic setup, so a caller can override anything it put in
 /// place.
+///
+/// `openpty` takes `size` verbatim, zeroes included, which is what lets a
+/// caller here start a session on the reading a terminal still negotiating
+/// its size answers with.
 fn spawn_view_on_hand_rolled_pty(
     paths: &common::ScratchPaths,
+    size: (u16, u16),
     stdin: Option<std::process::Stdio>,
     stderr: Option<std::process::Stdio>,
     configure: impl FnOnce(&mut std::process::Command),
@@ -2479,8 +2484,8 @@ fn spawn_view_on_hand_rolled_pty(
 
     let isolation = shared_isolation();
     let winsize = nix::pty::Winsize {
-        ws_row: 24,
-        ws_col: 80,
+        ws_row: size.1,
+        ws_col: size.0,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -2596,6 +2601,72 @@ fn pty_dump(screen: &std::sync::Mutex<Vec<u8>>) -> String {
         .unwrap_or_default()
 }
 
+/// Resizes a hand-rolled pty to `size` (`(cols, rows)`), the way a terminal
+/// emulator does when its window changes: the kernel raises `SIGWINCH` on
+/// the child from this call alone.
+fn resize_hand_rolled_pty(master: &std::fs::File, size: (u16, u16)) {
+    use std::os::fd::AsRawFd;
+
+    let winsize = nix::pty::Winsize {
+        ws_row: size.1,
+        ws_col: size.0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `master` is an open pty master this process owns for the whole
+    // call, and `TIOCSWINSZ` reads one `winsize` through the pointer given
+    // and writes nothing back.
+    #[allow(unsafe_code)]
+    let set = unsafe {
+        nix::libc::ioctl(
+            master.as_raw_fd(),
+            nix::libc::TIOCSWINSZ as _,
+            std::ptr::from_ref(&winsize),
+        )
+    };
+    assert_eq!(
+        set,
+        0,
+        "TIOCSWINSZ on the hand-rolled pty master: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// Replays every byte the child has written so far into a fresh `vt100`
+/// screen of `size` and reports whether `(row, col)` holds `want`, retrying
+/// until `timeout` runs out.
+///
+/// A hand-rolled pty carries no parser of its own -- these tests read raw
+/// bytes -- and a session that has been resized painted its earlier frames
+/// against the smaller screen, so the whole stream is replayed at the size
+/// the latest frame was painted for rather than parsed incrementally.
+fn wait_for_replayed_cell(
+    raw: &std::sync::Mutex<Vec<u8>>,
+    size: (u16, u16),
+    (row, col): (u16, u16),
+    want: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + view_test_support::host_deadline(timeout);
+    loop {
+        let mut parser = vt100::Parser::new(size.1, size.0, 0);
+        if let Ok(buf) = raw.lock() {
+            parser.process(&buf);
+        }
+        if parser
+            .screen()
+            .cell(row, col)
+            .is_some_and(|cell| cell.contents() == want)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Waits for `child` to exit within `within`, killing it and returning
 /// `None` if it does not.
 ///
@@ -2650,10 +2721,15 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     // -- the session under test writes it nowhere else (see
     // `view_tui::tiers::resolve`).
     let view_log = paths.isolated_home.join("view.log");
-    let session =
-        spawn_view_on_hand_rolled_pty(&paths, Some(Stdio::from(stdin_read)), None, |cmd| {
+    let session = spawn_view_on_hand_rolled_pty(
+        &paths,
+        (80, 24),
+        Some(Stdio::from(stdin_read)),
+        None,
+        |cmd| {
             cmd.arg("-").arg(&paths.scratch).env("VIEW_LOG", &view_log);
-        });
+        },
+    );
     let mut child = session.child;
 
     stdin_write
@@ -2724,6 +2800,76 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     );
 }
 
+/// The same relay on a terminal that reads 0x0, which is the one startup
+/// path where `main` releases a size for an attach it does not perform
+/// itself: a piped stdin makes `startup::spawn_and_attach` do the
+/// `nvim_ui_attach`, and the engine refuses that call below
+/// `view_core::model::ENGINE_MIN_SIZE` outright. Released with the raw
+/// reading instead of the geometry the spawn was seeded with, the attach is
+/// refused, the child never sources anything, and `vim_enter received`
+/// never reaches the log -- which is the assertion that carries this leg.
+/// `PtySession` cannot host it: `spawn_command` wires all three descriptors
+/// to the same slave, and the defining property of `ls | view -` is a pipe
+/// on fd 0.
+///
+/// The reflow is the other half, and the same claim the `PtySession` leg
+/// makes for a session with no pipe on it: the floor the spawn stood in for
+/// the reading is temporary, so the first real `SIGWINCH` lays the child
+/// out past the 24 rows it started with.
+#[test]
+fn piped_stdin_on_an_unsized_terminal_starts_and_reflows() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let paths = common::ScratchPaths::new("smoke-stdin-relay-unsized");
+    let view_log = paths.isolated_home.join("view.log");
+    // cloexec, for the reason the 80x24 leg above spells out: an inherited
+    // write end keeps the relayed stdin from ever reaching EOF
+    let (stdin_read, mut stdin_write) =
+        std::io::pipe().expect("cloexec pipe for the child's stdin");
+    let session =
+        spawn_view_on_hand_rolled_pty(&paths, (0, 0), Some(Stdio::from(stdin_read)), None, |cmd| {
+            cmd.arg("-").arg(&paths.scratch).env("VIEW_LOG", &view_log);
+        });
+    let mut child = session.child;
+    stdin_write
+        .write_all(b"piped stdin on an unsized terminal\n")
+        .expect("write piped content to the child's stdin");
+    drop(stdin_write);
+
+    let mut master = session.master;
+    let raw = drain_and_answer(&master);
+    common::wait_for_log_line(&view_log, "vim_enter received");
+
+    // row 30 sits past the bottom of the 24 rows the floor laid the child
+    // out at, so nvim's own past-EOF marker reaches it only once the resize
+    // has gone through to its window
+    resize_hand_rolled_pty(&master, (80, 48));
+    assert!(
+        wait_for_replayed_cell(&raw, (80, 48), (30, 0), "~", Duration::from_secs(10)),
+        "a piped-stdin session that started on a 0x0 terminal never reflowed \
+         past the floor's 24 rows (no '~' at row 30); last pty bytes:\n{:?}",
+        pty_dump(&raw)
+    );
+
+    master
+        .write_all(b"\x1b:qa!\r")
+        .expect("write :qa! to the pty master");
+    let Some(status) = wait_bounded(&mut child, Duration::from_secs(15)) else {
+        panic!(
+            "view never exited within 15s of :qa! on a relayed 0x0 session; \
+             last pty bytes:\n{:?}",
+            pty_dump(&raw)
+        );
+    };
+    assert!(
+        status.success(),
+        "view did not exit cleanly after :qa!; status={status:?}; last pty \
+         bytes:\n{:?}",
+        pty_dump(&raw)
+    );
+}
+
 #[test]
 fn a_session_writes_nothing_to_its_own_stderr() {
     // An editor owns the screen, so its stderr is the one descriptor a user
@@ -2739,8 +2885,12 @@ fn a_session_writes_nothing_to_its_own_stderr() {
     let paths = common::ScratchPaths::new("smoke-stderr-silence");
     let (mut stderr_read, stderr_write) =
         std::io::pipe().expect("cloexec pipe for the child's stderr");
-    let session =
-        spawn_view_on_hand_rolled_pty(&paths, None, Some(Stdio::from(stderr_write)), |cmd| {
+    let session = spawn_view_on_hand_rolled_pty(
+        &paths,
+        (80, 24),
+        None,
+        Some(Stdio::from(stderr_write)),
+        |cmd| {
             // `--tier basic` is the arm with the most to say and the least
             // to probe; no `VIEW_LOG`, so nothing routes the line to a file
             // either and stderr is the only place a regression could land.
@@ -2748,7 +2898,8 @@ fn a_session_writes_nothing_to_its_own_stderr() {
                 .arg("basic")
                 .arg(&paths.scratch)
                 .env_remove("VIEW_LOG");
-        });
+        },
+    );
     let mut child = session.child;
     let mut master = session.master;
     let screen = drain_and_answer(&master);
@@ -2977,6 +3128,38 @@ fn view_started_on_an_unsized_terminal_reflows_to_the_first_real_size() {
          the session it painted after the resize is the one the attach \
          deadline recovered; VIEW_LOG:\n{log}"
     );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
+/// The other half of the same guard: a terminal that answers a positive
+/// size the engine still refuses. `nvim_ui_attach` and the spawn's geometry
+/// `--cmd` take nothing under `view_core::model::ENGINE_MIN_SIZE`, so a
+/// 5-column terminal lays the child out at 12 columns and paints clipped
+/// against a screen that cannot hold it -- a session the user can see is
+/// wrong and nothing else on screen explains. The notice is the only report
+/// of it, and it is written before the terminal is entered, so `VIEW_LOG`
+/// is where it can be read.
+///
+/// Both sizes are named because neither is derivable from the other at read
+/// time: the reading is gone by the time the spawn is armed, and the
+/// geometry is the arithmetic's answer rather than a constant.
+#[test]
+fn a_terminal_under_the_engines_minimum_reports_the_geometry_it_was_clamped_to() {
+    let paths = common::ScratchPaths::new("smoke");
+    let view_log = paths.isolated_home.join("view.log");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_native_off_except(&mut cmd, &paths.isolated_home, &[]);
+    cmd.env("VIEW_LOG", &view_log);
+    let mut session = ViewPtySession {
+        session: PtySession::spawn_configured(cmd, 5, 40).unwrap(),
+        paths,
+        _isolation: shared_isolation(),
+    };
+
+    common::wait_for_log_line(&view_log, "terminal reported 5x40; engine spawned at 12x40");
 
     session.send(b"\x1b:q!\r").unwrap();
     let _ = session.wait();

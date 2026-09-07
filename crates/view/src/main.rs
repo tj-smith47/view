@@ -1037,20 +1037,19 @@ fn main() -> Result<()> {
     // lays every window out against what this `--cmd` tells it, so a spawn
     // seeded a row taller than `Model::grid_target` makes the attach a
     // relayout of every window on screen
-    let spawn_size = view_core::model::grid_target_for(
-        (width, height),
-        0,
-        resolved.tables.native.enabled("statusline"),
-    );
-    if width == 0 || height == 0 {
-        // a zero would abort the spawn's geometry `--cmd` outright
-        // (`view_core::model::SIZE_FLOOR`), so the reading the floor stood
-        // in for is what a report of a session that started tiny needs
+    let statusline = resolved.tables.native.enabled("statusline");
+    let spawn_size = view_core::model::grid_target_for((width, height), 0, statusline);
+    // what the chrome alone would have left, so the notice fires for every
+    // geometry the engine would have refused -- a zero floored to
+    // `view_core::model::SIZE_FLOOR`, an axis clamped to
+    // `view_core::model::ENGINE_MIN_SIZE` -- and for none it accepted. A
+    // session clamped on either axis paints clipped against a terminal
+    // smaller than its grid, and nothing else on screen says why
+    if spawn_size != (width, height.saturating_sub(u16::from(statusline))) {
         vlog::log_with("startup", || {
             format!(
-                "terminal reported {width}x{height}; engine spawned at the {}x{} floor",
-                view_core::model::SIZE_FLOOR.0,
-                view_core::model::SIZE_FLOOR.1
+                "terminal reported {width}x{height}; engine spawned at {}x{}",
+                spawn_size.0, spawn_size.1
             )
         });
     }
@@ -1919,11 +1918,14 @@ mod tests {
     /// ask for rather than the terminal's own. Both calls are arithmetic
     /// over values already in hand.
     ///
-    /// The floor notice is the fifth, and it is not a read at all: it
-    /// reports the reading the line above stood a floor in for
-    /// (`view_core::model::SIZE_FLOOR`), on the branch where the terminal
-    /// answered with a zero, and there is nothing left to name it by once
-    /// the spawn has consumed the geometry.
+    /// The geometry notice is the fifth, and it is not a read at all: it
+    /// reports the reading the line above stood a geometry in for, on every
+    /// branch where the two differ -- a zero answered with
+    /// `view_core::model::SIZE_FLOOR`, an axis held up to
+    /// `view_core::model::ENGINE_MIN_SIZE` -- and there is nothing left to
+    /// name either pair by once the spawn has consumed the geometry. Its
+    /// own comparison is the arithmetic the chrome takes, which the line
+    /// above has already performed on values in hand.
     #[test]
     fn only_the_config_prologue_runs_before_the_engine_spawn() {
         assert_eq!(
@@ -1953,8 +1955,10 @@ mod tests {
                 "view_tui::terminal::size_now",
                 "context",
                 "view_native::config::ext_surfaces",
-                "view_core::model::grid_target_for",
                 "enabled",
+                "view_core::model::grid_target_for",
+                "saturating_sub",
+                "u16::from",
                 "vlog::log_with",
                 "with_late_attach",
                 "stdin_relay_requested",
