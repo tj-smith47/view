@@ -583,7 +583,14 @@ new_geometry_case() {
   plant_geometry 'crates/view-core/src/update/mod.rs' 1
   plant_geometry 'crates/view-core/src/update/ui_event.rs' 1
   plant_geometry 'crates/view-engine/src/nvim_api.rs' 10
-  plant_geometry 'crates/view-engine/src/process.rs' 12
+  plant_geometry 'crates/view-engine/src/process.rs' 10
+  # the render and the field read, the two spellings that carry the seed
+  # without being a call named late_attach: a walk narrowed to
+  # `late_attach(` or to `with_late_attach` stops counting them
+  printf 'tokens.push(late_attach_cmd(width, height).into_bytes());\n' \
+    >> "$CASE/crates/view-engine/src/process.rs"
+  printf 'if let Some((width, height)) = cfg.late_attach {\n' \
+    >> "$CASE/crates/view-engine/src/process.rs"
   plant_geometry 'crates/view-oracle/src/hang.rs' 4
   plant_geometry 'crates/view-oracle/src/lib.rs' 2
   plant_geometry 'crates/view-oracle/src/reference.rs' 2
@@ -1106,7 +1113,7 @@ expect_temp_traps() {
   out=$(bash "$CHECKER" --temp-traps "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" \
-    | awk '/: makes a temp file with no EXIT trap to remove it$/ { c = $1; sub(/:$/, "", c); print c }' \
+    | awk '/: makes a temp file with no EXIT trap naming it$/ { c = $1; sub(/:$/, "", c); print c }' \
     | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
   if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
     printf 'ok %s - %s\n' "$n" "$desc"
@@ -1131,6 +1138,89 @@ mkdir -p "$CASE/scripts/acceptance"
 printf '#!/bin/sh\nf=$(mktemp)\nrm -f "$f"\n' > "$CASE/scripts/acceptance/leg"
 expect_temp_traps 1 'scripts/acceptance/leg' \
   'a suffix-less leg under scripts/acceptance/, which a scripts/*.sh glob never reached'
+
+new_temp_trap_case
+printf 'f=$(mktemp)\nrm -f "$f"\ntrap - EXIT\n' | write_temp_trap_script
+expect_temp_traps 1 'scripts/a.sh' \
+  'a trap that clears the handler, which is the spelling that removes nothing'
+
+new_temp_trap_case
+printf 'f=$(mktemp)\nchild=$!\ntrap %s EXIT\nrm -f "$f"\n' "'kill \"\$child\"'" \
+  | write_temp_trap_script
+expect_temp_traps 1 'scripts/a.sh' \
+  'a trap that reaps a child and removes no temp file'
+
+# the shape half of this population is written in: the trap names a function
+# and the removal is in its body, which is a pairing and has to stay green
+new_temp_trap_case
+printf 'cleanup() {\n  rm -f "$F"\n}\ntrap cleanup EXIT\nF=$(mktemp)\n' \
+  | write_temp_trap_script
+expect_temp_traps 0 '' 'the removal written in the function the trap names'
+
+# ---------------------------------------------------------------------------
+# the directories the whole run requires: a walk guarded on a directory that
+# has moved grades nothing and says nothing, so the run reports on rules it
+# never reached. Every literal directory a guard names is required by name.
+# ---------------------------------------------------------------------------
+new_required_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE"
+}
+
+expect_required() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(cd "$CASE" && bash "$CHECKER" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" \
+    | sed -n 's/^STYLE FAIL: \(.*\) directory missing$/\1/p' \
+    | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got" "$out"
+}
+
+new_required_case
+mkdir -p "$CASE/crates" "$CASE/compat" "$CASE/corpus" "$CASE/docs"
+: > "$CASE/README.md"
+expect_required 1 'scripts/ scripts/acceptance/' \
+  'a run from a root whose scripts/ has moved, which the walks alone pass silently'
+
+new_required_case
+mkdir -p "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" "$CASE/docs"
+: > "$CASE/README.md"
+expect_required 1 'crates/' \
+  'the same verdict for the sibling directory the run has always failed closed on'
+
+# ---------------------------------------------------------------------------
+# a mode handler reached by a relative path: the handlers cd into the root
+# they grade, and a scanner resolved after that cd is resolved against the
+# wrong directory.
+# ---------------------------------------------------------------------------
+relative_checker() {
+  dir="$WORK/relative$n"
+  mkdir -p "$dir"
+  # the checker named the way a caller standing beside its tree names it,
+  # from a directory that is not the root being graded
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'cd %s || exit 2\n' "$(dirname "$(dirname "$CHECKER")")"
+    printf 'exec bash %s/%s "$@"\n' \
+      "$(basename "$(dirname "$CHECKER")")" "$(basename "$CHECKER")"
+  } > "$dir/run.sh"
+  printf '%s\n' "$dir/run.sh"
+}
+
+new_geometry_case
+RUN=$(relative_checker)
+expect_geometry 0 '' 'the walk reached by a relative path, from a directory that is not the root'
+RUN=""
 
 # ---------------------------------------------------------------------------
 # three pins over the tree this file ships in rather than over a scratch
@@ -1231,6 +1321,35 @@ if [ "$SCRIPT_POPULATION" != "scripts/leg" ]; then
   note "the helper selected [$SCRIPT_POPULATION] rather than scripts/leg"
 fi
 expect_pin 'a suffix-less shebang file reached by the comment rules, the userland scan and the helper the drift matrix reads' "$missed"
+
+# Every directory the run guards a walk on is a directory the run requires
+# by name. Walking the guards rather than checking the two the last review
+# found: the next walk added behind an `if [ -d x ]` is fail-open the moment
+# it is written, and the guard is what a reader adds without thinking about
+# the else.
+new_pin_case
+guarded=$( {
+  grep -oE '\[ -d [A-Za-z0-9_/.-]+ \]' "$CHECKER" | awk '{ print $3 }'
+  sed -n 's/^for dir in \(.*\); do$/\1/p' "$CHECKER" | tr ' ' '\n'
+} | LC_ALL=C sort -u)
+required=$(sed -n 's/^for required in \(.*\); do$/\1/p' "$CHECKER" | tr ' ' '\n' \
+  | LC_ALL=C sort -u)
+unrequired=$(printf '%s\n' "$guarded" \
+  | while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    case "
+$required
+" in
+      *"
+$d
+"*) ;;
+      *) printf '%s is guarded on but not required\n' "$d" ;;
+    esac
+  done)
+if [ -z "$required" ]; then
+  unrequired=$(printf '%s\nthe run requires no directory at all\n' "$unrequired")
+fi
+expect_pin 'every directory a walk is guarded on named in the run required list' "$unrequired"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

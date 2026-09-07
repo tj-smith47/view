@@ -114,12 +114,36 @@ variable to still exist when it fires: a `local` is gone by then and `set -u`
 aborts the exit path on it, so the name the trap reads is a script global.
 
 `check_temp_traps` in `scripts/check-style.sh` walks the shebang population
-below for a `mktemp` and requires an `EXIT` trap somewhere in the same file,
-graded by three cases at the end of `scripts/check-style-cases.sh`. Keyed on
-the script rather than on the statement, because the removal legitimately
-sits far from the `mktemp`. The population and not `scripts/*.sh`: that glob
-reaches neither `scripts/acceptance/` nor a file with no suffix, and the
-first script it missed was making a temp directory a Ctrl-C stranded.
+below for a `mktemp`, and the pairing it requires is an armed `EXIT` trap
+whose handler names one of the variables a `mktemp` path went into --
+resolved through the function the handler names, since half of these scripts
+write the removal in a `cleanup()`. Two spellings pass a walk that only asks
+for the word `trap`: `trap - EXIT`, which clears the handler rather than
+arming one, and a trap that reaps a child and removes nothing. Both are
+cased, red, at the end of `scripts/check-style-cases.sh`, beside the
+function-body pairing that has to stay green. Keyed on the script rather
+than on the statement, because the removal legitimately sits far from the
+`mktemp`; matched without regard to case, because a removal written over an
+array of roots reads `$root` where the `mktemp` named `ROOT`. The population
+and not `scripts/*.sh`: that glob reaches neither `scripts/acceptance/` nor a
+file with no suffix, and the first script it missed was making a temp
+directory a Ctrl-C stranded.
+
+## A directory a walk is guarded on is required by name
+
+`scripts/check-style.sh` guards each walk on the directory it reads, so a
+walk is never handed a root that is not there. A guard with no `else` is
+fail-open: the run passes having graded nothing, and reports on rules it
+never reached. The run therefore names every guarded directory in one
+`for required in ...` list and fails closed on each, and a pin at the end of
+`scripts/check-style-cases.sh` walks the guards in the checker under test and
+reddens on the first one missing from that list -- so the next walk added
+behind an `if [ -d x ]` trips there rather than shipping silent.
+
+The same shape in one line: `[ -d docs ] && targets="$targets docs"` is not a
+guard under `set -e`. When the test fails the whole `&&` list fails, and the
+run aborts on the line that was meant to skip. Write it `if [ -d docs ]; then
+... fi`.
 
 ## A comment wraps at 80 characters
 

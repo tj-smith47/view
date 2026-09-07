@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This file's own directory, resolved once and before any mode handler cds
+# into the root it grades: from in there a relative $0 no longer names this
+# script, and every helper resolved through it reads as missing.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # The shebang selection under scripts/, shared with check-portability.sh and
-# check-budget-drift-cases.sh. Resolved from this file's own directory, so a
-# copy of the checker graded from a scratch root finds the helper it was
-# copied beside rather than one under the root.
+# check-budget-drift-cases.sh. Resolved beside this file, so a copy of the
+# checker graded from a scratch root finds the helper it was copied beside
+# rather than one under the root.
 # shellcheck source=lib/script-population.sh
-. "$(cd "$(dirname "$0")" && pwd)/lib/script-population.sh"
+. "$SCRIPT_DIR/lib/script-population.sh"
 
 # Session-narrative, spec-task-tag, and SDD-ledger-row markers, shared
 # between source comments (anchored on the language's own comment prefix,
@@ -514,11 +519,9 @@ PROD_LINES_WHY=""
 # on the name it cannot resolve
 PROD_LINES_ERR=""
 read_prod_lines() {
-  local scanner
   if [ -n "$PROD_LINES_CACHE" ]; then
     return 0
   fi
-  scanner="$(cd "$(dirname "$0")" && pwd)/audit-god-files.sh"
   if ! PROD_LINES_ERR=$(mktemp "${TMPDIR:-/tmp}/check-style-prod-lines.XXXXXX"); then
     PROD_LINES_WHY="mktemp under ${TMPDIR:-/tmp} failed"
     return 1
@@ -527,7 +530,7 @@ read_prod_lines() {
   # Ctrl-C or a set -e abort would strand this file is the whole of it; the
   # straight-line remove below still covers the ordinary path
   trap 'rm -f "$PROD_LINES_ERR"' EXIT
-  PROD_LINES_CACHE=$(bash "$scanner" --prod-lines . 2> "$PROD_LINES_ERR") || PROD_LINES_CACHE=""
+  PROD_LINES_CACHE=$(bash "$SCRIPT_DIR/audit-god-files.sh" --prod-lines . 2> "$PROD_LINES_ERR") || PROD_LINES_CACHE=""
   if [ -z "$PROD_LINES_CACHE" ]; then
     PROD_LINES_WHY=$(head -3 "$PROD_LINES_ERR")
   fi
@@ -612,28 +615,35 @@ check_tied_spawns() {
 # view-harness would otherwise fail this gate in a file whose owner never
 # touches an attach.
 #
+# Sixteen of the counted lines, in nine of the seventeen files, open a call,
+# a variant, a pattern or a signature whose arguments wrap onto the lines
+# below them, so the counted line itself names no pair. The rows below do not
+# enumerate those: the shape is the same in every one of them, and a row that
+# listed line numbers went stale the next time a signature was re-wrapped.
+#
 # Each row is a path, its pinned number of production lines, and where the
-# geometry those lines spend came from.
+# geometry those lines spend came from -- true line by line, so a row that
+# describes fewer sites than it counts is a row to rewrite.
 GEOMETRY_CALLS='ui_attach|UiAttach|ui_try_resize|try_resize\(|TryResize|(^|[^A-Za-z0-9_])attach\(|late_attach'
 GEOMETRY_ATTACH_CRATES='^crates/(view|view-core|view-engine|view-oracle)/'
 GEOMETRY_SITES='
 crates/view-core/src/model.rs 1 the one RpcCall::UiAttach production builds, from Model::grid_target -- grid_target_for over the model own terminal size
-crates/view-core/src/msg.rs 2 the UiAttach and TryResize variant declarations, whose fields wrap onto the lines below them; the pair each variant carries is what its builder put in it
+crates/view-core/src/msg.rs 2 the UiAttach and TryResize variant declarations; the pair each variant carries is what its builder put in it
 crates/view-core/src/update/ai_fs.rs 4 an AI filesystem lock release and its own helper, no geometry anywhere
 crates/view-core/src/update/mod.rs 1 the fold resizing the grid when the paint area moves, spending Model::grid_target
 crates/view-core/src/update/ui_event.rs 1 the tabline fold resizing the grid when the chrome row count moves, spending Model::grid_target
-crates/view-engine/src/nvim_api.rs 10 the handle own attach and resize entry points, the private attach both public ones funnel through, and the nvim_ui_attach and nvim_ui_try_resize method names they send; each spends what its caller hands it, except the private attach declaration line, whose parameters wrap onto the lines below it and which names no pair
-crates/view-engine/src/process.rs 12 the spawn own geometry seed: the late_attach field, the builder that stores a pair, the getter, and the two argv paths that render one into --cmd, each spending what main or recovery handed the config
-crates/view-oracle/src/hang.rs 4 the adversarial harness attaching and resizing its own engine at the fixture size it opened the session with, and the TryResize effect it forwards
+crates/view-engine/src/nvim_api.rs 10 the handle three public attach entry points and its one resize entry point, the private attach two of them hand off to and both hand-off lines, and the three wire method-name strings, which name the call rather than a pair; the rest spend what the caller hands them
+crates/view-engine/src/process.rs 12 the spawn own geometry seed: the late_attach field and its None default, the builder and its assignment, the getter and its body, the attaches_late predicate, late_attach_cmd, and the two argv paths that destructure the field and render it into --cmd; the field, the default, the getter two lines and the predicate carry no pair, and the rest spend what main or recovery handed the config
+crates/view-oracle/src/hang.rs 4 the adversarial harness attaching its own engine at the fixture size it opened the session with and, on the restart leg, at Model::grid_target, plus the TryResize effect it forwards and the resize forwarding it
 crates/view-oracle/src/lib.rs 2 the oracle driver attaching at the size its caller opened the session with, and the TryResize effect it forwards
-crates/view-oracle/src/reference.rs 2 the second applier attaching and resizing at the size the session under comparison is held at
+crates/view-oracle/src/reference.rs 2 the second applier attaching at the size the session under comparison was opened at, and resizing to the height the chrome row count leaves it
 crates/view-oracle/src/speculate.rs 2 the speculative-echo battery attaching and resizing at its own fixture geometry
-crates/view/src/engine_ops.rs 14 the EngineOps attach and resize surface: one declaration and the forwarding impls behind it, each spending the pair it was handed, except the four ui_attach signature lines, whose parameters wrap onto the lines below them
+crates/view/src/engine_ops.rs 14 the EngineOps attach and resize surface: the two trait declarations and the three forwarding impls of each behind them, every impl spelled over its signature and the call it forwards to, spending the pair it was handed
 crates/view/src/main.rs 2 the attach guard release and the spawn own geometry seed, both spending spawn_size -- what grid_target_for answered the terminal reading with
 crates/view/src/native.rs 1 the native session resizing the grid for the row the statusline claims, spending Model::grid_target
 crates/view/src/recovery.rs 1 the replacement engine own geometry seed, spending Model::grid_target
-crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model; the UiAttach arm own pattern opens on a line naming no pair
-crates/view/src/startup.rs 7 the attach guard release and the attaches it feeds, all spending the pair main released rather than a reading of their own, plus the restart own zero-argument attach() closure call and its read-back of the config late_attach seed, neither of which carries a pair
+crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model
+crates/view/src/startup.rs 7 the attach guard release and the three attaches it feeds, all spending the pair main released rather than a reading of their own, plus the read-back of the config late_attach seed and the restart own zero-argument attach() closure call, neither of which carries a pair
 '
 check_geometry_sites() {
   local expected actual
@@ -664,14 +674,52 @@ check_geometry_sites() {
   return 1
 }
 
+# The text an armed EXIT trap runs: the trap lines themselves, plus the body
+# of the function a handler names, which is where the removal is written in
+# half of these scripts. `trap - EXIT` is not armed -- it clears the handler
+# it otherwise reads as -- and is left out here.
+temp_trap_handlers() {
+  # the file is read twice: the traps at the top of a script name a function
+  # defined above them, and the handler set has to be complete before the
+  # bodies are selected
+  awk '
+    FNR == NR {
+      if ($0 ~ /^[[:space:]]*trap +(-- +)?[^-[:space:]]/ &&
+          $0 ~ /(^|[^A-Za-z0-9_])EXIT([^A-Za-z0-9_]|$)/) {
+        armed = armed $0 "\n"
+        h = $0
+        sub(/^[[:space:]]*trap +(-- +)?/, "", h)
+        sub(/[[:space:]].*/, "", h)
+        if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) { want[h] = 1 }
+      }
+      next
+    }
+    FNR == 1 { printf "%s", armed }
+    inbody { print; if ($0 ~ /^[[:space:]]*}/) { inbody = 0 } next }
+    {
+      name = $0
+      sub(/^[[:space:]]*/, "", name)
+      sub(/^function[[:space:]]+/, "", name)
+      if (name !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/) { next }
+      sub(/[[:space:]]*\(\).*/, "", name)
+      if (!(name in want)) { next }
+      print
+      if ($0 ~ /\{[[:space:]]*$/) { inbody = 1 }
+    }
+  ' "$1" "$1"
+}
+
 # A script that makes a temp file removes it under a trap. A straight-line
 # `rm` covers the ordinary path and nothing else: the gates here run for
 # seconds over a whole tree, and a Ctrl-C or a `set -e` abort inside that
 # window strands the file under `${TMPDIR:-/tmp}`. Keyed on the script
 # rather than on the statement, because the removal legitimately sits far
-# from the `mktemp` -- what matters is that one exists.
+# from the `mktemp` -- what matters is that the handler names the variable
+# the temp path went into, since a trap that clears the handler and a trap
+# that kills a child both read as a pairing to a walk that only asks for the
+# word.
 check_temp_traps() {
-  local fail=0 f
+  local fail=0 f names name handlers paired
   if ! read_script_population; then
     return 1
   fi
@@ -679,8 +727,27 @@ check_temp_traps() {
   # the verdict it sets is the one read below
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if grep -q 'mktemp' "$f" && ! grep -qE '^[[:space:]]*trap .*EXIT' "$f"; then
-      echo "$f: makes a temp file with no EXIT trap to remove it"
+    grep -q 'mktemp' "$f" || continue
+    names=$(grep -oE "[A-Za-z_][A-Za-z0-9_]*=[\"']*\\\$\\(mktemp" "$f" \
+      | sed 's/=.*//' | LC_ALL=C sort -u) || names=""
+    # lowercased once, because the removal is legitimately written over an
+    # array of roots and reads `$root` where the mktemp named `ROOT`; closed
+    # with a space so a name ending the text still has a character after it
+    handlers="$(temp_trap_handlers "$f" | tr 'A-Z' 'a-z') "
+    paired=0
+    # a file whose every mktemp goes somewhere unnamed leaves this loop
+    # unrun and is reported: there is no variable a trap could name
+    for name in $names; do
+      name=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
+      case "$handlers" in
+        *'$'"$name"[!a-z0-9_]* | *'${'"$name"[!a-z0-9_]*)
+          paired=1
+          break
+          ;;
+      esac
+    done
+    if [ "$paired" -eq 0 ]; then
+      echo "$f: makes a temp file with no EXIT trap naming it"
       fail=1
     fi
   done <<EOF
@@ -692,7 +759,8 @@ EOF
   echo "STYLE FAIL: a temp file with no trap to remove it"
   echo "  A straight-line rm covers the ordinary path alone: a signal or a"
   echo "  set -e abort inside the window leaves the file behind. Remove it"
-  echo "  under trap ... EXIT beside the mktemp."
+  echo "  under trap ... EXIT beside the mktemp, in a handler that names the"
+  echo "  variable the path went into."
   return 1
 }
 
@@ -952,8 +1020,8 @@ if [ "${1:-}" = "--prose-width" ]; then
   fi
   cd "$ROOT" || exit 2
   targets=""
-  [ -f README.md ] && targets="README.md"
-  [ -d docs ] && targets="$targets docs"
+  if [ -f README.md ]; then targets="README.md"; fi
+  if [ -d docs ]; then targets="$targets docs"; fi
   if [ -z "$targets" ]; then
     check_prose_width /dev/null
     exit $?
@@ -1038,6 +1106,16 @@ if [ "${1:-}" = "--temp-traps" ]; then
 fi
 
 fail=0
+# Every directory a walk below is guarded on, named once and required here:
+# a guard with no else reads as a pass when the tree it grades has moved, so
+# the run says nothing about the rules it never reached. The guards stay --
+# they keep a walk from being handed a root that is not there -- and this
+# loop is what makes their absence loud.
+for required in crates scripts scripts/acceptance compat corpus docs; do
+  if [ ! -d "$required" ]; then
+    echo "STYLE FAIL: $required/ directory missing"; fail=1
+  fi
+done
 if [ -d scripts ]; then
   check_temp_traps || fail=1
 fi
@@ -1048,8 +1126,6 @@ if [ -d crates ]; then
   check_written_programs || fail=1
   check_tied_spawns || fail=1
   check_geometry_sites || fail=1
-else
-  echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi
 # One fold, and only one, may raise the single locally-raised condition
 # notice. `Messages::set_native_condition` shows at most one such notice and
@@ -1194,7 +1270,7 @@ fi
 check_acceptance_expectations || fail=1
 if [ -f README.md ]; then
   doc_targets=(README.md)
-  [ -d docs ] && doc_targets+=(docs)
+  if [ -d docs ]; then doc_targets+=(docs); fi
   if grep -rn -- '—' "${doc_targets[@]}"; then
     echo "STYLE FAIL: emdash in user docs"; fail=1
   fi
