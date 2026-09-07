@@ -106,48 +106,61 @@ fn marker_path() -> PathBuf {
     dir.join(format!("hang-marker-{}", std::process::id()))
 }
 
-/// A terminal reporting zero on either axis is a startup path a user
-/// reaches -- a pty nothing has sized, and a real terminal for the first
-/// instant of a session still negotiating its size -- and the geometry
-/// `--cmd` is where that zero would be fatal rather than merely small: it
-/// opens with `vim.o.columns`, nvim refuses anything under 12 with `E594`,
-/// and the aborted chunk registers none of what follows it, the `VimEnter`
-/// hook the attach waits on included. The child then stays alive and never
-/// says it started, which is what the session's attach deadline expires
-/// against.
+/// A terminal the engine's own geometry refuses is a startup path a user
+/// reaches -- a pty nothing has sized reports 0x0, a real terminal reports
+/// it for the first instant of a session still negotiating its size, and a
+/// narrow split reports a positive width under nvim's minimum -- and the
+/// geometry `--cmd` is where such a reading is fatal rather than merely
+/// small: it opens with `vim.o.columns`, nvim refuses anything under 12
+/// with `E594` and anything under 3 lines with `E593`, and the aborted
+/// chunk registers none of what follows it, the `VimEnter` hook the attach
+/// waits on included. The child then stays alive and never says it started,
+/// which is what the session's attach deadline expires against.
 ///
 /// The size is taken through `grid_target_for` rather than written down
 /// here, because that is the one arithmetic both the spawn and the attach
 /// read: a floor that lived only at this call site would leave the attach
-/// asking for the zero instead.
+/// asking for the refused reading instead.
+///
+/// `vim.g.view` and the `VimEnter` hook are what tell a chunk that ran from
+/// one that aborted -- the statement after the geometry line, and the
+/// chunk's last. The geometry assertion is the pin on the answer's *value*:
+/// it is asked at a reading whose answer is not nvim's own 80x24 default
+/// (5x40 is clamped per axis to 12x40), so a spawn that took the default by
+/// aborting cannot satisfy it either.
 #[test]
-fn a_spawn_sized_from_a_zero_axis_terminal_runs_its_whole_startup_chunk() {
-    let (width, height) = view_core::model::grid_target_for((0, 0), 0, false);
-    let engine = Engine::spawn(EngineConfig::isolated().with_late_attach(width, height)).unwrap();
+fn a_spawn_sized_from_a_refused_geometry_runs_its_whole_startup_chunk() {
+    for reading in [(0, 0), (5, 40)] {
+        let (width, height) = view_core::model::grid_target_for(reading, 0, false);
+        let engine =
+            Engine::spawn(EngineConfig::isolated().with_late_attach(width, height)).unwrap();
 
-    let read = |lua: &str| {
-        engine
-            .handle
-            .request(
-                "nvim_exec_lua",
-                vec![rmpv::Value::from(lua), rmpv::Value::Array(vec![])],
-            )
-            .unwrap()
-    };
-    assert_eq!(
-        read("return { vim.o.columns, vim.o.lines }")
-            .as_array()
-            .and_then(|size| Some((size.first()?.as_u64()?, size.get(1)?.as_u64()?))),
-        Some((u64::from(width), u64::from(height))),
-        "the child lays out at the floor the spawn named"
-    );
-    // the statement after the geometry line, and the hook the attach waits
-    // on is the chunk's last: together they say the whole chunk ran
-    assert_eq!(read("return vim.g.view").as_u64(), Some(1));
-    assert!(
-        read("return #vim.api.nvim_get_autocmds({ event = 'VimEnter' })")
-            .as_u64()
-            .is_some_and(|hooks| hooks >= 1),
-        "the VimEnter hook the attach waits on was never registered"
-    );
+        let read = |lua: &str| {
+            engine
+                .handle
+                .request(
+                    "nvim_exec_lua",
+                    vec![rmpv::Value::from(lua), rmpv::Value::Array(vec![])],
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            read("return vim.g.view").as_u64(),
+            Some(1),
+            "the startup chunk aborted at its geometry line for {reading:?}"
+        );
+        assert!(
+            read("return #vim.api.nvim_get_autocmds({ event = 'VimEnter' })")
+                .as_u64()
+                .is_some_and(|hooks| hooks >= 1),
+            "the VimEnter hook the attach waits on was never registered for {reading:?}"
+        );
+        assert_eq!(
+            read("return { vim.o.columns, vim.o.lines }")
+                .as_array()
+                .and_then(|size| Some((size.first()?.as_u64()?, size.get(1)?.as_u64()?))),
+            Some((u64::from(width), u64::from(height))),
+            "the child lays out at the size the spawn named for {reading:?}"
+        );
+    }
 }

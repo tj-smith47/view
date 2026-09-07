@@ -1054,6 +1054,53 @@ mod tests {
         let _ = engine.wait_exit();
     }
 
+    /// The size the loop releases is what this spends on `nvim_ui_attach`
+    /// for the one child it attaches itself, and the engine refuses a
+    /// geometry below `view_core::model::ENGINE_MIN_SIZE` outright rather
+    /// than clamping it the way its own TUI would. So a relaying child
+    /// released with a terminal's raw 0x0 reading has no session at all,
+    /// while the same child released with what `grid_target_for` answered
+    /// the same reading with comes up and reads its pipe -- which is why
+    /// `main.rs` releases the spawn's geometry and not the reading
+    /// (`the_attach_is_released_with_the_size_the_spawn_was_seeded_with`
+    /// there is the half that says it still does).
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_at_a_geometry_the_engine_refuses_leaves_no_session() {
+        use std::os::fd::AsFd;
+
+        let scratch = ScratchDir::new("startup-refused-attach-size").unwrap();
+        let content = scratch.join("source.txt");
+        std::fs::write(&content, "hello from the relay\n").unwrap();
+        let source = std::fs::File::open(&content).unwrap();
+        let floor = view_core::model::grid_target_for((0, 0), 0, false);
+
+        let spawned = AtomicU32::new(0);
+        let refused = spawn_and_attach(
+            EngineConfig::isolated()
+                .with_arg("-")
+                .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap())
+                .with_late_attach(floor.0, floor.1),
+            &spawned,
+            || Some((0, 0, view_core::native::ext::ALL.to_vec())),
+            Vec::new,
+        );
+
+        let outcome = match refused {
+            Ok(_) => "the engine took the attach".to_string(),
+            Err(AttachFailure::Spawn(err) | AttachFailure::Attach(err)) => err.to_string(),
+        };
+        assert!(
+            outcome.contains("width") && outcome.contains("height"),
+            "an attach released at 0x0 ended with `{outcome}` rather than \
+             the engine's own refusal of the geometry, so releasing the \
+             terminal's raw reading is no longer the failure this pins -- \
+             the same child at {floor:?} is the contrast leg \
+             (`a_relayed_stdin_keeps_the_barrier_and_reaches_the_child`)"
+        );
+        assert_reaped(spawned.load(Ordering::SeqCst));
+    }
+
     /// A process that cannot bring its terminal up still spawned an nvim
     /// first, and the moment it returns that error there is nothing left
     /// holding the child: no attach will ever happen, no handle survives

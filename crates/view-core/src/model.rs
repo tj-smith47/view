@@ -1193,7 +1193,11 @@ impl Model {
 /// caller passes `0` chrome rows.
 ///
 /// A terminal reporting a zero on either axis is answered with
-/// [`SIZE_FLOOR`] before the chrome is taken off it.
+/// [`SIZE_FLOOR`], and the pair this returns is then held to
+/// [`ENGINE_MIN_SIZE`] on each axis -- after the chrome, because what the
+/// geometry `--cmd` and the attach spend is this pair, not the terminal's
+/// own reading, and a 4-row terminal with a tabline and a statusline leaves
+/// 2.
 #[must_use]
 pub fn grid_target_for(size: (u16, u16), chrome_rows: u16, statusline: bool) -> (u16, u16) {
     let size = if size.0 == 0 || size.1 == 0 {
@@ -1202,10 +1206,24 @@ pub fn grid_target_for(size: (u16, u16), chrome_rows: u16, statusline: bool) -> 
         size
     };
     (
-        size.0,
-        size.1.saturating_sub(chrome_rows + u16::from(statusline)),
+        size.0.max(ENGINE_MIN_SIZE.0),
+        size.1
+            .saturating_sub(chrome_rows + u16::from(statusline))
+            .max(ENGINE_MIN_SIZE.1),
     )
 }
+
+/// The smallest `columns` and `lines` the engine accepts, each on its own:
+/// `vim.o.columns` under 12 raises `E594` and `vim.o.lines` under 3 raises
+/// `E593`, and either aborts the geometry `--cmd`'s whole chunk (measured
+/// against the pinned engine, which takes 12 and 3 and refuses 11 and 2).
+///
+/// Per axis rather than a fallback to [`SIZE_FLOOR`] because that is what
+/// nvim's own TUI does with a positive-but-refused reading: on a pty sized
+/// 40x5 it lays out at 12 columns and keeps 40 lines, and on one sized
+/// 1x100 it keeps 100 columns and takes 3 lines. Only a non-positive axis
+/// makes it drop both readings, which is the case [`SIZE_FLOOR`] answers.
+pub const ENGINE_MIN_SIZE: (u16, u16) = (12, 3);
 
 /// The terminal size [`grid_target_for`] answers a zero-axis reading with,
 /// and nvim's own answer to the same reading: `tui_guess_size` takes both
@@ -1217,8 +1235,9 @@ pub fn grid_target_for(size: (u16, u16), chrome_rows: u16, statusline: bool) -> 
 /// so does a real terminal for the first instant of a session still
 /// negotiating its size. Carrying one into the spawn is what makes it fatal
 /// rather than merely small -- the geometry `--cmd` opens with
-/// `vim.o.columns`, whose minimum is 12, and the `E594` that raises aborts
-/// the whole chunk, taking the `VimEnter` hook the attach waits on with it.
+/// `vim.o.columns`, whose minimum is [`ENGINE_MIN_SIZE`], and the `E594`
+/// that raises aborts the whole chunk, taking the `VimEnter` hook the
+/// attach waits on with it.
 /// The session then paints its shell frame and waits out the attach
 /// deadline against a child that is alive and never says it started.
 pub const SIZE_FLOOR: (u16, u16) = (80, 24);
@@ -2729,11 +2748,12 @@ mod tests {
 
     /// A zero on either axis is a size no child can be started at: the
     /// geometry `--cmd` opens with `vim.o.columns`, nvim refuses anything
-    /// below 12 with `E594`, and the aborted chunk never registers the
-    /// `VimEnter` hook the attach waits on -- so the session paints its
-    /// shell frame and waits out the attach deadline against a live child.
-    /// The floor is nvim's own for the same reading, and it is taken before
-    /// the chrome, so the spawn and the attach still share one arithmetic.
+    /// below `ENGINE_MIN_SIZE` with `E594`/`E593`, and the aborted chunk
+    /// never registers the `VimEnter` hook the attach waits on -- so the
+    /// session paints its shell frame and waits out the attach deadline
+    /// against a live child. The floor is nvim's own for the same reading,
+    /// and it is taken before the chrome, so the spawn and the attach still
+    /// share one arithmetic.
     #[test]
     fn a_zero_on_either_axis_is_answered_with_the_floor_before_the_chrome() {
         assert_eq!(grid_target_for((0, 0), 0, false), SIZE_FLOOR);
@@ -2744,7 +2764,7 @@ mod tests {
             (SIZE_FLOOR.0, SIZE_FLOOR.1 - 2)
         );
         assert!(
-            SIZE_FLOOR.0 >= 12 && SIZE_FLOOR.1 >= 2,
+            SIZE_FLOOR.0 >= ENGINE_MIN_SIZE.0 && SIZE_FLOOR.1 >= ENGINE_MIN_SIZE.1,
             "the floor has to clear the minimums nvim raises E594/E593 below"
         );
 
@@ -2755,6 +2775,28 @@ mod tests {
         m.term_width = 263;
         m.term_height = 88;
         assert_eq!(m.grid_target(), (263, 88));
+    }
+
+    /// What stalls the child is a geometry the engine refuses, and zero is
+    /// only the widest case of it: 5 columns raises the same `E594`, one
+    /// row raises `E593`, and a terminal whose chrome leaves the grid under
+    /// three rows raises it without the terminal itself being that small.
+    /// Each axis is held on its own, because that is what nvim's own TUI
+    /// does with a positive reading it cannot take (40x5 lays out at 12x40,
+    /// 1x100 at 100x3) -- only a non-positive axis makes it drop both.
+    ///
+    /// `ENGINE_MIN_SIZE`'s own value is pinned live, against the engine,
+    /// by `view-engine`'s `tests/spawn.rs`: a clamp to a geometry nvim
+    /// still refuses fails there rather than at a user's terminal.
+    #[test]
+    fn a_geometry_the_engine_refuses_is_clamped_on_each_axis() {
+        assert_eq!(grid_target_for((5, 40), 0, false), (ENGINE_MIN_SIZE.0, 40));
+        assert_eq!(
+            grid_target_for((100, 1), 0, false),
+            (100, ENGINE_MIN_SIZE.1)
+        );
+        assert_eq!(grid_target_for((100, 4), 1, true), (100, ENGINE_MIN_SIZE.1));
+        assert_eq!(grid_target_for((263, 88), 0, false), (263, 88));
     }
 
     /// A full-height side panel takes its share of the rows an overlay may

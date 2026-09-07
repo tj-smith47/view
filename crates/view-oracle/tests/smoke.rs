@@ -2909,6 +2909,79 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
     let _ = session.wait();
 }
 
+/// A pty nothing has sized reports 0x0, and so does a real terminal for
+/// the first instant of a session still negotiating its size. The child is
+/// spawned at `view_core::model::SIZE_FLOOR` for it, because the geometry
+/// `--cmd` cannot take the reading itself -- and this is the leg that says
+/// the floor is temporary rather than a permanent 80x24 cap on a session
+/// that opened at 0x0: the first real `SIGWINCH` has to reflow it like any
+/// other resize.
+///
+/// The session is built here rather than through `spawn_view_pty_at`
+/// because the opening dimensions are the whole subject. Nothing is read
+/// off the screen before the resize: `PtySession::resize` sizes the local
+/// `vt100` parser, so every read below happens against a parser that has
+/// the real dimensions.
+///
+/// The reflow alone does not tell a floored spawn from an unfloored one:
+/// a child whose startup chunk aborted at its geometry line is attached by
+/// the runtime's own deadline instead of by `VimEnter`, and once the real
+/// size arrives that session paints too, about a second late. `VimEnter` is
+/// what parts them, and it is not a clock: the aborted chunk never
+/// registers the hook, so the line never arrives at all, on any host.
+#[test]
+fn view_started_on_an_unsized_terminal_reflows_to_the_first_real_size() {
+    let paths = common::ScratchPaths::new("smoke");
+    let view_log = paths.isolated_home.join("view.log");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_native_off_except(&mut cmd, &paths.isolated_home, &[]);
+    cmd.env("VIEW_LOG", &view_log);
+    let mut session = ViewPtySession {
+        session: PtySession::spawn_configured(cmd, 0, 0).unwrap(),
+        paths,
+        _isolation: shared_isolation(),
+    };
+
+    // the resize must not overtake the child's own first reading: its
+    // geometry `--cmd` is seeded from an ioctl it performs within a few ms
+    // of exec, and a pty resized before that is a session that never
+    // started at 0x0 at all. The caps line is the reading, reported
+    common::wait_for_log_line(&view_log, "term=0x0");
+
+    // row 30 is past the bottom edge of the 24-row grid the floor laid the
+    // child out at, so nvim's own past-EOF marker can only reach it once
+    // the resize has gone all the way through to its window (the same
+    // confirmation `view_resizes_with_tabline_open_and_reaches_the_new_row_count`
+    // uses, and `resize_until` re-issues the stimulus for a lost SIGWINCH)
+    let resized = session
+        .resize_until(80, 48, Duration::from_secs(10), |s| {
+            s.wait_for_cell(30, 0, "~", Duration::from_millis(400))
+        })
+        .unwrap();
+    assert!(
+        resized,
+        "a session that started on a 0x0 terminal never reflowed past the \
+         floor's 24 rows (no '~' at row 30); last screen:\n{}",
+        session.screen()
+    );
+    assert_eq!(
+        session.screen_raw().size(),
+        (48, 80),
+        "pty/vt100 geometry itself never reached the resized dimensions"
+    );
+    let log = std::fs::read_to_string(&view_log).unwrap_or_default();
+    assert!(
+        log.contains("vim_enter received"),
+        "the child spawned for a 0x0 terminal never reached VimEnter, so \
+         the session it painted after the resize is the one the attach \
+         deadline recovered; VIEW_LOG:\n{log}"
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
 #[test]
 fn view_shrinks_and_writes_nothing_below_the_new_last_row() {
     // The direction that had no coverage anywhere, and the one where a

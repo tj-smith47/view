@@ -1071,7 +1071,14 @@ fn main() -> Result<()> {
     );
     #[cfg(not(unix))]
     let msg_tx = wake::LoopSender::new(raw_tx.clone());
-    attach.release(msg_tx.clone(), width, height, surfaces.clone());
+    // the spawn's own geometry, never the terminal's reading: the one child
+    // this releases an attach for is the one `spawn_and_attach` attaches
+    // itself (a relayed stdin, a swap recovery), and `nvim_ui_attach` is
+    // refused outright below `view_core::model::ENGINE_MIN_SIZE` -- while
+    // off that path the raw reading is a row taller than the `--cmd`
+    // already told the child, which is the relayout the shared arithmetic
+    // exists to prevent
+    attach.release(msg_tx.clone(), spawn_size.0, spawn_size.1, surfaces.clone());
 
     let mut term = Term::init(resolved.ui.tier.value.map(Tier::from))
         .context("failed to initialize terminal backend")?;
@@ -1956,6 +1963,32 @@ mod tests {
             "a call added before the engine spawn prepends its own latency \
              to nvim's whole startup: move it below the spawn, or state \
              here why it cannot run there"
+        );
+    }
+
+    /// The attach carries the geometry the spawn's own `--cmd` gave the
+    /// child, never the terminal's raw reading: the one child released
+    /// here that `startup::spawn_and_attach` attaches itself (a relayed
+    /// stdin, a swap recovery) is attached at exactly this pair, and the
+    /// engine refuses `nvim_ui_attach` below
+    /// `view_core::model::ENGINE_MIN_SIZE` outright -- so a terminal still
+    /// negotiating its size would fail that attach where an ordinary start
+    /// floors. Off the zero path the raw reading is a row taller than the
+    /// `--cmd` whenever the statusline is on, which is the relayout the
+    /// shared arithmetic exists to prevent. Both pairs are in scope at the
+    /// call, and the release itself reports nothing, so nothing but the
+    /// source says which one was spent.
+    #[test]
+    fn the_attach_is_released_with_the_size_the_spawn_was_seeded_with() {
+        let body = startup_body();
+        let (_, call) = body
+            .split_once("attach.release(")
+            .expect("fn main no longer releases the attach itself");
+        let call = call.split_once(';').map_or(call, |(call, _)| call);
+        assert!(
+            call.contains("spawn_size.0") && call.contains("spawn_size.1"),
+            "the attach is released with `{call}`, not with the geometry the \
+             spawn's `--cmd` gave the child"
         );
     }
 

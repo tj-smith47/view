@@ -721,7 +721,12 @@ impl PtySession {
         drop(pair.slave);
 
         let rx = spawn_reader(reader, &writer, policy);
-        let parser = vt100::Parser::new(rows, cols, 0);
+        // the kernel takes the caller's dimensions verbatim -- a pty nothing
+        // has sized is 0x0, which is the reading a child under test may be
+        // asked to start on -- but `vt100`'s own grid underflows on a zero
+        // axis, so the local screen model opens at one cell and is sized by
+        // the first `resize` any such test has to perform before reading it
+        let parser = vt100::Parser::new(rows.max(1), cols.max(1), 0);
 
         Ok(Self {
             child,
