@@ -336,6 +336,31 @@ pub fn startup_budget(fixed: Duration) -> view_test_support::HostBudget {
     view_test_support::HostBudget::new(fixed, FLAT_STARTUP_BOUND.saturating_sub(fixed))
 }
 
+/// Blocks until the session's `VIEW_LOG` carries `needle`, and returns the
+/// instant it was seen.
+///
+/// For an event the screen cannot carry: a decoder window that makes no
+/// difference to what is painted, or a reading the child took before it had
+/// anything to paint it into. The budget is [`startup_budget`] over
+/// [`PROBE_HARD_CAP`], since what is being waited on is a `view` startup
+/// whose one fixed constant is the probe's cap and whose remainder is a
+/// process spawn the host takes as long over as its load says.
+pub fn wait_for_log_line(path: &Path, needle: &str) -> std::time::Instant {
+    let budget = startup_budget(PROBE_HARD_CAP);
+    let deadline = std::time::Instant::now() + budget.total();
+    loop {
+        if std::fs::read_to_string(path).is_ok_and(|log| log.contains(needle)) {
+            return std::time::Instant::now();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "view never logged {needle:?} within {budget}; log:\n{}",
+            std::fs::read_to_string(path).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Every source in the workspace that holds test code, as
 /// (path under `crates/`, the test-code part of its contents).
 ///

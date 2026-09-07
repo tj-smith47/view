@@ -158,31 +158,6 @@ fn each_chord_agrees(under_test: &mut PtySession, reference: &mut PtySession, pa
     }
 }
 
-/// Blocks until the session's `VIEW_LOG` carries `needle`, and returns the
-/// instant it was seen.
-///
-/// The file is the only place this event surfaces: the guard makes no
-/// difference to the screen, and asking crossterm to demonstrate one would
-/// mean handing it the sequence the guard exists to keep away from it.
-fn wait_for_log_line(path: &std::path::Path, needle: &str) -> std::time::Instant {
-    // the sequence being waited on is a `view` startup whose own constant is
-    // the guard's cap; everything else in it is a process spawn the host
-    // takes as long over as its load says
-    let budget = common::startup_budget(common::PROBE_HARD_CAP);
-    let deadline = std::time::Instant::now() + budget.total();
-    loop {
-        if std::fs::read_to_string(path).is_ok_and(|log| log.contains(needle)) {
-            return std::time::Instant::now();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "view never logged {needle:?} within {budget}; log:\n{}",
-            std::fs::read_to_string(path).unwrap_or_default()
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 /// The whole point: the same byte, the same mapping, the same screen.
 ///
 /// Both sides are asserted against the marker as well as against each
@@ -209,7 +184,7 @@ fn the_control_bytes_fire_the_mappings_their_nvim_names_are_written_against() {
 
     each_chord_agrees(&mut under_test, &mut reference, "guard window");
 
-    let armed = wait_for_log_line(&view_log, "input guard");
+    let armed = common::wait_for_log_line(&view_log, "input guard");
     std::thread::sleep(common::PROBE_HARD_CAP.saturating_sub(armed.elapsed()));
     each_chord_agrees(&mut under_test, &mut reference, "past the guard");
 

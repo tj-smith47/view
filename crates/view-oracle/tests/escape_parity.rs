@@ -235,32 +235,6 @@ fn each_run_agrees(under_test: &mut PtySession, reference: &mut PtySession, pass
     }
 }
 
-/// Blocks until the session's `VIEW_LOG` carries `needle`, and returns the
-/// instant it was seen.
-///
-/// The file is the only place this event surfaces: the guard makes no
-/// difference to the screen, and the two decoders it separates answer these
-/// runs the same way when they are read correctly -- which is the whole
-/// claim, and the reason both windows are typed at.
-fn wait_for_log_line(path: &std::path::Path, needle: &str) -> std::time::Instant {
-    // the sequence being waited on is a `view` startup whose own constant is
-    // the guard's cap; everything else in it is a process spawn the host
-    // takes as long over as its load says
-    let budget = common::startup_budget(common::PROBE_HARD_CAP);
-    let deadline = std::time::Instant::now() + budget.total();
-    loop {
-        if std::fs::read_to_string(path).is_ok_and(|log| log.contains(needle)) {
-            return std::time::Instant::now();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "view never logged {needle:?} within {budget}; log:\n{}",
-            std::fs::read_to_string(path).unwrap_or_default()
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 /// The whole point: the same bytes, the same mapping, the same screen.
 ///
 /// Both sides are asserted against the marker as well as against each
@@ -290,7 +264,7 @@ fn every_escape_run_fires_the_mapping_nvims_own_reading_of_it_fires() {
 
     each_run_agrees(&mut under_test, &mut reference, "guard window");
 
-    let armed = wait_for_log_line(&view_log, "input guard");
+    let armed = common::wait_for_log_line(&view_log, "input guard");
     std::thread::sleep(common::PROBE_HARD_CAP.saturating_sub(armed.elapsed()));
     each_run_agrees(&mut under_test, &mut reference, "past the guard");
 
