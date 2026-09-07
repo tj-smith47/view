@@ -500,7 +500,10 @@ read_prod_lines() {
     return 0
   fi
   scanner="$(cd "$(dirname "$0")" && pwd)/audit-god-files.sh"
-  err=$(mktemp "${TMPDIR:-/tmp}/check-style-prod-lines.XXXXXX") || return 1
+  if ! err=$(mktemp "${TMPDIR:-/tmp}/check-style-prod-lines.XXXXXX"); then
+    PROD_LINES_WHY="mktemp under ${TMPDIR:-/tmp} failed"
+    return 1
+  fi
   PROD_LINES_CACHE=$(bash "$scanner" --prod-lines . 2> "$err") || PROD_LINES_CACHE=""
   if [ -z "$PROD_LINES_CACHE" ]; then
     PROD_LINES_WHY=$(head -3 "$err")
