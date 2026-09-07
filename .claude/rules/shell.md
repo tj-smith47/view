@@ -100,6 +100,25 @@ trailing comment naming a spelling and requires the count to rise, so the
 next attempt to "fix" the over-count into a comment-stripping read is a red
 case rather than a silent narrowing.
 
+## A `mktemp` is paired with an EXIT trap in the same script
+
+A straight-line `rm` covers the ordinary path and nothing else. The gates
+here scan a whole tree for seconds at a time, and a Ctrl-C or a `set -e`
+abort inside that window leaves the file under `${TMPDIR:-/tmp}` for good --
+which is exactly what `check-style.sh`'s `read_prod_lines` did while it was
+the one temp file in `scripts/` without a trap.
+
+The trap is what removes the file; a straight-line `rm` beside it is fine
+and stays for the ordinary path. A trap naming a variable needs that
+variable to still exist when it fires: a `local` is gone by then and `set -u`
+aborts the exit path on it, so the name the trap reads is a script global.
+
+`check_temp_traps` in `scripts/check-style.sh` walks every `scripts/*.sh`
+that calls `mktemp` and requires an `EXIT` trap somewhere in it, graded by
+two cases at the end of `scripts/check-style-cases.sh`. Keyed on the script
+rather than on the statement, because the removal legitimately sits far from
+the `mktemp`.
+
 ## A comment wraps at 80 characters
 
 `scripts/check-style.sh` grades every comment line under `scripts/` at the

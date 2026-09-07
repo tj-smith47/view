@@ -502,21 +502,29 @@ crates/view/src/runtime.rs 1 a worker thread, not a process
 # caller without it sends its reader to the wrong file.
 PROD_LINES_CACHE=""
 PROD_LINES_WHY=""
+# global rather than local, so the EXIT trap below can still name it: a
+# local is gone by the time the trap runs, and set -u aborts the exit path
+# on the name it cannot resolve
+PROD_LINES_ERR=""
 read_prod_lines() {
-  local scanner err
+  local scanner
   if [ -n "$PROD_LINES_CACHE" ]; then
     return 0
   fi
   scanner="$(cd "$(dirname "$0")" && pwd)/audit-god-files.sh"
-  if ! err=$(mktemp "${TMPDIR:-/tmp}/check-style-prod-lines.XXXXXX"); then
+  if ! PROD_LINES_ERR=$(mktemp "${TMPDIR:-/tmp}/check-style-prod-lines.XXXXXX"); then
     PROD_LINES_WHY="mktemp under ${TMPDIR:-/tmp} failed"
     return 1
   fi
-  PROD_LINES_CACHE=$(bash "$scanner" --prod-lines . 2> "$err") || PROD_LINES_CACHE=""
+  # the scan is the slowest step in the gate, so the window in which a
+  # Ctrl-C or a set -e abort would strand this file is the whole of it; the
+  # straight-line remove below still covers the ordinary path
+  trap 'rm -f "$PROD_LINES_ERR"' EXIT
+  PROD_LINES_CACHE=$(bash "$scanner" --prod-lines . 2> "$PROD_LINES_ERR") || PROD_LINES_CACHE=""
   if [ -z "$PROD_LINES_CACHE" ]; then
-    PROD_LINES_WHY=$(head -3 "$err")
+    PROD_LINES_WHY=$(head -3 "$PROD_LINES_ERR")
   fi
-  rm -f "$err"
+  rm -f "$PROD_LINES_ERR"
   [ -n "$PROD_LINES_CACHE" ]
 }
 
@@ -573,6 +581,14 @@ check_tied_spawns() {
 # `nvim_api.rs` under that name would otherwise leave the pinned count
 # untouched in the one file that owns the call.
 #
+# The eighth is `late_attach`, the one way a geometry reaches the engine
+# without going over the wire at all: `with_late_attach` stores the pair
+# and `late_attach_cmd` renders it into the child's `--cmd` argument, which
+# is the spawn seed the rationale above turns on. Spelled bare rather than
+# as a call, because the pair passes through the field and the destructure
+# as well as the two calls, and a walk keyed on `late_attach(` counts
+# neither the render nor what feeds it.
+#
 # Fail-closed on a trailing comment: `--prod-lines` emits the raw line, so a
 # spelling written only after a `//` counts as a site. Eliding comments
 # would take the two spellings that are string literals (`"nvim_ui_attach"`,
@@ -591,24 +607,26 @@ check_tied_spawns() {
 #
 # Each row is a path, its pinned number of production lines, and where the
 # geometry those lines spend came from.
-GEOMETRY_CALLS='ui_attach|UiAttach|ui_try_resize|try_resize\(|TryResize|(^|[^A-Za-z0-9_])attach\('
+GEOMETRY_CALLS='ui_attach|UiAttach|ui_try_resize|try_resize\(|TryResize|(^|[^A-Za-z0-9_])attach\(|late_attach'
 GEOMETRY_ATTACH_CRATES='^crates/(view|view-core|view-engine|view-oracle)/'
 GEOMETRY_SITES='
 crates/view-core/src/model.rs 1 the one RpcCall::UiAttach production builds, from Model::grid_target -- grid_target_for over the model own terminal size
-crates/view-core/src/msg.rs 2 the UiAttach and TryResize variant declarations; each carries the pair its builder put in it
+crates/view-core/src/msg.rs 2 the UiAttach and TryResize variant declarations, whose fields wrap onto the lines below them; the pair each variant carries is what its builder put in it
 crates/view-core/src/update/ai_fs.rs 4 an AI filesystem lock release and its own helper, no geometry anywhere
 crates/view-core/src/update/mod.rs 1 the fold resizing the grid when the paint area moves, spending Model::grid_target
 crates/view-core/src/update/ui_event.rs 1 the tabline fold resizing the grid when the chrome row count moves, spending Model::grid_target
-crates/view-engine/src/nvim_api.rs 10 the handle own attach and resize entry points, the private attach both public ones funnel through, and the nvim_ui_attach and nvim_ui_try_resize method names they send; each spends what its caller hands it
+crates/view-engine/src/nvim_api.rs 10 the handle own attach and resize entry points, the private attach both public ones funnel through, and the nvim_ui_attach and nvim_ui_try_resize method names they send; each spends what its caller hands it, except the private attach declaration line, whose parameters wrap onto the lines below it and which names no pair
+crates/view-engine/src/process.rs 12 the spawn own geometry seed: the late_attach field, the builder that stores a pair, the getter, and the two argv paths that render one into --cmd, each spending what main or recovery handed the config
 crates/view-oracle/src/hang.rs 4 the adversarial harness attaching and resizing its own engine at the fixture size it opened the session with, and the TryResize effect it forwards
 crates/view-oracle/src/lib.rs 2 the oracle driver attaching at the size its caller opened the session with, and the TryResize effect it forwards
 crates/view-oracle/src/reference.rs 2 the second applier attaching and resizing at the size the session under comparison is held at
 crates/view-oracle/src/speculate.rs 2 the speculative-echo battery attaching and resizing at its own fixture geometry
-crates/view/src/engine_ops.rs 14 the EngineOps attach and resize surface: one declaration and the forwarding impls behind it, each spending the pair it was handed
-crates/view/src/main.rs 1 the attach guard release, spending spawn_size -- what grid_target_for answered the terminal reading with, and what the spawn own geometry --cmd already told the child
+crates/view/src/engine_ops.rs 14 the EngineOps attach and resize surface: one declaration and the forwarding impls behind it, each spending the pair it was handed, except the four ui_attach signature lines, whose parameters wrap onto the lines below them
+crates/view/src/main.rs 2 the attach guard release and the spawn own geometry seed, both spending spawn_size -- what grid_target_for answered the terminal reading with
 crates/view/src/native.rs 1 the native session resizing the grid for the row the statusline claims, spending Model::grid_target
-crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model
-crates/view/src/startup.rs 6 the attach guard release and the attaches it feeds, all spending the pair main released rather than a reading of their own, plus the restart own zero-argument attach() closure call, which carries no pair at all
+crates/view/src/recovery.rs 1 the replacement engine own geometry seed, spending Model::grid_target
+crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model; the UiAttach arm own pattern opens on a line naming no pair
+crates/view/src/startup.rs 7 the attach guard release and the attaches it feeds, all spending the pair main released rather than a reading of their own, plus the restart own zero-argument attach() closure call and its read-back of the config late_attach seed, neither of which carries a pair
 '
 check_geometry_sites() {
   local expected actual
@@ -636,6 +654,30 @@ check_geometry_sites() {
   echo "  seeded past its attach relayouts every window on screen. Add a row"
   echo "  to this file saying where this one geometry came from, or say"
   echo "  there that it carries none."
+  return 1
+}
+
+# A script that makes a temp file removes it under a trap. A straight-line
+# `rm` covers the ordinary path and nothing else: the gates here run for
+# seconds over a whole tree, and a Ctrl-C or a `set -e` abort inside that
+# window strands the file under `${TMPDIR:-/tmp}`. Keyed on the script
+# rather than on the statement, because the removal legitimately sits far
+# from the `mktemp` -- what matters is that one exists.
+check_temp_traps() {
+  local fail=0 f
+  for f in scripts/*.sh; do
+    if grep -q 'mktemp' "$f" && ! grep -qE '^[[:space:]]*trap .*EXIT' "$f"; then
+      echo "$f: makes a temp file with no EXIT trap to remove it"
+      fail=1
+    fi
+  done
+  if [ "$fail" -eq 0 ]; then
+    return 0
+  fi
+  echo "STYLE FAIL: a temp file with no trap to remove it"
+  echo "  A straight-line rm covers the ordinary path alone: a signal or a"
+  echo "  set -e abort inside the window leaves the file behind. Remove it"
+  echo "  under trap ... EXIT beside the mktemp."
   return 1
 }
 
@@ -997,8 +1039,22 @@ if [ "${1:-}" = "--geometry-sites" ]; then
   check_geometry_sites
   exit $?
 fi
+# The temp-file trap walk alone, graded the same way.
+if [ "${1:-}" = "--temp-traps" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --temp-traps ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_temp_traps
+  exit $?
+fi
 
 fail=0
+if [ -d scripts ]; then
+  check_temp_traps || fail=1
+fi
 if [ -d crates ]; then
   check_content crates '//|#' --include='*.rs' || fail=1
   check_lua_chunk_width || fail=1

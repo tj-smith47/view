@@ -529,10 +529,11 @@ expect_tied 1 'tied-spawns' \
 # refused by the engine below ENGINE_MIN_SIZE and relayouts every window
 # above it. Its blind spots are a spelling the pattern stops matching and a
 # classifier that reads a comment where the code has none, so the population
-# below is planted in all six spellings the tree uses -- the attach as a
-# method, as an effect variant and as the wire method name, and the resize
-# the same three ways -- with a doc comment quoting the call and a string
-# holding a // ahead of one.
+# below is planted in all eight spellings the tree uses -- the attach as a
+# method, as an effect variant and as the wire method name, the resize the
+# same three ways, the private attach both public ones funnel through, and
+# the argv seed a spawn carries -- with a doc comment quoting the call and
+# a string holding a // ahead of one.
 #
 # The rows mirror the checker own GEOMETRY_SITES.
 # ---------------------------------------------------------------------------
@@ -542,14 +543,15 @@ plant_geometry() {
   printf '/// A doc comment naming ui_attach and try_resize(, neither a call.\n' >> "$CASE/$1"
   i=0
   while [ "$i" -lt "$2" ]; do
-    case $((i % 7)) in
+    case $((i % 8)) in
       (0) printf 'ops.ui_attach(width, height, surfaces)?;\n' >> "$CASE/$1" ;;
       (1) printf 'Effect::Rpc(RpcCall::UiAttach { width, height })\n' >> "$CASE/$1" ;;
       (2) printf 'handle.request("nvim_ui_attach", args)?;\n' >> "$CASE/$1" ;;
       (3) printf 'ops.try_resize(width, height)?;\n' >> "$CASE/$1" ;;
       (4) printf 'Effect::Rpc(RpcCall::TryResize { width, height })\n' >> "$CASE/$1" ;;
       (5) printf 'handle.request("nvim_ui_try_resize", args)?;\n' >> "$CASE/$1" ;;
-      (*) printf 'self.attach(width, height, surfaces, false)?;\n' >> "$CASE/$1" ;;
+      (6) printf 'self.attach(width, height, surfaces, false)?;\n' >> "$CASE/$1" ;;
+      (*) printf 'let cfg = cfg.with_late_attach(width, height);\n' >> "$CASE/$1" ;;
     esac
     i=$((i + 1))
   done
@@ -581,15 +583,21 @@ new_geometry_case() {
   plant_geometry 'crates/view-core/src/update/mod.rs' 1
   plant_geometry 'crates/view-core/src/update/ui_event.rs' 1
   plant_geometry 'crates/view-engine/src/nvim_api.rs' 10
+  plant_geometry 'crates/view-engine/src/process.rs' 12
   plant_geometry 'crates/view-oracle/src/hang.rs' 4
   plant_geometry 'crates/view-oracle/src/lib.rs' 2
   plant_geometry 'crates/view-oracle/src/reference.rs' 2
   plant_geometry 'crates/view-oracle/src/speculate.rs' 2
   plant_geometry 'crates/view/src/engine_ops.rs' 14
   plant_release 'crates/view/src/main.rs' 1
+  # the one file holding both spellings: the guard release and the argv
+  # seed the spawn carries
+  printf 'let cfg = cfg.with_late_attach(width, height);\n' \
+    >> "$CASE/crates/view/src/main.rs"
   plant_geometry 'crates/view/src/native.rs' 1
+  plant_geometry 'crates/view/src/recovery.rs' 1
   plant_geometry 'crates/view/src/runtime/executor.rs' 3
-  plant_geometry 'crates/view/src/startup.rs' 6
+  plant_geometry 'crates/view/src/startup.rs' 7
 }
 
 # Graded on the rows that differ from the pinned listing, the way the
@@ -622,7 +630,7 @@ expect_geometry() {
 }
 
 new_geometry_case
-expect_geometry 0 '' 'the pinned population, in all seven spellings, with a doc comment quoting the call'
+expect_geometry 0 '' 'the pinned population, in all eight spellings, with a doc comment quoting the call'
 
 new_geometry_case
 plant_geometry 'crates/view-scratch/src/lib.rs' 1
@@ -632,7 +640,7 @@ expect_geometry 1 'crates/view-scratch/src/lib.rs=1 geometry-sites' \
 new_geometry_case
 printf 'let doc = "https://example.invalid/x"; ops.try_resize(width, height)?;\n' \
   >> "$CASE/crates/view/src/startup.rs"
-expect_geometry 1 'crates/view/src/startup.rs=7 geometry-sites' \
+expect_geometry 1 'crates/view/src/startup.rs=8 geometry-sites' \
   'a site behind a string holding a // on the same line'
 
 new_geometry_case
@@ -982,14 +990,14 @@ broken_checker() {
 
 new_geometry_case
 RUN=$(broken_checker 'grep -E "$GEOMETRY_CALLS"' 'grep -E "[unmatched"')
-expect_geometry 1 'geometry-sites' \
-  'the geometry call filter refusing its pattern, which leaves the pinned population unfound'
+expect_geometry 1 'crates/view/src/main.rs=1 geometry-sites' \
+  'the geometry call filter refusing its pattern, which leaves every call site unfound and main.rs short its argv seed'
 RUN=""
 
 new_geometry_case
 RUN=$(broken_checker 'release\(' 'release[')
-expect_geometry 1 'geometry-sites' \
-  'the lock release filter refusing its pattern, which leaves two pinned files unfound'
+expect_geometry 1 'crates/view/src/main.rs=1 geometry-sites' \
+  'the lock release filter refusing its pattern, which leaves one pinned file unfound and main.rs short its release'
 RUN=""
 
 # ---------------------------------------------------------------------------
@@ -1044,6 +1052,71 @@ RUN=$(broken_checker 'grep -v "^$CONDITION_OWNER:"' 'grep -v "[unmatched"')
 expect_condition 'filter-refused' \
   'the stranger filter refusing its pattern, which reports no stranger against a met count'
 RUN=""
+
+# the checker copied with no scanner beside it: `read_prod_lines` resolves
+# the classifier from the checker's own directory, so this is what a
+# renamed or missing one looks like to the ownership pin
+# its own directory name rather than the counter broken_checker uses: that
+# counter is incremented inside a command substitution, so it never leaves
+# the subshell, and a second name would land this copy beside the scanner
+# the first one linked
+scannerless_checker() {
+  dir="$WORK/scannerless"
+  mkdir -p "$dir"
+  cp "$CHECKER" "$dir/check-style.sh"
+  printf '%s\n' "$dir/check-style.sh"
+}
+
+new_condition_case
+printf 'fn c(m: &mut Messages) { m.set_native_condition(z); }\n' \
+  > "$CASE/crates/view-core/src/update/mod.rs"
+git -C "$CASE" add -A
+expect_condition 'stranger' \
+  'a second caller outside the owner, which flaps the one notice every pass'
+
+new_condition_case
+RUN=$(scannerless_checker)
+expect_condition 'no-prod-lines' \
+  'the classifier unreachable, which leaves the ownership pin ungraded rather than green'
+RUN=""
+
+# ---------------------------------------------------------------------------
+# the temp-file trap walk: every script here that makes a temp file removes
+# it under a trap, and the one that did not stranded its file for the whole
+# length of the slowest scan in the gate.
+# ---------------------------------------------------------------------------
+new_temp_trap_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/scripts"
+}
+
+expect_temp_traps() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "$CHECKER" --temp-traps "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" \
+    | awk '/: makes a temp file with no EXIT trap to remove it$/ { c = $1; sub(/:$/, "", c); print c }' \
+    | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'FAIL %s - %s\n  want rc=%s [%s]\n  got  rc=%s [%s]\n%s\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got" "$out"
+}
+
+new_temp_trap_case
+printf 'f=$(mktemp)\ntrap %s EXIT\n' "'rm -f \"\$f\"'" > "$CASE/scripts/a.sh"
+expect_temp_traps 0 '' 'a script removing its temp file under a trap'
+
+new_temp_trap_case
+printf 'f=$(mktemp)\nrm -f "$f"\n' > "$CASE/scripts/a.sh"
+expect_temp_traps 1 'scripts/a.sh' \
+  'a script removing its temp file in a straight line, which a signal skips'
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
