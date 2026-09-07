@@ -108,7 +108,7 @@ confirm it: under that same config the predicted glyph is on screen in
 the same run takes 1.25 ms, and the glyph is corrected the moment the engine
 answers. Both ran on this machine; what the prediction is for is an engine a
 network away, which a separate acceptance leg measures by injecting the
-round trip at four tiers.
+round trip at four tiers (`scripts/acceptance/remote-rtt.sh`).
 
 Scrolling, the picker, what happens when the engine hangs, memory, and what
 contributes to each of the numbers above:

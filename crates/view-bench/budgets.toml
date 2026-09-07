@@ -473,7 +473,7 @@ metric = "speculated_ratio_p50"
 max = 1.0
 classes = ["controlled-linux"]
 kind = "felt"
-felt = "you type and the character is on screen on view's own tick, without waiting for the engine's round trip to come back"
+felt = "you type and the character is on screen on view's own tick, without waiting for the engine to answer"
 config = "real"
 
 # Metrics measured outside their budget today.
@@ -595,7 +595,7 @@ fixture = "user"
 metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.1097269280826585
-why = "the felt typing row on the config it claims: view p50 0.920 ms against bare nvim's 0.829 ms in the same interleaved run, 0.9 percent over the 1.10 bar, while the same cell's view-side tail (1.583 ms) sits well inside its own 8 ms bound. Attribution is the echo.minimal entry above, reproduced under a real plugin config: the residual is the rpc-written to redraw-parsed leg of the round trip, which no view-side input or paint lever addresses, and the plugin stack moves this cell only from 1.1301 to 1.1097 rather than changing its shape. The pinned closure path is unchanged and is now measured on this same config: the speculated paint reads 0.332 of the paired bare-nvim run, which removes the engine round trip from perceived echo instead of shrinking view's share of the measured one. This entry keeps measuring the honest unspeculated round trip."
+why = "the felt typing row on the config it claims: view p50 0.920 ms against bare nvim's 0.829 ms in the same interleaved run, 0.9 percent over the 1.10 bar, while the same cell's view-side tail (1.583 ms) sits well inside its own 8 ms bound. Attribution is the echo.minimal entry above, reproduced under a real plugin config: the residual is the rpc-written to redraw-parsed leg of the round trip, which no view-side input or paint lever addresses. The plugin stack changes the cell's shape hardly at all: ratio_p50 reads 1.1097 on the login-shaped fixture. The plugin-free leg records ratio_p50 1.1301 on the entry above. The pinned closure path is unchanged and is now measured on this same config: the speculated paint reads 0.332 of the paired bare-nvim run, which removes the engine round trip from perceived echo instead of shrinking view's share of the measured one. This entry keeps measuring the honest unspeculated round trip."
 
 [[shortfall]]
 scenario = "flood"
@@ -712,4 +712,4 @@ fixture = "minimal"
 metric = "match_paint_p99_ms"
 class = "dev-macos"
 accepted = 19.4787
-why = "the felt picker keystroke on this class, 21.7 percent over the 16 ms bar and the bar untouched. What was measured: three trials read 20.05, 19.08 and 19.82 ms at the p99, the same run's match_paint p50 is 7.04 ms and its first_page p99 1.66 ms, and the seat this replaces was 32.35 ms. The same cell on dev-linux is 4.7 ms on the same fixture, and gh-macos reads 30.797 ms on its own runner, so the gap is the platform rather than one host. Spotlight indexing held one core through the run, which is a condition of the measurement and not an attribution. The cause is open and a root-cause task is open for it."
+why = "the felt picker keystroke on this class, 21.7 percent over the 16 ms bar and the bar untouched. What was measured, all of it from the 2026-09-06 record run this seat is the median of: three trials read 19.57, 19.48 and 19.35 ms at the p99; the same run's match_paint p50 trials read 7.20, 7.50 and 7.74 ms, median 7.50, and its first_page p99 trials 1.63, 1.67 and 1.69 ms, median 1.667, both of which the ratchet declined in favour of the 7.159 and 1.542 already recorded. The seat this run replaces was 32.35 ms. The same cell on dev-linux is 4.7 ms on the same fixture, and gh-macos reads 30.797 ms on its own runner, so the gap is the platform rather than one host. Spotlight indexing held one core through the run, which is a condition of the measurement and not an attribution. The cause is open and a root-cause task is open for it."

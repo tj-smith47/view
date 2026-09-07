@@ -63,7 +63,8 @@ at the worst of a thousand keystrokes, where the Neovim it is paired
 against in the same run takes 1.25 ms to paint the same character. A
 prediction answered 99.9% of the keystrokes measured; the rest waited out
 the engine and can only understate the row. Both editors ran on this
-machine, engines included -- that is the reading, not a network.
+machine, engines included -- that is the reading, not a network; the network
+case is the acceptance leg below (`scripts/acceptance/remote-rtt.sh`).
 
 The network is what the prediction is for, and it is measured on its own:
 an acceptance leg puts 0, 25, 100 and 300 ms of round trip in front of

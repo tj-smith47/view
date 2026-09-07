@@ -136,7 +136,7 @@ MD
   cat > "$CASE/$BENCH" <<'MD'
 # Benchmarking
 
-The harness pins the terminal at 120x40 for every cell.
+The harness pins the terminal at 120x40 for every cell, and `dev-linux` is the default class of this page.
 
 | what | view | bare Neovim |
 |---|---|---|
@@ -218,6 +218,17 @@ findings() {
     }
     /^BUDGET DRIFT FAIL: ratio-drift / {
       c = $5; sub(/:$/, "", c); print "ratio:" c; next
+    }
+    /^BUDGET DRIFT FAIL: ratio-scope / {
+      c = $5; sub(/:$/, "", c); print "scope:" c; next
+    }
+    /^BUDGET DRIFT FAIL: ratio-default / { print "default"; next }
+    /^BUDGET DRIFT FAIL: why-drift / {
+      c = $5; sub(/:$/, "", c); print "why:" c; next
+    }
+    /^BUDGET DRIFT FAIL: a transport condition stands/ { next }
+    /^  transport [^ ]+:[0-9]+: / {
+      c = $2; sub(/:$/, "", c); print "transport:" c; next
     }
     claims && /^  [^ ]+:[0-9]+: / {
       where = $1; sub(/:$/, "", where); print "claim:" where; next
@@ -482,6 +493,153 @@ seat_echo_ratio
 printf '\n| steady typing (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.13x slower |\n' \
   >> "$CASE/$BENCH"
 expect 0 '' 'the same multiplier, equal to what that cell records at the digits printed'
+
+# ---------------------------------------------------------------------------
+# a number resolves against one class and one fixture: the ones its own unit
+# names, the default class the page declares where it names none, and the one
+# fixture its cells are recorded on where its words name none. Resolving
+# against every class and fixture the unit mentioned passed one class's draw
+# as another's and the 15-plugin leg's as the plugin-free one
+# ---------------------------------------------------------------------------
+seat_echo_user_ratio() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[echo.user]
+ratio_p50 = 1.1097269280826585
+TOML
+}
+
+seat_macos_echo_ratio() {
+  cat > "$CASE/$BASELINES/dev-macos.toml" <<'TOML'
+machine_class = "dev-macos"
+
+[echo.minimal]
+ratio_p50 = 1.1066140177690031
+TOML
+}
+
+new_case
+seat_echo_ratio
+seat_macos_echo_ratio
+printf '\n| steady typing, no plugins (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.107x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'another class draw, quoted where the page resolves to its default class'
+
+new_case
+seat_echo_ratio
+seat_macos_echo_ratio
+printf '\n| steady typing, no plugins, dev-macos (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.107x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'the same draw on the row that names the class recording it'
+
+new_case
+seat_echo_ratio
+seat_echo_user_ratio
+printf '\n| steady typing, login-shaped (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.130x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'the plugin-free draw, quoted on the row that names the login-shaped leg'
+
+new_case
+seat_echo_ratio
+seat_echo_user_ratio
+printf '\n| steady typing, login-shaped (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.110x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'the login-shaped draw on the row that names that fixture'
+
+new_case
+seat_echo_ratio
+seat_echo_user_ratio
+printf '\n| steady typing (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.130x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'scope:docs/benchmarking.md:12' \
+  'a row naming no fixture, where the class records the cell on two'
+
+new_case
+seat_echo_ratio
+seat_macos_echo_ratio
+printf '\nOn dev-linux and dev-macos alike, `echo.ratio_p50` reads 1.130 plugin-free.\n' \
+  >> "$CASE/$BENCH"
+expect 1 'scope:docs/benchmarking.md:12' \
+  'a paragraph naming two classes, with a number that belongs to one'
+
+new_case
+seat_echo_ratio
+sed 's/, and `dev-linux` is the default class of this page//' "$CASE/$BENCH" > "$CASE/$BENCH.tmp"
+mv "$CASE/$BENCH.tmp" "$CASE/$BENCH"
+printf '\n| steady typing, no plugins (`echo.view_p99_ms`, `echo.ratio_p50`) | ~1.130x slower |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'scope:docs/benchmarking.md:12' \
+  'a page that declares no default class, where the row names none either'
+
+new_case
+seat_echo_ratio
+sed 's/`dev-linux` is the default class/`dev-solaris` is the default class/' "$CASE/$BENCH" > "$CASE/$BENCH.tmp"
+mv "$CASE/$BENCH.tmp" "$CASE/$BENCH"
+expect 1 'default' 'a declared default class no shipped baseline records'
+
+# ---------------------------------------------------------------------------
+# a percentage states the same ratio as its distance from 1, and a percentage
+# of a population states a share of it
+# ---------------------------------------------------------------------------
+new_case
+seat_echo_ratio
+printf '\n| steady typing, no plugins (`echo.ratio_p50`) | about 13%% behind |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a percentage equal to the cell it stands beside, as its distance from 1'
+
+new_case
+seat_echo_ratio
+printf '\n| steady typing, no plugins (`echo.ratio_p50`) | about 15%% behind |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'a percentage no value the cell records rounds to'
+
+new_case
+seat_echo_ratio
+printf '\n| steady typing, no plugins (`echo.ratio_p50`) | a prediction answered 99.9%% of the samples |\n' \
+  >> "$CASE/$BENCH"
+expect 0 '' 'a percentage of a population, which is a share and not a ratio'
+
+# ---------------------------------------------------------------------------
+# the ledger quotes the same measurement the page does: a shortfall names its
+# own class, scenario, fixture and metric, so a figure in its why beside a
+# cell of that entry resolves exactly
+# ---------------------------------------------------------------------------
+new_case
+sed 's/why = "a shortfall carries a scenario and a metric of its own"/why = "the recorded marker_ratio_p50 is 1.17"/' \
+  "$CASE/$BUDGETS" > "$CASE/$BUDGETS.tmp"
+mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
+expect 1 'why:dev-linux/first_paint.minimal' \
+  'a why quoting the draw a re-record replaced, beside the cell it names'
+
+new_case
+sed 's/why = "a shortfall carries a scenario and a metric of its own"/why = "the recorded marker_ratio_p50 is 1.094"/' \
+  "$CASE/$BUDGETS" > "$CASE/$BUDGETS.tmp"
+mv "$CASE/$BUDGETS.tmp" "$CASE/$BUDGETS"
+expect 0 '' 'the same why, equal to what that cell records at the digits printed'
+
+# ---------------------------------------------------------------------------
+# the predicted glyph is a local reading, and the acceptance RTT leg is the
+# only surface a transport claim may rest on
+# ---------------------------------------------------------------------------
+new_case
+printf '\n| with the engine on the far side of a network | not yet recorded | your config, same host, same run |\n' \
+  >> "$CASE/$PERF"
+expect 1 'transport:docs/performance.md:6' \
+  'a row on a user page stating a transport condition the cell never had'
+
+new_case
+printf '\nview draws the character it expects before the round trip is back.\n' \
+  >> "$CASE/$PERF"
+expect 1 'transport:docs/performance.md:6' \
+  'the predicted glyph described beside a transport word, with no leg named'
+
+new_case
+printf '\nview draws the character it expects before the round trip is back; the round trip is the one scripts/acceptance/remote-rtt.sh injects.\n' \
+  >> "$CASE/$PERF"
+expect 0 '' 'the same sentence, naming the leg that measures the transport'
 
 # ---------------------------------------------------------------------------
 # the gate runs under the bash macOS ships
