@@ -31,7 +31,7 @@ What a tiling desktop actually is, and what view takes from it:
 |---|---|
 | **Tiles never overlap.** The screen is fully partitioned into tiles (dwindle = recursive binary splits; master = one main + a stack). Resizing one tile resizes its neighbours. | nvim windows are the tiles; the window tree *is* the layout tree. No separator column: tiles are set apart by gaps. |
 | **Gaps and frames, no title bars.** `gaps_in` between tiles, `gaps_out` at the screen edge, rounded corners, a border whose colour marks the *active* tile. Identity lives in the bar, not on the window. | Each window gets a rounded frame with a gap; the active window's frame is the accent colour. The frame's top edge carries the buffer name, the bottom edge carries the status segments (mode, git, diagnostics, position). That replaces the per-window statusline: the frame *is* the status — laststatus/statusline plugins are superseded through the §5.5 registry, never drawn twice. |
-| **Floating is the exception, and transient.** The launcher (walker) floats centred over the tiles; notifications (mako) anchor to a corner; dialogs float. None of them are in the layout. | Pickers and the palette float centred; notifications anchor top-right; conflict notices float once (#22). Nothing structural floats: the tree is a tile (a sidebar), never a float (#32); the AI panel is a tile. |
+| **Floating is the exception, and transient.** The launcher (walker) floats centred over the tiles; notifications (mako) anchor to a corner; dialogs float. None of them are in the layout. | Pickers and the palette float centred; notifications anchor top-right; conflict notices float once (#22). Structural surfaces (tree, palette, agent panel, notifications) are **overlays by default and windowed by config**, per surface, with one key that cycles the whole set (user ruling 2026-09-14, supersedes the earlier "tree is a tile, never a float" wording; #32 becomes the windowed placement of the tree). |
 | **Workspaces**, one visible set of tiles at a time, switched from the bar. | tabpages are workspaces. |
 | **omarchy's top bar**: a thin bar with a centred workspace *pill* (the active workspace highlighted, siblings dimmed), clock/status at the edges, the launcher summoned by a key. | The tabline becomes a top pill: tabpages (or buffers when there is one tabpage — a config choice) centred as a pill, session identity (remote host, agent state) at the edges. Supersedes bufferline through the registry; `[native] tabline` chooses pill vs plugin (#25 folds into this). |
 | **Theme cohesion** comes from a switcher rewriting each tool's config. | `theme = "auto"` derives from the live colourscheme (C3 is the evidence task). |
@@ -121,6 +121,37 @@ keymaps, goldens), fable-reviewed, then:
 4. Tree is a sidebar tile, `<leader>e` toggles from inside it (#32).
 5. Pickers/palette centred floats, notifications corner-anchored, one
    conflict notice — the float class audited against the table.
+5a. Gapped vs gapless, and overlay vs windowed per surface (user ruling
+   2026-09-14). Both are runtime toggles as well as config:
+
+   ```toml
+   [ui]
+   panes = "auto"          # "auto" | "tiles" | "nvim"
+   gaps = true             # false = gapless: frames touch, no outer gap
+
+   [ui.surfaces]           # "overlay" | "windowed", each independent
+   tree = "overlay"
+   palette = "overlay"
+   agent = "overlay"
+   notifications = "overlay"
+
+   [keys]
+   toggle_gaps = "<leader>ug"
+   cycle_surfaces = "<leader>uw"   # config -> all windowed -> all overlay -> config
+   ```
+
+   `cycle_surfaces` never writes the config: the three positions are the
+   user's `[ui.surfaces]` table, all four forced windowed, all four forced
+   overlay, then back to the table. Windowed `tree` and `agent` are the
+   sidebar tiles from items 4 and the fleet plan; windowed `palette` is a
+   tile at the bottom edge. Windowed `notifications` is a slide-over stream
+   on the right edge: every recent notification in one scrollable list,
+   newest first, each row carrying its datetime; selecting the stream
+   (focus into it) stops the 4 s transient timeout for as long as it holds
+   focus, and `j`/`k`/`G`/`gg`/`y`/`d` behave as in the message history.
+   Requires a timestamp on `MessageEntry` (none today), which the history
+   overlay then shows too. Goldens for gapped/gapless and for every surface
+   in both placements join item 6.
 6. Tier goldens for every tile/pill/float surface at every tier (T24, #13).
 
 Exit: goldens committed for both look modes; user's Termius pass.
