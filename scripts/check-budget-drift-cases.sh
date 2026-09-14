@@ -1313,9 +1313,14 @@ report 'the construct list allows the anchored substitutions, which match once' 
 # next line, so the closing paren of a pattern below it ended the command
 # substitution the whole thing sat in. It has a tell a line-at-a-time scan
 # can see -- a `case` with no `in` beside it -- and every one in this
-# population is written on one line, so the tell is the rule.
+# population is written on one line, so the tell is the rule. Read wherever a
+# command can start rather than at the start of a line: the same header written
+# after a brace, a `;` or a `&&` breaks 3.2 identically, and the spelling that
+# broke the macOS run was at line start only because that is where someone
+# happened to write it.
+SPLIT_CASE='((^|[;&|({])[[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)case([[:space:]]|$)'
 split_case_headers() {
-  grep -nE '^[[:space:]]*case([[:space:]]|$)' "$@" \
+  grep -nE "$SPLIT_CASE" "$@" \
     | grep -vE '[[:space:]]in([[:space:]]|$)' || true
 }
 if [ -n "$empty" ]; then
@@ -1334,6 +1339,19 @@ if [ -z "$caught" ]; then
   missed="the planted split case header went unrefused"
 fi
 report 'the split-case scan refuses a case whose word runs onto the next line' "$missed"
+
+# the same header inside a one-line function, which is where this population
+# writes most of its `case` and where a line-start anchor sees nothing
+# the header is assembled through a variable, so planting one here does not
+# make this file a hit
+header='case "'
+printf '%s\n' '#!/usr/bin/env bash' "holds() { $header" '$x' '" in' '  *) ;;' 'esac; }' > "$planted"
+caught=$(split_case_headers "$planted")
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted split header after a brace went unrefused"
+fi
+report 'the split-case scan reads a case wherever a command starts' "$missed"
 
 # The third instance of the same defect, and the second with a spelling a
 # reader can see: a comment inside a multi-line $( ) or <( ). 3.2 is already

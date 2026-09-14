@@ -705,6 +705,42 @@ temp_trap_handlers() {
   # defined above them, and the handler set has to be complete before the
   # bodies are selected
   awk '
+    # the braces a shell reads as structure: a quoted or commented one is text,
+    # and a `${x}` outside quotes balances itself
+    function brace_delta(line,   i, n, c, prev, q, d) {
+      n = length(line); q = ""; prev = ""; d = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (q == "") {
+          if (c == "#" && (i == 1 || prev == " " || prev == "\t")) { break }
+          if (c == "\\") { i++; prev = ""; continue }
+          if (c == "\"" || c == SQ) { q = c; prev = c; continue }
+          if (c == "{") { d++ }
+          if (c == "}") { d-- }
+        } else if (c == q) {
+          q = ""
+        } else if (q == "\"" && c == "\\") {
+          i++; prev = ""; continue
+        }
+        prev = c
+      }
+      return d
+    }
+    # the here-doc a line opens, or "". Here-strings are cut first: `<<<"list"`
+    # otherwise reads as a here-doc named list.
+    function heredoc_tag(line,   t) {
+      t = line
+      gsub(/<<</, "", t)
+      if (!match(t, /<<-?[[:space:]]*["]?[A-Za-z_][A-Za-z0-9_]*/)) {
+        if (!match(t, "<<-?[[:space:]]*" SQ "?[A-Za-z_][A-Za-z0-9_]*")) { return "" }
+      }
+      t = substr(t, RSTART, RLENGTH)
+      dash = (t ~ /^<<-/)
+      sub(/^<<-?[[:space:]]*/, "", t)
+      sub(/^["]/, "", t)
+      sub("^" SQ, "", t)
+      return t
+    }
     FNR == NR {
       if ($0 ~ /^[[:space:]]*trap +(-- +)?[^-[:space:]]/ &&
           $0 ~ /(^|[^A-Za-z0-9_])EXIT([^A-Za-z0-9_]|$)/) {
@@ -717,7 +753,17 @@ temp_trap_handlers() {
       next
     }
     FNR == 1 { printf "%s", armed }
-    inbody { print; if (substr($0, 1, length(closer)) == closer) { inbody = 0 } next }
+    inbody {
+      print
+      if (tag != "") {
+        if ((dash && $0 ~ "^[[:space:]]*" tag "[[:space:]]*$") || $0 == tag) { tag = "" }
+        next
+      }
+      depth = depth + brace_delta($0)
+      tag = heredoc_tag($0)
+      if (depth <= 0) { inbody = 0 }
+      next
+    }
     {
       name = $0
       sub(/^[[:space:]]*/, "", name)
@@ -726,17 +772,49 @@ temp_trap_handlers() {
       sub(/[[:space:]]*\(\).*/, "", name)
       if (!(name in want)) { next }
       print
-      if ($0 ~ /\{[[:space:]]*$/) {
-        inbody = 1
-        # closed on a brace at the header own indentation, not on the first
-        # indented one: a `{ ...; } >&2` group inside a cleanup ends the body
-        # early and everything after it -- the removal included -- is dropped,
-        # which reddens a handler that is right
-        match($0, /^[[:space:]]*/)
-        closer = substr($0, 1, RLENGTH) "}"
-      }
+      # closed at the brace that closes the function, by depth outside quotes
+      # and comments and skipping here-doc bodies, never at an indentation: an
+      # indentation rule ends the body at a `{ ...; } >&2` group or at a JSON
+      # here-doc `}` in column one, and the removal below is then never read,
+      # which reddens a handler that is right
+      depth = brace_delta($0)
+      tag = ""
+      if (depth > 0) { inbody = 1 }
     }
-  ' "$1" "$1"
+  ' SQ="'" "$1" "$1"
+}
+
+# The names an armed handler actually removes: every `$NAME` on a line that
+# runs `rm`, plus the list a removed loop variable was bound from -- which is
+# how every array-of-roots cleanup in this population is written (`for root in
+# "${ROOTS[@]}"; do rm -rf "$root"; done` removes ROOTS by way of root).
+temp_trap_removals() {
+  awk '
+    function names_on(line,   s, n, out) {
+      s = line; out = ""
+      while (match(s, /[$][{]?[A-Za-z_][A-Za-z0-9_]*/)) {
+        n = substr(s, RSTART, RLENGTH)
+        sub(/^[$][{]?/, "", n)
+        out = out n " "
+        s = substr(s, RSTART + RLENGTH)
+      }
+      return out
+    }
+    /(^|[^A-Za-z0-9_.\/-])rm(dir)?[[:space:]]/ { removed = removed names_on($0) }
+    match($0, /(^|[[:space:]])for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]/) {
+      v = substr($0, RSTART, RLENGTH)
+      sub(/^[[:space:]]*for[[:space:]]+/, "", v)
+      sub(/[[:space:]]+in[[:space:]]*$/, "", v)
+      bound[v] = bound[v] names_on($0)
+    }
+    END {
+      for (v in bound) {
+        if (index(" " removed, " " v " ") > 0) { removed = removed bound[v] }
+      }
+      count = split(removed, seen, " ")
+      for (i = 1; i <= count; i++) { print seen[i] }
+    }
+  '
 }
 
 # A script that makes a temp file removes it under a trap. A straight-line
@@ -767,10 +845,13 @@ check_temp_traps() {
     # `TMP=/var/cache/keepme` that names an unrelated path, and the temp file
     # leaks with this walk silent. An assignment that is not an append is not
     # a holder: `other=$ROOT/sub` names a path inside the root, and removing
-    # that one removes nothing of this one.
+    # that one removes nothing of this one. The seed match is the quoting that
+    # still expands and no wider: `$(mktemp)`, `"$(mktemp)"` and `"'$(mktemp)'"`
+    # each make a file and each seeds, while `'$(mktemp)'` and `$'$(mktemp)'`
+    # are literal text, make nothing, and are excluded by the leading quote.
     names=$(awk '
       FNR == NR {
-        if (match($0, /[A-Za-z_][A-Za-z0-9_]*=["]*[$][(]mktemp/)) {
+        if (match($0, /[A-Za-z_][A-Za-z0-9_]*=(["][^$]?)?[$][(]mktemp/)) {
           n = substr($0, RSTART, RLENGTH)
           sub(/=.*/, "", n)
           seed[n] = 1
@@ -799,22 +880,24 @@ check_temp_traps() {
         for (h in hold) { print h }
       }
     ' "$f" "$f" | LC_ALL=C sort -u) || names=""
-    # closed with a space so a name ending the text still has a character
-    # after it
-    handlers="$(temp_trap_handlers "$f") "
+    # the names a removal in the handler reaches, never the names it mentions:
+    # a handler that prints an accumulator (`log="$log made $ROOT"`, `echo
+    # "$log"`) names the holder and removes nothing, and the temp root leaks
+    # with this walk silent. Delimited by blanks, which no variable name holds.
+    removed=" $(temp_trap_handlers "$f" | temp_trap_removals | tr '\n' ' ')"
     paired=0
-    # a file whose every mktemp goes somewhere unnamed leaves this loop
-    # unrun and is reported: there is no variable a trap could name
+    # a file whose every mktemp goes somewhere no removal reaches leaves this
+    # loop unrun and is reported
     for name in $names; do
-      case "$handlers" in
-        *'$'"$name"[!A-Za-z0-9_]* | *'${'"$name"[!A-Za-z0-9_]*)
+      case "$removed" in
+        *" $name "*)
           paired=1
           break
           ;;
       esac
     done
     if [ "$paired" -eq 0 ]; then
-      echo "$f: makes a temp file with no EXIT trap naming it"
+      echo "$f: makes a temp file with no EXIT trap removing it"
       fail=1
     fi
   done <<EOF
@@ -826,7 +909,7 @@ EOF
   echo "STYLE FAIL: a temp file with no trap to remove it"
   echo "  A straight-line rm covers the ordinary path alone: a signal or a"
   echo "  set -e abort inside the window leaves the file behind. Remove it"
-  echo "  under trap ... EXIT beside the mktemp, in a handler that names the"
+  echo "  under trap ... EXIT beside the mktemp, in a handler that removes the"
   echo "  variable the path went into."
   return 1
 }

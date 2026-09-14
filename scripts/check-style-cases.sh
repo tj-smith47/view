@@ -1119,7 +1119,7 @@ expect_temp_traps() {
   out=$(bash "$CHECKER" --temp-traps "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" \
-    | awk '/: makes a temp file with no EXIT trap naming it$/ { c = $1; sub(/:$/, "", c); print c }' \
+    | awk '/: makes a temp file with no EXIT trap removing it$/ { c = $1; sub(/:$/, "", c); print c }' \
     | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
   if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
     printf 'ok %s - %s\n' "$n" "$desc"
@@ -1242,6 +1242,75 @@ PLANT
 expect_temp_traps 1 'scripts/a.sh' \
   'a handler with a brace group and no removal anywhere in it'
 
+# The append side of the same fail-open: a variable that accumulates a message
+# rather than a path is a self-referential assignment naming the seed, so the
+# harvest reads it as a holder, and a handler that prints it names the holder
+# without removing anything. The temp root is never removed.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+log=""
+cleanup() { echo "$log"; }
+trap cleanup EXIT
+ROOT=$(mktemp -d)
+log="$log made $ROOT"
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler printing an accumulator that names the temp root but removes nothing'
+
+# A brace group written at the handler header own indentation, which a body
+# ending at a brace by indentation reads as the function close: the removal
+# below it is dropped and a correct cleanup is reported.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+cleanup() {
+{
+echo done
+}
+  rm -rf "$ROOT"
+}
+trap cleanup EXIT
+ROOT=$(mktemp -d)
+PLANT
+expect_temp_traps 0 '' 'a removal written after an unindented brace group in the handler body'
+
+# A here-doc body carrying a `}` in column one, which every top-level handler
+# in this population would read as its own close.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+cleanup() {
+  cat > "$HOME/x.json" <<JSON
+{
+  "a": 1
+}
+JSON
+  rm -rf "$ROOT"
+}
+trap cleanup EXIT
+ROOT=$(mktemp -d)
+PLANT
+expect_temp_traps 0 '' 'a removal written after a here-doc body holding a brace in column one'
+
+# The seed class, one case per quoting shape. Green is "this spelling seeds":
+# the handler removes `$N`, so a shape the harvest reads answers 0 and a shape
+# it passes over leaves no name to pair and answers 1. Which shape makes a file
+# is what the verdicts have to follow: the shape whose single quotes sit inside
+# the double ones still runs mktemp, because they quote nothing there.
+temp_trap_seed_case() {
+  new_temp_trap_case
+  printf 'trap %s EXIT\n%s\n' "'rm -f \"\$N\"'" "$1" | write_temp_trap_script
+  expect_temp_traps "$2" "$3" "$4"
+}
+temp_trap_seed_case 'N=$(mktemp)' 0 '' \
+  'a bare command substitution seeding the temp name'
+temp_trap_seed_case 'N="$(mktemp)"' 0 '' \
+  'a double-quoted command substitution seeding the temp name'
+temp_trap_seed_case "N=\"'\$(mktemp)'\"" 0 '' \
+  'single quotes inside the double ones, which still runs mktemp, seeding it'
+temp_trap_seed_case "N='\$(mktemp)'" 1 'scripts/a.sh' \
+  'a single-quoted spelling, which makes no file and seeds nothing'
+temp_trap_seed_case "N=\$'\$(mktemp)'" 1 'scripts/a.sh' \
+  'an ANSI-C quoted spelling, which makes no file and seeds nothing'
+
 # ---------------------------------------------------------------------------
 # the directories the whole run requires: a walk guarded on a directory that
 # has moved grades nothing and says nothing, so the run reports on rules it
@@ -1259,8 +1328,12 @@ expect_required() {
   desc="$3"
   out=$(cd "$CASE" && bash "$CHECKER" 2>&1)
   rc=$?
+  # both required arms read: the directory verdict says `x/ directory missing`
+  # and the file one says `README.md missing`, and a harvest that takes only
+  # the first can never grade the second
   got=$(printf '%s\n' "$out" \
-    | sed -n 's/^STYLE FAIL: \(.*\) directory missing$/\1/p' \
+    | sed -n -e 's/^STYLE FAIL: \(.*\) directory missing$/\1/p' \
+      -e 's/^STYLE FAIL: \([^ ]*\) missing$/\1/p' \
     | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
   if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
     printf 'ok %s - %s\n' "$n" "$desc"
@@ -1282,6 +1355,14 @@ mkdir -p "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" "$CASE/docs"
 : > "$CASE/README.md"
 expect_required 1 'crates/' \
   'the same verdict for the sibling directory the run has always failed closed on'
+
+# The file arm, which the two cases above cannot reach: each plants a README.md
+# so that the three walks behind `[ -f README.md ]` are the only ones the arm
+# guards, and a root with every directory and no page is what grades it.
+new_required_case
+mkdir -p "$CASE/crates" "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" "$CASE/docs"
+expect_required 1 'README.md' \
+  'a run from a root whose README.md has moved, which the three walks behind it pass silently'
 
 # ---------------------------------------------------------------------------
 # a mode handler reached by a relative path: the handlers cd into the root
@@ -1496,10 +1577,21 @@ expect_pin 'a suffix-less shebang file reached by the comment rules, the userlan
 # added behind either is fail-open the moment it is written, and the guard
 # is what a reader adds without thinking about the else.
 new_pin_case
-guarded=$( {
-  grep -oE '\[ -[df] [A-Za-z0-9_/.-]+ \]' "$CHECKER" | awk '{ print $3 }'
-  sed -n 's/^for dir in \(.*\); do$/\1/p' "$CHECKER" | tr ' ' '\n'
-} | LC_ALL=C sort -u)
+# Every guard spelling rather than the two the checker happens to write today:
+# `[ -e ]`, `[ -r ]`, `[ -s ]`, a `[[ ... ]]` and a bracket-free `test -f` all
+# guard a walk the same way and each is fail-open the moment it is written, so
+# the harvest that has to see the next one is the one that sees them all.
+# command position, so `cargo test -p view-core` is not read as a guard on a
+# directory named view-core
+TEST_GUARD='((^|[;&|(])[[:space:]]*|(^|[[:space:]])(if|then|do|else|elif|while|until|!)[[:space:]]+)test[[:space:]]+-[a-zA-Z][[:space:]]+[A-Za-z0-9_/.-]+'
+guarded_paths() {
+  {
+    grep -oE '\[\[? -[a-zA-Z] [A-Za-z0-9_/.-]+ \]\]?' "$1" | awk '{ print $3 }'
+    grep -oE "$TEST_GUARD" "$1" | awk '{ print $NF }'
+    sed -n 's/^for dir in \(.*\); do$/\1/p' "$1" | tr ' ' '\n'
+  } | LC_ALL=C sort -u
+}
+guarded=$(guarded_paths "$CHECKER")
 # `-f` beside `-d`, and both required lists read: the fail-open a guard with
 # no else leaves is the same one whether the walk is guarded on a directory
 # or on a page, and a pin that greps only `-d` can never see the second.
@@ -1526,6 +1618,32 @@ if [ -z "$required" ]; then
   unrequired=$(printf '%s\nthe run requires no directory at all\n' "$unrequired")
 fi
 expect_pin 'every path a walk is guarded on named in one of the run required lists' "$unrequired"
+
+# The harvest over one planted file per spelling, because the checker writes
+# two of them today and the pin is worth what it would see in the next one.
+# `cargo test -p` sits there too: a walk is guarded by `test` in command
+# position and by nothing else.
+new_pin_case
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'if [ -e alpha ]; then :; fi\n'
+  printf 'if [ -f bravo ]; then :; fi\n'
+  printf 'if [ -d charlie ]; then :; fi\n'
+  printf 'if [ -r delta ]; then :; fi\n'
+  printf 'if [ -s echoed ]; then :; fi\n'
+  printf 'if [[ -d foxtrot ]]; then :; fi\n'
+  printf 'if test -f golf; then :; fi\n'
+  printf 'for dir in hotel india; do\n'
+  printf '  :\n'
+  printf 'done\n'
+  printf 'cargo test -p juliet\n'
+} > "$CASE/guards.sh"
+spellings=$(guarded_paths "$CASE/guards.sh" | tr '\n' ' ' | sed 's/ *$//')
+missed=""
+if [ "$spellings" != 'alpha bravo charlie delta echoed foxtrot golf hotel india' ]; then
+  missed="the guard harvest answered [$spellings]"
+fi
+expect_pin 'every guard spelling harvested, and a cargo test -p read as none' "$missed"
 
 # The wrapped-opening carve-out, derived by the walk and printed rather than
 # written into the header by hand. A re-wrapped signature is what used to

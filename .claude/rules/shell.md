@@ -135,9 +135,18 @@ aborts the exit path on it, so the name the trap reads is a script global.
 
 `check_temp_traps` in `scripts/check-style.sh` walks the shebang population
 below for a `mktemp`, and the pairing it requires is an armed `EXIT` trap
-whose handler names one of the variables a `mktemp` path went into --
+whose handler *removes* one of the variables a `mktemp` path went into --
 resolved through the function the handler names, since half of these scripts
-write the removal in a `cleanup()`. Two spellings pass a walk that only asks
+write the removal in a `cleanup()`. Removes and not merely names: a handler
+that prints an accumulator (`log="$log made $ROOT"`, `echo "$log"`) reads as a
+pairing to a walk asking only whether the name appears, and the root is never
+removed. The names a removal reaches are those on a line running `rm`, plus
+the list a removed loop variable was bound from, which is how every
+array-of-roots cleanup here is written. A `mktemp` seeds through every quoting
+that still expands -- `$(mktemp)`, `"$(mktemp)"` and `"'$(mktemp)'"`, whose
+single quotes sit inside the double ones and quote nothing -- and through none
+that does not: `'$(mktemp)'` and `$'$(mktemp)'` are literal text and make no
+file. One case per shape. Two spellings pass a walk that only asks
 for the word `trap`: `trap - EXIT`, which clears the handler rather than
 arming one, and a trap that reaps a child and removes nothing. Both are
 cased, red, at the end of `scripts/check-style-cases.sh`, beside the
@@ -152,9 +161,12 @@ by lowercased name instead reads `TMP=/var/cache/keepme` as the removal for
 `tmp=$(mktemp)`, which passes a leak in silence -- that pair is cased, red.
 An assignment that is not an append is not a holder: `other=$ROOT/sub` names
 a path inside the temp root and removing it removes nothing of the root. A
-handler body ends at a brace on the function header's own indentation, never
-at the first indented one, because a `{ ...; } >&2` group inside a `cleanup`
-otherwise ends the body early and the removal below it is never read. The
+handler body ends at the brace that closes the function, counted by depth over
+the body with quoted and commented braces ignored and here-doc bodies skipped,
+never at an indentation: a `{ ...; } >&2` group written under the header
+indentation, and a JSON here-doc holding a `}` in column one, each end the body
+early under an indentation rule and the removal below is never read. Both
+shapes are cased, green. The
 population
 and not `scripts/*.sh`: that glob reaches neither `scripts/acceptance/` nor a
 file with no suffix, and the first script it missed was making a temp
@@ -168,20 +180,40 @@ fail-open: the run passes having graded nothing, and reports on rules it
 never reached. The run therefore names every guarded directory in one
 `for required in ...` list and every guarded file in `for required_file in
 ...` beside it, and fails closed on each; a pin at the end of
-`scripts/check-style-cases.sh` walks the `[ -d ]` and `[ -f ]` guards in the
-checker under test and reddens on the first one missing from either list --
-so the next walk added behind an `if [ -d x ]` or an `if [ -f x.md ]` trips
-there rather than shipping silent.
+`scripts/check-style-cases.sh` walks every guard spelling in the checker under
+test -- `[ -x PATH ]` for any test letter, the `[[ ... ]]` form and a
+bracket-free `test -x PATH` in command position -- and reddens on the first
+path missing from either list, so the next walk added behind any of them trips
+there rather than shipping silent. A planted file carrying one guard per
+spelling grades the harvest itself, `cargo test -p name` among them, which is
+`test` in argument position and no guard at all.
 
 The same shape in one line, `[ -d docs ] && targets="$targets docs"`, is safe
-where the population writes it and unsafe in one position. Mid-body under
-`set -e` it does what it reads as: the failing command is the test, which
-precedes the final `&&`, so errexit is suppressed and the run continues with
-`targets` unset. As the last command of a function or of the script it is a
-bug -- the list's status is then the function's, and a missing directory
-returns 1 to a caller reading that as a failure. Nothing in `scripts/` is in
-that position. Write it `if [ -d docs ]; then ... fi` anyway, because which
-of the two a reader is looking at depends on what follows the line rather
+where the population writes it and unsafe wherever its status becomes a
+command's status. Mid-body under `set -e` it does what it reads as: the
+failing command is the test, which precedes the final `&&`, so errexit is
+suppressed and the run continues with `targets` unset. Written last, the
+list's status of 1 becomes the status of whatever ends with it, and what
+happens next depends on which construct that is. Observed under bash 5.3.9,
+each line run with `set -euo pipefail`:
+
+| written last in | what the run does |
+|---|---|
+| the script | exits 1 |
+| a function (`f() { … }; f; echo S`) | exits 1, `S` unprinted |
+| a subshell in a list (`( … ); echo S`) | exits 1, `S` unprinted |
+| a command substitution (`x=$(f)`) | exits 1 -- the assignment takes what `f` returned |
+| a brace group (`{ … }; echo S`) | carries status 1, prints `S`, does not exit |
+| a loop body (`for i in 1; do … done; echo S`) | carries status 1, prints `S`, does not exit |
+
+The last two inherit the suppression from the list inside them, so only their
+status moves; the first four abort. A missing directory then returns 1 to a
+caller reading it as a failure. The population writes the shape mid-body and
+as the last command of a loop body (`[ -n "$root" ] && rm -rf "$root"` in the
+acceptance cleanups), both of which only carry the status; nothing in
+`scripts/` writes it last in a function, a subshell, a command substitution or
+the script. Write it `if [ -d docs ]; then ... fi` anyway, because which of
+the positions a reader is looking at depends on what follows the line rather
 than on the line.
 
 ## A symbolic link a script makes is written `ln -sn`
