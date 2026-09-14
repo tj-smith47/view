@@ -76,11 +76,13 @@ SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else|
 # rather than twice. A `<<` opens nothing inside a quoted string, inside an
 # ANSI-C string past an escaped quote, past the `#` that starts a trailing
 # comment, or inside `(( ))`, where it is a left shift and the operand after
-# it is a number; `<<<` is a here-string, one line of data with no body. The
-# blanks the shell allows between the operator and its word are skipped, so
-# `cat << TAG` opens the body `cat <<TAG` opens: read as no operator at all,
-# the body under it is scanned as commands, which is the direction that
-# hides findings behind text no shell ever runs.
+# it is a number. A `<<<` here-string opens none either: the tag scan below
+# takes word characters only and the third `<` is not one, so the line
+# carries its data and no body. The blanks the shell allows between the
+# operator and its word are skipped, so `cat << TAG` opens the body
+# `cat <<TAG` opens: read as no operator at all, the body under it is
+# scanned as commands, which is the direction that hides findings behind
+# text no shell ever runs.
 # shellcheck disable=SC2034
 SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
   out = ""
@@ -110,7 +112,6 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out,
     if (c != "<" || substr(line, i + 1, 1) != "<") { i += 1; continue }
     if (adepth > 0) { i += 2; continue }
     rest = substr(line, i + 2)
-    if (substr(rest, 1, 1) == "<") { i += 3; continue }
     dash = ""
     if (substr(rest, 1, 1) == "-") { dash = "-"; rest = substr(rest, 2) }
     sub(/^[[:space:]]+/, "", rest)

@@ -1521,34 +1521,55 @@ if [ -z "$caught" ]; then
 fi
 report 'the comment walk reads the inner level of a nested substitution' "$missed"
 
+# The two line shapes where the reader's quote pass and the shared tokenizer
+# disagree, which is what tells the halves of that boundary apart: a string
+# closing on the line that carries `cat <<EOF` is an opener to anything
+# reading the raw line and none to a reader that knows the quote opened two
+# lines up, and a left shift whose operand is a name is a tag to a regex and
+# none to the tokenizer's arithmetic branch. Either read swallows the comment
+# under it. Without these two, a matrix reddens only when the tokenizer and
+# the feed it is handed are wrong together, and grades neither alone.
+printf '%s\n' '#!/usr/bin/env bash' "msg='a string that opens here" "cat <<EOF'" \
+  'x=$(' '# a comment with a ) paren' 'echo hi' ')' 'if (( 1 << n )); then :; fi' \
+  'y=$(' '# another comment with a ) paren' 'echo hi' ')' > "$planted"
+caught=$(substitution_comments "$planted" 2> /dev/null | wc -l | tr -d ' ')
+missed=""
+if [ "$caught" != "2" ]; then
+  missed=$(printf '2 comments planted under the two disagreeing feeds, %s read back\n%s\n' \
+    "$caught" "$(substitution_comments "$planted" 2> /dev/null)")
+fi
+report 'the comment walk reads the lines under a tag only a raw line or a regex opens' "$missed"
+
 # What the walk read, printed rather than asserted in prose: the anchor it
 # replaces entered 3 substitutions in the whole tree, so a floor is what
 # tells a later narrowing apart from a green run.
 #
-# Each floor grades the number it was taken from. The two that can fall are
-# the multi-line opens and the lines read inside one: a walk that stops
-# entering the spelling this population writes loses the first, and a reader
-# whose quote and paren state stops carrying across lines loses the second
-# outright, while its count of opens per line goes up rather than down. The
-# total entered is printed beside them and graded by neither, because a
-# narrowing that reddens nothing here would show in it only as a smaller
-# number with no floor it came from.
+# One floor, on the lines read inside an open substitution and graded as a
+# ratio to the substitutions entered. That is the number the regression this
+# case exists for takes to zero: a reader whose quote and paren state stops
+# carrying across lines reads no line inside one, while its count of opens
+# per line goes up rather than down, so a floor on those opens is inert
+# against it. A ratio rather than a count because both numbers are sums over
+# files: an absolute grades the size of the population and falls on an
+# ordinary deletion, where a ratio moves numerator and denominator together.
+# The opens spanning more than one line and the total entered are printed
+# beside the ratio and graded on their own by neither.
 if [ -n "$empty" ]; then
   short="$empty"
 else
   printf '# %s\n' "$(cat "$subcount")"
-  spanned=$(sed -n 's/^substitutions: [0-9]* entered, \([0-9]*\) .*/\1/p' "$subcount")
+  entered=$(sed -n 's/^substitutions: \([0-9]*\) entered.*/\1/p' "$subcount")
   carried=$(sed -n 's/^substitutions: .* \([0-9]*\) lines read inside one$/\1/p' "$subcount")
-  short=""
-  if [ "${spanned:-0}" -lt 90 ]; then
-    short="the walk found ${spanned:-0} substitutions spanning more than one line, and the tree writes at least 90"
+  ratio=0
+  if [ "${entered:-0}" -gt 0 ]; then
+    ratio=$(( ${carried:-0} * 100 / entered ))
   fi
-  if [ "${carried:-0}" -lt 800 ]; then
-    short=$(printf '%s%s\n' "${short:+$short
-}" "the walk read ${carried:-0} lines inside an open substitution, and the tree carries at least 800")
+  short=""
+  if [ "$ratio" -lt 50 ]; then
+    short="the walk read ${carried:-0} lines inside an open substitution against ${entered:-0} entered, $ratio per 100 opens, and the tree reads at least 50"
   fi
 fi
-report 'the comment walk enters the multi-line substitutions the population writes and carries them across the lines they span' "$short"
+report 'the comment walk carries a substitution across the lines it spans, reading at least one line inside every two it enters' "$short"
 
 # The grep above reads constructs; it cannot see the shape that made 3.2
 # refuse this very checker -- a case pattern inside a process substitution,

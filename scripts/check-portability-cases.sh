@@ -290,6 +290,23 @@ cat <<-\EOF
 SH
 expect 1 'scripts/case.sh:8:inline' 'the backslash-escaped tag form is a here-doc like the other three'
 
+# the blank the shell allows between the operator and its word, in both
+# spellings: read as no operator, the body under it is scanned as commands
+# and the word classes inside it are reported as live call sites. The tabs
+# below are literal, for the same reason the dashed case above says.
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+cat << EOF
+a word class \bfoo on a =~ line inside a blank-separated body
+EOF
+cat <<-  "EOF"
+	a word class \sbar on a =~ line inside a dashed, blank-separated body
+	EOF
+[[ $x =~ \wbaz ]]
+SH
+expect 1 'scripts/case.sh:8:inline' 'a blank between the operator and its word opens the body the bare spelling opens'
+
 # ---------------------------------------------------------------------------
 # a `<<` the shell does not read as an opener must not be read as one here:
 # treating it as one swallows every line after it, which turns a live finding

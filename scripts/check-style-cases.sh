@@ -1452,6 +1452,20 @@ PLANT
 expect_temp_traps 0 '' \
   'a removal below a backslash-quoted here-doc that terminates on its own tag'
 
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  cat << TAG
+  not a removal
+TAG
+  rm -rf "$X"
+}
+PLANT
+expect_temp_traps 0 '' \
+  'a removal below a blank-separated here-doc that terminates on its own tag'
+
 # The fail-open the same swallow used to open in the other direction: a
 # handler that removes nothing, a tag inside a quoted argument, and a removal
 # in a function the trap never calls. Read as the operator, the tag swallows
@@ -1928,6 +1942,32 @@ if [ "$found" != "2" ]; then
     "$found" "$(flagless_links "$quoted")")
 fi
 expect_pin 'the link walk reads the lines under a tag spelling written in a string' "$missed"
+
+# The two line shapes where the reader's quote pass and the shared tokenizer
+# disagree, which is what tells the halves of that boundary apart: a string
+# closing on the line that carries `cat <<EOF` is an opener to anything
+# reading the raw line and none to a reader that knows the quote opened two
+# lines up, and a left shift whose operand is a name is a tag to a regex and
+# none to the tokenizer's arithmetic branch. Either read swallows the link
+# under it. Without these two, a matrix reddens only when the tokenizer and
+# the feed it is handed are wrong together, and grades neither alone.
+new_pin_case
+disagree="$CASE/disagreeing-feeds.sh"
+{
+  printf '#!/bin/sh\n'
+  printf 'msg=%sa string that opens here\n' "$apos"
+  printf 'cat <<EOF%s\n' "$apos"
+  printf '%s "$a" "$b"\n' "$flagless"
+  printf 'if (( 1 << n )); then :; fi\n'
+  printf '%s "$c" "$d"\n' "$flagless"
+} > "$disagree"
+found=$(flagless_links "$disagree" | wc -l | tr -d ' ')
+missed=""
+if [ "$found" != "2" ]; then
+  missed=$(printf '2 links planted under the two disagreeing feeds, %s read back\n%s\n' \
+    "$found" "$(flagless_links "$disagree")")
+fi
+expect_pin 'the link walk reads the lines under a tag only a raw line or a regex opens' "$missed"
 
 # A file with no suffix carrying a shebang, counted by every consumer of
 # scripts/lib/script-population.sh. Two of them take a scan root and are run

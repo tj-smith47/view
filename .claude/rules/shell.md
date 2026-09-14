@@ -98,12 +98,15 @@ which is an over-read taken on purpose so that nothing assembled in a
 string goes unread. The here-doc half of that state comes from the one
 tokenizer in the tree, `SCRIPT_HEREDOC_AWK` in the same file, which the
 userland scan reads as well: a `<<` inside a quoted argument, past a `#`, or
-inside `(( ))` opens nothing, and a tag that never terminates leaves the rest
-of its file unread rather than scanned as commands. Every spelling of the tag
-opens the same body -- bare, `'TAG'`, `"TAG"`, `\TAG`, `<<-TAG`, and any of
-those with the blank the shell allows between the operator and its word. A
-spelling read as no operator leaves the lines under it scanned as commands,
-which is the direction that hides a finding behind text no shell runs.
+inside `(( ))` opens nothing, a `<<<` here-string opens nothing because the
+tag scan takes word characters only, and a tag that never terminates leaves
+the rest of its file unread by the reader and stops the userland scan with
+`PORTABILITY-SELF-FAIL` rather than narrowing it in silence. Every spelling
+of the tag opens the same body -- bare, `'TAG'`, `"TAG"`, `\TAG`, `<<-TAG`,
+and any of those with the blank the shell allows between the operator and
+its word. A spelling read as no operator leaves the lines under it scanned
+as commands, which is the direction that hides a finding behind text no
+shell runs.
 
 The construct list is itself graded, by three planted spellings: the direct
 and the indirect substitution, each of which it must refuse, and an anchored
