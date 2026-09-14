@@ -1720,6 +1720,30 @@ quiet="$CASE/quiet.sh"
 } > "$quiet"
 expect_pin 'the link walk grades no comment and no here-doc body' "$(flagless_links "$quiet")"
 
+# The same boundary read the other way: a `<<TAG` inside a quoted argument is
+# text and opens no body, so the lines under it are commands still. Read as an
+# operator it blinds the walk from there to the end of that file, which is the
+# direction no walk over this population may fail in -- and the two spellings
+# planted here are the two this file and its drift sibling write themselves,
+# one in an argument and one in a `printf` format.
+new_pin_case
+quoted="$CASE/quoted-tag.sh"
+apos="'"
+{
+  printf '#!/bin/sh\n'
+  printf 'msg=%scat <<EOF%s\n' "$apos" "$apos"
+  printf '%s "$a" "$b"\n' "$flagless"
+  printf 'printf %scat <<EOF\\n%s\n' "$apos" "$apos"
+  printf '%s "$c" "$d"\n' "$flagless"
+} > "$quoted"
+found=$(flagless_links "$quoted" | wc -l | tr -d ' ')
+missed=""
+if [ "$found" != "2" ]; then
+  missed=$(printf '2 links planted under a quoted tag spelling, %s read back\n%s\n' \
+    "$found" "$(flagless_links "$quoted")")
+fi
+expect_pin 'the link walk reads the lines under a tag spelling written in a string' "$missed"
+
 # A file with no suffix carrying a shebang, counted by every consumer of
 # scripts/lib/script-population.sh. Two of them take a scan root and are run
 # against the fixture; the third, check-budget-drift-cases.sh, grades the

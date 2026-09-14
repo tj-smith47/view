@@ -1393,6 +1393,19 @@ report 'the split-case scan reads no case word written as prose in a string' "$(
 printf '%s\n' '#!/usr/bin/env bash' "# a note; $header" 'cat <<EOF' "$header" 'EOF' 'echo done' > "$planted"
 report 'the split-case scan grades no comment and no here-doc body' "$(split_case_headers "$planted")"
 
+# The same boundary read the other way: a `<<TAG` written inside a quoted
+# argument is text and opens no body, so the lines under it are still
+# commands. Read as an operator it would blind this scan from there to the end
+# of that file, which is the direction no scan over this population may fail
+# in -- and this file writes such a spelling itself, in the fixture above.
+printf '%s\n' '#!/usr/bin/env bash' "msg='cat <<EOF'" "$header" '$x' '" in' '  *) ;;' 'esac' > "$planted"
+caught=$(split_case_headers "$planted")
+missed=""
+if [ -z "$caught" ]; then
+  missed="the split header under a quoted tag spelling went unrefused"
+fi
+report 'the split-case scan reads the lines under a tag spelling written in a string' "$missed"
+
 # The second instance of the same defect, and the one with a spelling a
 # reader can see: a comment inside a multi-line $( ) or <( ). 3.2 is already
 # counting parens and quotes there and knows nothing about the `#`, so a
@@ -1414,6 +1427,7 @@ substitution_comments() {
     {
       script_code_scan($0)
       if (WAS == 0 && DEPTH > 0) { spanning++ }
+      if (WAS > 0) { carried++ }
       if (CMT == "" || CMTDEPTH == 0) { next }
       t = CMT
       if (gsub(/\(/, "(", t) != gsub(/\)/, ")", t) \
@@ -1422,8 +1436,8 @@ substitution_comments() {
       }
     }
     END {
-      printf "substitutions: %d entered, %d spanning more than one line\n", \
-        SUBS, spanning > "/dev/stderr"
+      printf "substitutions: %d entered, %d spanning more than one line, %d lines read inside one\n", \
+        SUBS, spanning, carried > "/dev/stderr"
     }
   ' "$@"
 }
@@ -1470,6 +1484,32 @@ printf '%s\n' '#!/usr/bin/env bash' 'x=$(' '  for l in a b; do' '    echo "$l"' 
 report 'the comment walk leaves a substitution closed on a done or an esac' \
   "$(substitution_comments "$planted" 2> /dev/null)"
 
+# The nesting the reader's header claims over a plain `( )` group inside a
+# substitution: pushed and popped without changing the depth, so the group
+# closing leaves the substitution open and the substitution ends at its own
+# paren. Three comments read it -- one inside the group, one between the two
+# closing parens, and one after both, of which the first two must be refused
+# and the third must not.
+printf '%s\n' '#!/usr/bin/env bash' 'a=$( (' '  # inside the group, and it carries a ) paren' \
+  '  echo hi' ')' '  # inside the substitution still, and it carries a ) paren' ')' \
+  '# outside both, carrying a ) paren of its own' > "$planted"
+caught=$(substitution_comments "$planted" 2> /dev/null)
+missed=""
+case "$caught" in
+  (*":3: "*) ;;
+  (*) missed="the comment inside the subshell group went unrefused" ;;
+esac
+case "$caught" in
+  (*":6: "*) ;;
+  (*) missed=$(printf '%s%s\n' "${missed:+$missed
+}" "the group closing ended the substitution that held it") ;;
+esac
+case "$caught" in
+  (*":8: "*) missed=$(printf '%s%s\n' "${missed:+$missed
+}" "the comment after the substitution closed was read as inside it") ;;
+esac
+report 'the reader holds its nesting across a subshell group and closes where the substitution ends' "$missed"
+
 # Two levels deep, with the defect on the inner one, which the boolean the
 # walk used to carry could not tell from the outer.
 printf '%s\n' '#!/usr/bin/env bash' 'outer=$(grep foo bar | sed "$(printf %s p |' \
@@ -1484,17 +1524,31 @@ report 'the comment walk reads the inner level of a nested substitution' "$misse
 # What the walk read, printed rather than asserted in prose: the anchor it
 # replaces entered 3 substitutions in the whole tree, so a floor is what
 # tells a later narrowing apart from a green run.
+#
+# Each floor grades the number it was taken from. The two that can fall are
+# the multi-line opens and the lines read inside one: a walk that stops
+# entering the spelling this population writes loses the first, and a reader
+# whose quote and paren state stops carrying across lines loses the second
+# outright, while its count of opens per line goes up rather than down. The
+# total entered is printed beside them and graded by neither, because a
+# narrowing that reddens nothing here would show in it only as a smaller
+# number with no floor it came from.
 if [ -n "$empty" ]; then
   short="$empty"
 else
   printf '# %s\n' "$(cat "$subcount")"
-  entered=$(sed -n 's/^substitutions: \([0-9]*\) .*/\1/p' "$subcount")
+  spanned=$(sed -n 's/^substitutions: [0-9]* entered, \([0-9]*\) .*/\1/p' "$subcount")
+  carried=$(sed -n 's/^substitutions: .* \([0-9]*\) lines read inside one$/\1/p' "$subcount")
   short=""
-  if [ "${entered:-0}" -lt 180 ]; then
-    short="the walk entered ${entered:-0} substitutions, and the tree carries at least 180"
+  if [ "${spanned:-0}" -lt 90 ]; then
+    short="the walk found ${spanned:-0} substitutions spanning more than one line, and the tree writes at least 90"
+  fi
+  if [ "${carried:-0}" -lt 800 ]; then
+    short=$(printf '%s%s\n' "${short:+$short
+}" "the walk read ${carried:-0} lines inside an open substitution, and the tree carries at least 800")
   fi
 fi
-report 'the comment walk enters the substitutions the population actually writes' "$short"
+report 'the comment walk enters the multi-line substitutions the population writes and carries them across the lines they span' "$short"
 
 # The grep above reads constructs; it cannot see the shape that made 3.2
 # refuse this very checker -- a case pattern inside a process substitution,

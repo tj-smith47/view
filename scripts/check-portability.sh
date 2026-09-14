@@ -59,67 +59,15 @@ fail=0
 SEP=$'\034'
 
 # Rules shared by both passes: drop whole-line comments, and drop the bodies
-# of the here-docs a line opens. Every `<<TAG` on the line opens one and their
-# bodies arrive in the order the tags were written, so a queue tracks them
-# rather than a single tag. A `<<` reached inside a quoted string, or past the
-# `#` that starts a trailing comment, is not an opener at all: reading one as
-# an opener swallows the remainder of the file as data and hides the real call
-# sites behind it, which is the one direction this scan must never fail in.
-# `<<<` is a here-string -- one line of data, no body to skip -- and a bare
-# `<<` yields an empty tag, which is no here-doc either. Inside `(( ))` or
-# `$(( ))` a `<<` is a left shift and its operand is a number, not a tag, so
-# arithmetic depth is tracked and openers are not looked for below it. An
-# ANSI-C string (`$'...'`) escapes with backslashes the way a double-quoted
-# one does, so a `\'` in it does not end the string and a tag spelling after
-# that quote is still inside it. The introducing line still gets scanned; only
-# the body and its terminator are dropped. A tag still open when a file ends
-# means this tokenizer read something as an opener that the shell does not, so
-# it stops the run loudly instead of narrowing the scan in silence.
-SKIP='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
-  out = ""
-  n = length(line)
-  q = ""
-  ansi = 0
-  adepth = 0
-  i = 1
-  while (i <= n) {
-    c = substr(line, i, 1)
-    if (q != "") {
-      if ((q == DQ || ansi) && c == "\\") { i += 2; continue }
-      if (c == q) { q = ""; ansi = 0 }
-      i += 1
-      continue
-    }
-    if (c == "\\") { i += 2; continue }
-    if (c == SQ || c == DQ) {
-      q = c
-      ansi = (c == SQ && i > 1 && substr(line, i - 1, 1) == "$")
-      i += 1
-      continue
-    }
-    if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;&|(]/)) break
-    if (c == "(" && substr(line, i + 1, 1) == "(") { adepth += 1; i += 2; continue }
-    if (c == ")" && substr(line, i + 1, 1) == ")" && adepth > 0) { adepth -= 1; i += 2; continue }
-    if (c != "<" || substr(line, i + 1, 1) != "<") { i += 1; continue }
-    if (adepth > 0) { i += 2; continue }
-    rest = substr(line, i + 2)
-    if (substr(rest, 1, 1) == "<") { i += 3; continue }
-    dash = ""
-    if (substr(rest, 1, 1) == "-") { dash = "-"; rest = substr(rest, 2) }
-    qc = substr(rest, 1, 1)
-    if (qc == SQ || qc == DQ || qc == "\\") rest = substr(rest, 2)
-    t = ""
-    while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_]/) {
-      t = t substr(rest, 1, 1)
-      rest = substr(rest, 2)
-    }
-    if (t != "" && (qc == SQ || qc == DQ) && substr(rest, 1, 1) == qc) rest = substr(rest, 2)
-    if (t != "") out = out dash t "\n"
-    i = n - length(rest) + 1
-  }
-  return out
-}
-function unterminated() {
+# of the here-docs a line opens. The tags a line opens come from the reader
+# beside the population, which is where the one here-doc tokenizer in this
+# tree lives; their bodies arrive in the order the tags were written, so a
+# queue tracks them rather than a single tag. The introducing line still gets
+# scanned; only the body and its terminator are dropped. A tag still open when
+# a file ends means that tokenizer read something as an opener that the shell
+# does not, so it stops the run loudly instead of narrowing the scan in
+# silence.
+SKIP="$SCRIPT_HEREDOC_AWK"'function unterminated() {
   printf("PORTABILITY-SELF-FAIL: %s opens a here-doc <<%s that no later line closes; the scan would read the rest of that file as data\n", opened[qh], queue[qh]) > "/dev/stderr"
   exit 2
 }
@@ -149,7 +97,7 @@ END { if (qn >= qh) unterminated() }
 '
 
 # every line the shell would run, numbered
-code() { awk -v SQ="'" -v DQ='"' "$SKIP"'{ print FNR ":" $0 }' "$1"; }
+code() { awk -v SQ="'" "$SKIP"'{ print FNR ":" $0 }' "$1"; }
 
 report() {
   printf 'PORTABILITY FAIL: %s -- %s\n' "$1" "$2"
@@ -220,7 +168,7 @@ done
 # every function in this tree is written; a one-liner closes on its own
 # line.
 annotate() {
-  awk -v SQ="'" -v DQ='"' -v S="$SEP" "$SKIP"'
+  awk -v SQ="'" -v S="$SEP" "$SKIP"'
     {
       if (fn == "" && match($0, /^[A-Za-z_][A-Za-z0-9_-]*\(\)[[:space:]]*\{/)) {
         name = $0; sub(/\(\).*/, "", name)

@@ -85,19 +85,28 @@ Both reading legs take their line from one reader in
 nesting state across lines the way 3.2 carries them. A word in a comment or
 in a here-doc body is not a command to it; a word in a string literal is,
 which is an over-read taken on purpose so that nothing assembled in a
-string goes unread.
+string goes unread. The here-doc half of that state comes from the one
+tokenizer in the tree, `SCRIPT_HEREDOC_AWK` in the same file, which the
+userland scan reads as well: a `<<` inside a quoted argument, past a `#`, or
+inside `(( ))` opens nothing, and a tag that never terminates leaves the rest
+of its file unread rather than scanned as commands.
 
 The construct list is itself graded, by three planted spellings: the direct
 and the indirect substitution, each of which it must refuse, and an anchored
-one, which it must let through. The split `case` scan is graded by three: a
+one, which it must let through. The split `case` scan is graded by six: a
 header whose word runs onto the next line, the same header written after a
-brace, and a comment and a here-doc body it must leave alone. The comment
-walk is graded by five: a paren in a substitution opened at end of line, an
-apostrophe in one opened with content still on the line, a substitution
-closed on a `done)` whose later comments it must not touch, a nested pair
-with the defect on the inner level, and a floor on how many substitutions it
-entered -- the line anchor these replace entered three in the whole tree,
-which reads the same as a clean run.
+brace, the same after an `if`, the word written as prose in a string, a
+comment and a here-doc body it must leave alone, and the lines under a `<<`
+spelling written inside a string, which it must read. The comment walk is graded by six: a paren in a substitution
+opened at end of line, an apostrophe in one opened with content still on the
+line, a substitution closed on a `done)` whose later comments it must not
+touch, a nested pair with the defect on the inner level, a plain `( )` group
+inside a substitution whose closing paren must not end it, and two floors --
+on the substitutions that span more than one line and on the lines read while
+one is open. The floors grade the numbers they were taken from: the line
+anchor these replace entered three substitutions in the whole tree, and a
+reader that stopped carrying state across lines would read none of those
+lines while reporting more opens than before.
 
 The population is the directory rather than the
 scripts `Taskfile.yml` names, because the release path runs

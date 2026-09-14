@@ -64,6 +64,63 @@ script_population_read() {
 # shellcheck disable=SC2034
 SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else)[[:space:]]+)'
 
+# The here-doc tokenizer both scans over this population share: the tags a
+# line opens, in the order their bodies arrive, one per line of the returned
+# string and prefixed `-` where the terminator may be tab-indented. Reading a
+# `<<` the shell does not read as an opener swallows the rest of that file as
+# data and hides every finding behind it, which is the one direction a scan
+# over this population may never fail in, so the boundary is drawn once here
+# rather than twice. A `<<` opens nothing inside a quoted string, inside an
+# ANSI-C string past an escaped quote, past the `#` that starts a trailing
+# comment, or inside `(( ))`, where it is a left shift and the operand after
+# it is a number; `<<<` is a here-string, one line of data with no body.
+# shellcheck disable=SC2034
+SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
+  out = ""
+  n = length(line)
+  q = ""
+  ansi = 0
+  adepth = 0
+  i = 1
+  while (i <= n) {
+    c = substr(line, i, 1)
+    if (q != "") {
+      if ((q == "\"" || ansi) && c == "\\") { i += 2; continue }
+      if (c == q) { q = ""; ansi = 0 }
+      i += 1
+      continue
+    }
+    if (c == "\\") { i += 2; continue }
+    if (c == SQ || c == "\"") {
+      q = c
+      ansi = (c == SQ && i > 1 && substr(line, i - 1, 1) == "$")
+      i += 1
+      continue
+    }
+    if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;&|(]/)) break
+    if (c == "(" && substr(line, i + 1, 1) == "(") { adepth += 1; i += 2; continue }
+    if (c == ")" && substr(line, i + 1, 1) == ")" && adepth > 0) { adepth -= 1; i += 2; continue }
+    if (c != "<" || substr(line, i + 1, 1) != "<") { i += 1; continue }
+    if (adepth > 0) { i += 2; continue }
+    rest = substr(line, i + 2)
+    if (substr(rest, 1, 1) == "<") { i += 3; continue }
+    dash = ""
+    if (substr(rest, 1, 1) == "-") { dash = "-"; rest = substr(rest, 2) }
+    qc = substr(rest, 1, 1)
+    if (qc == SQ || qc == "\"" || qc == "\\") rest = substr(rest, 2)
+    t = ""
+    while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_]/) {
+      t = t substr(rest, 1, 1)
+      rest = substr(rest, 2)
+    }
+    if (t != "" && (qc == SQ || qc == "\"") && substr(rest, 1, 1) == qc) rest = substr(rest, 2)
+    if (t != "") out = out dash t "\n"
+    i = n - length(rest) + 1
+  }
+  return out
+}
+'
+
 # The reader every walk over that population shares: an awk prelude that
 # turns a line into the text a shell reads as commands. Three gates grade a
 # word (`ln`, `case`) or a comment by where it sits, and each of them drew
@@ -86,21 +143,22 @@ SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else)
 # The ceilings, both deliberate. A string literal is command text to this
 # reader once a substitution inside it is entered, so a word assembled in one
 # is graded: the alternative blinds every walk to a generator, and the
-# population carries no such string. A `(` that opens a plain subshell is not
-# pushed while its `)` pops, so `$( ( x ) )` ends early; the population writes
-# none. A `(` that opens a subshell or gives a `case` pattern its leading
-# paren is pushed and popped without changing the nesting, so the pattern the
-# page mandates stays inside its substitution; a pattern written without that
-# paren pops the substitution, which is the miscount 3.2 itself makes.
+# population carries no such string. A `(` that opens a subshell or gives a
+# `case` pattern its leading paren is pushed and popped without changing the
+# nesting, so the pattern the page mandates stays inside its substitution and
+# a plain `$( ( x ) )` holds its nesting across the group; a pattern written
+# without that paren pops the substitution, which is the miscount 3.2 itself
+# makes.
 #
-# A `<<TAG` is the here-doc operator only where BARE carries it, so a tag
+# The here-doc operator is read by the tokenizer above, over BARE, so a tag
 # inside a quoted argument (`printf '%s' "<<x"`) opens nothing and the line
-# after it is still code. A tag that is the operator and never terminates
-# leaves CODE empty to the end of the file: every walk then reads no code
-# there, which is the fail-closed half -- a harvest stops rather than
-# running on into text the handler never runs.
+# after it is still code, and the tags a line opens are queued in the order
+# their bodies arrive. A tag that is the operator and never terminates leaves
+# CODE empty to the end of the file: every walk then reads no code there,
+# which is the fail-closed half -- a harvest stops rather than running on
+# into text the handler never runs.
 # shellcheck disable=SC2034
-SCRIPT_CODE_AWK='
+SCRIPT_CODE_AWK="$SCRIPT_HEREDOC_AWK"'
   FNR == 1 { DEPTH = 0; STACK = ""; HD = "" }
   function script_code_top() {
     return (STACK == "") ? "" : substr(STACK, length(STACK), 1)
@@ -114,26 +172,15 @@ SCRIPT_CODE_AWK='
     STACK = substr(STACK, 1, length(STACK) - 1)
     if (c == "(") { DEPTH-- }
   }
-  function script_code_heredoc(line,   t) {
-    t = line
-    gsub(/<<</, "", t)
-    if (!match(t, /<<-?[[:space:]]*["]?[A-Za-z_][A-Za-z0-9_]*/) &&
-      !match(t, "<<-?[[:space:]]*" SQ "?[A-Za-z_][A-Za-z0-9_]*")) { return "" }
-    t = substr(t, RSTART, RLENGTH)
-    HDDASH = (t ~ /^<<-/)
-    sub(/^<<-?[[:space:]]*/, "", t)
-    sub(/^["]/, "", t)
-    sub("^" SQ, "", t)
-    return t
+  function script_code_body(line,   cur, n) {
+    n = index(HD, "\n")
+    cur = substr(HD, 1, n - 1)
+    if (substr(cur, 1, 1) == "-") { sub(/^\t+/, "", line); cur = substr(cur, 2) }
+    if (line == cur) { HD = substr(HD, n + 1) }
   }
   function script_code_scan(line,   i, n, c, prev, top, j) {
     CODE = ""; BARE = ""; CMT = ""; CMTDEPTH = 0; WAS = DEPTH
-    if (HD != "") {
-      if ((HDDASH && line ~ "^[[:space:]]*" HD "[[:space:]]*$") || line == HD) {
-        HD = ""
-      }
-      return
-    }
+    if (HD != "") { script_code_body(line); return }
     n = length(line); prev = ""
     for (i = 1; i <= n; i++) {
       c = substr(line, i, 1)
@@ -162,17 +209,20 @@ SCRIPT_CODE_AWK='
         CMTDEPTH = DEPTH
         break
       }
-      BARE = BARE c
-      if (c == "\\") { i++; prev = ""; continue }
+      if (c == "\\") { BARE = BARE c; i++; prev = ""; continue }
       if (c == "\"" || c == SQ) {
         # a here-doc tag is quoted as often as it is bare, and quoting it
         # disables expansion in the body rather than making the `<<` text, so
-        # the tag is read into BARE here instead of being skipped with every
-        # other quoted word. It closes on its own line or it is no tag.
-        if (substr(BARE, 1, length(BARE) - 1) ~ /<<-?[[:space:]]*$/) {
+        # the tag is read into BARE with its quotes instead of being skipped
+        # with every other quoted word. It closes on its own line or it is no
+        # tag. The quote that opens an ordinary word is not read into BARE at
+        # all: the tokenizer below reads BARE as a line of its own, and an
+        # opening quote with no partner there would put the `<<` after it
+        # inside a string that never ends.
+        if (BARE ~ /<<-?[[:space:]]*$/) {
           j = index(substr(line, i + 1), c)
           if (j > 0) {
-            BARE = BARE substr(line, i + 1, j)
+            BARE = BARE c substr(line, i + 1, j)
             i = i + j
             prev = c
             continue
@@ -180,6 +230,7 @@ SCRIPT_CODE_AWK='
         }
         script_code_push(c); prev = c; continue
       }
+      BARE = BARE c
       if (c == "(") {
         if (prev == "$" || prev == "<" || prev == ">") {
           script_code_push("("); SUBS++
@@ -193,6 +244,6 @@ SCRIPT_CODE_AWK='
     }
     CODE = (CMT == "") ? line : substr(line, 1, length(line) - length(CMT))
     top = script_code_top()
-    if (top != SQ && top != "\"") { HD = script_code_heredoc(BARE) }
+    if (top != SQ && top != "\"") { HD = tags_of(BARE) }
   }
 '
