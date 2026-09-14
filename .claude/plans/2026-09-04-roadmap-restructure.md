@@ -129,11 +129,25 @@ keymaps, goldens), fable-reviewed, then:
    panes = "auto"          # "auto" | "tiles" | "nvim"
    gaps = true             # false = gapless: frames touch, no outer gap
 
-   [ui.surfaces]           # "overlay" | "windowed", each independent
-   tree = "overlay"
-   palette = "overlay"
-   agent = "overlay"
-   notifications = "overlay"
+   [ui.surfaces.tree]
+   placement = "overlay"   # "overlay" | "windowed", each surface independent
+   anchor    = "left"      # left | right              (sidebar shapes)
+   size      = 30          # percent of columns; alias of [native] tree_width
+
+   [ui.surfaces.agent]
+   placement = "overlay"
+   anchor    = "right"     # left | right
+   size      = 30          # alias of [ai] panel_width
+
+   [ui.surfaces.palette]
+   placement = "overlay"
+   anchor    = "center"    # overlay: center | top | bottom; windowed: top | bottom
+   size      = 40          # percent of rows
+
+   [ui.surfaces.notifications]
+   placement = "overlay"
+   anchor    = "top-right" # overlay: any corner; windowed: left | right (stream), top | bottom (ticker)
+   size      = 30
 
    [keys]
    toggle_gaps = "<leader>ug"
@@ -150,7 +164,15 @@ keymaps, goldens), fable-reviewed, then:
    (focus into it) stops the 4 s transient timeout for as long as it holds
    focus, and `j`/`k`/`G`/`gg`/`y`/`d` behave as in the message history.
    Requires a timestamp on `MessageEntry` (none today), which the history
-   overlay then shows too. Goldens for gapped/gapless and for every surface
+   overlay then shows too. `anchor` is one field with two readings: the
+   float anchor in overlay mode, the tile edge in windowed mode (the
+   existing `Anchor` enum in `native/geometry.rs`). The allowed set is per
+   surface; a value outside it is a startup notice plus the default, never
+   a rejected config. Two sidebars on one edge stack vertically when
+   windowed (tree above agent) and open on top of each other when overlay.
+   `size` means the same percent in both placements, so the cycling key
+   never resizes. `[native] tree_width` and `[ai] panel_width` stay as
+   aliases with a deprecation notice. Goldens for gapped/gapless and for every surface
    in both placements join item 6.
 6. Tier goldens for every tile/pill/float surface at every tier (T24, #13).
 
