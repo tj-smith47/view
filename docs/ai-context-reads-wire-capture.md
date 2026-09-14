@@ -1,14 +1,13 @@
 # Wire capture: the four context-read executors
 
-Captured live against the pinned engine per "capture, never recall." Source
-of truth for `CURRENT_BUFFER_TEXT_CHUNK`, `CURSOR_CONTEXT_CHUNK`,
-`DIAGNOSTIC_ENTRIES_CHUNK`, and `QUICKFIX_ENTRIES_CHUNK` -- the
-`nvim_exec_lua` chunks `EngineHandle::read_current_buffer_text`,
-`read_cursor_context`, `read_diagnostic_entries`, and
-`read_quickfix_entries` issue for `RpcCall::ReadCurrentBufferText`,
-`ReadCursorContext`, `ReadDiagnosticEntries`, and `ReadQuickfixEntries`
-respectively (declared by an earlier task; this task implements their
-engine-side execution).
+Captured live against the pinned engine per "capture, never recall." Source of
+truth for `CURRENT_BUFFER_TEXT_CHUNK`, `CURSOR_CONTEXT_CHUNK`,
+`DIAGNOSTIC_ENTRIES_CHUNK`, and `QUICKFIX_ENTRIES_CHUNK` -- the `nvim_exec_lua`
+chunks `EngineHandle::read_current_buffer_text`, `read_cursor_context`,
+`read_diagnostic_entries`, and `read_quickfix_entries` issue for
+`RpcCall::ReadCurrentBufferText`, `ReadCursorContext`, `ReadDiagnosticEntries`,
+and `ReadQuickfixEntries` respectively (declared by an earlier task; this task
+implements their engine-side execution).
 
 ## Engine identity
 
@@ -23,8 +22,8 @@ Matches `.engine-pin` (`v0.12.4`).
 
 ## Capture method
 
-A standalone Python msgpack-rpc client spawns `nvim --clean --headless
---listen <socket>` with the same hermetic `HOME`/`XDG_*` isolation
+A standalone Python msgpack-rpc client spawns `nvim --clean --headless --listen
+<socket>` with the same hermetic `HOME`/`XDG_*` isolation
 `EngineConfig::isolated()` uses, connects over the unix socket, and issues
 `nvim_exec_lua` requests running the exact chunk text each `nvim_api.rs`
 constant embeds.
@@ -76,12 +75,11 @@ and forward-ordered text (`"hello world"`) in the captures backing
 ## Fix round 1 (review-driven): a charwise selection ending on a multi-byte character
 
 `getpos('.')`'s own byte column is the byte offset of the FIRST byte of the
-character under the cursor, 1-indexed -- not an exclusive end. The
-original chunk passed that raw column straight through as
-`nvim_buf_get_text`'s exclusive end column, which truncates mid-character
-whenever the selection ends on a multi-byte one. Buffer `["a\xe9 bc"]`
-(`"aé bc"`, `é` a 2-byte UTF-8 sequence), `gg0v` then `l` (select `a` and
-extend one char onto `é`):
+character under the cursor, 1-indexed -- not an exclusive end. The original
+chunk passed that raw column straight through as `nvim_buf_get_text`'s exclusive
+end column, which truncates mid-character whenever the selection ends on a
+multi-byte one. Buffer `["a\xe9 bc"]` (`"aé bc"`, `é` a 2-byte UTF-8 sequence),
+`gg0v` then `l` (select `a` and extend one char onto `é`):
 
 ```
 mode() -> "v"
@@ -99,9 +97,9 @@ loud: `Value::as_str` on the reply fails UTF-8 validation, and
 `selection_*` triple turned a real, active selection into "no selection at
 all" with no error anywhere.
 
-The fix computes the char-index at that byte offset (`vim.fn.charidx`) and
-the byte offset one character further (`vim.fn.byteidx(line, charidx +
-1)`), and uses THAT as the exclusive end instead:
+The fix computes the char-index at that byte offset (`vim.fn.charidx`) and the
+byte offset one character further (`vim.fn.byteidx(line, charidx + 1)`), and
+uses THAT as the exclusive end instead:
 
 ```
 line = "a\xc3\xa9 bc"
@@ -198,10 +196,9 @@ row 1's screen columns 1-2 are the single character `é` (screen-width 1) plus
 are the bytes `"ab"`. Round 1's byte-column rectangle instead sliced row 1 at
 byte offset 2, landing mid-character inside `é`.
 
-The fix reads `virtcol('v')`/`virtcol('.')` for the shared screen-column
-bounds (not `getpos`'s byte columns) and converts each row's own low/high
-screen column to that row's own byte column via
-`vim.fn.virtcol2col(win, lnum, vcol)`:
+The fix reads `virtcol('v')`/`virtcol('.')` for the shared screen-column bounds
+(not `getpos`'s byte columns) and converts each row's own low/high screen column
+to that row's own byte column via `vim.fn.virtcol2col(win, lnum, vcol)`:
 
 ```lua
 local win = vim.api.nvim_get_current_win()
@@ -465,10 +462,10 @@ with a different answer, captured in "Fix round 4" below.
 
 All four fixtures above (the tab anchor low-bound case, the two right-edge
 padding cases, and the left-edge padding case) plus the existing ASCII and
-single-cell-multi-byte (`é`) regression cases were captured with a
-standalone Python msgpack-rpc client against `nvim --clean --headless
---listen <socket>` (NVIM v0.12.4), using `normal! y` + `getreg('"')` as the
-oracle, before writing any fix code.
+single-cell-multi-byte (`é`) regression cases were captured with a standalone
+Python msgpack-rpc client against `nvim --clean --headless --listen <socket>`
+(NVIM v0.12.4), using `normal! y` + `getreg('"')` as the oracle, before writing
+any fix code.
 
 ## Fix round 4 (review-driven): the `$`-block bypassed the padding walker, and a row ending before the block pads to the block's full width
 
@@ -562,13 +559,12 @@ oracle rather than assumed:
 (Round 3's chunk returned `"cdefgh\nb"` for the first of those -- the raw
 slice clamped `lo0` to the row's length instead of yielding nothing.)
 
-All nine round-4 captures (the two review cases, the empty-row variant, the
-two boundary captures, the two `$`-block short-row guards, and the two
-unchanged round-2/round-3 controls) were taken against `nvim --clean
---headless --listen <socket>` (NVIM v0.12.4) with a UI attached, driving the
-selection through `nvim_input` and reading `getreg('"')` after `y`. The
-candidate chunk agreed with the oracle on all nine before any source file
-was edited.
+All nine round-4 captures (the two review cases, the empty-row variant, the two
+boundary captures, the two `$`-block short-row guards, and the two unchanged
+round-2/round-3 controls) were taken against `nvim --clean --headless --listen
+<socket>` (NVIM v0.12.4) with a UI attached, driving the selection through
+`nvim_input` and reading `getreg('"')` after `y`. The candidate chunk agreed
+with the oracle on all nine before any source file was edited.
 
 ## Fix round 5 (review-driven): a `$`-block's padding width comes from the WIDEST row in the block, not the padded row's own end
 
@@ -602,10 +598,10 @@ a rounding of ours. Five fixtures pin the width formula, all with
 | `["abcdefgh","ab","gammaxyzABCD","wxyz"]` | `[9,3,13,5]` | `axyzABCD` (8) | 9 |
 | `["abcdefgh","ab","x\tyz"]` | `[9,3,11]` | `␣␣␣␣yz` (6) | 7 |
 
-So the pad width is `max(virtcol({row,'$'}) for row in srow..erow) -
-lo_vcol + 1`, computed once per block rather than per row, and the tab
-fixture confirms the maximum is taken over SCREEN columns (row 3's tab
-widens it to 11) rather than byte lengths.
+So the pad width is `max(virtcol({row,'$'}) for row in srow..erow) - lo_vcol +
+1`, computed once per block rather than per row, and the tab fixture confirms
+the maximum is taken over SCREEN columns (row 3's tab widens it to 11) rather
+than byte lengths.
 
 That maximum has to come from a scan of the block's own rows; the
 selection's shared `hi_vcol` is NOT a substitute, even though it coincides
@@ -652,12 +648,12 @@ Both round-4 controls (an ordinary block's short interior row, still padded
 to `hi_vcol - lo_vcol + 1`; a `$`-block whose low bound splits a leading
 tab) are unchanged under this fix, captured alongside the rest.
 
-All ten round-5 captures were taken the same way as round 4's (`nvim
---clean --headless --listen <socket>`, NVIM v0.12.4, UI attached,
+All ten round-5 captures were taken the same way as round 4's
+(`nvim --clean --headless --listen <socket>`, NVIM v0.12.4, UI attached,
 `nvim_input` to drive the selection, `getreg('"')` after `y`), running the
 committed chunk and the candidate chunk side by side against the same live
-selection. The candidate matched the oracle on all ten before any source
-file was edited.
+selection. The candidate matched the oracle on all ten before any source file
+was edited.
 
 ## `vim.diagnostic.get(0)`: 0-indexed, flat, closed severity range
 
@@ -735,17 +731,16 @@ picker preview pane's `PREVIEW_CHUNK` already proves for `PreviewBuffer`.
 
 ## Fix round 1 (review-driven): one shared 1-indexed convention across all three reads
 
-The three chunks above cross the wire in three different native
-conventions -- `nvim_win_get_cursor`'s column is 0-indexed, `vim.diagnostic
-.get`'s `lnum`/`col` are both 0-indexed, `getqflist`'s are already
-1-indexed -- and an earlier version of this document treated that as
-something each read should keep verbatim all the way out to
-`EngineReadSnapshot`. That was a mistake: it meant the identical physical
-buffer position rendered as three different numbers depending on which of
-the three reads reported it (e.g. a diagnostic on the same character the
-cursor sits on would show `col: 2` from one read and `col: 3` from the
-other), which is confusing for an agent reading a prompt's attached
-context and has no benefit to compensate.
+The three chunks above cross the wire in three different native conventions --
+`nvim_win_get_cursor`'s column is 0-indexed, `vim.diagnostic .get`'s
+`lnum`/`col` are both 0-indexed, `getqflist`'s are already 1-indexed -- and an
+earlier version of this document treated that as something each read should keep
+verbatim all the way out to `EngineReadSnapshot`. That was a mistake: it meant
+the identical physical buffer position rendered as three different numbers
+depending on which of the three reads reported it (e.g. a diagnostic on the same
+character the cursor sits on would show `col: 2` from one read and `col: 3` from
+the other), which is confusing for an agent reading a prompt's attached context
+and has no benefit to compensate.
 
 The corrected contract: `view-engine`'s own reply decoders (not the Lua
 chunks, which still emit each source's native wire values) renormalize
@@ -762,15 +757,15 @@ selection_start/_end:      wire value       (getpos rows are already 1-indexed,
                                               unchanged)
 ```
 
-Live-verified: `read_cursor_context_with_no_active_selection`'s cursor col
-0 on the wire (an empty buffer, column 0) now reads back as `col == 1`;
-`read_cursor_context_with_an_active_forward_selection`'s wire col 4 reads
-back as `col == 5`; `read_diagnostic_entries_decodes_every_severity`'s
-`lnum = 0, col = 2` / `lnum = 1, col = 0` read back as `line == 1, col ==
-3` / `line == 2, col == 1`. `view-ai::acp::driver`'s
+Live-verified: `read_cursor_context_with_no_active_selection`'s cursor col 0 on
+the wire (an empty buffer, column 0) now reads back as `col == 1`;
+`read_cursor_context_with_an_active_forward_selection`'s wire col 4 reads back
+as `col == 5`; `read_diagnostic_entries_decodes_every_severity`'s
+`lnum = 0, col = 2` / `lnum = 1, col = 0` read back as `line == 1, col == 3` /
+`line == 2, col == 1`. `view-ai::acp::driver`'s
 `cursor_diagnostic_and_quickfix_render_the_same_physical_position_identically`
-pins that a `Cursor`, `Diagnostics`, and `QuickfixList` block all built
-from the same physical position (line 5, column 3) render the identical
-numbers in their prose -- the renderer forwards whatever it is given and
-performs no index math of its own, so this only holds because the
-normalization already happened upstream.
+pins that a `Cursor`, `Diagnostics`, and `QuickfixList` block all built from the
+same physical position (line 5, column 3) render the identical numbers in their
+prose -- the renderer forwards whatever it is given and performs no index math
+of its own, so this only holds because the normalization already happened
+upstream.

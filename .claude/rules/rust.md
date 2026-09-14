@@ -1,6 +1,5 @@
 ---
-paths: ["**/*.rs"]
-template-source: "rules/rust.md.tmpl"
+paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
 ---
 # Rust conventions (edition 2021)
 
@@ -280,15 +279,15 @@ template-source: "rules/rust.md.tmpl"
   attach, since elsewhere that word reaches a lock or a scan gate. It reads the
   god-file scanner's own `--prod-lines` classifier, so a `//` inside a string
   and an item closed by `} // end` cannot hide a site the way they did while
-  this walk was a Rust test with a classifier of its own. A new site fails `task
-  ci` by name until its row exists, and `scripts/check-style-cases.sh` grades
-  the walk. Keying on spellings is the stated limit: a geometry that reaches the
-  engine under a ninth name is invisible, and the first version of this pin --
-  keyed on `try_resize(` alone -- counted none of the three folds that build
-  `RpcCall::TryResize` from `Model::grid_target`. The walk is fail-closed the
-  other way, on a spelling named only by a trailing comment: `--prod-lines`
-  emits the raw line, and `.claude/rules/shell.md` carries why eliding comments
-  is the worse trade.
+  this walk was a Rust test with a classifier of its own. A new site fails
+  `task ci` by name until its row exists, and `scripts/check-style-cases.sh`
+  grades the walk. Keying on spellings is the stated limit: a geometry that
+  reaches the engine under a ninth name is invisible, and the first version of
+  this pin -- keyed on `try_resize(` alone -- counted none of the three folds
+  that build `RpcCall::TryResize` from `Model::grid_target`. The walk is
+  fail-closed the other way, on a spelling named only by a trailing comment:
+  `--prod-lines` emits the raw line, and `.claude/rules/shell.md` carries why
+  eliding comments is the worse trade.
 - **A child that can outlive the process that spawned it goes out through
   `view_proc::spawn_tied_to_this_process`, and every other spawn writes down in
   one row why it cannot.** `Drop` covers the exits a process chooses and none of
@@ -352,18 +351,18 @@ template-source: "rules/rust.md.tmpl"
   harness pty put a fixed ~100 ms into the bare-nvim arm of every cold cell and
   none into view's `--embed` arm -- every recorded `first_paint.marker_ratio_*`
   was withdrawn for it. A ConPTY master is the harder case: it releases nothing
-  a child writes until a bare `\x1b[6n` is answered, measured against `cmd.exe
-  /c echo hi` as well as the engine (`docs/conpty-harness-wire-capture.md`), so
-  there the unanswered query costs the whole stream. The members of
-  `view_oracle::pty`'s table today are DA1, DECRQM 2026, the kitty keyboard
-  query, the SGR readback, the box-glyph probe, OSC 11, DSR and a bare cursor
-  report; the last three resolve no capability tier and therefore sit in
-  `BASE_ANSWERS` as well as `FULL_TIER`, so the policy a session picked for its
-  *tier* never decides whether its child *waits*. Where one query is nested
-  inside a longer one -- the cursor report inside the box-glyph probe --
-  longest-match wins and a chunk boundary cutting the longer query holds the
-  bytes rather than answering the shorter one, or the probe's own
-  position-dependent answer is spent on a capability the child never asked
+  a child writes until a bare `\x1b[6n` is answered, measured against
+  `cmd.exe /c echo hi` as well as the engine
+  (`docs/conpty-harness-wire-capture.md`), so there the unanswered query costs
+  the whole stream. The members of `view_oracle::pty`'s table today are DA1,
+  DECRQM 2026, the kitty keyboard query, the SGR readback, the box-glyph probe,
+  OSC 11, DSR and a bare cursor report; the last three resolve no capability
+  tier and therefore sit in `BASE_ANSWERS` as well as `FULL_TIER`, so the policy
+  a session picked for its *tier* never decides whether its child *waits*. Where
+  one query is nested inside a longer one -- the cursor report inside the
+  box-glyph probe -- longest-match wins and a chunk boundary cutting the longer
+  query holds the bytes rather than answering the shorter one, or the probe's
+  own position-dependent answer is spent on a capability the child never asked
   about. `every_answering_policy_answers_the_queries_no_tier_depends_on` and
   `a_glyph_probe_cut_anywhere_still_gets_its_own_answer` (both in `pty.rs`) fail
   a policy or an ordering that regresses, and `nvim_arm_startup.rs`'s tool-free

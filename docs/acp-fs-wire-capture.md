@@ -120,9 +120,9 @@ nvim_exec_lua("local a = ... return { is_nil = a == nil,
 
 The same fact `BUF_SET_TEXT_CHUNK`'s `expected` guard already depends on
 (`docs/buf-set-text-wire-capture.md`): an absent `line`/`limit` arrives as a
-userdata sentinel that is *not* `nil`, so `if line then` and `if line ~= nil
-then` both read "no window requested" as a window request. Every optional
-argument in both chunks here is therefore tested with
+userdata sentinel that is *not* `nil`, so `if line then` and
+`if line ~= nil then` both read "no window requested" as a window request. Every
+optional argument in both chunks here is therefore tested with
 `type(x) == 'number'`/`type(x) == 'boolean'`, never against `nil`.
 
 ## 4. Buffer truth: a modified buffer answers with its own text, never the file on disk
@@ -251,10 +251,10 @@ os.path.exists(no_such_dir/deep.txt) -> True, holding 'deep\n'
 The first is the wire's own "The Client MUST create the file if it doesn't
 exist," satisfied by `bufadd` + `bufload` naming a buffer for a path with no
 file behind it and `:write` creating it. The second needs the chunk's
-`vim.fn.mkdir(..., 'p')`: without it `:write` answers `E212: Can't open file
-for writing: not a directory` and the agent's write fails for a reason it
-cannot act on -- creating a file in a new directory is an ordinary thing an
-agent does, and the directory is not a second decision for the user to make.
+`vim.fn.mkdir(..., 'p')`: without it `:write` answers `E212: Can't open file for
+writing: not a directory` and the agent's write fails for a reason it cannot act
+on -- creating a file in a new directory is an ordinary thing an agent does, and
+the directory is not a second decision for the user to make.
 
 ## 9. A save nvim cannot perform reports `saved = false` and loses nothing
 
@@ -281,12 +281,11 @@ delete it -- the one case where an agent write leaves a hidden buffer
 behind, and the safe half of the trade: the alternative is deleting a buffer
 holding content that reached no file.
 
-The raw `pcall` error is a full Lua traceback
-(`[string "<nvim>"]:16: Lua: [string "vim/_core/editor"]:355: nvim_exec2(),
-line 1: Vim(write):E212: ... stack traceback: ...`). The chunk reduces it to
-its first line and then to the `E<number>:` substring within that line, so
-what crosses the wire is the diagnostic and not the call stack of the chunk
-that produced it.
+The raw `pcall` error is a full Lua traceback (`[string "<nvim>"]:16: Lua:
+[string "vim/_core/editor"]:355: nvim_exec2(), line 1: Vim(write):E212: ...
+stack traceback: ...`). The chunk reduces it to its first line and then to the
+`E<number>:` substring within that line, so what crosses the wire is the
+diagnostic and not the call stack of the chunk that produced it.
 
 ## 10. An agent write is one undo step, never joined onto the user's last edit
 

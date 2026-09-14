@@ -567,8 +567,7 @@ Two variants total, discriminated on the `outcome` string field. The
 verbatim: a client-received `session/cancel` "MUST respond to all pending
 `session/request_permission` requests with this `Cancelled` outcome."
 
-Worked example, `docs/protocol/v1/tool-calls.mdx` (`## Requesting
-Permission`):
+Worked example, `docs/protocol/v1/tool-calls.mdx` (`## Requesting Permission`):
 
 ```
 $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/tool-calls.mdx" | sed -n '112,180p'
@@ -664,11 +663,11 @@ discriminants, each with its own required companion payload merged via
 | `session_info_update` | `SessionInfoUpdate` | "Session metadata has been updated (title, timestamps, custom metadata)" |
 
 All 11 variants discriminate on the `sessionUpdate` string property
-(`"discriminator": {"propertyName": "sessionUpdate"}`). Later tasks that
-build the `Msg` enum for `session/update` handling own six more arms than
-planned: `UserMessageChunk`, `AgentThoughtChunk`,
-`AvailableCommandsUpdate`, `CurrentModeUpdate`, `ConfigOptionUpdate`,
-`SessionInfoUpdate`, in addition to the five already planned for.
+(`"discriminator": {"propertyName": "sessionUpdate"}`). Later tasks that build
+the `Msg` enum for `session/update` handling own six more arms than planned:
+`UserMessageChunk`, `AgentThoughtChunk`, `AvailableCommandsUpdate`,
+`CurrentModeUpdate`, `ConfigOptionUpdate`, `SessionInfoUpdate`, in addition to
+the five already planned for.
 
 ## `ToolCallContent`'s `"diff"` variant
 
@@ -791,9 +790,9 @@ print(json.dumps(d['\$defs']['Diff'], indent=2))
 }
 ```
 
-Pinned `"diff"` shape: `{"type": "diff", "path": <string>, "oldText":
-<string | null>, "newText": <string>}`. `oldText` is nullable (new-file
-case) and NOT required; `path` and `newText` are required.
+Pinned `"diff"` shape: `{"type": "diff", "path": <string>, "oldText": <string |
+null>, "newText": <string>}`. `oldText` is nullable (new-file case) and NOT
+required; `path` and `newText` are required.
 
 ## `Content`, `Terminal`, `Plan`, and `UsageUpdate`
 
@@ -934,10 +933,9 @@ Pinned facts:
 
 - `Content` (the `ToolCallContent` `"content"` variant's merged payload):
   one required field, `content`, itself a nested `ContentBlock` (the same
-  five-way `text`/`image`/`audio`/`resource_link`/`resource` union pinned
-  above under "`ContentBlock` and the chunk payload"). So a full
-  text-content item on the wire is
-  `{"type": "content", "content": {"type": "text", "text": "..."}}`.
+  five-way `text`/`image`/`audio`/`resource_link`/`resource` union pinned above
+  under "`ContentBlock` and the chunk payload"). So a full text-content item on
+  the wire is `{"type": "content", "content": {"type": "text", "text": "..."}}`.
 - `Terminal` (the `ToolCallContent` `"terminal"` variant's merged
   payload): one required field, `terminalId` (a string).
 - `Plan`: one required field, `entries`, an array of `PlanEntry`. The
@@ -1025,9 +1023,8 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 > requests with the `cancelled` outcome."
 
 This is a **`RequestPermissionOutcome` value** (`{"outcome": {"outcome":
-"cancelled"}}`), a valid JSON-RPC *result*, not an error. The trigger this
-prose names is the client sending `session/cancel` to cancel the whole
-prompt turn.
+"cancelled"}}`), a valid JSON-RPC *result*, not an error. The trigger this prose
+names is the client sending `session/cancel` to cancel the whole prompt turn.
 
 **Source 2, `docs/protocol/v1/cancellation.mdx`, its Cascading
 Cancellation Flow worked example:**
@@ -1052,23 +1049,21 @@ and the cascading example's mermaid diagram, numbered steps verbatim:
 > `Client->>Agent: response to id=3 (error -32800 "Cancelled")`
 
 **These two sources are describing the identical trigger and the identical
-pending-request type, and they prescribe two different response bodies for
-it.** The cascading example's own annotation "3. Client cancels the prompt
-turn" is a client-initiated `session/cancel` of the whole prompt turn, the
-exact same trigger Source 1's MUST governs, not an independent
-agent-initiated event. The following annotation, "4. Agent cascades
-cancellation internally," shows `$/cancel_request` as downstream of, and
-part of the same flow as, that `session/cancel`; the example does not
-depict the agent cancelling on its own initiative (that is
-`cancellation.mdx`'s separate "Internal Cancellation" section, e.g. "LLM
-context limit reached", which genuinely is independent of any client
-trigger and is not what this worked example shows). Yet for that one
+pending-request type, and they prescribe two different response bodies for it.**
+The cascading example's own annotation "3. Client cancels the prompt turn" is a
+client-initiated `session/cancel` of the whole prompt turn, the exact same
+trigger Source 1's MUST governs, not an independent agent-initiated event. The
+following annotation, "4. Agent cascades cancellation internally," shows
+`$/cancel_request` as downstream of, and part of the same flow as, that
+`session/cancel`; the example does not depict the agent cancelling on its own
+initiative (that is `cancellation.mdx`'s separate "Internal Cancellation"
+section, e.g. "LLM context limit reached", which genuinely is independent of any
+client trigger and is not what this worked example shows). Yet for that one
 client-initiated-whole-turn-cancel case, applied to the identical kind of
-pending request (`session/request_permission`, labeled "[permission
-request]" in the diagram): `prompt-turn.mdx` mandates a
-`RequestPermissionOutcome` `"cancelled"` result, while `cancellation.mdx`'s
-own worked example for the same trigger shows a raw JSON-RPC `-32800` error
-instead.
+pending request (`session/request_permission`, labeled "[permission request]" in
+the diagram): `prompt-turn.mdx` mandates a `RequestPermissionOutcome`
+`"cancelled"` result, while `cancellation.mdx`'s own worked example for the same
+trigger shows a raw JSON-RPC `-32800` error instead.
 
 **This is a genuine contradiction in the upstream ACP v1 docs, not two
 non-competing rules keyed on who initiated cancellation.** Both quotes are
@@ -1095,10 +1090,9 @@ degrade path should behave given that inconsistency is a downstream design
 call, not a fact this capture pins.
 
 **Reference/example agent implementation:** not discoverable. The
-`agentclientprotocol/agent-client-protocol` repository ships only the
-schema crate, the schema generator, and the docs site; no reference or
-example agent implementation exists in this repo to cross-check error
-handling against
+`agentclientprotocol/agent-client-protocol` repository ships only the schema
+crate, the schema generator, and the docs site; no reference or example agent
+implementation exists in this repo to cross-check error handling against
 (`agent-client-protocol-schema/`, `schema-generator/`, `schema/`, `docs/`,
 `scripts/` are the only source directories at the repo root).
 

@@ -230,8 +230,8 @@ $ cat dist/probe_0.0.0-SNAPSHOT-_checksums.txt
 ```
 
 The bundles must live outside `dist/`: anodizer refuses to start against a
-non-empty one (`dist directory './dist' is not empty; use --clean to remove
-it first`), which is why the workflow stages them under `bundles/`.
+non-empty one (`dist directory './dist' is not empty; use --clean to remove it
+first`), which is why the workflow stages them under `bundles/`.
 
 This repo's own config validates against the installed version:
 
@@ -341,11 +341,10 @@ bundle/libexec/view/nvim.exe
 bundle/libexec/view/share/nvim/runtime/filetype.lua
 ```
 
-A is the bug: Git Bash prints POSIX-style paths that Windows cannot
-resolve. B works but writes backslash-separated entry names, which every
-non-Windows unzip reads as part of the file name rather than as
-directories. C is what the packaging uses:
-`"$SYSTEMROOT/System32/tar.exe" -a -cf`, which is present on every Windows
-runner (`bsdtar 3.8.4 - libarchive 3.8.4`), needs no path translation, and
-writes the forward-slash names the format specifies. The `tar` on Git
-Bash's own `PATH` is GNU tar 1.35, which writes no zip container at all.
+A is the bug: Git Bash prints POSIX-style paths that Windows cannot resolve. B
+works but writes backslash-separated entry names, which every non-Windows unzip
+reads as part of the file name rather than as directories. C is what the
+packaging uses: `"$SYSTEMROOT/System32/tar.exe" -a -cf`, which is present on
+every Windows runner (`bsdtar 3.8.4 - libarchive 3.8.4`), needs no path
+translation, and writes the forward-slash names the format specifies. The `tar`
+on Git Bash's own `PATH` is GNU tar 1.35, which writes no zip container at all.

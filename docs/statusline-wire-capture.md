@@ -154,10 +154,9 @@ same `MsgShow{kind: "search_count", ..}` case, no new `UiEvent` variant.
 ## Conclusion for the implementation
 
 - New `UiEvent` variants needed: `MsgShowmode { content: Vec<(u64, String)> }`,
-  `MsgShowcmd { content: Vec<(u64, String)> }`,
-  `MsgRuler { content: Vec<(u64, String)> }` -- each decoded with the existing
-  `decode_content_chunks` helper, registered in `decode_event`'s match arm
-  exactly like `msg_show`.
+  `MsgShowcmd { content: Vec<(u64, String)> }`, `MsgRuler { content: Vec<(u64,
+  String)> }` -- each decoded with the existing `decode_content_chunks` helper,
+  registered in `decode_event`'s match arm exactly like `msg_show`.
 - `search_count` needs no new variant; it is consumed from the existing
   `UiEvent::MsgShow` case already routed by `toast::route()`.
 - Empty content on any of the three hides that segment -- `StatuslineState`

@@ -123,10 +123,9 @@ nvim_buf_set_lines(0, 0, 1, false, [])
 `linedata: []`, the deletion convention `nvim_buf_set_text`'s own empty-
 `lines` deletion (`docs/buf-set-text-wire-capture.md`) mirrors.
 
-Final buffer read back after all three edits: `["TWO-EDITED", "NEW-A",
-"NEW-B", "three", "four"]` -- matches applying each event in order,
-confirming the events alone are sufficient to rebuild buffer state without
-a fresh whole-buffer read.
+Final buffer read back after all three edits: `["TWO-EDITED", "NEW-A", "NEW-B",
+"three", "four"]` -- matches applying each event in order, confirming the events
+alone are sufficient to rebuild buffer state without a fresh whole-buffer read.
 
 ## 4. A 200-line `:%s` produces ONE event, not several -- `more` stays `false`
 
@@ -140,14 +139,14 @@ nvim_command("%s/row/ROW/")
                            linedata=<200 lines>, more=false)
 ```
 
-Exactly one notification for the whole substitution, `firstline: 0,
-lastline: 200` bounding the entire replaced range in one shot, `more:
-false`. This directly contradicts an earlier draft of this document, which
-attributed `more: true` to `:%s`-style batching without having captured it
-live -- that claim was never observed and is retracted. If `nvim_buf_attach`
-consumers ever need to fold `more: true` continuations, that behavior
-remains undemonstrated by this document; treat it as an open question, not
-an implemented-and-verified case.
+Exactly one notification for the whole substitution, `firstline: 0, lastline:
+200` bounding the entire replaced range in one shot, `more: false`. This
+directly contradicts an earlier draft of this document, which attributed
+`more: true` to `:%s`-style batching without having captured it live -- that
+claim was never observed and is retracted. If `nvim_buf_attach` consumers ever
+need to fold `more: true` continuations, that behavior remains undemonstrated by
+this document; treat it as an open question, not an implemented-and-verified
+case.
 
 ## 5. `nvim_buf_detach_event` on detach; no further events reach a detached buffer
 
@@ -230,17 +229,17 @@ nvim_command("undo")
 ```
 
 First three: `(tick=5, firstline=199, lastline=200, linedata=["row199"])`,
-`(tick=6, firstline=198, lastline=199, linedata=["row198"])`, `(tick=7,
-firstline=197, lastline=198, linedata=["row197"])`. Last three: `(tick=202,
-firstline=2, lastline=3, linedata=["row2"])`, `(tick=203, firstline=1,
-lastline=2, linedata=["row1"])`, `(tick=204, firstline=0, lastline=1,
-linedata=["row0"])`. All 200 are single-line (`lastline - firstline == 1`,
-`linedata.len() == 1`), all `more: false`, and `tick` is strictly
+`(tick=6, firstline=198, lastline=199, linedata=["row198"])`,
+`(tick=7, firstline=197, lastline=198, linedata=["row197"])`. Last three:
+`(tick=202, firstline=2, lastline=3, linedata=["row2"])`, `(tick=203,
+firstline=1, lastline=2, linedata=["row1"])`, `(tick=204, firstline=0,
+lastline=1, linedata=["row0"])`. All 200 are single-line (`lastline - firstline
+== 1`, `linedata.len() == 1`), all `more: false`, and `tick` is strictly
 consecutive across every one of them (`5, 6, 7, ..., 204`) -- tick-coherent,
-confirming these are 200 real, individually-applied edits nvim is replaying
-one line at a time, not one logical change nvim merely reports in pieces.
-Reading the buffer back afterward confirms the full revert (`["row0",
-"row1", "row2", ...]`, 200 lines).
+confirming these are 200 real, individually-applied edits nvim is replaying one
+line at a time, not one logical change nvim merely reports in pieces. Reading
+the buffer back afterward confirms the full revert (`["row0", "row1", "row2",
+...]`, 200 lines).
 
 This inverts the naive assumption section 4 might invite: the substitution
 that TOUCHES 200 lines produces exactly one event, but UNDOING it produces

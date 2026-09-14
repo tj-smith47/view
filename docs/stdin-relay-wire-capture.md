@@ -16,8 +16,8 @@ Matches `.engine-pin` (`v0.12.4`) exactly.
 
 ## `:help ui-startup-stdin` (verbatim, from `api-ui-events.txt`)
 
-Captured via
-`nvim --headless -c "help ui-startup-stdin" -c "write! <out>" -c "qa!"`.
+Captured via `nvim --headless -c "help ui-startup-stdin" -c "write! <out>" -c
+"qa!"`.
 
 ```
 						   *ui-startup-stdin*
@@ -127,13 +127,13 @@ capture:
   return one reply message, just with a `nil` result, which is what every
   `request`-based caller in this codebase (`command`, `eval_str`, ...) reads.
 - The `stdin_fd` UI-attach option this document's `:help` captures describe:
-  `nvim_ui_attach`'s own third parameter is an opaque `Dict` named
-  `options`, not individually-enumerated keys, so `--api-info` cannot name
-  `stdin_fd` any more specifically than that -- confirming structurally
-  that it is passed through this call's options map (exactly what
-  `EngineHandle::ui_attach_with_stdin_relay` does), while the `:help
-  ui-startup-stdin` and `:help ui-ext-options` captures above are what name
-  and define `stdin_fd` itself, since `--api-info` documents the RPC
+  `nvim_ui_attach`'s own third parameter is an opaque `Dict` named `options`,
+  not individually-enumerated keys, so `--api-info` cannot name `stdin_fd` any
+  more specifically than that -- confirming structurally that it is passed
+  through this call's options map (exactly what
+  `EngineHandle::ui_attach_with_stdin_relay` does), while the
+  `:help ui-startup-stdin` and `:help ui-ext-options` captures above are what
+  name and define `stdin_fd` itself, since `--api-info` documents the RPC
   surface's shape, not the semantics of an arbitrary dict key within it.
 
 ## Conclusions for the implementation

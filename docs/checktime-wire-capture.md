@@ -19,15 +19,15 @@ Matches `.engine-pin` (`v0.12.4`).
 
 A standalone Python msgpack-rpc client (no `pynvim`; not installed) spawns
 `nvim --clean --embed` -- `--embed`, not `--headless`, because view always
-attaches a UI (`nvim_ui_attach`) before issuing any RPC call, and (see
-capture 0 below) that materially changes `:checktime`'s blocking behavior
-versus a headless connection with no UI attached. The same hermetic
-`HOME`/`XDG_*` isolation `EngineConfig::isolated()` uses is applied. Every
-capture issues `nvim_exec_lua` running the exact chunk text
-`CHECKTIME_CHUNK` embeds, with a `time.sleep(1.1)` between an initial write
-and the "external" write in every case that needs two distinct disk mtimes
-(coarse-grained filesystem mtime resolution can otherwise leave two writes
-inside the same clock tick indistinguishable to nvim's own check).
+attaches a UI (`nvim_ui_attach`) before issuing any RPC call, and (see capture 0
+below) that materially changes `:checktime`'s blocking behavior versus a
+headless connection with no UI attached. The same hermetic `HOME`/`XDG_*`
+isolation `EngineConfig::isolated()` uses is applied. Every capture issues
+`nvim_exec_lua` running the exact chunk text `CHECKTIME_CHUNK` embeds, with a
+`time.sleep(1.1)` between an initial write and the "external" write in every
+case that needs two distinct disk mtimes (coarse-grained filesystem mtime
+resolution can otherwise leave two writes inside the same clock tick
+indistinguishable to nvim's own check).
 
 The chunk takes a LIST of paths and answers a `results` array in the same
 order (see capture 8 for why): every call resolves the loaded-buffer set
@@ -554,11 +554,11 @@ buffer performs the re-read itself, the open is refused, and nvim raises
 `E321` out of the command -- past the stat, which had nothing wrong to
 report.
 
-Driven with the fixture made unreadable by mode bits, against a child
-dropped to an unprivileged uid (`setpriv --reuid=65534 --regid=65534
---clear-groups nvim --clean --embed`), because mode bits are advisory to a
-privileged process and this host runs as root. Two paths in the call: the
-unreadable one, then one nothing touched.
+Driven with the fixture made unreadable by mode bits, against a child dropped to
+an unprivileged uid (`setpriv --reuid=65534 --regid=65534 --clear-groups nvim
+--clean --embed`), because mode bits are advisory to a privileged process and
+this host runs as root. Two paths in the call: the unreadable one, then one
+nothing touched.
 
 ```
 $ timeout -s KILL 90 python3 t_perm.py

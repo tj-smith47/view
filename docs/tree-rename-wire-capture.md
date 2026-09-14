@@ -168,11 +168,11 @@ post-rename-canon chunk.
 ## Conclusions for the implementation
 
 - `EngineHandle::rename_file(&self, old_path: &str, new_path: &str,
-  generation: u64)` issues `nvim_exec_lua` with the chunk above (both paths
-  as positional varargs, matching `REGISTER_MAPPINGS_CHUNK`/`PREVIEW_CHUNK`'s
+  generation: u64)` issues `nvim_exec_lua` with the chunk above (both paths as
+  positional varargs, matching `REGISTER_MAPPINGS_CHUNK`/`PREVIEW_CHUNK`'s
   calling convention), tagged `Waiter::Rename { generation }`, mirroring
-  `request_preview`'s shape: async, never blocks, decodes on the reader
-  thread, routes to `pump` as `Msg::TreeRenameReply { generation, ok }` (new
+  `request_preview`'s shape: async, never blocks, decodes on the reader thread,
+  routes to `pump` as `Msg::TreeRenameReply { generation, ok }` (new
   `Held::Rename` slot in `damage.rs`, alongside `Held::Preview`).
 - The buffer-retarget loop's candidates must be canonicalized before
   `vim.fn.rename` runs, never after -- case 4 above is the reproducible,

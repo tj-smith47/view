@@ -83,26 +83,25 @@ err: [1, 'Lua: [string "<nvim>"]:1: \'=\' expected near \'is\'']
 res: None
 ```
 
-`error` is a two-element array `[error_type, message]` (the same `(Value,
-Value)` shape every other `nvim_exec_lua`/generic-request error on this engine
-takes -- matching `decode_hl_probe_reply`'s and `decode_mapping_claims`'s
-existing "error reply degrades to empty/default" handling). Since the Lua
-chunk here is fixed, constant source (no interpolated caller data, same
-discipline as `REGISTER_MAPPINGS_CHUNK`), a non-nil error on this call can
-only mean something is wrong with the engine connection itself, not with the
-request's arguments -- `decode_buffer_list_reply` degrades an error reply to
-an empty list, the same "confirmed nothing" default `decode_mapping_claims`
-uses, rather than leaving a picker session stuck with no items and no
-explanation.
+`error` is a two-element array `[error_type, message]` (the same
+`(Value, Value)` shape every other `nvim_exec_lua`/generic-request error on this
+engine takes -- matching `decode_hl_probe_reply`'s and `decode_mapping_claims`'s
+existing "error reply degrades to empty/default" handling). Since the Lua chunk
+here is fixed, constant source (no interpolated caller data, same discipline as
+`REGISTER_MAPPINGS_CHUNK`), a non-nil error on this call can only mean something
+is wrong with the engine connection itself, not with the request's arguments --
+`decode_buffer_list_reply` degrades an error reply to an empty list, the same
+"confirmed nothing" default `decode_mapping_claims` uses, rather than leaving a
+picker session stuck with no items and no explanation.
 
 ## Conclusions for the implementation
 
 - `EngineHandle::request_buffer_list(&self, generation: u64)` issues
-  `nvim_exec_lua` with the chunk above, tagged `Waiter::BufferList
-  { generation }`, mirroring `request_probe`'s `Waiter::HlProbe` shape
-  exactly: async, never blocks, decodes on the reader thread, routes to
-  `pump` as `Msg::PickerBufferList { generation, names }` (new `Held` slot in
-  `damage.rs`, alongside `Held::Probe`/`Held::Claims`).
+  `nvim_exec_lua` with the chunk above, tagged `Waiter::BufferList { generation
+  }`, mirroring `request_probe`'s `Waiter::HlProbe` shape exactly: async, never
+  blocks, decodes on the reader thread, routes to `pump` as
+  `Msg::PickerBufferList { generation, names }` (new `Held` slot in `damage.rs`,
+  alongside `Held::Probe`/`Held::Claims`).
 - The reply's `name` field is used as-is for a real path; an empty string is
   rendered as `[No Name]` by the picker's `PickerItem` label, not filtered
   out (an unsaved scratch buffer is still a legitimate jump target).

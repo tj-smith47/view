@@ -204,9 +204,9 @@ nvim_buf_set_text(0, 0, 8, 0, 11, ["YYYY"])
                                            byte offsets
 ```
 
-The same two edits applied bottom-to-top (descending `(start_row,
-start_col)`, the order `EngineHandle::set_buf_text` now sorts into
-regardless of how the caller listed them):
+The same two edits applied bottom-to-top (descending `(start_row, start_col)`,
+the order `EngineHandle::set_buf_text` now sorts into regardless of how the
+caller listed them):
 
 ```
 nvim_buf_set_text(0, 0, 8, 0, 11, ["YYYY"])

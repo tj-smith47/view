@@ -67,24 +67,40 @@ script_population_read() {
 # shellcheck disable=SC2034
 SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else|elif|while|until)[[:space:]]+)'
 
+# The field separator a scan reaches for when it builds a record out of a
+# script line and its own fields. ASCII 1c and not a tab, because a scanned
+# line can start with one and a tab-separated record then splits that
+# indentation into a field of its own and pushes the code out of the last
+# field. Written once here because the same byte had been spelled two ways in
+# two files, each with its own comment arguing the choice, and the walk at the
+# end of scripts/check-style-cases.sh reads this name the way it reads the
+# command-start list. Written with printf rather than as `$'\034'`, which
+# bash 3.2 reads and `sh` does not.
+# shellcheck disable=SC2034
+SCRIPT_FIELD_SEP=$(printf '\034')
+
 # The here-doc tokenizer both scans over this population share: the tags a
 # line opens, in the order their bodies arrive, one per line of the returned
-# string and prefixed `-` where the terminator may be tab-indented. Reading a
+# string behind one flag character -- `-` where the terminator may be
+# tab-indented and `<` where it may not, so that a tag whose own first
+# character is `-` still says which it is. Reading a
 # `<<` the shell does not read as an opener swallows the rest of that file as
 # data and hides every finding behind it, which is the one direction a scan
 # over this population may never fail in, so the boundary is drawn once here
 # rather than twice. A `<<` opens nothing inside a quoted string, inside an
 # ANSI-C string past an escaped quote, past the `#` that starts a trailing
 # comment, or inside `(( ))`, where it is a left shift and the operand after
-# it is a number. A `<<<` here-string opens none either: the tag scan below
-# takes word characters only and the third `<` is not one, so the line
-# carries its data and no body. The blanks the shell allows between the
-# operator and its word are skipped, so `cat << TAG` opens the body
-# `cat <<TAG` opens: read as no operator at all, the body under it is
-# scanned as commands, which is the direction that hides findings behind
-# text no shell ever runs.
+# it is a number. A `<<<` here-string opens none either: the third `<` is
+# outside the characters a tag is read from, so the tag comes back empty and
+# the line carries its data and no body. The blanks the shell allows between
+# the operator and its word are skipped, so `cat << TAG` opens the body
+# `cat <<TAG` opens, and what follows them is read to the closing quote where
+# the tag is quoted and to the first character outside `[A-Za-z0-9_-]` where
+# it is not. A spelling read as no operator at all has the body under it
+# scanned as commands, which is the direction that hides findings behind text
+# no shell ever runs.
 # shellcheck disable=SC2034
-SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
+SCRIPT_HEREDOC_AWK='function tags_of(line,   i, j, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
   out = ""
   n = length(line)
   q = ""
@@ -118,12 +134,30 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out,
     qc = substr(rest, 1, 1)
     if (qc == SQ || qc == "\"" || qc == "\\") rest = substr(rest, 2)
     t = ""
-    while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_]/) {
-      t = t substr(rest, 1, 1)
-      rest = substr(rest, 2)
+    if (qc == SQ || qc == "\"") {
+      # a quoted tag runs to its closing quote and not to the first
+      # non-word character: `<<EOF-1` under quotes is the tag `EOF-1`, and a
+      # plain `EOF` line inside that body closes nothing, so a tag cut at
+      # the `-` leaves the rest of the body read as commands
+      j = index(rest, qc)
+      if (j > 0) { t = substr(rest, 1, j - 1); rest = substr(rest, j + 1) }
+    } else {
+      # an unquoted tag takes the `-` a blank separates from the operator:
+      # `<< -TAG` is the tag `-TAG`, where a scan of letters alone finds no
+      # tag at all and reads the body under it as commands. It goes no wider
+      # than the characters a tag in this population writes, because the
+      # userland scan hands this tokenizer the raw line: read to the first
+      # blank the way a shell reads a word, `/<<-?[[:space:]]*$/` inside a
+      # quoted awk program is an opener and the rest of that file is body
+      while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_-]/) {
+        t = t substr(rest, 1, 1)
+        rest = substr(rest, 2)
+      }
     }
-    if (t != "" && (qc == SQ || qc == "\"") && substr(rest, 1, 1) == qc) rest = substr(rest, 2)
-    if (t != "") out = out dash t "\n"
+    # the tab-strip flag is a character of its own rather than a `-` prefix
+    # on the tag: `<< -TAG` and `<<--TAG` both name a tag starting with `-`,
+    # and one prefix cannot say which of them strips the tabs off a terminator
+    if (t != "") out = out (dash == "-" ? "-" : "<") t "\n"
     i = n - length(rest) + 1
   }
   return out
@@ -186,7 +220,8 @@ SCRIPT_CODE_AWK="$SCRIPT_HEREDOC_AWK"'
   function script_code_body(line,   cur, n) {
     n = index(HD, "\n")
     cur = substr(HD, 1, n - 1)
-    if (substr(cur, 1, 1) == "-") { sub(/^\t+/, "", line); cur = substr(cur, 2) }
+    if (substr(cur, 1, 1) == "-") { sub(/^\t+/, "", line) }
+    cur = substr(cur, 2)
     if (line == cur) { HD = substr(HD, n + 1) }
   }
   function script_code_scan(line,   i, n, c, prev, top, j) {

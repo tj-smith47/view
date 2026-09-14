@@ -121,13 +121,13 @@ first bytes are the engine's own probe batch:
     1bP$qm\x1b\\\x1b[?u\x1b[c\x1b]11;?\x07\x1b[5n...
 ```
 
-**The request is not the editor's.** The same pty running `cmd.exe /c echo
-hi` carries it too, and stalls on it identically: with the request
-unanswered that session produces 4 bytes and never exits; answered, it
-produces 65 bytes and exits 0. The unix control (`/bin/sh -c echo hi`)
-produces 4 bytes (`hi` and a line break), carries no request, and exits 0.
-So this is a property of the pseudoconsole, not of nvim, and it applies to
-**every** child a Windows leg spawns.
+**The request is not the editor's.** The same pty running `cmd.exe /c echo hi`
+carries it too, and stalls on it identically: with the request unanswered that
+session produces 4 bytes and never exits; answered, it produces 65 bytes and
+exits 0. The unix control (`/bin/sh -c echo hi`) produces 4 bytes (`hi` and a
+line break), carries no request, and exits 0. So this is a property of the
+pseudoconsole, not of nvim, and it applies to **every** child a Windows leg
+spawns.
 
 `QueryPolicy`'s responder answers eight queries: the device-attributes
 fence, four optional capability queries (`\x1b[?2026$p`, `\x1b[?u`, the SGR

@@ -50,14 +50,12 @@ describes no longer exists in the code. Kept as the reason `bufload`
 replaced this mechanism at all.
 
 Loading a file's content into a freshly created buffer via
-`vim.api.nvim_buf_set_lines` (the only way to populate a buffer whose
-content this chunk itself reads through `vim.fn.readfile`, since
-`nvim_create_buf` starts the buffer empty) sets `modified = true`, unlike
-`vim.fn.bufload`, which does not. The
-chunk resets `vim.bo[buf].modified = false` immediately after the initial
-load specifically to undo this side effect: a buffer that merely mirrors
-what is already on disk must not read as having unsaved changes nobody
-made.
+`vim.api.nvim_buf_set_lines` (the only way to populate a buffer whose content
+this chunk itself reads through `vim.fn.readfile`, since `nvim_create_buf`
+starts the buffer empty) sets `modified = true`, unlike `vim.fn.bufload`, which
+does not. The chunk resets `vim.bo[buf].modified = false` immediately after the
+initial load specifically to undo this side effect: a buffer that merely mirrors
+what is already on disk must not read as having unsaved changes nobody made.
 
 ## 3. The existing-buffer lookup, scanned before `nvim_create_buf`
 
@@ -139,11 +137,11 @@ discarded.
 ## 8. `nvim_buf_delete` does NOT refuse a buffer that is visible in a window
 
 `nvim_buf_delete` does not refuse a window-visible buffer, contrary to an
-earlier reading of this case that assumed it mirrored case 7's
-modified-buffer refusal. Re-captured against the same pinned engine, in the
-exact shape `release_hidden` actually faces -- a buffer opened normally via
-`:edit` (this crate's own `OPEN_FILE_CHUNK`, not a bare
-`nvim_win_set_buf`), the sole window showing it, ui-attached:
+earlier reading of this case that assumed it mirrored case 7's modified-buffer
+refusal. Re-captured against the same pinned engine, in the exact shape
+`release_hidden` actually faces -- a buffer opened normally via `:edit` (this
+crate's own `OPEN_FILE_CHUNK`, not a bare `nvim_win_set_buf`), the sole window
+showing it, ui-attached:
 
 ```
 :edit path -> current buffer = 1, win_findbuf(1) = [win] -- confirms visible

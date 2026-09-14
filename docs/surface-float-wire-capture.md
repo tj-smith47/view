@@ -94,18 +94,17 @@ Three properties of that arrangement are load-bearing:
   no variable set outside survives to name the file. The scenario locates
   it by walking up from the session's cwd to the repo.
 
-One deviation from the wording this capture was specified with is recorded
-here rather than papered over: the heavy fixture pins nvim-cmp with
-`cmp-buffer` as its only source and configures insert mode alone, so no
-cmdline float exists until one is asked for. The chunk calls the pinned
-cmp's own `cmp.setup.cmdline(':' / '/', { mapping =
-cmp.mapping.preset.cmdline(), sources = { { name = 'buffer' } } })` at
-capture time. Same plugin, same version, same view layer
-(`lua/cmp/view/custom_entries_view.lua`) and the same window machinery
-(`lua/cmp/utils/window.lua`); only the candidate source differs from a
-config that also installs `cmp-cmdline`. Every geometry and identity value
-below is therefore the pinned plugin's, and the candidates are words the
-capture itself typed into the buffer (`prefabricated`, `preflight`).
+One deviation from the wording this capture was specified with is recorded here
+rather than papered over: the heavy fixture pins nvim-cmp with `cmp-buffer` as
+its only source and configures insert mode alone, so no cmdline float exists
+until one is asked for. The chunk calls the pinned cmp's own
+`cmp.setup.cmdline(':' / '/', { mapping = cmp.mapping.preset.cmdline(), sources
+= { { name = 'buffer' } } })` at capture time. Same plugin, same version, same
+view layer (`lua/cmp/view/custom_entries_view.lua`) and the same window
+machinery (`lua/cmp/utils/window.lua`); only the candidate source differs from a
+config that also installs `cmp-cmdline`. Every geometry and identity value below
+is therefore the pinned plugin's, and the candidates are words the capture
+itself typed into the buffer (`prefabricated`, `preflight`).
 
 ## nvim-cmp: the cmdline completion menu
 
@@ -229,12 +228,12 @@ how long a float takes to appear; that is measured separately below, and the
 two are different phenomena with different numbers.
 
 So cmp reconfigures rather than recreates, and its reconfiguration does not
-clear a `hide` view set: the style table cmp passes to
-`nvim_win_set_config` (`lua/cmp/utils/window.lua`, `window.open`) carries no
-`hide` key, and the pinned engine leaves the flag alone. A hide taken once
-per cmdline session holds for the whole session, and the double-chrome
-window a consumer has to close is the 31 ms between the key and the
-plugin's reconfiguration of the window it already had, not a per-key race.
+clear a `hide` view set: the style table cmp passes to `nvim_win_set_config`
+(`lua/cmp/utils/window.lua`, `window.open`) carries no `hide` key, and the
+pinned engine leaves the flag alone. A hide taken once per cmdline session holds
+for the whole session, and the double-chrome window a consumer has to close is
+the 31 ms between the key and the plugin's reconfiguration of the window it
+already had, not a per-key race.
 
 ### How long a float takes to appear
 
@@ -260,14 +259,12 @@ sampled with a blind window under 4 ms. (These two runs are later than the
 one the rest of this document quotes, which predates the sampler; everything
 else they recorded is unchanged, the geometry and identity values included.)
 
-That number is not a race, it is a setting: nvim-cmp's
-`performance.debounce` defaults to `60`
-(`lua/cmp/config/default.lua:20`), and `lua/cmp/core.lua:302` arms the
-filter with exactly that timeout while the menu is not yet visible. A
-consumer waiting on the cmdline events therefore has roughly 60 ms of
-notice, and gets it from the plugin's own configuration rather than from
-luck. A user who lowers `performance.debounce` shortens it by the same
-amount.
+That number is not a race, it is a setting: nvim-cmp's `performance.debounce`
+defaults to `60` (`lua/cmp/config/default.lua:20`), and `lua/cmp/core.lua:302`
+arms the filter with exactly that timeout while the menu is not yet visible. A
+consumer waiting on the cmdline events therefore has roughly 60 ms of notice,
+and gets it from the plugin's own configuration rather than from luck. A user
+who lowers `performance.debounce` shortens it by the same amount.
 
 The window identity is stable *within* a cmdline session and never across
 one: 1003, 1005, 1006, 1007 for the four cmdlines above. Each of those
@@ -346,16 +343,15 @@ path (`require('noice.util').notify(msg, vim.log.levels.ERROR)`):
     ns "notify-treesitter-override" (id 19): 1 marks
 ```
 
-Same title mark here: `virt_text = { { " " }, { " ", "NotifyERRORIcon5" },
-{ "noice.nvim", "NotifyERRORTitle5" } }`.
+Same title mark here: `virt_text = { { " " }, { " ", "NotifyERRORIcon5" }, {
+"noice.nvim", "NotifyERRORTitle5" } }`.
 
-noice's error float **is** an nvim-notify window: same anchor, same
-`zindex`, same namespace, same virtual-text furniture. Two fields part
-them, and both come from noice's own `on_open` in
-`lua/noice/util/init.lua`: the buffer `filetype` is `markdown` rather than
-`notify`, and the title virtual text is the literal string `noice.nvim`. An
-identity that names the plugin is available for this float and for no other
-one captured here.
+noice's error float **is** an nvim-notify window: same anchor, same `zindex`,
+same namespace, same virtual-text furniture. Two fields part them, and both come
+from noice's own `on_open` in `lua/noice/util/init.lua`: the buffer `filetype`
+is `markdown` rather than `notify`, and the title virtual text is the literal
+string `noice.nvim`. An identity that names the plugin is available for this
+float and for no other one captured here.
 
 ## telescope: the picker (negative control)
 
@@ -369,12 +365,10 @@ once:
 | 1012 | `TelescopePrompt` | prompt | 25 | 11 | 78 | 1 | 50 | false |
 | 1013 | (empty) | nofile | 24 | 10 | 80 | 3 | 50 | false |
 
-The two windows with no filetype are drawn border chrome: their buffer
-lines are the box-drawing characters themselves, an 80-cell top rule with
-a centered title (shortened here, the artifact carries the full 80
-columns: `"╭─── Results ───╮"`,
-`"╭─── Help ───╮"`), and they are
-`focusable = false, mouse = false`.
+The two windows with no filetype are drawn border chrome: their buffer lines are
+the box-drawing characters themselves, an 80-cell top rule with a centered title
+(shortened here, the artifact carries the full 80 columns: `"╭─── Results
+───╮"`, `"╭─── Help ───╮"`), and they are `focusable = false, mouse = false`.
 
 Selection, before and after one `<C-n>`:
 
@@ -389,15 +383,14 @@ Selection, before and after one `<C-n>`:
       { 2, 200, 1, { end_row = 201, hl_group = "TelescopeSelection", priority = 4096, hl_eol = true } }
 ```
 
-Telescope's selection is carried by extmarks in its own
-`telescope_selection` namespace (the cursor moves with them; the marks are
-what renders), the inverse of cmp's cursor-plus-`cursorline` with no
-extmarks at all. The results buffer carries a second namespace,
-`telescope_matching`, holding one mark per matched character: 408
-of them before the `<C-n>`, 416 after. The prompt window carries two more
-(`telescope_prompt`, holding the ` 50 / 13068` counter as right-aligned
-virtual text, and `telescope_prompt_prefix`). Four namespaces across the
-picker; cmp's menu buffer has none at all.
+Telescope's selection is carried by extmarks in its own `telescope_selection`
+namespace (the cursor moves with them; the marks are what renders), the inverse
+of cmp's cursor-plus-`cursorline` with no extmarks at all. The results buffer
+carries a second namespace, `telescope_matching`, holding one mark per matched
+character: 408 of them before the `<C-n>`, 416 after. The prompt window carries
+two more (`telescope_prompt`, holding the ` 50 / 13068` counter as right-aligned
+virtual text, and `telescope_prompt_prefix`). Four namespaces across the picker;
+cmp's menu buffer has none at all.
 
 ## What every float here has in common
 
@@ -548,7 +541,7 @@ Two warnings for anything built on this, both of them geometric:
   naming rule in the migration-integrity plan already anticipated.
 - Absorption is viable on the pinned versions: `nvim_win_set_config(win,
   { hide = true })` is accepted on cmp's menu window, the plugin's own next
-  reconfigure preserves it, no replacement window appears, and the window
-  id is stable for the life of the cmdline session. The absorbed rows are
-  the buffer's lines and the absorbed selection is
-  `nvim_win_get_cursor(win)[1]` gated on `vim.wo[win].cursorline`.
+  reconfigure preserves it, no replacement window appears, and the window id is
+  stable for the life of the cmdline session. The absorbed rows are the buffer's
+  lines and the absorbed selection is `nvim_win_get_cursor(win)[1]` gated on
+  `vim.wo[win].cursorline`.

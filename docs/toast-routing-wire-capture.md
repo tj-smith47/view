@@ -66,16 +66,15 @@ carried inside a `msg_show` tuple. A `route(kind: &str)` fed only from
 `"msg_showcmd"`, or `"msg_ruler"` as input: those three match arms in
 `route()`'s table are dead code under today's `msg_show`-only wiring, by
 construction of the wire protocol, not a bug in the table. They stay in
-`route()` unmodified (per "the table IS the implementation" and because the
-call site that decodes these sibling
-events depends on `route()`'s exact name/signature to classify them once it
-starts feeding them through). The three arms become live once that call
-site threads `UiEvent::MsgShowmode`/`MsgShowcmd`/`MsgRuler` variants through
-the same `route()` call by construction (kind string literal match, no
-protocol translation needed) -- today's wiring does not add those
-`UiEvent` variants or decode those wire events at all, since nothing routes
-through them yet (no statusline surface exists to consume
-`Route::Statusline`).
+`route()` unmodified (per "the table IS the implementation" and because the call
+site that decodes these sibling events depends on `route()`'s exact
+name/signature to classify them once it starts feeding them through). The three
+arms become live once that call site threads
+`UiEvent::MsgShowmode`/`MsgShowcmd`/`MsgRuler` variants through the same
+`route()` call by construction (kind string literal match, no protocol
+translation needed) -- today's wiring does not add those `UiEvent` variants or
+decode those wire events at all, since nothing routes through them yet (no
+statusline surface exists to consume `Route::Statusline`).
 
 ## Finding: `search_count` is a genuine `msg_show` kind
 
@@ -223,16 +222,15 @@ default and a source comparison therefore reads it as a plugin's: a session
 that owns the messages surface would report a foreign notifier for its own
 sink, and `foreign` is the one word this reading has to mean literally.
 
-`SafeState` rather than an inline read at `VimEnter`: a manager that
-finishes its own deferred loading on a timer after `VimEnter` (lazy.nvim's
-`VeryLazy`) would be read too early otherwise. And repeated rather than
-`once`, because a cold first launch clones the whole stack over the network
-and idles many times before the plugin it is about to load exists -- the
-notify goes out only on the first answer or a changed one, and the group
-deletes itself once every module is found, a notifier of the user's has
-been seen at `vim.notify`, or the session is a minute old. The live proof
-that the chunk answers, and answers differently for a session that loaded
-the module and one that did not, is
+`SafeState` rather than an inline read at `VimEnter`: a manager that finishes
+its own deferred loading on a timer after `VimEnter` (lazy.nvim's `VeryLazy`)
+would be read too early otherwise. And repeated rather than `once`, because a
+cold first launch clones the whole stack over the network and idles many times
+before the plugin it is about to load exists -- the notify goes out only on the
+first answer or a changed one, and the group deletes itself once every module is
+found, a notifier of the user's has been seen at `vim.notify`, or the session is
+a minute old. The live proof that the chunk answers, and answers differently for
+a session that loaded the module and one that did not, is
 `crates/view/tests/bridge_live.rs`'s
 `the_claimant_probe_answers_what_the_session_actually_loaded`.
 

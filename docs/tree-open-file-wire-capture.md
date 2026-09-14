@@ -74,8 +74,8 @@ through the args list as ordinary filenames.
 
 ## 2. The same call, `magic` left at its default (negative control)
 
-Identical script, identical files, chunk shortened to
-`nvim_cmd({ cmd = 'edit', args = { path } }, {})`:
+Identical script, identical files, chunk shortened to `nvim_cmd({ cmd = 'edit',
+args = { path } }, {})`:
 
 ```
 MAGIC-ON case="plain.txt"      ok=true match=true
@@ -107,10 +107,10 @@ Two findings the implementation's doc depends on:
 ## Conclusions for the implementation
 
 - `EngineHandle::open_file(&self, path: &str)` issues `nvim_exec_lua` with
-  the chunk above as a fire-and-forget `notify` (matching
-  `RegisterMappings`'s calling convention: no generation to correlate, no
-  reply awaited), reusing an already-open buffer for `path` the same way an
-  ordinary `:edit` would rather than duplicating it.
+  the chunk above as a fire-and-forget `notify` (matching `RegisterMappings`'s
+  calling convention: no generation to correlate, no reply awaited), reusing an
+  already-open buffer for `path` the same way an ordinary `:edit` would rather
+  than duplicating it.
 - Both halves of the chunk are load-bearing and neither subsumes the
   other: dropping the args-list shape re-exposes the space/`+` class,
   dropping `magic.file = false` re-exposes the silent `%`/`#`/`\` class.

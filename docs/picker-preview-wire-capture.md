@@ -60,8 +60,8 @@ candidate path that happens to canonicalize to nvim's cwd, which is what
 
 ## 1. Baseline: no buffer open for the path
 
-A file exists on disk at the candidate path (`disk line one` / `disk line
-two`) but no buffer has been opened for it in this session.
+A file exists on disk at the candidate path (`disk line one` / `disk line two`)
+but no buffer has been opened for it in this session.
 
 ```
 err: None
@@ -122,9 +122,9 @@ not-found outcome rather than the RPC layer inventing one.
 - `EngineHandle::request_preview(&self, path: &str, generation: u64)` issues
   `nvim_exec_lua` with the chunk above (path as the sole positional vararg),
   tagged `Waiter::Preview { generation }`, mirroring `request_buffer_list`'s
-  `Waiter::BufferList` shape exactly: async, never blocks, decodes on the
-  reader thread, routes to `pump` as `Msg::PickerPreviewReply { generation,
-  path, loaded, lines }` (new `Held::Preview` slot in `damage.rs`, alongside
+  `Waiter::BufferList` shape exactly: async, never blocks, decodes on the reader
+  thread, routes to `pump` as `Msg::PickerPreviewReply { generation, path,
+  loaded, lines }` (new `Held::Preview` slot in `damage.rs`, alongside
   `Held::BufferList`).
 - `decode_preview_reply` reads `loaded` first; when `loaded` is `true` it
   requires `lines` to be present and decodes it as `Vec<String>`, and when

@@ -90,11 +90,11 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
 - a figure in a `[[shortfall]]`'s `why` stands in a sentence that names no
   cell at all, or equals no value the cell it resolves to records;
 - a unit that names an `echo_speculated` cell, or the predicted glyph in
-  the words the pages write it in, also says `remote`, `network`, `far
-  side`, `another machine` or `RTT` while naming neither
-  `scripts/acceptance/remote-rtt.sh` nor the `remote_memory` row, and
-  without denying the transport word within the five tokens before it or
-  saying, in the clause that word stands in, that the reading is `local`;
+  the words the pages write it in, also says `remote`, `network`, `far side`,
+  `another machine` or `RTT` while naming neither
+  `scripts/acceptance/remote-rtt.sh` nor the `remote_memory` row, and without
+  denying the transport word within the five tokens before it or saying, in the
+  clause that word stands in, that the reading is `local`;
 - a figure on `README.md` or `docs/performance.md` states a moment the
   vocabulary names and equals no value that cell records on the class the
   page declares, or stands on a page that declares no class at all.
@@ -172,15 +172,14 @@ table, in the half of the tree the ledger lives in. So a retired reading is
 named in prose or left where the change that retired it is recorded, and a
 figure written in a `why` is a figure the check grades.
 
-The draws a record run took are not a sentence at all. They are a field on
-the entry -- `trials = [19.57, 19.48, 19.35]`, an optional array of floats
-`view_harness::budgets` loads beside `accepted` -- because no cell holds
-them (the bare-engine arm of a paired run
-has no seat of its own) and a spread written into the prose is a figure
-nothing can grade. It was written as prose twice, once behind a one-word
-`trial` escape and once behind a slash-joined list, and each spelling
-carried a stale seat through the exemption it bought: the shipped list at
-`budgets.toml:663` held the entry's own `accepted`.
+The draws a record run took are not a sentence at all. They are a field on the
+entry -- `trials = [19.57, 19.48, 19.35]`, an optional array of floats
+`view_harness::budgets` loads beside `accepted` -- because no cell holds them
+(the bare-engine arm of a paired run has no seat of its own) and a spread
+written into the prose is a figure nothing can grade. It was written as prose
+twice, once behind a one-word `trial` escape and once behind a slash-joined
+list, and each spelling carried a stale seat through the exemption it bought:
+the shipped list at `budgets.toml:663` held the entry's own `accepted`.
 
 The field holds that metric's own repeated draws and nothing else, so every
 member sits within 25 percent of the `accepted` those draws were reduced to
@@ -293,25 +292,23 @@ read them and one that runs the whole check on the shipped tree under an
 alarm -- because a gate that does not run on the bash macOS ships is a gate
 whose verdict a contributor never sees.
 
-The cases file grades the rules; `scripts/check-budget-drift-sweep.sh`
-grades the population. It copies the tracked tree, builds the seat table,
-takes every figure on the three pages and in every `why` that equals a
-recorded seat of any class -- outside fenced blocks and the deltas a
-sentence states as differences -- and perturbs each by one digit, and takes
-every member of every `trials` array and moves it outside its entry's band,
-requiring the check to fail naming that file and line either way. The edit
-follows the rule that grades the figure: a quoted reading is graded against
-the seat it equals, where a draw is graded against a band around one. The
-class a page declares is the default a unit falls back to, never a filter
-on what is graded: a
-population scoped to it left the gh-linux, gh-macos, dev-macos and
-controlled-linux figures the pages quote ungraded, and the sweep shared
-that blind spot with nothing, since the check resolves each of them where
-its own unit names it. A figure that survives is a recorded value
-nothing grades, which is what two rounds of hand-listed sites left behind.
-It runs as `task drift:sweep` and as its own CI step rather than inside
-`task ci`, because it re-runs the whole check once per figure: two minutes
-against the check's own second.
+The cases file grades the rules; `scripts/check-budget-drift-sweep.sh` grades
+the population. It copies the tracked tree, builds the seat table, takes every
+figure on the three pages and in every `why` that equals a recorded seat of any
+class -- outside fenced blocks and the deltas a sentence states as differences
+-- and perturbs each by one digit, and takes every member of every `trials`
+array and moves it outside its entry's band, requiring the check to fail naming
+that file and line either way. The edit follows the rule that grades the figure:
+a quoted reading is graded against the seat it equals, where a draw is graded
+against a band around one. The class a page declares is the default a unit falls
+back to, never a filter on what is graded: a population scoped to it left the
+gh-linux, gh-macos, dev-macos and controlled-linux figures the pages quote
+ungraded, and the sweep shared that blind spot with nothing, since the check
+resolves each of them where its own unit names it. A figure that survives is a
+recorded value nothing grades, which is what two rounds of hand-listed sites
+left behind. It runs as `task drift:sweep` and as its own CI step rather than
+inside `task ci`, because it re-runs the whole check once per figure: two
+minutes against the check's own second.
 
 The two user-facing pages are graded by the moment they name, because the
 identifier rule leaves them nothing else to resolve against. The felt
@@ -376,21 +373,19 @@ grounds state which of the two it is: the measured action (`picker.rs`,
 its own.
 
 Two walks hold the table.
-`every_typed_command_is_silenced_or_declared_the_measured_action` reads
-every literal each source writes above its `#[cfg(test)]` boundary, so a
-new send site fails by name. Literals alone would pin only the commands
-written here, so
-`every_command_built_outside_this_crate_is_declared_by_its_builder` pins
-the population of send sites instead: every call inside a
-`send`/`submitted` argument is read off -- the argument taken to the paren
-that closes it however many lines that takes, counting no paren a string,
-a raw string in either spelling (`r"..."` and `r#"..."#`), a char literal
-or the quote of a lifetime carries, and a path-qualified call read as its
-last segment -- and one whose builder this crate does not define is a
-command built elsewhere -- `wedge_command`, today's only one -- which
-fails unless a row declares it by that builder's name.
-A builder defined beside the send site needs no row, because its own
-literal is a line the first walk already reads.
+`every_typed_command_is_silenced_or_declared_the_measured_action` reads every
+literal each source writes above its `#[cfg(test)]` boundary, so a new send site
+fails by name. Literals alone would pin only the commands written here, so
+`every_command_built_outside_this_crate_is_declared_by_its_builder` pins the
+population of send sites instead: every call inside a `send`/`submitted`
+argument is read off -- the argument taken to the paren that closes it however
+many lines that takes, counting no paren a string, a raw string in either
+spelling (`r"..."` and `r#"..."#`), a char literal or the quote of a lifetime
+carries, and a path-qualified call read as its last segment -- and one whose
+builder this crate does not define is a command built elsewhere --
+`wedge_command`, today's only one -- which fails unless a row declares it by
+that builder's name. A builder defined beside the send site needs no row,
+because its own literal is a line the first walk already reads.
 
 The rule is scoped to the drivers, not to every session the tree types at:
 `view-oracle`'s tests make messages their subject (`:echo`, `:echomsg`,

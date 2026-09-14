@@ -26,15 +26,15 @@ Matches `.engine-pin` (`v0.12.4`).
 ## Capture method
 
 `Engine::spawn(EngineConfig::isolated())` -- `nvim --embed` under the hermetic
-`HOME`/`XDG_*` isolation a real session gets -- followed by
-`nvim_ui_attach(80, 24)`, then `EngineHandle::review_show` /
-`review_clear` themselves. **Not `--headless -l`**, for the reason
-`docs/checktime-wire-capture.md` gives: view always attaches a UI before
-issuing any RPC call, and the difference is material. Here it is the whole
-point -- a screenless capture can only echo extmark *attributes* back, and the
-first version of this capture did exactly that while the deletion highlight
-was painting one row too far. Every claim below about what the user sees is a
-`screenattr`/`screenstring` read of a rendered screen.
+`HOME`/`XDG_*` isolation a real session gets -- followed by `nvim_ui_attach(80,
+24)`, then `EngineHandle::review_show` / `review_clear` themselves. **Not
+`--headless -l`**, for the reason `docs/checktime-wire-capture.md` gives: view
+always attaches a UI before issuing any RPC call, and the difference is
+material. Here it is the whole point -- a screenless capture can only echo
+extmark *attributes* back, and the first version of this capture did exactly
+that while the deletion highlight was painting one row too far. Every claim
+below about what the user sees is a `screenattr`/`screenstring` read of a
+rendered screen.
 
 The editor is read back through `nvim_buf_get_extmarks(details = true)`,
 `nvim_buf_get_keymap`, `nvim_buf_get_changedtick`, `vim.fn.screenattr` and
@@ -96,47 +96,45 @@ ViewReviewSign    bg=007373 fg=eef1f8
 ```
 
 What is read off each group is the color nvim would *fill* a row with. For
-`DiffAdd`, `DiffChange` and `DiffText` here that is the `guibg`, handed over
-as it stands, because that background is what the author drew for a diffed
-row. `DiffDelete` here has only a `guifg`, so that foreground is laid a fifth
-of the way over `Normal`'s background instead: `#ffc0b9` a fifth over
-`#14161b` is the `43383b` above. A `reverse` group (dracula's `DiffDelete`,
-and the `quiet`/`sorbet`/`zaibatsu` schemes nvim itself ships) is the case
-where the two fields swap -- nvim fills such a row from the *foreground* -- so
-the fill is read off `guifg` there and blended the same way; reading `guibg`
-under `reverse` collapsed all four review states into the one background those
-schemes share. Text is the first color that reads at WCAG 3:1 or better on
-the fill it lands on: the group's own non-fill color -- its `guifg`, or its
-`guibg` under `reverse` -- then `Normal`'s foreground, then plain black or
-white. The `eef1f8` rows above are the first of those, `DiffAdd` and
-`DiffText`'s own paired foreground. Neither of the simpler rules survives the
-population: a diff group's own foreground is the row's background under
-`reverse`, and `Normal`'s foreground alone is light on a dark scheme while
-nvim's legacy diff palette hands `DiffText` a `#c6c6c6` fill over verbatim,
-which is 12 of the 28 schemes the pinned nvim ships reading between 1.06:1
-and 1.71:1. 3:1 is the floor view holds rather than a standard it quotes: it
-is the point past which the scheme's own paired color still survives, and a
-stricter number would trade the author's palette for plain black or white on
-schemes that read perfectly well. `ViewReviewSign` carries `ViewReviewHeader`'s
-fill -- both name the same hunk -- and runs the ladder against that, so the
-marker never depends on what the gutter under it happens to be. It cannot:
-the `▶` sits on the hunk the cursor is on, whose sign cell nvim fills from
-`CursorLineSign` while the cursor is on that row and from `SignColumn` the
-moment it moves off or `'cursorline'` is cleared (`:h hl-CursorLineSign`),
-18 of the 28 schemes the pinned nvim ships give those two different
-backgrounds, and moving the cursor one row raises no event a re-derive could
-hang off. nvim pads the sign to the width of the column it draws in, and the
-fill covers all of it. Nothing else crosses:
-`ViewReviewRemoved` and `ViewReviewStale` carry a background alone, so a
-reviewed row keeps whatever foreground its own syntax gave it, and no
-`reverse` or `bold` follows the color across. A colorscheme designs its diff
-groups for diff mode, where they color cells inside a diffed line; a
-`line_hl_group` paints a whole row with them, and dracula's foreground-only
-`reverse` `DiffDelete` fills that row with a solid block of `#FF5555`. The
-derived group is a fifth of that same red instead, under the row's own text
-(`crates/view-engine/tests/inline_review_live.rs`'s
-`a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block`
-pins both halves against a dracula-shaped scheme, and
+`DiffAdd`, `DiffChange` and `DiffText` here that is the `guibg`, handed over as
+it stands, because that background is what the author drew for a diffed row.
+`DiffDelete` here has only a `guifg`, so that foreground is laid a fifth of the
+way over `Normal`'s background instead: `#ffc0b9` a fifth over `#14161b` is the
+`43383b` above. A `reverse` group (dracula's `DiffDelete`, and the
+`quiet`/`sorbet`/`zaibatsu` schemes nvim itself ships) is the case where the two
+fields swap -- nvim fills such a row from the *foreground* -- so the fill is
+read off `guifg` there and blended the same way; reading `guibg` under `reverse`
+collapsed all four review states into the one background those schemes share.
+Text is the first color that reads at WCAG 3:1 or better on the fill it lands
+on: the group's own non-fill color -- its `guifg`, or its `guibg` under
+`reverse` -- then `Normal`'s foreground, then plain black or white. The `eef1f8`
+rows above are the first of those, `DiffAdd` and `DiffText`'s own paired
+foreground. Neither of the simpler rules survives the population: a diff group's
+own foreground is the row's background under `reverse`, and `Normal`'s
+foreground alone is light on a dark scheme while nvim's legacy diff palette
+hands `DiffText` a `#c6c6c6` fill over verbatim, which is 12 of the 28 schemes
+the pinned nvim ships reading between 1.06:1 and 1.71:1. 3:1 is the floor view
+holds rather than a standard it quotes: it is the point past which the scheme's
+own paired color still survives, and a stricter number would trade the author's
+palette for plain black or white on schemes that read perfectly well.
+`ViewReviewSign` carries `ViewReviewHeader`'s fill -- both name the same hunk --
+and runs the ladder against that, so the marker never depends on what the gutter
+under it happens to be. It cannot: the `▶` sits on the hunk the cursor is on,
+whose sign cell nvim fills from `CursorLineSign` while the cursor is on that row
+and from `SignColumn` the moment it moves off or `'cursorline'` is cleared
+(`:h hl-CursorLineSign`), 18 of the 28 schemes the pinned nvim ships give those
+two different backgrounds, and moving the cursor one row raises no event a
+re-derive could hang off. nvim pads the sign to the width of the column it draws
+in, and the fill covers all of it. Nothing else crosses: `ViewReviewRemoved` and
+`ViewReviewStale` carry a background alone, so a reviewed row keeps whatever
+foreground its own syntax gave it, and no `reverse` or `bold` follows the color
+across. A colorscheme designs its diff groups for diff mode, where they color
+cells inside a diffed line; a `line_hl_group` paints a whole row with them, and
+dracula's foreground-only `reverse` `DiffDelete` fills that row with a solid
+block of `#FF5555`. The derived group is a fifth of that same red instead, under
+the row's own text (`crates/view-engine/tests/inline_review_live.rs`'s
+`a_reverse_video_diff_group_becomes_a_subtle_background_not_a_solid_block` pins
+both halves against a dracula-shaped scheme, and
 `a_background_defined_diff_group_is_taken_verbatim` pins the other side).
 
 The range mark's `end_row` is one *below* the hunk's own `old_range` end: the
@@ -163,12 +161,11 @@ GLOBAL n-maps after show: 55
 
 Seven mappings, read out of `nvim_buf_get_keymap(buf, 'n')` -- the reviewed
 buffer's own list, and no other buffer's -- and the global map count is
-untouched. `<leader>` is nvim's default `\` here, expanded by
-`vim.keymap.set` when the map is set, so the review's keys
-follow whatever `mapleader` the user's own config chose. The right-hand side is
-literal `rpcnotify` text rather than an opaque Lua callback, which is what lets
-`:map`, `maparg()` and any plugin that introspects mappings show exactly what
-view installed and why.
+untouched. `<leader>` is nvim's default `\` here, expanded by `vim.keymap.set`
+when the map is set, so the review's keys follow whatever `mapleader` the user's
+own config chose. The right-hand side is literal `rpcnotify` text rather than an
+opaque Lua callback, which is what lets `:map`, `maparg()` and any plugin that
+introspects mappings show exactly what view installed and why.
 
 ```
 TEXT unchanged=true state [changedtick 2, modified true] -> [changedtick 2, modified true]
@@ -250,15 +247,14 @@ messages after two clears: ""
 derive flag=nil  view_review augroup=gone
 ```
 
-The namespace is emptied and every mapping is gone. So are the derived
-groups' one-shot flag and the `ColorScheme` autocmd that keeps them current:
-the next review derives against whatever colorscheme is loaded then, rather
-than against a session-old answer, and no autocmd outlives the review that
-installed it. A second clear over an
-already-clear buffer answers without error: `vim.keymap.del` raises for a
-mapping that does not exist, which is what the `pcall` around it absorbs.
-Idempotence is what lets a review's teardown run without first proving a show
-ever landed.
+The namespace is emptied and every mapping is gone. So are the derived groups'
+one-shot flag and the `ColorScheme` autocmd that keeps them current: the next
+review derives against whatever colorscheme is loaded then, rather than against
+a session-old answer, and no autocmd outlives the review that installed it. A
+second clear over an already-clear buffer answers without error:
+`vim.keymap.del` raises for a mapping that does not exist, which is what the
+`pcall` around it absorbs. Idempotence is what lets a review's teardown run
+without first proving a show ever landed.
 
 The empty message history is worth reading precisely: it says the `pcall`
 absorbed the delete, not that a raise would have been visible. Measured on

@@ -24,23 +24,21 @@ name the plugin.
 
 ## Reading a result cell
 
-`OK (engine-noise subtracted: ...)` is a row whose state runs the
-user's own configuration unadjusted: its epilogue subtracts
-exactly the errors the pinned engine raises on that same
-configuration with no `view` involved, and the cell names every
-line it subtracted. `EXPECTED FAILURE` is a row the suite expects
-red today, listed in the runner's own expected-red manifest and
-carrying what has to become true for it to go green; the run fails
-if such a row passes, so the manifest cannot outlive the defect.
-`FAILED` is an unplanned red and fails the run.
+`OK (engine-noise subtracted: ...)` is a row whose state runs the user's own
+configuration unadjusted: its epilogue subtracts exactly the errors the pinned
+engine raises on that same configuration with no `view` involved, and the cell
+names every line it subtracted. `EXPECTED FAILURE` is a row the suite expects
+red today, listed in the runner's own expected-red manifest and carrying what
+has to become true for it to go green; the run fails if such a row passes, so
+the manifest cannot outlive the defect. `FAILED` is an unplanned red and fails
+the run.
 
 ## Staleness rule
 
-Every engine-pin bump re-runs the matrix and re-dates this page.
-The generator refuses to write the page when any row in
-`compat/results.json` records an engine pin different from
-`.engine-pin`, so a pin bump forces a fresh `task compat` run
-before the page can regenerate.
+Every engine-pin bump re-runs the matrix and re-dates this page. The generator
+refuses to write the page when any row in `compat/results.json` records an
+engine pin different from `.engine-pin`, so a pin bump forces a fresh
+`task compat` run before the page can regenerate.
 
 ## Results
 

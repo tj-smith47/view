@@ -10,12 +10,9 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Status: pre-alpha](https://img.shields.io/badge/Status-pre--alpha-orange.svg)](#roadmap)
 
-[Install](#install) &bull;
-[Features](#features) &bull;
-[Not a distro](#not-another-neovim-distro) &bull;
-[Performance](#performance) &bull;
-[Roadmap](#roadmap) &bull;
-[Building](#building-from-source)
+[Install](#install) &bull; [Features](#features) &bull; [Not a
+distro](#not-another-neovim-distro) &bull; [Performance](#performance) &bull;
+[Roadmap](#roadmap) &bull; [Building](#building-from-source)
 
 ![view editing Rust code, Dracula themed, with a plugin-heavy lazy.nvim config loaded](assets/view-screenshot.png)
 
@@ -149,9 +146,8 @@ the graphics and keyboard protocols; [mpv](https://mpv.io), video playback.
 - [x] ★ **Engine supervision.** A hung or crashed Neovim is interrupted or
       restarted with buffers rehydrated from swap; the UI never blanks.
 - [x] ★ **Remote editing.** `view --remote host:path`: engine over SSH,
-      paint and input local, keystrokes echoed without waiting for the
-      round trip,
-      OSC 52 clipboard.
+      paint and input local, keystrokes echoed without waiting for the round
+      trip, OSC 52 clipboard.
 
 ### Landing before v0.1
 
@@ -240,10 +236,9 @@ sha256sum --check --ignore-missing view_0.1.0_checksums.txt
 
 ## Building from source
 
-You will need stable Rust, [Task](https://taskfile.dev), and the Neovim
-version `.engine-pin` names on your `PATH`. A source
-build resolves `nvim` from your `PATH`; only the released bundles carry an
-engine of their own.
+You will need stable Rust, [Task](https://taskfile.dev), and the Neovim version
+`.engine-pin` names on your `PATH`. A source build resolves `nvim` from your
+`PATH`; only the released bundles carry an engine of their own.
 
 ```bash
 git clone https://github.com/tj-smith47/view.git

@@ -110,23 +110,21 @@ pub fn render_page(results: &ResultsFile, current_pin: &str) -> Result<RenderedP
     );
     page.push_str("## Reading a result cell\n\n");
     page.push_str(
-        "`OK (engine-noise subtracted: ...)` is a row whose state runs the\n\
-         user's own configuration unadjusted: its epilogue subtracts\n\
-         exactly the errors the pinned engine raises on that same\n\
-         configuration with no `view` involved, and the cell names every\n\
-         line it subtracted. `EXPECTED FAILURE` is a row the suite expects\n\
-         red today, listed in the runner's own expected-red manifest and\n\
-         carrying what has to become true for it to go green; the run fails\n\
-         if such a row passes, so the manifest cannot outlive the defect.\n\
-         `FAILED` is an unplanned red and fails the run.\n\n",
+        "`OK (engine-noise subtracted: ...)` is a row whose state runs the user's own\n\
+         configuration unadjusted: its epilogue subtracts exactly the errors the pinned\n\
+         engine raises on that same configuration with no `view` involved, and the cell\n\
+         names every line it subtracted. `EXPECTED FAILURE` is a row the suite expects\n\
+         red today, listed in the runner's own expected-red manifest and carrying what\n\
+         has to become true for it to go green; the run fails if such a row passes, so\n\
+         the manifest cannot outlive the defect. `FAILED` is an unplanned red and fails\n\
+         the run.\n\n",
     );
     page.push_str("## Staleness rule\n\n");
     page.push_str(
-        "Every engine-pin bump re-runs the matrix and re-dates this page.\n\
-         The generator refuses to write the page when any row in\n\
-         `compat/results.json` records an engine pin different from\n\
-         `.engine-pin`, so a pin bump forces a fresh `task compat` run\n\
-         before the page can regenerate.\n\n",
+        "Every engine-pin bump re-runs the matrix and re-dates this page. The generator\n\
+         refuses to write the page when any row in `compat/results.json` records an\n\
+         engine pin different from `.engine-pin`, so a pin bump forces a fresh\n\
+         `task compat` run before the page can regenerate.\n\n",
     );
     page.push_str("## Results\n\n");
     page.push_str("| Plugin | Version | Engine pin | Scenario | State | Result | Date |\n");

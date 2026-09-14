@@ -53,11 +53,6 @@ WORD='(^|[^[:alnum:]_-])'
 
 fail=0
 
-# ASCII field separator: a scanned line may start with a tab, and a tab-
-# separated record would split that indentation into a field of its own and
-# push the code out of $4.
-SEP=$'\034'
-
 # Rules shared by both passes: drop whole-line comments, and drop the bodies
 # of the here-docs a line opens. The tags a line opens come from the reader
 # beside the population, which is where the one here-doc tokenizer in this
@@ -68,7 +63,7 @@ SEP=$'\034'
 # does not, so it stops the run loudly instead of narrowing the scan in
 # silence.
 SKIP="$SCRIPT_HEREDOC_AWK"'function unterminated() {
-  printf("PORTABILITY-SELF-FAIL: %s opens a here-doc <<%s that no later line closes; the scan would read the rest of that file as data\n", opened[qh], queue[qh]) > "/dev/stderr"
+  printf("PORTABILITY-SELF-FAIL: %s opens a here-doc tagged %s that no later line closes; the scan would read the rest of that file as data\n", opened[qh], substr(queue[qh], 2)) > "/dev/stderr"
   exit 2
 }
 BEGIN { qh = 1; qn = 0 }
@@ -76,7 +71,8 @@ FNR == 1 { if (qn >= qh) unterminated(); qh = 1; qn = 0; fn = "" }
 qn >= qh {
   line = $0
   cur = queue[qh]
-  if (substr(cur, 1, 1) == "-") { sub(/^\t+/, "", line); cur = substr(cur, 2) }
+  if (substr(cur, 1, 1) == "-") { sub(/^\t+/, "", line) }
+  cur = substr(cur, 2)
   if (line == cur) qh += 1
   next
 }
@@ -168,7 +164,7 @@ done
 # every function in this tree is written; a one-liner closes on its own
 # line.
 annotate() {
-  awk -v SQ="'" -v S="$SEP" "$SKIP"'
+  awk -v SQ="'" -v S="$SCRIPT_FIELD_SEP" "$SKIP"'
     {
       if (fn == "" && match($0, /^[A-Za-z_][A-Za-z0-9_-]*\(\)[[:space:]]*\{/)) {
         name = $0; sub(/\(\).*/, "", name)
@@ -186,7 +182,7 @@ ANNOTATED=$(annotate "${targets[@]}")
 
 # seed: a body that puts one of its own positionals on the right of `=~`
 readers=$(printf '%s\n' "$ANNOTATED" |
-  awk -F"$SEP" '$3 != "-" && $4 ~ /=~[[:space:]]*"?[$][{]?[0-9]/ { print $3 }' | sort -u | grep . || true)
+  awk -F"$SCRIPT_FIELD_SEP" '$3 != "-" && $4 ~ /=~[[:space:]]*"?[$][{]?[0-9]/ { print $3 }' | sort -u | grep . || true)
 # closure: a body that hands a reader nothing but a variable is a forwarder,
 # and the pattern that variable holds is whatever ITS caller wrote -- so the
 # forwarder's own call sites are call sites of the reader. A body passing a
@@ -197,7 +193,7 @@ FORWARDS='[[:space:]]+"?[$][{]?[A-Za-z_][A-Za-z0-9_]*[}]?"?([[:space:]]|$)'
 while [ -n "$readers" ]; do
   alternation=$(printf '%s\n' "$readers" | tr '\n' '|' | sed 's/|$//')
   grown=$(printf '%s\n%s\n' "$readers" "$(printf '%s\n' "$ANNOTATED" |
-    awk -F"$SEP" -v re="$WORD($alternation)$FORWARDS" '$3 != "-" && $4 ~ re { print $3 }')" |
+    awk -F"$SCRIPT_FIELD_SEP" -v re="$WORD($alternation)$FORWARDS" '$3 != "-" && $4 ~ re { print $3 }')" |
     sort -u | grep . || true)
   [ "$grown" = "$readers" ] && break
   readers=$grown
@@ -205,7 +201,7 @@ done
 
 for reader in $readers; do
   sites=$(printf '%s\n' "$ANNOTATED" |
-    awk -F"$SEP" -v re="$WORD$reader[[:space:]]+[\"']" '$4 ~ re { print $1 ":" $2 ":" $4 }' || true)
+    awk -F"$SCRIPT_FIELD_SEP" -v re="$WORD$reader[[:space:]]+[\"']" '$4 ~ re { print $1 ":" $2 ":" $4 }' || true)
   [ -n "$sites" ] || continue
   while IFS= read -r site; do
     [ -n "$site" ] || continue
