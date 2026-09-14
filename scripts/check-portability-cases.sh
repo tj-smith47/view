@@ -517,8 +517,11 @@ desc='an empty scripts/, which the two sibling gates over this population refuse
 out=$(bash "$SCANNER" "$CASE" 2>&1)
 rc=$?
 got=no
-# resolved, because the scanner names the root by pwd and macOS hands a
-# mktemp path out through two symlinked parents
+# the same logical path the scanner names: `cd` then `pwd` resolves no
+# symlink in bash, and the scanner spells its root the same way -- `cd
+# "$ROOT"` and `$(pwd)` -- so both sides agree whether or not a parent of
+# the scratch tree is a link, which is what macOS hands a mktemp path out
+# through
 root=$(cd "$CASE" && pwd)
 case "$out" in
   *"no file under $root whose first line names bash or sh"*) got=named ;;

@@ -1335,12 +1335,50 @@ if [ -z "$caught" ]; then
 fi
 report 'the split-case scan refuses a case whose word runs onto the next line' "$missed"
 
-# The grep above reads constructs; it cannot see the two shapes that made 3.2
-# refuse this very checker -- a case pattern and an apostrophe in a comment,
-# both inside a process substitution, whose closing paren 3.2 miscounts. Only
-# a parse under a pre-4 bash catches those, and the host that has one is the
-# host the contract is about, so the leg runs where /bin/bash is old and says
-# so where it is not.
+# The third instance of the same defect, and the second with a spelling a
+# reader can see: a comment inside a multi-line $( ) or <( ). 3.2 is already
+# counting parens and quotes there and knows nothing about the `#`, so a
+# comment whose parens do not balance ends the substitution early and one
+# carrying a lone quote swallows the rest. Balanced parens are left alone --
+# the count comes back, which is why the shipped comment naming two sidecars
+# in check-budget-drift.sh is not a finding. The block ends at a line that
+# starts with `)`, which under-reads a nested substitution rather than
+# over-reading one: a missed finding is what the parse leg below is for.
+substitution_comments() {
+  awk -v SQ="'" '
+    !depth && /(\$\(|<\()[[:space:]]*$/ { depth = 1; next }
+    depth && /^[[:space:]]*\)/ { depth = 0; next }
+    depth && /^[[:space:]]*#/ {
+      t = $0
+      if (gsub(/\(/, "(", t) != gsub(/\)/, ")", t) \
+        || gsub(SQ, SQ, t) % 2 || gsub(/"/, "\"", t) % 2) {
+        print FILENAME ":" FNR ": " $0
+      }
+    }
+  ' "$@"
+}
+if [ -n "$empty" ]; then
+  commented="$empty"
+else
+  commented=$(cd "$ROOT" && substitution_comments $GUARDED)
+fi
+report 'no comment inside a command substitution whose parens or quotes 3.2 miscounts' "$commented"
+
+# planted, because the walk above is worth what it refuses and the shipped
+# tree carries no such comment to refuse
+printf '%s\n' '#!/usr/bin/env bash' 'x=$(' '# a comment with a ) paren' 'echo hi' ')' > "$planted"
+caught=$(substitution_comments "$planted")
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted comment paren went unrefused"
+fi
+report 'the comment walk refuses a paren in a comment inside a substitution' "$missed"
+
+# The grep above reads constructs; it cannot see the shape that made 3.2
+# refuse this very checker -- a case pattern inside a process substitution,
+# whose closing paren 3.2 miscounts. Only a parse under a pre-4 bash catches
+# that one, and the host that has one is the host the contract is about, so
+# the leg runs where /bin/bash is old and says so where it is not.
 stock=/bin/bash
 stock_major=$("$stock" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 9)
 if [ -n "$empty" ]; then

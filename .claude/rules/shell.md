@@ -12,14 +12,17 @@ with a message reading as a script bug — CI's macos leg only passes because
 the runner image puts a newer bash ahead of it. So the whole population is
 written to 3.2, not just the scripts whose header says so.
 
-Four shapes break it, and only the first and the last are constructs you
-can name:
+Three shapes break it. The first and the last are constructs you can name.
+The middle one is not a construct at all but a defect in 3.2's own reader:
+it finds the end of a `$( )` or `<( )` by counting parens with quote
+awareness and no knowledge of comments, so any `)` it counts that the
+writer did not mean ends the substitution early, and any quote it counts
+swallows the rest.
 
 | shape | 3.2 says | write instead |
 |---|---|---|
-| `declare -A m=([k]=v)` | `k: unbound variable` under `set -u` | a `case`, or newline-joined strings matched with `grep -Fqx` |
-| `case "$x" in *.*) … ;; esac` inside `$( )` or `<( )` | `syntax error near unexpected token` | `case "$x" in (*.*) … ;; esac` — the leading paren keeps the count |
-| an apostrophe in a comment inside `$( )` or `<( )` | ``bad substitution: no closing `)' `` | reword the comment; 3.2 reads the quote, not the `#` |
+| `declare -A m=([k]=v)` | `k: unbound variable` under `set -u` | a `case`, or newline-joined strings fed to `grep -Fqx` by here-string (`grep -Fqx -- "$x" <<<"$list"`) and never by a pipe — a quiet `grep` exits at its first match, SIGPIPEs the producer, and under `pipefail` the hit comes back a miss (`crates/view-oracle/tests/shell_guards.rs:402` refuses the pipe) |
+| a paren or a quote inside `$( )` or `<( )` that the reader counts and the writer did not mean: a `case` pattern with no leading paren, a `)` or an apostrophe in a comment, a `case` word carried onto the next line | `syntax error near unexpected token`, or ``bad substitution: no closing `)' `` | give every `case` pattern its leading paren (`case "$x" in (*.*) … ;; esac`), keep the `case` word on the header line, and reword the comment |
 | `${x//a/b}` on anything longer than a word | nothing — it rescans the string per match and runs unbounded | `sed`/`tr` for a rewrite; `[[ $x == *[![:space:]]* ]]` (or its negation) for an emptiness test |
 
 The last row's class is the every-match substitution and nothing wider.
@@ -42,20 +45,27 @@ running at 283 s under an alarm, where the glob test answered in 0 s.
 The same ban covers `mapfile`, `readarray`, `[[ -v x ]]`, `${x,,}`,
 `${x^^}`, `\|&`, `&>>` and `;;&`.
 
-The second row's shape has a spelling a line-at-a-time scan can see, and it
-is banned on its own: a `case` whose word runs onto the next line. Written
-that way the pattern below it closes on a paren the substitution counts as
-its own, which took the whole style case matrix out of the 3.2 leg. Every
-`case` in this population puts its `in` on the header line, so a `case` with
-no `in` beside it is the tell, and the construct scan refuses it.
+Two of the middle row's three instances have a spelling a line-at-a-time
+scan can see, and each is banned on its own. A `case` whose word runs onto
+the next line: the pattern below it closes on a paren the substitution
+counts as its own, which took the whole style case matrix out of the 3.2
+leg, and every `case` in this population puts its `in` on the header line,
+so a `case` with no `in` beside it is the tell. A comment inside a
+multi-line `$( )` or `<( )` whose own parens do not balance, or which
+carries an odd number of quotes: the reader is inside a substitution there
+and reads the comment as code. Balanced parens in such a comment are left
+alone -- the count comes back and the substitution ends where it was
+written to, which is why the one shipped instance
+(`check-budget-drift.sh:338`) is not a finding.
 
-Four legs in `scripts/check-budget-drift-cases.sh` enforce it over every
+Five legs in `scripts/check-budget-drift-cases.sh` enforce it over every
 file under `scripts/` whose shebang names bash or `sh` -- the remote-test
 fixtures carry no suffix -- so a script is graded without anyone
 remembering to add it here: one greps the construct list, one greps the
-split `case` header, one parses each
+split `case` header, one walks the comments inside a multi-line
+substitution, one parses each
 script under `/bin/bash` when that is a pre-4 bash — which is the only leg
-that sees the two paren-counting shapes, and it runs on the host the
+that sees the leading-paren-less `case` pattern, and it runs on the host the
 contract is about — and one runs the drift check over the shipped tree,
 read-only, inside `perl -e 'alarm 120; exec @ARGV'` and under that same
 stock `/bin/bash`, because a cost this size is invisible to both of the
@@ -68,7 +78,8 @@ the only one.
 The construct list is itself graded, by three planted spellings: the direct
 and the indirect substitution, each of which it must refuse, and an anchored
 one, which it must let through. The split `case` scan is graded the same
-way, by a planted header whose word runs onto the next line.
+way, by a planted header whose word runs onto the next line, and the
+comment walk by a planted comment carrying a lone `)` inside a `$( )`.
 
 The population is the directory rather than the
 scripts `Taskfile.yml` names, because the release path runs

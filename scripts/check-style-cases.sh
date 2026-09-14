@@ -1406,16 +1406,54 @@ expect_pin 'a checker directory reused, which writes no link into the graded tre
 # The same property over every link the population makes, because the two
 # helpers above are not the last place one gets written and the failure is
 # silent where it happens.
+#
+# `ln` wherever a command can start -- after `&&`, `;`, `|`, `then`, `do`,
+# `else` and inside `$( )` -- rather than at the start of a line, which the
+# one production site would have escaped by gaining a `mkdir -p ... &&` in
+# front of it. The flag run is read as words with no `n` in any of them, so
+# `-s -n` written apart is as green as `-sn`, and the run has to end at an
+# operand: a trailing `-n` is what the line-wide spelling missed. Prose
+# naming the flagless spelling is not a finding, because a comment's `ln`
+# follows a backtick or a `#` and neither starts a command.
+FLAGLESS_LN='((^|[;&|(])[[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)ln[[:space:]]+(-[A-MO-Za-mo-z]+[[:space:]]+)*-[A-MO-Za-mo-z]*s[A-MO-Za-mo-z]*([[:space:]]+-[A-MO-Za-mo-z]+)*[[:space:]]+[^-[:space:]]'
+flagless_links() {
+  grep -nE "$FLAGLESS_LN" "$@" || true
+}
+
 new_pin_case
 if ! script_population_read "$TREE" > /dev/null || [ -z "$SCRIPT_POPULATION" ]; then
   deref="the population read answered nothing, so no link was graded"
 else
-  # anchored at the start of a command, so prose naming the flagless
-  # spelling is not a finding
-  deref=$(cd "$TREE" && grep -nE '^[[:space:]]*ln[[:space:]]+-s([^n]|$)' \
-    $SCRIPT_POPULATION) || deref=""
+  deref=$(cd "$TREE" && flagless_links $SCRIPT_POPULATION)
 fi
 expect_pin 'every link the population makes written -n, so none writes through one' "$deref"
+
+# planted, because the walk above is worth what it catches and the tree it
+# reads carries no flagless link to catch. The spelling is assembled through
+# a variable so planting one here does not make this file a hit.
+new_pin_case
+flagless='ln -s'
+{
+  printf '#!/bin/sh\n'
+  printf 'mkdir -p "$d" && %s "$a" "$b"\n' "$flagless"
+} > "$CASE/chained.sh"
+missed=""
+if [ -z "$(flagless_links "$CASE/chained.sh")" ]; then
+  missed="a link written after && went uncaught"
+fi
+expect_pin 'the link walk reads ln wherever a command starts, not only at the start of a line' "$missed"
+
+# The mirror: the flags written apart are the same link as `-sn`, and a walk
+# that reddens them teaches the population to write the spelling that
+# follows a link.
+new_pin_case
+apart='ln -s -n'
+{
+  printf '#!/bin/sh\n'
+  printf '%s "$a" "$b"\n' "$apart"
+} > "$CASE/apart.sh"
+caught=$(flagless_links "$CASE/apart.sh")
+expect_pin 'the link walk passes -s -n, the same link with its flags written apart' "$caught"
 
 # A file with no suffix carrying a shebang, counted by every consumer of
 # scripts/lib/script-population.sh. Two of them take a scan root and are run
