@@ -58,13 +58,13 @@ scan() {
     scanned_files=$((scanned_files + 1))
     findings=$(awk -v file="$file" '
       function indent_of(line,   n) {
-        n = match(line, /[^ \t]/)
+        n = match(line, /[^[:space:]]/)
         return n == 0 ? 0 : n - 1
       }
       # a gate opened on an earlier line covers every line indented deeper
       # than it; anything at or left of that indent has closed it
-      gated && indent_of($0) <= gate_indent && $0 ~ /[^ \t]/ { gated = 0 }
-      /--[ \t]*view-compat-accommodation:/ {
+      gated && indent_of($0) <= gate_indent && $0 ~ /[^[:space:]]/ { gated = 0 }
+      /--[[:space:]]*view-compat-accommodation:/ {
         # counted on the walk so the caller can hold it against an
         # independent count of the same markers: a walk that stops reaching
         # part of the tree otherwise reports a clean scan of nothing
@@ -72,8 +72,8 @@ scan() {
         pending = NR
         next
       }
-      /^[ \t]*$/ { next }
-      /^[ \t]*--/ { next }
+      /^[[:space:]]*$/ { next }
+      /^[[:space:]]*--/ { next }
       {
         if (pending) {
           if ($0 !~ /accommodate/) {
@@ -85,7 +85,7 @@ scan() {
           }
           pending = 0
         }
-        if (!gated && ($0 ~ /_once/ || $0 ~ /__/ || $0 ~ /package\.loaded\[[^]]*\][ \t]*=/)) {
+        if (!gated && ($0 ~ /_once/ || $0 ~ /__/ || $0 ~ /package\.loaded\[[^]]*\][[:space:]]*=/)) {
           printf "%s:%d: reaches a plugin private outside an accommodate gate (add a view-compat-accommodation marker)\n", file, NR
           bad = 1
         }

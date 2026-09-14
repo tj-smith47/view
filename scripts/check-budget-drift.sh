@@ -584,7 +584,7 @@ if [[ -f "$bench_page" && $seats == *[![:space:]]* ]]; then
         line = ul[i]
         gsub(/\|/, " \001 ", line)
         gsub(/\. /, " \001 ", line)
-        m = split(line, w, /[ \t]+/)
+        m = split(line, w, /[[:space:]]+/)
         for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
       }
       ngraded = 0
@@ -798,7 +798,7 @@ if [[ $seats == *[![:space:]]* ]]; then
       nf = split(fx, fixn, " ")
       if (nf > 1) { return }
       fixture = (nf == 1) ? fixn[1] : fixt
-      m = split(text, w, /[ \t]+/)
+      m = split(text, w, /[[:space:]]+/)
       bar = bar_of(w, m)
       nids = 0
       for (j = 1; j <= m; j++) {
@@ -869,7 +869,7 @@ if [[ $seats == *[![:space:]]* ]]; then
       n = split(body, t, /,/)
       for (i = 1; i <= n; i++) {
         num = t[i]
-        gsub(/[ \t]/, "", num)
+        gsub(/[[:space:]]/, "", num)
         if (num !~ /^-?[0-9]+(\.[0-9]+)?$/) { continue }
         off = num - acc
         if (off < 0) { off = -off }
@@ -944,8 +944,8 @@ NEGATED_AWK='
       rest = text
       while (match(rest, phrase) > 0) {
         before = substr(rest, 1, RSTART - 1)
-        sub(/[ \t]+$/, "", before)
-        n = split(before, w, /[ \t]+/)
+        sub(/[[:space:]]+$/, "", before)
+        n = split(before, w, /[[:space:]]+/)
         lo = (n - 4 < 1) ? 1 : n - 4
         for (j = lo; j <= n; j++) {
           if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
@@ -995,7 +995,7 @@ transport_in() {
       for (i = 1; i <= lines; i++) { text = text " " para_line[i] }
       # a phrase the vocabulary spells with single spaces survives the wrap
       # the page happens to have, and the indent a continuation line carries
-      gsub(/[ \t]+/, " ", text)
+      gsub(/[[:space:]]+/, " ", text)
       if (text ~ speculated) { verdict(text, para_no[1]) }
       lines = 0
     }
@@ -1008,7 +1008,7 @@ transport_in() {
       if (rows == 0) { return }
       text = ""
       for (i = 1; i <= rows; i++) { text = text " " row_line[i] }
-      gsub(/[ \t]+/, " ", text)
+      gsub(/[[:space:]]+/, " ", text)
       if (text ~ speculated) {
         for (i = 1; i <= rows; i++) { verdict(row_line[i], row_no[i]) }
       }
@@ -1242,7 +1242,7 @@ moment_in() {
         line = ul[i]
         gsub(/\|/, " ", line)
         gsub(/\. /, " \001 ", line)
-        m = split(line, w, /[ \t]+/)
+        m = split(line, w, /[[:space:]]+/)
         for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
       }
       ufx = fixtures_of(text)

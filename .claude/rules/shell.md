@@ -80,6 +80,16 @@ that interpreter turns out to be: an overrun is a cost regression under any
 bash, and the pattern substitution is the first cause to check rather than
 the only one.
 
+The same care applies to the awk these gates are written in, where the
+undefined construct is a backslash inside a bracket expression: `/[ \t]+/`
+and `/[^\\]";$/` are both left undefined by POSIX, and the three awks this
+tree has been run under are free to disagree. `[ \t]` is spelled
+`[[:space:]]` and an escaped quote is read by `substr` and `index`, so no
+bracket expression here holds a backslash at all; a pin at the end of
+`scripts/check-style-cases.sh` walks the population and reddens on the next
+one, reading a `[` where a command starts as the `test` builtin rather than
+as a bracket expression.
+
 Both reading legs take their line from one reader in
 `scripts/lib/script-population.sh`, which carries quote, here-doc and
 nesting state across lines the way 3.2 carries them. A word in a comment or
@@ -89,7 +99,11 @@ string goes unread. The here-doc half of that state comes from the one
 tokenizer in the tree, `SCRIPT_HEREDOC_AWK` in the same file, which the
 userland scan reads as well: a `<<` inside a quoted argument, past a `#`, or
 inside `(( ))` opens nothing, and a tag that never terminates leaves the rest
-of its file unread rather than scanned as commands.
+of its file unread rather than scanned as commands. Every spelling of the tag
+opens the same body -- bare, `'TAG'`, `"TAG"`, `\TAG`, `<<-TAG`, and any of
+those with the blank the shell allows between the operator and its word. A
+spelling read as no operator leaves the lines under it scanned as commands,
+which is the direction that hides a finding behind text no shell runs.
 
 The construct list is itself graded, by three planted spellings: the direct
 and the indirect substitution, each of which it must refuse, and an anchored
@@ -97,7 +111,8 @@ one, which it must let through. The split `case` scan is graded by six: a
 header whose word runs onto the next line, the same header written after a
 brace, the same after an `if`, the word written as prose in a string, a
 comment and a here-doc body it must leave alone, and the lines under a `<<`
-spelling written inside a string, which it must read. The comment walk is graded by six: a paren in a substitution
+spelling written inside a string, which it must read. The comment walk is graded
+by six: a paren in a substitution
 opened at end of line, an apostrophe in one opened with content still on the
 line, a substitution closed on a `done)` whose later comments it must not
 touch, a nested pair with the defect on the inner level, a plain `( )` group
@@ -166,7 +181,19 @@ whose handler *removes* one of the variables a `mktemp` path went into --
 resolved through the function the handler names, since half of these scripts
 write the removal in a `cleanup()`, and through a function that body calls,
 since the other half hand the root to a `cleanup_root "$X"` that removes its
-`$1`. The names a call like that reaches are the ones written at the call. Removes and not merely names: a handler
+`$1`. The names a call like that reaches are the ones written at the call.
+A call is read where the shell reads one, outside every quote: a callee named
+inside a string the handler prints (`echo "run; wipe now"`) runs nothing, and
+reading it as a call pairs the root against a removal that never fires. The
+trap line is a call site of its own -- the command a trap runs is a string
+the shell re-parses, so `trap 'wipe_q "$QROOT"' EXIT` is the call `wipe_q`
+with `$QROOT` as its argument, and the quotes around it are not part of it.
+A callee defined in a file the script sources is resolved through that file,
+one level, tried beside the script, from the scan root, and under
+`scripts/lib/`; a path none of the three resolves is named in the verdict,
+because a boundary the walk cannot cross that says nothing reddens a right
+script with a message claiming the opposite.
+Removes and not merely names: a handler
 that prints an accumulator (`log="$log made $ROOT"`, `echo "$log"`) reads as a
 pairing to a walk asking only whether the name appears, and the root is never
 removed. The names a removal reaches are those on a line running `rm`, plus
@@ -230,7 +257,15 @@ beforehand demands what the line is there to make, and the whole line is
 passed over. `test` is read where a command starts and nowhere else, through
 the same list the split-`case` scan in `scripts/check-budget-drift-cases.sh`
 reads, and the line is read as code, so a guard in a comment or a here-doc
-body is none. A planted file carrying one guard per spelling grades the
+body is none. That list is `SCRIPT_COMMAND_START`, and it is the union of
+what the three scans that once spelled it separately carried: the
+punctuation `^ ; & | ( { !`, and the words `if`, `then`, `do`, `else`,
+`elif`, `while`, `until`. A word dropped from it leaves a walk guarded
+behind that word fail-open, with the path it guards never demanded, so the
+guard harvest plants one spelling per word and the pin at the end of
+`scripts/check-style-cases.sh` walks the population for a list written
+beside this one rather than out of it. A planted file carrying one guard per
+spelling grades the
 harvest itself, `cargo test -p name` among them, which is `test` in argument
 position and no guard at all.
 
@@ -265,7 +300,12 @@ is what defuses it. That is a claim about the tree rather than about the
 shell, so a pin at the end of `scripts/check-style-cases.sh` walks the
 population for a guarded `&&` list whose next code line closes a function or
 a substitution, and reddens on any that carries no `|| true` and on a second
-file appearing beside that one. Write it `if [ -d docs ]; then ... fi` anyway, because which of
+file appearing beside that one. That walk reads the same
+`SCRIPT_COMMAND_START`: anchored at the line start instead, it read neither
+`x=1; [ -d docs ] && ...` nor the same list inside a `{ ...; }` group, both
+of which carry the caller verdict exactly as the line-start spelling does. Write
+it `if [ -d docs ]; then ... fi` anyway,
+because which of
 the positions a reader is looking at depends on what follows the line rather
 than on the line.
 
@@ -289,7 +329,10 @@ spelling at the start of a command.
 ## A comment wraps at 80 characters
 
 `scripts/check-style.sh` grades every comment line under `scripts/` at the
-width its markdown pages are held to, and a contributor meets the rule for
+width its markdown pages are held to -- `README.md`, `docs/` and the
+convention pages under `.claude/rules/`, which the same walk reads and which
+the run requires by name like every other guarded directory -- and a contributor
+meets the rule for
 the first time when it reddens a line. What the message says has to be what
 an editor shows, so the walks count characters and not bytes: a rule drawn
 in box characters is 77 characters and 105 bytes, and a gate measuring bytes

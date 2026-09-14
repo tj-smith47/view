@@ -1,5 +1,6 @@
 ---
-paths: ["crates/view-bench/**", "crates/view-harness/**", "docs/performance.md", "docs/benchmarking.md", "README.md"]
+paths: ["crates/view-bench/**", "crates/view-harness/**", "docs/performance.md",
+"docs/benchmarking.md", "README.md"]
 ---
 # Benchmark conventions
 

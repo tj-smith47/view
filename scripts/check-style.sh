@@ -294,8 +294,12 @@ check_lua_chunk_width() {
     inchunk {
       check_width($0)
       # an escaped quote inside the Lua does not close the Rust literal, so
-      # it must not end the walk either -- it would skip the rest silently
-      if ($0 ~ /^\);$/ || $0 ~ /^";$/ || $0 ~ /[^\\]";$/) { inchunk = 0 }
+      # it must not end the walk either -- it would skip the rest silently.
+      # The escape is read by index rather than by a bracket expression
+      # holding a backslash, which POSIX leaves undefined and both awks in
+      # this tree read differently
+      if ($0 ~ /^\);$/ || $0 ~ /^";$/ ||
+          ($0 ~ /";$/ && substr($0, length($0) - 2, 1) != "\\")) { inchunk = 0 }
       next
     }
     /^(pub(\(crate\))? )?const [A-Z_]+_CHUNK: &str =/ {
@@ -704,8 +708,16 @@ check_geometry_sites() {
 # here-doc body is not structure, and a brace inside a string is text.
 # `trap - EXIT` is not armed -- it clears the handler it otherwise reads as --
 # and is left out here.
+#
+# Each line carries both halves the reader made of it, the code text and the
+# part outside every quote, separated by TRAP_SEP. The removal walk below
+# needs both and cannot read the file itself: a here-doc opener survives into
+# the harvested text while its terminator does not, so a second pass of the
+# reader over this output opens a body that never closes and blanks every
+# removal under it.
+TRAP_SEP=$(printf '\034')
 temp_trap_handlers() {
-  awk -v SQ="'" -v CS="$SCRIPT_COMMAND_START" "$SCRIPT_CODE_AWK"'
+  awk -v SQ="'" -v S="$TRAP_SEP" -v CS="$SCRIPT_COMMAND_START" "$SCRIPT_CODE_AWK"'
     # the braces a shell reads as structure, counted over the text outside
     # every quote, comment and here-doc body: a `${x}` there balances itself
     function braces(s,   t, d) {
@@ -716,14 +728,35 @@ temp_trap_handlers() {
       script_code_scan($0)
       if (CODE ~ /^[[:space:]]*trap +(-- +)?[^-[:space:]]/ &&
           CODE ~ /(^|[^A-Za-z0-9_])EXIT([^A-Za-z0-9_]|$)/) {
-        armed = armed CODE "\n"
+        # what a trap runs is a string the shell re-parses, so the quotes
+        # around it are not part of it, and the signals after it are not part
+        # of it either. Printed with those quotes gone, a trap whose command
+        # is written inline rather than as a handler name reads downstream as
+        # the command it is -- a name in command position with a path beside
+        # it -- where the raw line offers a quote-led word that is no name to
+        # the extraction here and no call to the pairing below
         h = CODE
         sub(/^[[:space:]]*trap +(-- +)?/, "", h)
-        sub(/[[:space:]].*/, "", h)
-        if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) { want[h] = 1 }
+        q = substr(h, 1, 1)
+        if (q == SQ || q == "\"") {
+          j = index(substr(h, 2), q)
+          h = (j > 0) ? substr(h, 2, j - 1) : substr(h, 2)
+        } else {
+          sub(/[[:space:]].*/, "", h)
+        }
+        # the quotes left inside a re-parsed command string are the other
+        # kind and are balanced, so a run between a matching pair is the
+        # string it opens and the text outside them is where a call sits
+        bareh = h
+        gsub(/"[^"]*"/, "", bareh)
+        gsub(SQ "[^" SQ "]*" SQ, "", bareh)
+        armed = armed h S bareh "\n"
+        name = h
+        sub(/[[:space:]].*/, "", name)
+        if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) { want[name] = 1 }
       }
       if (inbody) {
-        body[cur] = body[cur] CODE "\n"
+        body[cur] = body[cur] CODE S BARE "\n"
         # closed at the brace that closes the function, by depth, never at an
         # indentation: an indentation rule ends the body at a `{ ...; } >&2`
         # group or at a JSON here-doc `}` in column one, and the removal below
@@ -738,7 +771,7 @@ temp_trap_handlers() {
       if (name !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/) { next }
       sub(/[[:space:]]*\(\).*/, "", name)
       cur = name
-      body[cur] = CODE "\n"
+      body[cur] = CODE S BARE "\n"
       depth = braces(BARE)
       if (depth > 0) { inbody = 1 }
     }
@@ -755,17 +788,61 @@ temp_trap_handlers() {
         seen[f] = 1
         if (!(f in body)) { continue }
         printf "%s", body[f]
+        # the call is read outside every quote: a name written inside a
+        # string is text the handler prints, and queueing its body pulls a
+        # removal the handler never runs into the pairing below
         k = split(body[f], lines, "\n")
         for (j = 1; j <= k; j++) {
+          out = substr(lines[j], index(lines[j], S) + 1)
           for (g in body) {
-            if (!(g in seen) && lines[j] ~ CS g "([^A-Za-z0-9_(]|$)") {
+            if (!(g in seen) && out ~ CS g "([^A-Za-z0-9_(]|$)") {
               queue[++n] = g
             }
           }
         }
       }
     }
-  ' "$1"
+  ' "$@"
+}
+
+# The files a script sources, resolved one level. A callee defined in a
+# sourced helper is the same removal written one file over, and a walk that
+# stops at the file refuses a script that is right. Each path is read after
+# the `$VAR/` or `$(...)/` that opens it -- the shape every source line in
+# this population writes -- and tried beside the script, from the scan root,
+# and under scripts/lib/. A path none of the three resolves is printed with
+# its line, because a boundary the walk cannot cross has to be named in the
+# verdict rather than left as a silent refusal.
+temp_trap_sources() {
+  local script="$1" here at path base cand got
+  here=$(dirname "$script")
+  awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+    {
+      script_code_scan($0)
+      if (CODE !~ /^[[:space:]]*(\.|source)[[:space:]]/) { next }
+      t = CODE
+      sub(/^[[:space:]]*(\.|source)[[:space:]]+/, "", t)
+      sub(/[[:space:]].*$/, "", t)
+      gsub(/["]/, "", t)
+      sub(/^[$][({][^)}]*[)}]\//, "", t)
+      sub(/^[$][A-Za-z_][A-Za-z0-9_]*\//, "", t)
+      if (t != "") { printf "%d %s\n", FNR, t }
+    }
+  ' "$script" | while read -r at path; do
+    base=${path##*/}
+    got=""
+    for cand in "$here/$path" "$path" "scripts/lib/$base"; do
+      if [ -f "$cand" ]; then
+        got="$cand"
+        break
+      fi
+    done
+    if [ -n "$got" ]; then
+      printf '%s\n' "$got"
+    else
+      printf '?%s:%s: %s\n' "$script" "$at" "$path"
+    fi
+  done
 }
 
 # The names an armed handler actually removes: every `$NAME` on a line that
@@ -777,7 +854,7 @@ temp_trap_handlers() {
 # The ceiling on the call: a callee that takes a path and removes a different
 # one still pairs the names at the call.
 temp_trap_removals() {
-  awk -v CS="$SCRIPT_COMMAND_START" '
+  awk -v S="$TRAP_SEP" -v CS="$SCRIPT_COMMAND_START" '
     function names_on(line,   s, n, out) {
       s = line; out = ""
       while (match(s, /[$][{]?[A-Za-z_][A-Za-z0-9_]*/)) {
@@ -794,9 +871,18 @@ temp_trap_removals() {
       return (line ~ CS g "([^A-Za-z0-9_(]|$)")
     }
     {
-      text[NR] = $0
-      if (match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/)) {
-        fn = substr($0, RSTART, RLENGTH)
+      # the two halves the harvest made of each line: the code text, which
+      # is where a `$NAME` sits, and the part outside every quote, which is
+      # where a call sits. A name inside a string is a word the handler
+      # prints, and reading it as a call pairs a root against a removal that
+      # never runs
+      sp = index($0, S)
+      CODE = substr($0, 1, sp - 1)
+      BARE = substr($0, sp + 1)
+      text[NR] = CODE
+      outside[NR] = BARE
+      if (match(CODE, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/)) {
+        fn = substr(CODE, RSTART, RLENGTH)
         sub(/^[[:space:]]*/, "", fn)
         sub(/[[:space:]]*\(\)$/, "", fn)
         defined[fn] = 1
@@ -805,15 +891,15 @@ temp_trap_removals() {
       # written as a string rather than a regex literal: the slash needed a
       # backslash only to get past the delimiter of the literal, and a
       # backslash inside a bracket expression is undefined
-      if ($0 ~ "(^|[^A-Za-z0-9_./-])rm(dir)?[[:space:]]") {
+      if (BARE ~ "(^|[^A-Za-z0-9_./-])rm(dir)?[[:space:]]") {
         isrm[NR] = 1
         removes[fn] = 1
       }
-      if (match($0, /(^|[[:space:]])for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]/)) {
-        v = substr($0, RSTART, RLENGTH)
+      if (match(BARE, /(^|[[:space:]])for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]/)) {
+        v = substr(BARE, RSTART, RLENGTH)
         sub(/^[[:space:]]*for[[:space:]]+/, "", v)
         sub(/[[:space:]]+in[[:space:]]*$/, "", v)
-        bound[v] = bound[v] names_on($0)
+        bound[v] = bound[v] names_on(CODE)
       }
     }
     END {
@@ -825,7 +911,7 @@ temp_trap_removals() {
         for (i = 1; i <= NR; i++) {
           if (removes[owner[i]]) { continue }
           for (g in defined) {
-            if (removes[g] && calls(text[i], g)) {
+            if (removes[g] && calls(outside[i], g)) {
               removes[owner[i]] = 1
               changed = 1
             }
@@ -838,7 +924,7 @@ temp_trap_removals() {
           continue
         }
         for (g in defined) {
-          if (removes[g] && calls(text[i], g)) {
+          if (removes[g] && calls(outside[i], g)) {
             removed = removed names_on(text[i])
             break
           }
@@ -863,7 +949,7 @@ temp_trap_removals() {
 # that kills a child both read as a pairing to a walk that only asks for the
 # word.
 check_temp_traps() {
-  local fail=0 f names name removed paired
+  local fail=0 f names name removed paired reach unread read_with line
   if ! read_script_population; then
     return 1
   fi
@@ -920,7 +1006,23 @@ check_temp_traps() {
     # a handler that prints an accumulator (`log="$log made $ROOT"`, `echo
     # "$log"`) names the holder and removes nothing, and the temp root leaks
     # with this walk silent. Delimited by blanks, which no variable name holds.
-    removed=" $(temp_trap_handlers "$f" | temp_trap_removals | tr '\n' ' ')"
+    # split in the shell rather than through a sed and a grep: this loop runs
+    # once per script that makes a temp file, and two more processes each
+    # time cost more than the walk they sort
+    reach=$(temp_trap_sources "$f")
+    unread=""
+    read_with=""
+    while IFS= read -r line; do
+      case "$line" in
+        ('') ;;
+        ('?'*) unread="${unread:+$unread; }${line#\?}" ;;
+        (*) read_with="$read_with $line" ;;
+      esac
+    done <<EOF
+$reach
+EOF
+    # shellcheck disable=SC2086
+    removed=" $(temp_trap_handlers "$f" $read_with | temp_trap_removals | tr '\n' ' ')"
     paired=0
     # a file whose every mktemp goes somewhere no removal reaches leaves this
     # loop unrun and is reported
@@ -933,7 +1035,12 @@ check_temp_traps() {
       esac
     done
     if [ "$paired" -eq 0 ]; then
-      echo "$f: makes a temp file with no EXIT trap removing it"
+      if [ -n "$unread" ]; then
+        echo "$f: makes a temp file with no EXIT trap removing it, and the" \
+          "walk could not read what it sources at $unread"
+      else
+        echo "$f: makes a temp file with no EXIT trap removing it"
+      fi
       fail=1
     fi
   done <<EOF
@@ -1029,7 +1136,7 @@ check_prose_width() {
       # the run longer than the limit is what cannot wrap, so it is what is
       # exempt: the rest of the line is prose and is measured without it
       rest = cols($0)
-      n = split($0, word, /[ \t]+/)
+      n = split($0, word, /[[:space:]]+/)
       for (i = 1; i <= n; i++) {
         if (cols(word[i]) > limit) { rest -= cols(word[i]) }
       }
@@ -1156,7 +1263,7 @@ check_script_comment_width() {
       # the run longer than the limit is what cannot wrap, so the comment is
       # measured without it, the way the page walk measures prose
       rest = cols($0)
-      n = split($0, word, /[ \t]+/)
+      n = split($0, word, /[[:space:]]+/)
       for (i = 1; i <= n; i++) {
         if (cols(word[i]) > limit) { rest -= cols(word[i]) }
       }
@@ -1208,6 +1315,7 @@ if [ "${1:-}" = "--prose-width" ]; then
   targets=""
   if [ -f README.md ]; then targets="README.md"; fi
   if [ -d docs ]; then targets="$targets docs"; fi
+  if [ -d .claude/rules ]; then targets="$targets .claude/rules"; fi
   if [ -z "$targets" ]; then
     check_prose_width /dev/null
     exit $?
@@ -1297,7 +1405,7 @@ fail=0
 # the run says nothing about the rules it never reached. The guards stay --
 # they keep a walk from being handed a root that is not there -- and this
 # loop is what makes their absence loud.
-for required in crates scripts scripts/acceptance compat corpus docs; do
+for required in crates scripts scripts/acceptance compat corpus docs .claude/rules; do
   if [ ! -d "$required" ]; then
     echo "STYLE FAIL: $required/ directory missing"; fail=1
   fi
@@ -1405,14 +1513,14 @@ if [ -d crates ]; then
       # a binding belongs to the function it was made in: bash-style file
       # scope would let one function name a root and whitelist the same
       # identifier for every sibling that never bound one
-      if (stmt ~ /(^|[^A-Za-z0-9_])fn[ \t]/) {
+      if (stmt ~ /(^|[^A-Za-z0-9_])fn[[:space:]]/) {
         delete rooted
       }
       if (stmt ~ /target_root\(\)/ &&
-          match(stmt, /let[ \t]+(mut[ \t]+)?[A-Za-z_][A-Za-z0-9_]*/)) {
+          match(stmt, /let[[:space:]]+(mut[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*/)) {
         name = substr(stmt, RSTART, RLENGTH)
-        sub(/^let[ \t]+/, "", name)
-        sub(/^mut[ \t]+/, "", name)
+        sub(/^let[[:space:]]+/, "", name)
+        sub(/^mut[[:space:]]+/, "", name)
         rooted[name] = 1
       }
       if (stmt !~ /\.join\("(release|debug)"\)/ && stmt !~ /\.join\(profile/) {
@@ -1476,6 +1584,12 @@ if [ -f README.md ]; then
   # section (e.g. docs/statusline-wire-capture.md's "spec §9"), where
   # source code never has occasion to.
   check_narrative_markers "" "${doc_targets[@]}" || fail=1
-  check_prose_width "${doc_targets[@]}" || fail=1
+  # the convention pages wrap at the same width as the docs and are measured
+  # by the same walk: they are prose a contributor reads, and nothing else
+  # measured them. The two bans above stay off them -- a rules page cites a
+  # spec section and quotes the markers it bans, where a doc never does
+  width_targets=("${doc_targets[@]}")
+  if [ -d .claude/rules ]; then width_targets+=(.claude/rules); fi
+  check_prose_width "${width_targets[@]}" || fail=1
 fi
 exit $fail

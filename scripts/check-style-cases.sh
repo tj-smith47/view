@@ -700,6 +700,21 @@ expect_width() {
 new_width_case
 expect_width 0 '' 'a tree whose pages are inside the width'
 
+# The convention pages wrap at the same width as the docs, and nothing
+# measured them until this walk read the directory they sit in: both lines
+# the last review found there were written by appending a sentence to a
+# paragraph rather than re-wrapping it, which is the shape no reader catches.
+new_width_case
+mkdir -p "$CASE/.claude/rules"
+{ printf '# shell\n\n'; pad 100 'A rule written as prose ' ' and never re-wrapped'; } \
+  > "$CASE/.claude/rules/shell.md"
+expect_width 1 '.claude/rules/shell.md:3' 'a prose line over the width on a convention page'
+
+new_width_case
+mkdir -p "$CASE/.claude/rules"
+printf '# shell\n\nA line inside the limit.\n' > "$CASE/.claude/rules/shell.md"
+expect_width 0 '' 'a convention page inside the width'
+
 new_width_case
 over 80 >> "$CASE/docs/page.md"
 expect_width 0 '' 'a prose line at exactly the width'
@@ -1124,7 +1139,7 @@ expect_temp_traps() {
   out=$(bash "$CHECKER" --temp-traps "$CASE" 2>&1)
   rc=$?
   got=$(printf '%s\n' "$out" \
-    | awk '/: makes a temp file with no EXIT trap removing it$/ { c = $1; sub(/:$/, "", c); print c }' \
+    | awk '/: makes a temp file with no EXIT trap removing it/ { c = $1; sub(/:$/, "", c); print c }' \
     | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
   if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ] && [ -z "$note" ]; then
     printf 'ok %s - %s\n' "$n" "$desc"
@@ -1390,6 +1405,53 @@ PLANT
 expect_temp_traps 1 'scripts/a.sh' \
   'a removal swallowed by a here-doc that never terminates'
 
+# The same swallow through the two spellings the reader nearly lost: a
+# backslash before the tag quotes it the way single quotes do, and a blank
+# between the operator and its word is one the shell allows. Read as no
+# operator at all, the text under either is scanned as commands and the `rm`
+# there pairs a root the handler never removes, so each has to answer what
+# the bare spelling above answers.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  cat <<\TAG
+  rm -rf "$X"
+}
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a removal swallowed by a backslash-quoted here-doc tag that never terminates'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  cat << TAG
+  rm -rf "$X"
+}
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a removal swallowed by a blank-separated here-doc tag that never terminates'
+
+# The closing half of the same two spellings: a body that does terminate
+# leaves the removal below it code, so a reader that opened the body and
+# never closed it reddens a file that is right.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  cat <<\TAG
+  not a removal
+TAG
+  rm -rf "$X"
+}
+PLANT
+expect_temp_traps 0 '' \
+  'a removal below a backslash-quoted here-doc that terminates on its own tag'
+
 # The fail-open the same swallow used to open in the other direction: a
 # handler that removes nothing, a tag inside a quoted argument, and a removal
 # in a function the trap never calls. Read as the operator, the tag swallows
@@ -1407,6 +1469,117 @@ elsewhere() {
 PLANT
 expect_temp_traps 1 'scripts/a.sh' \
   'a handler removing nothing, which does not pair on a removal in a function it never calls'
+
+# The same fail-open through the call rather than through the tag: the
+# callee name sits inside a string the handler prints, so the handler runs
+# no removal and the root leaks. A call is read where the shell reads one --
+# outside every quote -- and nowhere else.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+SROOT=$(mktemp -d)
+wipe_s() {
+  rm -rf "$SROOT"
+}
+cleanup() {
+  echo "run; wipe_s now"
+}
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler naming its callee inside a string, which runs no removal'
+
+# The other side of that boundary, so the case above cannot be answered by a
+# walk that reads no call at all: the same two functions with the name in
+# command position.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+CROOT=$(mktemp -d)
+wipe_c() {
+  rm -rf "$CROOT"
+}
+cleanup() {
+  wipe_c
+}
+PLANT
+expect_temp_traps 0 '' 'a handler whose callee removes, named in command position'
+
+# The same boundary on the removal rather than on the call: an `rm` written
+# inside a string is a word the handler prints. Read as a removal it pairs a
+# root nothing ever removes, which is the fail-open the quote boundary exists
+# to close, reached through the other slot the reader feeds.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  echo "rm -rf $X"
+}
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler printing an rm written inside a string, which removes nothing'
+
+# The trap line is a call site of its own: the command a trap runs is a
+# string the shell re-parses, so a quote-led word there is a name and the
+# path beside it is an argument. Refused, a script that removes its root one
+# call deep from the trap line reddens.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+wipe_q() {
+  rm -rf "$1"
+}
+QROOT=$(mktemp -d)
+trap 'wipe_q "$QROOT"' EXIT
+PLANT
+expect_temp_traps 0 '' 'the inline call on a trap line, whose callee removes what it is handed'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+wipe_q() {
+  : "$1"
+}
+QROOT=$(mktemp -d)
+trap 'wipe_q "$QROOT"' EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'the same inline call whose callee removes nothing'
+
+# A callee defined in a file the script sources is the same removal written
+# one file over. Resolved one level, beside the script or under scripts/lib/;
+# a path none of those resolves is named in the verdict rather than refused
+# in silence.
+new_temp_trap_case
+printf '%s\n' '#!/usr/bin/env bash' 'sourced_d() { rm -rf "$1"; }' > "$CASE/scripts/lib_d.sh"
+write_temp_trap_script <<'PLANT'
+HERE=$(dirname "$0")
+. "$HERE/lib_d.sh"
+DROOT=$(mktemp -d)
+cleanup() {
+  sourced_d "$DROOT"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a callee defined in a file the script sources'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+HERE=$(dirname "$0")
+. "$HERE/nowhere.sh"
+EROOT=$(mktemp -d)
+cleanup() {
+  sourced_e "$EROOT"
+}
+trap cleanup EXIT
+PLANT
+probe=$(bash "$CHECKER" --temp-traps "$CASE" 2>&1)
+named=""
+case "$probe" in
+  (*"could not read what it sources at scripts/a.sh:3: nowhere.sh"*) ;;
+  (*) named="the verdict did not name the source line it could not read" ;;
+esac
+expect_temp_traps 1 'scripts/a.sh' \
+  'a source the walk cannot resolve, named in the verdict rather than refused in silence' \
+  "$named"
 
 # The seed class, one case per quoting shape. Green is "this spelling seeds":
 # the handler removes `$N`, so a shape the harvest reads answers 0 and a shape
@@ -1482,13 +1655,14 @@ expect_required() {
 }
 
 new_required_case
-mkdir -p "$CASE/crates" "$CASE/compat" "$CASE/corpus" "$CASE/docs"
+mkdir -p "$CASE/crates" "$CASE/compat" "$CASE/corpus" "$CASE/docs" "$CASE/.claude/rules"
 : > "$CASE/README.md"
 expect_required 1 'scripts/ scripts/acceptance/' \
   'a run from a root whose scripts/ has moved, which the walks alone pass silently'
 
 new_required_case
-mkdir -p "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" "$CASE/docs"
+mkdir -p "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" "$CASE/docs" \
+  "$CASE/.claude/rules"
 : > "$CASE/README.md"
 expect_required 1 'crates/' \
   'the same verdict for the sibling directory the run has always failed closed on'
@@ -1497,9 +1671,20 @@ expect_required 1 'crates/' \
 # so that the three walks behind `[ -f README.md ]` are the only ones the arm
 # guards, and a root with every directory and no page is what grades it.
 new_required_case
-mkdir -p "$CASE/crates" "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" "$CASE/docs"
+mkdir -p "$CASE/crates" "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" \
+  "$CASE/docs" "$CASE/.claude/rules"
 expect_required 1 'README.md' \
   'a run from a root whose README.md has moved, which the three walks behind it pass silently'
+
+# The directory the width walk added to the guarded set, which is required
+# by the same rule as the six beside it: the walk over it is behind a guard,
+# and a guard with no else reads as a pass.
+new_required_case
+mkdir -p "$CASE/crates" "$CASE/scripts/acceptance" "$CASE/compat" "$CASE/corpus" \
+  "$CASE/docs"
+: > "$CASE/README.md"
+expect_required 1 '.claude/rules/' \
+  'a run from a root whose convention pages have moved, which the width walk passes silently'
 
 # ---------------------------------------------------------------------------
 # a mode handler reached by a relative path: the handlers cd into the root
@@ -1894,13 +2079,16 @@ new_pin_case
   printf 'if [[ ! -f november ]]; then :; fi\n'
   printf '{ test -f oscar; }\n'
   printf '# [ -d papa ]\n'
+  printf 'if false; then :\nelif test -f papaya; then :\nfi\n'
+  printf 'while test -f quebec; do break; done\n'
+  printf 'until test -f romeo; do break; done\n'
 } > "$CASE/guards.sh"
 spellings=$(guarded_paths "$CASE/guards.sh" | tr '\n' ' ' | sed 's/ *$//')
 missed=""
-if [ "$spellings" != 'alpha bravo charlie delta echoed foxtrot golf hotel india kilo mike november oscar' ]; then
+if [ "$spellings" != 'alpha bravo charlie delta echoed foxtrot golf hotel india kilo mike november oscar papaya quebec romeo' ]; then
   missed="the guard harvest answered [$spellings]"
 fi
-expect_pin 'every guard spelling harvested, the negated ones among them, with a create-if-missing, a comment and a cargo test -p read as none' "$missed"
+expect_pin 'every guard spelling harvested, the negated ones among them, after each of elif, while and until, with a create-if-missing, a comment and a cargo test -p read as none' "$missed"
 
 # The other half of the same guard: `[ -d docs ] && targets="$targets docs"`
 # is safe mid-body and safe last in a loop body, where only the status moves.
@@ -1910,9 +2098,12 @@ expect_pin 'every guard spelling harvested, the negated ones among them, with a 
 # defuses it, which is a claim about the tree rather than about the shell, so
 # it is walked rather than asserted: the list line, the line that closes over
 # it, and whether either carries the `|| true`.
-GUARDED_LIST='^[[:space:]]*(!|[[][[]?|test)[[:space:]]'
+# where the list may start is the one boundary, not a fourth spelling of it:
+# anchored at the line start this walk read nothing of `x=1; [ -d docs ] &&
+# ...` and nothing of the same list inside a `{ ...; }` group, both of which
+# carry the verdict the same way
 guarded_list_tails() {
-  awk -v SQ="'" -v GL="$GUARDED_LIST" "$SCRIPT_CODE_AWK"'
+  awk -v SQ="'" -v GL="$SCRIPT_COMMAND_START"'(!|[[][[]?|test)[[:space:]]' "$SCRIPT_CODE_AWK"'
     function verdict(l) {
       return (l ~ /[|][|][[:space:]]*(true|:)/) ? "defused" : "live"
     }
@@ -1961,6 +2152,160 @@ case "$(guarded_list_tails "$CASE/tail.sh")" in
   *) missed="a guarded list written last in a function went unread" ;;
 esac
 expect_pin 'the guarded-list walk reads a list written last in a function with no || true' "$missed"
+
+# The two positions a line anchor passed over, which are the positions the
+# shared list exists to name: the list written after a `;` and the same list
+# inside a brace group. Both carry the caller verdict exactly as the
+# line-start spelling does.
+new_pin_case
+{
+  printf '#!/bin/sh\n'
+  printf 'pick() {\n'
+  printf '  x=1; [ -d docs ] && targets="$targets docs"\n'
+  printf '}\n'
+  printf 'grab() {\n'
+  printf '  { [ -d docs ] && targets="$targets docs"; }\n'
+  printf '}\n'
+} > "$CASE/tail-mid.sh"
+missed=""
+found=$(guarded_list_tails "$CASE/tail-mid.sh" | grep -c ': live$') || found=0
+if [ "$found" != "2" ]; then
+  missed=$(printf '2 guarded lists planted off the line start, %s read back\n%s\n' \
+    "$found" "$(guarded_list_tails "$CASE/tail-mid.sh")")
+fi
+expect_pin 'the guarded-list walk reads a list written after a semicolon and inside a brace group' "$missed"
+
+# Where a command starts is one value in one file, and the fourth spelling
+# of it is what the next walk invents: three scans had drawn this boundary
+# three different ways before it was written down, and a fifth was written
+# beside the third the same week. Walked rather than asserted, over the
+# assignment that is how each of the four was written -- an anchored group,
+# the punctuation a command can follow, or the words it can follow -- with
+# the definition itself and every line that reads it passed over. The
+# ceiling: a list written straight into an `awk -v` rather than into a
+# variable is not read here, and nothing but this file says so.
+command_start_spellings() {
+  awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+    {
+      script_code_scan($0)
+      if (CODE ~ /^SCRIPT_COMMAND_START=/) { next }
+      if (index(CODE, "$SCRIPT_COMMAND_START") > 0) { next }
+      if (CODE !~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) { next }
+      if (index(CODE, "(^|[;") > 0 ||
+          index(CODE, "^[[:space:]]*(") > 0 ||
+          index(CODE, "(if|then|do") > 0) {
+        print FILENAME ":" FNR ": " $0
+      }
+    }
+  ' "$@"
+}
+
+new_pin_case
+if ! script_population_read "$TREE" > /dev/null || [ -z "$SCRIPT_POPULATION" ]; then
+  spellings="the population read answered nothing, so no list was graded"
+else
+  spellings=$(cd "$TREE" && command_start_spellings $SCRIPT_POPULATION)
+fi
+expect_pin 'one spelling of where a command starts, read by every walk that grades an English word' "$spellings"
+
+# planted, because the walk above is worth what it catches and the tree it
+# reads carries none: the private list deleted from this file, written back
+# in the shape it was written in.
+new_pin_case
+cat > "$CASE/private.sh" <<'PRIV'
+#!/bin/sh
+GUARDED_LIST='^[[:space:]]*(!|[[][[]?|test)[[:space:]]'
+printf '%s\n' "$GUARDED_LIST"
+PRIV
+missed=""
+if [ -z "$(command_start_spellings "$CASE/private.sh")" ]; then
+  missed="the planted private list went unread"
+fi
+expect_pin 'the spelling walk reads a private list written beside the shared one' "$missed"
+
+# A backslash inside a bracket expression is undefined in POSIX awk, and the
+# two awks this tree runs on read it differently, so the tree writes none:
+# `[ \t]` is spelled `[[:space:]]` and an escaped quote is read by index.
+# Walked rather than asserted, because the construct is one keystroke from
+# being written again and neither awk says a word about it.
+#
+# A `[` where a command starts is the test builtin and opens no bracket
+# expression, so the same list that names that position names it here. The
+# backslash counted is one an awk regex reads as an escape (`\t`, `\n`, a
+# backslash); a `\"` is the shell quoting its own argument and the regex
+# engine never sees it.
+bracket_backslash_sites() {
+  awk -v SQ="'" -v CS="$SCRIPT_COMMAND_START" "$SCRIPT_CODE_AWK"'
+    function undefined_bracket(s,   i, n, c, nxt, inb, first, hit) {
+      n = length(s); inb = 0; first = 0; hit = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (!inb) {
+          if (c == "\\") { i++; continue }
+          if (c != "[") { continue }
+          if (substr(s, 1, i) ~ CS "[[]$") { continue }
+          inb = 1; first = 1; hit = 0
+          continue
+        }
+        if (c == "^" && first) { continue }
+        if (c == "]" && !first) {
+          if (hit) { return 1 }
+          inb = 0; first = 0
+          continue
+        }
+        if (c == "\\") {
+          nxt = substr(s, i + 1, 1)
+          if (nxt == "\\" || nxt == "t" || nxt == "n") { hit = 1 }
+          i++
+        }
+        first = 0
+      }
+      return 0
+    }
+    {
+      script_code_scan($0)
+      if (undefined_bracket(CODE)) { print FILENAME ":" FNR ": " $0 }
+    }
+  ' "$@"
+}
+
+new_pin_case
+if ! script_population_read "$TREE" > /dev/null || [ -z "$SCRIPT_POPULATION" ]; then
+  brackets="the population read answered nothing, so no bracket expression was graded"
+else
+  brackets=$(cd "$TREE" && bracket_backslash_sites $SCRIPT_POPULATION)
+fi
+expect_pin 'no backslash inside a bracket expression, which POSIX awk leaves undefined' "$brackets"
+
+# planted, both sides: the two spellings the tree used to write, and the
+# shell test whose brackets are a command rather than a bracket expression.
+new_pin_case
+cat > "$CASE/bracket.sh" <<'BRK'
+#!/bin/sh
+awk '{ n = split($0, w, /[ \t]+/); print n }' "$1"
+BRK
+cat > "$CASE/bracket-quote.sh" <<'BRQ'
+#!/bin/sh
+awk '$0 ~ /[^\\]";$/ { print }' "$1"
+BRQ
+cat > "$CASE/bracket-test.sh" <<'BRT'
+#!/bin/sh
+if [ -n "$1" ] && [ "$1" != $'\n' ]; then
+  printf '%s\n' "$1"
+fi
+BRT
+missed=""
+for planted in bracket.sh bracket-quote.sh; do
+  if [ -z "$(bracket_backslash_sites "$CASE/$planted")" ]; then
+    missed=$(printf '%s%s\n' "${missed:+$missed
+}" "the backslash planted in $planted went unread")
+  fi
+done
+if [ -n "$(bracket_backslash_sites "$CASE/bracket-test.sh")" ]; then
+  missed=$(printf '%s%s\n' "${missed:+$missed
+}" "a shell test in command position was read as a bracket expression")
+fi
+expect_pin 'the bracket walk reads both undefined spellings and reads no shell test as one' "$missed"
 
 # The wrapped-opening carve-out, derived by the walk and printed rather than
 # written into the header by hand. A re-wrapped signature is what used to

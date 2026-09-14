@@ -55,14 +55,17 @@ script_population_read() {
   return 0
 }
 
-# Where a command can start, for the two walks that grade an English word.
+# Where a command can start, for the walks that grade an English word.
 # `case` and `test` are ordinary words this population writes in prose, so
 # neither can be read bare the way the `ln` walk reads its own: nine prose
 # `case` words inside string literals were measured. Written once because
 # three scans had drawn this boundary three different ways and none of them
-# was the union, and a fourth spelling is what the next scan invents.
+# was the union, and a fourth spelling is what the next scan invents. The
+# words are the union of what those three carried: dropping `elif`, `while`
+# or `until` leaves a walk guarded behind one of them fail-open, with the
+# path it guards never demanded and nothing said.
 # shellcheck disable=SC2034
-SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else)[[:space:]]+)'
+SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else|elif|while|until)[[:space:]]+)'
 
 # The here-doc tokenizer both scans over this population share: the tags a
 # line opens, in the order their bodies arrive, one per line of the returned
@@ -73,7 +76,11 @@ SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else)
 # rather than twice. A `<<` opens nothing inside a quoted string, inside an
 # ANSI-C string past an escaped quote, past the `#` that starts a trailing
 # comment, or inside `(( ))`, where it is a left shift and the operand after
-# it is a number; `<<<` is a here-string, one line of data with no body.
+# it is a number; `<<<` is a here-string, one line of data with no body. The
+# blanks the shell allows between the operator and its word are skipped, so
+# `cat << TAG` opens the body `cat <<TAG` opens: read as no operator at all,
+# the body under it is scanned as commands, which is the direction that
+# hides findings behind text no shell ever runs.
 # shellcheck disable=SC2034
 SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
   out = ""
@@ -97,7 +104,7 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out,
       i += 1
       continue
     }
-    if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;&|(]/)) break
+    if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:];&|(]/)) break
     if (c == "(" && substr(line, i + 1, 1) == "(") { adepth += 1; i += 2; continue }
     if (c == ")" && substr(line, i + 1, 1) == ")" && adepth > 0) { adepth -= 1; i += 2; continue }
     if (c != "<" || substr(line, i + 1, 1) != "<") { i += 1; continue }
@@ -106,6 +113,7 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out,
     if (substr(rest, 1, 1) == "<") { i += 3; continue }
     dash = ""
     if (substr(rest, 1, 1) == "-") { dash = "-"; rest = substr(rest, 2) }
+    sub(/^[[:space:]]+/, "", rest)
     qc = substr(rest, 1, 1)
     if (qc == SQ || qc == "\"" || qc == "\\") rest = substr(rest, 2)
     t = ""
@@ -153,10 +161,12 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, n, c, q, qc, rest, t, dash, out,
 # The here-doc operator is read by the tokenizer above, over BARE, so a tag
 # inside a quoted argument (`printf '%s' "<<x"`) opens nothing and the line
 # after it is still code, and the tags a line opens are queued in the order
-# their bodies arrive. A tag that is the operator and never terminates leaves
-# CODE empty to the end of the file: every walk then reads no code there,
-# which is the fail-closed half -- a harvest stops rather than running on
-# into text the handler never runs.
+# their bodies arrive. Every spelling of the tag reaches it: bare, single-
+# and double-quoted, backslash-quoted, `<<-`, and any of those written with
+# the blank the shell allows after the operator. A tag that is the operator
+# and never terminates leaves CODE empty to the end of the file: every walk
+# then reads no code there, which is the fail-closed half -- a harvest stops
+# rather than running on into text the handler never runs.
 # shellcheck disable=SC2034
 SCRIPT_CODE_AWK="$SCRIPT_HEREDOC_AWK"'
   FNR == 1 { DEPTH = 0; STACK = ""; HD = "" }
@@ -209,7 +219,16 @@ SCRIPT_CODE_AWK="$SCRIPT_HEREDOC_AWK"'
         CMTDEPTH = DEPTH
         break
       }
-      if (c == "\\") { BARE = BARE c; i++; prev = ""; continue }
+      if (c == "\\") {
+        # a backslash quotes the tag it introduces, so `<<\TAG` is the
+        # operator with a quoted `TAG` after it. The character the backslash
+        # quotes is read into BARE with it there and nowhere else: dropped,
+        # the tag arrives a letter short, the terminator below never matches
+        # it, and the rest of the file is read as body
+        if (BARE ~ /<<-?[[:space:]]*$/) { BARE = BARE c substr(line, i + 1, 1) }
+        else { BARE = BARE c }
+        i++; prev = ""; continue
+      }
       if (c == "\"" || c == SQ) {
         # a here-doc tag is quoted as often as it is bare, and quoting it
         # disables expansion in the body rather than making the `<<` text, so

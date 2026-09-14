@@ -150,7 +150,7 @@ collect_page() {
     /^[[:space:]]*```/ { fenced = !fenced; next }
     fenced { next }
     {
-      m = split($0, w, /[ \t]+/)
+      m = split($0, w, /[[:space:]]+/)
       idx = 0
       for (j = 1; j <= m; j++) {
         num = clean(w[j])
@@ -220,7 +220,7 @@ awk -v file="$BUDGETS" '
   # a foreign quantity parked in the ledger, which is what four arrays held.
   /^trials = / {
     idx = 0
-    m = split($0, w, /[ \t]+/)
+    m = split($0, w, /[[:space:]]+/)
     for (j = 1; j <= m; j++) {
       num = clean(w[j])
       if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
@@ -234,7 +234,7 @@ awk -v file="$BUDGETS" '
     idx = 0
     n = split($0, sent, /\. /)
     for (s = 1; s <= n; s++) {
-      m = split(sent[s], w, /[ \t]+/)
+      m = split(sent[s], w, /[[:space:]]+/)
       for (j = 1; j <= m; j++) {
         num = clean(w[j])
         if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
