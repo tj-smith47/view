@@ -1317,11 +1317,26 @@ report 'the construct list allows the anchored substitutions, which match once' 
 # command can start rather than at the start of a line: the same header written
 # after a brace, a `;` or a `&&` breaks 3.2 identically, and the spelling that
 # broke the macOS run was at line start only because that is where someone
-# happened to write it.
-SPLIT_CASE='((^|[;&|({])[[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)case([[:space:]]|$)'
+# happened to write it. `!` is on the list beside them, for the same reason.
+#
+# The position list stays, where the link walk in check-style-cases.sh dropped
+# its own: `case` is an ordinary English word and this population writes it in
+# prose inside nine string literals, so a walk that read the bare word would
+# redden all nine. What the two walks do share is the boundary -- both read
+# the shared reader's command text, so a `case` in a comment or in a here-doc
+# body is not a header wherever the punctuation in front of it sits. The
+# ceiling is a `case` word reached some way the list does not name; the parse
+# leg under a stock 3.2 is what answers for that.
+SPLIT_CASE='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)case([[:space:]]|$)'
 split_case_headers() {
-  grep -nE "$SPLIT_CASE" "$@" \
-    | grep -vE '[[:space:]]in([[:space:]]|$)' || true
+  awk -v SQ="'" -v CW="$SPLIT_CASE" "$SCRIPT_CODE_AWK"'
+    {
+      script_code_scan($0)
+      if (CODE ~ CW && CODE !~ /[[:space:]]in([[:space:]]|$)/) {
+        print FILENAME ":" FNR ": " $0
+      }
+    }
+  ' "$@"
 }
 if [ -n "$empty" ]; then
   split="$empty"
@@ -1353,44 +1368,114 @@ if [ -z "$caught" ]; then
 fi
 report 'the split-case scan reads a case wherever a command starts' "$missed"
 
-# The third instance of the same defect, and the second with a spelling a
+# The other side of that boundary: prose and a here-doc body are not
+# commands. The comment here opens with a `;` and the here-doc body starts at
+# column one, which are the two shapes a raw line scan reddens.
+printf '%s\n' '#!/usr/bin/env bash' "# a note; $header" 'cat <<EOF' "$header" 'EOF' 'echo done' > "$planted"
+report 'the split-case scan grades no comment and no here-doc body' "$(split_case_headers "$planted")"
+
+# The second instance of the same defect, and the one with a spelling a
 # reader can see: a comment inside a multi-line $( ) or <( ). 3.2 is already
 # counting parens and quotes there and knows nothing about the `#`, so a
 # comment whose parens do not balance ends the substitution early and one
 # carrying a lone quote swallows the rest. Balanced parens are left alone --
 # the count comes back, which is why the shipped comment naming two sidecars
-# in check-budget-drift.sh is not a finding. The block ends at a line that
-# starts with `)`, which under-reads a nested substitution rather than
-# over-reading one: a missed finding is what the parse leg below is for.
+# in check-budget-drift.sh is not a finding.
+#
+# Entered and left by the shared reader's nesting count, because the two line
+# anchors this replaces were wrong in both directions. Opening only on a `$(`
+# with nothing after it entered 3 substitutions in the whole tree and never
+# the `x="$(awk '` spelling this population writes most of them in. Closing at
+# the first line starting with `)` ended a block at a `done)` or an `esac)`
+# and then read every later comment in the file as if it sat inside one, so
+# the 596 comment lines here carrying a stray apostrophe or paren were one
+# such closing line away from being gate failures.
 substitution_comments() {
-  awk -v SQ="'" '
-    !depth && /(\$\(|<\()[[:space:]]*$/ { depth = 1; next }
-    depth && /^[[:space:]]*\)/ { depth = 0; next }
-    depth && /^[[:space:]]*#/ {
-      t = $0
+  awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+    {
+      script_code_scan($0)
+      if (WAS == 0 && DEPTH > 0) { spanning++ }
+      if (CMT == "" || CMTDEPTH == 0) { next }
+      t = CMT
       if (gsub(/\(/, "(", t) != gsub(/\)/, ")", t) \
         || gsub(SQ, SQ, t) % 2 || gsub(/"/, "\"", t) % 2) {
         print FILENAME ":" FNR ": " $0
       }
     }
+    END {
+      printf "substitutions: %d entered, %d spanning more than one line\n", \
+        SUBS, spanning > "/dev/stderr"
+    }
   ' "$@"
 }
+subcount="$WORK/substitutions.count"
+: > "$subcount"
 if [ -n "$empty" ]; then
   commented="$empty"
 else
-  commented=$(cd "$ROOT" && substitution_comments $GUARDED)
+  commented=$(cd "$ROOT" && substitution_comments $GUARDED 2> "$subcount")
 fi
 report 'no comment inside a command substitution whose parens or quotes 3.2 miscounts' "$commented"
 
 # planted, because the walk above is worth what it refuses and the shipped
 # tree carries no such comment to refuse
 printf '%s\n' '#!/usr/bin/env bash' 'x=$(' '# a comment with a ) paren' 'echo hi' ')' > "$planted"
-caught=$(substitution_comments "$planted")
+caught=$(substitution_comments "$planted" 2> /dev/null)
 missed=""
 if [ -z "$caught" ]; then
   missed="the planted comment paren went unrefused"
 fi
 report 'the comment walk refuses a paren in a comment inside a substitution' "$missed"
+
+# The spelling the line-end anchor never entered, and the one this population
+# writes most of its substitutions in: opened with content still on the line
+# and carried over the next. The defect here is the lone quote rather than
+# the paren, since that is the half that swallows the rest of the file.
+printf '%s\n' '#!/usr/bin/env bash' 'x=$(grep foo bar |' \
+  "  # the population's own prose style" "  sed 's/a/b/'" ')' > "$planted"
+caught=$(substitution_comments "$planted" 2> /dev/null)
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted apostrophe in an inline-opened substitution went unrefused"
+fi
+report 'the comment walk enters a substitution opened with content on the line' "$missed"
+
+# The other direction, which is the expensive one: a substitution that closes
+# on a `done)` or an `esac)` rather than on a line starting with `)`. Every
+# comment below those lines is outside, and this population writes 596 of
+# them carrying a stray apostrophe or paren.
+printf '%s\n' '#!/usr/bin/env bash' 'x=$(' '  for l in a b; do' '    echo "$l"' \
+  '  done)' '# outside the substitution, and it carries a ) paren' 'y=$(' \
+  '  case $z in (a) echo a ;; esac)' \
+  "# outside too, and it carries the population's apostrophe" > "$planted"
+report 'the comment walk leaves a substitution closed on a done or an esac' \
+  "$(substitution_comments "$planted" 2> /dev/null)"
+
+# Two levels deep, with the defect on the inner one, which the boolean the
+# walk used to carry could not tell from the outer.
+printf '%s\n' '#!/usr/bin/env bash' 'outer=$(grep foo bar | sed "$(printf %s p |' \
+  '  # an inner comment with a ) paren' '  cat)"' ')' > "$planted"
+caught=$(substitution_comments "$planted" 2> /dev/null)
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted comment inside the inner substitution went unrefused"
+fi
+report 'the comment walk reads the inner level of a nested substitution' "$missed"
+
+# What the walk read, printed rather than asserted in prose: the anchor it
+# replaces entered 3 substitutions in the whole tree, so a floor is what
+# tells a later narrowing apart from a green run.
+if [ -n "$empty" ]; then
+  short="$empty"
+else
+  printf '# %s\n' "$(cat "$subcount")"
+  entered=$(sed -n 's/^substitutions: \([0-9]*\) .*/\1/p' "$subcount")
+  short=""
+  if [ "${entered:-0}" -lt 180 ]; then
+    short="the walk entered ${entered:-0} substitutions, and the tree carries at least 180"
+  fi
+fi
+report 'the comment walk enters the substitutions the population actually writes' "$short"
 
 # The grep above reads constructs; it cannot see the shape that made 3.2
 # refuse this very checker -- a case pattern inside a process substitution,

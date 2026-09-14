@@ -1488,17 +1488,24 @@ expect_pin 'a checker directory reused, which writes no link into the graded tre
 # helpers above are not the last place one gets written and the failure is
 # silent where it happens.
 #
-# `ln` wherever a command can start -- after `&&`, `;`, `|`, `then`, `do`,
-# `else` and inside `$( )` -- rather than at the start of a line, which the
-# one production site would have escaped by gaining a `mkdir -p ... &&` in
-# front of it. The flag run is read as words with no `n` in any of them, so
-# `-s -n` written apart is as green as `-sn`, and the run has to end at an
-# operand: a trailing `-n` is what the line-wide spelling missed. Prose
-# naming the flagless spelling is not a finding, because a comment's `ln`
-# follows a backtick or a `#` and neither starts a command.
-FLAGLESS_LN='((^|[;&|(])[[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)ln[[:space:]]+(-[A-MO-Za-mo-z]+[[:space:]]+)*-[A-MO-Za-mo-z]*s[A-MO-Za-mo-z]*([[:space:]]+-[A-MO-Za-mo-z]+)*[[:space:]]+[^-[:space:]]'
+# The `ln` word wherever it sits, rather than after a list of the operators
+# a command can follow: that list left out `!`, `time`, `exec` and a brace
+# group, which are command starts too, and chasing it is endless. A word
+# boundary is what `ln=3`, `ln.sh` and `xln -s` need, and the shared reader
+# is what a comment and a here-doc body need. The flag run is read as words
+# with no `n` in any of them, so `-s -n` written apart is as green as `-sn`,
+# `--no-dereference` is green for the same reason, and the run has to end at
+# an operand, which is what makes a trailing `-n` visible. `--` and
+# `--symbolic` are flag words like any other.
+#
+# The over-read, on purpose: a string literal is code to the reader, so a
+# link assembled in one is graded. The alternative blinds the walk to every
+# generator in the tree, and the population carries no such string.
+FLAGLESS_LN='(^|[^A-Za-z0-9_])ln[[:space:]]+(--?[A-MO-Za-mo-z-]*[[:space:]]+)*--?[A-MO-Za-mo-z-]*s[A-MO-Za-mo-z-]*([[:space:]]+--?[A-MO-Za-mo-z-]*)*[[:space:]]+[^-[:space:]]'
 flagless_links() {
-  grep -nE "$FLAGLESS_LN" "$@" || true
+  awk -v SQ="'" -v LN="$FLAGLESS_LN" "$SCRIPT_CODE_AWK"'
+    { script_code_scan($0); if (CODE ~ LN) { print FILENAME ":" FNR ": " $0 } }
+  ' "$@"
 }
 
 new_pin_case
@@ -1535,6 +1542,45 @@ apart='ln -s -n'
 } > "$CASE/apart.sh"
 caught=$(flagless_links "$CASE/apart.sh")
 expect_pin 'the link walk passes -s -n, the same link with its flags written apart' "$caught"
+
+# The positions the operator list left out, and the two flag spellings it
+# could not reach. Every line here is a link written without -n, so every
+# line is a finding; the string-literal line is the over-read the walk takes
+# on purpose, and it is asserted rather than tolerated.
+new_pin_case
+starts="$CASE/starts.sh"
+sym="ln --symbolic"
+{
+  printf '#!/bin/sh\n'
+  printf '! %s "$a" "$b"\n' "$flagless"
+  printf 'time %s "$a" "$b"\n' "$flagless"
+  printf 'exec %s "$a" "$b"\n' "$flagless"
+  printf '{ %s "$a" "$b"; }\n' "$flagless"
+  printf '%s -- "$a" "$b"\n' "$flagless"
+  printf '%s "$a" "$b"\n' "$sym"
+  printf 'msg="%s a b"\n' "$flagless"
+} > "$starts"
+found=$(flagless_links "$starts" | wc -l | tr -d ' ')
+missed=""
+if [ "$found" != "7" ]; then
+  missed=$(printf '7 links planted, %s read back\n%s\n' "$found" "$(flagless_links "$starts")")
+fi
+expect_pin 'the link walk reads ln after !, time, exec and a brace, through -- and --symbolic, and inside a string' "$missed"
+
+# The other side of the same boundary: prose and a here-doc body are not
+# commands, so the walk holds its tongue there whatever punctuation sits in
+# front of the words. The comment carries a `;`, which is what the operator
+# list used to redden.
+new_pin_case
+quiet="$CASE/quiet.sh"
+{
+  printf '#!/bin/sh\n'
+  printf '# see foo; %s a b for why\n' "$flagless"
+  printf 'cat <<EOF\n'
+  printf '%s a b\n' "$flagless"
+  printf 'EOF\n'
+} > "$quiet"
+expect_pin 'the link walk grades no comment and no here-doc body' "$(flagless_links "$quiet")"
 
 # A file with no suffix carrying a shebang, counted by every consumer of
 # scripts/lib/script-population.sh. Two of them take a scan root and are run

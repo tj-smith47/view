@@ -22,7 +22,7 @@ swallows the rest.
 | shape | 3.2 says | write instead |
 |---|---|---|
 | `declare -A m=([k]=v)` | `k: unbound variable` under `set -u` | a `case`, or newline-joined strings fed to `grep -Fqx` by here-string (`grep -Fqx -- "$x" <<<"$list"`) and never by a pipe — a quiet `grep` exits at its first match, SIGPIPEs the producer, and under `pipefail` the hit comes back a miss (`crates/view-oracle/tests/shell_guards.rs:402` refuses the pipe) |
-| a paren or a quote inside `$( )` or `<( )` that the reader counts and the writer did not mean: a `case` pattern with no leading paren, a `)` or an apostrophe in a comment, a `case` word carried onto the next line | `syntax error near unexpected token`, or ``bad substitution: no closing `)' `` | give every `case` pattern its leading paren (`case "$x" in (*.*) … ;; esac`), keep the `case` word on the header line, and reword the comment |
+| a paren or a quote inside `$( )` or `<( )` that the reader counts and the writer did not mean: a `case` pattern with no leading paren, or a `)` or an apostrophe in a comment | `syntax error near unexpected token`, or ``bad substitution: no closing `)' `` | give every `case` pattern its leading paren (`case "$x" in (*.*) … ;; esac`) and reword the comment. Keep the `case` word on its header line too — that is not a third instance but the proxy a line scanner can see, and it is how the first one is caught |
 | `${x//a/b}` on anything longer than a word | nothing — it rescans the string per match and runs unbounded | `sed`/`tr` for a rewrite; `[[ $x == *[![:space:]]* ]]` (or its negation) for an emptiness test |
 
 The last row's class is the every-match substitution and nothing wider.
@@ -45,25 +45,30 @@ running at 283 s under an alarm, where the glob test answered in 0 s.
 The same ban covers `mapfile`, `readarray`, `[[ -v x ]]`, `${x,,}`,
 `${x^^}`, `\|&`, `&>>` and `;;&`.
 
-Two of the middle row's three instances have a spelling a line-at-a-time
-scan can see, and each is banned on its own. A `case` whose word runs onto
-the next line: the pattern below it closes on a paren the substitution
-counts as its own, which took the whole style case matrix out of the 3.2
-leg, and every `case` in this population puts its `in` on the header line,
-so a `case` with no `in` beside it is the tell. A comment inside a
-multi-line `$( )` or `<( )` whose own parens do not balance, or which
-carries an odd number of quotes: the reader is inside a substitution there
-and reads the comment as code. Balanced parens in such a comment are left
-alone -- the count comes back and the substitution ends where it was
-written to, which is why the one shipped instance
-(`check-budget-drift.sh:338`) is not a finding.
+The middle row names two instances, and each has a gate of its own. The
+first -- a `case` pattern with no leading paren -- is visible only to a
+parser, so what a scan bans in its place is the proxy: a `case` whose word
+runs onto the next line. That spelling took the whole style case matrix out
+of the 3.2 leg, and every `case` in this population puts its `in` on the
+header line, so a `case` with no `in` beside it is the tell. The missing
+paren is the defect and the newline is not: a split header whose patterns
+carry their parens extracts cleanly, and a one-line header whose patterns
+do not breaks exactly as the split one does.
+
+The second instance -- a comment inside a multi-line `$( )` or `<( )` whose
+own parens do not balance, or which carries an odd number of quotes -- is
+read directly, because the reader is inside a substitution there and reads
+the comment as code. Balanced parens in such a comment are left alone: the
+count comes back and the substitution ends where it was written to, which is
+why the shipped comments at `check-budget-drift.sh:337-340` are not
+findings.
 
 Five legs in `scripts/check-budget-drift-cases.sh` enforce it over every
 file under `scripts/` whose shebang names bash or `sh` -- the remote-test
 fixtures carry no suffix -- so a script is graded without anyone
-remembering to add it here: one greps the construct list, one greps the
-split `case` header, one walks the comments inside a multi-line
-substitution, one parses each
+remembering to add it here: one greps the construct list, one reads the
+`case` word in command position, one walks every comment sitting inside a
+`$( )` or a `<( )`, one parses each
 script under `/bin/bash` when that is a pre-4 bash — which is the only leg
 that sees the leading-paren-less `case` pattern, and it runs on the host the
 contract is about — and one runs the drift check over the shipped tree,
@@ -75,11 +80,24 @@ that interpreter turns out to be: an overrun is a cost regression under any
 bash, and the pattern substitution is the first cause to check rather than
 the only one.
 
+Both reading legs take their line from one reader in
+`scripts/lib/script-population.sh`, which carries quote, here-doc and
+nesting state across lines the way 3.2 carries them. A word in a comment or
+in a here-doc body is not a command to it; a word in a string literal is,
+which is an over-read taken on purpose so that nothing assembled in a
+string goes unread.
+
 The construct list is itself graded, by three planted spellings: the direct
 and the indirect substitution, each of which it must refuse, and an anchored
-one, which it must let through. The split `case` scan is graded the same
-way, by a planted header whose word runs onto the next line, and the
-comment walk by a planted comment carrying a lone `)` inside a `$( )`.
+one, which it must let through. The split `case` scan is graded by three: a
+header whose word runs onto the next line, the same header written after a
+brace, and a comment and a here-doc body it must leave alone. The comment
+walk is graded by five: a paren in a substitution opened at end of line, an
+apostrophe in one opened with content still on the line, a substitution
+closed on a `done)` whose later comments it must not touch, a nested pair
+with the defect on the inner level, and a floor on how many substitutions it
+entered -- the line anchor these replace entered three in the whole tree,
+which reads the same as a clean run.
 
 The population is the directory rather than the
 scripts `Taskfile.yml` names, because the release path runs
