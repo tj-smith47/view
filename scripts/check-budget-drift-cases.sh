@@ -1571,6 +1571,27 @@ else
 fi
 report 'the comment walk carries a substitution across the lines it spans, reading at least one line inside every two it enters' "$short"
 
+# The margin the floor above has today, so a fresh clone can read the
+# headroom without re-deriving it: measured 2026-09-14, the shipped tree
+# reads 132 per 100 opens, deleting scripts/check-budget-drift.sh alone (the
+# heaviest single file, 525 of the 1014 carried lines against 35 of the 765
+# opens) leaves 66, and the floor sits at 50 -- 16 points under that
+# deletion. The case below reddens once the shipped figure drifts more than
+# 10 points from what the tree now measures, which is the tell that this
+# comment is stale rather than the tree.
+shipped_ratio=132
+if [ -n "${ratio:-}" ]; then
+  drift=$((ratio - shipped_ratio))
+  [ "$drift" -lt 0 ] && drift=$((-drift))
+  stale=""
+  if [ "$drift" -gt 10 ]; then
+    stale="the comment states $shipped_ratio, the tree now measures $ratio, $drift points apart -- update the comment's shipped figure"
+  fi
+else
+  stale="$empty"
+fi
+report 'the shipped-ratio comment above is within 10 points of what the tree measures today' "$stale"
+
 # The grep above reads constructs; it cannot see the shape that made 3.2
 # refuse this very checker -- a case pattern inside a process substitution,
 # whose closing paren 3.2 miscounts. Only a parse under a pre-4 bash catches

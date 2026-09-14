@@ -97,8 +97,11 @@ string goes unread. The here-doc half of that state comes from the one
 tokenizer in the tree, `SCRIPT_HEREDOC_AWK` in the same file, which the
 userland scan reads as well: a `<<` inside a quoted argument, past a `#`, or
 inside `(( ))` opens nothing, a `<<<` here-string opens nothing because the
-third `<` is outside the characters a tag is read from, and a tag that never
-terminates leaves the rest of its file unread by the reader and stops the
+third `<` is outside the characters a tag is read from, a fourth `<`
+(`cat <<<<EOF`) is refused by the shell as a syntax error and carries no
+property for the scan to hold -- no branch reads it, and none is added,
+because no file this population accepts can carry the spelling. A tag that
+never terminates leaves the rest of its file unread by the reader and stops the
 userland scan with `PORTABILITY-SELF-FAIL` rather than narrowing it in
 silence. Every spelling of the tag opens the same body -- bare, `'TAG'`,
 `"TAG"`, `\TAG`, `<<-TAG`, and any of those with the blank the shell allows

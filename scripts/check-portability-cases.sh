@@ -265,6 +265,22 @@ read -r v <<<"literal" ; [[ $v =~ \bfoo ]]
 SH
 expect 1 'scripts/case.sh:2:inline scripts/case.sh:3:inline' 'a here-string opens no body, so its own line and the next stay scanned'
 
+# A fourth `<` is not a here-string read twice -- bash itself refuses
+# `cat <<<<EOF` as a syntax error, so no file this population accepts can
+# carry it, and no branch here is written for it. Planted anyway, since the
+# tokenizer's resume position lands back on the refused `<` and reads the
+# next two as a fresh opener: the line is taken as opening a real here-doc
+# tagged EOF, and with no later line closing it the scan stops loudly on the
+# same self-fail an ordinary unterminated tag hits, rather than reading a
+# live finding underneath in silence.
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+cat <<<<EOF
+a word class \bfoo on a =~ line, unreachable because bash never parses this
+SH
+expect 2 'scripts/case.sh:2:selffail' 'a doubled here-string is not shell; unclosed, the scan self-fails on it rather than swallowing the line beneath in silence'
+
 new_case
 write scripts/case.sh <<'SH'
 #!/usr/bin/env bash
