@@ -615,11 +615,14 @@ check_tied_spawns() {
 # view-harness would otherwise fail this gate in a file whose owner never
 # touches an attach.
 #
-# Sixteen of the counted lines, in nine of the seventeen files, open a call,
-# a variant, a pattern or a signature whose arguments wrap onto the lines
-# below them, so the counted line itself names no pair. The rows below do not
-# enumerate those: the shape is the same in every one of them, and a row that
-# listed line numbers went stale the next time a signature was re-wrapped.
+# Some of the counted lines open a call, a variant, a pattern or a signature
+# whose arguments wrap onto the lines below them, so the counted line itself
+# names no pair. The walk derives that set rather than listing it -- a
+# counted line ending in `(`, or ending in `{` and not a `fn` line, naming
+# none of width, height, cols or rows -- and prints how many there are and
+# how many files they sit in. Neither the rows nor this sentence carries the
+# number: any re-wrapped signature in the tree moves it, and a hand-written
+# one goes stale in silence the next time one is.
 #
 # Each row is a path, its pinned number of production lines, and where the
 # geometry those lines spend came from -- true line by line, so a row that
@@ -643,10 +646,10 @@ crates/view/src/main.rs 2 the attach guard release and the spawn own geometry se
 crates/view/src/native.rs 1 the native session resizing the grid for the row the statusline claims, spending Model::grid_target
 crates/view/src/recovery.rs 1 the replacement engine own geometry seed, spending Model::grid_target
 crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model
-crates/view/src/startup.rs 7 the attach guard release and the three attaches it feeds, all spending the pair main released rather than a reading of their own, plus the read-back of the config late_attach seed and the restart own zero-argument attach() closure call, neither of which carries a pair
+crates/view/src/startup.rs 7 the attach guard release and the one attach it feeds, spending the pair main released rather than a reading of their own, plus the restart pattern destructuring the UiAttach and the two attaches that pattern feeds, which spend the pair Model::takes_attach built from grid_target, the zero-argument attach() closure call that carries it, and the read-back of the config late_attach seed
 '
 check_geometry_sites() {
-  local expected actual
+  local expected actual sites
   if ! read_prod_lines; then
     echo "STYLE FAIL: could not read production lines to check geometry sites${PROD_LINES_WHY:+ -- $PROD_LINES_WHY}"
     return 1
@@ -654,12 +657,31 @@ check_geometry_sites() {
   expected=$(printf '%s\n' "$GEOMETRY_SITES" | awk 'NF { print $1, $2 }' | LC_ALL=C sort)
   # keyed to the path and line number the scanner emits rather than to the
   # match, so a line carrying both a call and a release counts once
-  actual=$({
+  sites=$({
     printf '%s\n' "$PROD_LINES_CACHE" | grep -E "$GEOMETRY_CALLS" || true
     printf '%s\n' "$PROD_LINES_CACHE" | grep -E "$GEOMETRY_ATTACH_CRATES" \
       | grep -E '(^|[^A-Za-z0-9_])release\(' || true
-  } | cut -d: -f1,2 | LC_ALL=C sort -u | sed 's/:[0-9]*$//' | uniq -c \
-    | awk '{ print $2, $1 }' | LC_ALL=C sort) || actual=""
+  } | LC_ALL=C sort -u) || sites=""
+  actual=$(printf '%s\n' "$sites" | grep . | cut -d: -f1,2 | LC_ALL=C sort -u \
+    | sed 's/:[0-9]*$//' | uniq -c | awk '{ print $2, $1 }' | LC_ALL=C sort) || actual=""
+  # the wrapped openings, derived here so that nothing written by hand can go
+  # stale: printed on the pass as well as the fail, because a carve-out
+  # nobody sees the size of is a carve-out nobody re-derives
+  printf '%s\n' "$sites" | grep . | awk -F: '
+    {
+      line = $0
+      sub(/^[^:]*:[0-9]*:/, "", line)
+      if (line ~ /width|height|cols|rows/) { next }
+      if (line !~ /\($/ && (line !~ /\{[[:space:]]*$/ || line ~ /(^|[^A-Za-z0-9_])fn[[:space:]]/)) { next }
+      wrapped += 1
+      files[$1] = 1
+    }
+    END {
+      n = 0
+      for (f in files) { n += 1 }
+      printf "geometry: %d counted lines, %d of them wrapped openings in %d files\n", NR, wrapped, n
+    }
+  ' || true
   if [ "$expected" = "$actual" ]; then
     return 0
   fi
@@ -695,7 +717,7 @@ temp_trap_handlers() {
       next
     }
     FNR == 1 { printf "%s", armed }
-    inbody { print; if ($0 ~ /^[[:space:]]*}/) { inbody = 0 } next }
+    inbody { print; if (substr($0, 1, length(closer)) == closer) { inbody = 0 } next }
     {
       name = $0
       sub(/^[[:space:]]*/, "", name)
@@ -704,7 +726,15 @@ temp_trap_handlers() {
       sub(/[[:space:]]*\(\).*/, "", name)
       if (!(name in want)) { next }
       print
-      if ($0 ~ /\{[[:space:]]*$/) { inbody = 1 }
+      if ($0 ~ /\{[[:space:]]*$/) {
+        inbody = 1
+        # closed on a brace at the header own indentation, not on the first
+        # indented one: a `{ ...; } >&2` group inside a cleanup ends the body
+        # early and everything after it -- the removal included -- is dropped,
+        # which reddens a handler that is right
+        match($0, /^[[:space:]]*/)
+        closer = substr($0, 1, RLENGTH) "}"
+      }
     }
   ' "$1" "$1"
 }
@@ -728,19 +758,56 @@ check_temp_traps() {
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     grep -q 'mktemp' "$f" || continue
-    names=$(grep -oE "[A-Za-z_][A-Za-z0-9_]*=[\"']*\\\$\\(mktemp" "$f" \
-      | sed 's/=.*//' | LC_ALL=C sort -u) || names=""
-    # lowercased once, because the removal is legitimately written over an
-    # array of roots and reads `$root` where the mktemp named `ROOT`; closed
-    # with a space so a name ending the text still has a character after it
-    handlers="$(temp_trap_handlers "$f" | tr 'A-Z' 'a-z') "
+    # every variable a trap could name for this file: the ones a `mktemp`
+    # path went into, plus any list one of those is appended to. The append
+    # is the relationship a removal written over an array of roots actually
+    # has -- it names the array and its own loop variable, never the ROOT the
+    # mktemp assigned -- and it is the reason the match below can stay
+    # case-sensitive. Lowercasing instead pairs `tmp=$(mktemp)` to a
+    # `TMP=/var/cache/keepme` that names an unrelated path, and the temp file
+    # leaks with this walk silent. An assignment that is not an append is not
+    # a holder: `other=$ROOT/sub` names a path inside the root, and removing
+    # that one removes nothing of this one.
+    names=$(awk '
+      FNR == NR {
+        if (match($0, /[A-Za-z_][A-Za-z0-9_]*=["]*[$][(]mktemp/)) {
+          n = substr($0, RSTART, RLENGTH)
+          sub(/=.*/, "", n)
+          seed[n] = 1
+        }
+        next
+      }
+      {
+        h = ""
+        if (match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\+=/)) {
+          h = substr($0, RSTART, RLENGTH)
+          sub(/^[[:space:]]*/, "", h)
+          sub(/\+=$/, "", h)
+        } else if (match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/)) {
+          h = substr($0, RSTART, RLENGTH)
+          sub(/^[[:space:]]*/, "", h)
+          sub(/=$/, "", h)
+          if ($0 !~ "[$][{]?" h "[}]?([^A-Za-z0-9_]|$)") { h = "" }
+        }
+        if (h == "") { next }
+        for (s in seed) {
+          if ($0 ~ "[$][{]?" s "[}]?([^A-Za-z0-9_]|$)") { hold[h] = 1 }
+        }
+      }
+      END {
+        for (s in seed) { print s }
+        for (h in hold) { print h }
+      }
+    ' "$f" "$f" | LC_ALL=C sort -u) || names=""
+    # closed with a space so a name ending the text still has a character
+    # after it
+    handlers="$(temp_trap_handlers "$f") "
     paired=0
     # a file whose every mktemp goes somewhere unnamed leaves this loop
     # unrun and is reported: there is no variable a trap could name
     for name in $names; do
-      name=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
       case "$handlers" in
-        *'$'"$name"[!a-z0-9_]* | *'${'"$name"[!a-z0-9_]*)
+        *'$'"$name"[!A-Za-z0-9_]* | *'${'"$name"[!A-Za-z0-9_]*)
           paired=1
           break
           ;;
@@ -1116,6 +1183,16 @@ for required in crates scripts scripts/acceptance compat corpus docs; do
     echo "STYLE FAIL: $required/ directory missing"; fail=1
   fi
 done
+# The same rule where the guard is on a file rather than a directory: the
+# emdash ban, the narrative-marker scan and the prose-width walk all sit
+# behind `[ -f README.md ]`, so a root without it would pass having run none
+# of the three. A second list because the test differs, and because the
+# directory verdicts read `x/ directory missing`.
+for required_file in README.md; do
+  if [ ! -f "$required_file" ]; then
+    echo "STYLE FAIL: $required_file missing"; fail=1
+  fi
+done
 if [ -d scripts ]; then
   check_temp_traps || fail=1
 fi
@@ -1281,7 +1358,5 @@ if [ -f README.md ]; then
   # source code never has occasion to.
   check_narrative_markers "" "${doc_targets[@]}" || fail=1
   check_prose_width "${doc_targets[@]}" || fail=1
-else
-  echo "STYLE FAIL: README.md missing"; fail=1
 fi
 exit $fail

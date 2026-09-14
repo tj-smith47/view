@@ -1308,6 +1308,33 @@ if [ -n "$caught" ]; then
 fi
 report 'the construct list allows the anchored substitutions, which match once' "$missed"
 
+# The grep above reads a line for a spelling, and the shape that stopped the
+# style matrix parsing on macOS is not one: a `case` whose word ran onto the
+# next line, so the closing paren of a pattern below it ended the command
+# substitution the whole thing sat in. It has a tell a line-at-a-time scan
+# can see -- a `case` with no `in` beside it -- and every one in this
+# population is written on one line, so the tell is the rule.
+split_case_headers() {
+  grep -nE '^[[:space:]]*case([[:space:]]|$)' "$@" \
+    | grep -vE '[[:space:]]in([[:space:]]|$)' || true
+}
+if [ -n "$empty" ]; then
+  split="$empty"
+else
+  split=$(cd "$ROOT" && split_case_headers $GUARDED)
+fi
+report 'no case header split across lines, whose paren bash 3.2 then miscounts' "$split"
+
+# planted, because the scan above is worth what it refuses, and the spelling
+# it refuses is one no file in the population still carries
+printf '%s\n' '#!/usr/bin/env bash' 'case "' '$x' '" in' '  *"' '$d' '"*) ;;' 'esac' > "$planted"
+caught=$(split_case_headers "$planted")
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted split case header went unrefused"
+fi
+report 'the split-case scan refuses a case whose word runs onto the next line' "$missed"
+
 # The grep above reads constructs; it cannot see the two shapes that made 3.2
 # refuse this very checker -- a case pattern and an apostrophe in a comment,
 # both inside a process substitution, whose closing paren 3.2 miscounts. Only

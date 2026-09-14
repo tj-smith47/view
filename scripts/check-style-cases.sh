@@ -1163,6 +1163,85 @@ printf 'cleanup() {\n  rm -f "$F"\n}\ntrap cleanup EXIT\nF=$(mktemp)\n' \
   | write_temp_trap_script
 expect_temp_traps 0 '' 'the removal written in the function the trap names'
 
+# The other shape half this population is written in: the path is appended
+# to a list and the removal walks the list, so the name the handler reads is
+# the array and its own loop variable. Green by the relationship that holds,
+# which is the append -- a pairing that lowercased the two names instead
+# passes the case below.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+ROOTS=()
+cleanup() {
+  for root in ${ROOTS[@]+"${ROOTS[@]}"}; do
+    rm -rf "$root"
+  done
+}
+trap cleanup EXIT
+ROOT=$(mktemp -d)
+ROOTS+=("$ROOT")
+PLANT
+expect_temp_traps 0 '' 'a removal written over the array the temp root is appended to'
+
+# The same, written as a string list rather than an array, because the
+# append is what the pairing reads and not the type of the thing appended to.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+list=""
+cleanup() {
+  for d in $list; do
+    rm -rf "$d"
+  done
+}
+trap cleanup EXIT
+ROOT=$(mktemp -d)
+list="$list $ROOT"
+PLANT
+expect_temp_traps 0 '' 'a removal written over the string list the temp root is appended to'
+
+# The leak a case-insensitive pairing admits: two variables differing only
+# by case, one a temp file and one a path that is meant to survive. The temp
+# file is stranded and the walk has to say so.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+TMP=/var/cache/keepme
+tmp=$(mktemp)
+trap 'rm -rf "$TMP"' EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a trap naming an unrelated variable that differs from the temp one by case'
+
+# A brace group inside the handler, which a body ending at the first indented
+# brace reads as the end of the function: everything after it, the removal
+# included, is dropped and a correct cleanup is reported.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+cleanup() {
+  {
+    echo done
+  } >&2
+  rm -f "$F"
+}
+trap cleanup EXIT
+F=$(mktemp)
+PLANT
+expect_temp_traps 0 '' 'a removal written after a brace group in the handler body'
+
+# The same handler with the removal taken out, so the case above is graded
+# on the removal it holds rather than on the walk having stopped reading.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+cleanup() {
+  {
+    echo done
+  } >&2
+  echo bye
+}
+trap cleanup EXIT
+F=$(mktemp)
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler with a brace group and no removal anywhere in it'
+
 # ---------------------------------------------------------------------------
 # the directories the whole run requires: a walk guarded on a directory that
 # has moved grades nothing and says nothing, so the run reports on rules it
@@ -1373,18 +1452,23 @@ if [ "$SCRIPT_POPULATION" != "scripts/leg" ]; then
 fi
 expect_pin 'a suffix-less shebang file reached by the comment rules, the userland scan and the helper the drift matrix reads' "$missed"
 
-# Every directory the run guards a walk on is a directory the run requires
-# by name. Walking the guards rather than checking the two the last review
-# found: the next walk added behind an `if [ -d x ]` is fail-open the moment
-# it is written, and the guard is what a reader adds without thinking about
-# the else.
+# Every path the run guards a walk on is a path the run requires by name,
+# a page behind `[ -f ]` as much as a directory behind `[ -d ]`. Walking the
+# guards rather than checking the two the last review found: the next walk
+# added behind either is fail-open the moment it is written, and the guard
+# is what a reader adds without thinking about the else.
 new_pin_case
 guarded=$( {
-  grep -oE '\[ -d [A-Za-z0-9_/.-]+ \]' "$CHECKER" | awk '{ print $3 }'
+  grep -oE '\[ -[df] [A-Za-z0-9_/.-]+ \]' "$CHECKER" | awk '{ print $3 }'
   sed -n 's/^for dir in \(.*\); do$/\1/p' "$CHECKER" | tr ' ' '\n'
 } | LC_ALL=C sort -u)
-required=$(sed -n 's/^for required in \(.*\); do$/\1/p' "$CHECKER" | tr ' ' '\n' \
-  | LC_ALL=C sort -u)
+# `-f` beside `-d`, and both required lists read: the fail-open a guard with
+# no else leaves is the same one whether the walk is guarded on a directory
+# or on a page, and a pin that greps only `-d` can never see the second.
+required=$( {
+  sed -n 's/^for required in \(.*\); do$/\1/p' "$CHECKER"
+  sed -n 's/^for required_file in \(.*\); do$/\1/p' "$CHECKER"
+} | tr ' ' '\n' | LC_ALL=C sort -u)
 # Defined out here rather than written inline below, and delimited by
 # blanks rather than by newlines: the closing paren of a case pattern
 # inside a command substitution is one of the two shapes bash 3.2
@@ -1403,7 +1487,40 @@ unrequired=$(printf '%s\n' "$guarded" \
 if [ -z "$required" ]; then
   unrequired=$(printf '%s\nthe run requires no directory at all\n' "$unrequired")
 fi
-expect_pin 'every directory a walk is guarded on named in the run required list' "$unrequired"
+expect_pin 'every path a walk is guarded on named in one of the run required lists' "$unrequired"
+
+# The wrapped-opening carve-out, derived by the walk and printed rather than
+# written into the header by hand. A re-wrapped signature is what used to
+# leave that sentence stale in silence; here it has to move the printed
+# count and redden the row for the file it was re-wrapped in.
+new_geometry_case
+wrapped_of() {
+  bash "$CHECKER" --geometry-sites "$CASE" 2>&1 \
+    | sed -n 's/^geometry: [0-9]* counted lines, \([0-9]*\) of them wrapped openings in \([0-9]*\) files$/\1 \2/p'
+}
+git -C "$CASE" add -A
+before=$(wrapped_of)
+printf 'fn ui_attach(\n' >> "$CASE/crates/view/src/native.rs"
+git -C "$CASE" add -A
+after=$(wrapped_of)
+out=$(bash "$CHECKER" --geometry-sites "$CASE" 2>&1) && rc=0 || rc=$?
+rewrap=""
+if [ "$before" != "0 0" ]; then
+  rewrap="the unwrapped tree printed [$before] rather than no wrapped opening"
+fi
+if [ "$after" != "1 1" ]; then
+  rewrap=$(printf '%sthe re-wrapped tree printed [%s] rather than one in one file\n' \
+    "${rewrap:+$rewrap
+}" "$after")
+fi
+row=$(printf '%s\n' "$out" \
+  | awk '$1 == "crates/view/src/native.rs" && $2 == "2" { f = 1 } END { if (f) print "found" }')
+if [ "$rc" != 1 ] || [ "$row" != found ]; then
+  rewrap=$(printf '%sthe row for the re-wrapped file did not redden (rc %s)\n' \
+    "${rewrap:+$rewrap
+}" "$rc")
+fi
+expect_pin 'a re-wrapped signature moving the printed wrapped-opening count and reddening its row' "$rewrap"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

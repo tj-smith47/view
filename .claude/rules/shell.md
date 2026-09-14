@@ -42,10 +42,18 @@ running at 283 s under an alarm, where the glob test answered in 0 s.
 The same ban covers `mapfile`, `readarray`, `[[ -v x ]]`, `${x,,}`,
 `${x^^}`, `\|&`, `&>>` and `;;&`.
 
-Three legs in `scripts/check-budget-drift-cases.sh` enforce it over every
+The second row's shape has a spelling a line-at-a-time scan can see, and it
+is banned on its own: a `case` whose word runs onto the next line. Written
+that way the pattern below it closes on a paren the substitution counts as
+its own, which took the whole style case matrix out of the 3.2 leg. Every
+`case` in this population puts its `in` on the header line, so a `case` with
+no `in` beside it is the tell, and the construct scan refuses it.
+
+Four legs in `scripts/check-budget-drift-cases.sh` enforce it over every
 file under `scripts/` whose shebang names bash or `sh` -- the remote-test
 fixtures carry no suffix -- so a script is graded without anyone
-remembering to add it here: one greps the construct list, one parses each
+remembering to add it here: one greps the construct list, one greps the
+split `case` header, one parses each
 script under `/bin/bash` when that is a pre-4 bash — which is the only leg
 that sees the two paren-counting shapes, and it runs on the host the
 contract is about — and one runs the drift check over the shipped tree,
@@ -59,7 +67,8 @@ the only one.
 
 The construct list is itself graded, by three planted spellings: the direct
 and the indirect substitution, each of which it must refuse, and an anchored
-one, which it must let through.
+one, which it must let through. The split `case` scan is graded the same
+way, by a planted header whose word runs onto the next line.
 
 The population is the directory rather than the
 scripts `Taskfile.yml` names, because the release path runs
@@ -123,27 +132,46 @@ arming one, and a trap that reaps a child and removes nothing. Both are
 cased, red, at the end of `scripts/check-style-cases.sh`, beside the
 function-body pairing that has to stay green. Keyed on the script rather
 than on the statement, because the removal legitimately sits far from the
-`mktemp`; matched without regard to case, because a removal written over an
-array of roots reads `$root` where the `mktemp` named `ROOT`. The population
+`mktemp`. The name a handler may pair on is the variable the `mktemp`
+assigned or a list that variable is appended to (`ROOTS+=("$ROOT")`,
+`list="$list $ROOT"`), and it is matched case-sensitively: a removal written
+over an array of roots reads `$root` where the `mktemp` named `ROOT`, and
+the append is the relationship that actually holds between the two. Pairing
+by lowercased name instead reads `TMP=/var/cache/keepme` as the removal for
+`tmp=$(mktemp)`, which passes a leak in silence -- that pair is cased, red.
+An assignment that is not an append is not a holder: `other=$ROOT/sub` names
+a path inside the temp root and removing it removes nothing of the root. A
+handler body ends at a brace on the function header's own indentation, never
+at the first indented one, because a `{ ...; } >&2` group inside a `cleanup`
+otherwise ends the body early and the removal below it is never read. The
+population
 and not `scripts/*.sh`: that glob reaches neither `scripts/acceptance/` nor a
 file with no suffix, and the first script it missed was making a temp
 directory a Ctrl-C stranded.
 
-## A directory a walk is guarded on is required by name
+## A path a walk is guarded on is required by name
 
-`scripts/check-style.sh` guards each walk on the directory it reads, so a
-walk is never handed a root that is not there. A guard with no `else` is
+`scripts/check-style.sh` guards each walk on the directory or page it reads,
+so a walk is never handed a root that is not there. A guard with no `else` is
 fail-open: the run passes having graded nothing, and reports on rules it
 never reached. The run therefore names every guarded directory in one
-`for required in ...` list and fails closed on each, and a pin at the end of
-`scripts/check-style-cases.sh` walks the guards in the checker under test and
-reddens on the first one missing from that list -- so the next walk added
-behind an `if [ -d x ]` trips there rather than shipping silent.
+`for required in ...` list and every guarded file in `for required_file in
+...` beside it, and fails closed on each; a pin at the end of
+`scripts/check-style-cases.sh` walks the `[ -d ]` and `[ -f ]` guards in the
+checker under test and reddens on the first one missing from either list --
+so the next walk added behind an `if [ -d x ]` or an `if [ -f x.md ]` trips
+there rather than shipping silent.
 
-The same shape in one line: `[ -d docs ] && targets="$targets docs"` is not a
-guard under `set -e`. When the test fails the whole `&&` list fails, and the
-run aborts on the line that was meant to skip. Write it `if [ -d docs ]; then
-... fi`.
+The same shape in one line, `[ -d docs ] && targets="$targets docs"`, is safe
+where the population writes it and unsafe in one position. Mid-body under
+`set -e` it does what it reads as: the failing command is the test, which
+precedes the final `&&`, so errexit is suppressed and the run continues with
+`targets` unset. As the last command of a function or of the script it is a
+bug -- the list's status is then the function's, and a missing directory
+returns 1 to a caller reading that as a failure. Nothing in `scripts/` is in
+that position. Write it `if [ -d docs ]; then ... fi` anyway, because which
+of the two a reader is looking at depends on what follows the line rather
+than on the line.
 
 ## A symbolic link a script makes is written `ln -sn`
 
