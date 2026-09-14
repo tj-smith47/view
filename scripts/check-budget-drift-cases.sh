@@ -1322,12 +1322,16 @@ report 'the construct list allows the anchored substitutions, which match once' 
 # The position list stays, where the link walk in check-style-cases.sh dropped
 # its own: `case` is an ordinary English word and this population writes it in
 # prose inside nine string literals, so a walk that read the bare word would
-# redden all nine. What the two walks do share is the boundary -- both read
-# the shared reader's command text, so a `case` in a comment or in a here-doc
-# body is not a header wherever the punctuation in front of it sits. The
-# ceiling is a `case` word reached some way the list does not name; the parse
-# leg under a stock 3.2 is what answers for that.
-SPLIT_CASE='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)case([[:space:]]|$)'
+# redden all nine. It is the one list, held in scripts/lib/script-population.sh
+# beside the reader, and the guard harvest in check-style-cases.sh reads the
+# same one for the same reason -- `test` is an English word too, and two lists
+# for one boundary is how the third spelling gets written. What the walks
+# share beyond the list is the boundary itself: all of them read the reader
+# command text, so a `case` in a comment or in a here-doc body is not a header
+# wherever the punctuation in front of it sits. The ceiling is a `case` word
+# reached some way the list does not name; the parse leg under a stock 3.2 is
+# what answers for that.
+SPLIT_CASE="$SCRIPT_COMMAND_START"'case([[:space:]]|$)'
 split_case_headers() {
   awk -v SQ="'" -v CW="$SPLIT_CASE" "$SCRIPT_CODE_AWK"'
     {
@@ -1367,6 +1371,21 @@ if [ -z "$caught" ]; then
   missed="the planted split header after a brace went unrefused"
 fi
 report 'the split-case scan reads a case wherever a command starts' "$missed"
+
+# The `if` position, which the list carried for the guard harvest and not for
+# this one until the two became the same list.
+printf '%s\n' '#!/usr/bin/env bash' "if $header" '$x' '" in' '  *) ;;' 'esac; then :; fi' > "$planted"
+caught=$(split_case_headers "$planted")
+missed=""
+if [ -z "$caught" ]; then
+  missed="the planted split header after an if went unrefused"
+fi
+report 'the split-case scan reads a case after an if' "$missed"
+
+# The reason the list is a list: the word in prose is not a header, and this
+# population writes it inside nine string literals.
+printf '%s\n' '#!/usr/bin/env bash' 'msg="a case for the shared list"' 'printf %s "$msg"' > "$planted"
+report 'the split-case scan reads no case word written as prose in a string' "$(split_case_headers "$planted")"
 
 # The other side of that boundary: prose and a here-doc body are not
 # commands. The comment here opens with a `;` and the here-doc body starts at

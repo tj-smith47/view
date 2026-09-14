@@ -696,100 +696,88 @@ check_geometry_sites() {
   return 1
 }
 
-# The text an armed EXIT trap runs: the trap lines themselves, plus the body
-# of the function a handler names, which is where the removal is written in
-# half of these scripts. `trap - EXIT` is not armed -- it clears the handler
-# it otherwise reads as -- and is left out here.
+# The text an armed EXIT trap runs: the trap lines themselves, the body of
+# the function a handler names, and the body of a function that body calls --
+# the removal sits one call deep about as often as it sits in the handler,
+# and a `cleanup_root "$X"` whose callee removes `$1` is a correct script.
+# Read through the shared code reader, so a `#`-led removal is a comment, a
+# here-doc body is not structure, and a brace inside a string is text.
+# `trap - EXIT` is not armed -- it clears the handler it otherwise reads as --
+# and is left out here.
 temp_trap_handlers() {
-  # the file is read twice: the traps at the top of a script name a function
-  # defined above them, and the handler set has to be complete before the
-  # bodies are selected
-  awk '
-    # the braces a shell reads as structure: a quoted or commented one is text,
-    # and a `${x}` outside quotes balances itself
-    function brace_delta(line,   i, n, c, prev, q, d) {
-      n = length(line); q = ""; prev = ""; d = 0
-      for (i = 1; i <= n; i++) {
-        c = substr(line, i, 1)
-        if (q == "") {
-          if (c == "#" && (i == 1 || prev == " " || prev == "\t")) { break }
-          if (c == "\\") { i++; prev = ""; continue }
-          if (c == "\"" || c == SQ) { q = c; prev = c; continue }
-          if (c == "{") { d++ }
-          if (c == "}") { d-- }
-        } else if (c == q) {
-          q = ""
-        } else if (q == "\"" && c == "\\") {
-          i++; prev = ""; continue
-        }
-        prev = c
-      }
-      return d
+  awk -v SQ="'" -v CS="$SCRIPT_COMMAND_START" "$SCRIPT_CODE_AWK"'
+    # the braces a shell reads as structure, counted over the text outside
+    # every quote, comment and here-doc body: a `${x}` there balances itself
+    function braces(s,   t, d) {
+      t = s; d = gsub(/[{]/, "", t)
+      t = s; return d - gsub(/[}]/, "", t)
     }
-    # the here-doc a line opens, or "". Here-strings are cut first: `<<<"list"`
-    # otherwise reads as a here-doc named list.
-    function heredoc_tag(line,   t) {
-      t = line
-      gsub(/<<</, "", t)
-      if (!match(t, /<<-?[[:space:]]*["]?[A-Za-z_][A-Za-z0-9_]*/)) {
-        if (!match(t, "<<-?[[:space:]]*" SQ "?[A-Za-z_][A-Za-z0-9_]*")) { return "" }
-      }
-      t = substr(t, RSTART, RLENGTH)
-      dash = (t ~ /^<<-/)
-      sub(/^<<-?[[:space:]]*/, "", t)
-      sub(/^["]/, "", t)
-      sub("^" SQ, "", t)
-      return t
-    }
-    FNR == NR {
-      if ($0 ~ /^[[:space:]]*trap +(-- +)?[^-[:space:]]/ &&
-          $0 ~ /(^|[^A-Za-z0-9_])EXIT([^A-Za-z0-9_]|$)/) {
-        armed = armed $0 "\n"
-        h = $0
+    {
+      script_code_scan($0)
+      if (CODE ~ /^[[:space:]]*trap +(-- +)?[^-[:space:]]/ &&
+          CODE ~ /(^|[^A-Za-z0-9_])EXIT([^A-Za-z0-9_]|$)/) {
+        armed = armed CODE "\n"
+        h = CODE
         sub(/^[[:space:]]*trap +(-- +)?/, "", h)
         sub(/[[:space:]].*/, "", h)
         if (h ~ /^[A-Za-z_][A-Za-z0-9_]*$/) { want[h] = 1 }
       }
-      next
-    }
-    FNR == 1 { printf "%s", armed }
-    inbody {
-      print
-      if (tag != "") {
-        if ((dash && $0 ~ "^[[:space:]]*" tag "[[:space:]]*$") || $0 == tag) { tag = "" }
+      if (inbody) {
+        body[cur] = body[cur] CODE "\n"
+        # closed at the brace that closes the function, by depth, never at an
+        # indentation: an indentation rule ends the body at a `{ ...; } >&2`
+        # group or at a JSON here-doc `}` in column one, and the removal below
+        # is then never read, which reddens a handler that is right
+        depth = depth + braces(BARE)
+        if (depth <= 0) { inbody = 0 }
         next
       }
-      depth = depth + brace_delta($0)
-      tag = heredoc_tag($0)
-      if (depth <= 0) { inbody = 0 }
-      next
-    }
-    {
-      name = $0
+      name = CODE
       sub(/^[[:space:]]*/, "", name)
       sub(/^function[[:space:]]+/, "", name)
       if (name !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/) { next }
       sub(/[[:space:]]*\(\).*/, "", name)
-      if (!(name in want)) { next }
-      print
-      # closed at the brace that closes the function, by depth outside quotes
-      # and comments and skipping here-doc bodies, never at an indentation: an
-      # indentation rule ends the body at a `{ ...; } >&2` group or at a JSON
-      # here-doc `}` in column one, and the removal below is then never read,
-      # which reddens a handler that is right
-      depth = brace_delta($0)
-      tag = ""
+      cur = name
+      body[cur] = CODE "\n"
+      depth = braces(BARE)
       if (depth > 0) { inbody = 1 }
     }
-  ' SQ="'" "$1" "$1"
+    END {
+      printf "%s", armed
+      n = 0
+      for (f in want) { queue[++n] = f }
+      # the queue grows as a printed body turns out to call another handler;
+      # walked by index rather than by `for (f in want)`, which is undefined
+      # the moment the walk adds a name to what it is walking
+      for (i = 1; i <= n; i++) {
+        f = queue[i]
+        if (f in seen) { continue }
+        seen[f] = 1
+        if (!(f in body)) { continue }
+        printf "%s", body[f]
+        k = split(body[f], lines, "\n")
+        for (j = 1; j <= k; j++) {
+          for (g in body) {
+            if (!(g in seen) && lines[j] ~ CS g "([^A-Za-z0-9_(]|$)") {
+              queue[++n] = g
+            }
+          }
+        }
+      }
+    }
+  ' "$1"
 }
 
 # The names an armed handler actually removes: every `$NAME` on a line that
-# runs `rm`, plus the list a removed loop variable was bound from -- which is
-# how every array-of-roots cleanup in this population is written (`for root in
+# runs `rm`, every name handed to a function whose own body removes -- the
+# path is the argument at the call and the `rm` one level down reads it as
+# `$1` -- plus the list a removed loop variable was bound from, which is how
+# every array-of-roots cleanup in this population is written (`for root in
 # "${ROOTS[@]}"; do rm -rf "$root"; done` removes ROOTS by way of root).
+# The ceiling on the call: a callee that takes a path and removes a different
+# one still pairs the names at the call.
 temp_trap_removals() {
-  awk '
+  awk -v CS="$SCRIPT_COMMAND_START" '
     function names_on(line,   s, n, out) {
       s = line; out = ""
       while (match(s, /[$][{]?[A-Za-z_][A-Za-z0-9_]*/)) {
@@ -800,14 +788,62 @@ temp_trap_removals() {
       }
       return out
     }
-    /(^|[^A-Za-z0-9_.\/-])rm(dir)?[[:space:]]/ { removed = removed names_on($0) }
-    match($0, /(^|[[:space:]])for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]/) {
-      v = substr($0, RSTART, RLENGTH)
-      sub(/^[[:space:]]*for[[:space:]]+/, "", v)
-      sub(/[[:space:]]+in[[:space:]]*$/, "", v)
-      bound[v] = bound[v] names_on($0)
+    # a name in command position, never the header that defines it: `f()` is
+    # excluded by the paren that follows the word
+    function calls(line, g) {
+      return (line ~ CS g "([^A-Za-z0-9_(]|$)")
+    }
+    {
+      text[NR] = $0
+      if (match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)/)) {
+        fn = substr($0, RSTART, RLENGTH)
+        sub(/^[[:space:]]*/, "", fn)
+        sub(/[[:space:]]*\(\)$/, "", fn)
+        defined[fn] = 1
+      }
+      owner[NR] = fn
+      # written as a string rather than a regex literal: the slash needed a
+      # backslash only to get past the delimiter of the literal, and a
+      # backslash inside a bracket expression is undefined
+      if ($0 ~ "(^|[^A-Za-z0-9_./-])rm(dir)?[[:space:]]") {
+        isrm[NR] = 1
+        removes[fn] = 1
+      }
+      if (match($0, /(^|[[:space:]])for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]/)) {
+        v = substr($0, RSTART, RLENGTH)
+        sub(/^[[:space:]]*for[[:space:]]+/, "", v)
+        sub(/[[:space:]]+in[[:space:]]*$/, "", v)
+        bound[v] = bound[v] names_on($0)
+      }
     }
     END {
+      # to a fixed point rather than one level, so the depth a removal is
+      # written at is not a verdict
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= NR; i++) {
+          if (removes[owner[i]]) { continue }
+          for (g in defined) {
+            if (removes[g] && calls(text[i], g)) {
+              removes[owner[i]] = 1
+              changed = 1
+            }
+          }
+        }
+      }
+      for (i = 1; i <= NR; i++) {
+        if (isrm[i]) {
+          removed = removed names_on(text[i])
+          continue
+        }
+        for (g in defined) {
+          if (removes[g] && calls(text[i], g)) {
+            removed = removed names_on(text[i])
+            break
+          }
+        }
+      }
       for (v in bound) {
         if (index(" " removed, " " v " ") > 0) { removed = removed bound[v] }
       }
@@ -827,7 +863,7 @@ temp_trap_removals() {
 # that kills a child both read as a pairing to a walk that only asks for the
 # word.
 check_temp_traps() {
-  local fail=0 f names name handlers paired
+  local fail=0 f names name removed paired
   if ! read_script_population; then
     return 1
   fi

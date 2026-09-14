@@ -155,16 +155,27 @@ aborts the exit path on it, so the name the trap reads is a script global.
 below for a `mktemp`, and the pairing it requires is an armed `EXIT` trap
 whose handler *removes* one of the variables a `mktemp` path went into --
 resolved through the function the handler names, since half of these scripts
-write the removal in a `cleanup()`. Removes and not merely names: a handler
+write the removal in a `cleanup()`, and through a function that body calls,
+since the other half hand the root to a `cleanup_root "$X"` that removes its
+`$1`. The names a call like that reaches are the ones written at the call. Removes and not merely names: a handler
 that prints an accumulator (`log="$log made $ROOT"`, `echo "$log"`) reads as a
 pairing to a walk asking only whether the name appears, and the root is never
 removed. The names a removal reaches are those on a line running `rm`, plus
 the list a removed loop variable was bound from, which is how every
-array-of-roots cleanup here is written. A `mktemp` seeds through every quoting
-that still expands -- `$(mktemp)`, `"$(mktemp)"` and `"'$(mktemp)'"`, whose
+array-of-roots cleanup here is written. Every line of the handler is read as
+code first: a `#`-led `rm` is a comment and reaches nothing, and a line under
+a `<<TAG` the handler never terminates is here-doc text the trap never runs,
+so the removal written there is a leak and reads as one. A tag inside a
+quoted argument (`printf '%s' "<<x"`) is not the operator and opens nothing.
+A `mktemp` seeds through every quoting that still expands and whose value is
+the temp path -- `$(mktemp)`, `"$(mktemp)"` and `"'$(mktemp)'"`, whose
 single quotes sit inside the double ones and quote nothing -- and through none
 that does not: `'$(mktemp)'` and `$'$(mktemp)'` are literal text and make no
-file. One case per shape. Two spellings pass a walk that only asks
+file. A prefixed `N="pre$(mktemp)"` is the third kind: it makes a file, and
+the name holds `pre` and the path, so a removal over `$N` removes nothing
+that was made. It is excluded by name, and the exclusion is fail-closed --
+a script whose `mktemp` reaches no recognised name is reported rather than
+passed. One case per shape. Two spellings pass a walk that only asks
 for the word `trap`: `trap - EXIT`, which clears the handler rather than
 arming one, and a trap that reaps a child and removes nothing. Both are
 cased, red, at the end of `scripts/check-style-cases.sh`, beside the
@@ -199,12 +210,20 @@ never reached. The run therefore names every guarded directory in one
 `for required in ...` list and every guarded file in `for required_file in
 ...` beside it, and fails closed on each; a pin at the end of
 `scripts/check-style-cases.sh` walks every guard spelling in the checker under
-test -- `[ -x PATH ]` for any test letter, the `[[ ... ]]` form and a
-bracket-free `test -x PATH` in command position -- and reddens on the first
-path missing from either list, so the next walk added behind any of them trips
-there rather than shipping silent. A planted file carrying one guard per
-spelling grades the harvest itself, `cargo test -p name` among them, which is
-`test` in argument position and no guard at all.
+test -- `[ -x PATH ]` for any test letter, the `[[ ... ]]` form, a
+bracket-free `test -x PATH` in command position, and each of those three
+negated (`[ ! -d PATH ]`, `[[ ! -f PATH ]]`, `test ! -e PATH`), which is the
+spelling this checker actually writes its own three guards in -- and reddens
+on the first path missing from either list, so the next walk added behind any
+of them trips there rather than shipping silent. One spelling is left out:
+`[ -d PATH ] || mkdir PATH` creates the path, so requiring it to exist
+beforehand demands what the line is there to make, and the whole line is
+passed over. `test` is read where a command starts and nowhere else, through
+the same list the split-`case` scan in `scripts/check-budget-drift-cases.sh`
+reads, and the line is read as code, so a guard in a comment or a here-doc
+body is none. A planted file carrying one guard per spelling grades the
+harvest itself, `cargo test -p name` among them, which is `test` in argument
+position and no guard at all.
 
 The same shape in one line, `[ -d docs ] && targets="$targets docs"`, is safe
 where the population writes it and unsafe wherever its status becomes a
@@ -228,9 +247,16 @@ The last two inherit the suppression from the list inside them, so only their
 status moves; the first four abort. A missing directory then returns 1 to a
 caller reading it as a failure. The population writes the shape mid-body and
 as the last command of a loop body (`[ -n "$root" ] && rm -rf "$root"` in the
-acceptance cleanups), both of which only carry the status; nothing in
-`scripts/` writes it last in a function, a subshell, a command substitution or
-the script. Write it `if [ -d docs ]; then ... fi` anyway, because which of
+acceptance cleanups), both of which only carry the status. It writes one line
+in a position that does not: the `stale=$(cd "$ROOT" && for f in $GUARDED; …)`
+parse leg in `scripts/check-budget-drift-cases.sh` ends its loop body with a
+guarded list, the loop ends the substitution, and the status would reach the
+assignment -- the `cmdsubst` row above. The `|| true` on the closing `done)`
+is what defuses it. That is a claim about the tree rather than about the
+shell, so a pin at the end of `scripts/check-style-cases.sh` walks the
+population for a guarded `&&` list whose next code line closes a function or
+a substitution, and reddens on any that carries no `|| true` and on a second
+file appearing beside that one. Write it `if [ -d docs ]; then ... fi` anyway, because which of
 the positions a reader is looking at depends on what follows the line rather
 than on the line.
 

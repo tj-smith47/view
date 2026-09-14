@@ -55,6 +55,15 @@ script_population_read() {
   return 0
 }
 
+# Where a command can start, for the two walks that grade an English word.
+# `case` and `test` are ordinary words this population writes in prose, so
+# neither can be read bare the way the `ln` walk reads its own: nine prose
+# `case` words inside string literals were measured. Written once because
+# three scans had drawn this boundary three different ways and none of them
+# was the union, and a fourth spelling is what the next scan invents.
+# shellcheck disable=SC2034
+SCRIPT_COMMAND_START='((^|[;&|({!])[[:space:]]*|(^|[[:space:]])(if|then|do|else)[[:space:]]+)'
+
 # The reader every walk over that population shares: an awk prelude that
 # turns a line into the text a shell reads as commands. Three gates grade a
 # word (`ln`, `case`) or a comment by where it sits, and each of them drew
@@ -63,8 +72,10 @@ script_population_read() {
 # `)`. The boundary is one property of the file, so it is read once here.
 #
 # `script_code_scan(line)` sets CODE to the line with its comment cut, and to
-# the empty string inside a here-doc body; CMT to the comment and CMTDEPTH to
-# the substitution nesting the comment sits in; WAS and DEPTH to the nesting
+# the empty string inside a here-doc body; BARE to the part of CODE a shell
+# reads outside every quote, which is where a `<<` is the here-doc operator
+# and a brace is structure; CMT to the comment and CMTDEPTH to the
+# substitution nesting the comment sits in; WAS and DEPTH to the nesting
 # before and after the line; SUBS to the running count of substitutions
 # entered. Quote, here-doc and nesting state carry across lines the way 3.2
 # carries them, so a `#` inside an open string is not a comment, a paren
@@ -81,6 +92,13 @@ script_population_read() {
 # paren is pushed and popped without changing the nesting, so the pattern the
 # page mandates stays inside its substitution; a pattern written without that
 # paren pops the substitution, which is the miscount 3.2 itself makes.
+#
+# A `<<TAG` is the here-doc operator only where BARE carries it, so a tag
+# inside a quoted argument (`printf '%s' "<<x"`) opens nothing and the line
+# after it is still code. A tag that is the operator and never terminates
+# leaves CODE empty to the end of the file: every walk then reads no code
+# there, which is the fail-closed half -- a harvest stops rather than
+# running on into text the handler never runs.
 # shellcheck disable=SC2034
 SCRIPT_CODE_AWK='
   FNR == 1 { DEPTH = 0; STACK = ""; HD = "" }
@@ -109,7 +127,7 @@ SCRIPT_CODE_AWK='
     return t
   }
   function script_code_scan(line,   i, n, c, prev, top, j) {
-    CODE = ""; CMT = ""; CMTDEPTH = 0; WAS = DEPTH
+    CODE = ""; BARE = ""; CMT = ""; CMTDEPTH = 0; WAS = DEPTH
     if (HD != "") {
       if ((HDDASH && line ~ "^[[:space:]]*" HD "[[:space:]]*$") || line == HD) {
         HD = ""
@@ -144,8 +162,24 @@ SCRIPT_CODE_AWK='
         CMTDEPTH = DEPTH
         break
       }
+      BARE = BARE c
       if (c == "\\") { i++; prev = ""; continue }
-      if (c == "\"" || c == SQ) { script_code_push(c); prev = c; continue }
+      if (c == "\"" || c == SQ) {
+        # a here-doc tag is quoted as often as it is bare, and quoting it
+        # disables expansion in the body rather than making the `<<` text, so
+        # the tag is read into BARE here instead of being skipped with every
+        # other quoted word. It closes on its own line or it is no tag.
+        if (substr(BARE, 1, length(BARE) - 1) ~ /<<-?[[:space:]]*$/) {
+          j = index(substr(line, i + 1), c)
+          if (j > 0) {
+            BARE = BARE substr(line, i + 1, j)
+            i = i + j
+            prev = c
+            continue
+          }
+        }
+        script_code_push(c); prev = c; continue
+      }
       if (c == "(") {
         if (prev == "$" || prev == "<" || prev == ">") {
           script_code_push("("); SUBS++
@@ -159,6 +193,6 @@ SCRIPT_CODE_AWK='
     }
     CODE = (CMT == "") ? line : substr(line, 1, length(line) - length(CMT))
     top = script_code_top()
-    if (top != SQ && top != "\"") { HD = script_code_heredoc(CODE) }
+    if (top != SQ && top != "\"") { HD = script_code_heredoc(BARE) }
   }
 '
