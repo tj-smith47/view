@@ -89,35 +89,36 @@ one, reading a `[` where a command starts as the `test` builtin rather than
 as a bracket expression.
 
 Both reading legs take their line from one reader in
-`scripts/lib/script-population.sh`, which carries quote, here-doc and
-nesting state across lines the way 3.2 carries them. A word in a comment or
-in a here-doc body is not a command to it; a word in a string literal is,
-which is an over-read taken on purpose so that nothing assembled in a
-string goes unread. The here-doc half of that state comes from the one
-tokenizer in the tree, `SCRIPT_HEREDOC_AWK` in the same file, which the
-userland scan reads as well: a `<<` inside a quoted argument, past a `#`, or
-inside `(( ))` opens nothing, a `<<<` here-string opens nothing because the
-third `<` is outside the characters a tag is read from, a fourth `<`
-(`cat <<<<EOF`) is refused by the shell as a syntax error and carries no
-property for the scan to hold -- no branch reads it, and none is added,
-because no file this population accepts can carry the spelling. A tag that
-never terminates leaves the rest of its file unread by the reader and stops the
-userland scan with `PORTABILITY-SELF-FAIL` rather than narrowing it in
-silence. Every spelling of the tag opens the same body -- bare, `'TAG'`,
-`"TAG"`, `\TAG`, `<<-TAG`, and any of those with the blank the shell allows
-between the operator and its word. A quoted tag runs to its closing quote, so
-`<<'EOF-1'` is the tag `EOF-1` and a plain `EOF` line inside that body closes
-nothing; an unquoted one is read to the first character outside
-`[A-Za-z0-9_-]`, which takes the `-` a blank separates from the operator
-(`<< -TAG` is the tag `-TAG`) and stops short of a shell word, because the
-userland scan hands this tokenizer the raw line and a scan to the first blank
-reads `/<<-?[[:space:]]*$/` inside a quoted awk program as an opener. Whether
-the terminator may be tab-indented travels as a flag character of its own and
-not as a `-` on the tag, since `<< -TAG` and `<<--TAG` name the same tag and
-strip differently. A spelling read as no operator leaves the lines under it
-scanned as commands, which is the direction that hides a finding behind text
-no shell runs.
-
+`scripts/lib/script-population.sh`, which carries quote, here-doc and nesting
+state across lines the way 3.2 carries them. A word in a comment or in a
+here-doc body is not a command to it; a word in a string literal is, which is an
+over-read taken on purpose so that nothing assembled in a string goes unread.
+The here-doc half of that state comes from the one tokenizer in the tree,
+`SCRIPT_HEREDOC_AWK` in the same file, which the userland scan reads as well,
+through the same reader and so on the text outside every quote: a `<<` inside a
+quoted argument, past a `#`, or inside `(( ))` opens nothing, a `<<<`
+here-string opens nothing because the third `<` ends the tag before it starts, a
+fourth `<` (`cat <<<<EOF`) is refused by the shell as a syntax error and carries
+no property for the scan to hold -- no branch reads it, and none is added,
+because no file this population accepts can carry the spelling. A tag that never
+terminates leaves the rest of its file unread by the reader and stops the
+userland scan with `PORTABILITY-SELF-FAIL` rather than narrowing it in silence.
+Every spelling of the tag opens the same body -- bare, `'TAG'`, `"TAG"`, `\TAG`,
+`<<-TAG`, and any of those with the blank the shell allows between the operator
+and its word. A quoted tag runs to its closing quote, so `<<'EOF-1'` is the tag
+`EOF-1` and a plain `EOF` line inside that body closes nothing; an unquoted one
+runs to the next blank, `;`, `|`, `&`, `<`, `>` or `)`, which is where the shell
+ends the word, and it takes the `-` a blank separates from the operator
+(`<< -TAG` is the tag `-TAG`). A tag may hold a dot, so `cat <<EOF.1` opens a
+body that a plain `EOF` line does not close, and reading the tag as the name up
+to the dot leaves the rest of that body scanned as commands. That class costs
+nothing now that both scans hand this tokenizer the text outside every quote:
+read off the raw line instead, `/<<-?[[:space:]]*$/` inside a quoted awk program
+is an opener and every line under it goes unscanned. Whether the terminator may
+be tab-indented travels as a flag character of its own and not as a `-` on the
+tag, since `<< -TAG` and `<<--TAG` name the same tag and strip differently. A
+spelling read as no operator leaves the lines under it scanned as commands,
+which is the direction that hides a finding behind text no shell runs.
 The construct list is itself graded, by three planted spellings: the direct and
 the indirect substitution, each of which it must refuse, and an anchored one,
 which it must let through. The split `case` scan is graded by six: a header
@@ -152,12 +153,12 @@ sibling about what an empty list means.
 
 ## A `--prod-lines` pin counts a spelling written in a trailing comment
 
-The three pins in `scripts/check-style.sh` that ask `scripts/audit-god-files.sh
---prod-lines` which lines are production code (`check_tied_spawns`,
-`check_geometry_sites`, the condition-notice ownership check) read the raw line
-the scanner emits. A whole-line comment never reaches them -- the classifier
-drops it -- but a spelling written after a `//` on a line of code does, and it
-counts as a site.
+The three pins in `scripts/check-style.sh` that ask
+`scripts/audit-god-files.sh --prod-lines` which lines are production code
+(`check_tied_spawns`, `check_geometry_sites`, the condition-notice ownership
+check) read the raw line the scanner emits. A whole-line comment never reaches
+them -- the classifier drops it -- but a spelling written after a `//` on a line
+of code does, and it counts as a site.
 
 That is the trade, and it is deliberate. The scanner's only eliding
 machinery removes string *contents*, and two of the geometry spellings are
@@ -199,35 +200,48 @@ the handler prints (`echo "run; wipe now"`) runs nothing, and reading it as a
 call pairs the root against a removal that never fires. The trap line is a call
 site of its own -- the command a trap runs is a string the shell re-parses, so
 `trap 'wipe_q "$QROOT"' EXIT` is the call `wipe_q` with `$QROOT` as its
-argument, and the quotes around it are not part of it. A callee defined in a
-file the script sources is resolved through that file, one level, tried beside
-the script, from the scan root, and under `scripts/lib/`; a path none of the
-three resolves is named in the verdict as the line writes it, because a boundary
-the walk cannot cross that says nothing reddens a right script with a message
-claiming the opposite, and a fragment of the operand names nothing a reader can
-go and look at. The operand ends at the first blank outside the `$( )` that
-opens it, which is what makes `source "$(dirname "$0")/lib/x.sh"` -- the shape
-every source line here writes -- resolve at all. Removes and not merely names: a
-handler that prints an accumulator (`log="$log made $ROOT"`, `echo "$log"`)
-reads as a pairing to a walk asking only whether the name appears, and the root
-is never removed. The names a removal reaches are those on a line running `rm`,
-plus the list a removed loop variable was bound from, which is how every
-array-of-roots cleanup here is written. Every line of the handler is read as
-code first: a `#`-led `rm` is a comment and reaches nothing, and a line under a
-`<<TAG` the handler never terminates is here-doc text the trap never runs, so
-the removal written there is a leak and reads as one. A tag inside a quoted
-argument (`printf '%s' "<<x"`) is not the operator and opens nothing. A `mktemp`
-seeds through every quoting that still expands and whose value is the temp path
--- `$(mktemp)`, `"$(mktemp)"` and `"'$(mktemp)'"`, whose single quotes sit
-inside the double ones and quote nothing -- and through none that does not:
-`'$(mktemp)'` and `$'$(mktemp)'` are literal text and make no file. A prefixed
-`N="pre$(mktemp)"` is the third kind: it makes a file, and the name holds `pre`
-and the path, so a removal over `$N` removes nothing that was made. It is
-excluded by name, and the exclusion is fail-closed -- a script whose `mktemp`
-reaches no recognised name is reported rather than passed. One case per shape.
-Two spellings pass a walk that only asks for the word `trap`: `trap - EXIT`,
-which clears the handler rather than arming one, and a trap that reaps a child
-and removes nothing. Both are cased, red, at the end of
+argument, and the quotes around it are not part of it. What the quotes inside
+that string decide is whether a name in it is still a name when the trap fires.
+A single-quoted or `$'...'` run in the re-parsed command never expands, so the
+removal written in one reaches no variable and is no pairing:
+`trap "rm -rf '\$X'" EXIT` and a handler line `rm -rf '$X'` both leak. A name
+the shell expanded while it built a double-quoted string is a path by the time
+the trap is armed, and the quotes the re-parse reads then sit around a value
+rather than around a name -- which is why `trap "rm -rf '$SELFCHECK_TMP'" EXIT`,
+the line `scripts/acceptance/artifacts.sh` arms, pairs, and why the name travels
+outside the quotes it was written inside. A callee defined in a file the script
+sources is resolved through that file, one level, tried beside the script, from
+the scan root, and under `scripts/lib/`; a path none of the three resolves is
+named in the verdict as the line writes it, because a boundary the walk cannot
+cross that says nothing reddens a right script with a message claiming the
+opposite, and a fragment of the operand names nothing a reader can go and look
+at. The operand ends at the first blank outside both the `$( )` and the quotes
+that opened it, which is what makes `source "$(dirname "$0")/lib/x.sh"` -- the
+shape every source line here writes -- resolve at all, and what keeps a quoted
+path holding a blank of its own whole in the verdict. The line number, the path
+and the operand travel from that scan to the shell as three records rather than
+three fields, for the reason the harvest writes two records: the operand is
+script text and can carry any byte a separator could be. Removes and not merely
+names: a handler that prints an accumulator (`log="$log made $ROOT"`,
+`echo "$log"`) reads as a pairing to a walk asking only whether the name
+appears, and the root is never removed. The names a removal reaches are those on
+a line running `rm`, plus the list a removed loop variable was bound from, which
+is how every array-of-roots cleanup here is written. Every line of the handler
+is read as code first: a `#`-led `rm` is a comment and reaches nothing, and a
+line under a `<<TAG` the handler never terminates is here-doc text the trap
+never runs, so the removal written there is a leak and reads as one. A tag
+inside a quoted argument (`printf '%s' "<<x"`) is not the operator and opens
+nothing. A `mktemp` seeds through every quoting that still expands and whose
+value is the temp path -- `$(mktemp)`, `"$(mktemp)"` and `"'$(mktemp)'"`, whose
+single quotes sit inside the double ones and quote nothing -- and through none
+that does not: `'$(mktemp)'` and `$'$(mktemp)'` are literal text and make no
+file. A prefixed `N="pre$(mktemp)"` is the third kind: it makes a file, and the
+name holds `pre` and the path, so a removal over `$N` removes nothing that was
+made. It is excluded by name, and the exclusion is fail-closed -- a script whose
+`mktemp` reaches no recognised name is reported rather than passed. One case per
+shape. Two spellings pass a walk that only asks for the word `trap`:
+`trap - EXIT`, which clears the handler rather than arming one, and a trap that
+reaps a child and removes nothing. Both are cased, red, at the end of
 `scripts/check-style-cases.sh`, beside the function-body pairing that has to
 stay green. Keyed on the script rather than on the statement, because the
 removal legitimately sits far from the `mktemp`. The name a handler may pair on
@@ -360,10 +374,10 @@ while passing a wider line whose long token it subtracts whole.
 
 Counted without a UTF-8 awk, because the same verdict has to come back from
 gawk, mawk and BSD awk: under `LC_ALL=C` a character is a lead byte plus its
-continuation bytes, so the walks drop the continuations (`gsub(/[\200-\277]/,
-"")`) and take the length of what is left. The `LC_ALL=C` is not decoration --
-gawk in a UTF-8 locale refuses that range as a collation character and the walk
-dies rather than grading.
+continuation bytes, so the walks drop the continuations
+(`gsub(/[\200-\277]/, "")`) and take the length of what is left. The `LC_ALL=C`
+is not decoration -- gawk in a UTF-8 locale refuses that range as a collation
+character and the walk dies rather than grading.
 
 A character is not a terminal column, and the measure has two stated limits
 because of it. A double-width glyph counts one and paints two, so a comment
@@ -386,7 +400,22 @@ whose next line continues the same paragraph reddens, over the same pages the
 width walk grades. Three shapes are short for a reason and are not graded: a
 line that ends its paragraph, a line whose next word is longer than what is
 left of the limit, and a line a heading, a table row, a list item, a rule or a
-fence follows. Each is cased beside the width cases.
+fence follows. Each is cased beside the width cases. The word that decides
+whether the next line would have fitted is the whole inline code span at the
+head of it plus the punctuation behind it, because that is what a re-wrap would
+have to move: measured to the first blank instead, the span's first word fits,
+the seam reddens, and the only way to satisfy it is to break the span.
+
+Which a wrap may not do. A wrap landing inside an inline code span leaves the
+page reading the same and the span gone, and these pages are read by their
+spans: `crates/view-harness/src/bin/bench.rs` looks its fixtures up in
+`docs/benchmarking.md` by the span each is written as, so a split span is a page
+whose next edit reddens a test rather than the page. A span the width walk finds
+still open at the end of a line reddens over the same pages, and a run of
+backticks closes only on a run of its own length, so a span holding a lone
+backtick inside a doubled pair is one span rather than three. A span longer than
+the limit is left alone for the reason the over-long run is: it has nowhere to
+go.
 
 What cannot wrap is exempt by shape rather than by a list of files:
 

@@ -693,6 +693,9 @@ expect_width() {
       c = $1; sub(/:$/, "", c); print c ":ragged"; next
     }
     /^[^ ].*:[0-9]+: [0-9]+ characters$/ { c = $1; sub(/:$/, "", c); print c; next }
+    /^[^ ].*:[0-9]+: an inline code span runs on to line [0-9]+$/ {
+      c = $1; sub(/:$/, "", c); print c ":span"; next
+    }
     /^[^ ].*: the width walk cannot read it$/ { c = $1; sub(/:$/, "", c); print c ":unreadable"; next }
     /^STYLE FAIL: no markdown page found/ { print "empty"; next }
   ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
@@ -852,6 +855,49 @@ expect_width 0 '' \
 new_width_case
 pad_wide 81 'A rule of box characters ' ' ends the section' >> "$CASE/docs/page.md"
 expect_width 1 'docs/page.md:4' 'a prose line of wide characters one character over'
+
+# A wrap that lands inside an inline code span leaves the page reading the
+# same and the span gone: `crates/view-harness/src/bin/bench.rs` looks its
+# fixtures up in docs/benchmarking.md by the span they are written as, and a
+# split one is a page whose next edit reddens a test rather than the page.
+new_width_case
+{
+  printf '# page\n\n'
+  printf 'A sentence before the call `nvim_buf_set_lines(0, 0, -1, false,\n'
+  printf '{})` and then more prose, which carries the paragraph on.\n'
+} > "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:3:span' 'an inline code span a wrap broke across two lines'
+
+new_width_case
+{
+  printf '# page\n\n'
+  printf 'A sentence before the call `nvim_buf_set_lines(0, 0)` and then\n'
+  printf 'more prose after it, which carries the paragraph on past here.\n'
+} > "$CASE/docs/page.md"
+expect_width 0 '' 'the same span whole on its line'
+
+# A span longer than the limit has nowhere to go, exactly like the run the
+# width walk subtracts: reddening it asks for a line over the limit.
+new_width_case
+{
+  printf '# page\n\n'
+  printf 'A sentence before `%s\n' "$(over 60 | tr -d ' ')"
+  printf '%s` and then more prose to carry it on.\n' "$(over 30 | tr -d ' ')"
+} > "$CASE/docs/page.md"
+expect_width 0 '' 'a code span longer than the limit itself, which no wrap can hold on one line'
+
+# The other side of the same rule: the word a short line is graded against is
+# the whole span and the punctuation behind it, because that is what a re-wrap
+# would have to move up. Measured to the first blank instead, the span's own
+# first word fits and the seam reddens -- with nothing to do about it but
+# break the span the case above forbids breaking.
+new_width_case
+{
+  printf '# page\n\n'
+  pad 58 'A sentence that stops ' ' short here.'
+  printf '%s and the paragraph runs on past the seam.\n' '`rm -rf /tmp/x and more`,'
+} > "$CASE/docs/page.md"
+expect_width 0 '' 'a short seam whose next line opens with a span too wide to move up beside it'
 
 new_width_case
 mkdir "$CASE/docs/adir.md"
@@ -1604,6 +1650,39 @@ new_temp_trap_case
 expect_temp_traps 0 '' \
   'a removal below a tab-stripping operator whose tag itself starts with a dash'
 
+# The rest of that class: a tag is a shell word, so it runs to the blank or
+# operator that ends one and every other character goes into it. Read to the
+# first character no variable name holds, `cat <<EOF.1` is the tag `EOF`, the
+# plain `EOF` line below closes the body it never opened, and the `rm` the shell
+# reads as data is read here as a removal.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  cat <<EOF.1
+EOF
+  rm -rf "$X"
+}
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a removal swallowed by an unquoted tag carrying a character no name holds'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  cat <<EOF.1
+EOF
+  not a removal
+EOF.1
+  rm -rf "$X"
+}
+PLANT
+expect_temp_traps 0 '' \
+  'a removal below an unquoted dotted tag that terminates on the whole tag'
+
 # The fail-open the same swallow used to open in the other direction: a
 # handler that removes nothing, a tag inside a quoted argument, and a removal
 # in a function the trap never calls. Read as the operator, the tag swallows
@@ -1713,6 +1792,60 @@ printf 'X=$(mktemp -d)\ntrap "echo \\"rm -rf $X\\"" EXIT\n' | write_temp_trap_sc
 expect_temp_traps 1 'scripts/a.sh' \
   'a trap printing an rm inside its own escaped quotes, which removes nothing'
 
+# What the shell expands and what it does not, on a trap command string. A
+# single-quoted run in the re-parsed command is literal text: the first two
+# below remove a path whose own name is `$X` and strand the temp root, which
+# real bash confirms. The third is right to be clean -- the name is bare in the
+# re-parsed command and expands when the trap fires -- and the fourth is the
+# shape scripts/acceptance/artifacts.sh writes: the name is expanded into the
+# string before the trap is armed, so the quotes the re-parse reads sit around
+# a path rather than around a name.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+trap "rm -rf '\$X'" EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a trap whose escaped name sits in single quotes, which removes a path named for it'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf '$X'
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'the same single-quoted removal written in a handler body'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf $'$X'
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'the same removal written in an ANSI-C run, which expands no name either'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+trap "rm -rf \$X" EXIT
+PLANT
+expect_temp_traps 0 '' \
+  'a trap whose name is bare in the re-parsed command, which expands when it fires'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+trap "rm -rf '$X'" EXIT
+PLANT
+expect_temp_traps 0 '' \
+  'a trap whose path is expanded into the string before the trap is armed'
+
 # The wire between the harvest and the removal walk carries no byte a script
 # can write: the two halves of a line arrive as two records, and a handler
 # line holding the ASCII field separator the harvest once wrote between them
@@ -1796,6 +1929,66 @@ case "$probe" in
 esac
 expect_temp_traps 1 'scripts/a.sh' \
   'an unresolvable substitution path named in the verdict as the line writes it' \
+  "$named"
+
+# A quoted operand may hold a blank of its own, which is neither the blank that
+# ends the operand nor one inside its `$( )`. Read to the first blank outside
+# the substitution, the verdict names the fragment `"$(dirname "$0")/nope` --
+# a path nobody can go and look at -- and the resolution tries it.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+source "$(dirname "$0")/nope with blank.sh"
+BROOT=$(mktemp -d)
+cleanup() {
+  sourced_b "$BROOT"
+}
+trap cleanup EXIT
+PLANT
+probe=$(bash "$CHECKER" --temp-traps "$CASE" 2>&1)
+named=""
+case "$probe" in
+  (*'could not read what it sources at scripts/a.sh:2: "$(dirname "$0")/nope with blank.sh"'*) ;;
+  (*) named="the verdict cut the operand at the blank inside its quotes" ;;
+esac
+expect_temp_traps 1 'scripts/a.sh' \
+  'a quoted source operand holding a blank, named whole in the verdict' \
+  "$named"
+
+# The same operand resolvable, so the case above cannot be answered by a walk
+# that reads the whole operand and resolves none of it: the callee the sourced
+# file defines is what this handler removes through.
+new_temp_trap_case
+printf '%s\n' '#!/usr/bin/env bash' 'sourced_k() { rm -rf "$1"; }' \
+  > "$CASE/scripts/lib k.sh"
+write_temp_trap_script <<'PLANT'
+source "$(dirname "$0")/lib k.sh"
+KROOT=$(mktemp -d)
+cleanup() {
+  sourced_k "$KROOT"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a callee in a sourced file whose path holds a blank'
+
+# The wire between the sources awk and the shell carries no byte a script can
+# write either: the line number, the path and the operand arrive as three
+# records of their own. Split on the shared separator instead, an operand
+# holding that byte is cut where the script wrote it, and the verdict names a
+# path the walk never tried.
+new_temp_trap_case
+printf 'LIB=lib\n. "$LIB/x\034y.sh"\nLROOT=$(mktemp -d)\ncleanup() {\n  :\n}\ntrap cleanup EXIT\n' \
+  | write_temp_trap_script
+probe=$(bash "$CHECKER" --temp-traps "$CASE" 2>&1)
+named=""
+# the byte itself is not spelled here: the wildcard stands where the script
+# wrote it, and a walk that split the record on it loses the tail of the
+# operand rather than moving it
+case "$probe" in
+  (*'could not read what it sources at scripts/a.sh:3: "$LIB/x'*'y.sh"'*) ;;
+  (*) named="the verdict cut the operand at the separator byte" ;;
+esac
+expect_temp_traps 1 'scripts/a.sh' \
+  'a source operand carrying the separator byte, named whole in the verdict' \
   "$named"
 
 # The seed class, one case per quoting shape. Green is "this spelling seeds":

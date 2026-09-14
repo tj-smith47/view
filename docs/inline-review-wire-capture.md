@@ -26,15 +26,15 @@ Matches `.engine-pin` (`v0.12.4`).
 ## Capture method
 
 `Engine::spawn(EngineConfig::isolated())` -- `nvim --embed` under the hermetic
-`HOME`/`XDG_*` isolation a real session gets -- followed by `nvim_ui_attach(80,
-24)`, then `EngineHandle::review_show` / `review_clear` themselves. **Not
-`--headless -l`**, for the reason `docs/checktime-wire-capture.md` gives: view
-always attaches a UI before issuing any RPC call, and the difference is
-material. Here it is the whole point -- a screenless capture can only echo
-extmark *attributes* back, and the first version of this capture did exactly
-that while the deletion highlight was painting one row too far. Every claim
-below about what the user sees is a `screenattr`/`screenstring` read of a
-rendered screen.
+`HOME`/`XDG_*` isolation a real session gets -- followed by
+`nvim_ui_attach(80, 24)`, then `EngineHandle::review_show` / `review_clear`
+themselves. **Not `--headless -l`**, for the reason
+`docs/checktime-wire-capture.md` gives: view always attaches a UI before issuing
+any RPC call, and the difference is material. Here it is the whole point -- a
+screenless capture can only echo extmark *attributes* back, and the first
+version of this capture did exactly that while the deletion highlight was
+painting one row too far. Every claim below about what the user sees is a
+`screenattr`/`screenstring` read of a rendered screen.
 
 The editor is read back through `nvim_buf_get_extmarks(details = true)`,
 `nvim_buf_get_keymap`, `nvim_buf_get_changedtick`, `vim.fn.screenattr` and

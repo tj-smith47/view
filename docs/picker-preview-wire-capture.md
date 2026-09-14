@@ -89,8 +89,8 @@ Case 3 is the one that can.
 
 ## 3. Buffer opened, modified without saving
 
-Driven from case 2's buffer: `nvim_buf_set_lines(0, 0, -1, false, {three new
-lines})`, no `:write`.
+Driven from case 2's buffer:
+`nvim_buf_set_lines(0, 0, -1, false, {three new lines})`, no `:write`.
 
 ```
 set_lines err: None
@@ -123,9 +123,9 @@ not-found outcome rather than the RPC layer inventing one.
   `nvim_exec_lua` with the chunk above (path as the sole positional vararg),
   tagged `Waiter::Preview { generation }`, mirroring `request_buffer_list`'s
   `Waiter::BufferList` shape exactly: async, never blocks, decodes on the reader
-  thread, routes to `pump` as `Msg::PickerPreviewReply { generation, path,
-  loaded, lines }` (new `Held::Preview` slot in `damage.rs`, alongside
-  `Held::BufferList`).
+  thread, routes to `pump` as
+  `Msg::PickerPreviewReply { generation, path, loaded, lines }` (new
+  `Held::Preview` slot in `damage.rs`, alongside `Held::BufferList`).
 - `decode_preview_reply` reads `loaded` first; when `loaded` is `true` it
   requires `lines` to be present and decodes it as `Vec<String>`, and when
   `loaded` is `false` (or the reply errors, following

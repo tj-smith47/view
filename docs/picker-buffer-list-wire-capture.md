@@ -97,11 +97,11 @@ picker session stuck with no items and no explanation.
 ## Conclusions for the implementation
 
 - `EngineHandle::request_buffer_list(&self, generation: u64)` issues
-  `nvim_exec_lua` with the chunk above, tagged `Waiter::BufferList { generation
-  }`, mirroring `request_probe`'s `Waiter::HlProbe` shape exactly: async, never
-  blocks, decodes on the reader thread, routes to `pump` as
-  `Msg::PickerBufferList { generation, names }` (new `Held` slot in `damage.rs`,
-  alongside `Held::Probe`/`Held::Claims`).
+  `nvim_exec_lua` with the chunk above, tagged
+  `Waiter::BufferList { generation }`, mirroring `request_probe`'s
+  `Waiter::HlProbe` shape exactly: async, never blocks, decodes on the reader
+  thread, routes to `pump` as `Msg::PickerBufferList { generation, names }` (new
+  `Held` slot in `damage.rs`, alongside `Held::Probe`/`Held::Claims`).
 - The reply's `name` field is used as-is for a real path; an empty string is
   rendered as `[No Name]` by the picker's `PickerItem` label, not filtered
   out (an unsaved scratch buffer is still a legitimate jump target).

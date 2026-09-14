@@ -367,8 +367,9 @@ once:
 
 The two windows with no filetype are drawn border chrome: their buffer lines are
 the box-drawing characters themselves, an 80-cell top rule with a centered title
-(shortened here, the artifact carries the full 80 columns: `"╭─── Results
-───╮"`, `"╭─── Help ───╮"`), and they are `focusable = false, mouse = false`.
+(shortened here, the artifact carries the full 80 columns:
+`"╭─── Results ───╮"`, `"╭─── Help ───╮"`), and they are
+`focusable = false, mouse = false`.
 
 Selection, before and after one `<C-n>`:
 
@@ -535,13 +536,12 @@ Two warnings for anything built on this, both of them geometric:
 - Detection has to read identity (`filetype`, the namespace *names*,
   `zindex`) with the mode and the surface ownership, never rect overlap with
   what view draws and never a namespace id.
-- Naming the plugin is possible for noice (its own title virtual text) and
-  for telescope (its filetype prefix), and impossible for cmp and
-  nvim-notify beyond the filetype itself, which is what the best-effort
-  naming rule in the migration-integrity plan already anticipated.
-- Absorption is viable on the pinned versions: `nvim_win_set_config(win,
-  { hide = true })` is accepted on cmp's menu window, the plugin's own next
-  reconfigure preserves it, no replacement window appears, and the window id is
-  stable for the life of the cmdline session. The absorbed rows are the buffer's
-  lines and the absorbed selection is `nvim_win_get_cursor(win)[1]` gated on
-  `vim.wo[win].cursorline`.
+- Naming the plugin is possible for noice (its own title virtual text) and for
+  telescope (its filetype prefix), and impossible for cmp and nvim-notify beyond
+  the filetype itself, which is what the best-effort naming rule in the
+  migration-integrity plan already anticipated. - Absorption is viable on the
+  pinned versions: `nvim_win_set_config(win, { hide = true })` is accepted on
+  cmp's menu window, the plugin's own next reconfigure preserves it, no
+  replacement window appears, and the window id is stable for the life of the
+  cmdline session. The absorbed rows are the buffer's lines and the absorbed
+  selection is `nvim_win_get_cursor(win)[1]` gated on `vim.wo[win].cursorline`.

@@ -230,8 +230,9 @@ $ cat dist/probe_0.0.0-SNAPSHOT-_checksums.txt
 ```
 
 The bundles must live outside `dist/`: anodizer refuses to start against a
-non-empty one (`dist directory './dist' is not empty; use --clean to remove it
-first`), which is why the workflow stages them under `bundles/`.
+non-empty one
+(`dist directory './dist' is not empty; use --clean to remove it first`), which
+is why the workflow stages them under `bundles/`.
 
 This repo's own config validates against the installed version:
 

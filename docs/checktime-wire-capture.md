@@ -165,9 +165,10 @@ CHUNK(paths={"<workdir>/real_target_dir/target.txt"}, force=false)
 
 `found = true` despite the buffer's own name being the *unresolved* symlinked
 spelling: `CHECKTIME_CHUNK`'s `canon()` is byte-identical to
-`PREVIEW_CHUNK`/`LOAD_HIDDEN_CHUNK`'s own (`vim.uv.fs_realpath(p) or
-vim.fn.fnamemodify(p, ':p')`), so both the buffer's name and the watcher's
-realpath'd event path resolve to the same key before comparison.
+`PREVIEW_CHUNK`/`LOAD_HIDDEN_CHUNK`'s own
+(`vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')`), so both the buffer's
+name and the watcher's realpath'd event path resolve to the same key before
+comparison.
 
 ## 7. `force = true`: driving the user's "reload, discarding local edits" answer
 
@@ -555,10 +556,10 @@ buffer performs the re-read itself, the open is refused, and nvim raises
 report.
 
 Driven with the fixture made unreadable by mode bits, against a child dropped to
-an unprivileged uid (`setpriv --reuid=65534 --regid=65534 --clear-groups nvim
---clean --embed`), because mode bits are advisory to a privileged process and
-this host runs as root. Two paths in the call: the unreadable one, then one
-nothing touched.
+an unprivileged uid
+(`setpriv --reuid=65534 --regid=65534 --clear-groups nvim --clean --embed`),
+because mode bits are advisory to a privileged process and this host runs as
+root. Two paths in the call: the unreadable one, then one nothing touched.
 
 ```
 $ timeout -s KILL 90 python3 t_perm.py

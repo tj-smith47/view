@@ -54,42 +54,30 @@ WORD='(^|[^[:alnum:]_-])'
 fail=0
 
 # Rules shared by both passes: drop whole-line comments, and drop the bodies
-# of the here-docs a line opens. The tags a line opens come from the reader
-# beside the population, which is where the one here-doc tokenizer in this
-# tree lives; their bodies arrive in the order the tags were written, so a
-# queue tracks them rather than a single tag. The introducing line still gets
-# scanned; only the body and its terminator are dropped. A tag still open when
-# a file ends means that tokenizer read something as an opener that the shell
-# does not, so it stops the run loudly instead of narrowing the scan in
-# silence.
-SKIP="$SCRIPT_HEREDOC_AWK"'function unterminated() {
-  printf("PORTABILITY-SELF-FAIL: %s opens a here-doc tagged %s that no later line closes; the scan would read the rest of that file as data\n", opened[qh], substr(queue[qh], 2)) > "/dev/stderr"
+# of the here-docs a line opens. Both come from the reader beside the
+# population, which is the one place in this tree that says what a shell reads
+# as commands: it carries quote, here-doc and nesting state across lines, so a
+# tag is read off the part of the line outside every quote rather than off the
+# raw line -- a `<<` written inside a quoted awk program opened a body here
+# while the shell reads none, which is why the tag scan had to stop at the
+# first character no name carries. The introducing line still gets scanned;
+# only the body and its terminator are dropped. A tag still open when a file
+# ends means that reader took something for an opener that the shell does not,
+# so it stops the run loudly instead of narrowing the scan in silence.
+SKIP="$SCRIPT_CODE_AWK"'function unterminated() {
+  printf("PORTABILITY-SELF-FAIL: %s opens a here-doc tagged %s that no later line closes; the scan would read the rest of that file as data\n", opened, substr(firsttag, 2, index(firsttag, "\n") - 2)) > "/dev/stderr"
   exit 2
 }
-BEGIN { qh = 1; qn = 0 }
-FNR == 1 { if (qn >= qh) unterminated(); qh = 1; qn = 0; fn = "" }
-qn >= qh {
-  line = $0
-  cur = queue[qh]
-  if (substr(cur, 1, 1) == "-") { sub(/^\t+/, "", line) }
-  cur = substr(cur, 2)
-  if (line == cur) qh += 1
-  next
-}
-/^[[:space:]]*#/ { next }
+FNR == 1 { if (opened != "") unterminated(); opened = ""; fn = "" }
 {
-  found = tags_of($0)
-  if (found != "") {
-    m = split(found, tags, "\n")
-    for (k = 1; k <= m; k += 1) {
-      if (tags[k] == "") continue
-      qn += 1
-      queue[qn] = tags[k]
-      opened[qn] = FILENAME ":" FNR
-    }
-  }
+  script_code_scan($0)
+  if (HD == "") { opened = "" }
+  else if (opened == "") { opened = FILENAME ":" FNR; firsttag = HD }
+  # a body line, a whole-line comment and a blank line each leave no command
+  # text behind, and the scan has nothing to read on any of them
+  if (CODE == "") next
 }
-END { if (qn >= qh) unterminated() }
+END { if (opened != "") unterminated() }
 '
 
 # every line the shell would run, numbered

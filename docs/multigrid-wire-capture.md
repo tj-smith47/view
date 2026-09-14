@@ -603,11 +603,12 @@ scroll: win=1003 tab=1 pos=[0,0] size=40x19 relative= | win=1002 tab=1 pos=[0,41
 
 Reading it against the events: at `vsplit`, window 1001 sits at `pos=[0,0]` 40
 wide and window 1000 at `pos=[0,41]` 39 wide, which is exactly what
-`win_pos [4, ext(1:1001), 0, 0, 40, 23]` and `win_pos [2, ext(1:1000), 0, 41,
-39, 23]` announced, with the separator column 40 belonging to grid 1. At
-`nvim_open_win float`, window 1004 is `relative=editor` at `pos=[2,4]`, matching
-`win_float_pos`'s `screen_row`/`screen_col` of `2, 4` rather than its float
-`anchor_row` and `anchor_col`.
+`win_pos [4, ext(1:1001), 0, 0, 40, 23]` and
+`win_pos [2, ext(1:1000), 0, 41, 39, 23]` announced, with the separator column
+40 belonging to grid 1. At `nvim_open_win float`, window 1004 is
+`relative=editor` at `pos=[2,4]`, matching `win_float_pos`'s
+`screen_row`/`screen_col` of `2, 4` rather than its float `anchor_row` and
+`anchor_col`.
 
 ## The pinned name sets
 

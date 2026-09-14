@@ -80,12 +80,12 @@ AI_FS_READ_CHUNK(2, nil, 0)   -> { ok = true, lines = [],                   eol 
 
 Four behaviors this pins:
 
-- A `line` past the end answers an empty window, not an error and not the
-  whole file: `strict_indexing = false` is what makes an out-of-range start
-  clamp instead of throwing, and an agent asking for line 99 of a 3-line
-  file has asked a well-formed question whose answer is "nothing."
-- A `limit` running past the end is clamped the same way (`line = 3,
-  limit = 99` yields one line, not an error).
+- A `line` past the end answers an empty window, not an error and not the whole
+  file: `strict_indexing = false` is what makes an out-of-range start clamp
+  instead of throwing, and an agent asking for line 99 of a 3-line file has
+  asked a well-formed question whose answer is "nothing." - A `limit` running
+  past the end is clamped the same way (`line = 3, limit = 99` yields one line,
+  not an error).
 - `line = 0` -- which the schema's own `minimum: 0` admits despite the
   1-based description -- reads from the first line. The chunk's guard is
   `line > 1`, so both `0` and `1` mean "start at index 0" and neither
@@ -251,10 +251,11 @@ os.path.exists(no_such_dir/deep.txt) -> True, holding 'deep\n'
 The first is the wire's own "The Client MUST create the file if it doesn't
 exist," satisfied by `bufadd` + `bufload` naming a buffer for a path with no
 file behind it and `:write` creating it. The second needs the chunk's
-`vim.fn.mkdir(..., 'p')`: without it `:write` answers `E212: Can't open file for
-writing: not a directory` and the agent's write fails for a reason it cannot act
-on -- creating a file in a new directory is an ordinary thing an agent does, and
-the directory is not a second decision for the user to make.
+`vim.fn.mkdir(..., 'p')`: without it `:write` answers
+`E212: Can't open file for writing: not a directory` and the agent's write fails
+for a reason it cannot act on -- creating a file in a new directory is an
+ordinary thing an agent does, and the directory is not a second decision for the
+user to make.
 
 ## 9. A save nvim cannot perform reports `saved = false` and loses nothing
 

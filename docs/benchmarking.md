@@ -279,8 +279,8 @@ The four session cells add ~3 min on top of that, both legs.
 
 view embeds Neovim, so it can never be smaller than the Neovim it embeds -- no
 claim here says otherwise. Under the committed 15-plugin lazy.nvim fixture, the
-same standard workload, recorded diagnostically (`task bench -- --scenario
-memory --fixture heavy`, not CI-gated):
+same standard workload, recorded diagnostically
+(`task bench -- --scenario memory --fixture heavy`, not CI-gated):
 
 | reading | PSS |
 |---|---|
@@ -399,13 +399,13 @@ Budgets are recorded per machine class and regression-gated: a change that
 makes any tracked metric worse fails the build. Each metric is also checked
 against the design spec's own budget, not just the last recorded value.
 
-A machine's class is declared, never detected: `CLASS=controlled-linux task
-bench` (and the same word on `task perf-audit` and `task acceptance`) says this
-host is quiet enough for the tail metrics and the controlled-only budget rows.
-Undeclared, a host is `dev-<platform>`, and the acceptance legs whose bound is
-armed on a controlled class alone -- today the RTT-injection proof,
-`scripts/acceptance/remote-rtt.sh` -- announce a skip and pass, rather than
-measuring against a bar nobody recorded for them.
+A machine's class is declared, never detected:
+`CLASS=controlled-linux task bench` (and the same word on `task perf-audit` and
+`task acceptance`) says this host is quiet enough for the tail metrics and the
+controlled-only budget rows. Undeclared, a host is `dev-<platform>`, and the
+acceptance legs whose bound is armed on a controlled class alone -- today the
+RTT-injection proof, `scripts/acceptance/remote-rtt.sh` -- announce a skip and
+pass, rather than measuring against a bar nobody recorded for them.
 
 Where a metric does not yet meet its spec budget, it is listed in
 `crates/view-bench/budgets.toml` with the value it was accepted at and a

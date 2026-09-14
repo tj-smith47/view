@@ -357,6 +357,35 @@ msg=$'don\'t<<EOF really'
 SH
 expect 1 'scripts/case.sh:3:inline' 'a tag spelling inside an ANSI-C string opens nothing, escaped quote and all'
 
+# The tag itself runs to the blank or operator that ends a shell word, which
+# is the class bash reads it in -- a tag may carry a dot, and a body opened on
+# one is not closed by the name up to the dot. The scan can afford that class
+# because it hands the tokenizer the line outside every quote: read off the
+# raw line, the awk program below is an opener and everything under it goes
+# unscanned.
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+awk '
+  /<<-?[[:space:]]*$/ { print }
+' /dev/null
+PAT='\bshould_not_be_hidden'
+[[ $x =~ $PAT ]]
+SH
+expect 1 'scripts/case.sh:5:var' 'an operator spelling inside a quoted awk program that spans lines opens nothing'
+
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+cat <<EOF.1
+a line of body text
+EOF
+[[ $x =~ \bstill_body ]]
+EOF.1
+[[ $y =~ \sfound ]]
+SH
+expect 1 'scripts/case.sh:7:inline' 'a body opened on a dotted tag, which the name up to the dot does not close'
+
 # ---------------------------------------------------------------------------
 # `<<` inside an arithmetic context is a left shift, and the operand after it
 # is a number rather than a tag

@@ -191,13 +191,14 @@ distinguish this class and drive `PromptState`'s parser:
 ## 5. `return_prompt` no longer exists on this engine
 
 The capture plan named `return_prompt` as a third prompt kind to capture.
-Driving the classic triggers (`:!echo hi`, and `:for i in range(1,30) | echomsg
-i | endfor`, both of which produce the legacy multi-line hit-enter prompt) with
-`ext_messages` attached produced **no `return_prompt`-kind `msg_show` at all**,
-and the session was never actually blocked waiting for acknowledgement (a
-follow-up `nvim_eval` succeeded immediately, with no key sent). This is not a
-capture-script bug: it is a documented, deliberate removal, found in the pinned
-build's own changelog rather than guessed:
+Driving the classic triggers (`:!echo hi`, and
+`:for i in range(1,30) | echomsg i | endfor`, both of which produce the legacy
+multi-line hit-enter prompt) with `ext_messages` attached produced **no
+`return_prompt`-kind `msg_show` at all**, and the session was never actually
+blocked waiting for acknowledgement (a follow-up `nvim_eval` succeeded
+immediately, with no key sent). This is not a capture-script bug: it is a
+documented, deliberate removal, found in the pinned build's own changelog rather
+than guessed:
 
 ```
 $ grep -n -B5 -A15 return_prompt \

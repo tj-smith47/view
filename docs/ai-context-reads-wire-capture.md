@@ -22,11 +22,11 @@ Matches `.engine-pin` (`v0.12.4`).
 
 ## Capture method
 
-A standalone Python msgpack-rpc client spawns `nvim --clean --headless --listen
-<socket>` with the same hermetic `HOME`/`XDG_*` isolation
-`EngineConfig::isolated()` uses, connects over the unix socket, and issues
-`nvim_exec_lua` requests running the exact chunk text each `nvim_api.rs`
-constant embeds.
+A standalone Python msgpack-rpc client spawns
+`nvim --clean --headless --listen <socket>` with the same hermetic
+`HOME`/`XDG_*` isolation `EngineConfig::isolated()` uses, connects over the unix
+socket, and issues `nvim_exec_lua` requests running the exact chunk text each
+`nvim_api.rs` constant embeds.
 
 ## `nvim_win_get_cursor` and `getpos`: nvim's own mixed indexing, verbatim
 
@@ -561,10 +561,11 @@ slice clamped `lo0` to the row's length instead of yielding nothing.)
 
 All nine round-4 captures (the two review cases, the empty-row variant, the two
 boundary captures, the two `$`-block short-row guards, and the two unchanged
-round-2/round-3 controls) were taken against `nvim --clean --headless --listen
-<socket>` (NVIM v0.12.4) with a UI attached, driving the selection through
-`nvim_input` and reading `getreg('"')` after `y`. The candidate chunk agreed
-with the oracle on all nine before any source file was edited.
+round-2/round-3 controls) were taken against
+`nvim --clean --headless --listen <socket>` (NVIM v0.12.4) with a UI attached,
+driving the selection through `nvim_input` and reading `getreg('"')` after `y`.
+The candidate chunk agreed with the oracle on all nine before any source file
+was edited.
 
 ## Fix round 5 (review-driven): a `$`-block's padding width comes from the WIDEST row in the block, not the padded row's own end
 
@@ -598,10 +599,10 @@ a rounding of ours. Five fixtures pin the width formula, all with
 | `["abcdefgh","ab","gammaxyzABCD","wxyz"]` | `[9,3,13,5]` | `axyzABCD` (8) | 9 |
 | `["abcdefgh","ab","x\tyz"]` | `[9,3,11]` | `␣␣␣␣yz` (6) | 7 |
 
-So the pad width is `max(virtcol({row,'$'}) for row in srow..erow) - lo_vcol +
-1`, computed once per block rather than per row, and the tab fixture confirms
-the maximum is taken over SCREEN columns (row 3's tab widens it to 11) rather
-than byte lengths.
+So the pad width is
+`max(virtcol({row,'$'}) for row in srow..erow) - lo_vcol + 1`, computed once per
+block rather than per row, and the tab fixture confirms the maximum is taken
+over SCREEN columns (row 3's tab widens it to 11) rather than byte lengths.
 
 That maximum has to come from a scan of the block's own rows; the
 selection's shared `hi_vcol` is NOT a substitute, even though it coincides
@@ -617,9 +618,10 @@ lo_vcol = 5, hi_vcol = 5, max row-end vcol = 13
 
 getreg('"') -> "efgh\n         \naxyzABCD\n"   -- 9 pad spaces
 -- pad sized from hi_vcol instead would emit exactly ONE space
-``` The predicate that decides
-WHETHER to pad is unchanged from round 4 -- still `virtcol({row,'$'}) <
-lo_vcol`, strictly:
+```
+
+The predicate that decides WHETHER to pad is unchanged from round 4 -- still
+`virtcol({row,'$'}) < lo_vcol`, strictly:
 
 ```
 ["alphabet","abcd","gammaxyz"]  gg0llll<C-v> jj$   -- row 2 ends at col 4,

@@ -90,15 +90,14 @@ SCRIPT_FIELD_SEP=$(printf '\034')
 # rather than twice. A `<<` opens nothing inside a quoted string, inside an
 # ANSI-C string past an escaped quote, past the `#` that starts a trailing
 # comment, or inside `(( ))`, where it is a left shift and the operand after
-# it is a number. A `<<<` here-string opens none either: the third `<` is
-# outside the characters a tag is read from, so the tag comes back empty and
-# the line carries its data and no body. The blanks the shell allows between
-# the operator and its word are skipped, so `cat << TAG` opens the body
-# `cat <<TAG` opens, and what follows them is read to the closing quote where
-# the tag is quoted and to the first character outside `[A-Za-z0-9_-]` where
-# it is not. A spelling read as no operator at all has the body under it
-# scanned as commands, which is the direction that hides findings behind text
-# no shell ever runs.
+# it is a number. A `<<<` here-string opens none either: the third `<` ends
+# the tag before it starts, so the tag comes back empty and the line carries
+# its data and no body. The blanks the shell allows between the operator and
+# its word are skipped, so `cat << TAG` opens the body `cat <<TAG` opens, and
+# what follows them is read to the closing quote where the tag is quoted and
+# to the blank or operator that ends a shell word where it is not. A spelling
+# read as no operator at all has the body under it scanned as commands, which
+# is the direction that hides findings behind text no shell ever runs.
 # shellcheck disable=SC2034
 SCRIPT_HEREDOC_AWK='function tags_of(line,   i, j, n, c, q, qc, rest, t, dash, out, ansi, adepth) {
   out = ""
@@ -142,14 +141,16 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, j, n, c, q, qc, rest, t, dash, o
       j = index(rest, qc)
       if (j > 0) { t = substr(rest, 1, j - 1); rest = substr(rest, j + 1) }
     } else {
-      # an unquoted tag takes the `-` a blank separates from the operator:
-      # `<< -TAG` is the tag `-TAG`, where a scan of letters alone finds no
-      # tag at all and reads the body under it as commands. It goes no wider
-      # than the characters a tag in this population writes, because the
-      # userland scan hands this tokenizer the raw line: read to the first
-      # blank the way a shell reads a word, `/<<-?[[:space:]]*$/` inside a
-      # quoted awk program is an opener and the rest of that file is body
-      while (rest != "" && substr(rest, 1, 1) ~ /[A-Za-z0-9_-]/) {
+      # an unquoted tag is a shell word: it runs to the blank or the operator
+      # that ends one, which takes the `-` a blank separates from the operator
+      # (`<< -TAG` is the tag `-TAG`) and every other character a tag can
+      # carry. A charset of its own reads `cat <<EOF.1` as the tag `EOF` and
+      # hands the body under it back to the scan, where the commands the shell
+      # never runs are read as live findings. The `|` and the `&` sit apart in
+      # the class because the bash-4 construct scan over this population reads
+      # those two characters written together as the pipe operator, wherever
+      # they are written
+      while (rest != "" && substr(rest, 1, 1) !~ /[;|<>)&[:space:]]/) {
         t = t substr(rest, 1, 1)
         rest = substr(rest, 2)
       }

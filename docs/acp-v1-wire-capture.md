@@ -1022,9 +1022,10 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 > "The Client **MUST** respond to all pending `session/request_permission`
 > requests with the `cancelled` outcome."
 
-This is a **`RequestPermissionOutcome` value** (`{"outcome": {"outcome":
-"cancelled"}}`), a valid JSON-RPC *result*, not an error. The trigger this prose
-names is the client sending `session/cancel` to cancel the whole prompt turn.
+This is a **`RequestPermissionOutcome` value**
+(`{"outcome": {"outcome": "cancelled"}}`), a valid JSON-RPC *result*, not an
+error. The trigger this prose names is the client sending `session/cancel` to
+cancel the whole prompt turn.
 
 **Source 2, `docs/protocol/v1/cancellation.mdx`, its Cascading
 Cancellation Flow worked example:**

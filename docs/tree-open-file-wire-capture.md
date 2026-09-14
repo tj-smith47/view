@@ -74,8 +74,8 @@ through the args list as ordinary filenames.
 
 ## 2. The same call, `magic` left at its default (negative control)
 
-Identical script, identical files, chunk shortened to `nvim_cmd({ cmd = 'edit',
-args = { path } }, {})`:
+Identical script, identical files, chunk shortened to
+`nvim_cmd({ cmd = 'edit', args = { path } }, {})`:
 
 ```
 MAGIC-ON case="plain.txt"      ok=true match=true

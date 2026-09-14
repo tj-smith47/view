@@ -758,12 +758,29 @@ temp_trap_handlers() {
         h = CODE
         sub(/^[[:space:]]*trap +(-- +)?/, "", h)
         q = substr(h, 1, 1)
+        preexp = ""
         if (q == SQ || q == "\"") {
           j = closing_quote(substr(h, 2), q)
           h = (j > 0) ? substr(h, 2, j - 1) : substr(h, 2)
-          # the shell drops the backslash while it builds the string it
-          # re-parses, so the command the trap runs carries the quote alone
-          if (q == "\"") { gsub(/\\"/, "\"", h) }
+          # a name the shell expanded while it built this string is a path by
+          # the time the trap is armed, so the quotes the re-parse reads sit
+          # around a value and not around a name: the name travels outside
+          # them. An escaped one is still a name at the re-parse, and the
+          # quotes there decide whether it ever expands -- inside single
+          # quotes it never does, and scripts/acceptance/artifacts.sh bakes
+          # its own path in this way because the variable is a local
+          if (q == "\"") {
+            tail = h
+            while (match(tail, /[$][{]?[A-Za-z_][A-Za-z0-9_]*/)) {
+              if (RSTART == 1 || substr(tail, RSTART - 1, 1) != "\\") {
+                preexp = preexp " " substr(tail, RSTART, RLENGTH)
+              }
+              tail = substr(tail, RSTART + RLENGTH)
+            }
+            # the shell drops the backslash while it builds the string it
+            # re-parses, so the command the trap runs carries the quote alone
+            gsub(/\\"/, "\"", h)
+          }
         } else {
           sub(/[[:space:]].*/, "", h)
         }
@@ -773,7 +790,7 @@ temp_trap_handlers() {
         bareh = h
         gsub(/"[^"]*"/, "", bareh)
         gsub(SQ "[^" SQ "]*" SQ, "", bareh)
-        armed = armed h "\n" bareh "\n"
+        armed = armed h preexp "\n" bareh "\n"
         name = h
         sub(/[[:space:]].*/, "", name)
         if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) { want[name] = 1 }
@@ -838,23 +855,35 @@ temp_trap_handlers() {
 # line writes it, with its line number, because a boundary the walk cannot
 # cross has to be named in the verdict rather than left as a silent refusal,
 # and a fragment of the operand names nothing.
+#
+# One call per script, and not one call over the whole subset with the file
+# name in each record: the fourteen forks that shape removes are worth 0.07 s
+# of a 0.98 s walk, measured over ten interleaved runs, and the bucketing it
+# needs in the shell costs more to read than the number is worth.
 temp_trap_sources() {
   local script="$1" here at path written base cand got
   # every path this walk is handed carries a directory; a bare name would
   # resolve its candidates against the wrong root
   here=${script%/*}
   if [ "$here" = "$script" ]; then here="."; fi
-  awk -v SQ="'" -v S="$SCRIPT_FIELD_SEP" "$SCRIPT_CODE_AWK"'
-    # the operand ends at the first blank outside the substitution that opens
-    # it, never at the first blank: `source "$(dirname "$0")/lib/x.sh"` -- the
-    # shape every source line in this population writes -- carries two blanks
-    # inside its own `$( )`, and an operand cut at the first of them is the
-    # fragment `$(dirname`, which resolves to nothing and names nothing a
-    # reader can act on
-    function operand(s,   i, n, c, d, out) {
-      n = length(s); d = 0
+  awk -v SQ="'" "$SCRIPT_CODE_AWK"'
+    # the operand ends at the first blank outside every quote and outside the
+    # substitution that opens it, never at the first blank: `source
+    # "$(dirname "$0")/lib/x.sh"` -- the shape every source line in this
+    # population writes -- carries two blanks inside its own `$( )`, and a
+    # quoted path may carry one of its own, which is what the wire below
+    # already assumes. An operand cut at either is a fragment that resolves to
+    # nothing and names nothing a reader can act on
+    function operand(s,   i, n, c, d, q, out) {
+      n = length(s); d = 0; q = ""
       for (i = 1; i <= n; i++) {
         c = substr(s, i, 1)
+        if (q != "") {
+          if (c == q) { q = "" }
+          out = out c
+          continue
+        }
+        if (c == SQ || c == "\"") { q = c; out = out c; continue }
         if (c == "$" && substr(s, i + 1, 1) ~ /[({]/) {
           d += 1; i += 1; out = out "$" substr(s, i, 1); continue
         }
@@ -876,11 +905,15 @@ temp_trap_sources() {
       sub(/^[$][A-Za-z_][A-Za-z0-9_]*\//, "", t)
       # the operand as the line writes it travels beside the path the walk
       # tried, because the verdict names one and the resolution reads the
-      # other. Separated by the shared field byte rather than by a blank,
-      # which a quoted path may hold
-      if (t != "") { printf "%d%s%s%s%s\n", FNR, S, t, S, op }
+      # other. Three records rather than one line and a separator byte: a
+      # script line can carry any byte a separator could be, and an operand
+      # holding that byte is then cut where the script wrote it and the
+      # verdict names a path the walk never tried. A newline cannot occur
+      # inside a record awk read as a line
+      if (t != "") { printf "%d\n%s\n%s\n", FNR, t, op }
     }
-  ' "$script" | while IFS="$SCRIPT_FIELD_SEP" read -r at path written; do
+  ' "$script" | while IFS= read -r at && IFS= read -r path &&
+    IFS= read -r written; do
     base=${path##*/}
     got=""
     for cand in "$here/$path" "$path" "scripts/lib/$base"; do
@@ -906,9 +939,42 @@ temp_trap_sources() {
 # The ceiling on the call: a callee that takes a path and removes a different
 # one still pairs the names at the call.
 temp_trap_removals() {
-  awk -v CS="$SCRIPT_COMMAND_START" '
+  awk -v SQ="'" -v CS="$SCRIPT_COMMAND_START" '
+    # the line with the runs the shell never expands blanked out. A $NAME
+    # inside a single-quoted or an ANSI-C run is literal text: a handler
+    # removing a path written that way removes a path whose own name is $X and
+    # the temp root leaks, while the walk reads the name and pairs. The
+    # double-quoted runs stay, since "$X" is the shape a removal is written in
+    function expanded(line,   i, n, c, q, ansi, out) {
+      n = length(line); q = ""; ansi = 0; out = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (q == SQ) {
+          # an ANSI-C run keeps its own escapes, so an escaped quote inside one
+          # is a literal quote and does not end the run
+          if (ansi && c == "\\") { out = out "  "; i++; continue }
+          if (c == SQ) { q = ""; ansi = 0 }
+          out = out " "
+          continue
+        }
+        if (q == "\"") {
+          if (c == "\\") { out = out c substr(line, i + 1, 1); i++; continue }
+          if (c == "\"") { q = "" }
+          out = out c
+          continue
+        }
+        if (c == SQ) {
+          ansi = (i > 1 && substr(line, i - 1, 1) == "$")
+          q = SQ; out = out " "
+          continue
+        }
+        if (c == "\"") { q = "\"" }
+        out = out c
+      }
+      return out
+    }
     function names_on(line,   s, n, out) {
-      s = line; out = ""
+      s = expanded(line); out = ""
       while (match(s, /[$][{]?[A-Za-z_][A-Za-z0-9_]*/)) {
         n = substr(s, RSTART, RLENGTH)
         sub(/^[$][{]?/, "", n)
@@ -1001,7 +1067,8 @@ temp_trap_removals() {
 # that kills a child both read as a pairing to a walk that only asks for the
 # word.
 check_temp_traps() {
-  local fail=0 f names name removed paired reach unread read_with line
+  local fail=0 f names name removed paired reach unread line
+  local read_with
   if ! read_script_population; then
     return 1
   fi
@@ -1063,18 +1130,22 @@ check_temp_traps() {
     # time cost more than the walk they sort
     reach=$(temp_trap_sources "$f")
     unread=""
-    read_with=""
+    # the resolved paths travel as array elements and not as a blank-separated
+    # word list: a quoted source operand may hold a blank, so the path it
+    # resolves to may hold one, and a split list hands awk half a path and
+    # takes a fatal on it -- the whole gate then stops on a tree that is right
+    read_with=()
     while IFS= read -r line; do
       case "$line" in
         ('') ;;
         ('?'*) unread="${unread:+$unread; }${line#\?}" ;;
-        (*) read_with="$read_with $line" ;;
+        (*) read_with+=("$line") ;;
       esac
     done <<EOF
 $reach
 EOF
-    # shellcheck disable=SC2086
-    removed=" $(temp_trap_handlers "$f" $read_with | temp_trap_removals | tr '\n' ' ')"
+    removed=" $(temp_trap_handlers "$f" ${read_with[@]+"${read_with[@]}"} \
+      | temp_trap_removals | tr '\n' ' ')"
     paired=0
     # a file whose every mktemp goes somewhere no removal reaches leaves this
     # loop unrun and is reported
@@ -1150,7 +1221,7 @@ PROSE_WIDTH=80
 # one-line paragraph and the last line of any other stay as they are.
 PROSE_RAGGED=60
 check_prose_width() {
-  local pages graded wide ragged unreadable rc
+  local pages graded wide ragged split unreadable rc
   pages=$(find "$@" -name '*.md' | LC_ALL=C sort)
   if [ -z "$pages" ]; then
     echo "STYLE FAIL: no markdown page found to grade for width"
@@ -1192,11 +1263,56 @@ check_prose_width() {
       if (l ~ /^[[:space:]]*(```|~~~)/) { return 0 }
       return 1
     }
-    function firstword(l,   t) {
-      t = l; sub(/^[[:space:]]+/, "", t); sub(/[[:space:]].*$/, "", t)
-      return t
+    # what a re-wrap would move onto the line above, which is a word unless it
+    # opens an inline code span: a span is moved whole or not at all, and a
+    # next word measured to the first blank inside one asks for the span to be
+    # broken across the line instead
+    function firstword(l,   t, w, c) {
+      t = l; sub(/^[[:space:]]+/, "", t)
+      w = ""
+      while (t != "") {
+        c = t; sub(/[[:space:]].*$/, "", c)
+        w = (w == "") ? c : w " " c
+        sub(/^[^[:space:]]+[[:space:]]*/, "", t)
+        c = w
+        # the span ends where its backticks balance, and the word it sits in
+        # ends at the blank after that: the comma a span is followed by moves
+        # with it, and a measure that stops at the closing backtick asks for a
+        # line the re-wrap cannot write
+        if (gsub(/`/, "", c) % 2 == 0) { break }
+      }
+      return w
     }
-    FNR == 1 { fenced = 0; held = "" }
+    # the run of backticks a code span opens on closes it at the same length
+    # and at no other, so a span holding a lone backtick inside a pair is one
+    # span rather than three. The state carries across lines: a span the line
+    # leaves open has been broken by a wrap, and a test that reads its page by
+    # a span goes red the next time the paragraph is touched. A span too long
+    # to sit on a line of its own is left alone -- it has nowhere to go
+    function span_step(l,   i, n, run, tick) {
+      i = 1; n = length(l)
+      while (i <= n) {
+        if (substr(l, i, 1) != "`") {
+          if (spanrun > 0) { spantext = spantext substr(l, i, 1) }
+          i += 1
+          continue
+        }
+        run = 0
+        while (i + run <= n && substr(l, i + run, 1) == "`") { run += 1 }
+        tick = substr(l, i, run)
+        i += run
+        if (spanrun == 0) { spanrun = run; spantext = tick; spanat = FNR; continue }
+        spantext = spantext tick
+        if (spanrun != run) { continue }
+        if (spanat != FNR && cols(spantext) <= limit) {
+          printf "span %s:%d: an inline code span runs on to line %d\n",
+            FILENAME, spanat, FNR
+        }
+        spanrun = 0; spantext = ""
+      }
+      if (spanrun > 0) { spantext = spantext " " }
+    }
+    FNR == 1 { fenced = 0; held = ""; spanrun = 0; spantext = "" }
     # CommonMark closes a fence only with the character that opened it, and
     # with a run at least as long. One toggle for both spellings read a
     # sample containing the other as a close: the block ended early, the
@@ -1212,6 +1328,7 @@ check_prose_width() {
     }
     fenced { next }
     {
+      span_step($0)
       # the short line is graded on the line that follows it, and only where
       # the word that opens that line would have fitted: a paragraph whose
       # next word is a path longer than what is left is wrapped as tightly as
@@ -1247,7 +1364,8 @@ check_prose_width() {
   fi
   wide=$(printf '%s\n' "$graded" | sed -n 's/^wide //p')
   ragged=$(printf '%s\n' "$graded" | sed -n 's/^ragged //p')
-  if [ -z "$wide" ] && [ -z "$ragged" ]; then
+  split=$(printf '%s\n' "$graded" | sed -n 's/^span //p')
+  if [ -z "$wide" ] && [ -z "$ragged" ] && [ -z "$split" ]; then
     return 0
   fi
   if [ -n "$wide" ]; then
@@ -1264,6 +1382,14 @@ check_prose_width() {
     echo "  Re-wrap the paragraph, not just the tail that went over the width:"
     echo "  a sentence added to a wrapped block leaves the seam behind it"
     echo "  short, and the width walk grades the maximum alone."
+  fi
+  if [ -n "$split" ]; then
+    printf '%s\n' "$split"
+    echo "STYLE FAIL: an inline code span is broken across a line"
+    echo "  Move the whole span onto one line -- the line before it may end"
+    echo "  short, which is what the ragged rule exempts. Tests read these"
+    echo "  pages by the spans they are written as, so a span a wrap cut in"
+    echo "  two is a page whose next edit reddens a test."
   fi
   return 1
 }
