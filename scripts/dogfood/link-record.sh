@@ -237,7 +237,7 @@ record_one() {
   dir=$OUT/$side-$index
   mkdir -p "$dir/state" "$dir/cache" "$dir/frames"
   cut -d ' ' -f 1 /proc/loadavg > "$dir/load" 2>/dev/null || echo 0 > "$dir/load"
-  mkfifo "$dir/in" "$dir/wire"
+  mkfifo "$dir/in" "$dir/wire" "$dir/ready"
 
   {
     # the local arm's editor runs in the pty `script` made, which starts at
@@ -272,9 +272,13 @@ record_one() {
   fi
 
   NODE_PATH=$DEPS/node_modules node "$HERE/link-replay.js" answer \
-    --cols "$COLS" --rows "$ROWS" --reply "$dir/in" \
-    < "$dir/wire" > "$dir/answer.log" 2>&1 &
+    --cols "$COLS" --rows "$ROWS" --wire "$dir/wire" --reply "$dir/in" \
+    --ready "$dir/ready" > "$dir/answer.log" 2>&1 &
   READER=$!
+  # node's own startup is some 30 ms, and an editor that asks its terminal a
+  # question inside that window waits for the answer: read the emulator's
+  # own ready line before the editor is started, which blocks until it is up
+  read -r _ < "$dir/ready" || true
   script -q -e -I "$dir/in.log" -O "$dir/out.log" -T "$dir/tm.log" \
     -c "bash $INNER" < "$dir/in" > "$dir/wire" 2>&1 &
   CHILD=$!
@@ -296,7 +300,7 @@ record_one() {
   exec 3>&-
   wait "$READER" 2>/dev/null || true
   READER=
-  rm -f "$dir/in" "$dir/wire"
+  rm -f "$dir/in" "$dir/wire" "$dir/ready"
 }
 
 # The moments of one recording, as `name_ms=` lines.

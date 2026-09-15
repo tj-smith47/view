@@ -14,7 +14,8 @@
 // `@xterm/headless` where it can find it.
 //
 // Usage:
-//   node link-replay.js answer --cols N --rows N --reply PATH
+//   node link-replay.js answer --cols N --rows N --wire PATH \
+//        --reply PATH --ready PATH
 //   node link-replay.js report --out OUT --timing TM --in IN --cols N \
 //        --rows N --needle TEXT [--palette] [--frames DIR]
 const fs = require('fs');
@@ -56,22 +57,32 @@ function registerColourQueries(term, reply) {
   term.parser.registerOscHandler(12, answer(12, FOREGROUND));
 }
 
-// The live consumer: the pty's output arrives on stdin, and everything the
-// emulator wants to say back is appended to `--reply`, which is the fifo
-// `script` is relaying into the pty. So the editor under test talks to
+// The live consumer: the pty's output arrives on `--wire`, and everything
+// the emulator wants to say back is appended to `--reply`, which is the
+// fifo `script` is relaying into the pty. So the editor under test talks to
 // something that answers, the way it does on the user's own terminal.
+//
+// `--ready` is a fifo written once the emulator is built and before either
+// of the other two is opened, and the recorder reads it before starting the
+// editor: node's own startup is some 30 ms, and spent inside the recording
+// it lands on the editor's clock as a slow terminal -- the queries in a
+// recording taken without it were answered 33 ms after they were asked. The
+// two fifos are then opened in the order `script` opens its own ends of
+// them, input first, because each open waits for the other side.
 function answer() {
   const { Terminal } = require('@xterm/headless');
   const cols = Number(arg('--cols'));
   const rows_ = Number(arg('--rows'));
+  const wire = arg('--wire');
   const replyPath = arg('--reply');
-  const back = fs.openSync(replyPath, 'a');
   const term = new Terminal({
     cols,
     rows: rows_,
     scrollback: 0,
     allowProposedApi: true,
   });
+  fs.writeFileSync(arg('--ready'), 'ready\n');
+  const back = fs.openSync(replyPath, 'a');
   const reply = (text) => {
     try {
       fs.writeSync(back, text);
@@ -82,8 +93,9 @@ function answer() {
   };
   registerColourQueries(term, reply);
   term.onData(reply);
-  process.stdin.on('data', (chunk) => term.write(chunk));
-  process.stdin.on('end', () => {
+  const stream = fs.createReadStream(wire);
+  stream.on('data', (chunk) => term.write(chunk));
+  stream.on('end', () => {
     fs.closeSync(back);
     process.exit(0);
   });
