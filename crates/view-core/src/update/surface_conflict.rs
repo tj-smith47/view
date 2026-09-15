@@ -587,10 +587,18 @@ pub(super) fn cmdline_closed(model: &mut Model) -> Vec<Effect> {
 /// pushed onto the end of the first sentence is a remedy the user cannot
 /// read.
 ///
-/// `disabled` names the plugin view turned off, and only the claimant
-/// notice ever carries one: a named plugin is one view can
+/// `disabled` names a plugin view asked to turn itself off, and only the
+/// claimant notice ever carries one: a named plugin is one view can
 /// ask to stop (`crate::msg::RpcCall::DisableClaimants`), while an
 /// anonymous float is a window nobody can be asked anything about.
+///
+/// The clause states the asking and what this reading found, never the
+/// outcome: the hand-back runs a module's own `disable` only where the
+/// module was already loaded when the takeover went out, and the takeover
+/// now runs ahead of every other plugin's `VimEnter`, so a claimant that
+/// loads from one of those never receives it. Nothing in the reply says
+/// which modules were there, and the one thing this probe does know is
+/// that the plugin is loaded now.
 ///
 /// `startup_account` adds the last line, and only the claimant notice
 /// passes it true: that notice is the account of a launch, and the history
@@ -650,7 +658,9 @@ fn notice(
     // its own row rather than a clause on the first: the message layer
     // clips at the grid's width less two rather than wrapping
     let turned_off = match disabled {
-        Some(class) => format!("\nview turned {class} off for this session."),
+        Some(class) => {
+            format!("\nview asked {class} to turn itself off at startup, and it is still loaded.")
+        }
         None => String::new(),
     };
     format!(
@@ -1596,7 +1606,8 @@ mod tests {
             vec![
                 "view: noice.nvim is using the command line and the message area, \
                  which view owns.\n\
-                 view turned noice.nvim off for this session.\n\
+                 view asked noice.nvim to turn itself off at startup, and it is \
+                 still loaded.\n\
                  Set [native] palette = false and [native] notifications = false \
                  in view.toml to give them back.\n\
                  Startup messages from this launch are in the history -- <leader>fm."
@@ -1684,7 +1695,8 @@ mod tests {
                 vec![
                     "view: noice.nvim is using the command line and the message area, \
                      which view owns.",
-                    "view turned noice.nvim off for this session.",
+                    "view asked noice.nvim to turn itself off at startup, and it \
+                     is still loaded.",
                     "Set [native] palette = false and [native] notifications = false \
                      in view.toml to give them back.",
                     "Startup messages from this launch are in the history -- <leader>fm.",

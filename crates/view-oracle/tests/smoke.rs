@@ -57,6 +57,24 @@ const STARTUP_SETTLE: Duration = Duration::from_millis(500);
 /// none of them at fault.
 const QUIT_WAIT: Duration = Duration::from_secs(10);
 
+/// Waits out the quit a teardown just typed, and fails the test naming the
+/// screen when it never lands.
+///
+/// The bound alone is half of what [`QUIT_WAIT`] is for: a teardown that
+/// drops the answer turns a swallowed quit into a test that spends ten
+/// seconds and passes, and the session's own `Drop` then kills the group so
+/// nothing leaks and nothing fails either. Every teardown in this file goes
+/// through here, so the next surface that eats a quit is named by the test
+/// whose quit it ate.
+#[track_caller]
+fn expect_quit(session: &mut PtySession) {
+    assert!(
+        session.wait_for_exit(QUIT_WAIT).is_some(),
+        "view never exited after the quit this teardown typed; screen:\n{}",
+        session.screen()
+    );
+}
+
 // The read side of `PTY_ISOLATION`, held for a whole session lifetime.
 // `unwrap_or_else(into_inner)` recovers a poisoned lock: the guarded value is
 // `()` with no invariant to protect, so a panicking test must not cascade into
@@ -721,7 +739,7 @@ fn view_paints_wide_character_without_corrupting_neighbor_cell() {
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 /// Supervision's headline promise, end to end: view's engine is killed the
@@ -1975,7 +1993,7 @@ fn view_shows_an_echoed_message() {
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 // A transient toast (Route::Transient in view-core's toast.rs) carries a
@@ -2014,7 +2032,7 @@ fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 // The live-process proof that the dismissal timer belongs to the top slot
@@ -2100,7 +2118,7 @@ fn a_stack_of_toasts_expires_one_slot_at_a_time_rather_than_all_at_once() {
         );
 
         session.send(b"\x1b:q!\r").unwrap();
-        let _ = session.wait_for_exit(QUIT_WAIT);
+        expect_quit(&mut session);
         return;
     }
     panic!(
@@ -2134,7 +2152,7 @@ fn a_persistent_emsg_survives_the_same_idle_wait_a_transient_toast_does_not() {
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 // The choke-point-unification counterpart to the wire-sourced test above.
@@ -2177,7 +2195,7 @@ fn a_native_notice_expires_on_its_own_after_the_idle_timeout_same_as_a_wire_toas
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 #[test]
@@ -2204,7 +2222,7 @@ fn view_shows_the_cmdline_prefix_inside_the_command_palette_while_typing_a_comma
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 #[test]
@@ -2228,7 +2246,7 @@ fn view_shows_the_prompt_label_on_the_bottom_row_during_call_input() {
     // <CR> submits the input() prompt itself before quitting, or the
     // pending prompt would swallow the following :q!
     session.send(b"\r\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 #[test]
@@ -2238,7 +2256,7 @@ fn view_propagates_cquit_exit_code() {
     session.send(b"\x1b:cq 5\r").unwrap();
 
     let exit = session
-        .wait()
+        .wait_for_exit(QUIT_WAIT)
         .expect("view process never exited after :cq 5");
     assert_eq!(
         exit.exit_code(),
@@ -2294,7 +2312,7 @@ fn a_leading_plus_line_number_places_the_cursor_on_that_line() {
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 #[test]
@@ -2347,7 +2365,7 @@ fn minus_capital_o_opens_two_vertical_splits() {
     );
 
     session.send(b"\x1b:qa!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 /// The glyphs a vertical split's separator column is drawn from, read off a
@@ -2403,7 +2421,7 @@ fn split_separator_screen(single_grid: bool) -> String {
     });
     let screen = session.screen();
     session.send(b"\x1b:qa!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
     assert!(
         separated,
         "`:vsplit` drew no separator at all with single_grid = {single_grid}; \
@@ -3007,7 +3025,7 @@ fn view_pastes_a_two_line_bracketed_paste_as_one_undo_unit() {
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 #[test]
@@ -3092,7 +3110,7 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
     // `:qa!` rather than `:q!`: `:tabnew` above left two tabs open, and
     // `:q!` alone only closes the current window/tab, not the editor
     session.send(b"\x1b:qa!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 /// A pty nothing has sized reports 0x0, and so does a real terminal for
@@ -3165,7 +3183,7 @@ fn view_started_on_an_unsized_terminal_reflows_to_the_first_real_size() {
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 /// The other half of the same guard: a terminal that answers a positive
@@ -3313,7 +3331,7 @@ fn view_shrinks_and_writes_nothing_below_the_new_last_row() {
     );
 
     session.send(b"\x1b:qa!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 /// A `--nvim-bin` wrapper that sleeps `delay_ms` milliseconds before the
@@ -3599,7 +3617,7 @@ fn a_pre_attach_key_overflow_notice_expires_after_attach_the_same_idle_wait_a_wi
     );
 
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 }
 
 /// Spawns `view` with `VIEW_LOG` pointed at a path whose parent directory
@@ -3639,7 +3657,7 @@ fn view_degrades_gracefully_when_view_log_path_is_unwritable() {
     session.send(b"ihello from an unwritable VIEW_LOG").unwrap();
     session.send(b"\x1b:wq\r").unwrap();
     let exit = session
-        .wait()
+        .wait_for_exit(QUIT_WAIT)
         .expect("view never exited after :wq with an unwritable VIEW_LOG path");
     assert!(
         exit.success(),
@@ -3794,7 +3812,7 @@ fn startup_log(policy: QueryPolicy, colorterm: Option<&str>) -> String {
     );
     settle_late_answer(policy);
     session.send(b"\x1b:q!\r").unwrap();
-    let _ = session.wait_for_exit(QUIT_WAIT);
+    expect_quit(&mut session);
 
     std::fs::read_to_string(&log_path).unwrap()
 }

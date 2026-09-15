@@ -881,6 +881,11 @@ pub(crate) struct FakeOps {
     /// refusing a write whose named tick the buffer has moved past, which
     /// is a routed message rather than a failure.
     pub(crate) refuse_next_write: std::cell::RefCell<bool>,
+    /// Fails `reply` and leaves every other call succeeding: the connection
+    /// dying between a pass's last effect and the answer nvim is blocked
+    /// on, which `fail_next` cannot express because it fails the pass from
+    /// wherever it is set onwards.
+    pub(crate) fail_reply: std::cell::RefCell<bool>,
 }
 
 #[cfg(test)]
@@ -948,7 +953,12 @@ impl EngineOps for FakeOps {
         ))
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
-        self.record(format!("reply({},{value:?})", token.msgid))
+        let call = format!("reply({},{value:?})", token.msgid);
+        if *self.fail_reply.borrow() {
+            self.calls.borrow_mut().push(call);
+            return Err(EngineError::Closed);
+        }
+        self.record(call)
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("probe_default_hl({generation})"))

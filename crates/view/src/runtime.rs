@@ -253,7 +253,15 @@ pub(crate) fn dispatch<E: EngineOps>(
     // an editor left waiting inside `VimEnter` has no way out but view's
     // own exit
     for eff in held {
-        let _ = executor.run(eff);
+        let held_flow = executor.run(eff);
+        // and the answer's own verdict is this pass's whenever the passes
+        // ahead of it had none: a connection that died between the last
+        // effect and the reply is a lost engine the loop has to hear about,
+        // where a `Continue` returned over it sends the cutover on to
+        // replay the resize and every buffered key into a corpse
+        if flow == Flow::Continue {
+            flow = held_flow;
+        }
     }
     flow
 }
@@ -1707,6 +1715,48 @@ mod tests {
         assert!(
             takeover < attach && attach < reply,
             "the takeover, then the attach, then the answer, got {calls:?}"
+        );
+    }
+
+    /// A connection that dies on the answer alone is a lost engine, not a
+    /// pass that went fine.
+    ///
+    /// The answer travels behind every other effect of its pass, so the
+    /// engine can die after the last of them and before it. Read as
+    /// `Continue`, that verdict sends `run_cutover` on to replay the
+    /// resize and every buffered key into a dead engine before anything
+    /// notices it is gone.
+    #[test]
+    fn a_vim_enter_answer_that_cannot_be_written_is_a_lost_engine() {
+        let ops = FakeOps::default();
+        *ops.fail_reply.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::all_enabled(7, None);
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter {
+                token: ReplyToken { msgid: 3 },
+            }),
+        );
+        let calls = ops.calls.borrow().clone();
+        assert!(
+            calls.iter().any(|call| call.starts_with("ui_attach(")),
+            "the effects ahead of the answer must all have gone out, or this \
+             pin is about a pass that failed somewhere else: {calls:?}"
+        );
+        assert_eq!(
+            flow,
+            Flow::EngineLost,
+            "the answer's own failure is the pass's verdict: {calls:?}"
         );
     }
 

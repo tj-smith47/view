@@ -1,11 +1,13 @@
 //! Source-text pins on how the workspace's tests are allowed to assert
 //! time.
 //!
-//! Two claims, neither of which any single timing test can make about
+//! Three claims, none of which any single timing test can make about
 //! itself: that the constant a budget is derived from still says what the
-//! copy here says it does, and that no later test in any crate reintroduces
+//! copy here says it does, that no later test in any crate reintroduces
 //! the shape those budgets replaced -- a hand-picked absolute wall clock,
-//! which passes or fails on what else the host was doing.
+//! which passes or fails on what else the host was doing -- and that no
+//! teardown waits out a quit forever, which is the shape that holds a whole
+//! test binary until CI's timeout when a view surface eats the key.
 //!
 //! Housed here rather than in each crate because the rule is one rule and a
 //! copy of it per crate is a rule that drifts. This crate's tests already
@@ -831,4 +833,119 @@ fn every_declared_absolute_is_still_in_the_test_it_names() {
             declared.file, declared.line, declared.grounds
         );
     }
+}
+
+/// One teardown that types a quit and then waits for the child with no
+/// bound on the wait.
+struct UnboundedQuitWait {
+    number: usize,
+    line: String,
+}
+
+/// Every such teardown in `source`, in the order they appear.
+///
+/// The shape is two lines in one function body: a write carrying `ESC :`,
+/// which is how every teardown in this tree types its quit, and a later
+/// `wait()` with nothing in the parentheses. A key a focused view surface
+/// answers never reaches nvim -- an overlay reads a one-piece `ESC :` as
+/// `<M-:>` and ignores it, which is the decoder's own reading and nvim's
+/// too -- so the quit that key carried never happens and the wait never
+/// returns. Read per function rather than per file, because a helper that
+/// reaps a `std::process::Child` it killed is the same three characters
+/// with none of the meaning.
+fn unbounded_quit_waits(source: &str) -> Vec<UnboundedQuitWait> {
+    let mut found = Vec::new();
+    let mut typed_quit = false;
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("fn ") || trimmed.starts_with("async fn ") {
+            typed_quit = false;
+        }
+        if line.contains("\\x1b:") {
+            typed_quit = true;
+        }
+        if typed_quit && line.contains(".wait()") {
+            found.push(UnboundedQuitWait {
+                number: index + 1,
+                line: trimmed.to_string(),
+            });
+        }
+    }
+    found
+}
+
+#[test]
+fn no_teardown_waits_out_a_quit_a_view_surface_can_swallow() {
+    let mut unbounded = Vec::new();
+    for (name, source) in common::workspace_test_sources() {
+        if name.ends_with(SELF_SOURCE) {
+            // this file quotes the shape it forbids, in the fixture below
+            continue;
+        }
+        for found in unbounded_quit_waits(&source) {
+            unbounded.push(format!("{name}:{}: {}", found.number, found.line));
+        }
+    }
+    assert!(
+        unbounded.is_empty(),
+        "these teardowns type a quit and then wait for the child forever, \
+         which is how one swallowed quit held the whole test binary until \
+         CI's own timeout -- 25 minutes, with every test behind the shared \
+         isolation guard reported as running and none of them at \
+         fault:\n  {}\nWait with a bound and assert on its answer \
+         (smoke.rs's `expect_quit`), so a quit a surface eats fails the \
+         test that typed it in ten seconds",
+        unbounded.join("\n  ")
+    );
+}
+
+/// The teardown shapes the walk must see, and the ones it must not report.
+///
+/// A rule proved only by a population that currently satisfies it is a rule
+/// that cannot tell "nothing is wrong" from "nothing is being read".
+const QUIT_TEARDOWNS: &str = r#"
+#[test]
+fn a_quit_and_an_unbounded_wait_is_the_shape_that_hung() {
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
+#[test]
+fn rustfmt_wrapping_hides_nothing() {
+    session.send(b"\x1b:cq 5\r").unwrap();
+    let exit = session
+        .wait()
+        .expect("view process never exited");
+}
+
+fn a_reap_of_a_child_this_helper_killed_is_not_a_teardown() {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn these_are_the_shapes_the_rule_asks_for() {
+    session.send(b"\x1b:q!\r").unwrap();
+    expect_quit(&mut session);
+    let exit = session.wait_for_exit(QUIT_WAIT).expect("view exits");
+}
+"#;
+
+#[test]
+fn the_quit_walk_sees_the_hang_and_leaves_the_bounded_teardowns_alone() {
+    let found: Vec<usize> = unbounded_quit_waits(QUIT_TEARDOWNS)
+        .iter()
+        .map(|found| found.number)
+        .collect();
+    // the quit typed in one piece and waited out forever, and the same
+    // wait with rustfmt's break in it; the reaped child below them is a
+    // different `wait()` in a function that types no quit, and the two
+    // bounded teardowns at the end are what the rule asks for
+    assert_eq!(
+        found,
+        vec![5, 12],
+        "the walk read {found:?} of the fixture. Every line it missed is a \
+         teardown that can hold the binary unnoticed; every extra line is a \
+         bounded teardown being reported as one"
+    );
 }

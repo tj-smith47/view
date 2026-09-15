@@ -7,7 +7,8 @@
 # noice's own `disable` before it installs anything of its own. The fixture
 # therefore runs noice as its README configures it, and the default states
 # assert what a user is left with: one renderer per surface, one notice
-# naming the plugin view turned off, and nothing of noice's on screen.
+# naming the plugin view asked to turn itself off, and nothing of noice's
+# on screen.
 #
 # `notifications` takes two things: the attach, and `vim.notify` itself.
 # The attach -- `palette = false` detaches ext_cmdline and ext_popupmenu,
@@ -56,7 +57,7 @@ steps = [
   # per row because the notice is four rows -- the message layer clips at
   # the grid's width less two rather than wrapping.
   { wait_for = "noice.nvim is using the command line and the message area", timeout_ms = 30000 },
-  { wait_for = "view turned noice.nvim off for this session", timeout_ms = 5000 },
+  { wait_for = "view asked noice.nvim to turn itself off at startup", timeout_ms = 5000 },
   { wait_for = "Set [native] palette = false and [native] notifications = false", timeout_ms = 5000 },
   { wait_for = "in view.toml to give them back", timeout_ms = 5000 },
   { wait_for = "Startup messages from this launch are in the history", timeout_ms = 5000 },

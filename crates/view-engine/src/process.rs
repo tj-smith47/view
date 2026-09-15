@@ -1869,35 +1869,74 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// until the loop's first turn after startup, by which time nvim has
 /// already drawn the whole screen once for the UI that was not there, and
 /// the attach then asks for all of it again. The wait drains that queue
-/// here instead, so the attach, the
-/// takeover behind it and the colorscheme are in force before the startup
-/// does its own drawing, and the frame that drawing produces is the one
-/// view paints. Same fixture, same host: the frame carrying the settled
-/// screen reaches the terminal 1.4 to 2.6 ms after the buffer behind it is
-/// written, where applying the attach after startup took 4.2 to 5.3 ms on
-/// an idle host and 6.1 to 12.3 ms on a busy one; bare nvim, drawing the
-/// same screen in the same interleaved run, takes 0.9 to 1.4 ms. What the
-/// wait costs instead is time inside `VimEnter`: the attach, the takeover
-/// and the `UIEnter` autocommands it fires now run before the rest of
-/// startup rather than after it.
+/// here instead, so the attach, the takeover behind it and the colorscheme
+/// are in force before the startup does its own drawing, and the frame
+/// that drawing produces is the one view paints.
 ///
-/// The reading is masked for the length of that event, because nvim's own
-/// OSC 52 plugin queries the terminal from `UIEnter` whenever it finds a
-/// `stdout_tty` UI. [`crate::nvim_api::EngineHandle::claim_stdout_tty`]
-/// travels in the same read as the attach and is therefore already in
-/// force here, where nvim firing this event itself would have fired it on a
-/// UI that had not claimed the option yet -- and view answers no terminal
-/// query, so the plugin's would block startup on a reply that never comes.
-/// Masking it hands `UIEnter` the same reading nvim's own ordering gave it.
+/// What the wait costs is spent inside `VimEnter`, and some of it is not
+/// view's own: the attach and the takeover run before the rest of startup
+/// rather than after it, and the loop turns the wait gives nvim also run
+/// whatever else is queued on it -- a callback a plugin armed with
+/// `vim.schedule` or `vim.defer_fn` while `init.lua` was sourcing runs
+/// here, ahead of every other plugin's `VimEnter`, rather than after
+/// startup. `vim.wait` is the only sanctioned way to let nvim service a
+/// channel from inside a callback, so that is the price of servicing it.
 ///
 /// The condition reads the `nvim_list_uis` this chunk saved before
 /// shimming it, because the shim answers for a UI that has not attached
 /// yet and would end the wait on its first check. The 200 ms bound is for
 /// the one case that has no attach coming -- a view that died between the
 /// reply and the attach -- and it bounds a single startup, not something
-/// anything waits on twice. A spawn that keeps the startup barrier
+/// anything waits on twice. That whole bound is spent inside `VimEnter`
+/// when it is spent at all, so the rest of the user's startup waits it
+/// out. A spawn that keeps the startup barrier
 /// ([`EngineConfig::attaches_late`]) has attached before this hook runs at
 /// all, and its wait returns on the first check.
+///
+/// # The `UIEnter` this hook fires, and the one it leaves to nvim
+///
+/// nvim gives a UI applied inside a `vim.wait` no `UIEnter` at all: the
+/// event it fires for a UI that attached during startup has already gone
+/// by the time `VimEnter` runs, and the one it fires for a UI attaching
+/// afterwards needs the loop. So the hook fires that event itself, and
+/// only for an attach that landed while this callback was running. A spawn
+/// that had attached before the hook ran (the stdin relay, `nvim -r`
+/// recovery, an attach deadline that fired ahead of `VimEnter`) gets
+/// nvim's own event once `VimEnter` returns, and firing a second one here
+/// would run every non-`once` `UIEnter` autocommand twice. The reading
+/// that tells the two apart is taken on the callback's first line rather
+/// than after the request: nvim answers a request that arrives in its own
+/// read while it is blocked here, so an attach can land inside the request
+/// as well as inside the wait, and both are attaches nvim fires nothing
+/// for.
+///
+/// `vim.schedule` rather than inline, which is where nvim would have put
+/// it: on the loop's next turn, after every other `VimEnter` autocommand
+/// has run. A handler registered from a plugin's own `VimEnter`, or from a
+/// lazy `config` that runs there, is therefore registered before the event
+/// arrives -- nvim-notify's documented lazy spec installs its notifier at
+/// exactly that event, and `view-engine/tests/claimant_takeover.rs` reads
+/// that notifier back.
+///
+/// What the event cannot carry is `v:event.chan`: `nvim_exec_autocmds`
+/// hands its `data` to the callback as `args.data`, and no API sets
+/// `v:event`, so a config reading the channel where `:help UIEnter`
+/// documents it reads nothing where nvim's own event gives it a number.
+/// `data.chan` is the channel, and is what a config can read here.
+///
+/// The `stdout_tty` reading is masked for the length of that event,
+/// because nvim's own OSC 52 plugin queries the terminal from `UIEnter`
+/// whenever it finds a `stdout_tty` UI.
+/// [`crate::nvim_api::EngineHandle::claim_stdout_tty`] travels in the same
+/// read as the attach and is therefore in force by the time this event
+/// fires, where nvim firing it itself would have fired it on a UI that had
+/// not claimed the option yet -- and view answers no terminal query, so
+/// the plugin's would sit unanswered. Scheduling the event moves it out of
+/// `VimEnter` and onto the loop, which is where an unanswered query stops
+/// being startup's problem, but it does not answer the query: the mask
+/// stays, and what it costs is that a config deciding at this event
+/// whether it is on a terminal decides from the masked reading. Anything
+/// asking after the event, `SafeState` included, reads the real one.
 fn late_attach_cmd(width: u16, height: u16) -> String {
     let modules: Vec<String> = view_core::native::surfaces::SURFACE_CLAIMANTS
         .iter()
@@ -1952,13 +1991,16 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          vim.api.nvim_create_autocmd('VimEnter', {{\n\
          once = true,\n\
          callback = function()\n\
+         local had_ui = #attached() > 0\n\
          vim.rpcrequest(channel, 'view_vim_enter')\n\
          vim.wait(200, function() return #attached() > 0 end, 1)\n\
-         if #attached() > 0 then\n\
+         if not had_ui and #attached() > 0 then\n\
+         vim.schedule(function()\n\
          quiet_tty = true\n\
          pcall(vim.api.nvim_exec_autocmds, 'UIEnter',\n\
          {{ data = {{ chan = channel }} }})\n\
          quiet_tty = false\n\
+         end)\n\
          end\n\
          end,\n\
          }})\n\
