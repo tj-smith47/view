@@ -33,8 +33,8 @@ view is 1.5 ms behind on that screen, and the bar view holds itself to for
 this moment is level with Neovim -- so this row is a bar view has not met, by
 2.9%. At the worst launch in a thousand under your config, held from the
 2026-09-06 run, the two are within a millisecond of each other (78.2 ms
-against 77.2 ms). With no plugins at all the same screen arrives in 16.1 ms
-against 14.7 ms, which is a bench fixture and not this row.
+against 77.2 ms). With no plugins at all the same screen is 9.6% behind
+Neovim's in the same run, which is a bench fixture and not this row.
 
 What makes it that number: view paints its own shell -- the chrome you see
 before anything has loaded -- in about 4 ms, and that frame is on screen
@@ -101,13 +101,15 @@ gap this page writes down rather than a lag you can see. Plugin-free the
 same staleness is 1.07 ms.
 
 A plugin storm or a `:terminal` flood pouring output into the screen is the
-same moment under load. Under your config the screen answers on a 16.9 ms
-cadence -- just past one frame, so this too is a bar view has not met -- and
-the Neovim it is paired against answers on a 17.5 ms one in the same run,
-both of them past the frame under this plugin stack. view drains the flood
-within 2% of the lines Neovim drains in the same window, and the longest it
-goes without painting is 48.9 ms. Plugin-free the cadence is 14.6 ms,
-inside the frame.
+same moment under load. Under your config, measured 2026-09-06, the screen
+answers on a 16.9 ms cadence -- just past one frame, so this too is a bar
+view has not met -- and the Neovim it is paired against answers on a 17.5 ms
+one in the same run. view drains the flood within 2% of the lines Neovim
+drains in the same window, and the longest it goes without painting is
+48.9 ms. Plugin-free the cadence is 16.1 ms, recorded 2026-09-15, so it sits
+past the frame as well and the plugins are not what puts it there: Neovim
+refreshes a terminal buffer on a fixed 10 ms timer, and neither side can
+paint more often than that timer plus one redraw.
 
 ## You search a huge tree
 

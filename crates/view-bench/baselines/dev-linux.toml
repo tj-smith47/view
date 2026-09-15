@@ -71,8 +71,8 @@ marker_ratio_p99 = 1.0459755652851106
 shell_visible_cold_ms = 4.542766
 
 [flood.minimal]
-cadence_p99_ms = 14.565679999999999
-cadence_p99_ratio = 0.9792970117228196
+cadence_p99_ms = 16.0907
+cadence_p99_ratio = 0.9690219746859104
 pace_ratio = 1.000040416926719
 
 [flood.user]

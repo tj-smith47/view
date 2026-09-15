@@ -276,6 +276,45 @@ about 12 h of session time across six commits, 823b76c through b880b9b).
   one draw at load 1.8, not a replicate median; this session re-seats both
   from a replicate median (`--campaign 8`) on a quiet host.
 
+**S1.13 flood cadence, the screen under a terminal storm** (2026-09-15, about
+3 h of session time, no code change).
+
+- *What remains.* `flood.cadence_p99_ms` on `dev-linux`/`user` reads 16.914 ms
+  against a bar of 16.0, ledgered as a `[[shortfall]]`; `flood.cadence_p99_ratio`
+  is 0.981, so view is the better of the two sides in every draw of the
+  recording run and the absolute the bar refuses is the engine's own.
+- *What was tried and measured.* No tuning: the cell was attributed by reading
+  and by two measurements. The engine refreshes a terminal buffer on a 10 ms
+  one-shot timer (`REFRESH_DELAY`, nvim v0.12.4 `terminal.c:132`, the pin in
+  `.engine-pin`), so both sides' cadence is that timer plus one redraw. The
+  login stack's share was measured with bare nvim over the generated `user`
+  fixture at host load 0.7 to 1.1: lualine's `statusline()` was evaluated 918
+  times in a 15 s flood for 167.6 ms in total, under a fifth of a millisecond
+  each, which exonerates it and leaves the share with nvim's own redraw under
+  the fixture's window options. `flood.minimal` was re-recorded the same day
+  and re-seated by hand from 14.5657 to 16.0907, so the two legs sit within a
+  millisecond of each other.
+- *Next lever, with the file it lives in.* L1, the floor itself
+  (`REFRESH_DELAY 10` in the pinned engine's `terminal.c:132`), is not view's
+  to move and no view-side change reaches under it. L2, the heartbeat prober
+  at `crates/view-engine/src/heartbeat.rs:63`, is the one flood cost only view
+  pays -- about seven `nvim_get_mode` requests per window, each taking an
+  engine main-loop turn -- and `task heartbeat-ab` is what decides whether it
+  is worth removing rather than a guess. L3, the missing scroll-region escape
+  (`crates/view-core/src/grid.rs:325-329` dirties every row of a scrolled
+  region and `crates/view-tui/src/terminal.rs` emits no `CSI r`/`IL`/`DL`
+  where the engine's own TUI does), buys nothing in this cell, where a
+  ~3000-line scroll exceeds the window and both sides repaint everything --
+  pull it for the `scroll` row. L5 is what the row records:
+  `crates/view-bench/src/scenarios/flood.rs:207-211` already computes p50 and
+  p90 per side and only the p99 is persisted at `flood.rs:416-418`, so
+  persisting the p90 beside it would tell a tail that has detached from its
+  bulk from a host that hiccupped a dozen times.
+- *Owed.* The published spread `"flood.cadence_p99_ms" = 1.02` in
+  `dev-linux.headroom.toml` was sized on the 14.566 level and the campaign
+  behind it drew inside 0.6%; today's three draws span 15.61 to 17.79. The
+  factor needs re-characterizing against the level the cell now holds.
+
 ## Execution discipline (binding from S1 on)
 
 - **One streak per session.** The harness list carries only the active

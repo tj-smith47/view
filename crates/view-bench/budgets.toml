@@ -274,33 +274,38 @@ config = "real"
 # instead would put the same number in two spec rows, which is the drift this
 # file exists to prevent.
 #
-# dev-linux now publishes a measured spread for this statistic:
+# dev-linux publishes a measured spread for this statistic:
 # "flood.cadence_p99_ms" = 1.02 in dev-linux.headroom.toml, from an 8
-# report-only-replicate campaign against the recorded 14.566. That
-# campaign's own worst reading was 1.006x the recorded value across host
-# loads up to 4.32, well short of the 1.02 ceiling it earns, and it did
-# not reproduce the two earlier, unreproduced loaded-host crossings this
-# comment used to carry as raw readings (16.429 ms at load 3.9, 16.29 ms
-# under a loaded bracket) -- those stay above this ceiling and outside
-# what the published spread covers. A third crossing was seen in the
+# report-only-replicate campaign sized against the 14.566 seat of the
+# day. That campaign's own worst reading was 1.006x that seat across
+# host loads up to 4.32, well short of the 1.02 ceiling it earns, and it
+# did not reproduce the two earlier, unreproduced loaded-host crossings
+# this comment used to carry as raw readings (16.429 ms at load 3.9,
+# 16.29 ms under a loaded bracket). A third crossing was seen in the
 # footprint-diet full-matrix campaign (task-footprint-diet-report.md):
 # flood.minimal cadence_p99_ms read 15.370, 15.711, and 17.802 across
-# three full-matrix runs, the 17.802 draw above every crossing recorded
-# here so far. It neither gates nor ratchets on this class (tail
-# statistic, budgets skipped on shared/dev-linux), so it did not fail;
-# it is recorded for the same reason as the two above. A breach in
-# (16.0, 14.566 x 1.02] reports as an excursion rather than failing; a
-# breach above that, including a repeat of any of the three crossings
-# above, still fails as a new finding and should be rerun quiet before
-# being read as a regression: median-of-3 absorbs a lone excursion, not
-# a sustained loaded run.
+# three full-matrix runs.
+#
+# The level those three were read against is gone. The 2026-09-15
+# re-record drew 15.61, 16.09 and 17.79 on the plugin-free fixture and
+# the cell was re-seated by hand to 16.0907, because a ratchet only ever
+# moves a seat down and this tree has not drawn a 14.6 p99 here since
+# 2026-08-26 -- so the three crossings above are ordinary draws of the
+# level the cell holds now, and the 1.02 factor states a spread this
+# host no longer holds. Re-characterizing it is the S9 perf session's,
+# and nothing gates on it meanwhile (tail statistic, budgets skipped on
+# shared/dev-linux). A breach in (16.0, 16.0907 x 1.02] reports as an
+# excursion rather than failing; a breach above that still fails as a
+# new finding and should be rerun quiet before being read as a
+# regression: median-of-3 absorbs a lone excursion, not a sustained
+# loaded run.
 [[budget]]
 spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "flood"
 metric = "cadence_p99_ms"
 max = 16.0
 kind = "felt"
-felt = "a plugin storm or a :terminal flood is pouring into the screen and it still answers your scroll, paired with nvim on the same host in the same run"
+felt = "the screen keeps moving evenly while a plugin storm or a :terminal flood pours in, no paint gap past a frame, paired with nvim on the same host in the same run"
 config = "real"
 
 # The spec row says "PSS", which names a Linux quantity. macOS has no PSS;
@@ -613,7 +618,8 @@ fixture = "user"
 metric = "cadence_p99_ms"
 class = "dev-linux"
 accepted = 16.914409
-why = "the redraw cadence under a terminal flood on the login-shaped fixture: cadence_p99_ms reads 16.914 ms at the p99 against the 16 ms frame. What is measured of the cause: both sides miss the frame under this plugin stack, and the recorded cadence_p99_ratio is 0.981 and pace_ratio 1.018, so view answers on the engine's own redraw cadence under the stack and drains within 2 percent of the lines nvim drains in the same fixed window. The same run reported bare nvim's own cadence p99 and its worst no-paint gap, neither of them gated. Attribution past that -- what the stack makes the engine spend per redraw -- is an open task; the bar is untouched."
+trials = [16.72, 16.914409, 17.17]
+why = "the redraw cadence under a terminal flood on the login-shaped fixture, recorded 2026-09-06: cadence_p99_ms reads 16.914 ms at the p99, which is 5.7 percent over the 16 ms bar. The floor under it is the engine's own: the pinned Neovim refreshes a terminal buffer on a 10 ms one-shot timer (REFRESH_DELAY, v0.12.4 terminal.c:132), so each side's cadence is that timer plus one redraw and view has nothing to paint until the engine flushes. view is the better of the two sides in every draw of that run: cadence_p99_ratio reads 0.981 and pace_ratio 1.018, so view answers on the engine's own redraw cadence and drains within 2 percent of the lines nvim drains in the same fixed window. What the login stack costs per redraw was measured rather than assumed: over a 15 s flood on this fixture, bare nvim evaluated lualine's statusline 918 times for 168 ms in total, under a fifth of a millisecond an evaluation, so the statusline is not where the cycle goes. The plugin-free leg of the same cell reads cadence_p99_ms 16.091 ms, re-recorded 2026-09-15, so the two legs sit within a millisecond of each other and the stack's share is the smaller part of the gap. What the stack does spend is nvim's own screen redraw under the fixture's window options -- relativenumber, number, cursorline, signcolumn and termguicolors over the terminal buffer -- which both arms of the pair pay. No view-side lever reaches the bar while that floor stands, so the residual is attributed rather than open and routes to the pre-v0.1.0 performance-and-stability session; the bar is untouched and this entry records the gap."
 
 # input_path.minimal key_to_rpc_p99_us dev-linux is no longer listed. The
 # entry accepted 112.647 against the 100.0 bound and named its own

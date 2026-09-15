@@ -230,7 +230,20 @@ well inside the 15% floor that refuses a run:
 | `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50, `echo.view_p99_ms` 1.583 ms p99 | 0.829 ms p50, 1.429 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.726 ms |
 | `echo_speculated.speculated_ratio_p50` (`user`) | 0.200 ms p50, `echo_speculated.speculated_paint_p99_ms` 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
 | `scroll.staleness_p99_ms` (`user`) | `scroll.staleness_p99_ms` 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |
-| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, unmet on both sides under this stack; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.018, worst no-paint gap 48.9 ms reported and not gated |
+| `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, recorded 2026-09-06, unmet on both sides; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.018, worst no-paint gap 48.9 ms reported and not gated |
+
+The flood cell's plugin-free leg was re-recorded 2026-09-15 in a quiet
+window of its own (1-minute load 1.19 rising to 2.25 over the run, null-pair
+calibration 3.7% at the start and 5.5% at the end, both inside the 15% floor
+that refuses a run). The seat it held was drawn before 2026-08-26 and no
+trial since has come near it, and a ratchet only ever moves a seat down, so
+the median of the three new draws was seated by hand.
+
+On the plugin-free fixture `flood.cadence_p99_ms` now reads 16.091 ms p99,
+so both legs sit past the 16 ms frame and the login stack is the smaller
+part of the gap: the engine refreshes a terminal buffer on a fixed 10 ms
+timer (`REFRESH_DELAY`, Neovim v0.12.4 `terminal.c:132`), and each side's
+cadence is that timer plus one redraw.
 
 The three unmet cells are `[[shortfall]]` entries in
 `crates/view-bench/budgets.toml`, each accepted at its recorded value with
