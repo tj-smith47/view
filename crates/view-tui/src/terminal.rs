@@ -600,7 +600,7 @@ impl Term {
     /// on a false `fence_seen` so a reply still in flight is recognized on
     /// the input path and delivered as
     /// [`Msg::CapsUpgraded`](view_core::msg::Msg::CapsUpgraded) instead.
-    /// Waiting here is what put an ssh session's first content behind
+    /// Waiting here is what put an ssh session's first frame behind
     /// [`PROBE_HARD_CAP`](crate::tiers::PROBE_HARD_CAP) -- 400ms of empty
     /// editor for a decision no frame needs to be blocked on.
     ///

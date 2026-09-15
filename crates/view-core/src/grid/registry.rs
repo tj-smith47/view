@@ -608,6 +608,34 @@ impl GridRegistry {
         self.slots.iter().any(|slot| slot.placed.is_some())
     }
 
+    /// Whether a window is showing buffer text yet.
+    ///
+    /// The frame a person calls the start, as distinct from the chrome view
+    /// paints around it: a session reaches its first flush with the tabline
+    /// and the statusline drawn over a window grid nvim has sized and not
+    /// yet drawn into, and that screen carries no file. Only a window
+    /// answers -- a float, a message area and an unplaced grid are all
+    /// something other than the file the user opened.
+    ///
+    /// A session with no grid of its own is a single-grid one, where nvim
+    /// composites the whole picture into the global grid and there is no
+    /// window grid to ask; the global grid answers for it.
+    ///
+    /// Costs the cells of every window grid while the answer is still
+    /// `false`, so a caller reads it until it turns true and never again.
+    #[must_use]
+    pub fn window_text_painted(&self) -> bool {
+        if self.slots.is_empty() {
+            return self.global.has_text();
+        }
+        self.slots.iter().any(|slot| {
+            slot.placed
+                .as_ref()
+                .is_some_and(|placed| matches!(placed.kind, PaneKind::Window) && !placed.hidden)
+                && slot.grid.has_text()
+        })
+    }
+
     /// The grid nvim last placed the cursor in.
     #[must_use]
     pub fn cursor_grid(&self) -> Option<GridId> {
@@ -1186,6 +1214,94 @@ mod tests {
         assert!(
             !hidden.full && hidden.rows.is_empty(),
             "a hidden pane damaged the frame: {hidden:?}"
+        );
+    }
+
+    /// The startup shape the two milestone lines are read off, in the
+    /// order a live session sends it: nvim sizes a window grid at the
+    /// attach and draws nothing into it, view paints its chrome over that,
+    /// and the file arrives a whole first screen update later.
+    ///
+    /// Disconfirm: answering off the global grid, off any placed grid, or
+    /// off a grid that has only been sized turns the third line back into
+    /// the second one.
+    #[test]
+    fn only_a_visible_window_holding_text_reads_as_content() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GLOBAL_GRID, 80, 24);
+        resize(&mut registry, GridId(3), 80, 24);
+        assert!(
+            !registry.window_text_painted(),
+            "a window grid nvim has sized and not drawn into is the chrome frame"
+        );
+
+        registry.apply(GridEvent::Message {
+            grid: GridId(4),
+            row: 23,
+            zindex: 200,
+            compindex: 0,
+        });
+        resize(&mut registry, GridId(4), 80, 1);
+        put(&mut registry, GridId(4), 0);
+        registry.apply(GridEvent::Float {
+            grid: GridId(5),
+            anchor_grid: GLOBAL_GRID,
+            screen_row: 1,
+            screen_col: 1,
+            zindex: 50,
+            compindex: 1,
+        });
+        resize(&mut registry, GridId(5), 20, 5);
+        put(&mut registry, GridId(5), 0);
+        assert!(
+            !registry.window_text_painted(),
+            "a message area and a float are not the file the user opened"
+        );
+
+        registry.apply(GridEvent::Window {
+            grid: GridId(6),
+            startrow: 0,
+            startcol: 0,
+        });
+        resize(&mut registry, GridId(6), 80, 23);
+        put(&mut registry, GridId(6), 0);
+        registry.apply(GridEvent::Hide { grid: GridId(6) });
+        assert!(
+            !registry.window_text_painted(),
+            "a window nvim has taken off screen shows the user nothing"
+        );
+
+        registry.apply(GridEvent::Window {
+            grid: GridId(2),
+            startrow: 0,
+            startcol: 0,
+        });
+        resize(&mut registry, GridId(2), 80, 23);
+        assert!(
+            !registry.window_text_painted(),
+            "the window is placed and nvim has still drawn nothing into it"
+        );
+        put(&mut registry, GridId(2), 0);
+        assert!(
+            registry.window_text_painted(),
+            "the file the user opened reached the window"
+        );
+    }
+
+    /// Without `ext_multigrid` there is no window grid to ask, and nvim
+    /// composites the file into the global grid along with everything else.
+    #[test]
+    fn a_single_grid_session_reads_its_content_off_the_global_grid() {
+        let mut registry = GridRegistry::new();
+        resize(&mut registry, GLOBAL_GRID, 80, 24);
+        assert!(
+            !registry.window_text_painted(),
+            "a sized and undrawn global grid carries no file either"
+        );
+        put(&mut registry, GLOBAL_GRID, 0);
+        assert!(
+            registry.window_text_painted(),
+            "the single-grid session's whole picture is the global grid"
         );
     }
 

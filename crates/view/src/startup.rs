@@ -782,7 +782,8 @@ impl PreAttach {
                 false
             }
             // applied to the model here for the same reason a resize is:
-            // the first content frame paints at the model's capabilities,
+            // the first frame the loop paints reads the model's
+            // capabilities,
             // and this window is the one place a late answer has no loop to
             // reach. No repaint of its own -- the shell frame carries no
             // cell a tier changes, so the cutover is early enough.

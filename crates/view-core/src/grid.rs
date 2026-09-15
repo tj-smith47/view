@@ -225,6 +225,19 @@ impl Grid {
         self.cells.get(idx)
     }
 
+    /// Whether any cell holds something other than blank space.
+    ///
+    /// A grid nvim has sized but not yet drawn into reads `false`: every
+    /// cell is [`Cell::default`]'s single space until a `grid_line` lands.
+    /// Stops at the first non-blank cell, so a grid that has text answers
+    /// in the cells before that one and an empty one costs its whole
+    /// buffer -- read only while a startup is still waiting for its first
+    /// text (see `GridRegistry::window_text_painted`), never per frame.
+    #[must_use]
+    pub fn has_text(&self) -> bool {
+        self.cells.iter().any(|cell| !cell.text.trim().is_empty())
+    }
+
     /// Concatenated text of every cell in `row`, left to right. Returns an empty
     /// string if `row` is out of bounds. Intended for debugging and tests.
     #[must_use]

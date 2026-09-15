@@ -1,6 +1,7 @@
-//! The start the user sees: one screen, not two. view's first content frame
-//! must be the frame nvim's own TUI first draws, and every screen nvim
-//! never showed must never reach the terminal.
+//! The start the user sees: one screen, not two. The first frame view
+//! draws a window's buffer text into must be the frame nvim's own TUI
+//! first draws, and every screen nvim never showed must never reach the
+//! terminal.
 //!
 //! What an editor draws while it sources depends on who is attached, and
 //! on whether anyone is: view externalizes the cmdline, the messages and

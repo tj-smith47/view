@@ -777,18 +777,29 @@ pub struct MsgChannel {
 /// `startup::drain_pre_attach` for the buffering that covers exactly that
 /// window. The executor drives
 /// `engine.handle` through [`EngineOps`]. Painting fires immediately when
-/// Which of the two startup lines the loop's paint site has already
+/// Which of the three startup lines the loop's paint site has already
 /// written, so each is written once for the frame it describes.
 ///
-/// Both under the `"startup"` `VIEW_LOG` topic, whose line prefix is the
-/// milliseconds since process start: a startup timeline is read off those
-/// numbers against the shell frame's own line and nvim's `--startuptime`.
+/// All three under the `"startup"` `VIEW_LOG` topic, whose line prefix is
+/// the milliseconds since process start: a startup timeline is read off
+/// those numbers against the shell frame's own line and nvim's
+/// `--startuptime`.
 #[derive(Default)]
 struct StartupMilestones {
     /// A paint pass found something to draw for the first time.
     painted: bool,
-    /// The first frame carrying grid content was written.
+    /// The first frame the engine's own flush produced was written: the
+    /// tabline and the statusline, over whatever grid nvim has sized so
+    /// far.
+    chrome: bool,
+    /// The first frame carrying a window's buffer text was written.
     content: bool,
+    /// Redraw batches folded since the chrome frame, and the events in
+    /// them: what separates a gap the engine spent silent from one view
+    /// spent reading.
+    redraws: u32,
+    /// Events those batches carried.
+    redraw_events: u32,
 }
 
 /// How long a startup may go without nvim's `VimEnter` before view
@@ -1163,20 +1174,33 @@ pub fn run(
         // each processed wakeup paints here on the next pass, immediately,
         // with no post-redraw silence timeout and no input-drain budget.
         if model.dirty {
-            // the two startup milestones a timeline needs and only this
-            // point holds: the first pass with anything to draw at all, and
-            // the first one drawing grid content -- the frame the user calls
-            // the start. Under a late attach the earlier one is whatever
-            // marked the shell dirty before nvim had a UI to draw on (a
-            // cached colorscheme lands ~14 ms in on the configs measured),
-            // so the gap between them is the child's own `init.lua`.
+            // the three startup milestones a timeline needs and only this
+            // point holds: the first pass with anything to draw at all, the
+            // first frame the engine's flush produced, and the first one
+            // carrying a window's buffer text -- the frame the user calls
+            // the start. Under a late attach the first is whatever marked
+            // the shell dirty before nvim had a UI to draw on (a cached
+            // colorscheme lands ~14 ms in on the configs measured), so the
+            // gap to the second is the child's own `init.lua`, and the gap
+            // from the second to the third is nvim's own first screen
+            // update: the window grid standing at the chrome frame is one
+            // nvim has sized and not yet drawn into.
             if !milestones.painted {
                 milestones.painted = true;
                 crate::vlog::log("startup", "first dirty pass painted");
             }
-            if !milestones.content && model.content_painted {
+            if !milestones.chrome && model.content_painted {
+                milestones.chrome = true;
+                milestones.redraws = 0;
+                milestones.redraw_events = 0;
+                crate::vlog::log("startup", "chrome frame written");
+            }
+            if !milestones.content && model.engine.grids().window_text_painted() {
                 milestones.content = true;
-                crate::vlog::log("startup", "first content frame written");
+                let (redraws, events) = (milestones.redraws, milestones.redraw_events);
+                crate::vlog::log_with("startup", || {
+                    format!("first content frame written redraws={redraws} events={events}")
+                });
             }
             let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
@@ -1255,6 +1279,18 @@ pub fn run(
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
+            // two increments per batch, and only while the start is still
+            // owed: the startup timeline's own question is whether the gap
+            // before the file appears was the engine's silence or view's
+            // reading, and nothing else in the loop records it
+            if !milestones.content {
+                if let Msg::Redraw(events) = &msg {
+                    milestones.redraws = milestones.redraws.saturating_add(1);
+                    milestones.redraw_events = milestones
+                        .redraw_events
+                        .saturating_add(u32::try_from(events.len()).unwrap_or(u32::MAX));
+                }
+            }
             if let Some(code) = step(
                 &mut model,
                 &executor,
