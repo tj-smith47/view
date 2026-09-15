@@ -1171,6 +1171,7 @@ pub fn run(
         // message happens to arrive. Steady-state behavior is unchanged --
         // each processed wakeup paints here on the next pass, immediately,
         // with no post-redraw silence timeout and no input-drain budget.
+        let painted = model.dirty;
         if model.dirty {
             // the three startup milestones a timeline needs and only this
             // point holds: the first pass with anything to draw at all, the
@@ -1203,9 +1204,13 @@ pub fn run(
             let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
             term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
-            felt.note_flush(&model);
             model.dirty = false;
         }
+        // read once per pass rather than inside the branch: an input the
+        // fold answered with no frame has to be closed by the pass that
+        // decided that, or the next frame -- about something else, seconds
+        // later -- is written up as the wait it had
+        felt.note_pass(&model, painted);
         // resolved here rather than inside the wait because it is the one
         // deadline read off the model, which the wait does not hold
         let speculation = crate::speculate::next_expiry(&model, follow_ups.speculate);

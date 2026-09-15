@@ -29,7 +29,7 @@ static START: OnceLock<Instant> = OnceLock::new();
 /// Initializes the process-wide log sink from `VIEW_LOG`, once, using
 /// `process_start` as the monotonic origin every logged timestamp is
 /// relative to -- the same `Instant` `main.rs` already captures before doing
-/// any other work, so a log line's `mono_ms` lines up with the shell-paint
+/// any other work, so a log line's stamp lines up with the shell-paint
 /// latency this build already measures in debug builds.
 ///
 /// A `VIEW_LOG` path that cannot be opened for append (bad permissions, a
@@ -633,16 +633,19 @@ fn log_ui_event(ev: &view_core::events::UiEvent) {
     }
 }
 
-/// Milliseconds since the origin [`init`] was handed, which is the number
-/// every line written here already carries as its own prefix.
+/// Microseconds since the origin [`init`] was handed, whose millisecond
+/// is the number every line written here already carries as its prefix.
 ///
-/// For a caller holding one reading open until a later line can close it:
-/// [`FeltLog`] stamps an input when it arrives and writes the line at the
-/// flush that answers it, so the wait is a subtraction of two readings
-/// taken from this one clock.
+/// Microseconds rather than the prefix's own unit because a keystroke
+/// answered inside one millisecond reads 0 or 1 there, and that is the
+/// whole span the input path is budgeted in. For a caller holding one
+/// reading open until a later line can close it: [`FeltLog`] stamps an
+/// input when it arrives and writes the line at the flush that answers
+/// it, so the wait is a subtraction of two readings taken from this one
+/// clock.
 #[must_use]
-pub fn mono_ms() -> u128 {
-    START.get().map_or(0, |start| start.elapsed().as_millis())
+pub fn mono_us() -> u128 {
+    START.get().map_or(0, |start| start.elapsed().as_micros())
 }
 
 /// Whether a sink is open, for a call site whose payload cannot be built
@@ -661,7 +664,10 @@ struct PendingInput {
     /// user's and whose size is the part a log can carry.
     detail: String,
     bytes: usize,
-    received: u128,
+    /// [`mono_us`] at the moment the event reached the loop. Microseconds
+    /// because the gap it opens is routinely shorter than the millisecond
+    /// every line is stamped in.
+    received_us: u128,
 }
 
 /// How long past the first frame carrying the file's text the `highlight`
@@ -689,7 +695,10 @@ pub struct FeltLog {
     /// appeared on, which every later frame is compared against. `None`
     /// until that frame.
     text_hls: Option<Vec<u64>>,
-    /// The reading of [`mono_ms`] that frame was written at, which
+    /// The one window grid the topic reads, pinned at the frame the file's
+    /// text first appeared on. `None` until then.
+    text_grid: Option<view_core::grid::registry::GridId>,
+    /// The reading of the millisecond clock that frame was written at, which
     /// [`HIGHLIGHT_WATCH`] runs from.
     text_at: u128,
     highlight_closed: bool,
@@ -725,12 +734,38 @@ impl FeltLog {
             ),
             _ => return,
         };
+        // whatever is still open when the user's next input arrives was
+        // answered by no frame: the loop paints before it waits, so every
+        // pass between the two had its chance
+        self.close_unanswered();
         self.pending.push(PendingInput {
             kind,
             detail,
             bytes,
-            received: mono_ms(),
+            received_us: mono_us(),
         });
+    }
+
+    /// Writes the line for every input the loop answered with no frame.
+    ///
+    /// Read at the next input and again when the loop ends, because a
+    /// pending input held past either would be stamped by an unrelated
+    /// frame -- a wait of seconds reported for a key that was never
+    /// waiting on anything. Not at the end of a pass that painted nothing:
+    /// a key view forwards to the engine is answered by the frame the
+    /// engine's own redraw produces, which is one pass later or several.
+    fn close_unanswered(&mut self) {
+        for input in self.pending.drain(..) {
+            log(
+                input.kind,
+                &format!(
+                    "bytes={}{} received={} flush=none",
+                    input.bytes,
+                    input.detail,
+                    input.received_us / 1000
+                ),
+            );
+        }
     }
 
     /// Writes the `palette` topic's two open-side lines off the state the
@@ -753,27 +788,32 @@ impl FeltLog {
         log("palette", if open { "open requested" } else { "closed" });
     }
 
-    /// Every line the frame that just reached the terminal closes.
+    /// Every line the pass that just ended closes.
     ///
-    /// Read after the write rather than before it, so a wait reported here
-    /// is a wait that ended: the render and the frame's own single write
-    /// both sit inside it. The three `startup` milestones at the same call
-    /// site are stamped before the render instead, so a reading taken
-    /// across the two is one frame's paint apart.
-    pub fn note_flush(&mut self, model: &view_core::model::Model) {
+    /// `painted` is whether that pass wrote a frame. Read after the write
+    /// rather than before it, so a wait reported here is a wait that
+    /// ended: the render and the frame's own single write both sit inside
+    /// it. The three `startup` milestones at the same call site are
+    /// stamped before the render instead, so a reading taken across the
+    /// two is one frame's paint apart.
+    pub fn note_pass(&mut self, model: &view_core::model::Model, painted: bool) {
         if !capturing() {
             return;
         }
-        let flushed = mono_ms();
+        if !painted {
+            return;
+        }
+        let flushed_us = mono_us();
+        let flushed = flushed_us / 1000;
         for input in self.pending.drain(..) {
             log(
                 input.kind,
                 &format!(
-                    "bytes={}{} received={} waited={}",
+                    "bytes={}{} received={} waited_us={}",
                     input.bytes,
                     input.detail,
-                    input.received,
-                    flushed.saturating_sub(input.received)
+                    input.received_us / 1000,
+                    flushed_us.saturating_sub(input.received_us)
                 ),
             );
         }
@@ -798,15 +838,16 @@ impl FeltLog {
         if self.highlight_closed {
             return;
         }
-        let Some(ids) = window_text_hls(model) else {
+        let Some((grid, ids)) = window_text_hls(model, self.text_grid) else {
             return;
         };
         let Some(base) = &self.text_hls else {
             log(
                 "highlight",
-                &format!("file text flushed hl-ids={}", ids.len()),
+                &format!("file text flushed grid={} hl-ids={}", grid.0, ids.len()),
             );
             self.text_hls = Some(ids);
+            self.text_grid = Some(grid);
             self.text_at = flushed;
             return;
         };
@@ -828,6 +869,17 @@ impl FeltLog {
     }
 }
 
+impl Drop for FeltLog {
+    /// Closes whatever the last pass left open, so an input the session
+    /// ended on is a line in the log rather than a reading nothing wrote.
+    fn drop(&mut self) {
+        if !capturing() {
+            return;
+        }
+        self.close_unanswered();
+    }
+}
+
 /// Whether the typed cmdline is what the palette is drawing.
 ///
 /// The same three answers `view_surface::render` reads to decide it, and
@@ -845,39 +897,44 @@ fn palette_shown(model: &view_core::model::Model) -> bool {
         )
 }
 
-/// The highlight ids on every non-blank cell of the window holding the
-/// file, or `None` while no window has drawn any text yet.
+/// The one window showing the file, and the highlight ids on every
+/// non-blank cell of it -- or `None` while that window has drawn no text.
 ///
-/// The windows nvim placed, never the global grid beside them: under
-/// `ext_multigrid` that grid carries nvim's own message area, whose ids
-/// move with every message and would read as the file being recoloured.
-/// A session with no placed window has its file on the global grid and is
-/// read there, which is the split
+/// `pinned` is the grid a previous frame already answered with, and it is
+/// read back unconditionally: the topic compares one window against
+/// itself, so a split or a tree pane changing colour is not the file
+/// being recoloured.
+///
+/// With nothing pinned yet the window is the one nvim has the cursor in,
+/// which at launch is the window holding the file named on the command
+/// line -- nvim opens that file in the current window and leaves the
+/// cursor there. A cursor in something other than a placed window (a
+/// float, a message grid) falls back to the first placed window carrying
+/// text, and a session with no placed window at all has its file on the
+/// global grid and is read there, which is the split
 /// [`window_text_painted`](view_core::grid::GridRegistry::window_text_painted)
 /// already makes.
 ///
-/// Latency consequence: one pass over the window's cells per flush, and
-/// only while the `highlight` topic still owes a line -- at most
+/// Latency consequence: one pass over that one window's cells per flush,
+/// and only while the `highlight` topic still owes a line -- at most
 /// [`HIGHLIGHT_WATCH`] past the frame the file appeared on, and never at
 /// all without `VIEW_LOG`.
-fn window_text_hls(model: &view_core::model::Model) -> Option<Vec<u64>> {
+fn window_text_hls(
+    model: &view_core::model::Model,
+    pinned: Option<view_core::grid::registry::GridId>,
+) -> Option<(view_core::grid::registry::GridId, Vec<u64>)> {
     use view_core::grid::registry::{GridId, PaneKind, GLOBAL_GRID};
     let grids = model.engine.grids();
-    let mut placed: Vec<GridId> = grids
+    let placed: Vec<GridId> = grids
         .panes_in_z_order()
         .into_iter()
         .filter(|pane| matches!(pane.kind, PaneKind::Window) && pane.id != GLOBAL_GRID)
         .map(|pane| pane.id)
         .collect();
-    if placed.is_empty() {
-        placed.push(GLOBAL_GRID);
-    }
-    let mut ids: Vec<u64> = Vec::new();
-    for id in placed {
-        let Some(grid) = grids.grid(id) else {
-            continue;
-        };
+    let read_ids = |id: GridId| -> Option<Vec<u64>> {
+        let grid = grids.grid(id)?;
         let (width, height) = grid.size();
+        let mut ids: Vec<u64> = Vec::new();
         for row in 0..height {
             for col in 0..width {
                 let Some(cell) = grid.cell(row, col) else {
@@ -891,8 +948,21 @@ fn window_text_hls(model: &view_core::model::Model) -> Option<Vec<u64>> {
                 }
             }
         }
+        (!ids.is_empty()).then_some(ids)
+    };
+    if let Some(id) = pinned {
+        return read_ids(id).map(|ids| (id, ids));
     }
-    (!ids.is_empty()).then_some(ids)
+    let cursor = grids.cursor_grid().filter(|id| placed.contains(id));
+    if let Some(id) = cursor {
+        return read_ids(id).map(|ids| (id, ids));
+    }
+    for id in placed {
+        if let Some(ids) = read_ids(id) {
+            return Some((id, ids));
+        }
+    }
+    read_ids(GLOBAL_GRID).map(|ids| (GLOBAL_GRID, ids))
 }
 
 #[cfg(test)]
@@ -1337,7 +1407,7 @@ mod tests {
 
         let mut model = view_core::model::Model::new();
         assert!(
-            window_text_hls(&model).is_none(),
+            window_text_hls(&model, None).is_none(),
             "a session that has drawn nothing has no reading to take"
         );
 
@@ -1363,7 +1433,7 @@ mod tests {
             },
         });
         assert!(
-            window_text_hls(&model).is_none(),
+            window_text_hls(&model, None).is_none(),
             "a message on the grid beside the window is not the file appearing"
         );
 
@@ -1375,7 +1445,8 @@ mod tests {
                 cells: vec![("1".to_string(), 9, 1), ("f".to_string(), 0, 2)],
             },
         });
-        let first = window_text_hls(&model).expect("the file has text now");
+        let (found, first) = window_text_hls(&model, None).expect("the file has text now");
+        assert_eq!(found, window, "the window with the file is the one read");
         assert_eq!(first.len(), 2, "the gutter's id and the text's: {first:?}");
         assert!(
             !first.contains(&77),
@@ -1390,11 +1461,59 @@ mod tests {
                 cells: vec![("f".to_string(), 42, 2)],
             },
         });
-        let coloured = window_text_hls(&model).expect("the file still has text");
+        let (_, coloured) = window_text_hls(&model, Some(window)).expect("the file still has text");
         assert!(
             coloured.iter().any(|id| !first.contains(id)),
             "the recolour has to carry an id the first frame did not: \
              {first:?} -> {coloured:?}"
+        );
+
+        let beside = GridId(3);
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: beside,
+            op: GridOp::Resize {
+                width: 4,
+                height: 1,
+            },
+        });
+        model.engine.apply_grid_event(GridEvent::Window {
+            grid: beside,
+            startrow: 0,
+            startcol: 8,
+        });
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: beside,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("t".to_string(), 512, 1)],
+            },
+        });
+        let (_, still) =
+            window_text_hls(&model, Some(window)).expect("the pinned window still has text");
+        assert!(
+            !still.contains(&512),
+            "a second window's colours reached a reading pinned to the file's: {still:?}"
+        );
+    }
+
+    /// An input the loop answered with no frame is written out and
+    /// released, so the next frame -- which can be seconds away and about
+    /// something else -- cannot be reported as the wait that keystroke had.
+    #[test]
+    fn a_key_no_frame_answered_is_closed_and_not_left_for_a_later_flush() {
+        let mut felt = FeltLog::default();
+        felt.pending.push(PendingInput {
+            kind: "key",
+            detail: String::new(),
+            bytes: 1,
+            received_us: 5_000,
+        });
+        felt.close_unanswered();
+        assert!(
+            felt.pending.is_empty(),
+            "a key held past the pass that answered nothing is stamped by \
+             whatever flushes next"
         );
     }
 
@@ -1413,7 +1532,7 @@ mod tests {
             "an input held for a log nobody opened is an allocation per keystroke"
         );
         felt.note_palette(&model);
-        felt.note_flush(&model);
+        felt.note_pass(&model, true);
         assert!(
             felt.text_hls.is_none(),
             "the grid was read for a log nobody opened"
