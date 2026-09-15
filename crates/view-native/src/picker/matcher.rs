@@ -41,6 +41,26 @@ const STREAM_ROWS: u32 = 200;
 /// out a whole pass over a large corpus.
 const TICK_BUDGET_MS: u64 = 10;
 
+/// Ceiling on the rayon pool nucleo scores a keystroke's corpus across,
+/// in place of the host's whole core count a `None` resolves to (see
+/// `nucleo::worker::Worker::new`). The first character typed into an open
+/// picker rescores every resident item, and nucleo fans that pass out by
+/// work-stealing: past a second thread the pass takes *longer* in wall
+/// time on a large corpus while burning most of the machine's cores,
+/// because every extra worker has to be woken from idle and then contends
+/// on the pass's own shared unmatched counter. Bounding the pool here
+/// gives the keystroke a narrower tail and hands the rest of the cores
+/// back to nvim, the paint loop and whatever else the user is running.
+const MAX_POOL_THREADS: usize = 2;
+
+/// The pool width [`Session::new`] asks nucleo for: the host's
+/// parallelism, capped at [`MAX_POOL_THREADS`]. A host whose parallelism
+/// cannot be read falls back to a single thread, which is the width the
+/// pass costs least per core on anyway.
+fn pool_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |cores| cores.get().min(MAX_POOL_THREADS))
+}
+
 /// One picker query handed to the matcher worker off the runtime loop
 /// thread; mirrors `Effect::PickerQuery`'s fields verbatim (see that
 /// variant's doc for the contract each one carries).
@@ -144,7 +164,7 @@ impl Session {
             // synchronously (see `stream_until_preempted`) instead of
             // waiting on nucleo's background-thread wakeup, so there is
             // nothing for the callback to signal.
-            nucleo: Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1),
+            nucleo: Nucleo::new(Config::DEFAULT, Arc::new(|| {}), Some(pool_threads()), 1),
             scan_started: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
             scan_handle: None,
@@ -158,11 +178,10 @@ impl Session {
     }
 
     /// Test-only twin of [`new`](Session::new) that caps nucleo's rayon
-    /// pool at `threads` instead of letting `None` resolve to
-    /// `available_parallelism()` (see `nucleo::worker::Worker::new`). A
-    /// `--test-threads`-parallel run of this module opens close to a dozen
-    /// unbounded sessions at once, each independently sizing its pool to
-    /// the host's core count; the resulting oversubscription starves
+    /// pool at `threads` rather than at [`MAX_POOL_THREADS`], which is
+    /// still a pool per session. A `--test-threads`-parallel run of this
+    /// module opens close to a dozen sessions at once, each with a pool of
+    /// its own to schedule; the resulting oversubscription starves
     /// nucleo's own tick loop and turns matches against a single-line
     /// fixture into multi-second waits, flaking any test with a fixed
     /// budget. A full duplicate of `new`'s body rather than a delegating
@@ -724,8 +743,8 @@ mod session_serial {
 
 /// Test-only twin of [`spawn`]: same shutdown shape (runs until `rx`
 /// disconnects), but every [`Session`] it opens caps nucleo's rayon pool at
-/// `threads` rather than the near-CPU-count width `Session::new` resolves
-/// to. A matcher/live-grep test that opens its worker through this instead
+/// `threads` rather than at the [`MAX_POOL_THREADS`] `Session::new` asks
+/// for. A matcher/live-grep test that opens its worker through this instead
 /// of `spawn` no longer contends with the near-dozen other sessions
 /// `--test-threads`-parallel test binaries open at once for the same
 /// handful of host cores -- see [`Session::new_bounded`] for the full
@@ -781,6 +800,25 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// `Nucleo::new` hands its thread count straight to
+    /// `rayon::ThreadPoolBuilder::num_threads`, where a zero means "size
+    /// the pool to the host" -- the width [`MAX_POOL_THREADS`] exists to
+    /// refuse -- so the floor is pinned here beside the ceiling.
+    #[test]
+    fn the_matchers_pool_is_bounded_and_never_zero() {
+        let width = pool_threads();
+        assert!(
+            (1..=MAX_POOL_THREADS).contains(&width),
+            "the pool Session::new asks nucleo for is outside its own bound: {width}"
+        );
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let wanted = cores.min(MAX_POOL_THREADS);
+        assert_eq!(
+            width, wanted,
+            "a {cores}-core host must get a {wanted}-thread matcher pool, not {width}"
+        );
+    }
 
     #[test]
     fn char_to_byte_offsets_shifts_past_multibyte_characters() {
