@@ -61,6 +61,11 @@ static DIAGNOSTICS: OnceLock<fn(&str)> = OnceLock::new();
 /// Installs the writer [`diagnose`] hands its lines to, under whatever
 /// topic the caller logs them at.
 ///
+/// Called only by a process that has somewhere to put the lines: this is
+/// the whole of what tells this crate a log is open, so a writer that
+/// discards what it is handed costs a formatted payload per event for a
+/// session nobody is capturing.
+///
 /// First call wins and later ones are ignored, the [`OnceLock`] contract:
 /// the sink belongs to the process, not to an engine, and a session that
 /// restarts its engine keeps writing to the log it opened.
@@ -74,5 +79,31 @@ pub fn set_diagnostics(sink: fn(&str)) {
 pub(crate) fn diagnose(payload: impl FnOnce() -> String) {
     if let Some(sink) = DIAGNOSTICS.get() {
         sink(&payload());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// What the whole closure shape is for. An ordinary session opens no
+    /// log, so every payload this crate could write is one nobody asked
+    /// for, and the arm that would write it has to cost a branch rather
+    /// than a `format!` and the allocation under it.
+    #[test]
+    fn a_session_with_no_writer_installed_never_builds_a_payload() {
+        static BUILT: AtomicUsize = AtomicUsize::new(0);
+
+        super::diagnose(|| {
+            BUILT.fetch_add(1, Ordering::Relaxed);
+            String::new()
+        });
+
+        assert_eq!(
+            BUILT.load(Ordering::Relaxed),
+            0,
+            "nothing installs a writer in this process, so the payload must \
+             not have been built"
+        );
     }
 }

@@ -39,18 +39,14 @@ static START: OnceLock<Instant> = OnceLock::new();
 /// silent. Idempotent: a second call is a no-op ([`OnceLock`] contract), so
 /// callers never need to guard against calling this more than once.
 ///
-/// Also hands `view-engine` the writer its own diagnostic lines go to
-/// ([`view_engine::set_diagnostics`]), so the reader thread's account of a
-/// notification it could not decode lands in this same file.
+/// Hands `view-engine` the writer its own diagnostic lines go to
+/// ([`view_engine::set_diagnostics`]) when -- and only when -- a sink was
+/// opened, so the reader thread's account of a notification it could not
+/// decode lands in this same file, and a session running without one
+/// builds no such account at all.
 pub fn init(process_start: Instant) {
     START.get_or_init(|| process_start);
-    // the engine's reader thread sees things no `Msg` carries -- a
-    // notification its decoder refused -- and sits below this sink with no
-    // way to reach it, so the crate that owns the sink hands it a writer
-    // here, where the sink is opened. Its lines go under the topic every
-    // other line about the connection uses.
-    view_engine::set_diagnostics(|line| log("engine", line));
-    SINK.get_or_init(|| match std::env::var_os("VIEW_LOG") {
+    let sink = SINK.get_or_init(|| match std::env::var_os("VIEW_LOG") {
         None => None,
         Some(path) => match OpenOptions::new().create(true).append(true).open(&path) {
             Ok(file) => Some(Mutex::new(file)),
@@ -63,6 +59,19 @@ pub fn init(process_start: Instant) {
             }
         },
     });
+    // the engine's reader thread sees things no `Msg` carries -- a
+    // notification its decoder refused -- and sits below this sink with no
+    // way to reach it, so the crate that owns the sink hands it a writer
+    // here. Its lines go under the topic every other line about the
+    // connection uses.
+    //
+    // Only once there is something to write to: the writer is what tells
+    // that crate a log is open, and handing it one that discards every
+    // line would leave it formatting a payload per event for a session
+    // nobody is capturing.
+    if sink.is_some() {
+        view_engine::set_diagnostics(|line| log("engine", line));
+    }
 }
 
 /// The sink's own file duplicated, for a caller that needs a descriptor of
