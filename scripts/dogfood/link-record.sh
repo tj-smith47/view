@@ -28,7 +28,15 @@
 #
 #   scripts/dogfood/link-record.sh [-n RUNS] [-f FILE] [-o OUTDIR]
 #                                  [-s NEEDLE] [-c COLS] [-r ROWS]
-#                                  [-l|--link] [--rate KBIT] [--delay MS]
+#                                  [--cold] [-l|--link]
+#                                  [--rate KBIT] [--delay MS]
+#
+# `--cold` gives each run a data directory of its own, holding nothing but
+# a link to the installed plugins, so everything the editors write beside
+# those plugins is absent the way it is on a machine that has not run them
+# before. State and cache are per-run in both arms already; the data
+# directory is what a warm HOME still carries, and the moment it moves is
+# VimEnter to the first content frame.
 #
 # `--link` puts a real link under the run instead of a local pty: the editor
 # runs over `ssh localhost` and a netem qdisc shapes the loopback traffic to
@@ -36,7 +44,8 @@
 # the drain of its full-grid chrome frame and holds the file's own frame
 # behind it, which a rate-limited reader on a local pipe cannot: the pipe
 # and the reader's own buffer together hold more than a whole session's
-# bytes, so nothing ever pushed back.
+# bytes, so nothing ever pushed back. It needs root and key-based ssh from
+# this host to itself, and refuses rather than falling back.
 set -euo pipefail
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -49,6 +58,7 @@ NEEDLE=
 COLS=263
 ROWS=88
 LINK=0
+COLD=0
 # the link the user's own recording showed: a 24 kB chrome frame arriving
 # over 37 ms, and a round trip in the tens of milliseconds
 RATE_KBIT=5200
@@ -63,7 +73,11 @@ while [ "$#" -gt 0 ]; do
     (-s) NEEDLE=$2; shift 2 ;;
     (-c) COLS=$2; shift 2 ;;
     (-r) ROWS=$2; shift 2 ;;
+    (--cold) COLD=1; shift ;;
     (-l|--link) LINK=1; shift ;;
+    (-h|--help)
+      awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
+      exit 0 ;;
     (--rate) RATE_KBIT=$2; shift 2 ;;
     (--delay) DELAY_MS=$2; shift 2 ;;
     (*) echo "link-record: see the header of $0" >&2; exit 2 ;;
@@ -236,6 +250,17 @@ record_one() {
   index=$2
   dir=$OUT/$side-$index
   mkdir -p "$dir/state" "$dir/cache" "$dir/frames"
+  # a data directory holding the plugins and nothing else, so the logs,
+  # histories and per-plugin scratch a warm HOME carries beside them are
+  # missing the way they are on a machine that has not run the editors
+  # before. The plugins themselves stay, because the fixture's config
+  # resolves them under the data home and installs nothing that is absent
+  data=$PLUGINS
+  if [ "$COLD" = "1" ]; then
+    mkdir -p "$dir/data/nvim"
+    ln -sn "$PLUGINS/nvim/lazy" "$dir/data/nvim/lazy"
+    data=$dir/data
+  fi
   cut -d ' ' -f 1 /proc/loadavg > "$dir/load" 2>/dev/null || echo 0 > "$dir/load"
   mkfifo "$dir/in" "$dir/wire" "$dir/ready"
 
@@ -247,7 +272,7 @@ record_one() {
       echo "stty rows $ROWS cols $COLS"
     fi
     echo "export XDG_CONFIG_HOME=$FIXTURE"
-    echo "export XDG_DATA_HOME=$PLUGINS"
+    echo "export XDG_DATA_HOME=$data"
     echo "export XDG_STATE_HOME=$dir/state"
     echo "export XDG_CACHE_HOME=$dir/cache"
     echo "export TERM=xterm-256color COLORTERM=truecolor"
@@ -346,6 +371,35 @@ content_frame() {
   awk '/first content frame written/ { print $1; exit }' "$1"
 }
 
+# The first reading the `startup` topic wrote for one milestone, in
+# milliseconds from the launch. Empty for the nvim side, which writes no
+# such log.
+milestone() {
+  if [ ! -f "$1" ]; then
+    echo ""
+    return 0
+  fi
+  awk -v want="$2" 'index($0, want) { print $1; exit }' "$1"
+}
+
+# How many redraw batches the engine sent before the frame with the file's
+# text on it. The count view itself wrote on that line, so a batch the
+# recorder cannot see from outside is still counted.
+redraw_batches() {
+  if [ ! -f "$1" ]; then
+    echo ""
+    return 0
+  fi
+  awk '/first content frame written/ {
+    for (i = 1; i <= NF; i++) {
+      if (substr($i, 1, 8) == "redraws=") {
+        print substr($i, 9)
+        exit
+      }
+    }
+  }' "$1"
+}
+
 # What view itself measured between the typed `:` and the frame carrying
 # the palette, in milliseconds off the `key` topic's own microseconds. The
 # recorder's wire reading covers the same moment plus the link; this is the
@@ -376,7 +430,7 @@ delta() {
 # found leaves its field empty, and a blank-separated column would then
 # collapse into the one beside it and be read as that one.
 RUNS_TSV=$OUT/runs.tsv
-printf 'side\trun\tload\tbusy\ttext_ms\thl_ms\tcolours\tcolon_ms\tpalette_ms\texit_ms\tengine_ms\tcontent_ms\n' \
+printf 'side\trun\tload\tbusy\ttext_ms\thl_ms\tcolours\tcolon_ms\tpalette_ms\texit_ms\tengine_ms\tcontent_ms\tvim_ms\tchrome_ms\tforeign_ms\tredraws\n' \
   > "$RUNS_TSV"
 
 index=1
@@ -386,7 +440,8 @@ while [ "$index" -le "$RUNS" ]; do
     dir=$OUT/$side-$index
     replay_one "$dir" "$side"
     load=$(cat "$dir/load")
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    content=$(content_frame "$dir/view.log")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$side" "$index" "$load" \
       "$(awk -v l="$load" 'BEGIN { print (l + 0 >= 2.0) ? "busy" : "" }')" \
       "$(moment "$dir/moments.txt" text_ms)" \
@@ -398,7 +453,13 @@ while [ "$index" -le "$RUNS" ]; do
       "$(delta "$(moment "$dir/moments.txt" handback_ms)" \
                "$(moment "$dir/moments.txt" typed3_ms)")" \
       "$(first_screen "$dir/startuptime")" \
-      "$(content_frame "$dir/view.log")" >> "$RUNS_TSV"
+      "$content" \
+      "$(delta "$content" \
+               "$(milestone "$dir/view.log" "vim_enter received")")" \
+      "$(delta "$content" \
+               "$(milestone "$dir/view.log" "chrome frame written")")" \
+      "$(milestone "$dir/view.log" "notify-sink foreign=true")" \
+      "$(redraw_batches "$dir/view.log")" >> "$RUNS_TSV"
   done
   index=$((index + 1))
 done
@@ -428,10 +489,15 @@ TABLE=$OUT/table.txt
     echo "arm: local pty"
   fi
   echo "consumer: live xterm.js answering the terminal's own queries"
+  if [ "$COLD" = "1" ]; then
+    echo "state: cold (per-run state, cache and data; plugins linked in)"
+  else
+    echo "state: warm data home, per-run state and cache"
+  fi
   echo
   awk -F'\t' '{
-    printf "%-5s %-4s %-6s %-5s %-9s %-9s %-8s %-9s %-11s %-9s %-10s %-11s\n", \
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+    printf "%-5s %-4s %-6s %-5s %-9s %-9s %-8s %-9s %-11s %-9s %-10s %-11s %-8s %-10s %-11s %-8s\n", \
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
   }' "$RUNS_TSV"
   echo
   echo "spread per moment per side, milliseconds from the launch"
@@ -443,6 +509,10 @@ TABLE=$OUT/table.txt
     spread "$side" 10 handback
     spread "$side" 11 engine
     spread "$side" 12 content
+    spread "$side" 13 vim-enter
+    spread "$side" 14 chrome
+    spread "$side" 15 foreign
+    spread "$side" 16 redraws
   done
 } > "$TABLE"
 
