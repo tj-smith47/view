@@ -643,11 +643,12 @@ mod tests {
     /// `cargo test` isolates each `#[test]` in its own process only when
     /// run as a `cargo test --workspace` binary per test target, which is
     /// exactly the case here since `OnceLock` is otherwise unresettable
-    /// within one process. Kept to a single test that exercises the full
-    /// `init` -> `log` -> file contents round trip, plus a second that
-    /// exercises the pure `log_msg` formatting without ever touching the
-    /// global sink (no `init` call, so `log`'s `SINK.get()` sees `None` and
-    /// every `log` call inside `log_msg` is the zero-overhead no-op path).
+    /// within one process. Kept to one `init` call in the whole module --
+    /// the test below asserting what a session with no log hands the
+    /// engine -- beside tests that exercise the pure `log_msg` formatting
+    /// without ever touching the global sink (no `init` call, so `log`'s
+    /// `SINK.get()` sees `None` and every `log` call inside `log_msg` is
+    /// the zero-overhead no-op path).
     #[test]
     fn log_msg_with_no_sink_initialized_is_the_zero_overhead_no_op() {
         // no init() call: SINK is whatever an earlier test in this same
@@ -665,6 +666,32 @@ mod tests {
                 sp: None,
             },
         ]));
+    }
+
+    /// The writer handed to `view-engine` is that crate's whole answer to
+    /// "is anything capturing this", so a session that opened no log has
+    /// to leave it uninstalled: installed anyway, the engine formats a
+    /// payload per undecodable event and hands it to a writer that drops
+    /// it.
+    ///
+    /// Reads the environment and never writes it: `init` resolves
+    /// `VIEW_LOG` itself, and a test that unset the variable would race
+    /// every other test in this binary that reads one.
+    #[test]
+    fn a_session_that_opened_no_log_installs_no_engine_diagnostics() {
+        assert!(
+            std::env::var_os("VIEW_LOG").is_none(),
+            "this test is about the session that captures nothing, so it \
+             has to run without VIEW_LOG set"
+        );
+
+        init(Instant::now());
+
+        assert!(
+            !view_engine::diagnostics_installed(),
+            "a writer installed here is a formatted payload per event for \
+             a log nobody opened"
+        );
     }
 
     /// Every event the `layout` topic keeps has a line to write, and every

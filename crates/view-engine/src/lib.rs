@@ -73,37 +73,24 @@ pub fn set_diagnostics(sink: fn(&str)) {
     let _ = DIAGNOSTICS.set(sink);
 }
 
+/// Whether a writer is installed, which is the same question as "is
+/// anything capturing a log", since [`set_diagnostics`] is called only by a
+/// process that opened one.
+///
+/// For the caller that installs the writer to check its own decision with:
+/// the branch it takes is what every payload this crate could build hangs
+/// on, and nothing on this side of the boundary can tell whether it was
+/// taken.
+#[must_use]
+pub fn diagnostics_installed() -> bool {
+    DIAGNOSTICS.get().is_some()
+}
+
 /// Writes one diagnostic line, building the payload only once a sink is
 /// known to exist -- the same closure shape, and for the same reason, as
 /// the logger on the other side of [`set_diagnostics`].
 pub(crate) fn diagnose(payload: impl FnOnce() -> String) {
     if let Some(sink) = DIAGNOSTICS.get() {
         sink(&payload());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// What the whole closure shape is for. An ordinary session opens no
-    /// log, so every payload this crate could write is one nobody asked
-    /// for, and the arm that would write it has to cost a branch rather
-    /// than a `format!` and the allocation under it.
-    #[test]
-    fn a_session_with_no_writer_installed_never_builds_a_payload() {
-        static BUILT: AtomicUsize = AtomicUsize::new(0);
-
-        super::diagnose(|| {
-            BUILT.fetch_add(1, Ordering::Relaxed);
-            String::new()
-        });
-
-        assert_eq!(
-            BUILT.load(Ordering::Relaxed),
-            0,
-            "nothing installs a writer in this process, so the payload must \
-             not have been built"
-        );
     }
 }
