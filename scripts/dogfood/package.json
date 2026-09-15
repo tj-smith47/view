@@ -1,0 +1,12 @@
+{
+  "name": "view-link-replay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dates a script(1) recording's moments by replaying it through xterm.js headless",
+  "main": "link-replay.js",
+  "type": "commonjs",
+  "license": "ISC",
+  "dependencies": {
+    "@xterm/headless": "6.0.0"
+  }
+}
