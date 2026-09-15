@@ -20,6 +20,13 @@ fi
 base="$1"
 head_rev="$2"
 
+for rev in "$base" "$head_rev"; do
+  if ! git rev-parse --verify -q "$rev^{commit}" >/dev/null; then
+    printf '%s: bad revision: %s\n' "$0" "$rev" >&2
+    exit 2
+  fi
+done
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 

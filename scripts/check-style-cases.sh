@@ -2196,6 +2196,102 @@ trap cleanup EXIT
 PLANT
 expect_temp_traps 0 '' 'a removal written in the braced spelling of the name'
 
+# The four parameter-expansion forms whose value is $X when it is set --
+# :?, :-, ? and - -- with and without a message, quoted or not. Each is the
+# root's own expansion, unlike #, % and / below, which read out a different
+# string and stay refused.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X:?}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written as ${X:?}, quoted, with no message'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf ${X:?unset}
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written as ${X:?msg}, unquoted, with a message'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X:-}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written as ${X:-}, quoted, with no fallback'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X?unset}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written as ${X?msg}, quoted, unset test only'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X-}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written as ${X-}, quoted, unset test only'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X:?}"/
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written as ${X:?} with a trailing path slash'
+
+# #, % and / read out a different string than $X, so a removal written with
+# any of them still leaves the root and stays refused.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X#/tmp}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' 'a removal written as ${X#pattern}, a different string'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X%/sub}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' 'a removal written as ${X%pattern}, a different string'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X/sub/pre}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' 'a removal written as ${X/pattern/repl}, a different string'
+
 new_temp_trap_case
 write_temp_trap_script <<'PLANT'
 X=$(mktemp -d)
@@ -2214,6 +2310,16 @@ trap "rm -rf '$X/sub'" EXIT
 PLANT
 expect_temp_traps 1 'scripts/a.sh' \
   'a trap whose expanded path names a file inside the root rather than the root'
+
+# The root's own spelling: scripts/acceptance/artifacts.sh:244 writes
+# rm -rf "${SELFCHECK_TMP:-}" in its abort handler.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+trap 'rm -rf "${X:-}"' EXIT
+PLANT
+expect_temp_traps 0 '' \
+  'a trap whose armed command removes ${X:-}, the root'\''s own spelling'
 
 # The wire between the harvest and the removal walk carries no byte a script
 # can write: the two halves of a line arrive as two records, and a handler
@@ -3166,6 +3272,25 @@ if [ "$rc" != 1 ] || [ "$row" != found ]; then
 }" "$rc")
 fi
 expect_pin 'a re-wrapped signature moving the printed wrapped-opening count and reddening its row' "$rewrap"
+
+# A bad revision used to let git's own "fatal: bad revision" reach stderr and
+# still exit 0 with no findings, indistinguishable from a clean tree.
+new_pin_case
+REWRAP="$(cd "$(dirname "$0")" && pwd)/check-rewrap-structure.sh"
+out=$(cd "$TREE" && bash "$REWRAP" nosuchrev HEAD 2>&1) && rc=0 || rc=$?
+bad_rev=""
+if [ "$rc" != 2 ]; then
+  bad_rev="a nonsense revision exited $rc rather than 2"
+fi
+case "$out" in
+  (*nosuchrev*) ;;
+  (*)
+    bad_rev=$(printf '%sthe bad revision was never named: [%s]\n' \
+      "${bad_rev:+$bad_rev
+}" "$out")
+    ;;
+esac
+expect_pin 'a nonsense revision to check-rewrap-structure.sh exits 2 naming it, rather than 0 with no findings' "$bad_rev"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

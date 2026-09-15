@@ -1013,7 +1013,7 @@ temp_trap_removals() {
     # rm -rf "$X.bak", rm -rf "$X/sub" and rm -rf "\\$X" each delete
     # something the root still holds, and the last of them stranded a temp
     # directory under a walk answering ok.
-    function removed_names(line,   i, n, w, part, out) {
+    function removed_names(line,   i, n, w, part, out, nm) {
       n = split(expanded(line), part, "[[:space:]]+")
       out = ""
       for (i = 1; i <= n; i++) {
@@ -1025,6 +1025,14 @@ temp_trap_removals() {
         sub(/\/+$/, "", w)
         if (w ~ /^[$][{][A-Za-z_][A-Za-z0-9_]*[}]$/) {
           out = out substr(w, 3, length(w) - 3) " "
+          continue
+        }
+        # the four parameter-expansion forms whose value is $X when set --
+        # :?/:-/?/- -- unlike #, % and /, which read out a different string
+        if (w ~ /^[$][{][A-Za-z_][A-Za-z0-9_]*(:[?-]|[?-])[^}]*[}]$/) {
+          nm = substr(w, 3)
+          sub(/(:[?-]|[?-]).*$/, "", nm)
+          out = out nm " "
           continue
         }
         if (w ~ /^[$][A-Za-z_][A-Za-z0-9_]*$/) { out = out substr(w, 2) " " }

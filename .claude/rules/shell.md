@@ -268,8 +268,13 @@ expansion -- `$X`, `"$X"`, `${X}` and the root with a trailing slash -- and
 never where it sits inside one. `rm -rf "pre$X"`, `rm -rf "$X.bak"` and
 `rm -rf "$X/sub"` each delete a path the root still holds, and `rm -rf "\\$X"`
 deletes a path whose name opens with a backslash, which is what bash makes of
-that pair: it answered ok while stranding a root under a scratch `TMPDIR`. The
-trap line is read the same way, since the quotes around a name the shell has
+that pair: it answered ok while stranding a root under a scratch `TMPDIR`.
+Four more spellings pair on the same rule, because each reads out `$X` when `X`
+is set: `${X:?}`, `${X:-}`, `${X?}` and `${X-}`, with or without a message and
+quoted or not -- the abort handler in `scripts/acceptance/artifacts.sh` writes
+`rm -rf "${SELFCHECK_TMP:-}"`. `${X#pattern}`, `${X%pattern}` and
+`${X/pattern/repl}` read out a different string and stay refused. The trap line
+is read the same way, since the quotes around a name the shell has
 already expanded sit around a path rather than around a name. A handler
 body ends at the brace that closes the function, counted by depth over the body
 with quoted and commented braces ignored and here-doc bodies skipped, never at
