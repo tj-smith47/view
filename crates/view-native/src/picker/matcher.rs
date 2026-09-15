@@ -818,6 +818,100 @@ mod tests {
             width, wanted,
             "a {cores}-core host must get a {wanted}-thread matcher pool, not {width}"
         );
+        // the width is only bounded where the production constructor asks for
+        // it: a `None` back in that one argument resolves to the host's core
+        // count again and leaves everything above this line still passing
+        let new_body = include_str!("matcher.rs")
+            .split_once("fn new(source: Source) -> Self {")
+            .expect("Session::new is no longer where this test reads it")
+            .1;
+        let new_body = new_body
+            .split_once("\n    }")
+            .expect("Session::new's body no longer ends where this test reads it")
+            .0;
+        assert!(
+            new_body.contains("Some(pool_threads())"),
+            "Session::new no longer asks nucleo for a bounded pool: {new_body}"
+        );
+    }
+
+    /// What one resident item may cost the keystroke that rescores it,
+    /// before [`view_test_support::host_deadline`] widens it for the load
+    /// the run started under. Wide enough to hold in an unoptimised test
+    /// build on a shared runner, where the same pass costs several times
+    /// what a release build costs a user: this catches the corpus being
+    /// scored more than once per keystroke or the pass losing its one-column
+    /// shape, not a drift of tens of percent.
+    const PER_ITEM_BOUND: Duration = Duration::from_nanos(900);
+
+    /// The first character typed into an open picker is the picker's most
+    /// expensive keystroke: nucleo moves the pattern to `Rescore` and scores
+    /// every resident item, so the cost a person waits through is the corpus
+    /// size times whatever one item costs. The bound is stated per item
+    /// rather than per pass because the corpus is what the pass is linear
+    /// in, so the same number holds whatever size corpus a later fixture
+    /// hands it.
+    #[test]
+    fn a_keystroke_rescores_the_corpus_within_its_per_item_bound() {
+        const CORPUS: usize = 100_000;
+        let bound = view_test_support::host_deadline(PER_ITEM_BOUND * (CORPUS as u32 + 1));
+        // the permit is taken first so the session drops before the slot
+        // frees (bindings drop in reverse declaration order), and the
+        // session itself comes from the production constructor: the pool
+        // this pass runs on has to be the pool a keystroke runs on
+        let _serial = session_serial::acquire();
+        let mut session = Session::new(Source::Buffers);
+        let injector = session.nucleo.injector();
+        for i in 0..CORPUS {
+            injector.push(
+                PickerItem::new(format!("d{}/zf{i}.txt", i / 1000)),
+                |item, cols| {
+                    cols[0] = item.label.as_str().into();
+                },
+            );
+        }
+        // the one label carrying an `a`: every other label is digits and
+        // `dzftx`, so the needle below matches exactly this row and the pass
+        // still has to look at all of the others to know that
+        injector.push(PickerItem::new("qa.txt"), |item, cols| {
+            cols[0] = item.label.as_str().into();
+        });
+        while session.nucleo.tick(TICK_BUDGET_MS).running {}
+        assert_eq!(
+            session.nucleo.snapshot().item_count(),
+            CORPUS as u32 + 1,
+            "the corpus did not finish ingesting, so the pass below would \
+             score fewer items than it is bounded for"
+        );
+
+        let started = Instant::now();
+        session
+            .nucleo
+            .pattern
+            .reparse(0, "a", CaseMatching::Smart, Normalization::Smart, false);
+        while session.nucleo.tick(TICK_BUDGET_MS).running {}
+        let pass = started.elapsed();
+
+        assert_eq!(
+            session.nucleo.snapshot().matched_item_count(),
+            1,
+            "the pass answered with the wrong set, so its timing is not the \
+             timing of a full rescore"
+        );
+        // printed on the way past, not only on the way down: a run that
+        // passes just under the bound is the only warning the next host gets
+        eprintln!(
+            "one keystroke's rescore of {CORPUS} items: {pass:?}, {}ns per item, bound {bound:?}",
+            pass.as_nanos() / (CORPUS as u128 + 1),
+        );
+        assert!(
+            pass <= bound,
+            "one keystroke's rescore of {CORPUS} items took {pass:?} against \
+             a bound of {bound:?} ({}ns per item, bound {}ns): the pool this \
+             pass runs on or the per-item cost inside it has regressed",
+            pass.as_nanos() / (CORPUS as u128 + 1),
+            PER_ITEM_BOUND.as_nanos(),
+        );
     }
 
     #[test]
