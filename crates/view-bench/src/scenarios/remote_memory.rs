@@ -10,17 +10,18 @@
 //!
 //! A settled process's PSS/`phys_footprint` reading moves with the host's
 //! ambient memory regime (page cache eviction pressure, other tenants'
-//! working sets) by as much as +/-20% across days on a shared box, which a
-//! within-window headroom sidecar cannot absorb -- a bar sized to one
-//! day's regime breaches on the next day's, with nothing about view having
-//! changed. The row's actual claim survives that noise: a single window
-//! put view's own local footprint with a remote engine, divided by its
-//! footprint with a local one, at a +1.2% delta (see "One leg at a time"
-//! below for that recording). Whether the delta holds across the regime
-//! itself -- not just within one window -- is tracked separately in
+//! working sets) across days on a shared box by an order of magnitude more
+//! than the paired ratio moves inside one window, which a within-window
+//! headroom sidecar cannot absorb -- a bar sized to one day's regime
+//! breaches on the next day's, with nothing about view having changed. The
+//! row's actual claim survives that noise: view's own local footprint with
+//! a remote engine, divided by its footprint with a local one, barely left
+//! 1 over a single window (see "One leg at a time" below for that
+//! recording). Whether the delta holds across the regime itself -- not just
+//! within one window -- is tracked separately in
 //! `.claude/plans/2026-08-09-p5_5-remote.md:405-413`: the amendment there
-//! records the +/-20% across-day host-regime envelope and a +1.23% paired
-//! delta landing inside it. So [`run_paired`]
+//! records the across-day host-regime envelope and the paired delta landing
+//! inside it. So [`run_paired`]
 //! gates [`RATIO_METRIC`] -- the remote/local ratio -- and records both
 //! absolutes for reference, record-only on a shared class the same way a
 //! tail statistic already is (see `view_harness::baselines::gate_headroom`).

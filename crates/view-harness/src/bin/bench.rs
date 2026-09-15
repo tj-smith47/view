@@ -258,10 +258,11 @@ const NULL_RATIO_FLOOR: f64 = 1.15;
 ///
 /// 2.0 is the threshold the 2026-08-30 dev-macos scroll campaign
 /// registered and published (23 replicates, 17 included). It held there:
-/// no excluded draw exceeded the included bands by more than 1.1%, so the
-/// rule removed contaminated readings without removing the band's own
-/// shape. Overridable per campaign with `--max-load`, because a host with
-/// more cores carries more load at the same quiet.
+/// every excluded draw sat close enough to the included bands to leave
+/// their shape where it was, so the rule removed contaminated readings
+/// without removing the band itself. Overridable per campaign with
+/// `--max-load`, because a host with more cores carries more load at the
+/// same quiet.
 const MAX_CAMPAIGN_LOAD: f64 = 2.0;
 
 /// How many runs one campaign may spend per included replicate it wants.

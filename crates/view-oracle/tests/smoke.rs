@@ -3360,12 +3360,13 @@ const ENGINE_CONTENT_MARKER: char = '~';
 /// the terminal and the engine's own content has not reached it yet, so
 /// keys the caller is about to type are genuinely pre-attach ones.
 ///
-/// Deliberately not a latency bar. Measured pre-attach windows span roughly
-/// 50ms on Linux to 450ms on macOS on developer hardware, so any fixed
-/// millisecond bar tight enough to be meaningful on one platform sits
-/// inside the other's ordinary distribution; absolute first-paint budgets
-/// are gated in the bench matrix, on a release build under a controlled
-/// protocol, rather than by a debug binary on whatever host runs the tests.
+/// Deliberately not a latency bar. Measured pre-attach windows run nearly
+/// an order of magnitude wider on macOS than on Linux on developer
+/// hardware, so any fixed millisecond bar tight enough to be meaningful on
+/// one platform sits inside the other's ordinary distribution; absolute
+/// first-paint budgets are gated in the bench matrix, on a release build
+/// under a controlled protocol, rather than by a debug binary on whatever
+/// host runs the tests.
 /// The caller's delayed-engine wrapper is what holds the window open long
 /// enough to be read at all.
 ///

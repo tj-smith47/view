@@ -113,8 +113,9 @@ const PROBE_LINE: &str = "hello from the jitter-tolerance test";
 
 /// Lower-bound slack for the per-tier floor check in `main`: generous
 /// enough that a genuinely working relay's own [`PROBE_TRIALS`]-median
-/// noise (measured spread ~8-10ms at N=11, see [`PROBE_TRIALS`]'s own doc
-/// comment) never trips it, comfortably tight enough that a relay which
+/// noise (the spread [`MEDIAN_NOISE_SPREAD_MS`] holds, see
+/// [`PROBE_TRIALS`]'s own doc comment) never trips it, comfortably tight
+/// enough that a relay which
 /// stopped injecting delay -- whose every tier's actual round trip stays
 /// near `floor_ms` regardless of `rtt_ms` -- still falls short of the
 /// expected floor by a wide margin once `rtt_ms` clears
@@ -123,7 +124,7 @@ const PROBE_LINE: &str = "hello from the jitter-tolerance test";
 const FLOOR_SLACK_MS: f64 = 20.0;
 
 /// The conservative (larger) end of [`PROBE_TRIALS`]'s own measured
-/// median-of-11 noise spread (8-10ms, from bucketing a 150-trial pool at
+/// median-of-11 noise spread (from bucketing a 150-trial pool at
 /// `DELAY_RELAY_MS=0`), reused rather than re-measured: this is the noise
 /// floor a `--tiers`-supplied gap's structural margin must clear before
 /// this binary trusts it.

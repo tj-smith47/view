@@ -103,8 +103,8 @@ const FIRST_PAGE_ROWS: usize = 5;
 /// sleeps out of that leaves no open there costing more than a handful of
 /// seconds, even charging the scan phase's one-time warm walk to it. The
 /// 288 opens this count adds are under half an hour at that cost, on a leg
-/// with most of an hour spare against the job timeout, and are seconds at
-/// what the samples themselves report (a first page of 3 to 7 ms,
+/// whose job timeout leaves nearly three times that much room, and are
+/// seconds at what the samples themselves report (a first page of 3 to 7 ms,
 /// [`Protocol::inter_sample`] of 10 ms, a close wait of the same order).
 /// The protocol's own 1000 samples is what the bound refuses: the same
 /// arithmetic prices this row above four hours.
@@ -701,8 +701,8 @@ mod tests {
     const REFUSED_SAMPLES: usize = 12;
 
     /// The leg-to-leg half-width the tighter of the two hosted classes
-    /// publishes for this statistic -- gh-linux's, against a gh-macos leg
-    /// half again as wide: the spread a headroom factor for the row is
+    /// publishes for this statistic -- gh-linux's, the gh-macos leg being
+    /// the wider of the pair: the spread a headroom factor for the row is
     /// sized on.
     const CLASS_HALF_WIDTH: f64 = 0.252;
 

@@ -396,23 +396,33 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   (`measure`, `observ` or `record`, in any case) opened, because an integer
   with a unit is far more often a constant the code passes -- a 150 ms
   throttle, a 20 ms cadence -- and sweeping those deletes the WHY the comment
-  is there for. Three shapes take a line out of the grading: a word that makes
-  the number a choice rather than a reading (`bar`, `budget`, `bound`, `band`,
+  is there for. A figure carries its sign and a spread is written as a range,
+  so `+1.23%` is one figure and `0.62ms..92.5ms`, `8-10ms` and `+/-20%` are
+  each two: the three separators become blanks before the line is read, except
+  the hyphen, which becomes the sign of the figure after it. A token shape
+  reading neither a sign nor a range passed ten measured figures on the shipped
+  tree. Three shapes take a line out of the grading: a word that makes the
+  number a choice rather than a reading (`bar`, `budget`, `bound`, `band`,
   `tolerance` and their plurals), a cell id the drift check knows, and a fenced
   block, which is a sample of what something prints and which rewording would
-  destroy. The cell ids are the drift check's own vocabulary, read at each run
-  through `scripts/check-budget-drift.sh --cell-ids` rather than written down a
-  second time, and a run that reads none of them fails closed: an empty
-  vocabulary grades every figure as anchored, which reads exactly like a tree
-  with nothing to report. A reading therefore goes to prose, or to
-  `docs/benchmarking.md` beside the cell that records it -- where the drift
-  check grades it against that cell, which is the whole point of naming one.
-  Two limits are stated rather than implied. The sentence the reading word
-  opens ends at the first `.` before a blank or a line end, so an integer two
-  sentences past the word that took it is graded as a constant; and a figure
-  written with no unit at all is graded by nothing here. Cased in
-  `scripts/check-style-cases.sh` over six shapes: the tree that passes on all
-  five escapes, the decimal, the integer inside a reading sentence, the same
-  integer wrapped onto the line below the word that introduced it, the
-  constant in the sentence after one a reading closed, and the budgets file
-  that declares no cell.
+  destroy. Each exempts the figures on its own line and never the sentence the
+  words on that line opened: skipping the line outright left a reading word
+  beside a bound to open no sentence at all, and the figure rustfmt wrapped
+  below it went ungraded. The cell ids are the drift check's own vocabulary,
+  read at each run through `scripts/check-budget-drift.sh --cell-ids` rather
+  than written down a second time, and a run that reads none of them fails
+  closed: an empty vocabulary grades every figure as anchored, which reads
+  exactly like a tree with nothing to report. A reading therefore goes to
+  prose, or to `docs/benchmarking.md` beside the cell that records it -- where
+  the drift check grades it against that cell, which is the whole point of
+  naming one. Two limits are stated rather than implied. The sentence the
+  reading word opens ends at the first `.` before a blank or a line end, so an
+  integer two sentences past the word that took it is graded as a constant;
+  and a figure written with no unit at all is graded by nothing here. Cased in
+  `scripts/check-style-cases.sh` over thirteen shapes: the tree that passes on
+  all five escapes, the decimal, the integer inside a reading sentence, the
+  same integer wrapped onto the line below the word that introduced it, the
+  constant in the sentence after one a reading closed, the reading on a line
+  naming a cell, the budgets file that declares no cell, one red per range and
+  sign spelling, and a reading word beside a bound and beside a cell id whose
+  figure is wrapped onto the line below.

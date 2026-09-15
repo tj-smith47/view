@@ -259,12 +259,12 @@ pub fn is_controlled_class(class: &str) -> bool {
 ///
 /// The shared-class exemption is lifted per statistic, by measuring one
 /// unchanged binary pair across host-load regimes. Two have been measured:
-/// - `paired_delta_p99_ms` tracked ambient load x149 (0.62ms..92.5ms);
-///   its regression protection is duplicated by the ratio from the same
-///   paired run.
-/// - `ratio_p99` has a +/-50% ambient noise floor (invocation medians
-///   1.05..1.95): shared tails are scheduler-dominated, and load
-///   compresses the ratio toward 1.
+/// - `paired_delta_p99_ms` tracked ambient load over more than two orders
+///   of magnitude; its regression protection is duplicated by the ratio
+///   from the same paired run.
+/// - `ratio_p99` carries an ambient noise floor wider than any regression
+///   a gate on it could name: shared tails are scheduler-dominated, and
+///   load compresses the ratio toward 1.
 ///
 /// Neither result transfers to a quotient of two tails taken over
 /// consecutive windows, which is what flood's `cadence_p99_ratio` is: the
@@ -498,16 +498,16 @@ fn is_cold_start_absolute(metric: &str) -> bool {
 ///
 /// A third exemption family alongside [`derives_from_tail`] and
 /// [`is_cold_start_absolute`], for the same shape of reason: one unchanged
-/// `remote_memory` binary pair swung `pss_mb` +/-20% across days on shared
-/// dev-linux, while a single window put the paired remote-vs-local ratio
-/// at a +1.2% delta (`remote_memory.pss_mb`'s `[headroom]` entry in
-/// `baselines/dev-linux.headroom.toml`, recorded 2026-08-16, both legs
-/// solo, non-co-resident spawns -- see `view_bench::scenarios::remote_memory`'s
-/// module doc for the full recording). That the delta also holds across
-/// the +/-20% regime swing itself, rather than just within that one
-/// window, is a separate claim tracked in
-/// `.claude/plans/2026-08-09-p5_5-remote.md:405-413` (the +/-20%
-/// across-day envelope and a +1.23% paired delta landing inside it). A
+/// `remote_memory` binary pair swung `pss_mb` across days on shared
+/// dev-linux by an order of magnitude more than the paired remote-vs-local
+/// ratio moved inside a single window (`remote_memory.pss_mb`'s
+/// `[headroom]` entry in `baselines/dev-linux.headroom.toml`, recorded
+/// 2026-08-16, both legs solo, non-co-resident spawns -- see
+/// `view_bench::scenarios::remote_memory`'s module doc for the full
+/// recording). That the delta also holds across the regime swing itself,
+/// rather than just within that one window, is a separate claim tracked in
+/// `.claude/plans/2026-08-09-p5_5-remote.md:405-413`, where the across-day
+/// envelope and the paired delta landing inside it are both recorded. A
 /// within-window headroom sidecar cannot absorb a cross-day regime shift
 /// any more than it can absorb the ambient load a tail percentile carries,
 /// so the absolute is recorded on a shared class and gated on a controlled

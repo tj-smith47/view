@@ -784,6 +784,53 @@ plant_cell_vocabulary without
 expect_doc_figures 1 'no-vocabulary' \
   'a tree whose budgets file declares no cell, which would grade every figure as anchored'
 
+# The four spellings a bare `[0-9]` token missed, each of which shipped a
+# reading: an instrument writes a delta with its sign and a spread as a
+# range, and a token that reads neither passed ten measured figures. The
+# range separators become blanks, except the hyphen, which becomes the sign
+# of the figure after it so a written `-0.5ms` reads the same way.
+new_doc_figures_case
+printf '%s\n' '/// The paired delta came out at +1.23% over the window.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a signed decimal carrying a unit'
+
+new_doc_figures_case
+printf '%s\n' '/// The tail tracked host load over 0.62ms..92.5ms.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a range written with two dots, whose ends are decimals carrying a unit'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured across days, the reading swung +/-20% either way.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a band written around a whole-unit figure, inside a reading sentence'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured spread 8-10ms over eleven trials.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a range written with a hyphen, whose ends are whole-unit figures'
+
+# An escape exempts the figures on its own line and never the sentence the
+# words on it opened. Skipping the line outright left a reading word beside
+# a bound to open no sentence, so the figure rustfmt wrapped below it went
+# ungraded -- and the same hole sat behind the cell-id escape.
+new_doc_figures_case
+printf '%s\n' '/// Not a 5ms bar. Measured pre-attach windows span roughly' \
+  '/// 50ms on one platform and more on the other.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:14 doc-figures' \
+  'a reading word beside a bound, whose figure is wrapped onto the line below'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured on echo.ratio_p50 and on the row beside it,' \
+  '/// at 6 ns per cell.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:14 doc-figures' \
+  'a reading word on a line naming a cell, whose figure is wrapped onto the line below'
+
 # ---------------------------------------------------------------------------
 # the prose width gate: a page wraps at 80 characters, and what cannot wrap
 # exempt by shape rather than by a list of files -- a fence is a sample of a
@@ -3164,9 +3211,17 @@ expect_pin 'the spelling walk reads a private list and a private separator writt
 #
 # A `[` where a command starts is the test builtin and opens no bracket
 # expression, so the same list that names that position names it here. The
-# backslash counted is one an awk regex reads as an escape (`\t`, `\n`, a
-# backslash); a `\"` is the shell quoting its own argument and the regex
-# engine never sees it.
+# backslash counted is one a regex engine reads as an escape (`\t`, `\n`, a
+# backslash, and either bracket); a `\"` is the shell quoting its own
+# argument and the regex engine never sees it.
+#
+# An escaped bracket is on that list because the set without it passed the
+# spelling the doc-figure walk shipped -- `[`*~()>\[\],;:"]`, which gawk and
+# mawk strip the punctuation for and busybox awk strips none of -- while the
+# rule's own sentence bans every backslash. The list is enumerated and not
+# "any backslash" because this walk reads shell text and cannot tell an awk
+# regex from a shell glob: a `case` pattern's `[!\ ]` carries a backslash no
+# regex engine ever sees.
 bracket_backslash_sites() {
   awk -v SQ="'" -v CS="$SCRIPT_COMMAND_START" "$SCRIPT_CODE_AWK"'
     function undefined_bracket(s,   i, n, c, nxt, inb, first, hit) {
@@ -3188,7 +3243,8 @@ bracket_backslash_sites() {
         }
         if (c == "\\") {
           nxt = substr(s, i + 1, 1)
-          if (nxt == "\\" || nxt == "t" || nxt == "n") { hit = 1 }
+          if (nxt == "\\" || nxt == "t" || nxt == "n" ||
+              nxt == "[" || nxt == "]") { hit = 1 }
           i++
         }
         first = 0
@@ -3221,6 +3277,10 @@ cat > "$CASE/bracket-quote.sh" <<'BRQ'
 #!/bin/sh
 awk '$0 ~ /[^\\]";$/ { print }' "$1"
 BRQ
+cat > "$CASE/bracket-square.sh" <<'BRS'
+#!/bin/sh
+awk '{ gsub(/[`*~()>\[\],;:"]/, "", $0); print }' "$1"
+BRS
 cat > "$CASE/bracket-test.sh" <<'BRT'
 #!/bin/sh
 if [ -n "$1" ] && [ "$1" != $'\n' ]; then
@@ -3228,7 +3288,7 @@ if [ -n "$1" ] && [ "$1" != $'\n' ]; then
 fi
 BRT
 missed=""
-for planted in bracket.sh bracket-quote.sh; do
+for planted in bracket.sh bracket-quote.sh bracket-square.sh; do
   if [ -z "$(bracket_backslash_sites "$CASE/$planted")" ]; then
     missed=$(printf '%s%s\n' "${missed:+$missed
 }" "the backslash planted in $planted went unread")
@@ -3238,7 +3298,7 @@ if [ -n "$(bracket_backslash_sites "$CASE/bracket-test.sh")" ]; then
   missed=$(printf '%s%s\n' "${missed:+$missed
 }" "a shell test in command position was read as a bracket expression")
 fi
-expect_pin 'the bracket walk reads both undefined spellings and reads no shell test as one' "$missed"
+expect_pin 'the bracket walk reads all three undefined spellings and reads no shell test as one' "$missed"
 
 # The wrapped-opening carve-out, derived by the walk and printed rather than
 # written into the header by hand. A re-wrapped signature is what used to

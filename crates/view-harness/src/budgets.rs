@@ -1827,10 +1827,10 @@ why = "because"
     }
 
     /// A tail statistic the class does not gate is not gated here either.
-    /// `ratio_p99` on a shared class tracks ambient load by +/-50%, which is
-    /// why the baseline ratchet exempts it; enforcing a shortfall ceiling on
-    /// it would reintroduce that noise as a build failure through the other
-    /// door.
+    /// `ratio_p99` on a shared class tracks ambient load rather than the
+    /// change under test, which is why the baseline ratchet exempts it;
+    /// enforcing a shortfall ceiling on it would reintroduce that noise as a
+    /// build failure through the other door.
     #[test]
     fn a_shortfall_on_a_metric_the_class_does_not_gate_has_no_ceiling() {
         let file = file_from(

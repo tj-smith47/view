@@ -157,7 +157,7 @@ check_content() {
   # them the contract. Anchored on the phrase plus an identifier-shaped
   # target so ordinary prose ("used by default", "called from within the
   # same lock hold") does not trip it.
-  if grep -rniE "(${comment_prefix}).*\\b(used by|called from|called by|invoked by|invoked from) [\`\[]*[A-Za-z_][A-Za-z0-9_]*(::|\\.|\\(|\`|\\])" \
+  if grep -rniE "(${comment_prefix}).*\\b(used by|called from|called by|invoked by|invoked from) [\`[]*[A-Za-z_][A-Za-z0-9_]*(::|\\.|\\(|\`|\\])" \
       "$target" "${includes[@]}"; then
     echo "STYLE FAIL: caller reference in comment"; fail=1
   fi
@@ -1279,11 +1279,20 @@ check_written_programs() {
 #     dev-linux ... R at 2990us"). The limit: the word is the anchor, so a
 #     reading stated without it is invisible to this half too.
 #
+# A figure carries its sign and a spread is written as a range, so a token
+# shape reading neither passed ten measured figures: `+1.23%`, `+/-20%`,
+# `0.62ms..92.5ms` and `8-10ms` all stood on the tree. `spread` below turns
+# the three separators into blanks before the line is tokenised.
+#
 # A line naming a bar, a budget, a bound, a band or a tolerance is refused as
 # a reading at all, on the drift check's own grounds: a bound is a number the
 # tree chose and can be read back off the constant that holds it. That is the
 # one escape a writer has, and it is the same escape bench.md already grants
-# the ledger.
+# the ledger. It exempts the figures on its own line and never the sentence
+# the words on it opened, and the cell-id escape works the same way: skipping
+# the line outright left "Deliberately not a latency bar. Measured pre-attach
+# windows span roughly" opening no sentence, and the milliseconds wrapped
+# below it went ungraded.
 check_doc_figures() {
   local ids found rc
   ids="$(bash "$SCRIPT_DIR/check-budget-drift.sh" --cell-ids "$PWD" | tr '\n' ' ')" || ids=""
@@ -1302,7 +1311,23 @@ check_doc_figures() {
   esac
   rc=0
   found=$(find crates -name '*.rs' -print0 | xargs -0 awk -v ids="$ids" '
-    function clean(t) { gsub(/[`*~()>\[\],;:"]/, "", t); sub(/\.$/, "", t); return t }
+    # A bracket expression here holds no backslash: POSIX leaves one
+    # undefined and the three awks this tree runs under disagree in fact.
+    # The closing bracket is written first, where it is literal, and the
+    # opening one anywhere inside.
+    function clean(t) { gsub(/[]`*~()>[,;:"]/, "", t); sub(/\.$/, "", t); return t }
+    # A range or a band states two readings, and this tree writes the
+    # separator three ways: `0.62ms..92.5ms`, `8-10ms` and `+/-20%`. Each
+    # becomes a blank, except the hyphen, which becomes the sign of the
+    # figure after it so that a written `-0.5ms` reads the same way.
+    function spread(t) {
+      gsub(/\.\./, " ", t)
+      gsub(/\+\/-/, " ", t)
+      while (match(t, /[0-9]-[0-9]/)) {
+        t = substr(t, 1, RSTART) " -" substr(t, RSTART + 2)
+      }
+      return t
+    }
     BEGIN { names = split(ids, id, " ") }
     FNR == 1 { fenced = 0; reading = 0 }
     {
@@ -1313,37 +1338,45 @@ check_doc_figures() {
       # A fenced block inside a doc comment is a sample of what something
       # prints or parses, quoted so a reader recognises the shape. Its
       # figures are the shape and not a claim, and rewriting them to prose
-      # would delete the sample.
+      # would delete the sample. Unlike the two escapes below, it is skipped
+      # for the sentence state as well: sample text is not prose, so a
+      # reading word inside one opens nothing and a `.` inside one closes
+      # nothing, which leaves a sentence interrupted by a fence still open
+      # over the prose after it.
       if (body ~ /^[[:space:]]*```/) { fenced = !fenced; next }
       if (fenced) { next }
       # Lowercased for both word tests: a reading word opens a sentence as
       # often as it stands inside one, and a case-sensitive read let every
       # capitalised `Measured` and `Observed` through.
       folded = tolower(body)
-      if (folded ~ /(^|[^a-z])(bar|bars|budget|budgets|bound|bounds|band|bands|tolerance)([^a-z]|$)/) {
-        next
-      }
-      anchored = 0
-      for (j = 1; j <= names; j++) {
-        if (index(body, id[j]) > 0) { anchored = 1 }
-      }
-      if (anchored) { next }
       # The reading state runs to the end of the sentence that opened it,
       # and not to the end of the line: a figure rustfmt wrapped onto the
       # line after the word that introduced it escapes a per-line test,
       # while a block-wide state grades every constant a block explains in
       # words as a reading.
+      #
+      # It is computed before either escape and updated below whether or not
+      # one fired, because an escape exempts the figures on its own line and
+      # never the sentence those words opened: skipping the line outright
+      # left a reading word beside a bound to open no sentence at all, and
+      # the figure wrapped onto the next line went ungraded.
       had_word = (folded ~ /measure|observ|record/)
       if (had_word) { reading = 1 }
-      n = split(body, w, /[[:space:]]+/)
+      escaped = (folded ~ /(^|[^a-z])(bar|bars|budget|budgets|bound|bounds|band|bands|tolerance)([^a-z]|$)/)
+      anchored = 0
+      for (j = 1; j <= names; j++) {
+        if (index(body, id[j]) > 0) { anchored = 1 }
+      }
+      n = 0
+      if (!escaped && !anchored) { n = split(spread(body), w, /[[:space:]]+/) }
       for (i = 1; i <= n; i++) {
         tok = clean(w[i])
         nxt = clean(w[i + 1])
         num = ""
-        if (tok ~ /^-?[0-9]+(\.[0-9]+)?(ms|us|ns|s|%|x)$/) {
+        if (tok ~ /^[-+]?[0-9]+(\.[0-9]+)?(ms|us|ns|s|%|x)$/) {
           num = tok
           sub(/(ms|us|ns|s|%|x)$/, "", num)
-        } else if (tok ~ /^-?[0-9]+(\.[0-9]+)?$/ &&
+        } else if (tok ~ /^[-+]?[0-9]+(\.[0-9]+)?$/ &&
                    (nxt == "ms" || nxt == "us" || nxt == "ns" || nxt == "s" ||
                     nxt == "%" || nxt == "percent" || nxt == "x")) {
           num = tok
@@ -1351,7 +1384,7 @@ check_doc_figures() {
         if (num == "") { continue }
         if (num ~ /\./ || reading) {
           printf "%s:%d: %s\n", FILENAME, FNR, num
-          next
+          break
         }
       }
       if (reading) {
