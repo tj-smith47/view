@@ -1017,8 +1017,8 @@ impl SurfaceConflicts {
     }
 
     /// Records which claimant modules took the hand-back, answering whether
-    /// the reading is news -- a launch where nothing was asked, or nothing
-    /// took it, records an empty list and changes no notice.
+    /// any of them is news: a report naming only modules already recorded
+    /// -- an empty one included -- records nothing and changes no notice.
     ///
     /// Added to rather than replacing what is already recorded: the ask
     /// goes out in more than one pass (a claimant that loads after the

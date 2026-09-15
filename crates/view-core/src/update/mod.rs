@@ -122,8 +122,16 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // and the conflict notice's own way down for a user who is typing
         // rather than reaching for `<Esc>`: only once it has stood the
         // window a transient one gets, so the key pressed while it is still
-        // being read leaves it alone
-        model.dirty |= model.engine.messages.dismiss_read_sticky();
+        // being read leaves it alone.
+        //
+        // Every input that reaches the editor, which is what excludes the
+        // one the busy modal eats: a key answering that modal is not a
+        // user reading past a notice behind it, and taking both with one
+        // keystroke spends an answer they made on a dismissal they did not
+        // (`route_key`'s own exclusion, for the same reason).
+        if model.engine_busy().is_none() {
+            model.dirty |= model.engine.messages.dismiss_read_sticky();
+        }
     }
     // both taken ahead of the message: the count is what tells a notice
     // that left the stack from one nvim replaced in place, and the slot is

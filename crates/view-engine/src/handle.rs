@@ -957,19 +957,35 @@ impl EngineHandle {
                                         pump.route_notify_sink(msg);
                                     }
                                     // and the same for the hand-back's late
-                                    // pass: it is sent once, when a claimant
-                                    // that loaded after the takeover turned
-                                    // itself off, and nothing recomputes it.
-                                    // Dropped, the notice standing on screen
-                                    // goes on saying the ask never reached a
-                                    // plugin that took it
+                                    // pass: one report per claimant that
+                                    // loads after the takeover and turns
+                                    // itself off, and nothing recomputes
+                                    // one. Dropped, the notice standing on
+                                    // screen goes on saying the ask never
+                                    // reached a plugin that took it
                                     Some(msg @ Msg::ClaimantsHandedBack { .. }) => {
                                         pump.route_claimants_handed_back(msg);
                                     }
                                     Some(msg) => {
                                         let _ = pump.route_msg(msg);
                                     }
-                                    None => {}
+                                    // one line for the whole vocabulary,
+                                    // not one per event: what a triage read
+                                    // needs is which event arrived in a
+                                    // shape this decoder refused, and the
+                                    // name and the argument count are what
+                                    // tell a chunk sending the wrong
+                                    // payload from one nothing consumes yet
+                                    None => crate::diagnose(|| {
+                                        let event = params
+                                            .first()
+                                            .and_then(rmpv::Value::as_str)
+                                            .unwrap_or("?");
+                                        format!(
+                                            "bridge event not decoded: {event}                                              args={}",
+                                            params.len()
+                                        )
+                                    }),
                                 }
                             } else if method == "nvim_buf_lines_event" {
                                 // nvim is never blocked on this notification

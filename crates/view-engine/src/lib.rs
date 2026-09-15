@@ -1,5 +1,7 @@
 //! Embedded Neovim lifecycle and msgpack-RPC client.
 
+use std::sync::OnceLock;
+
 pub mod damage;
 pub mod env;
 pub mod handle;
@@ -44,3 +46,33 @@ pub use process::{
 };
 pub use rpc::{RpcError, RpcMessage};
 pub use stall::{OutboxStallWatch, WRITER_STALL_THRESHOLD};
+
+/// Where this crate's own diagnostic lines go, for a session that opened a
+/// log to receive them.
+///
+/// The crate has no logger of its own and cannot have one: the `VIEW_LOG`
+/// sink is opened by the binary, which sits above every library here, and
+/// the reader thread that sees a malformed notification is several layers
+/// below it. So the binary hands this crate a writer once, at startup, and
+/// a session that opened no log leaves it unset -- one `OnceLock` read per
+/// call site and nothing formatted.
+static DIAGNOSTICS: OnceLock<fn(&str)> = OnceLock::new();
+
+/// Installs the writer [`diagnose`] hands its lines to, under whatever
+/// topic the caller logs them at.
+///
+/// First call wins and later ones are ignored, the [`OnceLock`] contract:
+/// the sink belongs to the process, not to an engine, and a session that
+/// restarts its engine keeps writing to the log it opened.
+pub fn set_diagnostics(sink: fn(&str)) {
+    let _ = DIAGNOSTICS.set(sink);
+}
+
+/// Writes one diagnostic line, building the payload only once a sink is
+/// known to exist -- the same closure shape, and for the same reason, as
+/// the logger on the other side of [`set_diagnostics`].
+pub(crate) fn diagnose(payload: impl FnOnce() -> String) {
+    if let Some(sink) = DIAGNOSTICS.get() {
+        sink(&payload());
+    }
+}

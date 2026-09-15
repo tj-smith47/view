@@ -2725,6 +2725,51 @@ fn a_raised_condition_survives_the_escape_that_clears_an_error_beside_it() {
     );
 }
 
+/// The conflict notice's rule is every input that reaches the editor, and
+/// a key the busy modal eats reaches nothing: the user answering that
+/// modal is not reading past a notice standing behind it.
+#[test]
+fn the_key_that_answers_the_busy_modal_leaves_the_conflict_notice_standing() {
+    let family = "view: noice.nvim is using ";
+    let mut m = started_model();
+    let armed = m
+        .engine
+        .record_native_notice_sticky_once(family, format!("{family}the cmdline, which view owns."));
+    let expiry = armed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ScheduleToastExpiry { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("a sticky notice is armed with its own reading window");
+    // past the window, so the only thing left holding the notice up is the
+    // modal in front of it
+    let _ = update(&mut m, Msg::ToastExpired { id: expiry });
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+        },
+    );
+    assert!(m.engine_busy().is_some(), "the modal opens past the bound");
+
+    let _ = press(&mut m, "<Esc>");
+
+    assert!(m.engine_busy().is_none(), "the modal takes the key");
+    assert!(
+        m.engine.has_native_notice(family),
+        "the key the modal ate must not also spend the notice behind it"
+    );
+
+    let _ = press(&mut m, "j");
+
+    assert!(
+        !m.engine.has_native_notice(family),
+        "the next input, reaching the editor, takes it"
+    );
+}
+
 #[test]
 fn the_escape_that_answers_the_busy_modal_leaves_the_error_behind_it_standing() {
     // the modal offers <Esc> as its own dismissal, and the standing error is
@@ -6680,6 +6725,44 @@ fn a_restart_forgets_the_notifier_the_dead_engine_was_speaking_to() {
             .any(|e| matches!(e, Effect::Rpc(RpcCall::Notify { .. }))),
         "nothing may be handed to a vim.notify inside a process that is \
          gone: {effects:?}"
+    );
+}
+
+/// The claimant notice re-worded by a late hand-back is the same notice
+/// saying something else, so a session speaking through a plugin's
+/// notifier hears it once.
+#[test]
+fn a_re_worded_claimant_notice_is_not_spoken_a_second_time() {
+    let family = "view: noice.nvim is using ";
+    let mut m = handed_back_model_with_a_plugin_notifier();
+    let raised = m.engine.record_native_notice_sticky_once(
+        family,
+        format!("{family}the cmdline, and the ask never reached it."),
+    );
+    assert!(
+        raised
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Notify { .. }))),
+        "the fixture must speak the first one for this to prove anything: \
+         {raised:?}"
+    );
+
+    let re_worded = m
+        .engine
+        .record_native_notice_once(family, format!("{family}the cmdline, and it did."));
+
+    assert!(
+        !re_worded
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Notify { .. }))),
+        "the user's notifier already popped this notice; a re-wording that \
+         speaks again is two pop-ups for one launch: {re_worded:?}"
+    );
+    assert!(
+        m.engine
+            .native_notice_line(family)
+            .is_some_and(|line| line.ends_with("and it did.")),
+        "the replacement itself must still have happened"
     );
 }
 

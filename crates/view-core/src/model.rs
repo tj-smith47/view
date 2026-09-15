@@ -1765,10 +1765,31 @@ impl EngineModel {
         {
             return Vec::new();
         }
+        let replaces_a_standing_one = self
+            .messages
+            .entries
+            .iter()
+            .any(|e| is_standing_native_notice(e, family));
         self.messages
             .entries
             .retain(|e| !is_standing_native_notice(e, family));
-        self.record_message_in_family(kind.to_string(), content, false, Some(family), None)
+        let mut effects =
+            self.record_message_in_family(kind.to_string(), content, false, Some(family), None);
+        // a session that left the messages with a plugin notifier hears
+        // this family once: the line it already popped is this notice, and
+        // a re-wording is that notice changing its mind, not a second
+        // thing to be told about. On screen the two are the same slot --
+        // the replacement above is what makes it so -- and through a
+        // foreign notifier they would be two pop-ups for one launch
+        if replaces_a_standing_one {
+            effects.retain(|e| {
+                !matches!(
+                    e,
+                    crate::msg::Effect::Rpc(crate::msg::RpcCall::Notify { .. })
+                )
+            });
+        }
+        effects
     }
 
     /// Retracts every standing one-shot native notice whose line starts

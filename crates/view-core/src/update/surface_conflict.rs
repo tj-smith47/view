@@ -3057,6 +3057,13 @@ mod tests {
             notices(&model)
         );
 
+        // a module no row names is not a claimant of view's: the takeover
+        // asks it nothing, and a report naming it settles nothing about
+        // the notice standing for the one it does name
+        let before = notices(&model);
+        handed_back(&mut model, &["nvim-notify"]);
+        assert_eq!(notices(&model), before);
+
         handed_back(&mut model, &["noice"]);
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
