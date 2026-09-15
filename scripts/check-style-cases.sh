@@ -3435,5 +3435,26 @@ case "$out" in
 esac
 expect_pin 'a nonsense revision to check-rewrap-structure.sh exits 2 naming it, rather than 0 with no findings' "$bad_rev"
 
+# The helper-order guard at the top of this file, graded on a copy of the
+# file itself: a case that calls a helper above its definition ran as rc 127
+# and was counted by nothing, so the copy plants exactly that call and the
+# guard has to refuse the whole run naming it before a single case starts.
+new_pin_case
+awk 'NR == 61 { print "expect_pin \"planted\" \"\"" } { print }' "$0" > "$CASE/cases.sh"
+out=$(bash "$CASE/cases.sh" 2>&1) && rc=0 || rc=$?
+bad_order=""
+if [ "$rc" != 2 ]; then
+  bad_order="a helper called above its definition exited $rc rather than 2"
+fi
+case "$out" in
+  (*"expect_pin called before its definition"*) ;;
+  (*)
+    bad_order=$(printf '%sthe misordered helper was never named: [%s]\n' \
+      "${bad_order:+$bad_order
+}" "$(printf '%s' "$out" | head -3)")
+    ;;
+esac
+expect_pin 'a helper called above its definition refuses the run with rc 2 naming it, rather than skipping the case at rc 127' "$bad_order"
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
