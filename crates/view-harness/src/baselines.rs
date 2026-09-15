@@ -477,10 +477,10 @@ fn derives_from_tail(metric: &str) -> bool {
 /// process starts: page cache occupancy, dyld/inode cache warmth, the
 /// power and thermal state at the moment each spawn begins. A shared host
 /// cannot hold any of that fixed between runs any more than it can hold a
-/// scheduler's queue depth fixed for a tail percentile, and the evidence
-/// is the same shape: `shell_visible` moved 6x cross-boot on gh-linux with
-/// no change to the code it measured. It is recorded on a shared class
-/// and gated on a controlled one, like a tail.
+/// scheduler's queue depth fixed for a tail percentile: the state resets
+/// with the host's boot, so the same metric reads differently from one
+/// boot to the next while the code it measures has not changed. It is
+/// recorded on a shared class and gated on a controlled one, like a tail.
 ///
 /// Matched on a name component rather than a substring, for the same
 /// reason [`derives_from_tail`] is: `coldstart_ms` holds the letters of

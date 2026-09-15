@@ -118,7 +118,7 @@ impl KeyRing {
 ///
 /// Logs the elapsed time since `process_start` under the `"startup"`
 /// `VIEW_LOG` topic: the design spec's informal 50ms shell-paint target,
-/// measured here but not enforced (the formal budget gate lands with the
+/// logged here but not enforced (the formal budget gate lands with the
 /// bench harness). Routed through [`crate::vlog::log_with`] rather than a
 /// bare stderr write: this fires from inside `paint_shell_frame`, called
 /// only after `Term::init` has entered both raw mode and the alternate

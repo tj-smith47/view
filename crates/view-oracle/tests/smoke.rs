@@ -3514,8 +3514,8 @@ fn pre_attach_keys_typed_before_a_slow_engine_replay_into_the_buffer_in_order() 
 /// whether the code under test still writes into that channel at cutover.
 /// Driving this pty with a 300ms-delayed engine and 150 keystrokes sent one
 /// at a time over ~450ms (to straddle attach completion) reliably fills the
-/// ring to its full 64-key capacity but has never observed a key landing in
-/// that microsecond-scale gap, so this harness cannot reliably distinguish
+/// ring to its full 64-key capacity. It has never observed a key landing
+/// in that microsecond-scale gap, so this harness cannot reliably distinguish
 /// a version that writes into the channel at cutover from one that does
 /// not -- the live race window is real for a paste-sized burst, just not
 /// reproducible through this harness's timing. Kept here anyway as

@@ -19,6 +19,35 @@
 # those fixtures frozen so the next one trips here instead.
 set -uo pipefail
 
+# A helper called above its own definition is "command not found" at rc 127,
+# which set -u never sees and the tally never counts, so the case it stands
+# in is skipped without a word: a spelling case shipped that way once. The
+# order is graded before any case runs, at command position only, since a
+# helper's name inside a string or an awk program is not a call.
+misordered=$(awk '
+  FNR == NR {
+    if ($0 ~ /^[a-z_]+\(\) \{/) {
+      name = $1
+      sub(/\(\).*/, "", name)
+      if (!(name in def)) def[name] = FNR
+    }
+    next
+  }
+  {
+    line = $0
+    sub(/^[[:space:]]*/, "", line)
+    for (name in def) {
+      if (FNR < def[name] && line ~ ("^" name "([[:space:]]|$)")) {
+        printf "%s:%d: %s called before its definition at line %d\n", FILENAME, FNR, name, def[name]
+      }
+    }
+  }
+' "$0" "$0")
+if [ -n "$misordered" ]; then
+  printf '%s\n' "$misordered" >&2
+  exit 2
+fi
+
 CHECKER=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -830,6 +859,47 @@ printf '%s\n' '/// Measured on echo.ratio_p50 and on the row beside it,' \
   >> "$CASE/crates/view-x/src/lib.rs"
 expect_doc_figures 1 'crates/view-x/src/lib.rs:14 doc-figures' \
   'a reading word on a line naming a cell, whose figure is wrapped onto the line below'
+
+# The same wrap the other way round: rustfmt puts the break wherever the
+# width runs out, so the word that makes a figure a reading is as free to
+# land after it as before it, and a state that only ran forward graded the
+# figure as a constant. What decides it either way is the sentence, so a `.`
+# between the two is the green case.
+new_doc_figures_case
+printf '%s\n' '/// A pre-attach window of 50 ms on one platform and more on' \
+  '/// the other, measured across every boot of the day.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a figure on the line before the reading word that grades it, in the same sentence'
+
+new_doc_figures_case
+printf '%s\n' '/// The loop asks for 20 ms between passes. Nothing about that' \
+  '/// number was measured.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' \
+  'a constant in the sentence before the one a reading word opens'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured over 1..=5 ms, depending on the host.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'an inclusive range, whose ends are whole-unit figures inside a reading sentence'
+
+# The finding names the token as the file spells it. A range is cut into two
+# figures so each is graded, and a reader sent to `-10` for source text
+# `8-10ms` is left to work out which half the file wrote.
+new_doc_figures_case
+printf '%s\n' '/// Measured spread 8-10ms over eleven trials.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+spelled=$(bash "${RUN:-$CHECKER}" --doc-figures "$CASE" 2>&1 |
+  sed -n 's|^crates/view-x/src/lib\.rs:13: ||p')
+desc='the finding prints the figure as the file spells it'
+if [ "$spelled" = 8-10ms ]; then
+  printf 'ok %s - %s\n' "$n" "$desc"
+else
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want [8-10ms]\n  got  [%s]\n' "$n" "$desc" "$spelled"
+fi
 
 # ---------------------------------------------------------------------------
 # the prose width gate: a page wraps at 80 characters, and what cannot wrap
@@ -3204,16 +3274,23 @@ done
 expect_pin 'the spelling walk reads a private list and a private separator written beside the shared ones' "$missed"
 
 # A backslash inside a bracket expression is undefined in POSIX awk, and the
-# two awks this tree runs on read it differently, so the tree writes none:
+# three awks this tree runs on read it differently, so the tree writes none:
 # `[ \t]` is spelled `[[:space:]]` and an escaped quote is read by index.
 # Walked rather than asserted, because the construct is one keystroke from
-# being written again and neither awk says a word about it.
+# being written again and no awk of the three says a word about it.
 #
 # A `[` where a command starts is the test builtin and opens no bracket
 # expression, so the same list that names that position names it here. The
 # backslash counted is one a regex engine reads as an escape (`\t`, `\n`, a
-# backslash, and either bracket); a `\"` is the shell quoting its own
-# argument and the regex engine never sees it.
+# backslash, either bracket, and a digit); a `\"` is the shell quoting its
+# own argument and the regex engine never sees it.
+#
+# The digit escape is on the list because an octal byte class is the one
+# spelling of a byte range that reads as a bracket expression everywhere and
+# is defined nowhere -- `[\200-\277]`, the continuation-byte range the
+# character measure used to carry, which is built out of two literal bytes by
+# sprintf instead. Measured over this tree's scripts, it reddens that one
+# site and nothing else.
 #
 # An escaped bracket is on that list because the set without it passed the
 # spelling the doc-figure walk shipped -- `[`*~()>\[\],;:"]`, which gawk and
@@ -3244,7 +3321,7 @@ bracket_backslash_sites() {
         if (c == "\\") {
           nxt = substr(s, i + 1, 1)
           if (nxt == "\\" || nxt == "t" || nxt == "n" ||
-              nxt == "[" || nxt == "]") { hit = 1 }
+              nxt == "[" || nxt == "]" || nxt ~ /^[0-9]$/) { hit = 1 }
           i++
         }
         first = 0
@@ -3266,8 +3343,10 @@ else
 fi
 expect_pin 'no backslash inside a bracket expression, which POSIX awk leaves undefined' "$brackets"
 
-# planted, both sides: the two spellings the tree used to write, and the
-# shell test whose brackets are a command rather than a bracket expression.
+# planted, both sides: the three spellings the tree used to write -- the two
+# awk regexes and the octal byte range the character measure carried -- and
+# the shell test whose brackets are a command rather than a bracket
+# expression.
 new_pin_case
 cat > "$CASE/bracket.sh" <<'BRK'
 #!/bin/sh
@@ -3281,6 +3360,10 @@ cat > "$CASE/bracket-square.sh" <<'BRS'
 #!/bin/sh
 awk '{ gsub(/[`*~()>\[\],;:"]/, "", $0); print }' "$1"
 BRS
+cat > "$CASE/bracket-octal.sh" <<'BRO'
+#!/bin/sh
+awk '{ t = $0; gsub(/[\200-\277]/, "", t); print length(t) }' "$1"
+BRO
 cat > "$CASE/bracket-test.sh" <<'BRT'
 #!/bin/sh
 if [ -n "$1" ] && [ "$1" != $'\n' ]; then
@@ -3288,7 +3371,7 @@ if [ -n "$1" ] && [ "$1" != $'\n' ]; then
 fi
 BRT
 missed=""
-for planted in bracket.sh bracket-quote.sh bracket-square.sh; do
+for planted in bracket.sh bracket-quote.sh bracket-square.sh bracket-octal.sh; do
   if [ -z "$(bracket_backslash_sites "$CASE/$planted")" ]; then
     missed=$(printf '%s%s\n' "${missed:+$missed
 }" "the backslash planted in $planted went unread")
@@ -3298,7 +3381,7 @@ if [ -n "$(bracket_backslash_sites "$CASE/bracket-test.sh")" ]; then
   missed=$(printf '%s%s\n' "${missed:+$missed
 }" "a shell test in command position was read as a bracket expression")
 fi
-expect_pin 'the bracket walk reads all three undefined spellings and reads no shell test as one' "$missed"
+expect_pin 'the bracket walk reads all four undefined spellings and reads no shell test as one' "$missed"
 
 # The wrapped-opening carve-out, derived by the walk and printed rather than
 # written into the header by hand. A re-wrapped signature is what used to

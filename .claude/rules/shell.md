@@ -88,6 +88,15 @@ bracket expression here holds a backslash at all; a pin at the end of
 one, reading a `[` where a command starts as the `test` builtin rather than
 as a bracket expression.
 
+A range of bytes is the one class with no escape-free spelling, and it is
+built rather than written: `sprintf("[%c-%c]", 128, 191)` gives the
+continuation-byte range out of two literal bytes, where `[\200-\277]` gives
+it out of two escapes POSIX leaves undefined -- the character measure in
+`scripts/check-style.sh` carries the built form, hoisted into a variable
+because a walk calls it per line, and busybox, mawk and gawk agree on its
+count. The escape before a digit is on the pin's counted set for that
+reason, so the octal spelling reddens the moment it is written again.
+
 Both reading legs take their line from one reader in
 `scripts/lib/script-population.sh`, which carries quote, here-doc and nesting
 state across lines the way 3.2 carries them. A word in a comment or in a

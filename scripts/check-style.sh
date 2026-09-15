@@ -243,6 +243,13 @@ fi
 # range of bytes at all: gawk in a UTF-8 locale refuses it as a collation
 # character.
 #
+# The continuation range is built by sprintf out of two literal bytes rather
+# than written as an octal escape inside the brackets: a backslash inside a
+# bracket expression is undefined in POSIX awk, which is the construct
+# .claude/rules/shell.md bans outright, and the three awks this tree runs
+# under are free to disagree over it. Built once into CONT and reused,
+# because a walk calls this per line.
+#
 # A character is not a terminal column, and every message this feeds says
 # characters because that is what it counts: a double-width glyph counts
 # one and paints two, a combining mark counts one and paints none, so the
@@ -250,7 +257,8 @@ fi
 # reddens a decomposed one of 92 that fills 62. Both limits are stated in
 # .claude/rules/shell.md and cased beside the width cases; a number carrying
 # a unit it is not in is worse than no number at all.
-AWK_COLS='function cols(s,   t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
+AWK_COLS='function cols(s,   t) { if (CONT == "") { CONT = sprintf("[%c-%c]", 128, 191) }
+                        t = s; gsub(CONT, "", t); return length(t) }
 '
 
 # Every embedded Lua chunk wraps at 80 characters. The chunks are read beside
@@ -296,8 +304,8 @@ check_lua_chunk_width() {
       # an escaped quote inside the Lua does not close the Rust literal, so
       # it must not end the walk either -- it would skip the rest silently.
       # The escape is read by index rather than by a bracket expression
-      # holding a backslash, which POSIX leaves undefined and both awks in
-      # this tree read differently
+      # holding a backslash, which POSIX leaves undefined and the three awks
+      # this tree runs under read differently
       if ($0 ~ /^\);$/ || $0 ~ /^";$/ ||
           ($0 ~ /";$/ && substr($0, length($0) - 2, 1) != "\\")) { inchunk = 0 }
       next
@@ -1317,23 +1325,41 @@ check_doc_figures() {
     # opening one anywhere inside.
     function clean(t) { gsub(/[]`*~()>[,;:"]/, "", t); sub(/\.$/, "", t); return t }
     # A range or a band states two readings, and this tree writes the
-    # separator three ways: `0.62ms..92.5ms`, `8-10ms` and `+/-20%`. Each
-    # becomes a blank, except the hyphen, which becomes the sign of the
-    # figure after it so that a written `-0.5ms` reads the same way.
+    # separator four ways: `0.62ms..92.5ms`, `1..=5 ms`, `8-10ms` and
+    # `+/-20%`. Each becomes a blank, except the hyphen, which becomes the
+    # sign of the figure after it so that a written `-0.5ms` reads the same
+    # way. The inclusive range takes its `=` with it: blanking the two dots
+    # alone left `=5 ms`, which no token pattern reads.
     function spread(t) {
-      gsub(/\.\./, " ", t)
+      gsub(/\.\.=?/, " ", t)
       gsub(/\+\/-/, " ", t)
       while (match(t, /[0-9]-[0-9]/)) {
         t = substr(t, 1, RSTART) " -" substr(t, RSTART + 2)
       }
       return t
     }
+    # The finding names the token as the file spells it: `spread()` cuts a
+    # range into two figures so each is graded, and a reader sent to `-10`
+    # for source text `8-10ms` is left to work out which half the file
+    # wrote. What it names is the first raw token whose own spread yields
+    # the graded one, so a line repeating a figure resolves the same way
+    # every run.
+    function spelled(line, t,   k, r, j, m, u, i) {
+      k = split(line, r, /[[:space:]]+/)
+      for (j = 1; j <= k; j++) {
+        m = split(spread(r[j]), u, /[[:space:]]+/)
+        for (i = 1; i <= m; i++) {
+          if (clean(u[i]) == t) { return clean(r[j]) }
+        }
+      }
+      return t
+    }
     BEGIN { names = split(ids, id, " ") }
-    FNR == 1 { fenced = 0; reading = 0 }
+    FNR == 1 { fenced = 0; reading = 0; held = "" }
     {
       body = $0
       sub(/^[[:space:]]*/, "", body)
-      if (body !~ /^(\/\/\/|\/\/!)/) { reading = 0; fenced = 0; next }
+      if (body !~ /^(\/\/\/|\/\/!)/) { reading = 0; fenced = 0; held = ""; next }
       sub(/^(\/\/\/|\/\/!)/, "", body)
       # A fenced block inside a doc comment is a sample of what something
       # prints or parses, quoted so a reader recognises the shape. Its
@@ -1360,14 +1386,30 @@ check_doc_figures() {
       # never the sentence those words opened: skipping the line outright
       # left a reading word beside a bound to open no sentence at all, and
       # the figure wrapped onto the next line went ungraded.
+      #
+      # The word is as free to fall after the figure as before it, because
+      # rustfmt wraps a sentence wherever the width runs out: a reading
+      # state that only runs forward graded `moved 6x cross-boot` as a
+      # constant for want of a `measured` that sat on the next line. An
+      # integer the walk cannot grade where it stands is therefore held
+      # until the sentence it stands in closes, and a reading word reached
+      # first reports it -- unless a `.` stands between the two, which is
+      # the same sentence boundary the forward state reads.
       had_word = (folded ~ /measure|observ|record/)
-      if (had_word) { reading = 1 }
+      if (had_word) {
+        head = folded
+        sub(/(measure|observ|record).*$/, "", head)
+        if (head ~ /\.([[:space:]]|$)/) { held = "" }
+        if (held != "") { printf "%s", held; held = "" }
+        reading = 1
+      }
       escaped = (folded ~ /(^|[^a-z])(bar|bars|budget|budgets|bound|bounds|band|bands|tolerance)([^a-z]|$)/)
       anchored = 0
       for (j = 1; j <= names; j++) {
         if (index(body, id[j]) > 0) { anchored = 1 }
       }
       n = 0
+      held_here = 0
       if (!escaped && !anchored) { n = split(spread(body), w, /[[:space:]]+/) }
       for (i = 1; i <= n; i++) {
         tok = clean(w[i])
@@ -1383,14 +1425,27 @@ check_doc_figures() {
         }
         if (num == "") { continue }
         if (num ~ /\./ || reading) {
-          printf "%s:%d: %s\n", FILENAME, FNR, num
+          printf "%s:%d: %s\n", FILENAME, FNR, spelled(body, tok)
           break
+        }
+        if (held == "") {
+          held = sprintf("%s:%d: %s\n", FILENAME, FNR, spelled(body, tok))
+          held_here = 1
+          held_tail = ""
+          for (k = i + 1; k <= n; k++) { held_tail = held_tail " " w[k] }
         }
       }
       if (reading) {
         tail = folded
         if (had_word) { sub(/^.*(measure|observ|record)/, "", tail) }
         if (tail ~ /\.([[:space:]]|$)/) { reading = 0 }
+      }
+      # A held figure lives as long as its own sentence: what closes it is a
+      # `.` after the figure on the line it stands on, or anywhere on a line
+      # the sentence runs onto.
+      if (held != "") {
+        rest = held_here ? held_tail : folded
+        if (rest ~ /\.([[:space:]]|$)/) { held = "" }
       }
     }
   ') || rc=$?
