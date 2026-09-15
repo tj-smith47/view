@@ -807,6 +807,14 @@ mod tests {
     /// refuse -- so the floor is pinned here beside the ceiling.
     #[test]
     fn the_matchers_pool_is_bounded_and_never_zero() {
+        // both assertions below are stated in terms of the constant, so a
+        // raised ceiling passes them while undoing the change: two is the
+        // only width whose tail stayed inside a millisecond of itself on the
+        // host the bar is set on, and the width the CPU claim is about
+        assert_eq!(
+            MAX_POOL_THREADS, 2,
+            "the pool ceiling the keystroke tail was taken against is no longer 2"
+        );
         let width = pool_threads();
         assert!(
             (1..=MAX_POOL_THREADS).contains(&width),
@@ -898,8 +906,9 @@ mod tests {
             "the pass answered with the wrong set, so its timing is not the \
              timing of a full rescore"
         );
-        // printed on the way past, not only on the way down: a run that
-        // passes just under the bound is the only warning the next host gets
+        // cargo captures this on a pass, so it is what a `-- --nocapture`
+        // run reads when a host wants its own headroom; the assert below
+        // carries the same two numbers on the way down
         eprintln!(
             "one keystroke's rescore of {CORPUS} items: {pass:?}, {}ns per item, bound {bound:?}",
             pass.as_nanos() / (CORPUS as u128 + 1),
