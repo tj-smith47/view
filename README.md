@@ -57,9 +57,9 @@ of every proposed change. See [docs/ai.md](docs/ai.md).
   instead? Then `native.picker = false` on a line of its own is the whole
   config. view never edits your config, so that one key is the whole
   reversal.
-- **Honest about the gaps.** The moments where view is currently *slower*
-  than Neovim are written down with the rest, and the build fails if any of
-  them quietly regresses further.
+- **Honest about the gaps.** The moments where view has not met its own bar
+  are written down with the rest, and the build fails if any of them quietly
+  regresses further.
 
 ## Not another Neovim distro
 
@@ -97,8 +97,8 @@ still running, which is where most of the gap went. What is left is the
 screen the attach asks for, travelling to view over the wire and painted
 again by view where Neovim's own terminal UI reads it out of the same
 process -- and because that attach now sits inside the engine's own startup,
-the engine's started mark lands 1.64 ms later under view than under Neovim's
-terminal UI.
+the engine's started mark lands 1.64 ms later under view: the same work,
+counted on the other side of the mark rather than added.
 
 **You type.** You press a key and the character appears. Under that same
 login-shaped config, view's worst keystroke in a thousand takes 1.58 ms

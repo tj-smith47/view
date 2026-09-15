@@ -69,13 +69,16 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
 - `README.md` or `docs/performance.md` names any metric identifier;
 - a paragraph on `README.md`, `docs/performance.md`, `docs/benchmarking.md`,
   spec section 1 or spec section 3.1 states a comparative -- a multiplier
-  (`5.2x`, `1.10x`) or a comparison naming what it beats ("faster than bare
-  Neovim", "ahead of") -- while naming no `kind = "felt"` cell id;
+  (`5.2x`, `1.10x`) or a comparison in either direction, naming what it beats
+  ("faster than bare Neovim", "ahead of") or what it trails ("slower than
+  nvim", "behind Neovim", "later than", "worse than") -- while naming no
+  `kind = "felt"` cell id;
 - a class `docs/benchmarking.md` names, in one sentence, as carrying a
   withdrawn first-paint ratio carries none in `baselines/<class>.toml`, or
   a class carrying one is named by no such sentence;
-- a table row states a comparative that names the engine ("faster than
-  bare Neovim", "ahead of nvim"), whatever anchors it;
+- a table row states a comparative that names the engine, in either
+  direction ("faster than bare Neovim", "ahead of nvim", "slower than
+  bare nvim", "behind Neovim"), whatever anchors it;
 - a backticked token in a spec 3.1 table row resolves to no scenario,
   metric or fixture that `budgets.toml`, a shipped class baseline or the
   harness row table (`view-harness/src/builds.rs`) declares, unless the
@@ -267,6 +270,19 @@ bare-nvim run") from a win, so an anchored row was free to state either.
 A row states a win by publishing the paired numbers; "faster than bare
 Neovim" on a row is refused wherever it stands, and a comparative naming
 no engine ("never faster than the server that draws it") is not touched.
+
+Both directions, because "9.6% behind Neovim's" names the engine in a
+comparative exactly as "5.2x faster than bare Neovim" does, and a page that
+may state its gaps is the page most likely to write one: a word list of
+wins alone passed that sentence on `docs/performance.md`. The comparative
+stays its object's own neighbour -- the engine within three words, the
+preposition the next word -- because reaching past that takes in
+"Objectively faster, smoother UX than nvim", which is the spec's statement
+of what view is for and states no measurement. Markup sits on the
+comparative as it does on the engine's name, and the pages wrap at 80
+characters, so each line is read with its successor joined on: `*slower*`
+at the margin and `than Neovim` under it is one comparative and was read
+as two.
 
 The re-seat rule is what keeps three files telling the same story: a
 commit that deletes a `withdrawn` entry re-seats the shortfall ledger and

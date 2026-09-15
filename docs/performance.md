@@ -33,8 +33,8 @@ view is 1.5 ms behind on that screen, and the bar view holds itself to for
 this moment is level with Neovim -- so this row is a bar view has not met, by
 2.9%. At the worst launch in a thousand under your config, held from the
 2026-09-06 run, the two are within a millisecond of each other (78.2 ms
-against 77.2 ms). With no plugins at all the same screen is 9.6% behind
-Neovim's in the same run, which is a bench fixture and not this row.
+against 77.2 ms). With no plugins at all the same gap is 9.6%, which is a
+bench fixture and not this row.
 
 What makes it that number: view paints its own shell -- the chrome you see
 before anything has loaded -- in about 4 ms, and that frame is on screen
@@ -45,9 +45,8 @@ already painted; it now attaches while your `init.lua` is still running. What
 is left of that gap is the screen the attach asks for, which travels to view
 over the wire and is painted again by view, where Neovim's own terminal UI
 reads it out of the same process. That attach is inside the engine's own
-startup now, so the engine's "started" mark lands 1.64 ms later under view
-than the same engine under Neovim's own terminal UI -- the same work, counted
-on the other side of the mark rather than added.
+startup now, so the engine's "started" mark lands 1.64 ms later under view --
+the same work, counted on the other side of the mark rather than added.
 
 ## You type
 

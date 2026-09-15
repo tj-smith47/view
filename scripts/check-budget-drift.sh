@@ -175,13 +175,6 @@ if [[ $felt_ids != *[![:space:]]* ]]; then
   exit 1
 fi
 
-# a multiplier ("5.2x", "1.10x"), or a comparative that names what it beats
-# ("faster than bare Neovim", "ahead of the round trip"). The multiplier
-# stops short of a digit so that a terminal size (120x40) is a size and not
-# a claim. Exported rather than passed with -v, because awk expands escape
-# sequences inside a -v assignment and would eat the regex's backslashes.
-export CLAIM='[0-9](\.[0-9]+)?[ ]*(x|\xc3\x97)([^0-9]|$)|(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([^a-z]|$)'
-
 # A comparative that names the engine, on a table row, is refused whatever
 # anchors it. A felt anchor licenses a multiplier -- the cell that earns the
 # number is named beside it -- but it cannot tell a bound ("ratio_p50 <= 0.30x
@@ -195,7 +188,33 @@ export CLAIM='[0-9](\.[0-9]+)?[ ]*(x|\xc3\x97)([^0-9]|$)|(faster|sooner|quicker|
 # another clause's subject. A window word is any non-space token and
 # markup may sit before the engine: the pages write `**bare Neovim**` and
 # `` `nvim` ``, and a letters-only class let both through.
-export ENGINE='(faster|sooner|quicker|snappier|ahead)[ ]+(than|of)([ ]+[^ ]+){0,3}[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)'
+#
+# Both directions, because a page saying view is behind the engine names it
+# in a comparative exactly as one saying view is ahead of it does, and a
+# word list of wins alone left "9.6% behind Neovim's" on a user-facing page
+# for the gate to pass. `behind` takes the engine as its own object the way
+# `ahead` takes it through `of`, so it carries no preposition; the rest pair
+# with `than`. Markup may sit on the comparative as it may on the engine: a
+# README wrote `*slower*` and a letters-and-space class read the closing
+# asterisk as the end of the claim.
+#
+# The preposition stays the comparative's own next word. Opening a window
+# there as well reaches "Objectively faster, smoother UX than nvim" -- the
+# spec's statement of what view is for, which states no measurement and
+# anchors no cell -- so a subject standing between the two ("lands 1.64 ms
+# later under view than under Neovim's") is out of the grammar's reach and
+# is a sentence a reader has to catch.
+export ENGINE='(faster|sooner|quicker|snappier|ahead|slower|later|worse)[^A-Za-z ]*[ ]+(than|of)([ ]+[^ ]+){0,3}[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)|behind[^A-Za-z ]*([ ]+[^ ]+){0,3}[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)'
+
+# a multiplier ("5.2x", "1.10x"), or a comparative that names what it beats
+# or what it trails ("faster than bare Neovim", "ahead of the round trip",
+# "slower than `heavy`", "behind Neovim"). The multiplier stops short of a
+# digit so that a terminal size (120x40) is a size and not a claim. An
+# engine-naming comparative is a claim whatever its object's distance, so
+# ENGINE stands here as its own alternative. Exported rather than passed
+# with -v, because awk expands escape sequences inside a -v assignment and
+# would eat the regex's backslashes.
+export CLAIM='[0-9](\.[0-9]+)?[ ]*(x|\xc3\x97)([^0-9]|$)|(faster|sooner|quicker|snappier|ahead|slower|later|worse)[^A-Za-z ]*[ ]+(than|of)([^a-z]|$)|'"$ENGINE"
 
 claims_in() {
   local page="$1" first="${2:-1}" last="${3:-}"
@@ -216,8 +235,16 @@ claims_in() {
       }
       print page ":" (at + off) ": " line
     }
+    # The pages wrap at 80 characters, so a comparative sits across the
+    # margin as often as within a line ("currently *slower*" / "than
+    # Neovim"), and a line-at-a-time read is a bypass one wrap wide. Each
+    # line is read with its successor joined on, and the finding is reported
+    # at the line the comparative starts on.
+    function probe(i) {
+      return (i < lines) ? para[i] " " para[i + 1] : para[i]
+    }
     function verdict(   i, j, anchored) {
-      if (hits == 0) { return }
+      if (lines == 0) { return }
       anchored = 0
       for (i = 1; i <= lines; i++) {
         for (j = 1; j <= names; j++) {
@@ -226,7 +253,7 @@ claims_in() {
       }
       if (anchored) { return }
       for (i = 1; i <= lines; i++) {
-        if (para[i] ~ claim) { print page ":" (no[i] + off) ": " para[i] }
+        if (probe(i) ~ claim) { print page ":" (no[i] + off) ": " para[i] }
       }
     }
     BEGIN {
@@ -235,12 +262,11 @@ claims_in() {
       engine = ENVIRON["ENGINE"]
     }
     /^[[:space:]]*\|/ { row_verdict($0, NR); next }
-    /^[[:space:]]*$/ { verdict(); lines = 0; hits = 0; next }
+    /^[[:space:]]*$/ { verdict(); lines = 0; next }
     {
       lines++
       para[lines] = $0
       no[lines] = NR
-      if ($0 ~ claim) { hits++ }
     }
     END { verdict() }
   '

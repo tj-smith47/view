@@ -375,6 +375,66 @@ printf '\n| settled screen (`echo.view_p99_ms`) | ahead of that boundary, a cost
 expect 0 '' 'a comparative whose object is a boundary, with the engine in a later clause'
 
 # ---------------------------------------------------------------------------
+# both directions. A page saying view is behind the engine names it in a
+# comparative exactly as one saying view is ahead of it does, and a word list
+# of wins alone passed "9.6% behind Neovim's" on the page a person reads.
+# ---------------------------------------------------------------------------
+new_case
+printf '\nWith no plugins at all the same screen is 9.6%% behind Neovim.\n' \
+  >> "$CASE/$PERF"
+expect 1 'claim:docs/performance.md:11' 'a page saying view trails the engine, in the word that takes it directly'
+
+new_case
+printf '\nUnder your config the same screen is slower than bare Neovim.\n' \
+  >> "$CASE/$PERF"
+expect 1 'claim:docs/performance.md:11' 'a page saying view is slower than the engine'
+
+new_case
+printf '\nThe mark lands later than Neovim does under the same load.\n' \
+  >> "$CASE/$PERF"
+expect 1 'claim:docs/performance.md:11' 'a page saying view lands later than the engine'
+
+new_case
+printf '\nThe tail reads worse than bare nvim on this class.\n' >> "$CASE/$PERF"
+expect 1 'claim:docs/performance.md:11' 'a page saying view reads worse than the engine'
+
+new_case
+printf '\nWith no plugins at all the same screen is 9.6%% behind on that screen.\n' \
+  >> "$CASE/$PERF"
+expect 0 '' 'the same sentence with the engine name gone, which is what the page may say'
+
+new_case
+printf '\n| first paint (`echo.view_p99_ms`) | 1.2x slower than bare nvim |\n' \
+  >> "$CASE/$BENCH"
+expect 1 'claim:docs/benchmarking.md:12' \
+  'a row naming the engine it trails, standing beside a felt cell id'
+
+# ---------------------------------------------------------------------------
+# the pages wrap at 80 characters, so the comparative and its object sit on
+# either side of the margin as often as on one line, and markup sits on the
+# comparative the way it sits on the engine's name
+# ---------------------------------------------------------------------------
+new_case
+printf '\nThe moments where view is currently *slower*\nthan Neovim are written down with the rest.\n' \
+  >> "$CASE/$PERF"
+expect 1 'claim:docs/performance.md:11' 'a comparative wrapped across the margin, reported where it starts'
+
+new_case
+printf '\nThe moments where view is currently *slower* than Neovim are here.\n' \
+  >> "$CASE/$PERF"
+expect 1 'claim:docs/performance.md:11' 'a comparative wearing the markup the pages emphasise it with'
+
+new_case
+printf '\nview is 1.5 ms behind on that screen, and the tree writes it down.\n' \
+  >> "$CASE/$PERF"
+expect 0 '' 'a gap stated with no engine named, which the rule does not touch'
+
+new_case
+printf '\nThe started mark lands 1.64 ms later under view than under the TUI.\n' \
+  >> "$CASE/$PERF"
+expect 0 '' 'a subject standing between the comparative and its preposition, past the reach'
+
+# ---------------------------------------------------------------------------
 # the same claim, anchored by nothing, by a diagnostic, and by an id the
 # budgets file never declared -- the three ways the shipped bug read as fine
 # ---------------------------------------------------------------------------
