@@ -78,7 +78,7 @@ impl Frame {
 ///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
 ///   `mouse_capture`, `mouse_on`, `next_overlay_id`, `attached` (it decides
 ///   only when the UI goes on, and the frame that follows is what flips
-///   `content_painted`, which is here) and `stdin_relay` (an attach option
+///   `chrome_painted`, which is here) and `stdin_relay` (an attach option
 ///   the session was started with)
 /// - read through a field already here: `engine` (this destructures it),
 ///   `grids` (via `grid`, which is the global grid's size -- the panes it
@@ -97,7 +97,7 @@ struct Inputs {
     grid: (u16, u16),
     offset: u16,
     term: (u16, u16),
-    content_painted: bool,
+    chrome_painted: bool,
     palette_enabled: bool,
     // the whole capability struct, not the tier alone: the border charset
     // follows `unicode_boxes`, which a probe reply arriving after the first
@@ -134,7 +134,7 @@ impl Inputs {
             grid: engine.grid().size(),
             offset: model.chrome_rows(),
             term: (model.term_width, model.term_height),
-            content_painted: model.content_painted,
+            chrome_painted: model.chrome_painted,
             palette_enabled: model.palette_enabled,
             caps: model.caps,
             statusline_rows: model.statusline_rows(),
@@ -158,7 +158,7 @@ impl Inputs {
             && self.grid == engine.grid().size()
             && self.offset == model.chrome_rows()
             && self.term == (model.term_width, model.term_height)
-            && self.content_painted == model.content_painted
+            && self.chrome_painted == model.chrome_painted
             && self.palette_enabled == model.palette_enabled
             && self.caps == model.caps
             && self.statusline_rows == model.statusline_rows()
@@ -913,7 +913,7 @@ mod tests {
 
         let mut model = model_with_grid(20, 6);
         model.statusline_enabled = true;
-        model.content_painted = false;
+        model.chrome_painted = false;
         let mut cache = SurfaceCache::new();
         let _ = cache.render(&model);
 

@@ -1442,12 +1442,12 @@ fn paint_frame_cells(
     }
 }
 
-/// Renders the pre-content startup shell: a themed statusline bar on the
-/// terminal's bottom row over an otherwise empty grid. Present only while
-/// `view_core::model::Model::content_painted` is `false` (see
-/// `view_surface::render`); `render()` stops including the
-/// [`LayerKind::Shell`] layer at all once real grid content has arrived, so
-/// this function has nothing left to overwrite it with.
+/// Renders the startup shell view paints before the engine's first frame: a
+/// themed statusline bar on the terminal's bottom row over an otherwise
+/// empty grid. Present only while `view_core::model::Model::chrome_painted`
+/// is `false` (see `view_surface::render`); `render()` stops including the
+/// [`LayerKind::Shell`] layer at all once that frame has arrived, so this
+/// function has nothing left to overwrite it with.
 ///
 /// No text of its own: a line announcing the wait makes a start that is
 /// usually over inside a frame read as slower than it is, and a start that
@@ -3538,7 +3538,7 @@ mod tests {
                 sp: None,
             },
         );
-        model.content_painted = false;
+        model.chrome_painted = false;
 
         let surface = view_surface::render(&model);
         let backend = TestBackend::new(20, 4);
@@ -3568,9 +3568,9 @@ mod tests {
     }
 
     #[test]
-    fn shell_never_paints_once_content_painted_is_true() {
+    fn shell_never_paints_once_chrome_painted_is_true() {
         let model = Model::with_term_size(20, 4);
-        assert!(model.content_painted, "default must be the steady state");
+        assert!(model.chrome_painted, "default must be the steady state");
 
         let surface = view_surface::render(&model);
 
@@ -3583,7 +3583,7 @@ mod tests {
                 .layers
                 .iter()
                 .any(|layer| matches!(layer.kind, view_surface::LayerKind::Shell)),
-            "render() must drop the Shell layer once content_painted is true"
+            "render() must drop the Shell layer once chrome_painted is true"
         );
     }
 
@@ -5622,7 +5622,7 @@ mod tests {
                 // the shell layer exists only before the first real content
                 // flush, which is also when a sidebar opened from the
                 // command line is already on screen
-                m.content_painted = false;
+                m.chrome_painted = false;
                 open_tree_with_entries(m);
             },
             60,

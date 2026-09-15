@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn the_startup_shell_rasters_no_text_at_all() {
         let mut model = Model::with_term_size(40, 5);
-        model.content_painted = false;
+        model.chrome_painted = false;
         let surface = view_surface::render(&model);
 
         let rows = screen_rows(&surface, model.engine.grid());

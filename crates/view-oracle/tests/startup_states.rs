@@ -347,6 +347,21 @@ fn a_one_line_buffer_over_blank_rows_reaches_neither_editors_terminal() {
 fn warm_the_home(home: &std::path::Path) {
     let mut session = view_session(home);
     let _ = until_the_split(&mut session, "view (warming)");
+    warm_out(home, session);
+}
+
+/// [`warm_the_home`] for a fixture whose config opens no layout of its own,
+/// so there is no second window to wait for on the way.
+///
+/// The theme cache is the readiness this is for either way, and it is
+/// ordered after the highlight probe rather than after any screen, so
+/// dropping the layout wait drops nothing the caller needed.
+fn warm_the_home_without_a_layout(home: &std::path::Path) {
+    let session = view_session(home);
+    warm_out(home, session);
+}
+
+fn warm_out(home: &std::path::Path, mut session: PtySession) {
     let cache = common::xdg_home(home, "XDG_STATE_HOME").join("view");
     let written = || {
         std::fs::read_dir(&cache).is_ok_and(|entries| {
@@ -502,8 +517,11 @@ const CONTENT_FRAME: &str = "first content frame written";
 ///
 /// The call site is what this pins, which neither the registry's own unit
 /// tests nor the four pins above reach: reverting the loop's condition to
-/// `model.content_painted` -- the frame view's first flush produced, which
+/// `model.chrome_painted` -- the frame view's first flush produced, which
 /// is the chrome -- leaves every one of them passing.
+///
+/// The home is warmed first, so the measured session paints no first-run
+/// notice over the rows the typed text lands on.
 ///
 /// Ordered by construction rather than by a clock. The fixture's window is
 /// empty and draws no end-of-buffer fill, no status line and no intro, so
@@ -515,13 +533,14 @@ const CONTENT_FRAME: &str = "first content frame written";
 /// construction, and one written for the text this test typed cannot,
 /// because the text arrived in a batch of its own.
 ///
-/// Disconfirm: point the loop's condition back at `model.content_painted`
+/// Disconfirm: point the loop's condition back at `model.chrome_painted`
 /// and this fails with `redraws=0` while the whole rest of the suite stays
 /// green.
 #[test]
 fn the_content_line_is_written_for_the_frame_carrying_window_text() {
     let paths = common::ScratchPaths::new("startup-content");
     common::plant_nvim_config(&paths.isolated_home, "startup-content");
+    warm_the_home_without_a_layout(&paths.isolated_home);
 
     let view_log = paths.isolated_home.join("view.log");
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());

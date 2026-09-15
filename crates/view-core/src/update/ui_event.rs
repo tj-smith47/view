@@ -189,9 +189,9 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             model.dirty = true;
             // idempotent past the first Flush: view attaches after the
             // config has been sourced, so this one carries the settled
-            // screen (see Model::takes_attach), and Model::content_painted
+            // screen (see Model::takes_attach), and Model::chrome_painted
             // documents why it never resets
-            model.content_painted = true;
+            model.chrome_painted = true;
             Vec::new()
         }
         UiEvent::ModeInfoSet {

@@ -140,11 +140,11 @@ pub enum LayerKind {
     Tabline(TablineState),
     /// The completion popup menu, present while it is open.
     Popupmenu(PopupmenuState),
-    /// The pre-content startup shell: a themed statusline placeholder bar
-    /// plus a static "waiting for nvim" indicator, painted over the
-    /// (empty, pre-attach) `EngineGrid` layer. Present only while
-    /// `Model::content_painted` is `false`; `render()` drops it for good
-    /// once the first grid `Flush` arrives. No animation lives here or in
+    /// The startup shell view paints before the engine's first frame: a
+    /// themed statusline placeholder bar plus a static "waiting for nvim"
+    /// indicator, painted over the (empty, pre-attach) `EngineGrid` layer.
+    /// Present only while `Model::chrome_painted` is `false`; `render()`
+    /// drops it for good once the first grid `Flush` arrives. No animation lives here or in
     /// its `view-tui` painter: the runtime loop is timer-free, so this is a
     /// fixed glyph, never a frame that advances on its own clock.
     Shell,
@@ -345,7 +345,7 @@ impl Surface {
 /// the frame around it was built at zero is a frame that disagrees with
 /// itself.
 pub(crate) fn painted_grid_size(model: &Model) -> (u16, u16) {
-    if model.content_painted {
+    if model.chrome_painted {
         model.engine.grid().size()
     } else {
         (0, 0)
@@ -406,7 +406,7 @@ pub fn render(model: &Model) -> Surface {
         layers.insert(SPECULATED_LAYER_INDEX, layer);
     }
 
-    if !model.content_painted {
+    if !model.chrome_painted {
         // sized from the real terminal, not the (still 0x0 pre-attach)
         // engine grid: the very first shell paint happens before nvim has
         // ever sent a grid_resize, so grid_w/grid_h are not yet meaningful
@@ -1031,7 +1031,7 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
             let col = cmdline_cursor_col(cmdline).min(width.saturating_sub(1));
             (height.saturating_sub(1).saturating_add(offset), col)
         }
-    } else if !model.content_painted {
+    } else if !model.chrome_painted {
         // the buffer caret belongs to the grid this frame is not painting
         // (see `painted_grid_size`), so it waits with it -- a caret parked
         // mid-screen over the startup shell points at a buffer that is not
@@ -1558,7 +1558,7 @@ mod tests {
             view_core::native::ext::Ext::Cmdline,
             view_core::native::ext::Ext::Messages,
         ]);
-        model.content_painted = false;
+        model.chrome_painted = false;
         model
     }
 
@@ -2303,8 +2303,8 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         // the opt-in only startup itself performs in production; every
         // other consumer's Model::new()/with_term_size defaults to
-        // content_painted: true (ordinary steady state)
-        model.content_painted = false;
+        // chrome_painted: true (ordinary steady state)
+        model.chrome_painted = false;
         let surface = render(&model);
 
         let shell = surface
@@ -2325,8 +2325,8 @@ mod tests {
     }
 
     #[test]
-    fn shell_layer_is_dropped_for_good_once_content_painted_flips_true() {
-        // content_painted: true is the default already; this test pins that
+    fn shell_layer_is_dropped_for_good_once_chrome_painted_flips_true() {
+        // chrome_painted: true is the default already; this test pins that
         // an ordinary model never renders Shell, symmetric with the
         // opted-in false case above
         let model = Model::with_term_size(80, 24);
@@ -2348,7 +2348,7 @@ mod tests {
         // rather than a raw Messages::push -- there is no bypass entry
         // point left for a fixture to reach past classification through.
         let mut model = Model::with_term_size(80, 24);
-        model.content_painted = false;
+        model.chrome_painted = false;
         let _ = model
             .engine
             .record_native_notice("dropped a key".to_string(), false);
@@ -3882,7 +3882,7 @@ mod tests {
         let mut model = model_with_grid(40, 12);
         model.term_width = 40;
         model.term_height = 12;
-        model.content_painted = true;
+        model.chrome_painted = true;
         predict(&mut model, 'a', (2, 3), 0);
         model.push_overlay(
             OverlayBox::new(30, 100).with_anchor(Anchor::Left),

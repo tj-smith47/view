@@ -112,7 +112,7 @@ impl KeyRing {
 /// terminal would show whatever `Term::init` last left on screen until the
 /// engine attaches and streams real content -- a blank screen for however
 /// long attach takes, rather than an immediate themed placeholder. The caller must have already set
-/// `model.content_painted = false` (`Model`'s default is `true`, the
+/// `model.chrome_painted = false` (`Model`'s default is `true`, the
 /// ordinary steady state; startup is the one caller that opts into the
 /// placeholder) for this frame to show the shell rather than an empty grid.
 ///
@@ -1606,7 +1606,7 @@ mod tests {
             let ops = crate::engine_ops::FakeOps::default();
             let executor = crate::runtime::Executor::new(ops);
             let mut model = Model::with_term_size(80, 24);
-            model.content_painted = false;
+            model.chrome_painted = false;
             let outcome = run_cutover(
                 &mut model,
                 &executor,
@@ -1629,8 +1629,8 @@ mod tests {
             (
                 outcome,
                 // what a dispatched `Flush` leaves behind (see
-                // `Model::content_painted`)
-                model.content_painted,
+                // `Model::chrome_painted`)
+                model.chrome_painted,
                 executor.into_ops().calls.into_inner(),
             )
         });
@@ -1681,7 +1681,7 @@ mod tests {
         let ops = crate::engine_ops::FakeOps::default();
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
-        model.content_painted = false;
+        model.chrome_painted = false;
 
         let exit_called = std::cell::Cell::new(false);
         let outcome = run_cutover(
@@ -1816,7 +1816,7 @@ mod tests {
         *ops.fail_next.borrow_mut() = true;
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
-        model.content_painted = false;
+        model.chrome_painted = false;
 
         let outcome = run_cutover(
             &mut model,

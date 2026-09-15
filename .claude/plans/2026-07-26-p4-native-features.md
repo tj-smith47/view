@@ -249,7 +249,7 @@ pub enum RpcCall {                       // #[non_exhaustive], core stays rmpv-f
 // view-core/src/model.rs
 pub struct Model { pub engine: EngineModel, pub focus: Focus, pub caps: TermCaps,
     pub dirty: bool, pub running: bool, pub term_width: u16, pub term_height: u16,
-    pub content_painted: bool, pub fatal_reason: Option<String>, .. }
+    pub chrome_painted: bool, pub fatal_reason: Option<String>, .. }
 pub fn chrome_rows(&self) -> u16         // tabline is the only persistent chrome today
 pub enum Focus { Engine, Native(OverlayId) }   // Native has NO consumer yet
 pub struct OverlayId(pub u64);                 // nothing constructs this yet

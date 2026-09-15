@@ -102,7 +102,7 @@ fn populated_model() -> Model {
             cells,
         });
     }
-    model.content_painted = true;
+    model.chrome_painted = true;
     model
 }
 
@@ -142,7 +142,7 @@ fn wide_model() -> Model {
             cells,
         });
     }
-    model.content_painted = true;
+    model.chrome_painted = true;
     model
 }
 

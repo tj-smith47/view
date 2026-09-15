@@ -1183,7 +1183,7 @@ pub fn run(
                 milestones.painted = true;
                 crate::vlog::log("startup", "first dirty pass painted");
             }
-            if !milestones.chrome && model.content_painted {
+            if !milestones.chrome && model.chrome_painted {
                 milestones.chrome = true;
                 milestones.redraws = 0;
                 milestones.redraw_events = 0;
@@ -4787,7 +4787,7 @@ mod tests {
             view_core::native::ext::Ext::Cmdline,
             view_core::native::ext::Ext::Messages,
         ]);
-        model.content_painted = false;
+        model.chrome_painted = false;
         model
     }
 

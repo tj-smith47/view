@@ -63,22 +63,32 @@ pub struct Model {
     pub term_width: u16,
     /// The real terminal's current height in cells; see `term_width`.
     pub term_height: u16,
-    /// Whether real grid content has ever arrived. Defaults `true` (an
-    /// ordinary already-running model, which is what every consumer other
-    /// than startup itself constructs and expects to render normally);
-    /// startup is the one caller that deliberately flips this to `false`
-    /// right after building its very first `Model`, to opt into painting
-    /// the shell frame (a themed statusline bar, see
+    /// Whether the engine's first `Flush` has arrived: the chrome frame,
+    /// which is view's tabline and statusline over whatever grid nvim has
+    /// sized so far. Not the frame carrying the file -- a window grid nvim
+    /// has sized and not yet drawn into stands under that first flush, and
+    /// the frame a person calls the start lands a whole screen update
+    /// later. [`GridRegistry::window_text_painted`] is the question about
+    /// that one, and the runtime's `first content frame written` line is
+    /// the moment.
+    ///
+    /// Defaults `true` (an ordinary already-running model, which is what
+    /// every consumer other than startup itself constructs and expects to
+    /// render normally); startup is the one caller that deliberately flips
+    /// this to `false` right after building its very first `Model`, to opt
+    /// into painting the shell frame (a themed statusline bar, see
     /// `view_surface::LayerKind::Shell`) instead of an unthemed empty grid
     /// while the engine attaches. `update()` flips it back to `true` on the
-    /// first `Flush`, which is the settled screen: the UI attaches after
-    /// the config has been sourced (see [`Self::takes_attach`]), so the
-    /// first frame nvim draws is the one its own TUI would first show. A
-    /// mid-session redraw storm never resets it -- it is not a second
-    /// pre-attach state -- but a respawned engine is one, and a restart
-    /// sets it back to `false` so the shell frame carries the supervision
-    /// notice until the replacement's own first frame lands.
-    pub content_painted: bool,
+    /// first `Flush`: the UI attaches after the config has been sourced
+    /// (see [`Self::takes_attach`]), so that frame is the first one nvim's
+    /// own TUI would have shown too. A mid-session redraw storm never
+    /// resets it -- it is not a second pre-attach state -- but a respawned
+    /// engine is one, and a restart sets it back to `false` so the shell
+    /// frame carries the supervision notice until the replacement's own
+    /// first frame lands.
+    ///
+    /// [`GridRegistry::window_text_painted`]: crate::grid::GridRegistry::window_text_painted
+    pub chrome_painted: bool,
     /// Whether the UI attach has been issued for the engine this session
     /// holds.
     ///
@@ -333,7 +343,7 @@ impl Model {
             running: true,
             term_width: 0,
             term_height: 0,
-            content_painted: true,
+            chrome_painted: true,
             attached: false,
             stdin_relay: false,
             fatal_reason: None,

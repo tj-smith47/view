@@ -1103,7 +1103,7 @@ fn main() -> Result<()> {
     // opts into startup's shell frame (a themed statusline bar over an
     // empty grid) instead of Model's ordinary already-running default;
     // update() flips this back to true for good on the first grid Flush
-    model.content_painted = false;
+    model.chrome_painted = false;
 
     // ahead of the trust and theme reads below rather than after them, for
     // the same reason the spawn is ahead of `Term::init`: until the attach

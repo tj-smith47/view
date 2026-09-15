@@ -362,7 +362,7 @@ pub(crate) fn restart_engine(
     // paint, so the shell frame carries the supervision notice the way the
     // first start's did
     model.rearm_attach();
-    model.content_painted = false;
+    model.chrome_painted = false;
     // the forgets change what is painted whether or not the spawn below
     // succeeds: a failed attempt goes back to a loop that only repaints on
     // its own account, and would leave the dropped overlays painted and the
