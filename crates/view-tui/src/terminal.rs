@@ -48,8 +48,11 @@ impl TerminalGuard {
     /// before delegating to the previous hook, and switches to the
     /// alternate screen with bracketed-paste reporting on.
     ///
-    /// The alternate screen goes up before any other byte this process
+    /// The alternate screen goes up before any escape sequence this process
     /// writes to the terminal, capability detection's probe batch included.
+    /// A plain-text notice can still precede it -- `main.rs` prints one to
+    /// stderr for a session with no terminal stdin, where the main screen
+    /// is the only sink left and is where the notice belongs.
     /// What a program leaves on the main screen ahead of `CSI ? 1049 h` is
     /// at the mercy of how the emulator saves and restores that screen
     /// around the switch, and one (Termius) put view's last alternate
@@ -173,6 +176,19 @@ const KITTY_KBD_POP: &[u8] = b"\x1b[<u";
 /// published behind it, so nothing is owed a happens-before.
 static KITTY_KBD_PUSHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the teardown escapes have already been written this process.
+///
+/// Held process-wide for the same reason [`KITTY_KBD_PUSHED`] is, and read
+/// by [`restore_bytes_once`] alone. The panic path is what needs it: the
+/// hook runs [`restore`], the previous hook prints the message on the main
+/// screen, and then unwinding drops the [`Term`] that owns the guard into
+/// [`restore`] a second time -- which would clear the screen, park the
+/// caret and switch buffers over the message a user is meant to read.
+///
+/// `Relaxed`, like its neighbour: the flag is the whole message, and
+/// nothing is being published behind it.
+static RESTORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Whether the terminal is reporting keys in the kitty keyboard protocol,
 /// which decides the name [`crate::keys::encode_terminal_key`] gives four
 /// of the C0 bytes.
@@ -207,12 +223,17 @@ fn enter_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
     )
 }
 
-/// Writes the keyboard-protocol push a terminal that only admitted to
-/// speaking it *after* [`enter_bytes`] ran is owed, and nothing at all
-/// when the entry window already pushed it or the terminal does not speak
-/// it. Generic over `Write` for the same reason its two siblings are:
-/// "exactly one push per session, however late the answer" is a claim
-/// about bytes, and only a `Vec<u8>` can hold a whole session's worth.
+/// Writes the keyboard-protocol push when the terminal speaks it and has
+/// not been pushed already, and nothing at all otherwise.
+///
+/// The one push site, for both moments a session can reach a decision at:
+/// [`TerminalGuard::push_keyboard_protocol`] runs it on the probe's first
+/// answer, with nothing pushed yet, and [`Term::adopt_caps`] runs it again
+/// for a terminal that only admitted to speaking the protocol after that
+/// window closed. Generic over `Write` for the same reason its two
+/// siblings are: "exactly one push per session, however late the answer"
+/// is a claim about bytes, and only a `Vec<u8>` can hold a whole session's
+/// worth.
 ///
 /// The pop in [`restore_bytes`] needs no matching condition: it is written
 /// unconditionally on every exit path, and a pop against an empty stack is
@@ -233,11 +254,12 @@ fn push_kitty_keyboard<W: Write>(
 /// Writes every teardown escape to `out`: the synchronized-update close
 /// first, then the keyboard-protocol pop, the clear of the frame the
 /// alternate screen is still showing, the caret parked at column 0 of that
-/// screen's bottom row, and last mouse capture, bracketed paste and the
-/// alternate screen, with one `CSI ? 25 h` after the switch back. Nothing
-/// else follows it: every byte that paints lands on the screen view drew
-/// on, which is what keeps its last frame out of the host shell's
-/// scrollback. `rows` is the terminal's height in cells, which the
+/// screen's bottom row, the caret shown on that screen, and last mouse
+/// capture, bracketed paste and the alternate screen -- then a second
+/// `CSI ? 25 h` on the screen the host shell resumes on. Two caret shows,
+/// one per screen, and nothing else after the switch back: every byte that
+/// paints lands on the screen view drew on, which is what keeps its last
+/// frame out of the host shell's scrollback. `rows` is the terminal's height in cells, which the
 /// bottom-row park needs and which [`restore`] asks the terminal for.
 /// Generic over `Write` (mirrors [`write_cursor_shape`]) so the byte
 /// sequence and ordering are unit-testable against a `Vec<u8>` instead of
@@ -314,15 +336,31 @@ fn restore_bytes<W: Write>(out: &mut W, rows: u16) -> std::io::Result<()> {
     out.flush()
 }
 
+/// [`restore_bytes`] the first time it is reached in this process, and
+/// nothing at all afterwards -- see [`RESTORED`].
+///
+/// Only the escapes are guarded. Everything else [`restore`] does is
+/// idempotent and costs a repeat nothing: raw mode is already off, the
+/// push flag is already false, and fd 2 already points where it did.
+fn restore_bytes_once<W: Write>(out: &mut W, rows: u16) -> std::io::Result<()> {
+    if RESTORED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    restore_bytes(out, rows)
+}
+
 fn restore() {
     let mut out = std::io::stdout();
     // asked here rather than carried on the guard: `restore` is a free
     // function the panic hook runs with no value in scope, and a terminal
-    // resized since entry parks at the height it has now. A terminal that
-    // will not report one parks at column 0 of the row it is already on,
-    // which is what this path did before the park existed.
-    let rows = crossterm::terminal::size().map_or(1, |(_, rows)| rows);
-    let _ = restore_bytes(&mut out, rows);
+    // resized since entry parks at the height it has now. `window_size`
+    // rather than `size`: the latter falls back to forking `tput cols` and
+    // `tput lines` once the tty is gone, which is two blocking spawns on
+    // the exit path and inside the panic hook. A terminal that reports no
+    // size parks at column 0 of the row it is already on, which is what
+    // this path did before the park existed.
+    let rows = crossterm::terminal::window_size().map_or(1, |size| size.rows);
+    let _ = restore_bytes_once(&mut out, rows);
     set_kitty_keyboard_pushed(false);
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = out.flush();
@@ -1284,7 +1322,7 @@ mod tests {
     // Windows reaches the WinAPI console layer instead of emitting bytes.
     #[cfg(unix)]
     #[test]
-    fn nothing_a_session_writes_lands_on_the_main_screen() {
+    fn no_escape_a_session_writes_lands_on_the_main_screen() {
         for kitty_kbd in [false, true] {
             let wire = session_bytes(kitty_kbd);
             assert!(
@@ -1352,6 +1390,35 @@ mod tests {
         assert!(
             find_subslice(&off, b"\x1b[?1049h").is_some(),
             "declining the push must not cost the alternate screen"
+        );
+    }
+
+    /// The panic path reaches [`restore`] twice: the hook runs it, the
+    /// previous hook prints the message on the main screen, and unwinding
+    /// then drops the [`Term`] that owns the guard. The second pass must
+    /// write nothing, or the clear, the park and the buffer switch land on
+    /// top of the message the first pass made readable.
+    ///
+    /// The only test that touches [`RESTORED`], and it leaves the flag set
+    /// on purpose: the flag is the process's, and nothing else in this
+    /// binary reaches [`restore_bytes_once`].
+    #[cfg(unix)]
+    #[test]
+    fn the_teardown_escapes_are_written_once_per_process() {
+        let mut first = Vec::new();
+        restore_bytes_once(&mut first, 24).unwrap();
+        assert!(
+            !first.is_empty(),
+            "the first pass writes the teardown the terminal is owed"
+        );
+
+        let mut second = Vec::new();
+        restore_bytes_once(&mut second, 24).unwrap();
+        assert!(
+            second.is_empty(),
+            "a second pass writes nothing: on the panic path it would otherwise clear and \
+             switch buffers over the message the first pass made readable -- {:?}",
+            String::from_utf8_lossy(&second)
         );
     }
 

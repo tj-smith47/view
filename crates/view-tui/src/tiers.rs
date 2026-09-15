@@ -30,9 +30,10 @@ use std::time::{Duration, Instant};
 use view_core::model::{TermCaps, Tier};
 
 /// How long the probe's first window -- the one `Term::init` spends before
-/// the startup shell frame paints -- waits for capability replies. A terminal on the same machine answers the DA1
-/// fence in single-digit milliseconds and ends the window early; this is
-/// the bound on what a terminal that answers nothing costs the first frame.
+/// the startup shell frame paints -- waits for capability replies. A
+/// terminal on the same machine answers the DA1 fence in single-digit
+/// milliseconds and ends the window early; this is the bound on what a
+/// terminal that answers nothing costs the first frame.
 pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);
 
 /// The total the probe may wait for the DA1 fence, measured from the moment
