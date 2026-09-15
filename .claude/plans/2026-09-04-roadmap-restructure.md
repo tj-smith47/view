@@ -227,6 +227,47 @@ first_paint regression check under a quiet window (#40), echo campaign
 T23 docs (#12), final whole-branch review (#16). Docs are written once,
 against the finished surface.
 
+#### The performance-and-stability session's ledger
+
+A task that has absorbed its hours leaves what it measured here rather than
+running another loop.
+
+**S1.12 cold start, the settled screen under a real config** (2026-09-14/15,
+about 12 h of session time across six commits, 823b76c through b880b9b).
+
+- *What remains.* `startup.settled_ratio_p50` on `dev-linux`/`user` reads
+  1.0287 against a bar of 1.0, ledgered as a `[[shortfall]]`. About a
+  millisecond of it is the attach's full-screen redraw travelling over RPC
+  and being re-rendered by view, where bare nvim's own TUI reads that screen
+  out of process memory; the rest is the attach-and-takeover round trip the
+  startup pump now runs inside `VimEnter`.
+- *What was tried and measured.* The parked attach was the cause: view's
+  attach and takeover sat behind the `view_vim_enter` reply until nvim had
+  drawn once, so the whole first draw was re-rendered afterwards. The fix
+  pumps the loop inside the startup chunk (`vim.wait(200, attached)`) and
+  fires one synthetic `UIEnter` on it. Round 1 A/B, three interleaved runs of
+  the same driver with both binaries in each run: base 1.1065 p50 against fix
+  1.0316 (n=22, load 7.0 to 4.5), and the same step on two earlier runs (base
+  1.0888 / fix unavailable, base 1.1409 / fix 1.0735). The traced tail --
+  marker buffer filled to the marker's bytes on the pty -- went from
+  6.11-12.27 ms to 1.35-2.62 ms against bare nvim's 0.90-1.41 ms, and the
+  attach moved from 4.33-9.96 ms after the marker buffer is filled to
+  4.0-7.3 ms before the marker's `VimEnter` starts. Fix rounds 1-4 were
+  review findings (the synthetic event's shape and ordering, the held reply's
+  `EngineLost`, bounded oracle teardowns, the doc-figure walk), not further
+  tuning of the number.
+- *Next lever, as the report names it.* Two, and each is a design change
+  rather than a tuning pass: removing the redraw needs the UI attached before
+  `init.lua` runs, which is the whole of what the late attach exists to avoid
+  (a plugin reading `nvim_list_uis` at configure time must see a plain TUI);
+  removing the round trip needs the takeover to stop being one.
+- *Carried with it.* `startup.server_delta_ms` on the same cell re-seats from
+  just below zero to 1.637 ms, because the attach wait now runs inside the
+  interval that metric measures. That is the same work on the other side of
+  the mark, and the ratchet's next honest reading on this cell cannot fall
+  more than the class's published spread below 1.637 without being refused as
+  a lucky draw -- so a fix that removes the wait needs another hand re-seat.
+
 ## Execution discipline (binding from S1 on)
 
 - **One streak per session.** The harness list carries only the active

@@ -217,13 +217,15 @@ bare-Neovim column reads `n/a` rather than a real comparison.
 
 Every felt row is stated under a real config, and the matrix seats five
 cells on the `user` fixture: `echo.user`, `echo_speculated.user`,
-`scroll.user`, `flood.user` and `startup.user`. dev-linux records all five,
-taken 2026-09-06 in two quiet windows, each cell's null-pair calibration
-inside 1.1%:
+`scroll.user`, `flood.user` and `startup.user`. dev-linux records all five.
+Four were taken 2026-09-06 in two quiet windows, each cell's null-pair
+calibration inside 1.1%; `startup.user` was re-recorded 2026-09-15 in a quiet
+window of its own, its null-pair calibration 3.4% at the start of the run and
+1.0% at the end, both well inside the 15% floor that refuses a run:
 
 | cell, `user` fixture | view | bare Neovim | reading |
 |---|---|---|---|
-| `startup.settled_ratio_p50` (`user`) | 56.031 ms p50 | 51.415 ms p50 | 1.090 against the 1.0 bar, unmet; the diagnostic `startup.server_delta_ms` reads -0.076 ms, so the engine's own startup is not the cost |
+| `startup.settled_ratio_p50` (`user`) | 53.929 ms p50 | 52.422 ms p50 | 1.029 against the 1.0 bar, unmet, re-recorded 2026-09-15 after the parked attach was fixed; the diagnostic `startup.server_delta_ms` reads 1.637 ms, the attach wait having moved inside the segment that metric measures |
 | `echo.ratio_p50`, `echo.view_p99_ms` (`user`) | 0.920 ms p50, `echo.view_p99_ms` 1.583 ms p99 | 0.829 ms p50, 1.429 ms p99 | `echo.ratio_p50` 1.110 against the 1.10 bar, unmet; the tail is inside its 8 ms bar, `echo.paired_delta_p99_ms` 0.726 ms |
 | `echo_speculated.speculated_ratio_p50` (`user`) | 0.200 ms p50, `echo_speculated.speculated_paint_p99_ms` 0.318 ms p99 | 0.603 ms p50, 1.250 ms p99 | 0.332 against the 1.0 bar, met; a prediction answered 99.9% of the samples and the rest can only understate it |
 | `scroll.staleness_p99_ms` (`user`) | `scroll.staleness_p99_ms` 1.572 ms p99 | 0.951 ms p99 | inside the 16 ms bar; `scroll.ratio_p50` 1.717 and `scroll.ratio_p99` 1.664 are recorded on a shared class and not gated |

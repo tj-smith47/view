@@ -87,13 +87,18 @@ of this page.
 
 **You open a project.** You type `view ~/.config` and wait for the screen you
 can start working in. Under a login-shaped plugin config -- lazy.nvim, noice
-and nvim-notify -- that screen arrives in 56.0 ms under view against 51.4 ms
-under Neovim: view 4.6 ms behind, which is a bar view has not met, since the
+and nvim-notify -- that screen arrives in 53.9 ms under view against 52.4 ms
+under Neovim: view 1.5 ms behind, which is a bar view has not met, since the
 bar for this moment is level with Neovim. view's own chrome is on screen in
 about 4 ms regardless -- the earlier frame, not that screen, painted while
-your config is still loading -- and view does not make Neovim's own startup
-slower: under that same config the embedded engine's started mark lands
-0.08 ms earlier than the same engine under Neovim's terminal UI.
+your config is still loading. view no longer waits out that whole first
+screen before attaching to the engine; it attaches while your config is
+still running, which is where most of the gap went. What is left is the
+screen the attach asks for, travelling to view over the wire and painted
+again by view where Neovim's own terminal UI reads it out of the same
+process -- and because that attach now sits inside the engine's own startup,
+the engine's started mark lands 1.64 ms later under view than under Neovim's
+terminal UI.
 
 **You type.** You press a key and the character appears. Under that same
 login-shaped config, view's worst keystroke in a thousand takes 1.58 ms

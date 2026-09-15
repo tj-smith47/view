@@ -124,8 +124,8 @@ settled_ratio_p50 = 1.0955247620066972
 [startup.user]
 first_frame_cold_ms = 78.19404
 first_frame_ratio_p99 = 1.0124123969947239
-server_delta_ms = -0.07600000000000051
-settled_ratio_p50 = 1.0897897644234942
+server_delta_ms = 1.637
+settled_ratio_p50 = 1.0287486403697355
 
 [supervision.minimal]
 restart_rehydrate_p99_ms = 20.980584999999998

@@ -27,22 +27,27 @@ the tree, the tabline and the statusline present and still.
 
 | | view | Neovim | on |
 |---|---|---|---|
-| screen ready | 56.0 ms | 51.4 ms | your config (lazy.nvim, noice, nvim-notify), same host, same run |
+| screen ready | 53.9 ms | 52.4 ms | your config (lazy.nvim, noice, nvim-notify), same host, same run |
 
-view is 4.6 ms behind on that screen, and the bar view holds itself to for
+view is 1.5 ms behind on that screen, and the bar view holds itself to for
 this moment is level with Neovim -- so this row is a bar view has not met, by
-9%. At the worst launch in a thousand under your config the two are within a
+2.9%. At the worst launch in a thousand under your config the two are within a
 millisecond of each other (78.2 ms against 77.2 ms). With no plugins at all
 the same screen arrives in 16.1 ms against 14.7 ms, which is a bench fixture
 and not this row.
 
 What makes it that number: view paints its own shell -- the chrome you see
 before anything has loaded -- in about 4 ms, and that frame is on screen
-whether your config has zero plugins or forty. The rest is your `init.lua`,
-which view does not make slower: under this same config the embedded
-engine's own "started" mark lands 0.08 ms earlier than the same engine
-under Neovim's own terminal UI. The 4.6 ms is view's attach and takeover,
-which happen after your `VimEnter` runs rather than before it.
+whether your config has zero plugins or forty. The rest is your `init.lua`.
+view used to wait out your whole first screen before attaching to the engine
+and taking the surfaces over, and then redraw everything that screen had
+already painted; it now attaches while your `init.lua` is still running. What
+is left of that gap is the screen the attach asks for, which travels to view
+over the wire and is painted again by view, where Neovim's own terminal UI
+reads it out of the same process. That attach is inside the engine's own
+startup now, so the engine's "started" mark lands 1.64 ms later under view
+than the same engine under Neovim's own terminal UI -- the same work, counted
+on the other side of the mark rather than added.
 
 ## You type
 
