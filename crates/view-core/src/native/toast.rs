@@ -22,8 +22,10 @@ pub enum Route {
     /// (`MessageEntry::is_persistent_kind`: nvim's error/warning kinds and
     /// view's own `"native_sticky"`), or a locally-raised condition. Never
     /// expires on its own: it stays
-    /// until replaced, cleared by nvim, or deliberately dismissed
-    /// ([`crate::model::Messages::dismiss_sticky`]).
+    /// until replaced, cleared by nvim, deliberately dismissed
+    /// ([`crate::model::Messages::dismiss_sticky`]), or -- for a notice
+    /// carrying a family -- taken by the input that follows its reading
+    /// window ([`crate::model::Messages::dismiss_read_sticky`]).
     Sticky,
     /// A statusline-owned kind (mode/pending-count/ruler/search-count
     /// indicators), meant for the statusline surface rather than the toast

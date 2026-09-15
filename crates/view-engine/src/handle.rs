@@ -956,6 +956,16 @@ impl EngineHandle {
                                     Some(msg @ Msg::NotifySinkRead { .. }) => {
                                         pump.route_notify_sink(msg);
                                     }
+                                    // and the same for the hand-back's late
+                                    // pass: it is sent once, when a claimant
+                                    // that loaded after the takeover turned
+                                    // itself off, and nothing recomputes it.
+                                    // Dropped, the notice standing on screen
+                                    // goes on saying the ask never reached a
+                                    // plugin that took it
+                                    Some(msg @ Msg::ClaimantsHandedBack { .. }) => {
+                                        pump.route_claimants_handed_back(msg);
+                                    }
                                     Some(msg) => {
                                         let _ = pump.route_msg(msg);
                                     }

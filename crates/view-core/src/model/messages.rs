@@ -44,6 +44,12 @@ pub struct MessageEntry {
     /// the standing line of a family whose current wording is not the one
     /// the user selected.
     family: Option<String>,
+    /// Whether this sticky notice has already stood for the window a
+    /// transient one gets, after which ordinary typing takes it down
+    /// ([`Messages::dismiss_read_sticky`]). Set by the expiry timer
+    /// `EngineModel::record_native_notice_sticky_once` arms, which is the
+    /// only clock view-core has.
+    stood_its_window: bool,
 }
 
 impl MessageEntry {
@@ -325,6 +331,7 @@ impl Messages {
             condition: false,
             id,
             family: None,
+            stood_its_window: false,
         };
         if replace_last {
             if let Some(last) = self
@@ -364,6 +371,7 @@ impl Messages {
             condition: false,
             id,
             family: None,
+            stood_its_window: false,
         }
     }
 
@@ -865,19 +873,59 @@ impl Messages {
     /// state a falsehood until whoever raised it noticed and re-raised it.
     /// It is retracted by that raiser, when the condition ends.
     ///
-    /// So does a notice carrying a family ([`MessageEntry::family`]), for
-    /// the same reason and with a sharper edge: view raises those about a
-    /// condition it went and observed, and nothing re-raises one while the
-    /// condition holds, so a blanket dismissal here would spend it for the
-    /// session. Those are retired one family at a time, by `d` in the
-    /// message history. The two populations partition the persistent
-    /// entries with no overlap: nvim's wire errors carry no family.
+    /// A notice carrying a family ([`MessageEntry::family`]) goes with
+    /// them. It was exempt while `<Esc>` was the only gesture that reached
+    /// the stack at all, and the session that showed what that costs left
+    /// one standing top-right for its whole length: view raises those about
+    /// a condition it observed, nothing re-raises one while the condition
+    /// holds, and `d` in the message history is not a way out anybody found.
+    /// The text stays in that history either way, and the deliberate
+    /// gesture is the same one every other standing line answers to.
     #[must_use]
     pub fn dismiss_sticky(&mut self) -> bool {
         let before = self.entries.len();
-        self.entries
-            .retain(|e| !e.is_persistent() || e.condition || e.family().is_some());
+        self.entries.retain(|e| !e.is_persistent() || e.condition);
         self.entries.len() != before
+    }
+
+    /// Drops every standing family notice that has already had its reading
+    /// window -- the way out for a user who is typing rather than reaching
+    /// for a dismissal.
+    ///
+    /// The window is what keeps this from being the bug it fixes: a notice
+    /// wiped by whatever key the user happened to press next is a notice
+    /// they never read, and view's own launch notice lands while they are
+    /// still starting up. A key arriving before the timer says otherwise
+    /// leaves it standing.
+    ///
+    /// nvim's wire errors are not this population. They carry no family,
+    /// they are answered by `<Esc>` alone ([`Self::dismiss_sticky`]), and
+    /// an error dismissed by the next motion is what that convention exists
+    /// to prevent.
+    #[must_use]
+    pub fn dismiss_read_sticky(&mut self) -> bool {
+        let before = self.entries.len();
+        self.entries
+            .retain(|e| !e.stood_its_window || e.family().is_none());
+        self.entries.len() != before
+    }
+
+    /// Marks the sticky notice `id` as having stood its reading window,
+    /// answering whether it named one that is still standing.
+    ///
+    /// Driven by the same idle timer a transient entry is retired on
+    /// (`Msg::ToastExpired`), because it is the one clock a pure update
+    /// loop has: this entry takes no toast slot, so nothing else would ever
+    /// tell it how long it has been up.
+    pub(crate) fn note_stood_its_window(&mut self, id: MessageId) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.id() == id) else {
+            return false;
+        };
+        if !entry.is_persistent() || entry.condition || entry.family.is_none() {
+            return false;
+        }
+        entry.stood_its_window = true;
+        true
     }
 
     /// Every visible toast's lines in one flat list, box structure dropped:

@@ -381,10 +381,16 @@ Compat has three classes; only the first is "by construction":
   them starts with a real conflict, and that conflict is view's to
   explain: a first launch that hits a surface conflict shows **one**
   notice per claiming plugin, naming the surfaces it took and carrying
-  the `[native]` lines that yield them. It stands for the session — the
-  conflict is true until the remedy is applied and view restarts — and
-  the user takes it down from the notification history (§9), which is
-  where the notice itself points. The plugin's own startup complaints are the same finding
+  the `[native]` lines that yield them. It stands until the user takes it
+  down — the conflict is true until the remedy is applied and view
+  restarts, so nothing retires it on a timer. `<Esc>` with no modal open
+  clears it at once, and any key, click or paste clears it once it has
+  stood at least as long as an ordinary transient toast, so the keystroke
+  already in flight when it appeared leaves it standing (amended
+  2026-09-15: the notice answered to nothing but `d` in the notification
+  history, and a dogfood session carried it top-right from launch to exit).
+  Its text stays in the notification history (§9), which is where the
+  notice itself points. The plugin's own startup complaints are the same finding
   in the plugin's voice, so they are recorded to the notification history
   rather than stacked as toasts beside it, and the notice says where they
   are. Nothing is discarded and the history is one key away — what a

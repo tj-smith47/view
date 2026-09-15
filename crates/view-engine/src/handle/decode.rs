@@ -89,8 +89,8 @@ pub(super) fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Optio
 /// and `colorscheme_failed` carry the scheme's name alone, `diagnostics` an `(errors, warnings)`
 /// count pair, `git` the branch name alone, `buffer` a `(name, modified)`
 /// pair, `ttimeout` the effective escape wait in milliseconds as a string,
-/// and `float` the twelve positional fields
-/// [`decode_float_observed`] names.
+/// `handed_back` the module names a late hand-back pass turned off, and
+/// `float` the twelve positional fields [`decode_float_observed`] names.
 ///
 /// The bridge deliberately carries more triggers than there are consumers
 /// today: the group is registered once, and adding a consumer must not mean
@@ -147,6 +147,18 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
                 .filter_map(|name| name.as_str().map(str::to_owned))
                 .collect(),
         )),
+        // the hand-back's late pass, sent only when a claimant that loaded
+        // after the takeover actually turned itself off: the takeover's own
+        // answer names only what was loaded when it went out, and a
+        // lazy-loaded plugin is asked by the autocommands the chunk leaves
+        // behind (`DISABLE_CLAIMANTS_CHUNK`)
+        "handed_back" => Some(Msg::ClaimantsHandedBack {
+            modules: first
+                .as_array()?
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect(),
+        }),
         // the probe's re-reading of `vim.notify`, sent only when the answer
         // changed: the takeover's own reading is taken before the UI
         // attaches, so a notifier a config installs on `UIEnter` is one

@@ -225,9 +225,9 @@ end
 }
 
 /// The lua chunk [`EngineHandle::disable_claimants`] runs inside nvim,
-/// taking the module names to turn off as its single vararg. Constant by
-/// construction for the same reason as [`FEED_KEYS_CHUNK`]: the names
-/// travel as an argument and are only ever used as table keys and as
+/// taking view's channel and the module names to turn off as its varargs.
+/// Constant by construction for the same reason as [`FEED_KEYS_CHUNK`]: the
+/// names travel as an argument and are only ever used as table keys and as
 /// `require` arguments.
 ///
 /// `package.loaded` rather than `require` alone, on the same terms as
@@ -279,33 +279,77 @@ end
 /// It answers with the modules whose own `disable` ran, which is a
 /// different question from the one the later probe answers and the only
 /// one that can word the notice's account of the ask. A module absent from
-/// that list either had not loaded when the takeover went out -- the
-/// takeover runs ahead of every other plugin's `VimEnter`, so a claimant
-/// loading from one of those never receives it -- or raised inside its own
-/// `disable`. Either way the ask did not take, where the probe reading
-/// alone could only say the module is loaded now, which a plugin that
-/// turned itself off perfectly well still is.
+/// that list raised inside its own `disable`, or had not loaded yet, where
+/// the probe reading alone could only say the module is loaded now, which
+/// a plugin that turned itself off perfectly well still is.
+///
+/// # The pass that runs after this one
+///
+/// The first pass reaches only what `package.loaded` already holds, and
+/// the takeover goes out ahead of every other plugin's `VimEnter`: noice's
+/// own documented spec is `event = "VeryLazy"`, so the ordinary
+/// lazy.nvim session loads the claimant long after the ask went out and
+/// the user reads a notice saying the ask never reached it for the whole
+/// session. So the chunk leaves two autocommands behind that run the same
+/// pass again -- `VimEnter`, which covers a plugin any init-time loader
+/// pulls in, and `User LazyLoad`, which lazy.nvim fires once per plugin it
+/// loads -- and reports what the late pass turned off on the
+/// `view_bridge` `handed_back` event, where `Msg::ClaimantsHandedBack`
+/// re-words the standing notice.
+///
+/// A module is asked once and never again, whichever pass reached it, so
+/// a plugin that loads late is disabled exactly as the eager one is; the
+/// group deletes itself once every module has been asked, because an
+/// autocommand still walking a settled list on every lazy load is work
+/// nobody reads.
 const DISABLE_CLAIMANTS_CHUNK: &str = concat!(
-    "local modules = ...\n",
+    "local channel, modules = ...\n",
     notify_predicate_lua!(),
     "\
-local handed_back = {}
-for _, name in ipairs(modules) do
-  if package.loaded[name] ~= nil then
-    if pcall(function()
-      require(name).disable()
-    end) then
-      handed_back[#handed_back + 1] = name
+local group = vim.api.nvim_create_augroup(
+  'view_claimant_hand_back', { clear = true })
+local asked, pending = {}, #modules
+local function hand_back()
+  local handed_back = {}
+  for _, name in ipairs(modules) do
+    if not asked[name] and package.loaded[name] ~= nil then
+      asked[name] = true
+      pending = pending - 1
+      if pcall(function()
+        require(name).disable()
+      end) then
+        handed_back[#handed_back + 1] = name
+      end
     end
   end
+  if #handed_back > 0
+    and package.loaded.notify ~= nil
+    and is_engine_notify(vim.notify)
+  then
+    vim.notify = package.loaded.notify
+  end
+  return handed_back
 end
-if #handed_back > 0
-  and package.loaded.notify ~= nil
-  and is_engine_notify(vim.notify)
-then
-  vim.notify = package.loaded.notify
+local function late_pass()
+  local handed_back = hand_back()
+  if #handed_back > 0 then
+    pcall(vim.rpcnotify, channel, 'view_bridge', 'handed_back',
+      handed_back)
+  end
+  if pending == 0 then
+    pcall(vim.api.nvim_del_augroup_by_id, group)
+  end
 end
-return handed_back"
+vim.api.nvim_create_autocmd('VimEnter', {
+  group = group,
+  callback = late_pass,
+})
+vim.api.nvim_create_autocmd('User', {
+  group = group,
+  pattern = 'LazyLoad',
+  callback = late_pass,
+})
+return hand_back()"
 );
 
 /// The lua chunk [`EngineHandle::raise_notice`] runs inside nvim, taking
@@ -3257,12 +3301,11 @@ impl EngineHandle {
     /// Returns `EngineError::Closed` if the connection's writer thread has
     /// already exited.
     pub fn disable_claimants(&self, modules: &[String]) -> Result<(), EngineError> {
-        let names: Vec<Value> = modules.iter().map(|name| Value::from(&name[..])).collect();
         self.notify(
             "nvim_exec_lua",
             vec![
                 Value::from(DISABLE_CLAIMANTS_CHUNK),
-                Value::Array(vec![Value::Array(names)]),
+                Value::Array(disable_claimants_args(modules, self.channel_id)),
             ],
         )
     }
@@ -3490,7 +3533,10 @@ impl EngineHandle {
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited.
     pub fn takeover(&self, steps: &[TakeoverStep]) -> Result<(), EngineError> {
-        let steps: Vec<Value> = steps.iter().map(takeover_step).collect();
+        let steps: Vec<Value> = steps
+            .iter()
+            .map(|step| takeover_step(step, self.channel_id))
+            .collect();
         self.request_takeover(
             "nvim_exec_lua",
             vec![
@@ -4358,19 +4404,27 @@ fn mapping_args(specs: &[MappingSpec], channel_id: u64) -> Vec<Value> {
     ]
 }
 
+/// [`DISABLE_CLAIMANTS_CHUNK`]'s varargs, shared by the standalone call and
+/// the takeover's step so the two can never send the chunk a different
+/// shape: the channel its late pass reports on, then the names.
+fn disable_claimants_args(modules: &[String], channel_id: u64) -> Vec<Value> {
+    vec![
+        Value::from(channel_id),
+        Value::Array(modules.iter().map(|m| Value::from(&m[..])).collect()),
+    ]
+}
+
 /// One [`TakeoverStep`] as the `{ src, args, out }` table
 /// [`TAKEOVER_CHUNK`] runs.
 ///
 /// Exhaustive by construction: `TakeoverStep` is a closed vocabulary
 /// precisely so that a step added without a chunk fails to compile here
 /// rather than travelling as a step nvim never runs.
-fn takeover_step(step: &TakeoverStep) -> Value {
+fn takeover_step(step: &TakeoverStep, channel_id: u64) -> Value {
     let (src, args) = match step {
         TakeoverStep::DisableClaimants { modules } => (
             DISABLE_CLAIMANTS_CHUNK,
-            vec![Value::Array(
-                modules.iter().map(|m| Value::from(&m[..])).collect(),
-            )],
+            disable_claimants_args(modules, channel_id),
         ),
         TakeoverStep::HoldOption { name, value } => (
             HOLD_OPTION_CHUNK,
@@ -5322,10 +5376,10 @@ mod tests {
             params,
             vec![
                 Value::from(DISABLE_CLAIMANTS_CHUNK),
-                Value::Array(vec![Value::Array(vec![
-                    Value::from("noice"),
-                    Value::from(&hostile[..]),
-                ])]),
+                Value::Array(vec![
+                    Value::from(h.channel_id),
+                    Value::Array(vec![Value::from("noice"), Value::from(&hostile[..]),]),
+                ]),
             ]
         );
         assert!(
@@ -5344,6 +5398,23 @@ mod tests {
         assert!(DISABLE_CLAIMANTS_CHUNK.contains("package.loaded[name] ~= nil"));
         assert!(DISABLE_CLAIMANTS_CHUNK.contains("pcall(function()"));
         assert!(DISABLE_CLAIMANTS_CHUNK.contains("require(name).disable()"));
+    }
+
+    /// The late pass's own three guards. A chunk that lost the `asked`
+    /// table would call one plugin's `disable` again at every lazy load,
+    /// one that lost either autocommand would leave the whole lazy.nvim
+    /// population unreachable, and one that lost the report would turn the
+    /// plugin off while the notice went on saying the ask never arrived.
+    #[test]
+    fn the_disable_chunk_asks_again_when_a_claimant_loads_late() {
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("not asked[name]"));
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("'VimEnter'"));
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("pattern = 'LazyLoad'"));
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("'view_bridge', 'handed_back'"));
+        assert!(
+            DISABLE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_augroup_by_id"),
+            "the group must stop itself once every module has been asked"
+        );
     }
 
     /// The name travels as an argument, and the source is the same constant

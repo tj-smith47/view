@@ -1578,6 +1578,7 @@ impl EngineModel {
         let spoken = (self.messages.speaks_notices()
             && crate::model::MessageEntry::is_native_kind(&kind))
         .then(|| content.iter().map(|(_, t)| t.as_str()).collect::<String>());
+        let sticky = kind == "native_sticky";
         let id = self.messages.push(kind, content, replace_last);
         // recorded by id, not `.entries.last()`: `push`'s replace path can
         // overwrite an entry that sits before a still-open condition
@@ -1598,6 +1599,17 @@ impl EngineModel {
         // predecessor's place before being held hands the slot back here
         let mut effects: Vec<crate::msg::Effect> =
             self.messages.arm_top_slot().into_iter().collect();
+        // a sticky notice never holds that slot and so is handed no timer
+        // by it, which is the whole point -- but the reading window it owes
+        // the user before ordinary typing may take it down needs one clock,
+        // and this is the one a pure update loop has
+        // (`Messages::note_stood_its_window`)
+        if sticky {
+            effects.push(crate::msg::Effect::ScheduleToastExpiry {
+                id,
+                after: crate::native::toast::TRANSIENT_TOAST_TIMEOUT,
+            });
+        }
         if let Some(text) = spoken {
             effects.push(crate::msg::Effect::Rpc(crate::msg::RpcCall::Notify {
                 text,
@@ -1712,7 +1724,13 @@ impl EngineModel {
     /// notice's four seconds, so a transient line cycles on and off for as
     /// long as the user types instead of standing to be read. It leaves the
     /// way every sticky entry does -- replaced by its own family, cleared by
-    /// nvim, or dismissed deliberately ([`Messages::dismiss_sticky`]).
+    /// nvim, or dismissed deliberately ([`Messages::dismiss_sticky`]) -- and
+    /// one way of its own: the timer this record arms says when the line has
+    /// been up long enough to have been read, after which ordinary typing
+    /// takes it down too ([`Messages::dismiss_read_sticky`]). Standing until
+    /// the user does something is the contract; standing after they have
+    /// read it and moved on is the session that carried one top-right from
+    /// launch to exit.
     pub fn record_native_notice_sticky_once(
         &mut self,
         family: &str,
@@ -1791,6 +1809,23 @@ impl EngineModel {
             .entries
             .iter()
             .any(|e| is_standing_native_notice(e, prefix))
+    }
+
+    /// The whole text of that standing notice, on exactly the terms
+    /// [`Self::has_native_notice`] answers about.
+    ///
+    /// For a caller that has to re-word one clause of a line it did not
+    /// keep a copy of: the notice is the only record of what the user was
+    /// told, and the rest of it -- which surfaces a plugin took, the
+    /// `view.toml` remedy, where the launch's messages are -- is not
+    /// recoverable from anything else the model holds.
+    #[must_use]
+    pub fn native_notice_line(&self, prefix: &str) -> Option<String> {
+        self.messages
+            .entries
+            .iter()
+            .find(|e| is_standing_native_notice(e, prefix))
+            .map(|e| e.content.iter().map(|(_, line)| line.as_str()).collect())
     }
 }
 

@@ -672,22 +672,65 @@ fn notice(
     // its own row rather than a clause on the first: the message layer
     // clips at the grid's width less two rather than wrapping
     let turned_off = match disabled {
-        Some(Ask { class, taken: true }) => {
-            format!("\nview asked {class} to turn itself off at startup, and it did.")
-        }
-        Some(Ask {
-            class,
-            taken: false,
-        }) => format!(
-            "\nview asked {class} to turn itself off at startup, and the ask \
-             never reached it."
-        ),
+        Some(Ask { class, taken }) => ask_clause(class, taken),
         None => String::new(),
     };
     format!(
         "{family}{}, which view owns.{turned_off}{remedy}{history}",
         join(&labels)
     )
+}
+
+/// The notice's account of the ask, in both wordings.
+///
+/// One place rather than two literals, because a claimant that loads after
+/// the takeover has the standing notice re-worded by swapping one of these
+/// for the other ([`on_claimants_handed_back`]): a second spelling of
+/// either sentence would leave a notice nothing could re-word.
+fn ask_clause(class: &str, taken: bool) -> String {
+    if taken {
+        format!("\nview asked {class} to turn itself off at startup, and it did.")
+    } else {
+        format!(
+            "\nview asked {class} to turn itself off at startup, and the ask \
+             never reached it."
+        )
+    }
+}
+
+/// Answers the hand-back's own report, including the one a late pass sends
+/// for a claimant that loaded after the takeover asked.
+///
+/// A late report arrives with the notice already standing and already
+/// worded from the first pass's answer, which said the ask never reached a
+/// plugin that has now taken it. The standing line is re-worded rather than
+/// rebuilt: the rest of it is still true and is not recoverable from
+/// anything the model kept.
+///
+/// The replacement is transient where the notice it replaces was sticky. A
+/// sticky line is one standing for a condition the user has to act on, and
+/// what this one now says is that view asked and the plugin complied --
+/// which the remedy beside it still makes worth reading once, and worth
+/// nothing after that.
+pub(super) fn on_claimants_handed_back(model: &mut Model, modules: Vec<String>) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for claimant in surfaces::probed_claimants(&modules) {
+        let family = claimant_family(claimant.class);
+        let never = ask_clause(claimant.class, false);
+        let took = ask_clause(claimant.class, true);
+        let Some(text) = model
+            .engine
+            .native_notice_line(&family)
+            .filter(|line| line.contains(&never))
+            .map(|line| line.replace(&never, &took))
+        else {
+            continue;
+        };
+        effects.extend(model.engine.record_native_notice_once(&family, text));
+        model.dirty = true;
+    }
+    model.surface_conflicts.note_handed_back(modules);
+    effects
 }
 
 /// `["a", "b", "c"]` as `"a, b and c"`: the reading order a sentence needs,
@@ -930,10 +973,8 @@ mod tests {
             );
         }
 
-        // the way out is `d` in the message history, which retracts one
-        // family; an incidental <Esc> deliberately leaves this notice up
-        assert!(!model.engine.messages.dismiss_sticky());
-        assert_eq!(notices(&model), expected, "<Esc> is not this notice's exit");
+        // the way out that leaves the rest of the stack alone is `d` in
+        // the message history, which retracts one family
         assert!(model
             .engine
             .withdraw_native_notice("view: cmp_menu is drawing over "));
@@ -1666,17 +1707,9 @@ mod tests {
         let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
         let standing = notices(&model);
         assert_eq!(standing.len(), 1, "{standing:?}");
-        assert!(
-            !effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::ScheduleToastExpiry { .. })),
-            "a notice on an idle-expiry timer is one that leaves without being \
-             answered: {effects:?}"
-        );
 
-        // the same fact read off the entry rather than off the effect list:
-        // `Msg::ToastExpired` retains by id alone, so what keeps the timer
-        // from ever being armed for this line is the kind it carries
+        // the kind it carries is what keeps it off the slot queue, and
+        // `Msg::ToastExpired` retires by that queue alone
         assert!(
             model
                 .engine
@@ -1688,10 +1721,37 @@ mod tests {
             notices(&model)
         );
 
-        // and the idle expiry a transient line would have owned: this kind
-        // is handed no timer at all
+        // the idle expiry a transient line would have owned: this kind is
+        // handed none by the slot it never holds
         assert!(model.engine.messages.arm_top_slot().is_none());
+
+        // the one timer it does own says only that it has now been up long
+        // enough to have been read (`Messages::dismiss_read_sticky`), and
+        // nothing about it leaves the screen when that lands
+        let _ = update(
+            &mut model,
+            Msg::ToastExpired {
+                id: read_window(&effects),
+            },
+        );
         assert_eq!(notices(&model), standing, "an idle timer took it down");
+    }
+
+    /// The reading window's own timer, off the effects the notice's record
+    /// returned.
+    fn read_window(effects: &[Effect]) -> crate::model::MessageId {
+        let armed: Vec<crate::model::MessageId> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::ScheduleToastExpiry { id, after } => {
+                    assert_eq!(*after, crate::native::toast::TRANSIENT_TOAST_TIMEOUT);
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(armed.len(), 1, "{effects:?}");
+        armed[0]
     }
 
     /// The decided wording, line for line: the three-line shape the message
@@ -2971,6 +3031,95 @@ mod tests {
             "{:?}",
             standing[0]
         );
+    }
+
+    /// A claimant loading after the takeover: the engine's late pass asks
+    /// it, reports what took, and the standing notice stops telling the
+    /// user the plugin never heard from view.
+    ///
+    /// The line is re-worded rather than rebuilt, so the rest of it -- the
+    /// surfaces, the remedy, the history key -- has to survive the swap:
+    /// nothing in the model holds those, and a rebuild from what is left
+    /// would print a notice missing the only actionable line it carries.
+    #[test]
+    fn a_claimant_that_loads_late_re_words_the_notice_it_left_standing() {
+        let mut model = captured_session();
+        handed_back(&mut model, &[]);
+        probe(&mut model, &["noice"]);
+        assert!(
+            notices(&model)[0].contains("the ask never reached it."),
+            "{:?}",
+            notices(&model)
+        );
+
+        handed_back(&mut model, &["noice"]);
+        let standing = notices(&model);
+        assert_eq!(standing.len(), 1, "{standing:?}");
+        assert!(
+            standing[0].contains(
+                "view asked noice.nvim to turn itself off at startup, and it \
+                 did."
+            ),
+            "{:?}",
+            standing[0]
+        );
+        assert!(
+            !standing[0].contains("never reached it"),
+            "both accounts of one ask stood in one notice: {:?}",
+            standing[0]
+        );
+        assert!(
+            standing[0].contains("Set [native] palette = false"),
+            "the remedy is the only actionable line, and a rebuild would \
+             have dropped it: {:?}",
+            standing[0]
+        );
+        assert!(
+            !model
+                .engine
+                .messages
+                .entries
+                .iter()
+                .any(crate::model::MessageEntry::is_persistent),
+            "an account of an ask that took has nothing left to stand for: \
+             {:?}",
+            standing
+        );
+    }
+
+    /// The claimant notice's two ways down, which is what the session that
+    /// left one standing top-right for its whole length was missing.
+    ///
+    /// `<Esc>` is the deliberate gesture and takes it at once. Anything
+    /// else takes it only once the line has stood the window a transient
+    /// one gets -- a notice wiped by whatever key the user pressed next is
+    /// a notice they never read, and this one lands while they are still
+    /// starting up.
+    #[test]
+    fn the_conflict_notice_goes_on_escape_at_once_and_on_typing_once_read() {
+        let mut model = captured_session();
+        let _ = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+        assert!(model.engine.messages.dismiss_sticky());
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+
+        let mut model = captured_session();
+        let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+        let standing = notices(&model);
+        key(&mut model);
+        assert_eq!(
+            notices(&model),
+            standing,
+            "a key pressed while the notice is still being read took it down"
+        );
+
+        let _ = update(
+            &mut model,
+            Msg::ToastExpired {
+                id: read_window(&effects),
+            },
+        );
+        key(&mut model);
+        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
     }
 
     /// Every needle `compat/scenarios/noice.toml` waits for on the claimant

@@ -589,6 +589,126 @@ fn wait_for_sink_read(rx: &mpsc::Receiver<Msg>, want: impl Fn(bool) -> bool) -> 
     None
 }
 
+/// The claimant as a lazy plugin manager leaves it: defined, not loaded,
+/// and pulled in later by `_G.view_pin.load_noice()` -- which is what
+/// lazy.nvim does for a plugin whose spec defers it, and what noice's own
+/// documented `event = "VeryLazy"` spec asks for.
+fn config_home_lazy_claimant(name: &str) -> ScratchDir {
+    let dir = ScratchDir::new(&format!("claimant-takeover-{name}")).unwrap();
+    std::fs::write(
+        dir.join("init.lua"),
+        "_G.view_pin = { orig = vim.notify, disables = 0 }\n\
+         _G.view_pin.claimed = function(...) end\n\
+         _G.view_pin.load_noice = function()\n\
+         vim.notify = _G.view_pin.claimed\n\
+         package.loaded['noice'] = {\n\
+         disable = function()\n\
+         _G.view_pin.disables = _G.view_pin.disables + 1\n\
+         vim.notify = _G.view_pin.orig\n\
+         end,\n\
+         }\n\
+         end\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// Runs `src` in the child and waits for its reply, which is what orders
+/// everything the chunk sent from it ahead of the next assertion.
+fn run_lua(engine: &Engine, src: &str) {
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![Value::from(src), Value::Array(vec![])],
+        )
+        .unwrap();
+}
+
+/// The first `Msg::ClaimantsHandedBack` naming anybody, within three engine
+/// round trips, with the takeover's own empty answer drained past.
+fn wait_for_hand_back(rx: &mpsc::Receiver<Msg>) -> Option<Vec<String>> {
+    let deadline = Instant::now() + common::rpc_deadline_for(3);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Msg::ClaimantsHandedBack { modules }) if !modules.is_empty() => {
+                return Some(modules)
+            }
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// The gap the first pass cannot reach: the takeover runs ahead of every
+/// other plugin's `VimEnter`, so a claimant lazy.nvim loads afterwards
+/// never receives the ask, and the notice view raises says so for the rest
+/// of the session -- which is what a dogfood session read top-right from
+/// launch to exit.
+///
+/// Asked of a real child because what is pinned is that nvim runs the pass
+/// again from the autocommands the chunk left behind, and reports what it
+/// turned off on the channel it was given.
+#[test]
+fn a_claimant_that_loads_after_the_takeover_is_asked_by_the_late_pass() {
+    let dir = config_home_lazy_claimant("late-load");
+    let mut engine = engine(&dir);
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .takeover(&[TakeoverStep::DisableClaimants {
+            modules: vec!["noice".to_string()],
+        }])
+        .unwrap();
+    run_lua(&engine, "return 1");
+    assert_eq!(
+        disables(&engine),
+        0,
+        "the claimant is not loaded yet, so the first pass reaches nothing \
+         -- the gap this test exists for"
+    );
+
+    run_lua(
+        &engine,
+        "_G.view_pin.load_noice() \
+         vim.api.nvim_exec_autocmds('User', { pattern = 'LazyLoad' })",
+    );
+    assert_eq!(
+        wait_for_hand_back(&rx),
+        Some(vec!["noice".to_string()]),
+        "the late pass must name the module it turned off, or the notice \
+         goes on saying the ask never reached it"
+    );
+    assert_eq!(disables(&engine), 1);
+    assert_eq!(
+        notify_owner(&engine),
+        "orig",
+        "the late pass runs the claimant's own disable, restore included"
+    );
+
+    // the next load event finds the module already asked
+    run_lua(
+        &engine,
+        "vim.api.nvim_exec_autocmds('User', { pattern = 'LazyLoad' })",
+    );
+    run_lua(&engine, "return 1");
+    assert_eq!(
+        disables(&engine),
+        1,
+        "a module is asked once, whichever pass reached it"
+    );
+    let second: Vec<Msg> = rx.try_iter().collect();
+    assert!(
+        !second.iter().any(|msg| {
+            matches!(msg, Msg::ClaimantsHandedBack { modules } if !modules.is_empty())
+        }),
+        "a pass that turned nothing off reports nothing: {second:?}"
+    );
+}
+
 /// The hand-back's own answer, carried out of the same reply: the module
 /// whose `disable` actually ran, named.
 ///

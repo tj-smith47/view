@@ -12191,14 +12191,17 @@ fn below_full_tier_a_dismissal_still_arms_the_next_slot() {
     }
 }
 
-/// `<Esc>` is the way out of nvim's own sticky errors, which is why it is
-/// not narrowed to a mode. A notice view raised about a condition that is
-/// still true is a different population: nothing re-raises it, so an
-/// `<Esc>` leaving insert mode would spend the conflict notice -- and its
-/// remedy line -- for the rest of the session. The family is what separates
-/// the two, and `d` in the history is what retires the family-carrying half.
+/// `<Esc>` is the way out of nvim's own sticky errors, and of the notices
+/// view raises beside them.
+///
+/// The notices used to be exempt: nothing re-raises one, so taking it on a
+/// keystroke spends its remedy line for the session, and `d` in the message
+/// history was the way out. Nobody found that way out -- a dogfood session
+/// carried the claimant notice top-right from launch to exit -- and the
+/// remedy is still readable in the history either way, which is what makes
+/// the deliberate gesture enough.
 #[test]
-fn an_incidental_esc_must_not_take_down_the_conflict_notice() {
+fn an_escape_takes_down_the_conflict_notice_beside_nvims_own_error() {
     let family = "view: noice.nvim is using ";
     let mut m = started_model();
     let _ = m
@@ -12217,8 +12220,16 @@ fn an_incidental_esc_must_not_take_down_the_conflict_notice() {
     let _ = press(&mut m, "<Esc>");
 
     assert!(
-        m.engine.has_native_notice(family),
-        "an incidental <Esc> must leave a standing conflict notice up"
+        !m.engine.has_native_notice(family),
+        "<Esc> is the gesture every standing line answers to"
+    );
+    assert!(
+        m.engine
+            .toast_history
+            .entries()
+            .flat_map(|entry| entry.lines())
+            .any(|line| line.starts_with(family)),
+        "nothing is discarded: the remedy is still in the history"
     );
     assert!(
         !m.engine

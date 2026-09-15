@@ -1019,12 +1019,22 @@ impl SurfaceConflicts {
     /// Records which claimant modules took the hand-back, answering whether
     /// the reading is news -- a launch where nothing was asked, or nothing
     /// took it, records an empty list and changes no notice.
+    ///
+    /// Added to rather than replacing what is already recorded: the ask
+    /// goes out in more than one pass (a claimant that loads after the
+    /// takeover is asked by the engine's own autocommands, and reported on
+    /// its own), and each pass names only what it turned off. Replacing
+    /// would leave the eager plugin's notice worded from the lazy one's
+    /// answer.
     pub fn note_handed_back(&mut self, modules: Vec<String>) -> bool {
-        if self.handed_back == modules {
-            return false;
+        let mut news = false;
+        for module in modules {
+            if !self.took_the_hand_back(&module) {
+                self.handed_back.push(module);
+                news = true;
+            }
         }
-        self.handed_back = modules;
-        true
+        news
     }
 
     /// Whether `module`'s own `disable` ran when view asked it to turn

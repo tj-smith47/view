@@ -119,6 +119,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // click before any key cannot leave view holding a licence to take
         // a window down
         model.surface_conflicts.note_user_acted();
+        // and the conflict notice's own way down for a user who is typing
+        // rather than reaching for `<Esc>`: only once it has stood the
+        // window a transient one gets, so the key pressed while it is still
+        // being read leaves it alone
+        model.dirty |= model.engine.messages.dismiss_read_sticky();
     }
     // both taken ahead of the message: the count is what tells a notice
     // that left the stack from one nvim replaced in place, and the slot is
@@ -261,12 +266,12 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty |= model.engine.seed_startup_history(&text);
             Vec::new()
         }
-        // no effects and no paint of its own: it only decides how the
-        // claimant notice the probe reply raises afterwards is worded, and
-        // that reply is behind this one on the same connection
+        // the takeover's own report decides how the claimant notice the
+        // probe reply raises afterwards is worded, and that reply is behind
+        // this one on the same connection; a late pass's report arrives
+        // with the notice already standing and re-words it
         Msg::ClaimantsHandedBack { modules } => {
-            model.surface_conflicts.note_handed_back(modules);
-            Vec::new()
+            surface_conflict::on_claimants_handed_back(model, modules)
         }
         // marks dirty unconditionally: the reading decides which entries
         // the stack paints at all, so a frame drawn before it and one drawn
@@ -748,6 +753,11 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 model.engine.messages.entries.retain(|e| e.id() != id);
                 model.dirty = true;
             }
+            // a sticky notice holds no slot, so an expiry naming one is not
+            // stale: it is the timer its own record armed, and what it says
+            // is that the line has now stood long enough to have been read.
+            // Nothing leaves the screen for it, so nothing repaints
+            model.engine.messages.note_stood_its_window(id);
             Vec::new()
         }
         // one frame of the stack's exit motion, and the only place a
@@ -1333,11 +1343,13 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // way out that always works is worth more than a dismissal
             // that is always deliberate.
             //
-            // What it must not cost is a notice view raised about a
-            // condition that is still true: its standing-ness is the
-            // claim, and unlike the text it does not come back. Those
-            // carry a family and `dismiss_sticky` leaves them alone; `d`
-            // in that same history is their one way down.
+            // A notice view raised about a condition it observed goes
+            // the same way: it was exempt, and the session that showed
+            // what that costs read one top-right from launch to exit,
+            // because `d` in the history is a way out nobody found. The
+            // raised condition notice is the one that stays -- its
+            // standing-ness is the claim and, unlike the text, it does
+            // not come back.
             //
             // The busy modal is excluded outright. It offers `<Esc>` as its
             // own dismissal (`SupervisionChoice::Dismiss`), and the error
