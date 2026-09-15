@@ -185,6 +185,12 @@ Exit: goldens committed for both look modes; user's Termius pass.
 3. History pause/copy/dismiss, live-grep results, diagnostics segment, key
    replay — each captured live under the user's config, fixed if absent (#35).
 4. Real-config compat leg skipped by default (#34).
+5. nvim-cmp's cmdline completion draws its own box at the bottom-left
+   instead of landing in the palette's rows (user report 2026-09-15). The
+   absorption path exists (`view-core::native::palette::AbsorbedRows`,
+   `docs/palette-popupmenu-source-wire-capture.md`); prove under the user's
+   config why cmp's float is not absorbed and fix so the candidates render
+   inside the palette.
 
 Exit: one capture per feature in the report, under the user's config.
 
