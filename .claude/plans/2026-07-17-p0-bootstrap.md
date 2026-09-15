@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Repo root: `/opt/repos/view`; branch `master`; git identity already configured locally.
-- Commits are fine and expected per task. Commit messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Commits are fine and expected per task.
 - After Task 2 exists, commit via `task commit -- -m "<msg>"`; before that, plain `git commit`.
 - Workspace lints (exact values in Task 1) apply to every crate forever: `unsafe_code = "deny"`, clippy `unwrap_used`/`expect_used`/`panic` = deny. Test modules may open with `#![allow(clippy::unwrap_used, clippy::expect_used)]` — test code only, never lib code.
 - Inline comments: WHY-only (constraint, invariant, workaround). No session narrative, no "Phase/Task/Step" markers, no "§" chapter refs in code or comments.
@@ -171,7 +171,6 @@ Expected: both succeed with zero warnings.
 git add -A
 git commit -m "chore: workspace skeleton with eight crates and strict lints
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -299,7 +298,6 @@ Expected: all steps pass (audit exits 0; test step compiles and runs zero tests 
 ```bash
 task commit -- -m "chore: Taskfile workflow and dependency-direction audit
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -389,7 +387,6 @@ Expected: no YAML error; `task ci` green. (Real CI proof needs a GHA run on a re
 ```bash
 task commit -- -m "ci: fmt/clippy/test matrix on linux, macos, windows with nvim installed
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -447,7 +444,6 @@ MIT or Apache-2.0, at your option.
 ```bash
 task commit -- -m "docs: README and dual MIT/Apache-2.0 licensing
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---

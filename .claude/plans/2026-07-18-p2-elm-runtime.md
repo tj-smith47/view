@@ -60,8 +60,7 @@ detection uses raw escape queries
   marker, we/I/Claude, plan/review/finding/audit references, em dashes
   (`scripts/check-style.sh` scans crate sources and will fail the commit).
 - Build/lint/test via task targets only; commit via
-  `task commit -- -m "<msg>"`. Trailer on every commit:
-  `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. Any commit
+  `task commit -- -m "<msg>"`. Any commit
   touching key dispatch, grid apply, or paint states its latency consequence
   in one sentence.
 - **Wire-capture rule (planning protocol step 1):** every fixture for a

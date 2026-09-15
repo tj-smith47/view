@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- All P0 constraints apply (lints, Taskfile usage, commit trailer, WHY-only comments).
+- All P0 constraints apply (lints, Taskfile usage, WHY-only comments).
 - Attach options this phase: `ext_linegrid` only. Other ext layers land in P2 per the spec.
 - nvim ≥ 0.11 on PATH is required for integration tests; tests fail loudly if missing — no silent skips.
 - Add dependencies with `cargo add <crate> -p <member>` (e.g. `cargo add rmpv -p view-engine`); never hand-write guessed version numbers.
@@ -193,7 +193,6 @@ Expected: 4 passed.
 ```bash
 task commit -- -m "feat(engine): msgpack-rpc message codec
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -428,7 +427,6 @@ Expected: all pass, including the completed flood test with both assertions.
 ```bash
 task commit -- -m "feat(engine): rpc handle with correlation and flood-proof reader
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -676,7 +674,6 @@ Expected: PASS (requires nvim on PATH; a loud failure here means the prerequisit
 ```bash
 task commit -- -m "feat(engine): spawn nvim --embed with api-info handshake
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -871,7 +868,6 @@ Expected: 1 passed.
 ```bash
 task commit -- -m "feat(engine): typed ext_linegrid redraw event decoding
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -986,7 +982,6 @@ Expected: 4 passed.
 ```bash
 task commit -- -m "feat(core): grid model with put/scroll/resize semantics
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1070,7 +1065,6 @@ Expected: 4 passed.
 ```bash
 task commit -- -m "feat(tui): crossterm-to-nvim key notation encoding
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1441,7 +1435,6 @@ Expected: PASS. If timing flakes, raise sleeps — this is a smoke test; the rea
 ```bash
 task commit -- -m "feat: view binary paints an editable embedded nvim in the terminal
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1489,7 +1482,6 @@ Expected: both tables print with nonzero sensible numbers (single-digit-to-low-t
 ```bash
 task commit -- -m "feat(bench): paired keypress-to-paint latency harness v0
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
