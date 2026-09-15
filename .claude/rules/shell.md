@@ -107,18 +107,28 @@ Every spelling of the tag opens the same body -- bare, `'TAG'`, `"TAG"`, `\TAG`,
 `<<-TAG`, and any of those with the blank the shell allows between the operator
 and its word. A quoted tag runs to its closing quote, so `<<'EOF-1'` is the tag
 `EOF-1` and a plain `EOF` line inside that body closes nothing; an unquoted one
-runs to the next blank, `;`, `|`, `&`, `<`, `>` or `)`, which is where the shell
-ends the word, and it takes the `-` a blank separates from the operator
+runs to the next blank, `;`, `|`, `&`, `<`, `>`, `(` or `)`, which is where the
+shell ends the word, and it takes the `-` a blank separates from the operator
 (`<< -TAG` is the tag `-TAG`). A tag may hold a dot, so `cat <<EOF.1` opens a
 body that a plain `EOF` line does not close, and reading the tag as the name up
-to the dot leaves the rest of that body scanned as commands. That class costs
-nothing now that both scans hand this tokenizer the text outside every quote:
-read off the raw line instead, `/<<-?[[:space:]]*$/` inside a quoted awk program
-is an opener and every line under it goes unscanned. Whether the terminator may
-be tab-indented travels as a flag character of its own and not as a `-` on the
-tag, since `<< -TAG` and `<<--TAG` name the same tag and strip differently. A
-spelling read as no operator leaves the lines under it scanned as commands,
-which is the direction that hides a finding behind text no shell runs.
+to the dot leaves the rest of that body scanned as commands. The quoting a tag
+carries sits anywhere in the word and not only at its head: `cat <<EO"F"` and
+`cat <<EO\F` are both the tag `EOF` once the shell has removed the quoting, so a
+run between a pair of quotes is taken without them and a backslash is taken off
+the character it quotes. Read with the quoting still in the tag, neither body
+ever terminates: loud in the userland scan, as a `PORTABILITY-SELF-FAIL`, and
+silent in the style walk, which reddens a handler that is right. Reaching that
+class at all needs the reader to hand the tokenizer the quoted run, since the
+text outside every quote holds `cat <<EO`, so the tail it reads for is the whole
+tag word built since the operator rather than the operator alone. That class
+costs nothing now that both scans hand this tokenizer the text outside every
+quote: read off the raw line instead, `/<<-?[[:space:]]*$/` inside a quoted awk
+program is an opener and every line under it goes unscanned. Whether the
+terminator may be tab-indented travels as a flag character of its own and not as
+a `-` on the tag, since `<< -TAG` and `<<--TAG` name the same tag and strip
+differently. A spelling read as no operator leaves the lines under it scanned as
+commands, which is the direction that hides a finding behind text no shell runs.
+
 The construct list is itself graded, by three planted spellings: the direct and
 the indirect substitution, each of which it must refuse, and an anchored one,
 which it must let through. The split `case` scan is graded by six: a header
@@ -416,6 +426,28 @@ backticks closes only on a run of its own length, so a span holding a lone
 backtick inside a doubled pair is one span rather than three. A span longer than
 the limit is left alone for the reason the over-long run is: it has nowhere to
 go.
+
+The span state belongs to the paragraph, because a span cannot cross a blank
+line and cannot cross a fence. Carried past either, one stray backtick used as
+punctuation pairs with the opening tick of the next real span, the text that
+accumulates runs past the limit and takes the over-long exemption, and the
+genuine split span below it is never reported -- silent, which is the
+direction that matters. So the run and the text it holds are cleared on a
+blank line and at a fence line, and a stray tick costs the paragraph it sits
+in rather than the rest of the page.
+
+A list item a wrap pulled up onto the line above it reddens too, over the same
+pages. Nothing else in the walk can see one: a list opener is exempt from the
+ragged rule, the merged line is inside the width, and a comparison of the word
+stream before and after reads the `-` either way -- three bullets were spent
+that way to rejoin split spans, and one of them was a convention heading that
+stopped being an item of its list. The rule is anchored on the end of a
+sentence, because prose writes a bare `-` or `+` mid-line as arithmetic far
+more often than as a bullet, and it grades a list opener as well as a
+continuation, since an item is merged into the opener above it as often as
+into one of its continuations. What it cannot see is the other half of the
+same damage: a paragraph break the wrap deleted leaves text no rule can call
+wrong, and only a comparison against the revision before it finds one.
 
 What cannot wrap is exempt by shape rather than by a list of files:
 

@@ -146,12 +146,30 @@ SCRIPT_HEREDOC_AWK='function tags_of(line,   i, j, n, c, q, qc, rest, t, dash, o
       # (`<< -TAG` is the tag `-TAG`) and every other character a tag can
       # carry. A charset of its own reads `cat <<EOF.1` as the tag `EOF` and
       # hands the body under it back to the scan, where the commands the shell
-      # never runs are read as live findings. The `|` and the `&` sit apart in
-      # the class because the bash-4 construct scan over this population reads
-      # those two characters written together as the pipe operator, wherever
-      # they are written
-      while (rest != "" && substr(rest, 1, 1) !~ /[;|<>)&[:space:]]/) {
-        t = t substr(rest, 1, 1)
+      # never runs are read as live findings. A quote inside the word ends
+      # nothing either: `cat <<EO"F"` is the tag `EOF` after quote removal, so
+      # a run between a pair of quotes is taken without them, and a tag read
+      # with the quotes still in it never terminates and swallows the rest of
+      # the file. The `|` and the `&` sit apart in the class because the bash-4
+      # construct scan over this population reads those two characters written
+      # together as the pipe operator, wherever they are written, and the `(`
+      # sits beside the `)` for the same reason
+      while (rest != "" && substr(rest, 1, 1) !~ /[;|<>()&[:space:]]/) {
+        c = substr(rest, 1, 1)
+        if (c == SQ || c == "\"") {
+          j = index(substr(rest, 2), c)
+          if (j > 0) {
+            t = t substr(rest, 2, j - 1)
+            rest = substr(rest, j + 2)
+            continue
+          }
+        }
+        if (c == "\\" && length(rest) > 1) {
+          t = t substr(rest, 2, 1)
+          rest = substr(rest, 3)
+          continue
+        }
+        t = t c
         rest = substr(rest, 2)
       }
     }
@@ -261,8 +279,12 @@ SCRIPT_CODE_AWK="$SCRIPT_HEREDOC_AWK"'
         # operator with a quoted `TAG` after it. The character the backslash
         # quotes is read into BARE with it there and nowhere else: dropped,
         # the tag arrives a letter short, the terminator below never matches
-        # it, and the rest of the file is read as body
-        if (BARE ~ /<<-?[[:space:]]*$/) { BARE = BARE c substr(line, i + 1, 1) }
+        # it, and the rest of the file is read as body. The quoting sits
+        # anywhere in the word and not only at its head -- `<<EO\F` is the
+        # tag `EOF` -- so the tail read here is the whole tag word so far
+        if (BARE ~ /<<-?[[:space:]]*[^;|<>()&[:space:]]*$/) {
+          BARE = BARE c substr(line, i + 1, 1)
+        }
         else { BARE = BARE c }
         i++; prev = ""; continue
       }
@@ -274,8 +296,11 @@ SCRIPT_CODE_AWK="$SCRIPT_HEREDOC_AWK"'
         # tag. The quote that opens an ordinary word is not read into BARE at
         # all: the tokenizer below reads BARE as a line of its own, and an
         # opening quote with no partner there would put the `<<` after it
-        # inside a string that never ends.
-        if (BARE ~ /<<-?[[:space:]]*$/) {
+        # inside a string that never ends. The quote sits anywhere in the tag
+        # word rather than only at its head -- `<<EO"F"` is the tag `EOF` --
+        # so what is read here is the whole word built since the operator,
+        # which ends where a shell word ends and nowhere inside it.
+        if (BARE ~ /<<-?[[:space:]]*[^;|<>()&[:space:]]*$/) {
           j = index(substr(line, i + 1), c)
           if (j > 0) {
             BARE = BARE c substr(line, i + 1, j)

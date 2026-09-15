@@ -778,8 +778,12 @@ temp_trap_handlers() {
               tail = substr(tail, RSTART + RLENGTH)
             }
             # the shell drops the backslash while it builds the string it
-            # re-parses, so the command the trap runs carries the quote alone
+            # re-parses, so the command the trap runs carries the quote alone,
+            # and a `\$X` written here is a live `$X` by the time the trap
+            # fires -- which is why the escape is removed here and blanked in
+            # a handler body, where nothing re-parses it
             gsub(/\\"/, "\"", h)
+            gsub(/\\[$]/, "$", h)
           }
         } else {
           sub(/[[:space:]].*/, "", h)
@@ -857,9 +861,13 @@ temp_trap_handlers() {
 # and a fragment of the operand names nothing.
 #
 # One call per script, and not one call over the whole subset with the file
-# name in each record: the fourteen forks that shape removes are worth 0.07 s
-# of a 0.98 s walk, measured over ten interleaved runs, and the bucketing it
-# needs in the shell costs more to read than the number is worth.
+# name in each record. The subset is 14 scripts and the single-awk shape still
+# forks one awk, so it removes 13 forks; over ten interleaved runs those were
+# worth 0.066 s of a 0.978 s walk (0.95-1.00 s against 0.88-0.98 s). The bar a
+# rewrite of this shape has to clear is 0.2 s, and the measured cut sits inside
+# the walk's own run-to-run spread of 0.074 s, so it is not a number a decision
+# can rest on. The bucketing the shape needs in the shell costs more to read
+# than the number is worth.
 temp_trap_sources() {
   local script="$1" here at path written base cand got
   # every path this walk is handed carries a directory; a bare name would
@@ -944,7 +952,11 @@ temp_trap_removals() {
     # inside a single-quoted or an ANSI-C run is literal text: a handler
     # removing a path written that way removes a path whose own name is $X and
     # the temp root leaks, while the walk reads the name and pairs. The
-    # double-quoted runs stay, since "$X" is the shape a removal is written in
+    # double-quoted runs stay, since "$X" is the shape a removal is written in.
+    # A backslash-escaped $ is the same leak in the quoting the single quotes
+    # do not reach: `rm -rf "\$X"` and `rm -rf \$X` in a handler body each
+    # remove a path literally called $X, so the pair is blanked wherever the
+    # run it sits in is not re-parsed
     function expanded(line,   i, n, c, q, ansi, out) {
       n = length(line); q = ""; ansi = 0; out = ""
       for (i = 1; i <= n; i++) {
@@ -958,11 +970,15 @@ temp_trap_removals() {
           continue
         }
         if (q == "\"") {
-          if (c == "\\") { out = out c substr(line, i + 1, 1); i++; continue }
+          if (c == "\\") {
+            if (substr(line, i + 1, 1) == "$") { out = out "  "; i++; continue }
+            out = out c substr(line, i + 1, 1); i++; continue
+          }
           if (c == "\"") { q = "" }
           out = out c
           continue
         }
+        if (c == "\\" && substr(line, i + 1, 1) == "$") { out = out "  "; i++; continue }
         if (c == SQ) {
           ansi = (i > 1 && substr(line, i - 1, 1) == "$")
           q = SQ; out = out " "
@@ -1221,7 +1237,7 @@ PROSE_WIDTH=80
 # one-line paragraph and the last line of any other stay as they are.
 PROSE_RAGGED=60
 check_prose_width() {
-  local pages graded wide ragged split unreadable rc
+  local pages graded wide ragged split merged unreadable rc
   pages=$(find "$@" -name '*.md' | LC_ALL=C sort)
   if [ -z "$pages" ]; then
     echo "STYLE FAIL: no markdown page found to grade for width"
@@ -1324,11 +1340,32 @@ check_prose_width() {
       if (!fenced) { fenced = 1; fence_ch = ch; fence_run = run }
       else if (ch == fence_ch && run >= fence_run) { fenced = 0 }
       held = ""
+      spanrun = 0; spantext = ""
       next
     }
     fenced { next }
     {
+      # a code span ends at the paragraph it is written in: it cannot cross a
+      # blank line and it cannot cross a fence. Carried past either, one stray
+      # backtick pairs with the next real opening tick and every span below it
+      # is read one tick out of phase -- a genuine split span then goes
+      # unreported, which is the silent direction
+      if ($0 ~ /^[[:space:]]*$/) { spanrun = 0; spantext = "" }
       span_step($0)
+      # a list marker that follows the end of a sentence in prose is a bullet
+      # a re-wrap pulled up onto the line above it: the item stops being an
+      # item of its list, and nothing else in this walk can see it -- a list
+      # opener is exempt from the ragged rule, a merged line is inside the
+      # width, and a word-stream comparison reads the `-` either way. Anchored
+      # on the sentence end because a bare marker mid-line is arithmetic
+      # (`hi_vcol - lo_vcol + 1`) far more often than it is a bullet. The
+      # line an item was merged into is as often the opener of the item above
+      # as it is one of its continuations, so an opener is graded too -- what
+      # is exempt from the ragged rule is not exempt from this
+      if ((wraps($0) || $0 ~ /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]/) &&
+          $0 ~ /[.!?:]["*)]*[[:space:]]+([-*+]|[0-9]+[.)])[[:space:]]/) {
+        printf "marker %s:%d: a list marker sits mid-line in prose\n", FILENAME, FNR
+      }
       # the short line is graded on the line that follows it, and only where
       # the word that opens that line would have fitted: a paragraph whose
       # next word is a path longer than what is left is wrapped as tightly as
@@ -1365,7 +1402,8 @@ check_prose_width() {
   wide=$(printf '%s\n' "$graded" | sed -n 's/^wide //p')
   ragged=$(printf '%s\n' "$graded" | sed -n 's/^ragged //p')
   split=$(printf '%s\n' "$graded" | sed -n 's/^span //p')
-  if [ -z "$wide" ] && [ -z "$ragged" ] && [ -z "$split" ]; then
+  merged=$(printf '%s\n' "$graded" | sed -n 's/^marker //p')
+  if [ -z "$wide" ] && [ -z "$ragged" ] && [ -z "$split" ] && [ -z "$merged" ]; then
     return 0
   fi
   if [ -n "$wide" ]; then
@@ -1390,6 +1428,13 @@ check_prose_width() {
     echo "  short, which is what the ragged rule exempts. Tests read these"
     echo "  pages by the spans they are written as, so a span a wrap cut in"
     echo "  two is a page whose next edit reddens a test."
+  fi
+  if [ -n "$merged" ]; then
+    printf '%s\n' "$merged"
+    echo "STYLE FAIL: a list item was pulled into the prose above it"
+    echo "  Put the marker back at the start of its own line and re-wrap"
+    echo "  inside the item. A bullet spent to rejoin a code span or to"
+    echo "  shorten a line is an item the list no longer has."
   fi
   return 1
 }

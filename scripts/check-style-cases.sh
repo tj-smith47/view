@@ -696,6 +696,9 @@ expect_width() {
     /^[^ ].*:[0-9]+: an inline code span runs on to line [0-9]+$/ {
       c = $1; sub(/:$/, "", c); print c ":span"; next
     }
+    /^[^ ].*:[0-9]+: a list marker sits mid-line in prose$/ {
+      c = $1; sub(/:$/, "", c); print c ":marker"; next
+    }
     /^[^ ].*: the width walk cannot read it$/ { c = $1; sub(/:$/, "", c); print c ":unreadable"; next }
     /^STYLE FAIL: no markdown page found/ { print "empty"; next }
   ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
@@ -898,6 +901,72 @@ new_width_case
   printf '%s and the paragraph runs on past the seam.\n' '`rm -rf /tmp/x and more`,'
 } > "$CASE/docs/page.md"
 expect_width 0 '' 'a short seam whose next line opens with a span too wide to move up beside it'
+
+# The span state belongs to the paragraph: a code span cannot cross a blank
+# line and cannot cross a fence. Carried past either, the stray backtick in
+# the first paragraph pairs with the opening tick of the real span below it,
+# the run that accumulates takes the over-long exemption, and the genuine
+# split span is never reported -- silently, which is the direction that
+# matters.
+new_width_case
+{
+  printf '# page\n\n'
+  printf 'A paragraph that uses a ` as punctuation and then carries on past\n'
+  printf 'the seam so that the line above it is not short either.\n\n'
+  printf 'A second paragraph of prose that runs on and stops here at a seam.\n\n'
+  printf 'A sentence before the call `nvim_buf_set_lines(0, 0, -1, false,\n'
+  printf '{})` and then more prose, which carries the paragraph on.\n'
+} > "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:8:span' \
+  'a split span two paragraphs under a stray backtick, which a carried state hides'
+
+new_width_case
+{
+  printf '# page\n\n'
+  printf 'A paragraph that uses a ` as punctuation and then carries on past\n'
+  printf 'the seam so that the line above it is not short either.\n\n'
+  printf '```\n'
+  printf 'a sample line holding one ` of its own\n'
+  printf '```\n\n'
+  printf 'A sentence before the call `nvim_buf_set_lines(0, 0, -1, false,\n'
+  printf '{})` and then more prose, which carries the paragraph on.\n'
+} > "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:10:span' \
+  'the same split span under a fence, whose sample ticks are not the page prose'
+
+# A bullet the wrap pulled up onto the line above it stops being an item of
+# its list, and nothing else in this walk sees it: a list opener is exempt
+# from the ragged rule, the merged line is inside the width, and a word-stream
+# comparison reads the `-` either way. Three of these were spent to rejoin
+# split code spans on pages this walk grades.
+new_width_case
+{
+  printf '# page\n\n'
+  printf -- '- A first item whose sentence ends here. - A second item that was\n'
+  printf '  pulled up onto the line above it by a re-wrap.\n'
+} > "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:3:marker' \
+  'a bullet a re-wrap pulled into the item above it'
+
+new_width_case
+{
+  printf '# page\n\n'
+  printf -- '- A first item whose sentence ends here.\n'
+  printf -- '- A second item that keeps the line it opens, as an item of the list.\n'
+} > "$CASE/docs/page.md"
+expect_width 0 '' 'the same two items, each opening its own line'
+
+# The marker rule is anchored on the end of a sentence because prose writes a
+# bare `-` and a bare `+` mid-line far more often as arithmetic than as a
+# bullet: the pages this walk grades carry a dozen of these and not one of
+# them is a list.
+new_width_case
+{
+  printf '# page\n\n'
+  printf 'The row is measured to `hi_vcol - lo_vcol + 1`, computed once for\n'
+  printf 'each row the block covers rather than for the block as a whole.\n'
+} > "$CASE/docs/page.md"
+expect_width 0 '' 'arithmetic written mid-line in prose, which is no list marker'
 
 new_width_case
 mkdir "$CASE/docs/adir.md"
@@ -1683,6 +1752,25 @@ PLANT
 expect_temp_traps 0 '' \
   'a removal below an unquoted dotted tag that terminates on the whole tag'
 
+# A quote inside the tag word ends nothing for the shell: `cat <<EO"F"` is
+# the tag `EOF` after quote removal, so the plain `EOF` line below closes the
+# body and the removal under it is code. Read with the quotes still in the
+# tag, the body never terminates, the rest of the file goes unread, and a
+# handler that is right reddens.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+trap cleanup EXIT
+X=$(mktemp -d)
+cleanup() {
+  cat <<EO"F"
+not a removal
+EOF
+  rm -rf "$X"
+}
+PLANT
+expect_temp_traps 0 '' \
+  'a removal below a tag whose word carries a quoted run the shell removes'
+
 # The fail-open the same swallow used to open in the other direction: a
 # handler that removes nothing, a tag inside a quoted argument, and a removal
 # in a function the trap never calls. Read as the operator, the tag swallows
@@ -1837,6 +1925,33 @@ trap "rm -rf \$X" EXIT
 PLANT
 expect_temp_traps 0 '' \
   'a trap whose name is bare in the re-parsed command, which expands when it fires'
+
+# The same escape one file-position over, where nothing re-parses it: a
+# handler body is script text the shell reads directly, so `\$X` there is a
+# literal `$X` and the removal strands the root. Real bash leaves both of
+# these roots behind. The trap line above stays green because the shell drops
+# the backslash while it builds the string the trap re-parses.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "\$X"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler body removing an escaped name inside double quotes'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf \$X
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler body removing an escaped name with no quotes around it'
 
 new_temp_trap_case
 write_temp_trap_script <<'PLANT'

@@ -83,9 +83,9 @@ Four behaviors this pins:
 - A `line` past the end answers an empty window, not an error and not the whole
   file: `strict_indexing = false` is what makes an out-of-range start clamp
   instead of throwing, and an agent asking for line 99 of a 3-line file has
-  asked a well-formed question whose answer is "nothing." - A `limit` running
-  past the end is clamped the same way (`line = 3, limit = 99` yields one line,
-  not an error).
+  asked a well-formed question whose answer is "nothing."
+- A `limit` running past the end is clamped the same way (`line = 3, limit = 99`
+  yields one line, not an error).
 - `line = 0` -- which the schema's own `minimum: 0` admits despite the
   1-based description -- reads from the first line. The chunk's guard is
   `line > 1`, so both `0` and `1` mean "start at index 0" and neither

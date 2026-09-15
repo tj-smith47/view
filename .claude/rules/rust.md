@@ -321,23 +321,23 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   is a leaf nobody can find. A reaping pin adopts the pid its own child reports
   (`orphan_reaping.rs`'s stderr marker), never one recognised by `comm` off the
   process table: the first version of the bench pin adopted an `nvim --version`
-  capability probe and passed identically against a plain spawn. - **A
-  module-scope item whose only use sits inside a `#[cfg(target_os = "linux")]`
-  block is dead code on the other two legs, and nothing on a Linux host says
-  so.** `task lint` denies `dead_code` and `unused_imports`, but it lints the
-  host's own source selection: a `const`, a `use` or a helper `fn` left outside
-  a fence its only reader is inside compiles clean here and fails
-  `clippy -D warnings` on the macOS and Windows legs -- after a push, which is
-  how five such items reached one branch at once, and how `engine_child_of` came
-  to be called from unfenced code in `terminal_hangup.rs`. `task lint:cross` is
-  the gate: `--all-features` clippy over `x86_64-unknown-freebsd`, which is
-  unix-and-not-Linux, so it selects the same source the macOS leg does for every
-  fence in the tree, and unlike darwin and windows-msvc it cross-compiles with
-  no foreign C toolchain (criterion's `alloca` and ureq's `ring` both build for
-  it, and both refuse the other two). It runs inside `task ci`, gated
-  `platforms: [linux]` because on the other hosts it is not a cross check at
-  all. The shape that holds: the fenced block owns its own imports and consts
-  (`use std::io::BufRead;` inside the block,
+  capability probe and passed identically against a plain spawn.
+- **A module-scope item whose only use sits inside a
+  `#[cfg(target_os = "linux")]` block is dead code on the other two legs, and
+  nothing on a Linux host says so.** `task lint` denies `dead_code` and
+  `unused_imports`, but it lints the host's own source selection: a `const`, a
+  `use` or a helper `fn` left outside a fence its only reader is inside compiles
+  clean here and fails `clippy -D warnings` on the macOS and Windows legs --
+  after a push, which is how five such items reached one branch at once, and how
+  `engine_child_of` came to be called from unfenced code in
+  `terminal_hangup.rs`. `task lint:cross` is the gate: `--all-features` clippy
+  over `x86_64-unknown-freebsd`, which is unix-and-not-Linux, so it selects the
+  same source the macOS leg does for every fence in the tree, and unlike darwin
+  and windows-msvc it cross-compiles with no foreign C toolchain (criterion's
+  `alloca` and ureq's `ring` both build for it, and both refuse the other two).
+  It runs inside `task ci`, gated `platforms: [linux]` because on the other
+  hosts it is not a cross check at all. The shape that holds: the fenced block
+  owns its own imports and consts (`use std::io::BufRead;` inside the block,
   `#[cfg(target_os = "linux")] const REAPED`), and a helper called from unfenced
   code gets a `#[cfg(not(target_os = "linux"))]` twin returning the empty answer
   rather than a second fence at the call site.

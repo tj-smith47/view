@@ -386,6 +386,31 @@ EOF.1
 SH
 expect 1 'scripts/case.sh:7:inline' 'a body opened on a dotted tag, which the name up to the dot does not close'
 
+# A quote inside the tag word ends nothing for the shell either: `<<EO"F"` is
+# the tag `EOF` after quote removal, so the plain `EOF` line closes the body
+# and the line under it is scanned. Read with the quotes still in the tag, the
+# body never terminates and the rest of the file goes unread -- loud here, as
+# a PORTABILITY-SELF-FAIL, and silent in the style walk.
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+cat <<EO"F"
+[[ $x =~ \bstill_body ]]
+EOF
+[[ $y =~ \sfound ]]
+SH
+expect 1 'scripts/case.sh:5:inline' 'a body opened on a tag whose word carries a quoted run'
+
+new_case
+write scripts/case.sh <<'SH'
+#!/usr/bin/env bash
+cat <<EO\F
+[[ $x =~ \bstill_body ]]
+EOF
+[[ $y =~ \sfound ]]
+SH
+expect 1 'scripts/case.sh:5:inline' 'a body opened on a tag whose word carries a backslash-quoted character'
+
 # ---------------------------------------------------------------------------
 # `<<` inside an arithmetic context is a left shift, and the operand after it
 # is a number rather than a tag
