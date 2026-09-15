@@ -28,8 +28,14 @@
 #
 #   scripts/dogfood/link-record.sh [-n RUNS] [-f FILE] [-o OUTDIR]
 #                                  [-s NEEDLE] [-c COLS] [-r ROWS]
-#                                  [--cold] [-l|--link]
+#                                  [--cold] [--home] [-l|--link]
 #                                  [--rate KBIT] [--delay MS]
+#
+# `--home` drops the fixture and launches both editors on the real `$HOME`
+# with its XDG directories untouched, which is the config the user actually
+# reports lag on. Nothing under `$HOME` is removed or reset: a launch writes
+# to its own state and cache the way any launch does. It cannot be combined
+# with `--cold`, whose whole subject is a state directory of its own.
 #
 # `--cold` gives each run a data directory of its own, holding nothing but
 # a link to the installed plugins, so everything the editors write beside
@@ -59,6 +65,7 @@ COLS=263
 ROWS=88
 LINK=0
 COLD=0
+HOME_ARM=0
 # the link the user's own recording showed: a 24 kB chrome frame arriving
 # over 37 ms, and a round trip in the tens of milliseconds
 RATE_KBIT=5200
@@ -74,6 +81,7 @@ while [ "$#" -gt 0 ]; do
     (-c) COLS=$2; shift 2 ;;
     (-r) ROWS=$2; shift 2 ;;
     (--cold) COLD=1; shift ;;
+    (--home) HOME_ARM=1; shift ;;
     (-l|--link) LINK=1; shift ;;
     (-h|--help)
       awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
@@ -83,6 +91,12 @@ while [ "$#" -gt 0 ]; do
     (*) echo "link-record: see the header of $0" >&2; exit 2 ;;
   esac
 done
+
+if [ "$COLD" = "1" ] && [ "$HOME_ARM" = "1" ]; then
+  echo "link-record: --cold gives the run a state directory of its own and" \
+       "--home uses the user's; pick one" >&2
+  exit 2
+fi
 
 VIEW_BIN=${VIEW_BIN:-$REPO/target/release/view}
 NVIM_BIN=${NVIM_BIN:-$(command -v nvim || true)}
@@ -271,10 +285,15 @@ record_one() {
     if [ "$LINK" = "0" ]; then
       echo "stty rows $ROWS cols $COLS"
     fi
-    echo "export XDG_CONFIG_HOME=$FIXTURE"
-    echo "export XDG_DATA_HOME=$data"
-    echo "export XDG_STATE_HOME=$dir/state"
-    echo "export XDG_CACHE_HOME=$dir/cache"
+    # the home arm exports none of these, so every editor resolves its
+    # config, plugins, state and cache exactly where the user's own launch
+    # resolves them
+    if [ "$HOME_ARM" = "0" ]; then
+      echo "export XDG_CONFIG_HOME=$FIXTURE"
+      echo "export XDG_DATA_HOME=$data"
+      echo "export XDG_STATE_HOME=$dir/state"
+      echo "export XDG_CACHE_HOME=$dir/cache"
+    fi
     echo "export TERM=xterm-256color COLORTERM=truecolor"
     case "$side" in
       # view forwards the flag to the engine it spawns, so the engine's own
@@ -400,6 +419,24 @@ redraw_batches() {
   }' "$1"
 }
 
+# Where the engine first placed the file's own window, off the `layout`
+# topic. The global grid is skipped: it is the one view's chrome frame
+# draws into, and it is placed before the file's window exists.
+window_placed() {
+  if [ ! -f "$1" ]; then
+    echo ""
+    return 0
+  fi
+  awk '/layout win_pos grid=/ {
+    for (i = 1; i <= NF; i++) {
+      if (substr($i, 1, 5) == "grid=" && substr($i, 6) != "1") {
+        print $1
+        exit
+      }
+    }
+  }' "$1"
+}
+
 # What view itself measured between the typed `:` and the frame carrying
 # the palette, in milliseconds off the `key` topic's own microseconds. The
 # recorder's wire reading covers the same moment plus the link; this is the
@@ -430,7 +467,7 @@ delta() {
 # found leaves its field empty, and a blank-separated column would then
 # collapse into the one beside it and be read as that one.
 RUNS_TSV=$OUT/runs.tsv
-printf 'side\trun\tload\tbusy\ttext_ms\thl_ms\tcolours\tcolon_ms\tpalette_ms\texit_ms\tengine_ms\tcontent_ms\tvim_ms\tchrome_ms\tforeign_ms\tredraws\n' \
+printf 'side\trun\tload\tbusy\ttext_ms\thl_ms\tcolours\tcolon_ms\tpalette_ms\texit_ms\tengine_ms\tcontent_ms\tvim_ms\tchrome_ms\tforeign_ms\tredraws\twinpos_ms\n' \
   > "$RUNS_TSV"
 
 index=1
@@ -441,7 +478,7 @@ while [ "$index" -le "$RUNS" ]; do
     replay_one "$dir" "$side"
     load=$(cat "$dir/load")
     content=$(content_frame "$dir/view.log")
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$side" "$index" "$load" \
       "$(awk -v l="$load" 'BEGIN { print (l + 0 >= 2.0) ? "busy" : "" }')" \
       "$(moment "$dir/moments.txt" text_ms)" \
@@ -459,7 +496,8 @@ while [ "$index" -le "$RUNS" ]; do
       "$(delta "$content" \
                "$(milestone "$dir/view.log" "chrome frame written")")" \
       "$(milestone "$dir/view.log" "notify-sink foreign=true")" \
-      "$(redraw_batches "$dir/view.log")" >> "$RUNS_TSV"
+      "$(redraw_batches "$dir/view.log")" \
+      "$(window_placed "$dir/view.log")" >> "$RUNS_TSV"
   done
   index=$((index + 1))
 done
@@ -489,15 +527,18 @@ TABLE=$OUT/table.txt
     echo "arm: local pty"
   fi
   echo "consumer: live xterm.js answering the terminal's own queries"
-  if [ "$COLD" = "1" ]; then
+  if [ "$HOME_ARM" = "1" ]; then
+    echo "state: the real \$HOME, its XDG directories untouched"
+  elif [ "$COLD" = "1" ]; then
     echo "state: cold (per-run state, cache and data; plugins linked in)"
   else
     echo "state: warm data home, per-run state and cache"
   fi
   echo
   awk -F'\t' '{
-    printf "%-5s %-4s %-6s %-5s %-9s %-9s %-8s %-9s %-11s %-9s %-10s %-11s %-8s %-10s %-11s %-8s\n", \
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+    printf "%-5s %-4s %-6s %-5s %-9s %-9s %-8s %-9s %-11s %-9s %-10s %-11s %-8s %-10s %-11s %-8s %-10s\n", \
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, \
+      $17
   }' "$RUNS_TSV"
   echo
   echo "spread per moment per side, milliseconds from the launch"
@@ -513,6 +554,7 @@ TABLE=$OUT/table.txt
     spread "$side" 14 chrome
     spread "$side" 15 foreign
     spread "$side" 16 redraws
+    spread "$side" 17 winpos
   done
 } > "$TABLE"
 
