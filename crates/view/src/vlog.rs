@@ -633,6 +633,268 @@ fn log_ui_event(ev: &view_core::events::UiEvent) {
     }
 }
 
+/// Milliseconds since the origin [`init`] was handed, which is the number
+/// every line written here already carries as its own prefix.
+///
+/// For a caller holding one reading open until a later line can close it:
+/// [`FeltLog`] stamps an input when it arrives and writes the line at the
+/// flush that answers it, so the wait is a subtraction of two readings
+/// taken from this one clock.
+#[must_use]
+pub fn mono_ms() -> u128 {
+    START.get().map_or(0, |start| start.elapsed().as_millis())
+}
+
+/// Whether a sink is open, for a call site whose payload cannot be built
+/// inside a [`log_with`] closure -- one that has to read the grid, or hold
+/// state between two passes of the loop.
+#[must_use]
+pub fn capturing() -> bool {
+    matches!(SINK.get(), Some(Some(_)))
+}
+
+/// One input received and not yet answered by a frame.
+struct PendingInput {
+    kind: &'static str,
+    /// What the event carried beyond its size: a key's own notation, a
+    /// mouse's button and action. Empty for a paste, whose text is the
+    /// user's and whose size is the part a log can carry.
+    detail: String,
+    bytes: usize,
+    received: u128,
+}
+
+/// How long past the first frame carrying the file's text the `highlight`
+/// topic keeps reading the window grid. A bound rather than an
+/// expectation: a session whose colours never change would otherwise scan
+/// every window cell on every frame for the rest of its life.
+const HIGHLIGHT_WATCH: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The three waits a user reports as lag, each closed by the frame that
+/// ends it: a keystroke's own wait for the screen, the command palette
+/// opening, and the syntax colours arriving on the file opened at launch.
+///
+/// A recording of those three moments is what a `script -O` capture and
+/// the topics before this one could not give: the capture holds no input
+/// timing at all, and no topic recorded a key, the palette or a highlight.
+/// Every method below returns on [`capturing`] first, so a session with no
+/// `VIEW_LOG` allocates nothing here, holds no input, and never reads a
+/// cell.
+#[derive(Default)]
+pub struct FeltLog {
+    pending: Vec<PendingInput>,
+    palette_open: bool,
+    palette_owes_paint: bool,
+    /// The highlight ids the window's text carried on the frame it first
+    /// appeared on, which every later frame is compared against. `None`
+    /// until that frame.
+    text_hls: Option<Vec<u64>>,
+    /// The reading of [`mono_ms`] that frame was written at, which
+    /// [`HIGHLIGHT_WATCH`] runs from.
+    text_at: u128,
+    highlight_closed: bool,
+}
+
+impl FeltLog {
+    /// Holds one key, paste or mouse event until the next frame reaches the
+    /// terminal.
+    ///
+    /// Read before the fold rather than after it, so the reading is when
+    /// the event arrived and the fold's own cost sits inside the wait the
+    /// line reports. Every other `Msg` is a deliberate no-op: nothing else
+    /// is a thing the user did.
+    pub fn note_input(&mut self, msg: &view_core::msg::Msg) {
+        use view_core::msg::Msg;
+        if !capturing() {
+            return;
+        }
+        let (kind, detail, bytes) = match msg {
+            Msg::Key(key) => (
+                "key",
+                format!(" notation={:?}", key.notation),
+                key.notation.len(),
+            ),
+            Msg::Paste(text) => ("paste", String::new(), text.len()),
+            Msg::Mouse(mouse) => (
+                "mouse",
+                format!(
+                    " button={} action={} modifier={:?}",
+                    mouse.button, mouse.action, mouse.modifier
+                ),
+                mouse.button.len() + mouse.action.len() + mouse.modifier.len(),
+            ),
+            _ => return,
+        };
+        self.pending.push(PendingInput {
+            kind,
+            detail,
+            bytes,
+            received: mono_ms(),
+        });
+    }
+
+    /// Writes the `palette` topic's two open-side lines off the state the
+    /// fold just produced.
+    ///
+    /// Read after the fold, because what decides whether the typed `:`
+    /// reaches the palette rather than nvim's own one-line cmdline is
+    /// state: the feature's own switch, and whether a prompt overlay
+    /// already owns the same typed text ([`palette_shown`]).
+    pub fn note_palette(&mut self, model: &view_core::model::Model) {
+        if !capturing() {
+            return;
+        }
+        let open = palette_shown(model);
+        if open == self.palette_open {
+            return;
+        }
+        self.palette_open = open;
+        self.palette_owes_paint = open;
+        log("palette", if open { "open requested" } else { "closed" });
+    }
+
+    /// Every line the frame that just reached the terminal closes.
+    ///
+    /// Read after the write rather than before it, so a wait reported here
+    /// is a wait that ended: the render and the frame's own single write
+    /// both sit inside it. The three `startup` milestones at the same call
+    /// site are stamped before the render instead, so a reading taken
+    /// across the two is one frame's paint apart.
+    pub fn note_flush(&mut self, model: &view_core::model::Model) {
+        if !capturing() {
+            return;
+        }
+        let flushed = mono_ms();
+        for input in self.pending.drain(..) {
+            log(
+                input.kind,
+                &format!(
+                    "bytes={}{} received={} waited={}",
+                    input.bytes,
+                    input.detail,
+                    input.received,
+                    flushed.saturating_sub(input.received)
+                ),
+            );
+        }
+        if self.palette_owes_paint && self.palette_open {
+            self.palette_owes_paint = false;
+            log("palette", "painted");
+        }
+        self.note_highlight(model, flushed);
+    }
+
+    /// The `highlight` topic's two lines: the frame the file's text first
+    /// reached the terminal on, and the first later frame whose window text
+    /// carries a highlight id that frame did not.
+    ///
+    /// Growth in the set rather than the presence of a non-default id: a
+    /// config with `'number'` on draws its gutter in `LineNr` from the very
+    /// first frame, so a reading of "any id but the default" answers the
+    /// moment the file appeared and never the moment it was coloured. Each
+    /// line carries how many ids the frame held, so a file that arrived
+    /// already coloured says so on the first line and writes no second one.
+    fn note_highlight(&mut self, model: &view_core::model::Model, flushed: u128) {
+        if self.highlight_closed {
+            return;
+        }
+        let Some(ids) = window_text_hls(model) else {
+            return;
+        };
+        let Some(base) = &self.text_hls else {
+            log(
+                "highlight",
+                &format!("file text flushed hl-ids={}", ids.len()),
+            );
+            self.text_hls = Some(ids);
+            self.text_at = flushed;
+            return;
+        };
+        if ids.iter().any(|id| !base.contains(id)) {
+            self.highlight_closed = true;
+            log(
+                "highlight",
+                &format!(
+                    "window text recoloured hl-ids={} was={} after={}",
+                    ids.len(),
+                    base.len(),
+                    flushed.saturating_sub(self.text_at)
+                ),
+            );
+        } else if flushed.saturating_sub(self.text_at) > HIGHLIGHT_WATCH.as_millis() {
+            self.highlight_closed = true;
+            log("highlight", "window text unchanged for the whole watch");
+        }
+    }
+}
+
+/// Whether the typed cmdline is what the palette is drawing.
+///
+/// The same three answers `view_surface::render` reads to decide it, and
+/// read here rather than inferred from the keystroke: `:` typed into a
+/// session whose palette is switched off draws nvim's own one-line cmdline,
+/// and one typed while a prompt overlay holds the stack draws that
+/// overlay's input line instead.
+fn palette_shown(model: &view_core::model::Model) -> bool {
+    use view_core::model::OverlayKind;
+    model.engine.cmdline.is_some()
+        && model.palette_enabled
+        && !matches!(
+            model.overlays().last().map(|open| &open.kind),
+            Some(OverlayKind::Prompt(_))
+        )
+}
+
+/// The highlight ids on every non-blank cell of the window holding the
+/// file, or `None` while no window has drawn any text yet.
+///
+/// The windows nvim placed, never the global grid beside them: under
+/// `ext_multigrid` that grid carries nvim's own message area, whose ids
+/// move with every message and would read as the file being recoloured.
+/// A session with no placed window has its file on the global grid and is
+/// read there, which is the split
+/// [`window_text_painted`](view_core::grid::GridRegistry::window_text_painted)
+/// already makes.
+///
+/// Latency consequence: one pass over the window's cells per flush, and
+/// only while the `highlight` topic still owes a line -- at most
+/// [`HIGHLIGHT_WATCH`] past the frame the file appeared on, and never at
+/// all without `VIEW_LOG`.
+fn window_text_hls(model: &view_core::model::Model) -> Option<Vec<u64>> {
+    use view_core::grid::registry::{GridId, PaneKind, GLOBAL_GRID};
+    let grids = model.engine.grids();
+    let mut placed: Vec<GridId> = grids
+        .panes_in_z_order()
+        .into_iter()
+        .filter(|pane| matches!(pane.kind, PaneKind::Window) && pane.id != GLOBAL_GRID)
+        .map(|pane| pane.id)
+        .collect();
+    if placed.is_empty() {
+        placed.push(GLOBAL_GRID);
+    }
+    let mut ids: Vec<u64> = Vec::new();
+    for id in placed {
+        let Some(grid) = grids.grid(id) else {
+            continue;
+        };
+        let (width, height) = grid.size();
+        for row in 0..height {
+            for col in 0..width {
+                let Some(cell) = grid.cell(row, col) else {
+                    continue;
+                };
+                if cell.text.trim().is_empty() {
+                    continue;
+                }
+                if !ids.contains(&cell.hl_id) {
+                    ids.push(cell.hl_id);
+                }
+            }
+        }
+    }
+    (!ids.is_empty()).then_some(ids)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1024,6 +1286,138 @@ mod tests {
         );
 
         assert_eq!(ai_command_payload(&AiCommand::Cancel), "Cancel");
+    }
+
+    /// The palette's own three answers, read off the model rather than off
+    /// the keystroke: the same `:` reaches nvim's one-line cmdline in a
+    /// session whose palette is switched off, and a prompt overlay's input
+    /// line while one holds the stack. A line saying "open requested" for
+    /// either of those names a surface nobody drew.
+    #[test]
+    fn the_palette_line_is_owed_only_where_the_palette_is_what_draws_the_cmdline() {
+        use view_core::events::UiEvent;
+
+        let mut model = view_core::model::Model::new();
+        model.palette_enabled = true;
+        assert!(
+            !palette_shown(&model),
+            "no cmdline is open, so nothing routed anywhere"
+        );
+
+        // through the fold, because that is the only thing that builds a
+        // `CmdlineState` -- the same `cmdline_show` the typed `:` comes back as
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            }]),
+        );
+        assert!(palette_shown(&model), "the palette is what draws this");
+
+        model.palette_enabled = false;
+        assert!(
+            !palette_shown(&model),
+            "a switched-off palette leaves nvim's own cmdline drawing it"
+        );
+    }
+
+    /// The window that holds the file, and not the global grid beside it:
+    /// under `ext_multigrid` that grid carries nvim's message area, whose
+    /// ids move with every message and would read as the file being
+    /// recoloured.
+    #[test]
+    fn the_highlight_reading_takes_the_placed_window_and_not_the_grid_beside_it() {
+        use view_core::grid::registry::{GridEvent, GridId, GLOBAL_GRID};
+        use view_core::grid::GridOp;
+
+        let mut model = view_core::model::Model::new();
+        assert!(
+            window_text_hls(&model).is_none(),
+            "a session that has drawn nothing has no reading to take"
+        );
+
+        let window = GridId(2);
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::Resize {
+                width: 8,
+                height: 2,
+            },
+        });
+        model.engine.apply_grid_event(GridEvent::Window {
+            grid: window,
+            startrow: 0,
+            startcol: 0,
+        });
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: GLOBAL_GRID,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("E".to_string(), 77, 1)],
+            },
+        });
+        assert!(
+            window_text_hls(&model).is_none(),
+            "a message on the grid beside the window is not the file appearing"
+        );
+
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("1".to_string(), 9, 1), ("f".to_string(), 0, 2)],
+            },
+        });
+        let first = window_text_hls(&model).expect("the file has text now");
+        assert_eq!(first.len(), 2, "the gutter's id and the text's: {first:?}");
+        assert!(
+            !first.contains(&77),
+            "the grid beside the window reached the reading: {first:?}"
+        );
+
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 1,
+                cells: vec![("f".to_string(), 42, 2)],
+            },
+        });
+        let coloured = window_text_hls(&model).expect("the file still has text");
+        assert!(
+            coloured.iter().any(|id| !first.contains(id)),
+            "the recolour has to carry an id the first frame did not: \
+             {first:?} -> {coloured:?}"
+        );
+    }
+
+    /// Every method of the recorder is the zero-overhead no-op without a
+    /// sink, which is what lets the input stamp and the whole-grid read sit
+    /// on the loop's own paint path at all.
+    #[test]
+    fn the_felt_recorder_holds_nothing_and_reads_nothing_with_no_sink_open() {
+        let model = view_core::model::Model::new();
+        let mut felt = FeltLog::default();
+        felt.note_input(&view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: ":".to_string(),
+        }));
+        assert!(
+            felt.pending.is_empty(),
+            "an input held for a log nobody opened is an allocation per keystroke"
+        );
+        felt.note_palette(&model);
+        felt.note_flush(&model);
+        assert!(
+            felt.text_hls.is_none(),
+            "the grid was read for a log nobody opened"
+        );
     }
 
     #[test]

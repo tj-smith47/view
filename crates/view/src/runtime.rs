@@ -985,6 +985,10 @@ pub fn run(
     let mut reconnect = ReconnectSchedule::default();
     let mut spinner_due: Option<Instant> = None;
     let mut milestones = StartupMilestones::default();
+    // the three moments a user reports as lag, which no topic recorded:
+    // the wait a keystroke spends, the palette's own open, and the colours
+    // arriving on the file. Empty and free with no `VIEW_LOG` sink open
+    let mut felt = crate::vlog::FeltLog::default();
     // re-armed below on every transition back into waiting, so a restart's
     // attach is bounded from its own arming rather than from the first one
     let mut attach_started = Instant::now();
@@ -1199,6 +1203,7 @@ pub fn run(
             let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
             term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
+            felt.note_flush(&model);
             model.dirty = false;
         }
         // resolved here rather than inside the wait because it is the one
@@ -1285,6 +1290,7 @@ pub fn run(
                         .saturating_add(u32::try_from(events.len()).unwrap_or(u32::MAX));
                 }
             }
+            felt.note_input(&msg);
             if let Some(code) = step(
                 &mut model,
                 &executor,
@@ -1295,6 +1301,7 @@ pub fn run(
             ) {
                 return Ok((model, code));
             }
+            felt.note_palette(&model);
             // the rest of this batch was addressed to an engine that is
             // being replaced, and the replacement happens at the top of the
             // next pass; the residue drain below is what keeps the damage
