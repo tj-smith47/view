@@ -783,10 +783,10 @@ impl PreAttach {
             }
             // applied to the model here for the same reason a resize is:
             // the first frame the loop paints reads the model's
-            // capabilities,
-            // and this window is the one place a late answer has no loop to
-            // reach. No repaint of its own -- the shell frame carries no
-            // cell a tier changes, so the cutover is early enough.
+            // capabilities, and this window is the one place a late answer
+            // has no loop to reach. No repaint of its own -- the shell
+            // frame carries no cell a tier changes, so the cutover is
+            // early enough.
             //
             // Logged through the loop's own path rather than beside it: the
             // last `caps tier=` line is the session's record of what it

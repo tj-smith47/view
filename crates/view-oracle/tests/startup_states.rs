@@ -485,3 +485,93 @@ fn kill(pid: u32) {
         nix::sys::signal::Signal::SIGKILL,
     );
 }
+
+/// The text the test types into the empty window, which is the only thing
+/// on the whole screen a window grid ever holds under the
+/// `startup-content` fixture.
+const CONTENT_TYPED: &str = "CONTENTLANDED";
+
+/// The two `VIEW_LOG` lines the paint loop writes for the two frames a
+/// person lives through: the chrome over an empty window, and the window
+/// carrying text.
+const CHROME_FRAME: &str = "chrome frame written";
+const CONTENT_FRAME: &str = "first content frame written";
+
+/// The content line is written for the frame that carries a window's text,
+/// and never for the chrome frame before it.
+///
+/// The call site is what this pins, which neither the registry's own unit
+/// tests nor the four pins above reach: reverting the loop's condition to
+/// `model.content_painted` -- the frame view's first flush produced, which
+/// is the chrome -- leaves every one of them passing.
+///
+/// Ordered by construction rather than by a clock. The fixture's window is
+/// empty and draws no end-of-buffer fill, no status line and no intro, so
+/// every cell of the window grid is blank until the test types; the wait
+/// is on the chrome line reaching the log, and only then does the typing
+/// start. The discriminator is the redraw counter the content line
+/// carries, which the loop zeroes at the chrome frame: a content line
+/// written on the chrome frame's own pass reads `redraws=0` by
+/// construction, and one written for the text this test typed cannot,
+/// because the text arrived in a batch of its own.
+///
+/// Disconfirm: point the loop's condition back at `model.content_painted`
+/// and this fails with `redraws=0` while the whole rest of the suite stays
+/// green.
+#[test]
+fn the_content_line_is_written_for_the_frame_carrying_window_text() {
+    let paths = common::ScratchPaths::new("startup-content");
+    common::plant_nvim_config(&paths.isolated_home, "startup-content");
+
+    let view_log = paths.isolated_home.join("view.log");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+    cmd.env("VIEW_LOG", &view_log);
+    let mut under_test = recording(cmd);
+
+    let read_log = || std::fs::read_to_string(&view_log).unwrap_or_default();
+    let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
+    while !read_log().contains(CHROME_FRAME) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let at_the_chrome_frame = read_log();
+    assert!(
+        at_the_chrome_frame.contains(CHROME_FRAME),
+        "view never logged the chrome frame, so this run says nothing about \
+         the line written after it; log:\n{at_the_chrome_frame}\nscreen:\n{}",
+        under_test.screen()
+    );
+
+    under_test
+        .send(format!("i{CONTENT_TYPED}\x1b").as_bytes())
+        .expect("the pty under test accepts the typing");
+    assert!(
+        under_test.wait_for(CONTENT_TYPED, view_test_support::host_deadline(BUDGET)),
+        "the text typed into the empty window never reached the terminal; \
+         screen:\n{}",
+        under_test.screen()
+    );
+
+    let deadline = std::time::Instant::now() + view_test_support::host_deadline(BUDGET);
+    while !read_log().contains(CONTENT_FRAME) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let log = read_log();
+    let line = log
+        .lines()
+        .find(|line| line.contains(CONTENT_FRAME))
+        .unwrap_or_else(|| {
+            panic!("view painted {CONTENT_TYPED} and logged no content frame; log:\n{log}")
+        });
+    let redraws: u32 = line
+        .split("redraws=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("the content line carries no redraw count: {line}"));
+    assert!(
+        redraws > 0,
+        "the content line was written for the chrome frame's own pass, \
+         before any window held text: {line}\nlog:\n{log}"
+    );
+}

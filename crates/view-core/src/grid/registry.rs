@@ -621,6 +621,11 @@ impl GridRegistry {
     /// composites the whole picture into the global grid and there is no
     /// window grid to ask; the global grid answers for it.
     ///
+    /// Visible means both flags: a withheld pane paints no cell either, and
+    /// [`place`](Self::place) carries `withheld` across a re-place that
+    /// changes the kind, so a withheld float nvim re-places as a window
+    /// would otherwise answer yes while showing nothing.
+    ///
     /// Costs the cells of every window grid while the answer is still
     /// `false`, so a caller reads it until it turns true and never again.
     #[must_use]
@@ -629,10 +634,9 @@ impl GridRegistry {
             return self.global.has_text();
         }
         self.slots.iter().any(|slot| {
-            slot.placed
-                .as_ref()
-                .is_some_and(|placed| matches!(placed.kind, PaneKind::Window) && !placed.hidden)
-                && slot.grid.has_text()
+            slot.placed.as_ref().is_some_and(|placed| {
+                matches!(placed.kind, PaneKind::Window) && !placed.hidden && !placed.withheld
+            }) && slot.grid.has_text()
         })
     }
 
@@ -1222,9 +1226,9 @@ mod tests {
     /// attach and draws nothing into it, view paints its chrome over that,
     /// and the file arrives a whole first screen update later.
     ///
-    /// Disconfirm: answering off the global grid, off any placed grid, or
-    /// off a grid that has only been sized turns the third line back into
-    /// the second one.
+    /// Disconfirm: answering off the global grid, off any placed grid, off
+    /// a grid that has only been sized, or off either visibility flag alone
+    /// turns the third line back into the second one.
     #[test]
     fn only_a_visible_window_holding_text_reads_as_content() {
         let mut registry = GridRegistry::new();
@@ -1269,6 +1273,17 @@ mod tests {
         assert!(
             !registry.window_text_painted(),
             "a window nvim has taken off screen shows the user nothing"
+        );
+
+        registry.withhold_float(GridId(5), true);
+        registry.apply(GridEvent::Window {
+            grid: GridId(5),
+            startrow: 0,
+            startcol: 0,
+        });
+        assert!(
+            !registry.window_text_painted(),
+            "a withheld float re-placed as a window keeps the hold and paints no cell"
         );
 
         registry.apply(GridEvent::Window {

@@ -229,6 +229,10 @@ impl Grid {
     ///
     /// A grid nvim has sized but not yet drawn into reads `false`: every
     /// cell is [`Cell::default`]'s single space until a `grid_line` lands.
+    /// The end-of-buffer `~` fillers count, so a window on an empty file
+    /// reads `true` the moment nvim draws it: that draw is the file
+    /// appearing, and a start that waited for a glyph the empty file has
+    /// none of would never arrive.
     /// Stops at the first non-blank cell, so a grid that has text answers
     /// in the cells before that one and an empty one costs its whole
     /// buffer -- read only while a startup is still waiting for its first

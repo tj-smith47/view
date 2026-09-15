@@ -767,23 +767,17 @@ pub struct MsgChannel {
     pub rx: mpsc::Receiver<Msg>,
 }
 
-/// Takes ownership of `engine` for the whole call (see the module docs'
-/// ownership chain), plus the already-attached `pump` and the `msg_rx` end
-/// of the channel `pump`'s sink and every other producer already feed.
-/// Both are built by `startup` rather than here: input capture goes live
-/// (and `msg_tx`/`msg_rx` are created) right after the very first shell
-/// frame paints, well before this function is ever called, so a key typed
-/// while the engine is still attaching is never lost -- see
-/// `startup::drain_pre_attach` for the buffering that covers exactly that
-/// window. The executor drives
-/// `engine.handle` through [`EngineOps`]. Painting fires immediately when
 /// Which of the three startup lines the loop's paint site has already
 /// written, so each is written once for the frame it describes.
 ///
 /// All three under the `"startup"` `VIEW_LOG` topic, whose line prefix is
 /// the milliseconds since process start: a startup timeline is read off
 /// those numbers against the shell frame's own line and nvim's
-/// `--startuptime`.
+/// `--startuptime`. "Written" is the frame being handed to the terminal
+/// writer: all three are logged just above the `draw_surface` call that
+/// renders them, so each stamp is a fraction of a millisecond early and
+/// all three are early by the same step, which is what a timeline read
+/// across them needs.
 #[derive(Default)]
 struct StartupMilestones {
     /// A paint pass found something to draw for the first time.
