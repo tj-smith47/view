@@ -770,12 +770,18 @@ temp_trap_handlers() {
           # quotes it never does, and scripts/acceptance/artifacts.sh bakes
           # its own path in this way because the variable is a local
           if (q == "\"") {
-            tail = h
-            while (match(tail, /[$][{]?[A-Za-z_][A-Za-z0-9_]*/)) {
-              if (RSTART == 1 || substr(tail, RSTART - 1, 1) != "\\") {
-                preexp = preexp " " substr(tail, RSTART, RLENGTH)
-              }
-              tail = substr(tail, RSTART + RLENGTH)
+            # the operand the name sits in rather than the name alone, since a
+            # removal below pairs on a whole operand: the single quotes here
+            # sit around a value the shell has already expanded and come off,
+            # while a prefix or a suffix stays -- a trap removing "$X/sub"
+            # removes nothing of the root
+            pn = split(h, pw, "[[:space:]]+")
+            for (pi = 1; pi <= pn; pi++) {
+              pt = pw[pi]
+              if (!match(pt, /[$][{]?[A-Za-z_][A-Za-z0-9_]*/)) { continue }
+              if (RSTART > 1 && substr(pt, RSTART - 1, 1) == "\\") { continue }
+              gsub(SQ, "", pt)
+              preexp = preexp " " pt
             }
             # the shell drops the backslash while it builds the string it
             # re-parses, so the command the trap runs carries the quote alone,
@@ -999,6 +1005,32 @@ temp_trap_removals() {
       }
       return out
     }
+    # the name a removal reaches: the one whose own expansion is the operand.
+    # Quote removal comes first, so that "$X"/sub and "$X/sub" are the one
+    # path they are, and a trailing slash is allowed because rm -rf "$X"/
+    # removes the root. A name read out of the middle of an operand pairs the
+    # leak with a removal that never touched the root: rm -rf "pre$X",
+    # rm -rf "$X.bak", rm -rf "$X/sub" and rm -rf "\\$X" each delete
+    # something the root still holds, and the last of them stranded a temp
+    # directory under a walk answering ok.
+    function removed_names(line,   i, n, w, part, out) {
+      n = split(expanded(line), part, "[[:space:]]+")
+      out = ""
+      for (i = 1; i <= n; i++) {
+        w = part[i]
+        gsub(/"/, "", w)
+        # the operators a word carries when a handler is written on one line:
+        # rm -f "$RAW"; }  is the operand and the list separator behind it
+        sub(/[;&)]+$/, "", w)
+        sub(/\/+$/, "", w)
+        if (w ~ /^[$][{][A-Za-z_][A-Za-z0-9_]*[}]$/) {
+          out = out substr(w, 3, length(w) - 3) " "
+          continue
+        }
+        if (w ~ /^[$][A-Za-z_][A-Za-z0-9_]*$/) { out = out substr(w, 2) " " }
+      }
+      return out
+    }
     # a name in command position, never the header that defines it: `f()` is
     # excluded by the paren that follows the word
     function calls(line, g) {
@@ -1054,12 +1086,12 @@ temp_trap_removals() {
       }
       for (i = 1; i <= r; i++) {
         if (isrm[i]) {
-          removed = removed names_on(text[i])
+          removed = removed removed_names(text[i])
           continue
         }
         for (g in defined) {
           if (removes[g] && calls(outside[i], g)) {
-            removed = removed names_on(text[i])
+            removed = removed removed_names(text[i])
             break
           }
         }
@@ -1262,6 +1294,12 @@ check_prose_width() {
   rc=0
   graded=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" \
     -v short="$PROSE_RAGGED" "$AWK_COLS"'
+    # the line a list item opens, which the ragged measure exempts and the
+    # marker rule grades: written once because two rules reading the same
+    # class out of two regexes drift apart at the first edit of either
+    function opens_list(l) {
+      return (l ~ /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]/)
+    }
     # what a re-wrap may move a word onto or off: prose and the continuation
     # of a list item. A table row, a heading, a block quote, a rule and a
     # fence line each carry their own newline by construction, so neither the
@@ -1274,7 +1312,7 @@ check_prose_width() {
       # pulled the paragraph up into the marker would be gone at the next run
       # of the test that writes that block
       if (l ~ /^[[:space:]]*<!--/) { return 0 }
-      if (l ~ /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]/) { return 0 }
+      if (opens_list(l)) { return 0 }
       if (l ~ /^[[:space:]]*(---+|===+)[[:space:]]*$/) { return 0 }
       if (l ~ /^[[:space:]]*(```|~~~)/) { return 0 }
       return 1
@@ -1362,7 +1400,7 @@ check_prose_width() {
       # line an item was merged into is as often the opener of the item above
       # as it is one of its continuations, so an opener is graded too -- what
       # is exempt from the ragged rule is not exempt from this
-      if ((wraps($0) || $0 ~ /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]/) &&
+      if ((wraps($0) || opens_list($0)) &&
           $0 ~ /[.!?:]["*)]*[[:space:]]+([-*+]|[0-9]+[.)])[[:space:]]/) {
         printf "marker %s:%d: a list marker sits mid-line in prose\n", FILENAME, FNR
       }

@@ -262,7 +262,15 @@ a removal written over an array of roots reads `$root` where the `mktemp` named
 Pairing by lowercased name instead reads `TMP=/var/cache/keepme` as the removal
 for `tmp=$(mktemp)`, which passes a leak in silence -- that pair is cased, red.
 An assignment that is not an append is not a holder: `other=$ROOT/sub` names a
-path inside the temp root and removing it removes nothing of the root. A handler
+path inside the temp root and removing it removes nothing of the root. What a
+removal names is read the same way: a name pairs where the operand is its own
+expansion -- `$X`, `"$X"`, `${X}` and the root with a trailing slash -- and
+never where it sits inside one. `rm -rf "pre$X"`, `rm -rf "$X.bak"` and
+`rm -rf "$X/sub"` each delete a path the root still holds, and `rm -rf "\\$X"`
+deletes a path whose name opens with a backslash, which is what bash makes of
+that pair: it answered ok while stranding a root under a scratch `TMPDIR`. The
+trap line is read the same way, since the quotes around a name the shell has
+already expanded sit around a path rather than around a name. A handler
 body ends at the brace that closes the function, counted by depth over the body
 with quoted and commented braces ignored and here-doc bodies skipped, never at
 an indentation: a `{ ...; } >&2` group written under the header indentation, and
@@ -448,6 +456,15 @@ continuation, since an item is merged into the opener above it as often as
 into one of its continuations. What it cannot see is the other half of the
 same damage: a paragraph break the wrap deleted leaves text no rule can call
 wrong, and only a comparison against the revision before it finds one.
+`scripts/check-rewrap-structure.sh BASE HEAD` is that comparison, and a sweep
+runs it before it commits. Per page it reports the blank lines and list openers
+that fell between the two trees where the words themselves did not change, and
+every base block whose text survives verbatim inside a bigger head block, which
+is the deleted break itself -- the same words, one paragraph shorter. It reports
+and never gates: the second shape names a paragraph that legitimately gained a
+sentence as readily as one a wrap swallowed, and over the sweep this rule came
+out of it named the merged block and two more. A hard gate needs that tail
+answered first.
 
 What cannot wrap is exempt by shape rather than by a list of files:
 

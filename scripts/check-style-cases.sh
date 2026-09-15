@@ -956,6 +956,35 @@ new_width_case
 } > "$CASE/docs/page.md"
 expect_width 0 '' 'the same two items, each opening its own line'
 
+# The line an item is merged into is as often a continuation of the item above
+# as it is that item's opener, and all three bullets the sweep spent sat on a
+# continuation: graded by the opener arm alone, the rule finds none of them.
+new_width_case
+{
+  printf '# page\n\n'
+  printf -- '- A first item whose sentence opens the list and runs on to a\n'
+  printf '  second line of its own, where it ends. - A second item that a\n'
+  printf '  re-wrap pulled up onto that continuation line.\n'
+} > "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:4:marker' \
+  'a bullet a re-wrap pulled onto a continuation line of the item above it'
+
+# The marker spellings beside the `-` the three shipped merges were written
+# with: a list is as readily starred, plussed or numbered, and a rule that
+# reads one of the four grades a quarter of the population.
+new_width_case
+{
+  printf '# page\n\n'
+  printf -- '* A starred item that opens its own list and runs on to a second\n'
+  printf '  line of its own, where it ends. * A second starred item pulled up.\n\n'
+  printf -- '+ A plus item that opens its own list and runs on to a second line\n'
+  printf '  of its own, where it ends. + A second plus item pulled up onto it.\n\n'
+  printf -- '1. An ordered item that opens its own list and runs on to a second\n'
+  printf '   line of its own, where it ends. 2. A second ordered item pulled up.\n'
+} > "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:10:marker docs/page.md:4:marker docs/page.md:7:marker' \
+  'a starred, a plussed and a numbered item, each merged onto a continuation'
+
 # The marker rule is anchored on the end of a sentence because prose writes a
 # bare `-` and a bare `+` mid-line far more often as arithmetic than as a
 # bullet: the pages this walk grades carry a dozen of these and not one of
@@ -1960,6 +1989,101 @@ trap "rm -rf '$X'" EXIT
 PLANT
 expect_temp_traps 0 '' \
   'a trap whose path is expanded into the string before the trap is armed'
+
+# A removal reaches the name only where the operand is its expansion. The four
+# below each delete a path the temp root still holds -- bash expands the first
+# to a backslash and a path, and the other three to a sibling, a suffixed name
+# and a file inside the root -- while a walk reading the name out of the middle
+# of the operand pairs the leak with a removal that never touched it. The last
+# of them ran under real bash with TMPDIR pointed at a scratch directory and
+# left its root behind.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "\\$X"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler body whose removal carries a literal backslash before the name'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "pre$X"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler body removing a name the operand prefixes, which is another path'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "$X.bak"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler body removing a suffixed name, which leaves the root it names'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "$X/sub"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a handler body removing a path inside the root, which removes none of it'
+
+# The shapes that are the expansion of the name and stay green: a path under
+# the root removes the root when the slash is all that follows it, the braced
+# spelling is the same name, and a handler written on one line carries the
+# list separator behind its operand -- which is the line
+# scripts/capture-terminal-probe.sh writes.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "$X"/
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written as the root with a trailing slash'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() {
+  rm -rf "${X}"
+}
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a removal written in the braced spelling of the name'
+
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+cleanup() { rm -rf "$X"; }
+trap cleanup EXIT
+PLANT
+expect_temp_traps 0 '' 'a handler written on one line, whose operand ends at a semicolon'
+
+# The same operand rule on the trap line, where the name was expanded into the
+# string before the trap was armed: the quotes there sit around a path, and
+# what they hold is graded as the operand it is.
+new_temp_trap_case
+write_temp_trap_script <<'PLANT'
+X=$(mktemp -d)
+trap "rm -rf '$X/sub'" EXIT
+PLANT
+expect_temp_traps 1 'scripts/a.sh' \
+  'a trap whose expanded path names a file inside the root rather than the root'
 
 # The wire between the harvest and the removal walk carries no byte a script
 # can write: the two halves of a line arrive as two records, and a handler
