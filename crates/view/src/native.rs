@@ -278,15 +278,13 @@ impl NativeSession {
             let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
             format!("takeover options={taken:?} channel={}", self.channel_id)
         });
-        // after every call above and after the reply `update()` put ahead of
-        // all of them: nvim applies one connection's traffic in the order it
-        // arrives, so the frame the attach produces is drawn with this
-        // takeover already in force -- a `cmdheight` or a `laststatus`
-        // landing after it would cost a second frame showing the surface
-        // view had just taken. The reply leads because nvim is blocked
-        // inside the request it answers, and a redraw asked for while it is
-        // blocked is deferred to a flush carrying nothing
-        // ([`Model::takes_attach`]).
+        // after every call above: nvim applies one connection's traffic in
+        // the order it arrives, so the frame the attach produces is drawn
+        // with this takeover already in force -- a `cmdheight` or a
+        // `laststatus` landing after it would cost a second frame showing
+        // the surface view had just taken. Both are written before the
+        // reply that lets nvim look at either ([`Model::takes_attach`], and
+        // `view::runtime`'s `dispatch` for the hold).
         let mut effects = batched(effects);
         effects.extend(model.takes_attach().map(Effect::Rpc));
         // and last of all: `nvim_ui_set_option` is about a UI on this

@@ -132,9 +132,9 @@ pub struct FollowUps<'a> {
 /// loops resolve the two messages it hangs off: nvim's `VimEnter` lands in
 /// the pump's presink whenever it fires before the sink attaches, and in
 /// `msg_rx` whenever it fires after. It runs after `update()`'s own effects
-/// so nvim's blocking `VimEnter` request is answered before the takeover it
-/// unblocks, and so the first-run notice reads claims `update()` has already
-/// recorded.
+/// so the first-run notice reads claims `update()` has already recorded,
+/// and the answer to nvim's blocking `VimEnter` request is held back until
+/// behind it (see the hold below).
 ///
 /// The theme-cache follow-up sits at the same seam for the same reason, and
 /// before the native one because it has nothing to do with the native
@@ -162,6 +162,21 @@ pub(crate) fn dispatch<E: EngineOps>(
     }
     let mut flow = Flow::Continue;
     let effects = update(model, msg);
+    // the answer to nvim's `VimEnter` request travels behind everything
+    // this pass sends, because nvim drains what it has parked on the
+    // channel as soon as that answer frees it: the attach and the takeover
+    // are already queued when it looks, so the settled screen is drawn
+    // once, with the surfaces view's, rather than drawn for a UI that is
+    // not there and drawn again for the one that arrives after startup
+    // (`view_engine::process`'s startup chunk pumps that drain).
+    let (held, effects): (Vec<Effect>, Vec<Effect>) =
+        if matches!(stage, crate::native::Stage::VimEnter) {
+            effects
+                .into_iter()
+                .partition(|eff| matches!(eff, Effect::Reply { .. }))
+        } else {
+            (Vec::new(), effects)
+        };
     crate::vlog::log_layout(model, &layout);
     for eff in effects {
         // read off what is actually going to the engine rather than off the
@@ -211,29 +226,34 @@ pub(crate) fn dispatch<E: EngineOps>(
             }
         }
     }
-    if flow != Flow::Continue {
-        return flow;
-    }
-    for eff in follow_ups.theme.follow_up(model, trigger) {
-        match executor.run(eff) {
-            Flow::Continue => {}
-            other => {
-                flow = other;
-                break;
+    if flow == Flow::Continue {
+        for eff in follow_ups.theme.follow_up(model, trigger) {
+            match executor.run(eff) {
+                Flow::Continue => {}
+                other => {
+                    flow = other;
+                    break;
+                }
             }
         }
     }
-    if flow != Flow::Continue {
-        return flow;
-    }
-    for eff in follow_ups.native.follow_up(model, stage) {
-        match executor.run(eff) {
-            Flow::Continue => {}
-            other => {
-                flow = other;
-                break;
+    if flow == Flow::Continue {
+        for eff in follow_ups.native.follow_up(model, stage) {
+            match executor.run(eff) {
+                Flow::Continue => {}
+                other => {
+                    flow = other;
+                    break;
+                }
             }
         }
+    }
+    // whatever those passes decided: nvim is blocked inside the request
+    // this answers, and a pass that stopped early still owes the answer --
+    // an editor left waiting inside `VimEnter` has no way out but view's
+    // own exit
+    for eff in held {
+        let _ = executor.run(eff);
     }
     flow
 }
@@ -1640,6 +1660,54 @@ mod tests {
         }));
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "input(x)");
+    }
+
+    /// The answer nvim's `VimEnter` waits for is written behind the takeover
+    /// and the attach, never ahead of them.
+    ///
+    /// nvim stops draining the channel the moment that answer reaches it and
+    /// leaves whatever came with it parked, so the engine's startup chunk
+    /// pumps the queue once the answer frees it
+    /// (`view_engine::process`'s `late_attach_cmd`). What is already parked
+    /// then is in force for the one redraw the startup does of the settled
+    /// screen; anything written after the answer misses that redraw and
+    /// costs a second one, which is the whole of the launch cost this
+    /// ordering removes.
+    #[test]
+    fn the_vim_enter_answer_is_written_behind_the_takeover_and_the_attach() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::all_enabled(7, None);
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::EngineRequest(view_core::msg::EngineRequest::VimEnter {
+                token: ReplyToken { msgid: 3 },
+            }),
+        );
+        assert!(matches!(flow, Flow::Continue));
+        let calls = ops.calls.borrow().clone();
+        let at = |prefix: &str| {
+            calls
+                .iter()
+                .position(|call| call.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{prefix} must be called, got {calls:?}"))
+        };
+        let takeover = at("disable_claimants(");
+        let attach = at("ui_attach(");
+        let reply = at("reply(3,");
+        assert!(
+            takeover < attach && attach < reply,
+            "the takeover, then the attach, then the answer, got {calls:?}"
+        );
     }
 
     #[test]

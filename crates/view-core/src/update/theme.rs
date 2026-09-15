@@ -12,9 +12,14 @@ use crate::msg::{Effect, ReplyToken, ReplyValue, RpcCall};
 
 /// The effects nvim's `VimEnter` is owed, in the order it is owed them.
 ///
-/// The reply leads, and nothing may be queued ahead of it: nvim is blocked
-/// inside the `rpcrequest` this answers, so a call placed first would be
-/// waiting on the engine that is waiting on view.
+/// The reply's place in this list is not when it is sent. The loop holds a
+/// `VimEnter` answer behind everything else the pass produces -- these
+/// calls, and the takeover and attach a native session adds after them --
+/// because the engine's startup chunk drains what it parked on the channel
+/// as soon as this answer frees it, and what it finds parked is what the
+/// settled screen is drawn from (`view::runtime`'s `dispatch`). Nothing
+/// here may wait on nvim in the meantime: it is inside the `rpcrequest`
+/// this answers and cannot serve a call that blocks on it.
 pub(super) fn on_vim_enter(model: &mut Model, token: ReplyToken) -> Vec<Effect> {
     let mut effects = vec![
         Effect::Reply {

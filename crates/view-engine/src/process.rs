@@ -1856,6 +1856,48 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// `term_colors` is derived from that same `$TERM` (and `$COLORTERM`)
 /// rather than from terminfo: nothing has opened a terminal on this side,
 /// and 256-vs-8 is the whole of what a plugin branches on.
+///
+/// # The attach applied inside `VimEnter`
+///
+/// The hook answers with a `vim.wait`, and that wait is the difference
+/// between one redraw of the settled screen and two. nvim stops draining
+/// the channel the moment the reply it is blocked on arrives, so
+/// everything written behind that reply -- and everything that arrived in
+/// the same read as it -- sits parked on the channel's own queue:
+/// measured on the pinned engine against the `user` fixture, the
+/// `nvim_ui_attach` view writes while answering this hook is not applied
+/// until the loop's first turn after startup, by which time nvim has
+/// already drawn the whole screen once for the UI that was not there, and
+/// the attach then asks for all of it again. The wait drains that queue
+/// here instead, so the attach, the
+/// takeover behind it and the colorscheme are in force before the startup
+/// does its own drawing, and the frame that drawing produces is the one
+/// view paints. Same fixture, same host: the frame carrying the settled
+/// screen reaches the terminal 1.4 to 2.6 ms after the buffer behind it is
+/// written, where applying the attach after startup took 4.2 to 5.3 ms on
+/// an idle host and 6.1 to 12.3 ms on a busy one; bare nvim, drawing the
+/// same screen in the same interleaved run, takes 0.9 to 1.4 ms. What the
+/// wait costs instead is time inside `VimEnter`: the attach, the takeover
+/// and the `UIEnter` autocommands it fires now run before the rest of
+/// startup rather than after it.
+///
+/// The reading is masked for the length of that event, because nvim's own
+/// OSC 52 plugin queries the terminal from `UIEnter` whenever it finds a
+/// `stdout_tty` UI. [`crate::nvim_api::EngineHandle::claim_stdout_tty`]
+/// travels in the same read as the attach and is therefore already in
+/// force here, where nvim firing this event itself would have fired it on a
+/// UI that had not claimed the option yet -- and view answers no terminal
+/// query, so the plugin's would block startup on a reply that never comes.
+/// Masking it hands `UIEnter` the same reading nvim's own ordering gave it.
+///
+/// The condition reads the `nvim_list_uis` this chunk saved before
+/// shimming it, because the shim answers for a UI that has not attached
+/// yet and would end the wait on its first check. The 200 ms bound is for
+/// the one case that has no attach coming -- a view that died between the
+/// reply and the attach -- and it bounds a single startup, not something
+/// anything waits on twice. A spawn that keeps the startup barrier
+/// ([`EngineConfig::attaches_late`]) has attached before this hook runs at
+/// all, and its wait returns on the first check.
 fn late_attach_cmd(width: u16, height: u16) -> String {
     let modules: Vec<String> = view_core::native::surfaces::SURFACE_CLAIMANTS
         .iter()
@@ -1896,15 +1938,28 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          for _, ext in ipairs({{ {vocabulary} }}) do pending[ext] = false end\n\
          pending.ext_linegrid = true\n\
          local attached = vim.api.nvim_list_uis\n\
+         local quiet_tty = false\n\
          vim.api.nvim_list_uis = function()\n\
          local uis = attached()\n\
-         if #uis > 0 then return uis end\n\
+         if #uis > 0 then\n\
+         if quiet_tty then\n\
+         for _, ui in ipairs(uis) do ui.stdout_tty = false end\n\
+         end\n\
+         return uis\n\
+         end\n\
          return {{ pending }}\n\
          end\n\
          vim.api.nvim_create_autocmd('VimEnter', {{\n\
          once = true,\n\
          callback = function()\n\
          vim.rpcrequest(channel, 'view_vim_enter')\n\
+         vim.wait(200, function() return #attached() > 0 end, 1)\n\
+         if #attached() > 0 then\n\
+         quiet_tty = true\n\
+         pcall(vim.api.nvim_exec_autocmds, 'UIEnter',\n\
+         {{ data = {{ chan = channel }} }})\n\
+         quiet_tty = false\n\
+         end\n\
          end,\n\
          }})\n\
          assert(load([==[\n\

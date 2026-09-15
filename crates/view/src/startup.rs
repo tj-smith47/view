@@ -1647,16 +1647,18 @@ mod tests {
             flush_dispatched,
             "the pending-damage Flush was not dispatched"
         );
-        // presink's VimEnter reply and the call it carries, then the attach
-        // probe the cutover closes the staged traffic with, then the resize,
-        // then every buffered key, in that exact order -- the arrival order
-        // run_cutover's doc comment claims. The takeover and the attach it
-        // closes with belong to a session that has one, which this inert one
-        // is deliberately not (`NativeSession::inert`)
+        // the call presink's VimEnter carries and then its reply, which
+        // travels last so nvim reads the traffic behind it in the same turn,
+        // then the attach probe the cutover closes the staged traffic with,
+        // then the resize, then every buffered key, in that exact order --
+        // the arrival order run_cutover's doc comment claims. The takeover
+        // and the attach it closes with belong to a session that has one,
+        // which this inert one is deliberately not
+        // (`NativeSession::inert`)
         let expected_len = 4 + KEY_RING_CAPACITY;
         assert_eq!(calls.len(), expected_len, "{calls:?}");
-        assert_eq!(calls[0], "reply(1,Nil)");
-        assert_eq!(calls[1], "probe_swap_recovery(1)");
+        assert_eq!(calls[0], "probe_swap_recovery(1)");
+        assert_eq!(calls[1], "reply(1,Nil)");
         assert_eq!(calls[2], "probe_swap_recovery(2)");
         assert!(calls[3].starts_with("try_resize("));
         assert_eq!(calls[4], "input(0)");
@@ -1838,18 +1840,24 @@ mod tests {
         );
 
         assert!(matches!(outcome, CutoverOutcome::Continue));
-        // the failed reply is the only call made: pending damage, the attach
-        // probe, the resize and the key are all skipped once the engine is
-        // lost
+        // the failed probe and the reply held behind it are the only calls
+        // made: pending damage, the cutover's own attach probe, the resize
+        // and the key are all skipped once the engine is lost. The reply is
+        // still attempted, because an nvim that is still there is blocked on
+        // it
         let calls = executor.into_ops().calls.into_inner();
-        assert_eq!(calls, vec!["reply(1,Nil)"]);
+        assert_eq!(calls, vec!["probe_swap_recovery(1)", "reply(1,Nil)"]);
     }
 
-    /// The takeover a real session performs is triggered here, not by
+    /// The takeover a real session performs is triggered here rather than by
     /// `runtime::run`'s loop: a config that sources quickly fires `VimEnter`
-    /// into the presink, and nothing else in the process resolves that.
+    /// into the presink, and nothing else in the process resolves that. It
+    /// travels ahead of the answer for the reason
+    /// [`crate::runtime::dispatch`] holds that answer back: nvim reads what
+    /// view has queued as soon as the answer frees it, so the takeover and
+    /// the attach are already there to be read.
     #[test]
-    fn a_presink_vim_enter_hands_the_surfaces_over_after_answering_nvim() {
+    fn a_presink_vim_enter_hands_the_surfaces_over_before_answering_nvim() {
         use view_core::msg::{EngineRequest, ReplyToken};
 
         let ops = crate::engine_ops::FakeOps::default();
@@ -1886,9 +1894,9 @@ mod tests {
             .iter()
             .position(|c| c.starts_with("hold_option(laststatus"));
         assert!(
-            answered < took_over && answered.is_some(),
-            "nvim's blocking request is answered before the takeover it \
-             unblocks: {calls:?}"
+            took_over < answered && took_over.is_some(),
+            "the takeover is written before the answer that lets nvim read \
+             it: {calls:?}"
         );
         assert!(
             calls
