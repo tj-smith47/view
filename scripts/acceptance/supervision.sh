@@ -390,8 +390,8 @@ assert_exit_was_clean() {
         fail "the caret was never parked on the bottom row before the switch back, so the host shell resumes mid-screen over its own scrollback"
         return 1
     }
-    grep -qU $'\033\[?25h\033\[?1006l\033\[?1015l\033\[?1003l\033\[?1002l\033\[?1000l\033\[?2004l\033\[?1049l' "$ROOT/pane.raw" || {
-        fail "the caret show, the mouse-reporting and bracketed-paste disables and the switch back never reached the pty as one sequence"
+    grep -qU $'\033\[?25h\033\[?1006l\033\[?1015l\033\[?1003l\033\[?1002l\033\[?1000l\033\[?2004l\033\[?1049l\033\[?25h' "$ROOT/pane.raw" || {
+        fail "the caret show, the mouse-reporting and bracketed-paste disables, the switch back and the caret show on the screen the shell resumes on never reached the pty as one sequence"
         return 1
     }
 

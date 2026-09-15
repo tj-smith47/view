@@ -234,11 +234,11 @@ fn push_kitty_keyboard<W: Write>(
 /// first, then the keyboard-protocol pop, the clear of the frame the
 /// alternate screen is still showing, the caret parked at column 0 of that
 /// screen's bottom row, and last mouse capture, bracketed paste and the
-/// alternate screen. Nothing follows the switch back: every byte view
-/// writes lands on the screen it drew on, which is what keeps its last
-/// frame out of the host shell's scrollback. `rows` is the terminal's
-/// height in cells, which the bottom-row park needs and which [`restore`]
-/// asks the terminal for.
+/// alternate screen, with one `CSI ? 25 h` after the switch back. Nothing
+/// else follows it: every byte that paints lands on the screen view drew
+/// on, which is what keeps its last frame out of the host shell's
+/// scrollback. `rows` is the terminal's height in cells, which the
+/// bottom-row park needs and which [`restore`] asks the terminal for.
 /// Generic over `Write` (mirrors [`write_cursor_shape`]) so the byte
 /// sequence and ordering are unit-testable against a `Vec<u8>` instead of
 /// only provable via a live terminal.
@@ -303,6 +303,14 @@ fn restore_bytes<W: Write>(out: &mut W, rows: u16) -> std::io::Result<()> {
         crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen
     )?;
+    // shown a second time, on the other screen: a terminal that tracks
+    // DECTCEM per buffer resumes the main screen with whatever visibility
+    // it last had there, and the `Show` above applied to the alternate
+    // screen only. nvim's recorded exit writes the same second show after
+    // `exit_ca_mode` (`CSI ? 1049 l`, its title pop, `CSI ? 25 h`); it is
+    // the only byte here that follows the switch back, and it paints
+    // nothing.
+    out.write_all(b"\x1b[?25h")?;
     out.flush()
 }
 
@@ -1229,10 +1237,11 @@ mod tests {
              switch back"
         );
         assert_eq!(
-            leave_alt + b"\x1b[?1049l".len(),
-            buf.len(),
-            "nothing may be written after the switch back: every byte view sends lands on the \
-             screen it drew on"
+            &buf[leave_alt..],
+            b"\x1b[?1049l\x1b[?25h",
+            "the switch back is followed by the caret show and nothing else, matching nvim's \
+             own exit: a terminal tracking DECTCEM per buffer needs it, and every byte that \
+             paints has already landed on the screen view drew on"
         );
     }
 
@@ -1289,10 +1298,10 @@ mod tests {
             let leave_alt = find_subslice(&wire, b"\x1b[?1049l")
                 .expect("a session still leaves the alternate screen");
             assert_eq!(
-                leave_alt + b"\x1b[?1049l".len(),
-                wire.len(),
-                "the switch back is the last thing written, so nothing reaches the screen the \
-                 host shell resumes on -- {:?}",
+                &wire[leave_alt..],
+                b"\x1b[?1049l\x1b[?25h",
+                "the only byte after the switch back is the caret show, which paints nothing: \
+                 anything else would reach the screen the host shell resumes on -- {:?}",
                 String::from_utf8_lossy(&wire[leave_alt..])
             );
         }
