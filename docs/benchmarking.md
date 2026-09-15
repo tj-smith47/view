@@ -220,8 +220,9 @@ cells on the `user` fixture: `echo.user`, `echo_speculated.user`,
 `scroll.user`, `flood.user` and `startup.user`. dev-linux records all five.
 Four were taken 2026-09-06 in two quiet windows, each cell's null-pair
 calibration inside 1.1%; `startup.user` was re-recorded 2026-09-15 in a quiet
-window of its own, its null-pair calibration 3.4% at the start of the run and
-1.0% at the end, both well inside the 15% floor that refuses a run:
+window of its own (1-minute load 1.82 falling to 1.42 over the run), its
+null-pair calibration 3.4% at the start of the run and 1.0% at the end, both
+well inside the 15% floor that refuses a run:
 
 | cell, `user` fixture | view | bare Neovim | reading |
 |---|---|---|---|

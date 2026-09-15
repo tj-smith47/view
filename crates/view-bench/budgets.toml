@@ -237,18 +237,19 @@ fixtures = ["minimal", "heavy"]
 # The two startup cells, in the vocabulary spec 3.1 states them in: what a
 # person waits through, and the one diagnostic that decomposes it. Neither
 # carries a `classes` list yet -- dev-linux is the only class that has
-# recorded the row (2026-09-06, settled_ratio_p50 1.096 and server_delta_ms
-# 0.682), so a class restriction here would be a guess about where the
+# recorded the row (2026-09-15, settled_ratio_p50 1.0287 and server_delta_ms
+# 1.637), so a class restriction here would be a guess about where the
 # number will next be recorded rather than a statement about where it means
 # something. `server_delta_ms`'s 5 ms is the controlled-leg
 # bar spec 3.1 states. The metric belongs to none of the three
 # shared-class exemption families in
 # `view_harness::baselines::gate_headroom`, so the recorded-value ratchet
 # reads it on every class that holds a seat, this one included: the
-# 2026-09-15 record run breached that ratchet -- a signed bar a quarter of
-# a millisecond above a recorded value near zero -- while staying far
-# under the 5 ms bound. A shared class reporting the row without being
-# able to fail on it was true only while the row had no seat here.
+# 2026-09-15 record run held the prior seat (-0.076 ms) and reported
+# RECORD REGRESSION MASKED -- the measured 1.637 ms breaches the signed bar
+# a quarter of a millisecond above that seat -- while staying far under the
+# 5 ms bound. A shared class reporting the row without being able to fail
+# on it was true only while the row had no seat here.
 [[budget]]
 spec_row = "Launch -> the settled screen, real config"
 scenario = "startup"

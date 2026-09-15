@@ -267,6 +267,14 @@ about 12 h of session time across six commits, 823b76c through b880b9b).
   the mark, and the ratchet's next honest reading on this cell cannot fall
   more than the class's published spread below 1.637 without being refused as
   a lucky draw -- so a fix that removes the wait needs another hand re-seat.
+  The same record run's tail moved too: `first_frame_ratio_p99` measured
+  1.0715 (82.764 ms against 77.243 ms) against the 1.0124 seat the run held
+  (tails are recorded, not gated, on this shared class) -- the first thing
+  to check when this session revisits the path that produces the first
+  frame.
+- *Owed.* `startup.settled_ratio_p50` and `startup.server_delta_ms` are each
+  one draw at load 1.8, not a replicate median; this session re-seats both
+  from a replicate median (`--campaign 8`) on a quiet host.
 
 ## Execution discipline (binding from S1 on)
 
