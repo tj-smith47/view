@@ -873,33 +873,37 @@ impl Messages {
     /// state a falsehood until whoever raised it noticed and re-raised it.
     /// It is retracted by that raiser, when the condition ends.
     ///
-    /// A notice carrying a family ([`MessageEntry::family`]) goes with
-    /// them. It was exempt while `<Esc>` was the only gesture that reached
-    /// the stack at all, and the session that showed what that costs left
-    /// one standing top-right for its whole length: view raises those about
-    /// a condition it observed, nothing re-raises one while the condition
-    /// holds, and `d` in the message history is not a way out anybody found.
-    /// The text stays in that history either way, and the deliberate
-    /// gesture is the same one every other standing line answers to.
+    /// So does a notice carrying a family ([`MessageEntry::family`]): view
+    /// raises those about a condition it went and observed, nothing
+    /// re-raises one while the condition holds, and this gesture arrives
+    /// while a launch's notice is still being read. Those answer to one
+    /// rule of their own ([`Self::dismiss_read_sticky`]) -- any input at
+    /// all, once the line has stood long enough to have been read -- so
+    /// `<Esc>` does take them, a moment later than it takes an error and
+    /// through the other door. The two populations partition the
+    /// persistent entries with no overlap: nvim's wire errors carry no
+    /// family.
     #[must_use]
     pub fn dismiss_sticky(&mut self) -> bool {
         let before = self.entries.len();
-        self.entries.retain(|e| !e.is_persistent() || e.condition);
+        self.entries
+            .retain(|e| !e.is_persistent() || e.condition || e.family().is_some());
         self.entries.len() != before
     }
 
     /// Drops every standing family notice that has already had its reading
-    /// window -- the way out for a user who is typing rather than reaching
-    /// for a dismissal.
+    /// window -- the one way down those notices have, and the one every
+    /// input takes.
     ///
     /// The window is what keeps this from being the bug it fixes: a notice
     /// wiped by whatever key the user happened to press next is a notice
     /// they never read, and view's own launch notice lands while they are
-    /// still starting up. A key arriving before the timer says otherwise
-    /// leaves it standing.
+    /// still starting up. Any input arriving before the timer says
+    /// otherwise -- `<Esc>` included, which is why that key is not a second
+    /// rule here -- leaves it standing.
     ///
     /// nvim's wire errors are not this population. They carry no family,
-    /// they are answered by `<Esc>` alone ([`Self::dismiss_sticky`]), and
+    /// they are answered by `<Esc>` at once ([`Self::dismiss_sticky`]), and
     /// an error dismissed by the next motion is what that convention exists
     /// to prevent.
     #[must_use]

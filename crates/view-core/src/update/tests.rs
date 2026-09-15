@@ -12191,20 +12191,23 @@ fn below_full_tier_a_dismissal_still_arms_the_next_slot() {
     }
 }
 
-/// `<Esc>` is the way out of nvim's own sticky errors, and of the notices
-/// view raises beside them.
+/// `<Esc>` is the way out of nvim's own sticky errors at once, and of the
+/// notices view raises beside them only once they have stood the window a
+/// transient toast gets.
 ///
-/// The notices used to be exempt: nothing re-raises one, so taking it on a
-/// keystroke spends its remedy line for the session, and `d` in the message
-/// history was the way out. Nobody found that way out -- a dogfood session
-/// carried the claimant notice top-right from launch to exit -- and the
-/// remedy is still readable in the history either way, which is what makes
-/// the deliberate gesture enough.
+/// Two populations, one keystroke, and the difference is who raised the
+/// line. nvim's error is a record of something that already happened and
+/// the user pressing `<Esc>` is acknowledging it; view's notice is raised
+/// at a launch the user is still living through, so the same `<Esc>` --
+/// the one that leaves insert mode a moment after startup -- would spend a
+/// remedy line nothing re-raises. The reading window is the whole of that
+/// difference: after it, this key takes the notice like any other input
+/// (`Messages::dismiss_read_sticky`).
 #[test]
-fn an_escape_takes_down_the_conflict_notice_beside_nvims_own_error() {
+fn an_escape_takes_the_conflict_notice_only_once_it_has_stood_its_window() {
     let family = "view: noice.nvim is using ";
     let mut m = started_model();
-    let _ = m
+    let armed = m
         .engine
         .record_native_notice_sticky_once(family, format!("{family}the cmdline, which view owns."));
     let _ = update(
@@ -12220,16 +12223,8 @@ fn an_escape_takes_down_the_conflict_notice_beside_nvims_own_error() {
     let _ = press(&mut m, "<Esc>");
 
     assert!(
-        !m.engine.has_native_notice(family),
-        "<Esc> is the gesture every standing line answers to"
-    );
-    assert!(
-        m.engine
-            .toast_history
-            .entries()
-            .flat_map(|entry| entry.lines())
-            .any(|line| line.starts_with(family)),
-        "nothing is discarded: the remedy is still in the history"
+        m.engine.has_native_notice(family),
+        "an <Esc> inside the reading window must leave the notice up"
     );
     assert!(
         !m.engine
@@ -12238,5 +12233,28 @@ fn an_escape_takes_down_the_conflict_notice_beside_nvims_own_error() {
             .iter()
             .any(|entry| entry.kind == "emsg"),
         "<Esc> must still be the way out of nvim's own sticky errors"
+    );
+
+    let expiry = armed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ScheduleToastExpiry { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("a sticky notice is armed with its own reading window");
+    let _ = update(&mut m, Msg::ToastExpired { id: expiry });
+    let _ = press(&mut m, "<Esc>");
+
+    assert!(
+        !m.engine.has_native_notice(family),
+        "past the window, <Esc> takes it like any other input"
+    );
+    assert!(
+        m.engine
+            .toast_history
+            .entries()
+            .flat_map(|entry| entry.lines())
+            .any(|line| line.starts_with(family)),
+        "nothing is discarded: the remedy is still in the history"
     );
 }

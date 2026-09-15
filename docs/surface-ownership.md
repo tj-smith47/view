@@ -95,9 +95,9 @@ claimant that loads after it, so a plugin lazy.nvim defers is turned off on
 the load event rather than left running behind a notice saying the ask never
 reached it.
 
-The notice stands until you take it down. `<Esc>` with no window open over
-it clears it at once, and so does any other key, click or paste once the
-notice has been on screen for as long as an ordinary one -- so the keystroke
-you were already typing when it appeared leaves it alone. Its text stays in
-the notification history (`<leader>fm`) either way, which is where the
-`view.toml` line that resolves the conflict can be read back.
+The notice stands until you take it down. Any key, click or paste --
+`<Esc>` included -- clears it once the notice has been on screen for as long
+as an ordinary one, so the keystroke you were already typing when it appeared
+leaves it alone. Its text stays in the notification history (`<leader>fm`)
+either way, which is where the `view.toml` line that resolves the conflict
+can be read back.

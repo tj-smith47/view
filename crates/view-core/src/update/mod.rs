@@ -1343,13 +1343,12 @@ fn route_key(model: &mut Model, notation: String, modal_was_open: bool) -> Vec<E
             // way out that always works is worth more than a dismissal
             // that is always deliberate.
             //
-            // A notice view raised about a condition it observed goes
-            // the same way: it was exempt, and the session that showed
-            // what that costs read one top-right from launch to exit,
-            // because `d` in the history is a way out nobody found. The
-            // raised condition notice is the one that stays -- its
-            // standing-ness is the claim and, unlike the text, it does
-            // not come back.
+            // What it must not cost is a notice view raised about a
+            // condition that is still true: its standing-ness is the
+            // claim, and unlike the text it does not come back. Those
+            // carry a family, `dismiss_sticky` leaves them alone, and
+            // their own way down is the rule above -- any input, `<Esc>`
+            // included, once the line has stood its reading window.
             //
             // The busy modal is excluded outright. It offers `<Esc>` as its
             // own dismissal (`SupervisionChoice::Dismiss`), and the error

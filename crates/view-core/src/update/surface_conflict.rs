@@ -1642,10 +1642,15 @@ mod tests {
     }
 
     fn key(model: &mut Model) {
+        press(model, "j");
+    }
+
+    /// One keypress, as the terminal's own decode delivers it.
+    fn press(model: &mut Model, notation: &str) {
         let _ = update(
             model,
             Msg::Key(crate::msg::Key {
-                notation: "j".to_string(),
+                notation: notation.to_string(),
             }),
         );
     }
@@ -3087,39 +3092,44 @@ mod tests {
         );
     }
 
-    /// The claimant notice's two ways down, which is what the session that
+    /// The claimant notice's one way down, which is what the session that
     /// left one standing top-right for its whole length was missing.
     ///
-    /// `<Esc>` is the deliberate gesture and takes it at once. Anything
-    /// else takes it only once the line has stood the window a transient
-    /// one gets -- a notice wiped by whatever key the user pressed next is
-    /// a notice they never read, and this one lands while they are still
-    /// starting up.
+    /// One rule for every input, `<Esc>` included: the notice comes down on
+    /// whatever the user does next, but only once the line has stood the
+    /// window a transient one gets. A notice wiped by whatever key the user
+    /// pressed next is a notice they never read, and this one lands while
+    /// they are still starting up -- which is as true of the `<Esc>` that
+    /// leaves insert mode as of any letter.
     #[test]
-    fn the_conflict_notice_goes_on_escape_at_once_and_on_typing_once_read() {
-        let mut model = captured_session();
-        let _ = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
-        assert!(model.engine.messages.dismiss_sticky());
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+    fn the_conflict_notice_comes_down_on_any_input_once_it_has_stood_its_window() {
+        for notation in ["j", "<Esc>"] {
+            let mut model = captured_session();
+            let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
+            let standing = notices(&model);
+            assert_eq!(standing.len(), 1, "{notation}: {standing:?}");
 
-        let mut model = captured_session();
-        let effects = update(&mut model, Msg::ClaimantsProbed(vec!["noice".to_string()]));
-        let standing = notices(&model);
-        key(&mut model);
-        assert_eq!(
-            notices(&model),
-            standing,
-            "a key pressed while the notice is still being read took it down"
-        );
+            press(&mut model, notation);
+            assert_eq!(
+                notices(&model),
+                standing,
+                "{notation} arrived while the notice was still being read \
+                 and took it down"
+            );
 
-        let _ = update(
-            &mut model,
-            Msg::ToastExpired {
-                id: read_window(&effects),
-            },
-        );
-        key(&mut model);
-        assert!(notices(&model).is_empty(), "{:?}", notices(&model));
+            let _ = update(
+                &mut model,
+                Msg::ToastExpired {
+                    id: read_window(&effects),
+                },
+            );
+            press(&mut model, notation);
+            assert!(
+                notices(&model).is_empty(),
+                "{notation}: {:?}",
+                notices(&model)
+            );
+        }
     }
 
     /// Every needle `compat/scenarios/noice.toml` waits for on the claimant

@@ -383,12 +383,12 @@ Compat has three classes; only the first is "by construction":
   notice per claiming plugin, naming the surfaces it took and carrying
   the `[native]` lines that yield them. It stands until the user takes it
   down — the conflict is true until the remedy is applied and view
-  restarts, so nothing retires it on a timer. `<Esc>` with no modal open
-  clears it at once, and any key, click or paste clears it once it has
-  stood at least as long as an ordinary transient toast, so the keystroke
-  already in flight when it appeared leaves it standing (amended
-  2026-09-15: the notice answered to nothing but `d` in the notification
-  history, and a dogfood session carried it top-right from launch to exit).
+  restarts, so nothing retires it on a timer. Any key, click or paste --
+  `<Esc>` included -- clears it once it has stood at least as long as an
+  ordinary transient toast, so the keystroke already in flight when it
+  appeared leaves it standing (amended 2026-09-15: the notice answered to
+  nothing but `d` in the notification history, and a dogfood session
+  carried it top-right from launch to exit).
   Its text stays in the notification history (§9), which is where the
   notice itself points. The plugin's own startup complaints are the same finding
   in the plugin's voice, so they are recorded to the notification history

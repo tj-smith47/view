@@ -1724,13 +1724,13 @@ impl EngineModel {
     /// notice's four seconds, so a transient line cycles on and off for as
     /// long as the user types instead of standing to be read. It leaves the
     /// way every sticky entry does -- replaced by its own family, cleared by
-    /// nvim, or dismissed deliberately ([`Messages::dismiss_sticky`]) -- and
-    /// one way of its own: the timer this record arms says when the line has
-    /// been up long enough to have been read, after which ordinary typing
-    /// takes it down too ([`Messages::dismiss_read_sticky`]). Standing until
-    /// the user does something is the contract; standing after they have
-    /// read it and moved on is the session that carried one top-right from
-    /// launch to exit.
+    /// nvim -- except for the deliberate gesture, which it answers a moment
+    /// later and through its own door: the timer this record arms says when
+    /// the line has been up long enough to have been read, after which any
+    /// input at all takes it down ([`Messages::dismiss_read_sticky`]).
+    /// Standing until the user does something is the contract; standing
+    /// after they have read it and moved on is the session that carried one
+    /// top-right from launch to exit.
     pub fn record_native_notice_sticky_once(
         &mut self,
         family: &str,

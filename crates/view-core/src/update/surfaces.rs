@@ -303,11 +303,11 @@ pub(crate) const HISTORY_KEYS: &[(&str, &str)] = &[
 /// is the router's shared fallback, not a key of this overlay's own.
 ///
 /// `d` retires a notice view raised about a condition it observed, one
-/// family at a time, which is what it is for: `<Esc>` and the reading
-/// window take the whole standing set at once
+/// family at a time, which is what it is for: the input rule takes the
+/// whole standing set once each line has stood its reading window
 /// (`Messages::dismiss_read_sticky`), and this is how a user takes down the
 /// one line they are done with. nvim's own sticky errors carry no family,
-/// so `d` no-ops on them.
+/// so `d` no-ops on them and `<Esc>` is their way out.
 pub(super) fn message_history_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     // `gg` reaches the router as two `g` events -- `encode_key` emits one
     // notation per key event -- and `dispatch` drops the shared chord

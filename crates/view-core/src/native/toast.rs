@@ -24,7 +24,7 @@ pub enum Route {
     /// expires on its own: it stays
     /// until replaced, cleared by nvim, deliberately dismissed
     /// ([`crate::model::Messages::dismiss_sticky`]), or -- for a notice
-    /// carrying a family -- taken by the input that follows its reading
+    /// carrying a family -- taken by the first input after its reading
     /// window ([`crate::model::Messages::dismiss_read_sticky`]).
     Sticky,
     /// A statusline-owned kind (mode/pending-count/ruler/search-count

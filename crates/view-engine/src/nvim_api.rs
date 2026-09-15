@@ -285,20 +285,24 @@ end
 ///
 /// # The pass that runs after this one
 ///
-/// The first pass reaches only what `package.loaded` already holds, and
-/// the takeover goes out ahead of every other plugin's `VimEnter`: noice's
-/// own documented spec is `event = "VeryLazy"`, so the ordinary
-/// lazy.nvim session loads the claimant long after the ask went out and
-/// the user reads a notice saying the ask never reached it for the whole
-/// session. So the chunk leaves two autocommands behind that run the same
-/// pass again -- `VimEnter`, which covers a plugin any init-time loader
-/// pulls in, and `User LazyLoad`, which lazy.nvim fires once per plugin it
-/// loads -- and reports what the late pass turned off on the
-/// `view_bridge` `handed_back` event, where `Msg::ClaimantsHandedBack`
+/// The first pass reaches only what `package.loaded` already holds, which
+/// is every module an init-time loader brought in: the takeover runs
+/// inside nvim's own `VimEnter`, after the config has been sourced, so a
+/// plugin loaded by anything at startup is loaded by the time the ask goes
+/// out and needs no second pass. What the first pass cannot reach is a
+/// plugin loaded after it -- noice's own documented spec is
+/// `event = "VeryLazy"`, so the ordinary lazy.nvim session loads the
+/// claimant later and the user reads a notice saying the ask never reached
+/// it for the whole session.
+///
+/// So the chunk leaves one autocommand behind: `User LazyLoad`, which
+/// lazy.nvim fires once per plugin it loads, carrying the plugin's name in
+/// `data`. It runs the same pass again and reports what it turned off on
+/// the `view_bridge` `handed_back` event, where `Msg::ClaimantsHandedBack`
 /// re-words the standing notice.
 ///
-/// A module is asked once and never again, whichever pass reached it, so
-/// a plugin that loads late is disabled exactly as the eager one is; the
+/// A module is asked once and never again, whichever pass reached it, so a
+/// plugin that loads late is disabled exactly as the eager one is; the
 /// group deletes itself once every module has been asked, because an
 /// autocommand still walking a settled list on every lazy load is work
 /// nobody reads.
@@ -340,10 +344,6 @@ local function late_pass()
     pcall(vim.api.nvim_del_augroup_by_id, group)
   end
 end
-vim.api.nvim_create_autocmd('VimEnter', {
-  group = group,
-  callback = late_pass,
-})
 vim.api.nvim_create_autocmd('User', {
   group = group,
   pattern = 'LazyLoad',
@@ -5402,13 +5402,12 @@ mod tests {
 
     /// The late pass's own three guards. A chunk that lost the `asked`
     /// table would call one plugin's `disable` again at every lazy load,
-    /// one that lost either autocommand would leave the whole lazy.nvim
+    /// one that lost the autocommand would leave the whole lazy.nvim
     /// population unreachable, and one that lost the report would turn the
     /// plugin off while the notice went on saying the ask never arrived.
     #[test]
     fn the_disable_chunk_asks_again_when_a_claimant_loads_late() {
         assert!(DISABLE_CLAIMANTS_CHUNK.contains("not asked[name]"));
-        assert!(DISABLE_CLAIMANTS_CHUNK.contains("'VimEnter'"));
         assert!(DISABLE_CLAIMANTS_CHUNK.contains("pattern = 'LazyLoad'"));
         assert!(DISABLE_CLAIMANTS_CHUNK.contains("'view_bridge', 'handed_back'"));
         assert!(
