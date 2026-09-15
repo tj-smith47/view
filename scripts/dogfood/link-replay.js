@@ -1,6 +1,8 @@
-// Dates the moments of a `script -I -O -T` recording by replaying its output
-// through xterm.js headless -- the same engine Termius embeds -- so what a
-// moment is read off is the cell the user saw rather than a byte on the wire.
+// Stands in for the terminal a lag report came from, in the two ways a
+// recording needs one: live, answering the queries an editor asks its
+// terminal at startup, and afterwards, replaying the recording through
+// xterm.js headless -- the same engine Termius embeds -- so what a moment
+// is read off is the cell the user saw rather than a byte on the wire.
 //
 // The timing log is what turns a screen into a time: its `O` records carry
 // the child's output in the chunks the pty delivered it in, each with the
@@ -12,9 +14,9 @@
 // `@xterm/headless` where it can find it.
 //
 // Usage:
-//   node link-replay.js report --out OUT --timing TM --cols N --rows N \
-//        --needle TEXT [--cmd-re RE] [--frames DIR]
-//   node link-replay.js throttle BYTES_PER_SECOND
+//   node link-replay.js answer --cols N --rows N --reply PATH
+//   node link-replay.js report --out OUT --timing TM --in IN --cols N \
+//        --rows N --needle TEXT [--palette] [--frames DIR]
 const fs = require('fs');
 const path = require('path');
 
@@ -30,24 +32,59 @@ function arg(name, fallback) {
   return process.argv[i + 1];
 }
 
-// A slow reader of the pty, standing in for the link the user is on: the
-// recorder puts it where `script` writes, so `script` stops reading the pty
-// when it fills and the editor under test feels the back-pressure a remote
-// terminal applies.
-function throttle(rate) {
-  const window = 20;
-  const slice = Math.max(1, Math.floor((rate * window) / 1000));
-  let budget = slice;
-  process.stdin.on('data', (chunk) => {
-    budget -= chunk.length;
-    if (budget <= 0) process.stdin.pause();
+// The background colour an OSC 11 query is answered with. Any colour would
+// do -- what the editor is waiting on is a reply, not a shade -- and this
+// is the one xterm.js itself defaults its background to.
+const BACKGROUND = 'rgb:0000/0000/0000';
+const FOREGROUND = 'rgb:ffff/ffff/ffff';
+
+// Registers the colour queries xterm.js does not answer on its own.
+//
+// nvim blocks for up to 100 ms on the OSC 11 background reply at startup
+// (`runtime/lua/vim/_core/defaults.lua`), and a pty whose master is a file
+// or a pipe answers nothing, so an arm recorded without this pays a wait no
+// terminal-attached session pays and the whole comparison tilts. The
+// cursor, device and DECRQSS replies xterm.js already writes itself.
+function registerColourQueries(term, reply) {
+  const answer = (code, colour) => (data) => {
+    if (data !== '?') return true;
+    reply(`\x1b]${code};${colour}\x07`);
+    return true;
+  };
+  term.parser.registerOscHandler(10, answer(10, FOREGROUND));
+  term.parser.registerOscHandler(11, answer(11, BACKGROUND));
+  term.parser.registerOscHandler(12, answer(12, FOREGROUND));
+}
+
+// The live consumer: the pty's output arrives on stdin, and everything the
+// emulator wants to say back is appended to `--reply`, which is the fifo
+// `script` is relaying into the pty. So the editor under test talks to
+// something that answers, the way it does on the user's own terminal.
+function answer() {
+  const { Terminal } = require('@xterm/headless');
+  const cols = Number(arg('--cols'));
+  const rows_ = Number(arg('--rows'));
+  const replyPath = arg('--reply');
+  const back = fs.openSync(replyPath, 'a');
+  const term = new Terminal({
+    cols,
+    rows: rows_,
+    scrollback: 0,
+    allowProposedApi: true,
   });
-  const timer = setInterval(() => {
-    budget = slice;
-    process.stdin.resume();
-  }, window);
+  const reply = (text) => {
+    try {
+      fs.writeSync(back, text);
+    } catch (err) {
+      // the run is over and the fifo's reader is gone; a reply nobody can
+      // receive is not a failure of the recording
+    }
+  };
+  registerColourQueries(term, reply);
+  term.onData(reply);
+  process.stdin.on('data', (chunk) => term.write(chunk));
   process.stdin.on('end', () => {
-    clearInterval(timer);
+    fs.closeSync(back);
     process.exit(0);
   });
 }
@@ -105,19 +142,56 @@ function colours(term, row, col) {
   return seen;
 }
 
+// view's own palette chrome, which is the title of the box it draws the
+// typed line inside.
+const PALETTE_TITLE = '\u2500 Command \u2500';
+
+// Whether the command line is on screen. view draws a framed box carrying
+// its own title; bare nvim echoes the `:` into the first cell of the last
+// row. Both read off cells rather than off a pattern over the screen: the
+// pattern this replaces matched `use std::path::PathBuf;` in the file
+// itself, so the moment was dated at the first record after the key
+// whatever was drawn.
+function cmdlineShown(term, screen, palette) {
+  if (palette) {
+    return screen.some((line) => line.indexOf(PALETTE_TITLE) !== -1);
+  }
+  const line = term.buffer.active.getLine(term.rows - 1);
+  if (!line) return false;
+  const cell = line.getCell(0);
+  return !!cell && cell.getChars() === ':';
+}
+
+// Whether an input record is the emulator answering a query rather than a
+// step this recording typed. Every reply the live consumer writes goes down
+// the same pty as the steps and is logged beside them, so a count of input
+// records would date the `:` at whichever reply happened to be fourth.
+// Every reply opens with escape and carries more than that one byte; the
+// only escape a step sends is the bare one that closes the palette.
+function isReply(chunk) {
+  return chunk.length > 1 && chunk[0] === 0x1b;
+}
+
 function report() {
   const { Terminal } = require('@xterm/headless');
   const timing = arg('--timing');
   const cols = Number(arg('--cols'));
   const rows_ = Number(arg('--rows'));
   const needle = arg('--needle');
-  const cmdRe = new RegExp(arg('--cmd-re', '^:'));
+  // which chrome the typed `:` is answered by: view's framed palette, or
+  // bare nvim's own last-row command line
+  const palette = process.argv.indexOf('--palette') !== -1;
   const frames = arg('--frames', '');
   const recs = records(timing);
   const total = recs
     .filter((r) => r.stream === 'O')
     .reduce((sum, r) => sum + r.bytes, 0);
   const data = payload(arg('--out'), total);
+  const typedTotal = recs
+    .filter((r) => r.stream === 'I')
+    .reduce((sum, r) => sum + r.bytes, 0);
+  const typedData = payload(arg('--in'), typedTotal);
+  let typedOffset = 0;
   const term = new Terminal({
     cols,
     rows: rows_,
@@ -145,7 +219,9 @@ function report() {
   (async () => {
     for (const rec of recs) {
       if (rec.stream === 'I') {
-        typed.push(rec.ms);
+        const sent = typedData.subarray(typedOffset, typedOffset + rec.bytes);
+        typedOffset += rec.bytes;
+        if (!isReply(sent)) typed.push(rec.ms);
         continue;
       }
       const chunk = data.subarray(offset, offset + rec.bytes);
@@ -170,7 +246,7 @@ function report() {
         }
       }
       if (typed.length > 0 && moments.cmdline === undefined) {
-        if (screen.some((line) => cmdRe.test(line.trim()))) {
+        if (cmdlineShown(term, screen, palette)) {
           note('cmdline', rec.ms);
         }
       }
@@ -186,11 +262,11 @@ function report() {
 }
 
 const mode = process.argv[2];
-if (mode === 'throttle') {
-  throttle(Number(process.argv[3]));
+if (mode === 'answer') {
+  answer();
 } else if (mode === 'report') {
   report();
 } else {
-  console.error('link-replay: usage: report | throttle');
+  console.error('link-replay: usage: answer | report');
   process.exit(2);
 }
