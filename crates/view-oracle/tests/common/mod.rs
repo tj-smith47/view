@@ -289,8 +289,8 @@ impl Drop for ScratchPaths {
 }
 
 /// view-tui's `PROBE_DEADLINE`: how long the capability probe's first
-/// window -- the one that runs before the alternate screen goes up -- waits
-/// for replies that a silent terminal never sends.
+/// window -- the one that runs before the first frame paints -- waits for
+/// replies that a silent terminal never sends.
 ///
 /// Re-declared rather than imported. This crate takes no dependency on
 /// view-tui (see the crate's module doc, and the crossterm/ratatui reach

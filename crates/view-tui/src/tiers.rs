@@ -1,8 +1,15 @@
 //! Terminal capability detection: sends a batched capability probe right
 //! after raw mode is entered (canonical-mode line buffering and echo would
-//! otherwise corrupt or swallow the escape replies) and before the
-//! alternate screen takes over, so `Term::init` can wire real gating
-//! booleans into `Model.caps` instead of the conservative defaults.
+//! otherwise corrupt or swallow the escape replies), on the alternate
+//! screen and before the first frame paints, so `Term::init` can wire real
+//! gating booleans into `Model.caps` instead of the conservative defaults.
+//!
+//! On the alternate screen and never ahead of it: a terminal is free to
+//! restore the main screen as it was when `CSI ? 1049 h` switched away,
+//! and one that restores the wrong buffer puts whatever a program wrote
+//! ahead of the switch over the shell's own scrollback. Every question
+//! below is answered the same on either screen (see
+//! `TerminalGuard::enter`).
 //!
 //! The probe reads whatever is sitting on stdin, which is not necessarily
 //! only the terminal's own replies: a user typing before or during the
@@ -23,8 +30,7 @@ use std::time::{Duration, Instant};
 use view_core::model::{TermCaps, Tier};
 
 /// How long the probe's first window -- the one `Term::init` spends before
-/// the alternate screen goes up and the startup shell frame paints -- waits
-/// for capability replies. A terminal on the same machine answers the DA1
+/// the startup shell frame paints -- waits for capability replies. A terminal on the same machine answers the DA1
 /// fence in single-digit milliseconds and ends the window early; this is
 /// the bound on what a terminal that answers nothing costs the first frame.
 pub const PROBE_DEADLINE: Duration = Duration::from_millis(50);
@@ -60,7 +66,7 @@ const QUERY_KITTY: &[u8] = b"\x1b[?u";
 /// batch.
 ///
 /// No cell is painted by this: the set and the reset are adjacent, with no
-/// text between them, and both run before the alternate screen exists.
+/// text between them.
 const QUERY_TRUECOLOR: &[u8] = b"\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m";
 
 /// Writes one rounded box-drawing corner from a known column and asks the
@@ -87,10 +93,9 @@ const QUERY_TRUECOLOR: &[u8] = b"\x1b[48;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m";
 /// The leading `\r` is what makes column 2 the expected answer whatever
 /// else has been printed on the line, and the trailing `\r ESC [ K` puts
 /// the cursor back and clears from there to the end of the line -- the
-/// glyph, and anything else that line was carrying. All of it runs before
-/// the alternate screen exists, on a line the startup path has not yet
-/// written to, so what the erase can reach is the shell prompt the user
-/// launched from rather than anything this program painted.
+/// glyph, and anything else that line was carrying. All of it runs on the
+/// freshly entered alternate screen, before any frame has painted, so the
+/// erase reaches the glyph and nothing else.
 const QUERY_BOX_GLYPH: &[u8] = "\r╭\x1b[6n\r\x1b[K".as_bytes();
 
 /// The cursor column a terminal that advanced [`QUERY_BOX_GLYPH`]'s glyph
@@ -373,13 +378,12 @@ pub struct ProbeOutcome {
 /// collected by [`Probe::finish`].
 ///
 /// Split in two because the two halves belong at different points in
-/// startup. The first window has to complete before the alternate screen
-/// goes up -- `caps.kitty_kbd` decides whether the keyboard protocol is
-/// pushed, and with it how a C0 byte is named, and the startup shell frame
-/// paints at the tier this resolves --
-/// while the rest is pure waiting, which the caller overlaps with the
-/// engine attach so a slow terminal costs the process nothing it was not
-/// already spending on spawning nvim.
+/// startup. The first window has to complete before the first frame --
+/// `caps.kitty_kbd` decides whether the keyboard protocol is pushed, and
+/// with it how a C0 byte is named, and the startup shell frame paints at
+/// the tier this resolves -- while the rest is pure waiting, which the
+/// caller overlaps with the engine attach so a slow terminal costs the
+/// process nothing it was not already spending on spawning nvim.
 pub struct Probe<'a> {
     source: Box<dyn ReplySource + 'a>,
     buf: Vec<u8>,

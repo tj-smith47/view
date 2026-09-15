@@ -1,7 +1,8 @@
 //! The keys the kitty keyboard protocol makes reachable, decoded end to end
 //! from terminal bytes to nvim input notation.
 //!
-//! `terminal::enter_bytes` pushing `CSI > 1 u` is only half the contract:
+//! `TerminalGuard::push_keyboard_protocol` sending `CSI > 1 u` is only half
+//! the contract:
 //! the other half is that what a terminal sends back under that flag
 //! survives crossterm's parser and view's encoder as a distinct key. In
 //! legacy mode a shifted and a plain `<CR>` are the same byte and `<C-i>`

@@ -21,17 +21,16 @@ use view_surface::{CursorShape, Surface};
 
 /// Owns raw mode and the alternate screen for the lifetime of the value,
 /// restoring both (plus mouse capture and bracketed paste) on drop.
-/// Entry is two phases, not one: [`enter_raw_mode`](Self::enter_raw_mode)
-/// constructs the guard, enabling raw mode and installing a panic hook that
-/// restores the terminal before the default panic message prints;
-/// [`finish_entering_alt_screen`](Self::finish_entering_alt_screen) is
-/// called separately afterward to enter the alternate screen and enable
-/// bracketed paste, once capability detection has had a chance to run in
-/// between (see that method's own doc for why the split exists). Both
-/// phases restore together, whether entry finished or not: [`Drop`] and
+/// [`enter`](Self::enter) performs the whole entry: raw mode, a panic hook
+/// that restores the terminal before the default panic message prints, then
+/// the alternate screen and bracketed paste. The keyboard protocol is the
+/// one entry byte that cannot be written there
+/// ([`push_keyboard_protocol`](Self::push_keyboard_protocol)), because
+/// whether the terminal speaks it is what capability detection answers and
+/// that detection now runs on the alternate screen. Everything restores
+/// together, whether entry finished or not: [`Drop`] and
 /// [`restore_now`](Self::restore_now) both call the same unconditional
-/// [`restore`] that undoes every phase's effects regardless of how far
-/// entry got.
+/// [`restore`] that undoes every effect regardless of how far entry got.
 ///
 /// This is the only place in the crate that enables raw mode or enters the
 /// alternate screen, and the only one whose panic hook restores them
@@ -45,22 +44,39 @@ use view_surface::{CursorShape, Surface};
 pub struct TerminalGuard;
 
 impl TerminalGuard {
-    /// The first half of entry: enables raw mode and installs a panic hook
-    /// that restores the terminal before delegating to the previous hook.
+    /// Enables raw mode, installs a panic hook that restores the terminal
+    /// before delegating to the previous hook, and switches to the
+    /// alternate screen with bracketed-paste reporting on.
     ///
-    /// Split from alternate-screen entry (see
-    /// [`finish_entering_alt_screen`](Self::finish_entering_alt_screen)) so
-    /// [`Term::init`] can run capability detection in between: detection's
-    /// CSI replies are only readable once canonical mode's line buffering,
-    /// echo, and missing newline terminator are off, which raw mode alone
-    /// provides, and the detection log line must still print to the
-    /// visible screen rather than a not-yet-entered alternate buffer.
+    /// The alternate screen goes up before any other byte this process
+    /// writes to the terminal, capability detection's probe batch included.
+    /// What a program leaves on the main screen ahead of `CSI ? 1049 h` is
+    /// at the mercy of how the emulator saves and restores that screen
+    /// around the switch, and one (Termius) put view's last alternate
+    /// screen back over the shell's scrollback because of it -- the probe's
+    /// queries being the only bytes nvim, which leaves no such residue,
+    /// does not also write. Every question in that batch is answered the
+    /// same on either screen, and the `╭` the cell-width query prints is
+    /// erased by that query's own `CSI K` on a line nothing else has
+    /// written.
+    ///
+    /// Raw mode still comes first within that: canonical mode's line
+    /// buffering, echo, and missing newline terminator would corrupt or
+    /// swallow the probe's CSI replies. The hook is installed between the
+    /// two, so a panic during entry itself is covered.
+    ///
+    /// Bracketed paste is enabled unconditionally (unlike mouse capture,
+    /// which [`Term::draw_surface`] toggles only while nvim reports
+    /// `mouse_on`): a paste is never ambiguous with ordinary typed input
+    /// the way raw mouse tracking would be with the host terminal's own
+    /// selection/scrollback gestures, so there is no reason to gate it
+    /// behind engine state.
     ///
     /// # Errors
     ///
-    /// Returns the underlying `std::io::Error` if raw mode cannot be
-    /// enabled.
-    pub fn enter_raw_mode() -> std::io::Result<Self> {
+    /// Returns the underlying `std::io::Error` if raw mode or the alternate
+    /// screen cannot be entered.
+    pub fn enter() -> std::io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         // a panic must restore the terminal before the message prints, or the
         // user is left with a broken shell and an invisible error; installed
@@ -71,37 +87,38 @@ impl TerminalGuard {
             restore();
             prev(info);
         }));
-        Ok(Self)
+        // the value first: from here the alternate screen is this guard's to
+        // undo, and a failed write leaves a dropped guard to undo it
+        let guard = Self;
+        enter_bytes(&mut std::io::stdout())?;
+        Ok(guard)
     }
 
-    /// The second half of entry: switches to the alternate screen and
-    /// enables bracketed-paste reporting. Must be called exactly once,
-    /// after [`enter_raw_mode`](Self::enter_raw_mode).
-    ///
-    /// Bracketed paste is enabled unconditionally here (unlike mouse
-    /// capture, which [`Term::draw_surface`] toggles only while nvim
-    /// reports `mouse_on`): a paste is never ambiguous with ordinary typed
-    /// input the way raw mouse tracking would be with the host terminal's
-    /// own selection/scrollback gestures, so there is no reason to gate it
-    /// behind engine state.
+    /// Pushes the kitty keyboard protocol, once capability detection has
+    /// said the terminal speaks it, inside the alternate screen
+    /// [`enter`](Self::enter) already opened -- so the protocol's lifetime
+    /// nests strictly inside the alternate screen's, which is the order
+    /// nvim's own teardown uses: `terminfo_disable` pops the key encoding
+    /// at `src/nvim/tui/tui.c:556`, and only the later `terminfo_stop`
+    /// emits `exit_ca_mode` at `:599`.
     ///
     /// `kitty_kbd` is `Model.caps.kitty_kbd` -- the startup probe's answer,
-    /// or what a `--tier` override asserted. When it holds, the kitty
-    /// keyboard protocol is pushed here and popped by [`restore_bytes`], so
-    /// `<S-CR>`, `<C-i>` and `<Esc>` reach [`crate::keys::encode_key`] as
-    /// keys distinct from `<CR>`, `<Tab>` and an Alt prefix.
+    /// or what a `--tier` override asserted. When it holds, the push lands
+    /// here and [`restore_bytes`] pops it, so `<S-CR>`, `<C-i>` and `<Esc>`
+    /// reach [`crate::keys::encode_key`] as keys distinct from `<CR>`,
+    /// `<Tab>` and an Alt prefix.
     ///
     /// # Errors
     ///
-    /// Returns the underlying `std::io::Error` if the alternate screen
-    /// cannot be entered or the keyboard-protocol push cannot be written.
-    pub fn finish_entering_alt_screen(&self, kitty_kbd: bool) -> std::io::Result<()> {
+    /// Returns the underlying `std::io::Error` if the keyboard-protocol
+    /// push cannot be written.
+    pub fn push_keyboard_protocol(&self, kitty_kbd: bool) -> std::io::Result<()> {
         // cfg!(unix) rather than a cfg attribute so the parameter stays used
         // on every platform: the capability probe only runs on unix, and a
         // `--tier full` override elsewhere asserts a protocol nothing
         // negotiated
         let pushed = cfg!(unix) && kitty_kbd;
-        enter_bytes(&mut std::io::stdout(), pushed)?;
+        push_kitty_keyboard(&mut std::io::stdout(), false, pushed)?;
         set_kitty_keyboard_pushed(pushed);
         Ok(())
     }
@@ -173,29 +190,21 @@ fn set_kitty_keyboard_pushed(pushed: bool) {
     KITTY_KBD_PUSHED.store(pushed, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Writes every setup escape to `out`: the alternate screen, bracketed
-/// paste, and the kitty keyboard-protocol push when `kitty_kbd`. Generic
-/// over `Write` for the same reason [`restore_bytes`] is -- the byte
-/// sequence and its ordering are provable against a `Vec<u8>` rather than
-/// only against a live terminal.
+/// Writes every setup escape to `out`: the alternate screen and bracketed
+/// paste, in that order and ahead of every other byte the process sends
+/// the terminal. Generic over `Write` for the same reason [`restore_bytes`]
+/// is -- the byte sequence and its ordering are provable against a
+/// `Vec<u8>` rather than only against a live terminal.
 ///
-/// The push comes after [`EnterAlternateScreen`](crossterm::terminal::EnterAlternateScreen)
-/// and its pop comes before `LeaveAlternateScreen`, so the protocol's
-/// lifetime nests strictly inside the alternate screen's. That is the
-/// order nvim's own teardown uses: `terminfo_disable` pops the key
-/// encoding at `src/nvim/tui/tui.c:556`, and only the later
-/// `terminfo_stop` emits `exit_ca_mode` at `:599`.
-fn enter_bytes<W: Write>(out: &mut W, kitty_kbd: bool) -> std::io::Result<()> {
+/// The keyboard-protocol push is not here, because the answer that decides
+/// it is not known yet: see
+/// [`TerminalGuard::push_keyboard_protocol`].
+fn enter_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
     crossterm::execute!(
         out,
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableBracketedPaste
-    )?;
-    if kitty_kbd {
-        out.write_all(KITTY_KBD_PUSH)?;
-        out.flush()?;
-    }
-    Ok(())
+    )
 }
 
 /// Writes the keyboard-protocol push a terminal that only admitted to
@@ -223,9 +232,13 @@ fn push_kitty_keyboard<W: Write>(
 
 /// Writes every teardown escape to `out`: the synchronized-update close
 /// first, then the keyboard-protocol pop, the clear of the frame the
-/// alternate screen is still showing, mouse capture, bracketed paste, the
-/// alternate screen, and last the caret parked at column 0 of the screen
-/// the host shell resumes on.
+/// alternate screen is still showing, the caret parked at column 0 of that
+/// screen's bottom row, and last mouse capture, bracketed paste and the
+/// alternate screen. Nothing follows the switch back: every byte view
+/// writes lands on the screen it drew on, which is what keeps its last
+/// frame out of the host shell's scrollback. `rows` is the terminal's
+/// height in cells, which the bottom-row park needs and which [`restore`]
+/// asks the terminal for.
 /// Generic over `Write` (mirrors [`write_cursor_shape`]) so the byte
 /// sequence and ordering are unit-testable against a `Vec<u8>` instead of
 /// only provable via a live terminal.
@@ -244,7 +257,7 @@ fn push_kitty_keyboard<W: Write>(
 /// that does, so a session ending from such a frame would hand the host
 /// shell an invisible or insert-mode caret at its own prompt -- which reads
 /// to a user as a terminal that has stopped responding.
-fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
+fn restore_bytes<W: Write>(out: &mut W, rows: u16) -> std::io::Result<()> {
     out.write_all(b"\x1b[?2026l")?;
     // popped unconditionally, for the same reason the ESU close above is
     // written unconditionally: `restore` is a free function reachable from
@@ -268,6 +281,17 @@ fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
     // the host shell's scrollback. nvim's own teardown writes the same
     // clear before `exit_ca_mode` for the same reason.
     out.write_all(b"\x1b[H\x1b[2J")?;
+    // parked on the bottom row of the screen being left, which is what nvim
+    // does (`\r CSI <rows-1> B` before `exit_ca_mode`): an emulator that
+    // carries the alternate screen's cursor position back to the main screen
+    // instead of restoring the saved one would otherwise resume the host
+    // shell's prompt at row 1, printing it over the scrollback the user was
+    // reading before view started.
+    if let Some(down) = rows.checked_sub(1).filter(|down| *down > 0) {
+        write!(out, "\r\x1b[{down}B")?;
+    } else {
+        out.write_all(b"\r")?;
+    }
     // mouse capture disabled unconditionally, even though it is only ever
     // turned on dynamically (see Term::draw_surface): leaving it enabled
     // across process exit would swallow the host shell's own mouse
@@ -279,16 +303,18 @@ fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
         crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen
     )?;
-    // after the switch back, not before it: the column the shell resumes
-    // at is a property of the screen it resumes on, and a `Show` issued on
-    // the screen being left says nothing about the caret on this one.
-    out.write_all(b"\r\x1b[?25h")?;
     out.flush()
 }
 
 fn restore() {
     let mut out = std::io::stdout();
-    let _ = restore_bytes(&mut out);
+    // asked here rather than carried on the guard: `restore` is a free
+    // function the panic hook runs with no value in scope, and a terminal
+    // resized since entry parks at the height it has now. A terminal that
+    // will not report one parks at column 0 of the row it is already on,
+    // which is what this path did before the park existed.
+    let rows = crossterm::terminal::size().map_or(1, |(_, rows)| rows);
+    let _ = restore_bytes(&mut out, rows);
     set_kitty_keyboard_pushed(false);
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = out.flush();
@@ -320,7 +346,7 @@ static SAVED_STDERR: std::sync::OnceLock<std::os::fd::OwnedFd> = std::sync::Once
 /// the terminal the same hook just restored; this value's [`Drop`] covers
 /// every ordinary return out of the session; and [`redirect`](Self::redirect)
 /// chains a hook of its own, so a panic between the redirect and
-/// [`TerminalGuard::enter_raw_mode`] -- which is where the hook that calls
+/// [`TerminalGuard::enter`] -- which is where the hook that calls
 /// [`restore`] is installed -- still prints where a user can read it.
 ///
 /// Unix only. The mechanism is `dup2` on fd 2, which rustix exposes under
@@ -533,11 +559,11 @@ pub struct Term {
 }
 
 impl Term {
-    /// Initializes the backend terminal: raw mode first, then capability
-    /// detection (or `tier_override` if given), then the alternate screen,
-    /// matching [`TerminalGuard::enter_raw_mode`]'s ordering contract; the
-    /// ratatui terminal is constructed last, directly over the now-prepared
-    /// stdout.
+    /// Initializes the backend terminal: raw mode and the alternate screen
+    /// first ([`TerminalGuard::enter`]), then capability detection on that
+    /// screen (or `tier_override` if given), then the keyboard-protocol
+    /// push its answer decides; the ratatui terminal is constructed last,
+    /// directly over the now-prepared stdout.
     ///
     /// Deliberately does not use `ratatui::try_init`: that function repeats
     /// the same raw-mode/alternate-screen/panic-hook setup `TerminalGuard`
@@ -550,9 +576,9 @@ impl Term {
     /// screen cannot be entered, if capability detection's I/O fails, or if
     /// the backend terminal cannot be built.
     pub fn init(tier_override: Option<Tier>) -> std::io::Result<Self> {
-        let guard = TerminalGuard::enter_raw_mode()?;
+        let guard = TerminalGuard::enter()?;
         let (caps, probe, caps_source) = tiers::resolve(tier_override)?;
-        guard.finish_entering_alt_screen(caps.kitty_kbd)?;
+        guard.push_keyboard_protocol(caps.kitty_kbd)?;
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
         let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
         Ok(Self {
@@ -647,7 +673,7 @@ impl Term {
     /// [`draw_surface`](Self::draw_surface) following `Model::caps`.
     fn adopt_caps(&mut self, caps: TermCaps) -> std::io::Result<()> {
         // a decision that arrives after the alternate screen is already up
-        // still owes the terminal the push `finish_entering_alt_screen`
+        // still owes the terminal the push `push_keyboard_protocol`
         // skipped, or `keys::encode_key` spends the session unable to tell
         // `<S-CR>` from `<CR>` on a terminal that can
         let pushed = cfg!(unix) && caps.kitty_kbd;
@@ -1157,7 +1183,7 @@ mod tests {
     #[test]
     fn restore_bytes_closes_the_sync_bracket_before_leaving_the_alternate_screen() {
         let mut buf = Vec::new();
-        restore_bytes(&mut buf).unwrap();
+        restore_bytes(&mut buf, 24).unwrap();
 
         let esu_close = find_subslice(&buf, b"\x1b[?2026l")
             .expect("restore must write the ESU close unconditionally");
@@ -1192,13 +1218,56 @@ mod tests {
             clear < leave_alt,
             "the clear must land while the alternate screen is still the visible one"
         );
-        let park = find_subslice(&buf, b"\r\x1b[?25h")
-            .expect("restore must park the caret at column 0 after the switch back");
-        assert!(
-            leave_alt < park,
-            "the caret is parked on the screen the host shell resumes on, so the park follows \
-             the leave"
+        let park = find_subslice(&buf, b"\r\x1b[23B").expect(
+            "restore must park the caret on the bottom row of the screen it is leaving, the \
+             way nvim does: an emulator that carries the alternate screen's cursor back to \
+             the main screen otherwise resumes the shell prompt mid-screen",
         );
+        assert!(
+            clear < park && park < leave_alt,
+            "the park is written on the alternate screen, after the clear and before the \
+             switch back"
+        );
+        assert_eq!(
+            leave_alt + b"\x1b[?1049l".len(),
+            buf.len(),
+            "nothing may be written after the switch back: every byte view sends lands on the \
+             screen it drew on"
+        );
+    }
+
+    /// A [`tiers::ReplySource`] a terminal that answers nothing looks like,
+    /// so the probe's query batch is written and its window closes at once.
+    struct SilentTerminal;
+
+    impl tiers::ReplySource for SilentTerminal {
+        fn next_chunk(&mut self, _budget: std::time::Duration) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// Every byte one session writes the terminal, in the order
+    /// [`Term::init`] and [`restore`] write them: entry, the capability
+    /// probe's query batch, the keyboard-protocol push its answer decides,
+    /// and teardown. Composed from the same functions the real path calls
+    /// -- a `Vec<u8>` stands in for the one stdout they share -- because
+    /// the claim is about the whole stream and no single one of them can
+    /// see it.
+    #[cfg(unix)]
+    fn session_bytes(kitty_kbd: bool) -> Vec<u8> {
+        let mut wire = Vec::new();
+        enter_bytes(&mut wire).unwrap();
+        let probe = tiers::Probe::start(
+            SilentTerminal,
+            &mut wire,
+            std::time::Duration::ZERO,
+            &tiers::EnvHints::default(),
+        )
+        .unwrap();
+        drop(probe);
+        push_kitty_keyboard(&mut wire, false, kitty_kbd).unwrap();
+        restore_bytes(&mut wire, 24).unwrap();
+        wire
     }
 
     // Same unix gate and same reason as the restore_bytes test above:
@@ -1206,11 +1275,57 @@ mod tests {
     // Windows reaches the WinAPI console layer instead of emitting bytes.
     #[cfg(unix)]
     #[test]
-    fn enter_bytes_pushes_the_kitty_keyboard_protocol_only_when_the_terminal_speaks_it() {
-        let mut on = Vec::new();
-        enter_bytes(&mut on, true).unwrap();
+    fn nothing_a_session_writes_lands_on_the_main_screen() {
+        for kitty_kbd in [false, true] {
+            let wire = session_bytes(kitty_kbd);
+            assert!(
+                wire.starts_with(b"\x1b[?1049h"),
+                "the switch to the alternate screen is the first thing written: a terminal \
+                 that restores the main screen around CSI ? 1049 h/l is free to put anything \
+                 written ahead of the switch back over the shell's scrollback, and the \
+                 capability probe's queries were the only such bytes -- {:?}",
+                String::from_utf8_lossy(&wire[..wire.len().min(32)])
+            );
+            let leave_alt = find_subslice(&wire, b"\x1b[?1049l")
+                .expect("a session still leaves the alternate screen");
+            assert_eq!(
+                leave_alt + b"\x1b[?1049l".len(),
+                wire.len(),
+                "the switch back is the last thing written, so nothing reaches the screen the \
+                 host shell resumes on -- {:?}",
+                String::from_utf8_lossy(&wire[leave_alt..])
+            );
+        }
+    }
+
+    /// The probe's `╭` is printed and erased inside the alternate screen
+    /// now, which is what makes the ordering above free: the glyph the
+    /// cell-width query borrows a line for never reaches the screen the
+    /// shell resumes on, whatever the emulator does with either buffer.
+    #[cfg(unix)]
+    #[test]
+    fn the_cell_width_glyph_is_printed_and_erased_on_the_alternate_screen() {
+        let wire = session_bytes(false);
+        let glyph = find_subslice(&wire, "╭".as_bytes())
+            .expect("the cell-width query still prints its glyph");
+        let enter_alt = find_subslice(&wire, b"\x1b[?1049h")
+            .expect("a session still enters the alternate screen");
+        let erase = find_subslice(&wire, b"\r\x1b[K")
+            .expect("the cell-width query still erases the line it borrowed");
+        let leave_alt = find_subslice(&wire, b"\x1b[?1049l")
+            .expect("a session still leaves the alternate screen");
+        assert!(
+            enter_alt < glyph && glyph < erase && erase < leave_alt,
+            "the glyph is drawn and erased between the two switches"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_keyboard_protocol_push_lands_inside_the_alternate_screen() {
+        let on = session_bytes(true);
         let enter_alt = find_subslice(&on, b"\x1b[?1049h")
-            .expect("entry must still switch to the alternate screen");
+            .expect("entry still switches to the alternate screen");
         let push = find_subslice(&on, b"\x1b[>1u").expect(
             "the full tier must push DISAMBIGUATE_ESCAPE_CODES, or a shifted and a plain \
              <CR> stay the same byte and <S-CR> can never fire",
@@ -1220,10 +1335,9 @@ mod tests {
             "the protocol's lifetime nests inside the alternate screen's: push after entering"
         );
 
-        let mut off = Vec::new();
-        enter_bytes(&mut off, false).unwrap();
+        let off = session_bytes(false);
         assert!(
-            find_subslice(&off, b"\x1b[>").is_none(),
+            find_subslice(&off, b"\x1b[>1u").is_none(),
             "a terminal whose probe said no must be sent no keyboard-protocol push at all"
         );
         assert!(
@@ -1236,7 +1350,7 @@ mod tests {
     #[test]
     fn restore_bytes_pops_the_kitty_keyboard_protocol_before_leaving_the_alternate_screen() {
         let mut buf = Vec::new();
-        restore_bytes(&mut buf).unwrap();
+        restore_bytes(&mut buf, 24).unwrap();
 
         let pop = find_subslice(&buf, b"\x1b[<u").expect(
             "restore must pop the keyboard protocol unconditionally: the panic hook reaches \
@@ -1262,7 +1376,7 @@ mod tests {
     #[test]
     fn a_kitty_answer_arriving_after_entry_pushes_the_protocol_exactly_once() {
         let mut wire = Vec::new();
-        enter_bytes(&mut wire, false).unwrap();
+        enter_bytes(&mut wire).unwrap();
         assert_eq!(
             occurrences(&wire, KITTY_KBD_PUSH),
             0,
@@ -1280,7 +1394,7 @@ mod tests {
             "a terminal pushed twice needs two pops, and this session writes one"
         );
 
-        restore_bytes(&mut wire).unwrap();
+        restore_bytes(&mut wire, 24).unwrap();
         assert_eq!(
             occurrences(&wire, KITTY_KBD_POP),
             1,
@@ -1294,7 +1408,7 @@ mod tests {
     #[test]
     fn a_terminal_that_never_answers_is_pushed_nothing() {
         let mut wire = Vec::new();
-        enter_bytes(&mut wire, false).unwrap();
+        enter_bytes(&mut wire).unwrap();
         for _ in 0..3 {
             push_kitty_keyboard(&mut wire, false, false).unwrap();
         }

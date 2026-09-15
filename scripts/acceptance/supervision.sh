@@ -367,18 +367,31 @@ assert_exit_was_clean() {
         fail "no leave-alternate-screen escape ever reached the pty"
         return 1
     }
-    # the caret escapes are matched as one contiguous burst rather than
+    # the teardown escapes are matched as contiguous bursts rather than
     # searched for individually: `?25h` alone is written by every frame that
     # has a caret to place, so finding one somewhere in a session's bytes
-    # proves nothing about the teardown. Only `restore_bytes` closes a sync
-    # bracket, resets the shape and shows the caret back to back, so this
-    # match fails the moment any of the three leaves it.
+    # proves nothing about the teardown. Only `restore_bytes` writes these
+    # runs back to back, so each match fails the moment a member leaves it.
     grep -qU $'\033\[<u' "$ROOT/pane.raw" || {
         fail "the kitty keyboard protocol was never popped, so a terminal that entered it keeps sending view's key encoding to the shell"
         return 1
     }
-    grep -qU $'\033\[?2026l\033\[<u\033\[0 q\033\[?25h' "$ROOT/pane.raw" || {
-        fail "the restore burst (sync-bracket close, kitty keyboard pop, caret shape reset, caret show) never reached the pty as one sequence"
+    grep -qU $'\033\[?2026l\033\[<u\033\[0 q\033\[H\033\[2J' "$ROOT/pane.raw" || {
+        fail "the restore burst (sync-bracket close, kitty keyboard pop, caret shape reset, clear of the frame being left) never reached the pty as one sequence"
+        return 1
+    }
+    # the row count is the pane's, so the park is the one pattern here, and
+    # its `?` is written `[?]` because bash reads `\?` as a plain `?` and
+    # ERE then takes it for a quantifier on the bracket before it. The caret
+    # is parked at column 0 of the bottom row and shown there, which is what
+    # keeps the host shell's prompt off row 1 and view's last frame out of
+    # the scrollback above it.
+    grep -qUE $'\r\033\[[0-9]+B\033\[[?]25h' "$ROOT/pane.raw" || {
+        fail "the caret was never parked on the bottom row before the switch back, so the host shell resumes mid-screen over its own scrollback"
+        return 1
+    }
+    grep -qU $'\033\[?25h\033\[?1006l\033\[?1015l\033\[?1003l\033\[?1002l\033\[?1000l\033\[?2004l\033\[?1049l' "$ROOT/pane.raw" || {
+        fail "the caret show, the mouse-reporting and bracketed-paste disables and the switch back never reached the pty as one sequence"
         return 1
     }
 
