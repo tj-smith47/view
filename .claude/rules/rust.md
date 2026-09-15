@@ -385,3 +385,34 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   child asks for it -- `-n` on an argument list is a statement of intent, not a
   mechanism, and a comment claiming it suppresses the swapfile is wrong wherever
   no UI attaches.
+- **A figure in a doc comment states a measurement nobody re-takes, so the
+  mechanism goes in words and the reading stays in the commit that took it.**
+  `check_doc_figures` in `scripts/check-style.sh` reads every `///` and `//!`
+  line under `crates/` and fails one that carries a millisecond, microsecond,
+  nanosecond, second, percentage or multiplier figure. What counts as a figure
+  has two forms. A decimal carrying one of those units is a reading wherever it
+  stands, since nothing in this tree passes 0.37 us to anything. An integer
+  carrying one is a reading only inside the sentence a reading word
+  (`measure`, `observ` or `record`, in any case) opened, because an integer
+  with a unit is far more often a constant the code passes -- a 150 ms
+  throttle, a 20 ms cadence -- and sweeping those deletes the WHY the comment
+  is there for. Three shapes take a line out of the grading: a word that makes
+  the number a choice rather than a reading (`bar`, `budget`, `bound`, `band`,
+  `tolerance` and their plurals), a cell id the drift check knows, and a fenced
+  block, which is a sample of what something prints and which rewording would
+  destroy. The cell ids are the drift check's own vocabulary, read at each run
+  through `scripts/check-budget-drift.sh --cell-ids` rather than written down a
+  second time, and a run that reads none of them fails closed: an empty
+  vocabulary grades every figure as anchored, which reads exactly like a tree
+  with nothing to report. A reading therefore goes to prose, or to
+  `docs/benchmarking.md` beside the cell that records it -- where the drift
+  check grades it against that cell, which is the whole point of naming one.
+  Two limits are stated rather than implied. The sentence the reading word
+  opens ends at the first `.` before a blank or a line end, so an integer two
+  sentences past the word that took it is graded as a constant; and a figure
+  written with no unit at all is graded by nothing here. Cased in
+  `scripts/check-style-cases.sh` over six shapes: the tree that passes on all
+  five escapes, the decimal, the integer inside a reading sentence, the same
+  integer wrapped onto the line below the word that introduced it, the
+  constant in the sentence after one a reading closed, and the budgets file
+  that declares no cell.

@@ -107,9 +107,10 @@ pub const DETECTION_BOUND: Duration = Duration::from_millis(
 /// reached exactly rather than approached, every measurement here would fail
 /// a comparison that allowed nothing for the reading.
 ///
-/// This is the entire headroom a gated run has, not a generous pad: a
-/// detection measured at 12.0002s has spent under a millisecond of it, and
-/// what the rest is for is the host rather than the engine. Half a second
+/// This is the entire headroom a gated run has, not a generous pad: the
+/// observation a detection lands on sits a fraction of a millisecond past
+/// the bound, and what the rest is for is the host rather than the engine.
+/// Half a second
 /// covers a fold cadence two orders of magnitude below it, covers an
 /// ordinary scheduling hiccup, and covers nothing a supervision regression
 /// could do, since the next thing that can go wrong costs a whole probe
@@ -189,11 +190,12 @@ const SURVIVAL_WINDOW: Duration = HEARTBEAT_PROBE_INTERVAL;
 /// What makes it evidence is the distance to either side. A harness that
 /// hung folds once and stops; every live host measured folds two orders of
 /// magnitude past this bar, and none of that distance is the fold's own
-/// work. Over this window an idle 10-core macOS host completes 268-302
-/// folds while spending 2.3ms of the 2s inside `fold()` itself -- the rest
-/// is the [`FOLD_INTERVAL`] sleep costing ~7.4ms of wall clock for the 5ms
-/// it asks for -- and a 3-core runner executing the whole `--lib` suite at
-/// once completes 68, the same sleep costing ~29ms there.
+/// work. Over this window an idle 10-core macOS host completes a few
+/// hundred folds while spending a couple of milliseconds inside `fold()`
+/// itself -- the rest is the [`FOLD_INTERVAL`] sleep, which costs half
+/// again the wall clock it asks for -- and a 3-core runner executing the
+/// whole `--lib` suite at once completes a fraction of that count, the same
+/// sleep costing several times its ask there.
 ///
 /// It does not scale with [`SLACK_SCALE_VAR`]. A wider slack lowers this
 /// bar toward the single fold a stopped observer reports, which is the one

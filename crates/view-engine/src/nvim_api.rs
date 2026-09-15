@@ -275,26 +275,37 @@ end
 /// The reading itself is [`notify_predicate_lua`]'s, shared with the
 /// takeover's own and with the probe's later ones, so a session cannot be
 /// told two different things about the function standing at `vim.notify`.
+///
+/// It answers with the modules whose own `disable` ran, which is a
+/// different question from the one the later probe answers and the only
+/// one that can word the notice's account of the ask. A module absent from
+/// that list either had not loaded when the takeover went out -- the
+/// takeover runs ahead of every other plugin's `VimEnter`, so a claimant
+/// loading from one of those never receives it -- or raised inside its own
+/// `disable`. Either way the ask did not take, where the probe reading
+/// alone could only say the module is loaded now, which a plugin that
+/// turned itself off perfectly well still is.
 const DISABLE_CLAIMANTS_CHUNK: &str = concat!(
     "local modules = ...\n",
     notify_predicate_lua!(),
     "\
-local handed_back = false
+local handed_back = {}
 for _, name in ipairs(modules) do
   if package.loaded[name] ~= nil then
     if pcall(function()
       require(name).disable()
     end) then
-      handed_back = true
+      handed_back[#handed_back + 1] = name
     end
   end
 end
-if handed_back
+if #handed_back > 0
   and package.loaded.notify ~= nil
   and is_engine_notify(vim.notify)
 then
   vim.notify = package.loaded.notify
-end"
+end
+return handed_back"
 );
 
 /// The lua chunk [`EngineHandle::raise_notice`] runs inside nvim, taking
@@ -858,10 +869,11 @@ end";
 /// registration down with it -- and one message must not be the thing that
 /// changes that. A step that raises leaves the rest of the takeover done.
 ///
-/// `answer[step.out]` rather than the whole result list: exactly one step
-/// (the mapping registration) has an answer anyone reads, and naming the
-/// key here means the reply's decoder does not have to know which index the
-/// caller put it at.
+/// `answer[step.out]` rather than the whole result list: two steps have an
+/// answer anyone reads -- the mapping registration's claims and the
+/// hand-back's list of the modules that took it -- and naming the key here
+/// means the reply's decoder does not have to know which index the caller
+/// put each at.
 ///
 /// The `:messages` read is the one moment view can have it. The child runs
 /// its whole startup `--headless`, so every message raised before this
@@ -907,6 +919,10 @@ return answer"
 pub(crate) const TAKEOVER_CLAIMS_KEY: &str = "claims";
 pub(crate) const TAKEOVER_MESSAGES_KEY: &str = "messages";
 pub(crate) const TAKEOVER_NOTIFIER_KEY: &str = "foreign_notifier";
+
+/// The key [`TAKEOVER_CHUNK`] returns [`DISABLE_CLAIMANTS_CHUNK`]'s answer
+/// under: the modules whose own `disable` ran.
+pub(crate) const TAKEOVER_DISABLED_KEY: &str = "disabled";
 
 /// [`EngineHandle::set_option`] as a chunk, for the one caller that batches
 /// it ([`TAKEOVER_CHUNK`]): `nvim_set_option_value` is an API call rather
@@ -4376,8 +4392,14 @@ fn takeover_step(step: &TakeoverStep) -> Value {
         (Value::from("src"), Value::from(src)),
         (Value::from("args"), Value::Array(args)),
     ];
-    if matches!(step, TakeoverStep::RegisterMappings { .. }) {
-        table.push((Value::from("out"), Value::from(TAKEOVER_CLAIMS_KEY)));
+    match step {
+        TakeoverStep::RegisterMappings { .. } => {
+            table.push((Value::from("out"), Value::from(TAKEOVER_CLAIMS_KEY)));
+        }
+        TakeoverStep::DisableClaimants { .. } => {
+            table.push((Value::from("out"), Value::from(TAKEOVER_DISABLED_KEY)));
+        }
+        _ => {}
     }
     Value::Map(table)
 }

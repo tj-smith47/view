@@ -227,12 +227,13 @@ const MIN_RECORDED_WARMUP: usize = 100;
 
 /// How long one `:terminal` flood samples steady output. A duration, not a
 /// line count: hosts drain a fixed line count at wildly different rates (a
-/// 3M-line flood took ~12.6s on dev-linux but ~845ms on mbp, ~1020 vs ~12
-/// observed frame changes), so a line count cannot make the cadence sample
-/// count comparable across hosts, but a fixed window does by construction.
-/// Sized from measurement: at the UI's ~12ms coalesced cadence a 12s window
-/// yielded ~960 gaps on a loaded dev-linux, just under the 1000-gap floor;
-/// 15s clears it with margin on both hosts (dev-linux ~1200, mbp ~1350).
+/// 3M-line flood took over ten seconds on dev-linux and under a second on
+/// mbp, two orders of magnitude apart in observed frame changes), so a line
+/// count cannot make the cadence sample count comparable across hosts, but
+/// a fixed window does by construction. Sized from measurement: at the UI's
+/// coalesced redraw cadence a twelve-second window fell just under the
+/// 1000-gap floor on a loaded dev-linux, and this length clears the floor
+/// with margin on both hosts.
 const FLOOD_WINDOW: Duration = Duration::from_secs(15);
 
 /// Null-pair calibration sampling: two instances of the pinned nvim
@@ -436,9 +437,9 @@ const FIRST_PAINT_MARKER: &str = "VIEWBENCHCOLDSTARTMARKER";
 /// contiguous on one row. Observed on the heavy fixture -- three stacked
 /// `nvim-notify` popups began at column 20 and clipped the marker to
 /// `VIEWBENCHCOLDSTARTM`, so the row did not match until the toasts faded
-/// about seven seconds later. That recorded view at 7133 ms against bare
-/// nvim's 225 ms and read as a 31x cold-start regression; view had in fact
-/// painted the buffer immediately. Bare nvim never showed the artifact
+/// about seven seconds later. That recorded view seconds behind bare nvim
+/// and read as an order-of-magnitude cold-start regression; view had in
+/// fact painted the buffer immediately. Bare nvim never showed the artifact
 /// because its messages go to the command line, which sits below the
 /// buffer rather than over it.
 ///

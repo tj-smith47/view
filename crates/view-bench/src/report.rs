@@ -83,7 +83,7 @@ pub fn flood_trial(scenario: &str, fixture: &str, trial: &FloodTrial) -> String 
 }
 
 /// The numbers behind one unpaired cell line, with the unit spelled by
-/// the caller so microsecond rows don't print as 0.00ms.
+/// the caller so microsecond rows don't round to zero milliseconds.
 #[derive(Debug, Clone, Copy)]
 pub struct AbsoluteStats<'a> {
     pub p50: f64,

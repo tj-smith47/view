@@ -40,9 +40,10 @@
 //! co-resident instances of one binary split their shared file-backed
 //! pages' PSS between them, so keeping both legs alive through one shared
 //! sampling window -- this row's design before this revision -- deflates
-//! both legs' readings below what either reads alone. Measured ~-8.0% on
-//! this class for a co-resident sibling against a ~+0.8% no-sibling
-//! control (the same process read twice, alone); reproducible by spawning
+//! both legs' readings below what either reads alone. Measured on this
+//! class, a co-resident sibling deflated the reading by several percent
+//! against a no-sibling control that barely moved (the same process read
+//! twice, alone); reproducible by spawning
 //! a second instance of any sufficiently large binary and re-reading
 //! `/proc/<pid>/smaps_rollup` for the first with and without the second
 //! alive. [`run_paired`] instead runs `protocol.trials` ABBA-alternating

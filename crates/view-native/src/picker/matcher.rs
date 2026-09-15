@@ -1665,7 +1665,8 @@ mod tests {
     }
 
     /// Spec 3.1's picker-match row (keystroke -> first results painted,
-    /// 100k resident entries, <= 16 ms) measured once here and recorded in
+    /// 100k resident entries, at the spec's own bound) measured once here
+    /// and recorded in
     /// the commit description; a paired, class-gated bench-suite scenario
     /// enforces this budget going forward. "Resident" means the corpus is
     /// fully matched before the timer starts: the cost under measurement is

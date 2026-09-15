@@ -1,8 +1,9 @@
 //! What one keystroke costs to cross from the input thread to the runtime
 //! loop, measured on the production primitive.
 //!
-//! The tapped `echo_path` row puts `key-decoded->loop-wake` at 60.8us p50
-//! on dev-linux, which is the largest single view-owned segment of the
+//! The tapped `echo_path` row puts `key-decoded->loop-wake` at tens of
+//! microseconds p50 on dev-linux, which is the largest single view-owned
+//! segment of the
 //! typing round trip and roughly a third of the whole view-vs-nvim gap.
 //! That segment is one `SyncSender::send` and the `recv()` that wakes for
 //! it, so either the primitive really costs that much on this host or the

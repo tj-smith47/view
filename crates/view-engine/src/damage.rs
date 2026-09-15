@@ -335,6 +335,13 @@ struct Route {
     /// sent once per session), so one shared slot would let a probe reply
     /// arriving a moment later evict the report for good.
     deferred_claims: Option<Msg>,
+    /// The `Msg::ClaimantsHandedBack` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// Its own slot for [`Route::deferred_startup_messages`]'s reason: it
+    /// arrives from the same one reply, which is issued once per
+    /// connection.
+    deferred_handed_back: Option<Msg>,
     /// The `Msg::StartupMessages` an attached-but-full sink refused, held
     /// for the next routing attempt to retry.
     ///
@@ -446,6 +453,7 @@ enum Held {
     Probe,
     Heartbeat,
     Claims,
+    ClaimantsHandedBack,
     StartupMessages,
     NotifySink,
     BufferList,
@@ -465,6 +473,7 @@ impl Route {
             Held::Probe => &mut self.deferred_probe,
             Held::Heartbeat => &mut self.deferred_heartbeat,
             Held::Claims => &mut self.deferred_claims,
+            Held::ClaimantsHandedBack => &mut self.deferred_handed_back,
             Held::StartupMessages => &mut self.deferred_startup_messages,
             Held::NotifySink => &mut self.deferred_notify_sink,
             Held::BufferList => &mut self.deferred_buffer_list,
@@ -487,6 +496,7 @@ impl Route {
             Held::Probe,
             Held::Heartbeat,
             Held::Claims,
+            Held::ClaimantsHandedBack,
             Held::StartupMessages,
             Held::NotifySink,
             Held::BufferList,
@@ -743,6 +753,20 @@ impl PumpShared {
     /// switch gives it back.
     pub(crate) fn route_claims(&self, msg: Msg) {
         self.route_held(msg, Held::Claims);
+    }
+
+    /// Routes a `Msg::ClaimantsHandedBack` without ever dropping it on a
+    /// full sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// Its own slot rather than the claim report's, for the reason that one
+    /// has its own: both arrive from the takeover's single reply, so a
+    /// shared slot would hold the first and let the second write over it.
+    /// A dropped reading is silent and permanent -- the hand-back runs once
+    /// per connection -- and the notice raised afterwards would then say
+    /// the ask never reached a plugin that took it.
+    pub(crate) fn route_claimants_handed_back(&self, msg: Msg) {
+        self.route_held(msg, Held::ClaimantsHandedBack);
     }
 
     /// Routes a `Msg::StartupMessages` without ever dropping it on a full

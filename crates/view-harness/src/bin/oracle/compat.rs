@@ -709,7 +709,8 @@ fn warm_cache_targets(
 /// git fetching that plugin: the first scenario to reach a cold shared
 /// cache otherwise pays the whole install inside its own timed wait and
 /// fails on a deadline that has nothing to say about the plugin under test
-/// (43.8 s at a 15 s wait, observed).
+/// -- an install has been observed running several times the wait it was
+/// charged to.
 ///
 /// # Errors
 ///
@@ -1231,7 +1232,10 @@ fn apply_red_expectation_over(result: &mut ScenarioResult, manifest: &[RedRow]) 
 }
 
 /// Prints one scenario's report line in a fixed shape:
-/// `compat: lualine (heavy, present) ... OK (4 steps, 2.1s)`.
+///
+/// ```text
+/// compat: lualine (heavy, present) ... OK (4 steps, 2.1s)
+/// ```
 fn print_scenario_result(result: &ScenarioResult) {
     let fixture = result.fixture.as_deref().unwrap_or("none");
     // the scenario file's own stem, not result.plugin: more than one

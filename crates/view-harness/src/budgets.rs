@@ -635,9 +635,10 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
 /// How far a draw of a metric may sit from the seat its draws were reduced
 /// to before it is another quantity rather than a noisy reading.
 ///
-/// The shipped honest arrays span +5.3%/-1.1%, -1.9%, +0.5%/-0.7% and
-/// +12.3%/-12.6%, so this is five times the tightest of them and clear of
-/// the noisiest cell; the ledger has held a ratio prepended to two
+/// The shipped honest arrays sit within a couple of percent of their seats,
+/// bar one an order of magnitude wider, so this is five times the tightest
+/// of them and clear of the noisiest cell; the ledger has held a ratio
+/// prepended to two
 /// millisecond figures of the paired arm, and that pair is what a band this
 /// wide refuses.
 ///
@@ -776,8 +777,9 @@ fn find_shortfall<'a>(
 /// An accepted value is one sample of a noisy statistic, not a constant, so
 /// comparing the next sample to it exactly makes any listed shortfall a
 /// coin flip: the first re-run after this ledger was written measured
-/// `echo.minimal` ratio_p50 at 1.176 against an accepted 1.172 and failed
-/// the gate on a 0.35% difference. The ceiling is therefore the same one
+/// `echo.minimal` ratio_p50 a shade above its accepted value and failed the
+/// gate on a difference well under a percent. The ceiling is therefore the
+/// same one
 /// [`crate::baselines`] grants the recorded bar for this metric on this
 /// class, so the two gates agree about what counts as a regression instead
 /// of one of them firing on measurement noise the other was built to
@@ -1402,12 +1404,13 @@ fixtures = ["minimal", "heavy"]
         }
     }
 
-    /// The row this mechanism exists for, in its real proportions:
-    /// `first_paint.minimal` `marker_cold_ms` on dev-linux records 25.151 ms
-    /// against a 30 ms bound while the class's sidecar puts that statistic's
-    /// spread at x2.0. A quiet run sits 19% under a bound the host's own
-    /// noise clears several times over, and the row is one-shot -- no
-    /// median-of-trials stands between an ambient spike and the verdict.
+    /// The row this mechanism exists for, in its real proportions (the
+    /// fixture below carries them): `first_paint.minimal` `marker_cold_ms`
+    /// on dev-linux records a quiet run a fifth under its bound, while the
+    /// class's sidecar puts that statistic's spread at twice the recorded
+    /// value -- noise that clears the gap several times over. The row is
+    /// one-shot besides: no median-of-trials stands between an ambient
+    /// spike and the verdict.
     const COLD_START_BUDGET: &str = r#"
 schema = 1
 [[budget]]
@@ -1736,7 +1739,8 @@ why = \"because\"
     ///
     /// Disconfirm: comparing the next sample to `accepted` exactly is what
     /// this replaced, and it failed on the first re-run of a freshly
-    /// written ledger over a 0.35% difference. Both directions are asserted
+    /// written ledger over a difference well under a percent. Both
+    /// directions are asserted
     /// here, because a ceiling that only ever passes is not a gate.
     #[test]
     fn a_listed_shortfall_widens_only_past_the_ratchet_it_shares() {

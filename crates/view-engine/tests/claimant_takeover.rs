@@ -34,6 +34,8 @@ use view_test_support::ScratchDir;
 struct TakeoverReply {
     foreign: Option<bool>,
     startup: Option<String>,
+    /// The hand-back step's own answer: the modules whose `disable` ran.
+    handed_back: Option<Vec<String>>,
 }
 
 /// Runs the real takeover batch against `dir`'s config and collects what
@@ -53,12 +55,16 @@ fn takeover_reply(dir: &ScratchDir) -> TakeoverReply {
     let mut reply = TakeoverReply {
         foreign: None,
         startup: None,
+        handed_back: None,
     };
-    while Instant::now() < deadline && (reply.foreign.is_none() || reply.startup.is_none()) {
+    while Instant::now() < deadline
+        && (reply.foreign.is_none() || reply.startup.is_none() || reply.handed_back.is_none())
+    {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {
             Ok(Msg::NotifySinkRead { foreign }) => reply.foreign = Some(foreign),
             Ok(Msg::StartupMessages { text }) => reply.startup = Some(text),
+            Ok(Msg::ClaimantsHandedBack { modules }) => reply.handed_back = Some(modules),
             Ok(_) => {}
             Err(_) => break,
         }
@@ -581,4 +587,25 @@ fn wait_for_sink_read(rx: &mpsc::Receiver<Msg>, want: impl Fn(bool) -> bool) -> 
         }
     }
     None
+}
+
+/// The hand-back's own answer, carried out of the same reply: the module
+/// whose `disable` actually ran, named.
+///
+/// Nothing else in a session can tell a plugin that turned itself off from
+/// one that never received the call. A disabled module is still on
+/// `package.loaded`, so the later claimant probe reads both cases
+/// identically, and the notice worded off that reading told every user the
+/// plugin was "still loaded" -- a success reported as a failure.
+#[test]
+fn the_takeover_reply_names_the_module_whose_disable_ran() {
+    let dir = config_home("handed-back");
+    let handed_back = takeover_reply(&dir)
+        .handed_back
+        .expect("the takeover reply must carry the hand-back's own answer");
+    assert_eq!(
+        handed_back,
+        vec!["noice".to_string()],
+        "the step ran this module's own disable, so its answer names it"
+    );
 }

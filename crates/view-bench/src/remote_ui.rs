@@ -1,7 +1,7 @@
 //! The out-of-process UI control arm: nvim's own TUI driving a headless
 //! nvim over the same msgpack-rpc UI protocol view speaks.
 //!
-//! The echo row measures view against bare nvim and reports view ~1.2x
+//! The echo row measures view against bare nvim and reports view slightly
 //! slower at steady typing. That number answers "what does a user pay to
 //! run view", but it cannot say *why*, because it varies two things at
 //! once: the UI implementation (Rust, view's) and the UI's location (a

@@ -1572,14 +1572,14 @@ fi
 report 'the comment walk carries a substitution across the lines it spans, reading at least one line inside every two it enters' "$short"
 
 # The margin the floor above has today, so a fresh clone can read the
-# headroom without re-deriving it: measured 2026-09-14, the shipped tree
-# reads 132 per 100 opens, deleting scripts/check-budget-drift.sh alone (the
-# heaviest single file, 525 of the 1014 carried lines against 35 of the 765
-# opens) leaves 66, and the floor sits at 50 -- 16 points under that
+# headroom without re-deriving it: measured 2026-09-15, the shipped tree
+# reads 148 per 100 opens, deleting scripts/check-budget-drift.sh alone (the
+# heaviest single file, 525 of the 1161 carried lines against 35 of the 783
+# opens) leaves 85, and the floor sits at 50 -- 35 points under that
 # deletion. The case below reddens once the shipped figure drifts more than
 # 10 points from what the tree now measures, which is the tell that this
 # comment is stale rather than the tree.
-shipped_ratio=132
+shipped_ratio=148
 if [ -n "${ratio:-}" ]; then
   drift=$((ratio - shipped_ratio))
   [ "$drift" -lt 0 ] && drift=$((-drift))

@@ -2,12 +2,12 @@
 //!
 //! A background writer thread used to be the only way out. That costs a
 //! cross-thread wake per message, and a wake is charged for bringing an
-//! idle core back: measured on this project's own channel primitive, one
-//! hop costs 7.8 us after 50 us of idle and 40 us after 10 ms. Steady
-//! typing leaves the writer idle for a keystroke interval, so every
-//! keystroke paid the deep end of that curve -- 42.5 us p50 of a 163.5 us
-//! view-versus-nvim gap, for a write the caller's own thread was already
-//! awake to do.
+//! idle core back: measured on this project's own channel primitive, a hop
+//! taken after a keystroke interval of idle costs several times one taken
+//! after a few tens of microseconds. Steady typing leaves the writer idle
+//! for exactly that long, so every keystroke paid the deep end of that
+//! curve -- a quarter of the view-versus-nvim gap at the time, for a write
+//! the caller's own thread was already awake to do.
 //!
 //! So the caller writes the message itself when it provably can, and hands
 //! it to the thread when it cannot. Two invariants decide "provably", and

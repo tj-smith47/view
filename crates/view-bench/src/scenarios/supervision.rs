@@ -180,7 +180,8 @@ pub fn run(
 /// noticed at the first probe it fails to answer, so detection falls as
 /// that offset grows and jumps a whole interval when it passes the tick.
 /// The spawn-to-settle path costs very nearly the same every time -- an
-/// earlier recording's fifteen samples spanned 4.5 ms of a 2 s interval --
+/// earlier recording's fifteen samples spanned a few milliseconds of a
+/// two-second interval --
 /// so a sample fired at a fixed delay after settle reads one phase over and
 /// over, and its p99 is a constant wearing a tail's name: it says nothing
 /// about the rest of the cadence, hides a regression of up to a whole

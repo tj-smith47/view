@@ -56,10 +56,11 @@ pub const SUPPORTED_SCHEMA: u32 = 1;
 /// **1.25 is deliberately conservative and is not a target.** Where a
 /// class has characterized the spread it should say so in its headroom
 /// sidecar (see [`HeadroomTable`]) rather than inherit this:
-/// dev-linux measured `ratio_p50` to a 1.70% half-width over eight
-/// replicates spanning host loads 0.44 to 8.53, so 1.25 admitted a 25%
-/// regression on a number that host resolves to under 2%, and it now
-/// gates at 1.06 there. This value remains the floor for every metric and
+/// dev-linux resolved `ratio_p50` to a half-width of a couple of percent
+/// over eight replicates spanning an order of magnitude of host load, so
+/// 1.25 admitted a regression many times larger than anything that host's
+/// own quiet runs show, and it gates tighter there now. This value
+/// remains the floor for every metric and
 /// class that has not been measured, because guessing tighter than the
 /// evidence is how a gate starts failing on weather.
 pub const RATIO_HEADROOM: f64 = 1.25;
@@ -78,8 +79,9 @@ pub const ABSOLUTE_HEADROOM: f64 = 1.5;
 ///
 /// A proportional allowance shrinks to nothing as a value approaches zero,
 /// which is exactly where a signed metric spends its most interesting
-/// range: at a recorded delta of 0.01 ms a x1.25 factor is a 0.0025 ms
-/// band, far under the round trip's own run-to-run jitter. This floor is
+/// range: a hundredth of a millisecond scaled by the default factor
+/// leaves a band far under the round trip's own run-to-run jitter. This
+/// floor is
 /// the same order as the resolution floor a paired echo round trip is
 /// measured at, so it absorbs that jitter while a real slowdown of view
 /// against nvim still breaches.
@@ -330,9 +332,10 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
 /// dev-macos the scroll replicates resolve the bar-relevant spread of
 /// `ratio_p50` to a few percent while the echo replicates put it an order
 /// of magnitude wider -- and it splits again between fixtures of one
-/// scenario: gh-macos resolves `echo/minimal`'s `ratio_p50` to a 3.2%
-/// half-width against `echo/heavy`'s 33.4%, so a scenario-wide factor sized
-/// honestly for heavy would loosen minimal's bar from 1.378 to 2.095. Each
+/// scenario: gh-macos resolves `echo/minimal`'s `ratio_p50` an order of
+/// magnitude tighter than `echo/heavy`'s, so a scenario-wide factor sized
+/// honestly for heavy would loosen minimal's bar well past what its own
+/// replicates earn. Each
 /// level stays the characterization for every cell below it without one of
 /// its own.
 ///
@@ -439,10 +442,11 @@ pub fn declared_headroom(table: &HeadroomTable, cell: &CellId, metric: &str) -> 
 ///
 /// A percentile's value is set by the worst samples in the run, and on a
 /// shared host the worst samples are the ones a foreign process preempted.
-/// Measured on this class with one unchanged binary pair: `view_p99_ms`
-/// spans 0.925ms to 6.676ms across host loads 0.44 to 8.53, a 7.4x range,
-/// while the `ratio_p50` from those same eight runs stays inside 1.70%. No
-/// fixed allowance can tell a 7x regression from a busy afternoon, so such
+/// Measured on this class with one unchanged binary pair, `view_p99_ms`
+/// spans most of an order of magnitude across an order of magnitude of
+/// host load, while the `ratio_p50` from those same eight runs stays
+/// inside a couple of percent. No fixed allowance can tell a real tail
+/// regression from a busy afternoon, so such
 /// a statistic is recorded on a shared class and gated on a controlled one.
 ///
 /// The regression protection is not lost: a real slowdown in view's own
@@ -1464,9 +1468,9 @@ pub enum RatchetOutcome {
 /// without removing it, and it reaches ratios as well as absolutes. The
 /// scroll characterization is the live example: its ratio_p50 factor
 /// clears the replicate band's own rule by under half a percent, so a
-/// record lowering scroll.minimal's floor about 4% (1.7778 to 1.70) puts
-/// the bar at 2.006 against a 2.013 already observed on unchanged
-/// binaries. Where the class has published its resolution -- a sidecar
+/// record lowering scroll.minimal's floor by a few percent puts the bar
+/// just under a ratio unchanged binaries have already produced on this
+/// class. Where the class has published its resolution -- a sidecar
 /// spread for the statistic, read via [`declared_headroom`] -- the
 /// downward move is therefore bounded by the same band mirrored below the
 /// recorded value ([`Headroom::record_floor`]): a single draw past it is
@@ -2811,7 +2815,8 @@ mod tests {
     /// The narrowest key wins: `"scenario.fixture.metric"` over
     /// `"scenario.metric"` over the bare name. Two fixtures of one scenario
     /// resolve the same statistic differently -- gh-macos puts `echo/heavy`
-    /// at a 33.4% half-width against `echo/minimal`'s 3.2% -- so a factor
+    /// at an order of magnitude wider half-width than `echo/minimal` -- so a
+    /// factor
     /// sized honestly for the wide fixture must reach that cell and no
     /// other, or characterizing it loosens the narrow bar beside it.
     ///

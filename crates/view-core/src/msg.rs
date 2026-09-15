@@ -439,6 +439,18 @@ pub enum Msg {
     /// obligation; the hold was only ever the anti-flash mechanism for the
     /// claimant that loaded eagerly.
     ClaimantsProbed(Vec<String>),
+    /// The hand-back step's own answer, carried out of the same takeover
+    /// reply as [`Msg::MappingsClaimed`]: the claimant modules whose own
+    /// `disable` ran.
+    ///
+    /// What it settles is the wording of the claimant notice, which
+    /// otherwise has only the probe's later reading to go on -- and a
+    /// plugin that turned itself off exactly as asked is still in
+    /// `package.loaded`, so that reading alone reports a success as a
+    /// failure.
+    ClaimantsHandedBack {
+        modules: Vec<String>,
+    },
     /// The startup hold's deadline elapsed
     /// ([`Effect::ScheduleStartupHold`]) with no probe answer. Releases the
     /// hold, which is what makes an engine that never answers degrade to

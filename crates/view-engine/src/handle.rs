@@ -650,6 +650,9 @@ impl EngineHandle {
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: reading.claimed,
                                     });
+                                    pump.route_claimants_handed_back(Msg::ClaimantsHandedBack {
+                                        modules: reading.handed_back,
+                                    });
                                 }
                             }
                             Some(Waiter::ClaimantsProbe) => {

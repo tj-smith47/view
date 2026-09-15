@@ -123,9 +123,9 @@ fn vimscript_loop() -> String {
 /// loop-cached time, which only `uv_update_time` moves and which no
 /// iteration of a loop holding the main thread ever runs. Measured against
 /// the pinned engine, `vim.uv.now()` returned the same millisecond across a
-/// 1.5s spin of 44 million iterations, so a bound written against it never
-/// expires and the engine spins until something kills it -- which is how two
-/// of these ended up reparented to init at 100% CPU for days.
+/// spin of tens of millions of iterations, so a bound written against it
+/// never expires and the engine spins until something kills it -- which is
+/// how two of these ended up reparented to init with a core pinned for days.
 fn lua_loop() -> String {
     format!(
         ":lua local t=vim.uv.hrtime() while {} - (vim.uv.hrtime()-t) > 0 do end<CR>",

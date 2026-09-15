@@ -87,9 +87,10 @@ const FIRST_PAGE_ROWS: usize = 5;
 /// Sized from what the statistic has to resolve, not from a guess at what
 /// a sample costs. A median of `n` samples carries sampling error
 /// proportional to `1/sqrt(n)`, so 100 opens read the same boundary
-/// `sqrt(100/12) = 2.89x` tighter than the twelve this row used to take.
-/// Twelve is where one hosted leg produced trial medians of 6.80, 5.12
-/// and 3.59 ms with nothing between them but the draw, so the claim this
+/// nearly three times tighter than the twelve this row used to take.
+/// Twelve is where one hosted leg produced three trial medians spread
+/// across a factor of two, with nothing between them but the draw, so the
+/// claim this
 /// count once carried -- that the boundary "stabilizes within a dozen
 /// opens" -- was a statement about an estimator too coarse to see its own
 /// spread, and is retracted. The resampling check below holds both sides
@@ -97,12 +98,12 @@ const FIRST_PAGE_ROWS: usize = 5;
 /// not.
 ///
 /// Scenario-owned still, and now for a measured reason rather than an
-/// asserted one. The whole picker cell has taken at most 248 s on the
-/// slowest hosted class, of which the match phase's own inter-sample
-/// sleeps are 30 s, so no open there cost more than `(248 - 30) / 42 =
-/// 5.2 s` even charging the scan phase's one-time warm walk to it. The
-/// 288 opens this count adds are at most 25 min under that bound, on a
-/// 98-minute leg against a 180-minute job timeout, and are seconds at
+/// asserted one. The whole picker cell has fitted in a few minutes on the
+/// slowest hosted class, and taking the match phase's own inter-sample
+/// sleeps out of that leaves no open there costing more than a handful of
+/// seconds, even charging the scan phase's one-time warm walk to it. The
+/// 288 opens this count adds are under half an hour at that cost, on a leg
+/// with most of an hour spare against the job timeout, and are seconds at
 /// what the samples themselves report (a first page of 3 to 7 ms,
 /// [`Protocol::inter_sample`] of 10 ms, a close wait of the same order).
 /// The protocol's own 1000 samples is what the bound refuses: the same
@@ -700,8 +701,9 @@ mod tests {
     const REFUSED_SAMPLES: usize = 12;
 
     /// The leg-to-leg half-width the tighter of the two hosted classes
-    /// publishes for this statistic (gh-linux 25.2%, against gh-macos
-    /// 35.4%): the spread a headroom factor for the row is sized on.
+    /// publishes for this statistic -- gh-linux's, against a gh-macos leg
+    /// half again as wide: the spread a headroom factor for the row is
+    /// sized on.
     const CLASS_HALF_WIDTH: f64 = 0.252;
 
     /// How wide the sampling spread of the gated median is allowed to be,
@@ -723,8 +725,8 @@ mod tests {
     /// One draw from a population shaped like the readings this row
     /// records: nine parts first page a few ms apart, one part tail an
     /// order of magnitude out, matching the per-trial p50/p99/max the scan
-    /// phase reports on a hosted class (3.6..6.8 ms against ~31 ms). An
-    /// LCG rather than a crate, because the point is that the two counts
+    /// phase reports on a hosted class. An LCG rather than a crate, because
+    /// the point is that the two counts
     /// see the identical population.
     fn draw(state: &mut u64) -> f64 {
         let mut next = || {

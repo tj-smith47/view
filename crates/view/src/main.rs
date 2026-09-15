@@ -1845,19 +1845,18 @@ mod tests {
     /// it to the three calls it is, so it cannot quietly become the place
     /// new startup reads accumulate.
     ///
-    /// Measured on dev-linux, two alternating pairs of 200 cold spawns,
-    /// uninstrumented builds from one source path and one target dir:
-    /// `first_paint.minimal` marker p50 16.03/16.86ms with the spawn after
-    /// the terminal handshake, 15.11/14.77ms with it before, for a shell
-    /// frame that did not move (3.24/3.33ms against 3.34/3.25ms). A
-    /// terminal that never answers the probe at all gains nothing and loses
-    /// nothing (404.25ms against 404.19ms): its content was held by the
-    /// probe's own second window, not by anything nvim is doing -- a wait
+    /// Measured on dev-linux over two alternating pairs of cold spawns,
+    /// uninstrumented builds from one source path and one target dir: the
+    /// `first_paint.minimal` marker came in a little earlier with the spawn
+    /// ahead of the terminal handshake than behind it, for a shell frame
+    /// that did not move. A terminal that never answers the probe at all
+    /// gains nothing and loses nothing: its content was held by the probe's
+    /// own second window, not by anything nvim is doing -- a wait
     /// `settle_probe` has since removed, which is what leaves this ordering
     /// measurable at all on such a terminal.
     ///
-    /// Those numbers measure the boundary this test pins -- the spawn
-    /// against the terminal handshake -- and were taken before the config
+    /// That reading measures the boundary this test pins -- the spawn
+    /// against the terminal handshake -- and was taken before the config
     /// prologue moved ahead of the spawn. The prologue's own cost (one file
     /// read of a few hundred bytes and one environment sweep) is unmeasured
     /// since that move, so nothing here states a current end-to-end

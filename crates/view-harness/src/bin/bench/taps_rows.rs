@@ -42,10 +42,11 @@ const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 /// own chrome would still produce a clean percentile here, measured over
 /// the engine round trips the user never waited for.
 ///
-/// One paint per 3300 keystrokes in each of three full dev-linux matrix
-/// runs is the measured rate, so this share sits ~33x above what a
-/// healthy build produces and ~100x below the per-keystroke regime it
-/// exists to catch. A share rather than a count, because `--samples` and
+/// One paint per few thousand keystrokes in each of three full dev-linux
+/// matrix runs is the measured rate, so this share sits more than an order
+/// of magnitude above what a healthy build produces and two below the
+/// per-keystroke regime it exists to catch. A share rather than a count,
+/// because `--samples` and
 /// `--trials` are operator-set and a count would silently change meaning
 /// with them; and floored at one event, so that no run length can be
 /// short enough for a single stray paint to fail it.

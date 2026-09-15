@@ -168,9 +168,9 @@ impl Damage {
 /// Whether diffing only `runs` costs less than diffing all `height` rows.
 ///
 /// Staging a run swaps its cells out of the shadow's buffers and back
-/// again, measured at 0.37 us per repainted row of a 120-column frame
-/// against the 0.71 us the unclipped scan spends on that same row, so
-/// clipping stops paying once roughly two thirds of the frame repaints.
+/// again, which costs about half of what the unclipped scan spends on the
+/// same row, so clipping stops paying once roughly two thirds of the frame
+/// repaints.
 /// Half the frame sits on the conservative side of that crossover: a large
 /// repaint (a scroll, a resize) takes the unclipped path rather than paying
 /// the swap on top of a scan it cannot avoid. The two paths emit the same
@@ -205,11 +205,12 @@ fn clipping_pays(runs: &[(u16, u16)], height: u16) -> bool {
 /// blank-visible-style rules beside it) correct by construction rather than
 /// by a re-derivation that would silently drift on a `ratatui` upgrade.
 ///
-/// That delegation is also what bounds the diff's cost. A whole-frame diff
-/// compares every cell, and a `Cell` comparison is a symbol-string compare
-/// before it is anything else, measured at 6 ns per cell -- 29 us for a
-/// 120x40 frame in which one cell changed. So the diff is handed *fewer
-/// cells* rather than a cheaper comparison: the rows the frame actually
+/// That delegation is also what keeps the diff's cost down. A whole-frame
+/// diff compares every cell, and a `Cell` comparison is a symbol-string
+/// compare before it is anything else, so a terminal-sized frame in which
+/// one cell changed spends most of a paint comparing cells no repaint
+/// touched. So the diff is handed *fewer cells* rather than a cheaper
+/// comparison: the rows the frame actually
 /// repainted are lifted into sub-buffers carrying their own terminal-space
 /// rect, and `diff_iter` runs over those. Same iterator, same wide-glyph
 /// rules, same absolute coordinates out; only the input is clipped.
@@ -250,9 +251,10 @@ pub struct Shadow {
 /// scans that run's cells instead of the whole frame's.
 ///
 /// The run's cells are *swapped* in rather than cloned. A `Cell` clone
-/// copies a `CompactString` per cell and measured 8.5 ns against 0.8 ns for
-/// the swap, which would have spent more on the copy than the 6 ns per-cell
-/// scan the clip exists to avoid. Both buffers carry the run's real
+/// copies a `CompactString` per cell, an order of magnitude more than the
+/// swap costs and more than the per-cell scan the clip exists to avoid, so
+/// cloning would have spent the saving on the copy. Both buffers carry the
+/// run's real
 /// terminal-space rect, so `ratatui::buffer::Buffer::diff_iter` reports
 /// absolute coordinates and nothing translates them back.
 #[derive(Debug, Default)]
@@ -608,9 +610,9 @@ impl OverlayShadow {
     /// when it is the layout of exactly `layer`.
     ///
     /// Lets the painter spend [`OverlayShadow::advance`]'s layout instead of
-    /// repeating it: laying a full-height panel out measured 67 us against
-    /// 0.7 us for the row compare that decided it was needed, so a frame
-    /// that laid the panel out twice spent most of itself there.
+    /// repeating it: laying a full-height panel out costs two orders of
+    /// magnitude more than the row compare that decides it is needed, so a
+    /// frame that laid the panel out twice spent most of itself there.
     fn laid_for(&self, index: usize, layer: &Layer) -> Option<&view_surface::overlay::Rows> {
         self.painted
             .get(index)

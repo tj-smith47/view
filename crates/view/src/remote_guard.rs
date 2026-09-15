@@ -468,8 +468,9 @@ fn probe_capturing(remote: &RemoteSpec, limit: Duration, capture: Option<Capture
 /// finishes writing to. OpenSSH for Windows (9.5p2, the client shipped in
 /// `%SystemRoot%\System32\OpenSSH`) does not exit while its stderr is a
 /// pipe: measured against a host that rejects it, the same connection ends
-/// in 83ms with a file-backed stderr and was still running after 20s with a
-/// pipe-backed one, with pipes on stdin and stdout making no difference
+/// in a fraction of a second with a file-backed stderr and was still
+/// running tens of seconds later with a pipe-backed one, with pipes on
+/// stdin and stdout making no difference
 /// either way. Through a pipe that client outlives every bound this module
 /// would be willing to wait, so the refusal it did diagnose is never read
 /// and the user gets the generic message instead. A file costs one

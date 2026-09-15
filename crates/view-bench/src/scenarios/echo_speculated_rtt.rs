@@ -56,8 +56,9 @@ pub const STUB_TARGET: &str = "view-rtt-acceptance-stub-host";
 /// (tens of ms), cross-region (low hundreds), and a `0` row that is a
 /// floor-only control, not a zero-latency one -- the relay's own
 /// coalescing window and interpreter overhead still apply at `0`, so this
-/// row isolates *that* fixed floor (measured ~28ms round trip over `cat`)
-/// from the configured delay the other three add on top of it, rather
+/// row isolates *that* fixed floor (a measured round trip of tens of
+/// milliseconds over `cat`) from the configured delay the other three add
+/// on top of it, rather
 /// than measuring an actual zero-transport-latency spawn.
 pub const RTT_TIERS_MS: [u64; 4] = [0, 25, 100, 300];
 
@@ -354,9 +355,10 @@ mod tests {
     /// The delay relay's own falsifiable contract: it adds a delay that
     /// *tracks the configuration*, not a constant sleep and not an
     /// environment variable it silently ignores. A single measurement
-    /// inside a wide tolerance band cannot tell "adds 40ms" apart from
-    /// "adds a fixed ~40ms no matter what `DELAY_RELAY_MS` says" -- both
-    /// land inside the same band -- so this measures at two settings and
+    /// inside a wide tolerance band cannot tell a relay that applies the
+    /// configured delay apart from one that adds a fixed sleep no matter
+    /// what `DELAY_RELAY_MS` says -- both land inside the same band -- so
+    /// this measures at two settings and
     /// asserts on the *difference* between them, which only a relay that
     /// actually reads and applies the configuration produces.
     ///
@@ -364,8 +366,9 @@ mod tests {
     /// two arbitrary nonzero points because it is also this crate's own
     /// zero-delay tier ([`RTT_TIERS_MS`]), one fewer magic number, and the
     /// relay's own fixed overhead (interpreter startup, thread scheduling,
-    /// the coalescing window -- a measured ~28ms round trip even at `0`,
-    /// see the module doc) is present at both settings and cancels out of
+    /// the coalescing window -- a measured round trip of tens of
+    /// milliseconds even at `0`, see the module doc) is present at both
+    /// settings and cancels out of
     /// a difference regardless of which two points are chosen.
     ///
     /// Medians, not single points, on each side of the difference: this
@@ -374,8 +377,8 @@ mod tests {
     /// trial's relay-subprocess spawn can be delayed by scheduler
     /// contention that has nothing to do with `DELAY_RELAY_MS` at all --
     /// observed in practice, where a single `LOW_MS` trial came back at
-    /// 62ms against an idle-host baseline of ~28ms, pulling the diff below
-    /// a single-trial band's floor on an otherwise-correct relay. A median
+    /// twice the idle-host baseline, pulling the diff below a single-trial
+    /// band's floor on an otherwise-correct relay. A median
     /// of [`TRIALS`] independent trials per side cancels one-off spikes
     /// the same way this crate's own scenarios reduce to `_p50` medians
     /// rather than trusting a single sample.
@@ -387,14 +390,14 @@ mod tests {
     /// at different moments: a median cancels a one-off spike but not
     /// sustained contention, which inflates whichever side it lands on and
     /// *shrinks* the difference when that side is the low one -- observed
-    /// at a `LOW_MS` median of 37ms against this host's ~28ms idle
-    /// baseline, on a relay applying the configuration exactly. Half the
+    /// at a `LOW_MS` median a third above this host's idle baseline, on a
+    /// relay applying the configuration exactly. Half the
     /// causal difference is still unreachable for the two failures this
     /// test exists to catch, both of which put the difference at
     /// approximately zero: a relay that ignores `DELAY_RELAY_MS`, and one
     /// adding a constant sleep regardless of it. What it gives up is
     /// everything between: the floor sits at exactly the half-scale point,
-    /// so a relay applying half the configured delay lands ~0.6ms under it
+    /// so a relay applying half the configured delay lands a hair under it
     /// -- caught here, a coin flip on a slower host -- and any scaling
     /// between half and full passes outright. A relay applying much less
     /// than half is what this floor still catches with margin; the 155ms

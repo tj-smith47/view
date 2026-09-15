@@ -7,9 +7,9 @@
 //! costs.** Every function below except the cold ones runs its frames back
 //! to back, which keeps the whole paint path's working set resident; steady
 //! typing leaves the core idle between frames and pays cold. The same frame
-//! measures 2.94us hot and 21.27us cold, so a hot number understates what a
-//! keystroke actually costs by roughly 7x. Use them to tell whether a change
-//! made the code worse, never to answer how long a keystroke takes.
+//! costs several times more cold than hot, so a hot number understates what
+//! a keystroke actually costs. Use them to tell whether a change made the
+//! code worse, never to answer how long a keystroke takes.
 //!
 //! Seven functions bracket the damage-clipping lever:
 //!
@@ -308,8 +308,9 @@ fn bench_paint_frame_crossterm(c: &mut Criterion) {
 /// keystroke interval of idle before each one and only the frame itself
 /// timed.
 ///
-/// The tapped production run puts the two stages this covers at 28.4us p50
-/// while the back-to-back version of it measures 2.9us. A tight loop keeps
+/// The tapped production run puts the two stages this covers an order of
+/// magnitude above what the back-to-back version of them costs. A tight
+/// loop keeps
 /// every cache line, branch predictor entry and page mapping the paint path
 /// touches resident, and steady typing never presents that state: a human
 /// leaves the core idle between keystrokes and each frame starts cold. This
@@ -395,8 +396,9 @@ fn agent_panel_model() -> Model {
 ///
 /// The panel is full height, so this is the frame that proves a composer
 /// keystroke costs the row it changed rather than the screen the panel
-/// covers: the pre-clipping shape measured 539us against 88us at 263x88,
-/// and it grew with the terminal instead of with the typing. Hot and cold
+/// covers: the pre-clipping shape cost several times what the clipped one
+/// does on a large terminal, and it grew with the terminal instead of with
+/// the typing. Hot and cold
 /// both, for the same reason `paint_frame_cold` exists -- typing is a cold
 /// path, and the panel's own layout is the largest thing in it.
 fn bench_paint_frame_agent_composer(c: &mut Criterion) {

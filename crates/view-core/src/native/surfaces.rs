@@ -606,7 +606,7 @@ pub struct SurfaceConflicts {
     /// The window a keystroke closes is the wrong bound for a plugin that
     /// raises its complaint on a timer of its own: noice re-runs its health
     /// check every second and raises the one about view holding
-    /// `vim.notify` at about 4.8 s, which is past any realistic first
+    /// `vim.notify` several seconds in, which is past any realistic first
     /// keystroke. What the grace does not relax is what may be taken: a
     /// float inside it is closed only when its rows read as a complaint
     /// ([`SurfaceConflicts::reads_as_complaint`]), so a window the user
@@ -620,7 +620,8 @@ pub struct SurfaceConflicts {
     /// superseded claimant's -- and the probe's own round trip is short
     /// enough that the answer is worth waiting for and long enough that a
     /// plugin timer firing at a fixed offset from `VimEnter` can beat it
-    /// (69 ms of margin measured over a remote link). A float placed while
+    /// (a remote link left tens of milliseconds between the two). A float
+    /// placed while
     /// this is false is held in `probe_holds` and classified by the reply.
     probe_answered: bool,
     /// The floats held off the screen only because the probe had not
@@ -639,6 +640,14 @@ pub struct SurfaceConflicts {
     /// [`Model::expire_startup_hold`](crate::model::Model::expire_startup_hold)),
     /// never at the dispatch site.
     generation: u64,
+    /// The claimant modules whose own `disable` ran when the takeover asked
+    /// them to turn themselves off ([`Msg::ClaimantsHandedBack`](crate::msg::Msg::ClaimantsHandedBack)).
+    ///
+    /// The notice's account of the ask is worded from this and not from the
+    /// probe: a plugin that turned itself off exactly as asked is still in
+    /// `package.loaded`, so the probe reading alone reports every success
+    /// as "still loaded".
+    handed_back: Vec<String>,
 }
 
 /// One float the take-down has claimed, and the bar its rows are held to.
@@ -996,13 +1005,33 @@ impl SurfaceConflicts {
     /// | `generation` | bumped: the dead engine's deadlines are still sleeping in their timer threads, and their expiries must find nobody to answer to |
     /// | `claimants` | kept: a claimant is named by identity, not by handle, and the same config loads the same plugins -- forgetting it would raise a second notice per plugin for one conflict |
     /// | `covers` | kept: the surfaces a standing notice accounts for, which the replacement's notice accounts for identically |
+    /// | `handed_back` | dropped: the hand-back is a step of one connection's takeover, and the replacement's own asks its own plugins again -- a list kept past the death would word the replacement's notice from an ask that went to a process that is gone |
     pub fn forget_engine(&mut self) {
         self.complaints.clear();
         self.typed = false;
         self.complaint_grace = false;
         self.probe_answered = false;
         self.probe_holds.clear();
+        self.handed_back.clear();
         self.generation += 1;
+    }
+
+    /// Records which claimant modules took the hand-back, answering whether
+    /// the reading is news -- a launch where nothing was asked, or nothing
+    /// took it, records an empty list and changes no notice.
+    pub fn note_handed_back(&mut self, modules: Vec<String>) -> bool {
+        if self.handed_back == modules {
+            return false;
+        }
+        self.handed_back = modules;
+        true
+    }
+
+    /// Whether `module`'s own `disable` ran when view asked it to turn
+    /// itself off.
+    #[must_use]
+    pub fn took_the_hand_back(&self, module: &str) -> bool {
+        self.handed_back.iter().any(|name| name == module)
     }
 
     /// Whether the startup conflict window is still open, which is spec

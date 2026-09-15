@@ -2,7 +2,8 @@
 //!
 //! macOS takes unattended maintenance sleeps, and a Mach monotonic clock
 //! does not advance across one: measured on this repo's own macOS host,
-//! view's log advanced 11s over 313s of wall. Every harness here that reads
+//! view's log advanced seconds over minutes of wall. Every harness here
+//! that reads
 //! a clock and asserts a duration -- the bench matrix, the micro-benches,
 //! the heartbeat campaign, the oracle and compat legs, the acceptance
 //! scripts, the test suite's own live legs -- reports numbers nothing

@@ -835,6 +835,33 @@ fn every_declared_absolute_is_still_in_the_test_it_names() {
     }
 }
 
+/// Whether `trimmed` opens a function item, in every spelling one is
+/// written in: the visibility, `async`, `unsafe` and `const` stand ahead of
+/// the `fn` in any order.
+///
+/// Reading `fn ` and `async fn ` alone left the walk carrying a teardown's
+/// quit across the 32 `pub fn` / `pub(crate) fn` helpers the workspace's
+/// test sources declare, so a helper's own reap of a child it killed was
+/// reported as a teardown that waits a quit out forever.
+fn opens_a_fn_item(trimmed: &str) -> bool {
+    const AHEAD_OF_FN: [&str; 6] = [
+        "pub",
+        "pub(crate)",
+        "pub(super)",
+        "async",
+        "unsafe",
+        "const",
+    ];
+    let mut words = trimmed.split_whitespace();
+    loop {
+        match words.next() {
+            Some("fn") => return true,
+            Some(word) if AHEAD_OF_FN.contains(&word) => {}
+            _ => return false,
+        }
+    }
+}
+
 /// One teardown that types a quit and then waits for the child with no
 /// bound on the wait.
 struct UnboundedQuitWait {
@@ -858,7 +885,7 @@ fn unbounded_quit_waits(source: &str) -> Vec<UnboundedQuitWait> {
     let mut typed_quit = false;
     for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("fn ") || trimmed.starts_with("async fn ") {
+        if opens_a_fn_item(trimmed) {
             typed_quit = false;
         }
         if line.contains("\\x1b:") {
@@ -904,13 +931,11 @@ fn no_teardown_waits_out_a_quit_a_view_surface_can_swallow() {
 /// A rule proved only by a population that currently satisfies it is a rule
 /// that cannot tell "nothing is wrong" from "nothing is being read".
 const QUIT_TEARDOWNS: &str = r#"
-#[test]
 fn a_quit_and_an_unbounded_wait_is_the_shape_that_hung() {
     session.send(b"\x1b:q!\r").unwrap();
     let _ = session.wait();
 }
 
-#[test]
 fn rustfmt_wrapping_hides_nothing() {
     session.send(b"\x1b:cq 5\r").unwrap();
     let exit = session
@@ -918,12 +943,21 @@ fn rustfmt_wrapping_hides_nothing() {
         .expect("view process never exited");
 }
 
+pub fn a_pub_helpers_reap_is_not_the_teardown_above_it() {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub(crate) fn nor_is_a_crate_visible_ones() {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn a_reap_of_a_child_this_helper_killed_is_not_a_teardown() {
     let _ = child.kill();
     let _ = child.wait();
 }
 
-#[test]
 fn these_are_the_shapes_the_rule_asks_for() {
     session.send(b"\x1b:q!\r").unwrap();
     expect_quit(&mut session);
@@ -938,12 +972,13 @@ fn the_quit_walk_sees_the_hang_and_leaves_the_bounded_teardowns_alone() {
         .map(|found| found.number)
         .collect();
     // the quit typed in one piece and waited out forever, and the same
-    // wait with rustfmt's break in it; the reaped child below them is a
-    // different `wait()` in a function that types no quit, and the two
-    // bounded teardowns at the end are what the rule asks for
+    // wait with rustfmt's break in it; the two visible helpers below them
+    // reap a child in a function that typed no quit of its own, as does the
+    // private one after them, and the two bounded teardowns at the end are
+    // what the rule asks for
     assert_eq!(
         found,
-        vec![5, 12],
+        vec![4, 10],
         "the walk read {found:?} of the fixture. Every line it missed is a \
          teardown that can hold the binary unnoticed; every extra line is a \
          bounded teardown being reported as one"

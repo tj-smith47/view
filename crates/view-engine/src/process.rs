@@ -2728,7 +2728,8 @@ const BUSY_TEXT_BACKOFF: Duration = Duration::from_millis(10);
 /// How long after an exec a death is still the kernel's own doing rather
 /// than something that happened to a running editor. Measured on macOS
 /// 26.2/arm64: a binary this host has already run, re-exec'd while a writer
-/// holds it, is `SIGKILL`ed 0.3 ms after the spawn returns, and one written
+/// holds it, is `SIGKILL`ed a fraction of a millisecond after the spawn
+/// returns, and one written
 /// under a live process dies as promptly. Bounded rather than open-ended so
 /// a child `SIGKILL`ed late (an out-of-memory kill during a slow handshake,
 /// a session torn down by hand) is reported, not respawned six times.
@@ -2747,8 +2748,8 @@ const KILLED_AT_SPAWN_WINDOW: Duration = Duration::from_millis(500);
 /// writer invalidated, and the race reaches the handshake as a connection
 /// that closed before it opened. Measured on macOS 26.2/arm64 against a
 /// copy of the real editor: an `nvim` the host had already run, spawned
-/// while an installer holds it, dies `SIGKILL` every time; released at
-/// 60 ms, the second attempt handshakes.
+/// while an installer holds it, dies `SIGKILL` every time; released a
+/// moment later, the second attempt handshakes.
 ///
 /// Bounded, never a plain `wait`: a child that is merely slow to answer
 /// must stay the handshake's problem, and this is asked on the thread the

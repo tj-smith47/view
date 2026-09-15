@@ -129,7 +129,8 @@ pub(crate) fn engine_swap_dir(env: &[(OsString, OsString)]) -> Option<PathBuf> {
 /// recovery autocommand, two or more put nvim's "Enter number of swap file
 /// to use" on screen, where a harness with nothing to type parks until the
 /// wait gives up. Observed on the `startup` row, whose fourth cold spawn
-/// was still at that prompt 30 s later. Emptying rather than removing the
+/// was still at that prompt half a minute later. Emptying rather than
+/// removing the
 /// root: the state home is also where view keeps the first-run record and
 /// theme cache a warm side is measured with.
 pub(crate) fn empty_swap_dir(dir: &std::path::Path) {

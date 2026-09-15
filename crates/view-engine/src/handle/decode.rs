@@ -314,18 +314,23 @@ pub(super) fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
 }
 
 /// What the takeover's one reply carries: the mapping registration's
-/// claims, nvim's own `:messages` at `VimEnter`, and whether a notifier
-/// other than nvim's own stands at `vim.notify` once every step has run.
+/// claims, nvim's own `:messages` at `VimEnter`, whether a notifier other
+/// than nvim's own stands at `vim.notify` once every step has run, and the
+/// claimant modules whose own `disable` ran.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct TakeoverReading {
     pub(super) claimed: Vec<MappingClaim>,
     pub(super) messages: String,
     pub(super) foreign_notifier: bool,
+    /// The modules whose own `disable` ran, which is what lets a notice
+    /// say whether the ask took rather than only that the plugin is
+    /// loaded.
+    pub(super) handed_back: Vec<String>,
 }
 
 /// Decodes the takeover's one reply: the claims under `claims`, the startup
-/// messages under `messages`, and the `vim.notify` reading under
-/// `foreign_notifier`.
+/// messages under `messages`, the `vim.notify` reading under
+/// `foreign_notifier`, and the hand-back's own answer under `disabled`.
 ///
 /// Any key absent is the honest answer for that part alone -- a session
 /// that registered no mappings, a startup that said nothing, a reading a
@@ -346,6 +351,15 @@ pub(super) fn decode_takeover_reply(result: &Value) -> TakeoverReading {
         foreign_notifier: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_NOTIFIER_KEY)
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        handed_back: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_DISABLED_KEY)
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

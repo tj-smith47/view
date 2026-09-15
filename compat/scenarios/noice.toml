@@ -55,9 +55,12 @@ steps = [
   # What a defaults user must see: view's own single notice, carrying what
   # view did about the conflict and the exact keys that undo it. One needle
   # per row because the notice is four rows -- the message layer clips at
-  # the grid's width less two rather than wrapping.
+  # the grid's width less two rather than wrapping. Each row of that notice
+  # has to be covered by a needle here, which
+  # `every_compat_needle_is_a_row_view_still_writes` grades: these are a
+  # copy of view's own wording, and nothing else read it back.
   { wait_for = "noice.nvim is using the command line and the message area", timeout_ms = 30000 },
-  { wait_for = "view asked noice.nvim to turn itself off at startup", timeout_ms = 5000 },
+  { wait_for = "view asked noice.nvim to turn itself off at startup, and it did", timeout_ms = 5000 },
   { wait_for = "Set [native] palette = false and [native] notifications = false", timeout_ms = 5000 },
   { wait_for = "in view.toml to give them back", timeout_ms = 5000 },
   { wait_for = "Startup messages from this launch are in the history", timeout_ms = 5000 },

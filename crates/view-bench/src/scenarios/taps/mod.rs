@@ -475,8 +475,8 @@ const INPUT_CHAIN: &[u8] = b"KUS";
 /// tap that follows it: that tap is stamped after the write syscall
 /// returns and after its lock is dropped, so a redraw parsed while the
 /// writing thread was descheduled is stamped *before* the write it
-/// answers (measured on dev-linux under a live agent turn: R at 2990us,
-/// W at 3008us for the same keystroke).
+/// answers, which a live agent turn on dev-linux produced: an R stamped
+/// ahead of the W of the keystroke it belongs to.
 const HANDOFF_CHAIN: &[u8] = b"KU";
 
 /// One label per interval the chain resolves, including the leading
@@ -1320,10 +1320,11 @@ pub fn run_pty_floor(
 /// Unpaced, the loop fills the FIFO far faster than the reader drains it,
 /// and once it is full every remaining write fails immediately with
 /// `EAGAIN` -- which is cheap, and nothing like what a tap on the
-/// measured path pays. Observed on dev-linux: 100000 unpaced writes
-/// delivered 39398 records at p50 0.27us, while paced writes delivered
-/// all 20000 of them at p50 1.11us. A bar compared against the unpaced
-/// number is a bar against a mostly-failed operation, so the
+/// measured path pays. Observed on dev-linux, an unpaced loop dropped more
+/// than half its writes and the survivors' p50 came in several times
+/// cheaper than the paced loop's, which delivered every one. A bar
+/// compared against the unpaced number is a bar against a mostly-failed
+/// operation, so the
 /// characterization pays for the pace.
 pub const OVERHEAD_PACE: Duration = Duration::from_micros(20);
 
@@ -1337,8 +1338,8 @@ const OVERHEAD_ITERATIONS: usize = 20_000;
 /// A sleeping pace measures every write on a thread that just woke, cold
 /// and possibly on another CPU, which is the one thing the real tap sites
 /// never are: they fire on a thread already running. Observed on
-/// dev-linux, that artifact lands entirely in the tail -- p50 1.07us
-/// either way, p99 6.8us sleeping.
+/// dev-linux, that artifact lands entirely in the tail -- the same p50
+/// either way, and a p99 several times higher when sleeping.
 fn spin_for(pace: Duration) {
     let until =
         monotonic_nanos().saturating_add(i64::try_from(pace.as_nanos()).unwrap_or(i64::MAX));
@@ -1385,10 +1386,11 @@ pub fn characterize_overhead(
 /// so a wide one characterizes the tap's own cost exactly as faithfully as
 /// a narrow one -- the ceiling exists only so a doubling ladder terminates.
 /// 1ms is 200x the 5us bar the rows hold the tap to, and the delivery it
-/// buys is what sets it: the smallest pipe buffer measured on the classes
-/// this project runs holds ~330 of these records (8 KiB on macOS 26
-/// against 64 KiB on Linux), so 1ms spacing gives the reader thread a
-/// third of a second of scheduling stall per buffer-full. A host that
+/// buys is what sets it: the smallest pipe buffer on the classes this
+/// project runs was measured at a few hundred of these records (8 KiB on
+/// macOS 26 against 64 KiB on Linux). At this cap that buys the reader
+/// thread a third of a second of scheduling stall per buffer-full. A host
+/// that
 /// still drops writes with that much slack is not one a slower pace fixes.
 ///
 /// Doubling from a 1us floor reaches it in 11 passes, bounding the

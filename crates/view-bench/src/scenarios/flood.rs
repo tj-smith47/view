@@ -20,8 +20,9 @@ use crate::BenchError;
 ///
 /// Runs the producer under a NON-interactive `sh -c` rather than typing it
 /// into `:terminal`'s default interactive `$SHELL`: the interactive shell is
-/// a cross-host measurement variable (zsh's ZLE makes a Linux flood ~20x
-/// slower or never finish; macOS ships an ancient slow-interactive bash),
+/// a cross-host measurement variable (zsh's ZLE makes a Linux flood an
+/// order of magnitude slower or never finish; macOS ships an ancient
+/// slow-interactive bash),
 /// while a non-interactive `sh -c` is fast on every host. `yes | cat -n` is
 /// the producer: unbounded (the wall-clock window, not a line count, bounds
 /// the run so sample counts are comparable across hosts) and line-varying
@@ -64,8 +65,8 @@ pub struct FloodSide {
 /// How far above the probe loop's own period a cadence measurement must
 /// sit to be treated as a measurement of view rather than of the harness.
 ///
-/// 2x: at the floor itself every observed gap is one probe iteration and
-/// the number is pure instrument; one factor of two above it, the observed
+/// At the floor itself every observed gap is one probe iteration and the
+/// number is pure instrument; one factor of two above it, the observed
 /// distribution has room to hold at least two distinguishable outcomes per
 /// gap, so a real change in view's coalescing can still move it.
 const CADENCE_RESOLUTION_FACTOR: f64 = 2.0;

@@ -655,6 +655,136 @@ plant_release 'crates/view-harness/src/fixture.rs' 1
 expect_geometry 0 '' 'a lock release in a crate that owns no engine attach'
 
 # ---------------------------------------------------------------------------
+# the doc-figure walk: a measurement written into a doc comment is graded by
+# nothing and re-recorded by nobody, so a `///` or `//!` line stating one
+# fails unless the line names a cell the drift check knows. Three things
+# decide whether a figure is a reading, and each is planted below: a decimal
+# carrying a unit is one wherever it stands, an integer is one only inside
+# the sentence a reading word opened, and neither is graded where the line
+# names a bound, names a cell id, or sits inside a fenced sample.
+#
+# The sentence scope is the case that pins the shape. A per-line reading
+# state let a figure rustfmt wrapped onto the next line through, and a
+# block-wide one graded every constant a block explains beside a measurement
+# as a reading -- so the wrapped figure and the constant standing in a block
+# whose other sentence measured something are a red case and a green one.
+#
+# The vocabulary is the drift check's own, read through
+# `check-budget-drift.sh --cell-ids`, so each case tree carries the two files
+# that check requires. A tree whose budgets file declares no cell is its own
+# red case: a walk that read no ids grades every figure as anchored, which
+# reads exactly like a tree with nothing to report.
+# ---------------------------------------------------------------------------
+plant_cell_vocabulary() {
+  mkdir -p "$CASE/crates/view-bench" "$CASE/.claude/specs"
+  : > "$CASE/.claude/specs/2026-07-17-view-design.md"
+  {
+    if [ "${1:-with}" = with ]; then
+      printf '%s\n' '[[budget]]'
+      printf '%s\n' 'scenario = "echo"'
+      printf '%s\n' 'metric = "ratio_p50"'
+    fi
+  } > "$CASE/crates/view-bench/budgets.toml"
+}
+
+# Every shape the walk lets through, in one file: a mechanism stated in
+# words, a constant the code passes, a figure anchored on a cell id, a figure
+# behind the word that makes it a choice, and a fenced sample of what
+# something prints.
+plant_doc_figures() {
+  mkdir -p "$CASE/crates/view-x/src"
+  {
+    printf '%s\n' '/// Clipping stops paying once most of the frame repaints.'
+    printf '%s\n' '///'
+    printf '%s\n' '/// The cadence the loop asks for is 150 ms.'
+    printf '%s\n' '///'
+    printf '%s\n' '/// The gate holds echo.ratio_p50 to 1.25x.'
+    printf '%s\n' '///'
+    printf '%s\n' '/// A 0.37 us bar is what the row is held to.'
+    printf '%s\n' '///'
+    printf '%s\n' '/// ```text'
+    printf '%s\n' '/// echo/minimal: view p50 0.612ms | nvim p50 0.550ms'
+    printf '%s\n' '/// ```'
+    printf '%s\n' 'fn clipping_pays() {}'
+  } > "$CASE/crates/view-x/src/lib.rs"
+}
+
+new_doc_figures_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE"
+  plant_cell_vocabulary with
+  plant_doc_figures
+}
+
+# Graded on the file and line of every reported figure, not on the figure
+# itself: what a case proves is that the walk saw the planted line, and a
+# case expecting one finding has to fail when a second is reported.
+expect_doc_figures() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "${RUN:-$CHECKER}" --doc-figures "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^STYLE FAIL: a doc comment states a measurement nothing re-takes$/ {
+      print "doc-figures"; next
+    }
+    /^STYLE FAIL: the doc-figure walk read no cell ids to grade against$/ {
+      print "no-vocabulary"; next
+    }
+    /^crates\// { sub(/:$/, "", $1); print $1 }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want rc=%s findings [%s]\n  got  rc=%s findings [%s]\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+}
+
+new_doc_figures_case
+expect_doc_figures 0 '' 'a tree whose doc comments state mechanisms, constants, anchors, bounds and samples'
+
+new_doc_figures_case
+printf '%s\n' '/// A repainted row costs 0.37 us of the frame.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a decimal carrying a unit, with no reading word anywhere near it'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured on this host at 6 ns per cell.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'an integer inside the sentence a reading word opened'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured on this host and on the one beside it,' \
+  '/// at 6 ns per cell.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:14 doc-figures' \
+  'the same integer wrapped onto the line after the word that introduced it'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured once on this host and never since.' \
+  '/// The loop asks for 20 ms between passes.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' \
+  'a constant in the sentence after the one a reading word opened and closed'
+
+new_doc_figures_case
+printf '%s\n' '/// Measured at 0.37 us on echo.ratio_p50.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' 'a reading on a line naming a cell the drift check knows'
+
+new_doc_figures_case
+plant_cell_vocabulary without
+expect_doc_figures 1 'no-vocabulary' \
+  'a tree whose budgets file declares no cell, which would grade every figure as anchored'
+
+# ---------------------------------------------------------------------------
 # the prose width gate: a page wraps at 80 characters, and what cannot wrap
 # exempt by shape rather than by a list of files -- a fence is a sample of a
 # file, a row is a row, a heading is one line by construction, a link has

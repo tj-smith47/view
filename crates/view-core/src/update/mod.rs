@@ -26,8 +26,8 @@ const STARTUP_HOLD_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 /// `VIEW_COMPAT_LOG`): noice re-runs its health check on a one-second
 /// interval and raises the one about view holding `vim.notify` on the
 /// fifth cycle, past any realistic first keystroke. The probe reply that
-/// arms the grace landed at 0.39 s of that same launch, so 4.57 s of the
-/// grace was spent by the time the complaint arrived.
+/// arms the grace landed within half a second of that same launch, so
+/// nearly the whole grace was spent by the time the complaint arrived.
 const COMPLAINT_RAISE_MEASURED: std::time::Duration = std::time::Duration::from_millis(4960);
 
 /// The plugin's own checker interval (`noice/health.lua`, `Util.interval(1000, ..)`):
@@ -259,6 +259,13 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // history's own (`EngineModel::seed_startup_history`)
         Msg::StartupMessages { text } => {
             model.dirty |= model.engine.seed_startup_history(&text);
+            Vec::new()
+        }
+        // no effects and no paint of its own: it only decides how the
+        // claimant notice the probe reply raises afterwards is worded, and
+        // that reply is behind this one on the same connection
+        Msg::ClaimantsHandedBack { modules } => {
+            model.surface_conflicts.note_handed_back(modules);
             Vec::new()
         }
         // marks dirty unconditionally: the reading decides which entries

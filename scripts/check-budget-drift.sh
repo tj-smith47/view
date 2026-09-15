@@ -11,6 +11,17 @@
 # needs a newer one is a gate that silently does not run for whoever has it.
 set -euo pipefail
 
+# The cell vocabulary alone, printed and nothing else. check-style.sh's
+# doc-figure walk grades a figure in a Rust doc comment by whether the line
+# names a cell, and a second reader of budgets.toml would be a second answer
+# to "what is a cell" -- one of which would go stale the next time the file's
+# shape moves.
+cells_only=0
+if [[ "${1:-}" == "--cell-ids" ]]; then
+  cells_only=1
+  shift
+fi
+
 # A tree handed in as the single argument replaces the one this script lives
 # in, which is how the case matrix points it at a fixture tree.
 root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -20,6 +31,16 @@ spec="$root/.claude/specs/2026-07-17-view-design.md"
 for f in "$budgets" "$spec"; do
   [[ -f "$f" ]] || { echo "BUDGET DRIFT FAIL: $f not found" >&2; exit 1; }
 done
+
+if [[ $cells_only -eq 1 ]]; then
+  awk '
+    /^\[/ { metric=""; scenario=""; next }
+    /^scenario = / { scenario=$0; sub(/^scenario = "/, "", scenario); sub(/"$/, "", scenario) }
+    /^metric = / { metric=$0; sub(/^metric = "/, "", metric); sub(/"$/, "", metric) }
+    { if (metric != "" && scenario != "") { print scenario "." metric; metric="" } }
+  ' "$budgets" | LC_ALL=C sort -u
+  exit 0
+fi
 
 fail=0
 entries=0

@@ -58,7 +58,7 @@ struct Cli {
     /// Measured samples per tier. Kept far below a recorded row's
     /// thousand-sample protocol: the falsifiable check here is a threshold
     /// crossing, not a tail statistic precise enough to record, and the
-    /// 300ms tier's own injected delay already dominates this binary's
+    /// widest tier's own injected delay already dominates this binary's
     /// wall time at any sample count.
     #[arg(long, default_value_t = 60)]
     samples: usize,
@@ -101,10 +101,10 @@ impl Drop for ScratchRoot {
 
 /// How many independent round trips [`median_probe`] takes through the
 /// relay before reducing to a median. Sized from measured data, not
-/// guessed: 150 raw single-sample trials at `DELAY_RELAY_MS=0` on this
-/// host ranged 28.4-52.0ms (a 23.6ms single-sample spread); bucketing that
-/// same pool into medians-of-N narrowed the spread to 11.1ms at N=7,
-/// 9.0ms at N=9, 8.2ms at N=11.
+/// guessed: raw single-sample trials at `DELAY_RELAY_MS=0` on this host
+/// spread over tens of milliseconds, and bucketing that same pool into
+/// medians-of-N more than halved the spread by this count, with little
+/// left to gain past it.
 const PROBE_TRIALS: usize = 11;
 
 /// The probe payload every [`median_probe`] round trip must read back

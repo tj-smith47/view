@@ -21,7 +21,7 @@ mod common;
 
 use rmpv::Value;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use view_core::msg::{EngineRequest, Msg, ReplyValue};
 use view_engine::process::{Engine, EngineConfig};
 use view_test_support::ScratchDir;
@@ -134,6 +134,26 @@ fn reading(engine: &Engine) -> Reading {
     }
 }
 
+/// The fixture read once the child has been back round its own loop, which
+/// is where the scheduled event runs and where `SafeState` fires.
+///
+/// The `sleep` is the turn: answering a request is not one, so a reading
+/// taken straight after the reply can precede the event it is about. The
+/// poll between readings is paced rather than tight -- a child that never
+/// schedules the event would otherwise spend the whole deadline being asked
+/// again as fast as a shared host allows, which is load the other tests on
+/// that host pay for.
+fn settled(engine: &Engine) -> Reading {
+    engine.handle.eval_str("execute('sleep 100m')").unwrap();
+    let deadline = Instant::now() + common::rpc_deadline_for(3);
+    let mut read = reading(engine);
+    while Instant::now() < deadline && read.chan_when_idle < 0 {
+        std::thread::sleep(Duration::from_millis(10));
+        read = reading(engine);
+    }
+    read
+}
+
 /// The `VimEnter` request the child is parked inside, whether it landed
 /// before the sink was attached or after.
 fn vim_enter_token(
@@ -174,14 +194,7 @@ fn the_hook_has_the_ui_in_force_before_the_rest_of_startup_runs() {
         .ui_attach(120, 40, view_engine::UI_EXT_OPTIONS)
         .unwrap();
 
-    // the event the hook schedules runs on the loop, which answering a
-    // request is not: this puts the child back through its own
-    engine.handle.eval_str("execute('sleep 100m')").unwrap();
-    let deadline = Instant::now() + common::rpc_deadline_for(3);
-    let mut read = reading(&engine);
-    while Instant::now() < deadline && read.chan_when_idle < 0 {
-        read = reading(&engine);
-    }
+    let read = settled(&engine);
 
     assert_eq!(
         read.uis_at_vim_enter, 1,
@@ -207,5 +220,66 @@ fn the_hook_has_the_ui_in_force_before_the_rest_of_startup_runs() {
         "the event must reach a settled session, not only a polled one; \
          the child took {} idle transitions",
         read.safe
+    );
+}
+
+/// The other spawn shape, where the guard that fires nothing is the whole
+/// of what is being read.
+///
+/// A relayed stdin keeps nvim's own pre-startup attach barrier
+/// ([`EngineConfig::attaches_late`] drops `--headless` for it), so the
+/// child parks before it sources `init.lua` at all and the UI is in force
+/// by the time the hook runs. nvim fires its own `UIEnter` once `VimEnter`
+/// returns, and a second one from here would run every non-`once` handler
+/// twice -- which is what the reading taken on the callback's first line
+/// exists to prevent, and what nothing else in this tree reads.
+///
+/// Unix only, because the relay is: the descriptor is handed to the child
+/// by `dup2` between `fork` and `exec`.
+#[cfg(unix)]
+#[test]
+fn a_spawn_that_kept_nvims_own_attach_barrier_gets_one_uienter() {
+    let dir = pin_config();
+    let dev_null = std::fs::File::open("/dev/null").expect("/dev/null always opens");
+    let mut engine = Engine::spawn(
+        EngineConfig::isolated()
+            .with_arg("-u")
+            .with_arg(dir.join("init.lua"))
+            .with_late_attach(120, 40)
+            .with_stdin_relay(dev_null.into()),
+    )
+    .unwrap();
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, cutover) = engine.start_pump(tx);
+
+    // the attach first, and not behind the answer: this child sources
+    // nothing until a UI is there, so waiting for `view_vim_enter` before
+    // attaching would wait for an event the barrier is holding back
+    engine
+        .handle
+        .ui_attach(120, 40, view_engine::UI_EXT_OPTIONS)
+        .unwrap();
+    let token = vim_enter_token(cutover.presink, &rx)
+        .expect("the child never asked view_vim_enter, so nothing here was measured");
+    engine.handle.reply(token, ReplyValue::Nil).unwrap();
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.uis_at_vim_enter, 1,
+        "the barrier holds startup until a UI attaches, so this child runs \
+         its config with one in force"
+    );
+    assert_eq!(
+        read.uienters, 1,
+        "nvim fires its own UIEnter for a UI the barrier waited for, so the \
+         hook must fire nothing: two events run every non-once UIEnter \
+         autocommand twice"
+    );
+    assert_eq!(
+        read.chan, 0,
+        "nvim's own event puts the channel in v:event, which a callback \
+         reads as no args.data at all -- so a chan read here is view's \
+         event, fired where nvim had already fired one"
     );
 }

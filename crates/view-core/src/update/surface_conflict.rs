@@ -82,9 +82,12 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
             continue;
         }
         named = true;
-        let disabled = surfaces::superseded_claimants(model)
-            .any(|superseded| superseded.module == claimant.module)
-            .then_some(claimant.class);
+        let asked = surfaces::superseded_claimants(model)
+            .any(|superseded| superseded.module == claimant.module);
+        let disabled = asked.then(|| Ask {
+            class: claimant.class,
+            taken: model.surface_conflicts.took_the_hand_back(claimant.module),
+        });
         let family = claimant_family(claimant.class);
         let text = notice(&family, &claimed, model.config_was_read(), true, disabled);
         effects.extend(model.engine.record_native_notice_sticky_once(&family, text));
@@ -227,8 +230,8 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 /// fires for one, and its slide animation moves the window with
 /// `nvim_win_set_config`, which arms nothing either. So a complaint drawn
 /// during a startup nobody has typed into waits for the next unrelated
-/// arming event -- measured at 4.8 s on this machine's own configuration,
-/// and 2.1 s on the user's. The placement event is the zero-latency
+/// arming event -- seconds away on both of the configurations this was
+/// measured on. The placement event is the zero-latency
 /// sighting, and this is the whole reason it is read here.
 ///
 /// The bar is [`take_complaint`]'s, with the identity half left out
@@ -587,18 +590,21 @@ pub(super) fn cmdline_closed(model: &mut Model) -> Vec<Effect> {
 /// pushed onto the end of the first sentence is a remedy the user cannot
 /// read.
 ///
-/// `disabled` names a plugin view asked to turn itself off, and only the
+/// `disabled` is the ask view made of a plugin it can name, and only the
 /// claimant notice ever carries one: a named plugin is one view can
 /// ask to stop (`crate::msg::RpcCall::DisableClaimants`), while an
 /// anonymous float is a window nobody can be asked anything about.
 ///
-/// The clause states the asking and what this reading found, never the
-/// outcome: the hand-back runs a module's own `disable` only where the
-/// module was already loaded when the takeover went out, and the takeover
-/// now runs ahead of every other plugin's `VimEnter`, so a claimant that
-/// loads from one of those never receives it. Nothing in the reply says
-/// which modules were there, and the one thing this probe does know is
-/// that the plugin is loaded now.
+/// The clause states the asking and whether it took, and the second half is
+/// the hand-back's own answer rather than this probe's
+/// ([`Msg::ClaimantsHandedBack`](crate::msg::Msg::ClaimantsHandedBack)): the
+/// takeover runs a module's own `disable` only where the module was already
+/// loaded when it went out, and it runs ahead of every other plugin's
+/// `VimEnter`, so a claimant loading from one of those never receives it.
+/// Read off the probe instead, the clause said "and it is still loaded" for
+/// every plugin -- including the one that had turned itself off exactly as
+/// asked, since a disabled module is still in `package.loaded` -- which
+/// reports a success as a failure.
 ///
 /// `startup_account` adds the last line, and only the claimant notice
 /// passes it true: that notice is the account of a launch, and the history
@@ -609,12 +615,20 @@ pub(super) fn cmdline_closed(model: &mut Model) -> Vec<Effect> {
 /// launch is owed the key that shows the rest of it. A float notice raised
 /// mid-session is about a window that just opened, not about a launch, and
 /// says nothing about the history.
+/// One plugin view asked to turn itself off, and whether the ask took.
+struct Ask {
+    class: &'static str,
+    /// Whether the module's own `disable` ran, which is the hand-back's
+    /// answer and not the probe's.
+    taken: bool,
+}
+
 fn notice(
     family: &str,
     claimed: &[Surface],
     config_was_read: bool,
     startup_account: bool,
-    disabled: Option<&str>,
+    disabled: Option<Ask>,
 ) -> String {
     let rows: Vec<_> = claimed
         .iter()
@@ -658,9 +672,16 @@ fn notice(
     // its own row rather than a clause on the first: the message layer
     // clips at the grid's width less two rather than wrapping
     let turned_off = match disabled {
-        Some(class) => {
-            format!("\nview asked {class} to turn itself off at startup, and it is still loaded.")
+        Some(Ask { class, taken: true }) => {
+            format!("\nview asked {class} to turn itself off at startup, and it did.")
         }
+        Some(Ask {
+            class,
+            taken: false,
+        }) => format!(
+            "\nview asked {class} to turn itself off at startup, and the ask \
+             never reached it."
+        ),
         None => String::new(),
     };
     format!(
@@ -1543,6 +1564,17 @@ mod tests {
         );
     }
 
+    /// The takeover's hand-back answer, as the reply that carries it beside
+    /// the mapping claims delivers it: the modules whose own `disable` ran.
+    fn handed_back(model: &mut Model, modules: &[&str]) {
+        let _ = update(
+            model,
+            Msg::ClaimantsHandedBack {
+                modules: modules.iter().map(|m| (*m).to_string()).collect(),
+            },
+        );
+    }
+
     fn probe(model: &mut Model, loaded: &[&str]) {
         let _ = update(
             model,
@@ -1596,18 +1628,21 @@ mod tests {
 
     /// The wording `compat/scenarios/noice.toml` reads back off a real
     /// screen, asserted here so a reworded notice fails in a unit test
-    /// rather than in a 15-second pty wait.
+    /// rather than in a 15-second pty wait. The file's own needles are
+    /// graded against this text by
+    /// [`every_compat_needle_is_a_row_view_still_writes`].
     #[test]
     fn a_loaded_claimant_is_named_once_with_every_surface_it_takes() {
         let mut model = captured_session();
+        handed_back(&mut model, &["noice"]);
         probe(&mut model, &["noice"]);
         assert_eq!(
             notices(&model),
             vec![
                 "view: noice.nvim is using the command line and the message area, \
                  which view owns.\n\
-                 view asked noice.nvim to turn itself off at startup, and it is \
-                 still loaded.\n\
+                 view asked noice.nvim to turn itself off at startup, and it \
+                 did.\n\
                  Set [native] palette = false and [native] notifications = false \
                  in view.toml to give them back.\n\
                  Startup messages from this launch are in the history -- <leader>fm."
@@ -1686,6 +1721,7 @@ mod tests {
                     }]),
                 );
             }
+            handed_back(&mut model, &["noice"]);
             probe(&mut model, &["noice"]);
             let standing = notices(&model);
             assert_eq!(standing.len(), 1, "parked={parked}: {standing:?}");
@@ -1696,7 +1732,7 @@ mod tests {
                     "view: noice.nvim is using the command line and the message area, \
                      which view owns.",
                     "view asked noice.nvim to turn itself off at startup, and it \
-                     is still loaded.",
+                     did.",
                     "Set [native] palette = false and [native] notifications = false \
                      in view.toml to give them back.",
                     "Startup messages from this launch are in the history -- <leader>fm.",
@@ -1876,8 +1912,9 @@ mod tests {
     /// The startup hold is resolved before the float is ever sighted, which
     /// is the live order and not a stricter setup than the product gets:
     /// the hold ends three seconds after attach, and the heavy fixture's
-    /// noice raises this complaint at ~7.6 s (`VIEW_COMPAT_LOG`, the
-    /// unaccommodated state). A take-down keyed on the hold fires for
+    /// noice raises this complaint several seconds later still
+    /// (`VIEW_COMPAT_LOG`, the unaccommodated state). A take-down keyed on
+    /// the hold fires for
     /// neither the real launch nor this test.
     #[test]
     fn a_claimants_own_startup_complaint_goes_to_the_history_and_the_window_goes() {
@@ -2116,7 +2153,7 @@ mod tests {
 
     /// The bound the startup window alone cannot carry: a claimant that
     /// re-checks its own health on a timer raises complaints past any
-    /// realistic first keystroke (noice's `vim.notify` line lands ~4.8 s
+    /// realistic first keystroke (noice's `vim.notify` line arrives seconds
     /// into a heavy launch, on a one-second interval), so the grace its
     /// probe reply arms is what takes those down. One grace per session,
     /// armed by the first reply that names anyone -- a second reply must
@@ -2911,6 +2948,76 @@ mod tests {
             .collect()
     }
 
+    /// The other half of the same wording: a claimant that never received
+    /// the ask.
+    ///
+    /// Both halves are pinned because the notice cannot read the outcome off
+    /// the probe -- a plugin that turned itself off is still loaded -- so
+    /// the clause is worded from the hand-back's own answer, and a clause
+    /// that stopped consulting it would still pass whichever of the two was
+    /// pinned alone.
+    #[test]
+    fn a_claimant_that_never_received_the_ask_is_told_apart_from_one_that_did() {
+        let mut model = captured_session();
+        handed_back(&mut model, &[]);
+        probe(&mut model, &["noice"]);
+        let standing = notices(&model);
+        assert_eq!(standing.len(), 1, "{standing:?}");
+        assert!(
+            standing[0].contains(
+                "view asked noice.nvim to turn itself off at startup, and the \
+                 ask never reached it."
+            ),
+            "{:?}",
+            standing[0]
+        );
+    }
+
+    /// Every needle `compat/scenarios/noice.toml` waits for on the claimant
+    /// notice is a row this notice still writes.
+    ///
+    /// The file held a hand copy of the wording, and nothing read it back:
+    /// a rewording left the battery waiting fifteen seconds for a line view
+    /// no longer writes, naming only the needle. Read row by row rather
+    /// than needle by needle -- the file splits the remedy row across two
+    /// needles, and its other waits are about the screen rather than about
+    /// this notice -- so every row has to be covered by a needle and a
+    /// needle left behind by a rewording covers no row.
+    #[test]
+    fn every_compat_needle_is_a_row_view_still_writes() {
+        let scenario = include_str!("../../../../compat/scenarios/noice.toml");
+        let needles: Vec<String> = scenario
+            .lines()
+            .filter_map(|line| line.split_once("wait_for = \""))
+            .filter_map(|(_, rest)| rest.split_once('"'))
+            .map(|(needle, _)| needle.to_string())
+            .collect();
+        assert!(
+            needles.len() > 5,
+            "the file's needles went unread: {needles:?}"
+        );
+
+        let mut model = captured_session();
+        handed_back(&mut model, &["noice"]);
+        probe(&mut model, &["noice"]);
+        let standing = notices(&model);
+        assert_eq!(standing.len(), 1, "{standing:?}");
+
+        let uncovered: Vec<&str> = standing[0]
+            .split('\n')
+            .filter(|row| !needles.iter().any(|needle| row.contains(needle.as_str())))
+            .collect();
+        assert!(
+            uncovered.is_empty(),
+            "compat/scenarios/noice.toml waits for none of these rows, so a \
+             rewording of them fails no wait and the needles beside them are \
+             a copy of a line view no longer writes:\n  {}\nIts needles \
+             are:\n  {}",
+            uncovered.join("\n  "),
+            needles.join("\n  ")
+        );
+    }
+
     #[test]
     fn the_notice_text_starts_with_its_own_family() {
         let claimed = [Surface::Cmdline, Surface::Messages];
@@ -2921,7 +3028,17 @@ mod tests {
         ] {
             for read in [true, false] {
                 for parked in [true, false] {
-                    for disabled in [Some("noice.nvim"), None] {
+                    for disabled in [
+                        Some(super::Ask {
+                            class: "noice.nvim",
+                            taken: true,
+                        }),
+                        Some(super::Ask {
+                            class: "noice.nvim",
+                            taken: false,
+                        }),
+                        None,
+                    ] {
                         let text = super::notice(&family, &claimed, read, parked, disabled);
                         assert!(text.starts_with(&family), "{text:?} is not in {family:?}");
                     }

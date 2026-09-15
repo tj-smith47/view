@@ -1245,6 +1245,130 @@ check_written_programs() {
   return 1
 }
 
+# A measurement figure written into a Rust doc comment is a reading nothing
+# re-takes. The gate re-records the bench cells and the drift check grades
+# every figure the three published pages quote against the seat it resolves
+# to -- and reaches no doc comment, so a startup chunk's doc went on stating
+# milliseconds from a round of measurement two branches old, with no reader
+# able to tell it from a current one.
+#
+# So a `///` or `//!` line that states a reading fails unless it names a cell
+# the drift check knows, which is the one place a figure can be looked up
+# again. The vocabulary of cells is the drift check's own
+# (`check-budget-drift.sh --cell-ids`): a second reader of budgets.toml would
+# be a second answer to what a cell is, and one of the two would go stale the
+# next time that file's shape moved.
+#
+# What counts as a reading, and the two limits, both stated:
+#
+#   * a number with a fractional digit, in ms, us, ns, s, a percentage or a
+#     multiplier. A value someone chose is round -- the tree's own throttles
+#     and timeouts read 20ms, 150 ms, 200 ms -- and a value someone read off
+#     an instrument is not. The limit: a reading rounded to a whole unit is
+#     invisible to this half.
+#   * any number in those units on a line that says measure, observ or
+#     record, which is what reaches the whole-unit readings ("measured on
+#     dev-linux ... R at 2990us"). The limit: the word is the anchor, so a
+#     reading stated without it is invisible to this half too.
+#
+# A line naming a bar, a budget, a bound, a band or a tolerance is refused as
+# a reading at all, on the drift check's own grounds: a bound is a number the
+# tree chose and can be read back off the constant that holds it. That is the
+# one escape a writer has, and it is the same escape bench.md already grants
+# the ledger.
+check_doc_figures() {
+  local ids found rc
+  ids="$(bash "$SCRIPT_DIR/check-budget-drift.sh" --cell-ids "$PWD" | tr '\n' ' ')" || ids=""
+  # Fail closed: a vocabulary this walk could not read grades every figure as
+  # unanchored, which reads as a tree full of findings, and an empty one
+  # grades every figure as anchored, which reads as a clean tree. The second
+  # is the dangerous direction and is the one refused here.
+  case "$ids" in
+    (*[!\ ]*) ;;
+    (*)
+      echo "STYLE FAIL: the doc-figure walk read no cell ids to grade against"
+      echo "  Every figure in a doc comment would pass for want of a"
+      echo "  vocabulary. Check scripts/check-budget-drift.sh --cell-ids."
+      return 1
+      ;;
+  esac
+  rc=0
+  found=$(find crates -name '*.rs' -print0 | xargs -0 awk -v ids="$ids" '
+    function clean(t) { gsub(/[`*~()>\[\],;:"]/, "", t); sub(/\.$/, "", t); return t }
+    BEGIN { names = split(ids, id, " ") }
+    FNR == 1 { fenced = 0; reading = 0 }
+    {
+      body = $0
+      sub(/^[[:space:]]*/, "", body)
+      if (body !~ /^(\/\/\/|\/\/!)/) { reading = 0; fenced = 0; next }
+      sub(/^(\/\/\/|\/\/!)/, "", body)
+      # A fenced block inside a doc comment is a sample of what something
+      # prints or parses, quoted so a reader recognises the shape. Its
+      # figures are the shape and not a claim, and rewriting them to prose
+      # would delete the sample.
+      if (body ~ /^[[:space:]]*```/) { fenced = !fenced; next }
+      if (fenced) { next }
+      # Lowercased for both word tests: a reading word opens a sentence as
+      # often as it stands inside one, and a case-sensitive read let every
+      # capitalised `Measured` and `Observed` through.
+      folded = tolower(body)
+      if (folded ~ /(^|[^a-z])(bar|bars|budget|budgets|bound|bounds|band|bands|tolerance)([^a-z]|$)/) {
+        next
+      }
+      anchored = 0
+      for (j = 1; j <= names; j++) {
+        if (index(body, id[j]) > 0) { anchored = 1 }
+      }
+      if (anchored) { next }
+      # The reading state runs to the end of the sentence that opened it,
+      # and not to the end of the line: a figure rustfmt wrapped onto the
+      # line after the word that introduced it escapes a per-line test,
+      # while a block-wide state grades every constant a block explains in
+      # words as a reading.
+      had_word = (folded ~ /measure|observ|record/)
+      if (had_word) { reading = 1 }
+      n = split(body, w, /[[:space:]]+/)
+      for (i = 1; i <= n; i++) {
+        tok = clean(w[i])
+        nxt = clean(w[i + 1])
+        num = ""
+        if (tok ~ /^-?[0-9]+(\.[0-9]+)?(ms|us|ns|s|%|x)$/) {
+          num = tok
+          sub(/(ms|us|ns|s|%|x)$/, "", num)
+        } else if (tok ~ /^-?[0-9]+(\.[0-9]+)?$/ &&
+                   (nxt == "ms" || nxt == "us" || nxt == "ns" || nxt == "s" ||
+                    nxt == "%" || nxt == "percent" || nxt == "x")) {
+          num = tok
+        }
+        if (num == "") { continue }
+        if (num ~ /\./ || reading) {
+          printf "%s:%d: %s\n", FILENAME, FNR, num
+          next
+        }
+      }
+      if (reading) {
+        tail = folded
+        if (had_word) { sub(/^.*(measure|observ|record)/, "", tail) }
+        if (tail ~ /\.([[:space:]]|$)/) { reading = 0 }
+      }
+    }
+  ') || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "STYLE FAIL: the doc-figure walk could not be evaluated (find or awk failed)"
+    return 1
+  fi
+  if [ -z "$found" ]; then
+    return 0
+  fi
+  printf '%s\n' "$found"
+  echo "STYLE FAIL: a doc comment states a measurement nothing re-takes"
+  echo "  A figure in a doc comment is graded by nothing and re-recorded by"
+  echo "  nobody. State the mechanism in words and leave the reading in the"
+  echo "  commit that took it, or name the cell it belongs to and quote it in"
+  echo "  docs/benchmarking.md beside that cell."
+  return 1
+}
+
 # A doc line wraps at 80 characters, which is the width the pages are
 # written to. A line that cannot wrap is exempt and says which shape it is:
 # a fenced block is a sample of a file rather than prose, a table row is one
@@ -1703,6 +1827,19 @@ if [ "${1:-}" = "--geometry-sites" ]; then
   check_geometry_sites
   exit $?
 fi
+# The doc-figure walk alone, graded the same way: a walk that stops matching
+# the shape a reading is written in reads exactly like a tree whose doc
+# comments quote nothing.
+if [ "${1:-}" = "--doc-figures" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --doc-figures ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_doc_figures
+  exit $?
+fi
 # The temp-file trap walk alone, graded the same way.
 if [ "${1:-}" = "--temp-traps" ]; then
   ROOT="${2:-}"
@@ -1746,6 +1883,7 @@ if [ -d crates ]; then
   check_written_programs || fail=1
   check_tied_spawns || fail=1
   check_geometry_sites || fail=1
+  check_doc_figures || fail=1
 fi
 # One fold, and only one, may raise the single locally-raised condition
 # notice. `Messages::set_native_condition` shows at most one such notice and
