@@ -753,6 +753,9 @@ pub struct FeltLog {
     /// The reading of the millisecond clock that frame was written at, which
     /// [`HIGHLIGHT_WATCH`] runs from.
     text_at: u128,
+    /// Whether any frame has already reported colours the text arrived
+    /// without, which is what the watch's own closing line answers.
+    recoloured: bool,
     highlight_closed: bool,
 }
 
@@ -942,6 +945,13 @@ impl FeltLog {
     /// moment the file appeared and never the moment it was coloured. Each
     /// line carries how many ids the frame held, so a file that arrived
     /// already coloured says so on the first line and writes no second one.
+    ///
+    /// Every growth, not the first alone: on a login-shaped config the
+    /// colours arrive in waves, and a topic that closed on the first one
+    /// dated the earliest pass and left the row's own final colours -- which
+    /// can be most of a second behind it -- recorded nowhere. Each line
+    /// names the ids that arrived and the foreground each resolves to, which
+    /// is what says whose pass it was.
     fn note_highlight(&mut self, model: &view_core::model::Model, flushed: u128) {
         if self.highlight_closed {
             return;
@@ -959,20 +969,41 @@ impl FeltLog {
             self.text_at = flushed;
             return;
         };
-        if ids.iter().any(|id| !base.contains(id)) {
-            self.highlight_closed = true;
+        let added: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|id| !base.contains(id))
+            .collect();
+        if !added.is_empty() {
+            let was = base.len();
+            let since = flushed.saturating_sub(self.text_at);
+            let colours = added
+                .iter()
+                .map(|id| {
+                    let fg = model
+                        .engine
+                        .hl()
+                        .attr(*id)
+                        .and_then(|attr| attr.fg)
+                        .map_or_else(|| "none".to_string(), |fg| format!("{fg:06x}"));
+                    format!("{id}/fg={fg}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             log(
                 "highlight",
                 &format!(
-                    "window text recoloured hl-ids={} was={} after={}",
+                    "window text recoloured hl-ids={} was={was} after={since} added={colours}",
                     ids.len(),
-                    base.len(),
-                    flushed.saturating_sub(self.text_at)
                 ),
             );
+            self.text_hls = Some(ids);
+            self.recoloured = true;
         } else if flushed.saturating_sub(self.text_at) > HIGHLIGHT_WATCH.as_millis() {
             self.highlight_closed = true;
-            log("highlight", "window text unchanged for the whole watch");
+            if !self.recoloured {
+                log("highlight", "window text unchanged for the whole watch");
+            }
         }
     }
 }
@@ -1617,6 +1648,68 @@ mod tests {
             engine_answered: false,
             staged_batch,
         }
+    }
+
+    /// Colours that arrive in waves are each reported, because a topic that
+    /// closed on the first wave dated the earliest pass and left the row's
+    /// own final colours -- most of a second behind it on the config a lag
+    /// was reported on -- recorded nowhere.
+    #[test]
+    fn every_wave_of_colours_is_reported_and_not_just_the_first() {
+        use view_core::grid::registry::{GridEvent, GridId};
+        use view_core::grid::GridOp;
+
+        let window = GridId(2);
+        let mut model = view_core::model::Model::new();
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::Resize {
+                width: 8,
+                height: 2,
+            },
+        });
+        model.engine.apply_grid_event(GridEvent::Window {
+            grid: window,
+            startrow: 0,
+            startcol: 0,
+        });
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("f".to_string(), 9, 2)],
+            },
+        });
+        let mut felt = FeltLog::default();
+        felt.note_highlight(&model, 100);
+        for (at, id) in [(150_u128, 42_u64), (500, 77)] {
+            model.engine.apply_grid_event(GridEvent::Cells {
+                grid: window,
+                op: GridOp::PutLine {
+                    row: 0,
+                    col_start: 0,
+                    cells: vec![("f".to_string(), id, 2)],
+                },
+            });
+            felt.note_highlight(&model, at);
+            assert!(
+                !felt.highlight_closed,
+                "the watch closed on the wave at {at} and the ones after it \
+                 are recorded nowhere"
+            );
+            assert!(
+                felt.text_hls.as_ref().is_some_and(|ids| ids.contains(&id)),
+                "the wave that arrived is not the set the next one is read \
+                 against"
+            );
+        }
+        felt.note_highlight(&model, 500 + HIGHLIGHT_WATCH.as_millis() + 1);
+        assert!(
+            felt.highlight_closed,
+            "the watch never ends and the window is scanned for the rest of \
+             the session"
+        );
     }
 
     /// An input the loop answered with no frame is written out and
