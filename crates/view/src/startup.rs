@@ -111,13 +111,14 @@ impl KeyRing {
 /// (no `Flush` has ever arrived), so without this explicit call the
 /// terminal would show whatever `Term::init` last left on screen until the
 /// engine attaches and streams real content -- a blank screen for however
-/// long attach takes, rather than an immediate themed placeholder. The caller must have already set
+/// long attach takes, rather than an immediate themed placeholder. The
+/// caller must have already set
 /// `model.chrome_painted = false` (`Model`'s default is `true`, the
 /// ordinary steady state; startup is the one caller that opts into the
 /// placeholder) for this frame to show the shell rather than an empty grid.
 ///
 /// Logs the elapsed time since `process_start` under the `"startup"`
-/// `VIEW_LOG` topic: the design spec's informal 50ms shell-paint target,
+/// `VIEW_LOG` topic: the design spec's informal 50ms shell-paint budget,
 /// logged here but not enforced (the formal budget gate lands with the
 /// bench harness). Routed through [`crate::vlog::log_with`] rather than a
 /// bare stderr write: this fires from inside `paint_shell_frame`, called

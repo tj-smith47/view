@@ -921,17 +921,68 @@ printf '%s\n' '/// A 20,000-entry tree walked in 83 ms on a loaded host.' \
 expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
   'a whole-unit reading in a sentence saying how long a walk took'
 
+# Each of these carries a reading verb, so the escape is what passes it. The
+# two that shipped first carried none, and passed under the checker that had
+# no escape at all -- a green case that would be green either way grades
+# nothing.
 new_doc_figures_case
-printf '%s\n' '/// The scan is throttled 150 ms and absorbs the rest.' \
+printf '%s\n' '/// The scan spends 150 ms, which is the throttle it was given.' \
   >> "$CASE/crates/view-x/src/lib.rs"
 expect_doc_figures 0 '' \
-  'a whole-unit figure on a line naming the throttle that chose it'
+  'a whole-unit reading on a line naming the throttle that chose it'
 
 new_doc_figures_case
-printf '%s\n' '/// The retry holds every 300 ms tier for one trip.' \
+printf '%s\n' '/// The retry spends 300 ms, which is the tier it was given.' \
   >> "$CASE/crates/view-x/src/lib.rs"
 expect_doc_figures 0 '' \
-  'a whole-unit figure on a line naming the tier that chose it'
+  'a whole-unit reading on a line naming the tier that chose it'
+
+# `(s|d)?` gave cap, caps, capd, and the comment claimed `capped` -- the one
+# spelling whose stem changes. `tiered` and `bounded` are the same shape.
+new_doc_figures_case
+printf '%s\n' '/// The scan spends 150 ms, capped there by the loop that arms it.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' \
+  'a whole-unit reading on a line naming the cap that chose it, spelled `capped`'
+
+# The verbs a reading is stated in that the first vocabulary missed. Each of
+# these shipped on the tree behind a closure keyed on the verbs already in it.
+new_doc_figures_case
+printf '%s\n' '/// A cold heavy start pays 13 s to take the notices down.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a start pays'
+
+new_doc_figures_case
+printf '%s\n' '/// The write lands after the keypress, 250 us later.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying where a write lands'
+
+new_doc_figures_case
+printf '%s\n' '/// The fold ran 83 ms behind the tick that moved it.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying how long something ran'
+
+# `ran` as a stem is inside `range`, `transient` and `guarantee`, and every
+# one of those would open a sentence the walk then grades. The vocabulary is
+# read off a copy whose words each carry a space, so the stem matches the
+# word and not the words it sits inside.
+new_doc_figures_case
+printf '%s\n' '/// The range the loop asks for is 20 ms wide.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' \
+  'a constant in a sentence whose only reading verb is a word that contains one'
+
+# A figure the code computes is neither a reading nor a value written down:
+# the only way to keep `2 x` and the `31s` five doubled waits come to was to
+# drop the verb that made either a sentence.
+new_doc_figures_case
+printf '%s\n' '/// Five doubled waits spend the 31 s derived from that base.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' \
+  'a whole-unit figure on a line saying the code derives it'
 
 # ---------------------------------------------------------------------------
 # the prose width gate: a page wraps at 80 characters, and what cannot wrap

@@ -1289,11 +1289,14 @@ check_written_programs() {
 # The second half is what the first cannot do: a reading is as free to land
 # on a whole unit as on a fraction, and the word "measured" is not how this
 # tree writes most of them. So the vocabulary is the verbs a reading is
-# stated in -- measure, observ, record, spend, cost, take, walk, clock, time,
-# appear, and the noun "reading" -- and a whole-unit figure standing in a
-# sentence carrying one of them is graded exactly as a fractional figure is.
+# stated in -- measure, observ, record, spend, cost, take (taking and takes
+# with it), walk, clock, time, appear, pay, land, need, run and ran -- and
+# the noun "reading", and a whole-unit figure standing in a sentence
+# carrying one of them is graded exactly as a fractional figure is.
 # `98 ms` in a startup chunk's doc passed for a round number a writer had
-# chosen while the sentence around it said what the parse spent.
+# chosen while the sentence around it said what the parse spent, and
+# `pays ~13s`, `lands ~250us later` and `taking 83 ms` each shipped a
+# reading past a vocabulary keyed on the verbs that were already in it.
 #
 # A figure carries its sign and a spread is written as a range, so a token
 # shape reading neither passed ten measured figures: `+1.23%`, `+/-20%`,
@@ -1301,13 +1304,18 @@ check_written_programs() {
 # the three separators into blanks before the line is tokenised.
 #
 # A line naming a bar, a budget, a bound, a band, a tolerance, a deadline, a
-# throttle, a debounce, a ceiling, a cap, a tier or a pace -- in any of those
-# words' own inflections, since the tree writes `throttled` and `capped` as
-# readily as the nouns -- is refused as a reading at all, on the drift
-# check's own grounds: each of those is a number the tree chose and can be
-# read back off the constant that holds it, so a re-record moves none of
-# them. That is the one escape a writer has, and it
-# is the same escape bench.md already grants the ledger. It exempts the
+# throttle, a debounce, a ceiling, a cap, a tier, a pace, or a figure the
+# code derives -- in any of those words' own inflections, since the tree
+# writes `throttled` and `capped` as readily as the nouns, and the stems
+# that change spelling (`capped`, `tiered`, `bounded`) need `ed` and `ped`
+# as well as `s` and `d` -- is refused as a reading at all, on the drift
+# check's own grounds: each of those is a number the tree chose or computes
+# from one it chose, and can be read back off the constant that holds it, so
+# a re-record moves none of them. `derive` is what the other twelve could
+# not say: `2 x` trials and the `31s` five doubled waits come to are
+# arithmetic the code performs, and the only way to keep either was to drop
+# the verb that made it a sentence. That is the one escape a writer has, and
+# it is the same escape bench.md already grants the ledger. It exempts the
 # figures on its own line and never the sentence the words on it opened, and
 # the cell-id escape works the same way: skipping the line outright left
 # "Deliberately not a latency bar. Measured pre-attach windows span roughly"
@@ -1385,7 +1393,13 @@ check_doc_figures() {
       # Lowercased for both word tests: a reading word opens a sentence as
       # often as it stands inside one, and a case-sensitive read let every
       # capitalised `Measured` and `Observed` through.
-      folded = tolower(body)
+      # A trailing blank so that `ran`, the one stem that is a word inside
+      # other words (`range`, `transient`, `guarantee`), can be written
+      # with a non-letter on each side without the pattern needing a `$`:
+      # an anchor in the middle of an alternation is not portable across
+      # the three awks this tree runs under, and the marker stripped off
+      # the front of the line has already left a blank there.
+      folded = tolower(body) " "
       # The reading state runs to the end of the sentence that opened it,
       # and not to the end of the line: a figure rustfmt wrapped onto the
       # line after the word that introduced it escapes a per-line test,
@@ -1406,15 +1420,15 @@ check_doc_figures() {
       # until the sentence it stands in closes, and a reading word reached
       # first reports it -- unless a `.` stands between the two, which is
       # the same sentence boundary the forward state reads.
-      had_word = (folded ~ /measure|observ|record|spen[dt]|cost|took|take[sn]|walked|clocked|timed|reading|appear/)
+      had_word = (folded ~ /measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|lands|need(ed|s)|runs|[^a-z]ran[^a-z]/)
       if (had_word) {
         head = folded
-        sub(/(measure|observ|record|spen[dt]|cost|took|take[sn]|walked|clocked|timed|reading|appear).*$/, "", head)
+        sub(/(measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|lands|need(ed|s)|runs|[^a-z]ran[^a-z]).*$/, "", head)
         if (head ~ /\.([[:space:]]|$)/) { held = "" }
         if (held != "") { printf "%s", held; held = "" }
         reading = 1
       }
-      escaped = (folded ~ /(^|[^a-z])(bar|budget|bound|band|tolerance|deadline|throttle|debounce|ceiling|cap|tier|pace)(s|d)?([^a-z]|$)/)
+      escaped = (folded ~ /(^|[^a-z])(bar|budget|bound|band|tolerance|deadline|throttle|debounce|ceiling|cap|tier|pace|derive)(s|d|ed|ped)?([^a-z]|$)/)
       anchored = 0
       for (j = 1; j <= names; j++) {
         if (index(body, id[j]) > 0) { anchored = 1 }
@@ -1448,7 +1462,7 @@ check_doc_figures() {
       }
       if (reading) {
         tail = folded
-        if (had_word) { sub(/^.*(measure|observ|record|spen[dt]|cost|took|take[sn]|walked|clocked|timed|reading|appear)/, "", tail) }
+        if (had_word) { sub(/^.*(measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|lands|need(ed|s)|runs|[^a-z]ran[^a-z])/, "", tail) }
         if (tail ~ /\.([[:space:]]|$)/) { reading = 0 }
       }
       # A held figure lives as long as its own sentence: what closes it is a

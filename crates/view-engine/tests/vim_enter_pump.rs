@@ -202,6 +202,24 @@ fn markdown_buffer(fill: usize) -> (String, usize) {
     for i in 0..fill {
         lines.push(format!("- item {i} {}", "p".repeat(100)));
     }
+    buffer_of(&lines)
+}
+
+/// A lua buffer of a stated size, carrying a comment on every line: the
+/// bundled grammar is not combined, and the comments are where the planted
+/// injections query below puts a grammar that is.
+fn lua_buffer(fill: usize) -> (String, usize) {
+    let lines: Vec<String> = (0..fill)
+        .map(|i| format!("local x{i} = {i} -- {}", "p".repeat(100)))
+        .collect();
+    buffer_of(&lines)
+}
+
+/// The lua that creates a buffer holding these lines and makes it current,
+/// with the byte count nvim reads off it -- every line and its newline,
+/// which is what `nvim_buf_get_offset` answers -- so a test says which side
+/// of a bound it stands on rather than trusting a line count to land there.
+fn buffer_of(lines: &[String]) -> (String, usize) {
     let bytes = lines.iter().map(|line| line.len() + 1).sum();
     let table: String = lines.iter().map(|line| format!("  '{line}',\n")).collect();
     (
@@ -216,6 +234,19 @@ fn markdown_buffer(fill: usize) -> (String, usize) {
 }
 
 const START_MARKDOWN_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'markdown')\n";
+
+/// The same for lua, after planting an injections query that routes every
+/// comment into markdown.
+///
+/// Planted rather than found: no grammar nvim bundles injects a combined
+/// child, and the ones that do in the wild (elixir, java, julia, nim) are
+/// not on a hermetic spawn's runtimepath. What the plant stands in for is
+/// elixir's `@moduledoc`, and the query is the same two directives that
+/// one writes.
+const START_LUA_INJECTING_MARKDOWN: &str = "\
+vim.treesitter.query.set('lua', 'injections',\n\
+  [[((comment) @injection.content (#set! injection.language \"markdown\"))]])\n\
+vim.treesitter.start(buf, 'lua')\n";
 
 fn pin_config() -> ScratchDir {
     config(PIN_CONFIG)
@@ -232,6 +263,16 @@ fn highlighted_markdown_config(fill: usize) -> (ScratchDir, usize) {
     let (buffer, bytes) = markdown_buffer(fill);
     (
         highlighted_config(&buffer, START_MARKDOWN_HIGHLIGHTER),
+        bytes,
+    )
+}
+
+/// A lua buffer of a stated size whose grammar has been given an injection
+/// into markdown, with the bytes it holds.
+fn highlighted_lua_injecting_markdown(fill: usize) -> (ScratchDir, usize) {
+    let (buffer, bytes) = lua_buffer(fill);
+    (
+        highlighted_config(&buffer, START_LUA_INJECTING_MARKDOWN),
         bytes,
     )
 }
@@ -449,9 +490,10 @@ fn a_combined_injection_grammar_under_its_own_bound_is_parsed_inline() {
     );
 }
 
-/// The same grammar over that bound is left to the asynchronous path: the
-/// injection scan is the whole document, so a file this size costs more
-/// than the frame it would have to finish inside.
+/// The same grammar over that bound is left to the asynchronous path. What
+/// the hook keys on is the byte count, and this fixture stands over the
+/// bound; what the bound stands for is a scan of the whole document, whose
+/// cost on dense markdown of this size is in the commit that set it.
 ///
 /// The reading that says the hook skipped it is the first screen update
 /// beginning with an unparsed tree, which is what the highlighter's own
@@ -481,6 +523,44 @@ fn a_combined_injection_grammar_over_its_own_bound_takes_the_async_path() {
          unparsed tree: a first frame carrying colours here is the inline \
          parse having run on a file whose injection scan costs more than \
          the frame"
+    );
+}
+
+/// A grammar that carries no combined injections of its own, but injects
+/// one that does, gets the same bound: the child's scan is the whole
+/// document as much as a root's would be, and the root's own query is
+/// where the child is named.
+///
+/// The control is
+/// `the_highlighters_parse_is_finished_before_nvims_first_frame`, whose
+/// buffer is lua of about this size with nothing planted and which reads a
+/// coloured first frame. What changes the answer here is the injection, not
+/// the size.
+#[test]
+fn a_grammar_injecting_a_combined_child_takes_that_childs_bound() {
+    let (dir, bytes) = highlighted_lua_injecting_markdown(200);
+    assert!(
+        bytes > COMBINED_PARSE_BYTES,
+        "the fixture has to stand over the combined bound and under the \
+         root one to measure the branch this test is about, and it holds \
+         {bytes} bytes"
+    );
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.highlighted, 1,
+        "the fixture attaches a lua highlighter while init.lua is sourcing, \
+         so one must be active here or this test measured nothing"
+    );
+    assert_ne!(
+        read.coloured_draw, 1,
+        "nvim's own screen update at the end of startup must begin with an \
+         unparsed tree: the root grammar is not combined, so a first frame \
+         carrying colours here is the guard reading the root alone and \
+         admitting a scan of the whole document behind it"
     );
 }
 

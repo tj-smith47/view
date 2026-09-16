@@ -87,9 +87,9 @@ const _: () = assert!(
 /// getting a reading that no tick moved underneath it.
 ///
 /// One retry would do at the prober's cadence -- a second collision needs
-/// two ticks inside the handful of loads below, which is 4 s of probes in
-/// the width of one function -- and three is the same reasoning with a
-/// margin, at three relaxed loads apiece.
+/// two ticks inside the handful of loads below, which is the 4 s derived
+/// from [`HEARTBEAT_PROBE_INTERVAL`] spent inside one function -- and three
+/// is the same reasoning with a margin, at three relaxed loads apiece.
 const ANCHOR_READ_ATTEMPTS: usize = 3;
 
 /// How soon a caller told `Alive` by a raced anchor read is asked to look

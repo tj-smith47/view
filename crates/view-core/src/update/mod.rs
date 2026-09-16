@@ -78,6 +78,7 @@ mod watch;
 use ai::{on_ai_event, open_ai_trust_prompt};
 use paste::paste_into_focused_surface;
 use supervision::{note_engine_liveness, note_supervision_choice};
+pub use surface_conflict::FLOAT_SCAN_THROTTLE;
 use surfaces::{
     message_history_key, notice_ai_disabled, notice_clipboard_unavailable, open_ai_panel,
     open_message_history, open_picker, picker_preview_request, picker_source_for_verb,

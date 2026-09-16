@@ -1644,7 +1644,7 @@ mod tests {
     }
 
     /// The shape the AI rows produce constantly: the panel's frame starts
-    /// before the keypress and its write lands after it, ~250us later.
+    /// before the keypress and its write lands just after it.
     #[test]
     fn an_announcement_from_the_frame_in_flight_still_explains_its_write() {
         let records = [

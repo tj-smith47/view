@@ -182,7 +182,7 @@ pub const REMOTE_RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
 /// How many reconnect attempts a dropped remote connection is given before
 /// the failure is handed back to the user. The waits double from
 /// [`REMOTE_RECONNECT_BACKOFF_BASE`], so five of them hold the session for
-/// about half a minute in total before giving up.
+/// the 31s derived from that base before giving up.
 pub const REMOTE_RECONNECT_MAX_ATTEMPTS: u32 = 5;
 
 /// The wait owed before reconnect attempt `attempt`, counted from one:
@@ -1937,6 +1937,21 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// at once and the colours arrive in slices, which is what bare nvim does
 /// with it.
 ///
+/// A root that carries no combined injections of its own can still inject
+/// a grammar that does, and pays that grammar's scan: elixir routes
+/// `@moduledoc` into markdown, and so do julia, nim, unison and facility.
+/// So the smaller bound is applied when any language the root's own
+/// injections query names is combined.
+///
+/// Two limits on that read, and the second is what the walk costs. A
+/// language chosen at match time from a capture, rather than written into
+/// a `#set!` directive, is named nowhere the query object can be asked for
+/// it. And the walk stops one level down, so java -- whose own query names
+/// javadoc, whose query names markdown_inline -- keeps the wider bound.
+/// Going deeper is what makes the read unaffordable: every name costs a
+/// query load, and a walk to the bottom of the graph is tens of
+/// milliseconds on a path whose whole purpose is to finish inside a frame.
+///
 /// The buffer and the range are read where this callback runs, which is
 /// before every `VimEnter` autocommand the config registers: a dashboard,
 /// a split or a session restore that changes the window afterwards is
@@ -2007,6 +2022,7 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
         .collect();
     let vocabulary = vocabulary.join(", ");
     let bridge = crate::nvim_api::REGISTER_BRIDGE_CHUNK;
+    let throttle = crate::nvim_api::FLOAT_SCAN_THROTTLE_MS;
     let claimants = crate::nvim_api::PROBE_CLAIMANTS_CHUNK;
     format!(
         "lua vim.o.columns = {width} vim.o.lines = {height}\n\
@@ -2076,11 +2092,34 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          vim.api.nvim_buf_line_count(buf))\n\
          if h and bytes <= sync_parse_bytes then\n\
          -- the public read: a renamed private field would read nil and\n\
-         -- run the parse this bound is here to hold\n\
-         local injections =\n\
-         vim.treesitter.query.get(h.tree:lang(), 'injections')\n\
-         if injections and injections.has_combined_injections\n\
-         and bytes > combined_parse_bytes then\n\
+         -- run the parse this bound is here to hold. The root query also\n\
+         -- names the languages it injects, and a root that is not\n\
+         -- combined itself pays a combined child's scan all the same\n\
+         local function combined(lang, child)\n\
+         local q = vim.treesitter.query.get(lang, 'injections')\n\
+         if not q then return false end\n\
+         if q.has_combined_injections then return true end\n\
+         -- one level: a grandchild is reached only through a child this\n\
+         -- walk has already answered for, and each name costs a query\n\
+         -- load on a path whose whole purpose is to stay inside a frame\n\
+         if child then return false end\n\
+         for _, pattern in pairs((q.info or {{}}).patterns or {{}}) do\n\
+         for _, directive in ipairs(pattern) do\n\
+         if directive[1] == 'set!'\n\
+         and directive[2] == 'injection.language'\n\
+         and type(directive[3]) == 'string'\n\
+         and combined(directive[3], true) then\n\
+         return true\n\
+         end\n\
+         end\n\
+         end\n\
+         return false\n\
+         end\n\
+         -- the bytes first: the walk costs a query load per name, and\n\
+         -- every buffer under the bound is parsed inline whatever it\n\
+         -- injects\n\
+         if bytes > combined_parse_bytes\n\
+         and combined(h.tree:lang()) then\n\
          return\n\
          end\n\
          -- the range the highlighter's own on_start asks for, 0-based:\n\
@@ -2099,7 +2138,7 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          }})\n\
          assert(load([==[\n\
          {bridge}\n\
-         ]==]))(channel)\n\
+         ]==]))(channel, {throttle})\n\
          assert(load([==[\n\
          {claimants}\n\
          ]==]))(channel, {{ {modules} }})"

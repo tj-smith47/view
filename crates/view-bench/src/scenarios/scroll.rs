@@ -318,8 +318,9 @@ mod tests {
         assert!(content.ends_with("L100000 scroll benchmark line\n"));
     }
 
-    /// A cold heavy start pays ~13s to take view's notices down, and the
-    /// readiness loop needs a second search after the first one misses.
+    /// A cold heavy start spends much of the settle deadline taking view's
+    /// notices down, and the readiness loop needs a second search after the
+    /// first one misses.
     #[test]
     fn the_label_search_keeps_its_retry_after_a_takedown_spends_the_startup_budget() {
         let started = Instant::now();

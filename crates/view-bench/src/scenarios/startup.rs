@@ -100,8 +100,8 @@ const EDITOR_PROCESS: &str = "Embedded";
 /// here, where the attribution is made, rather than inferred downstream
 /// from two sides disagreeing about how many samples survived -- an
 /// interleave that swaps one figure for another leaves those counts equal
-/// and the published median mixing a ~2 ms UI-client figure into ~50 ms
-/// editor ones.
+/// and the published median mixing the UI client's own figure, an order of
+/// magnitude the smaller of the two, into the editor ones.
 ///
 /// The figure is the first field of the line carrying [`STARTED_LINE`]:
 /// `clock` in `--startuptime`'s own `clock  self+sourced self` header,

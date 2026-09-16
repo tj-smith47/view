@@ -134,19 +134,28 @@ for required in "$VIEW_BIN" "$NVIM_BIN" "$FILE"; do
   fi
 done
 HEAD_SHA=$(git -C "$REPO" log -1 --format=%h)
-HEAD_CT=$(git -C "$REPO" log -1 --format=%ct)
+# The newest change to something this binary is built from, which is what a
+# stale binary is stale against. HEAD's own time refused a correct binary
+# after every docs-only or scripts-only change, and the rebuild the message
+# printed cleared nothing: cargo had nothing to redo, so the mtime never
+# moved and only touching a source file got past it. The inputs are the
+# crates and the two cargo manifests -- this workspace has no build script,
+# and nothing the crates read at build time lives outside them.
+BUILD_SHA=$(git -C "$REPO" log -1 --format=%h -- crates Cargo.toml Cargo.lock)
+BUILD_CT=$(git -C "$REPO" log -1 --format=%ct -- crates Cargo.toml Cargo.lock)
 BIN_MTIME=$(mtime_of "$VIEW_BIN")
 
 # A binary under $REPO/target/ is this repo's own build, so a run over one
-# older than HEAD's own commit measured a build that does not carry HEAD's
-# effect -- the defect only the `takeover` topic's wire order gave away once
-# already. VIEW_BIN pointing outside target/ is a scratch build, which is the
-# whole point of the variable, and is measured as given.
+# older than the last build input measured a build that does not carry that
+# input's effect -- the defect only the `takeover` topic's wire order gave
+# away once already. VIEW_BIN pointing outside target/ is a scratch build,
+# which is the whole point of the variable, and is measured as given.
 case "$VIEW_BIN" in
   ("$REPO"/target/*)
-    if [ "$BIN_MTIME" -lt "$HEAD_CT" ]; then
-      echo "link-record: $VIEW_BIN (mtime $BIN_MTIME) is older than HEAD" \
-           "$HEAD_SHA (committed $HEAD_CT); rebuild with:" \
+    if [ "$BIN_MTIME" -lt "$BUILD_CT" ]; then
+      echo "link-record: $VIEW_BIN (mtime $BIN_MTIME) is older than" \
+           "$BUILD_SHA, the last change to crates, Cargo.toml or" \
+           "Cargo.lock (recorded $BUILD_CT); rebuild with:" \
            "cargo build --release -p view" >&2
       exit 1
     fi

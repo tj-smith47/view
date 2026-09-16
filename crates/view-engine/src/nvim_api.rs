@@ -645,7 +645,7 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 ///   scan the last keystroke of a burst is the one whose menu is never
 ///   reported -- a user who types `:e pre` and stops to read the menu gets
 ///   nothing at all. One trailing scan per window keeps the same
-///   one-walk-per-150 ms bound.
+///   one-walk-per-[`view_core::update::FLOAT_SCAN_THROTTLE`] bound.
 /// - **A hidden float is still a sighting, and says so.** `cfg.hide` rides
 ///   along as the last field rather than filtering the window out of the
 ///   walk. The window view itself hides ([`HIDE_FLOAT_CHUNK`], for the
@@ -696,8 +696,14 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 /// wait rather than an unbounded one, and so is a negative `ttimeoutlen`.
 /// Both mean the engine reads a run that stopped short on the pass that
 /// read it, which is why neither reaches the wire as a sentinel.
+/// The float watcher's throttle in the milliseconds `vim.defer_fn` takes,
+/// read off view-core's own [`view_core::update::FLOAT_SCAN_THROTTLE`] so
+/// the chunk and the update module that explains it cannot disagree.
+pub(crate) const FLOAT_SCAN_THROTTLE_MS: u64 =
+    view_core::update::FLOAT_SCAN_THROTTLE.as_millis() as u64;
+
 pub(crate) const REGISTER_BRIDGE_CHUNK: &str = "\
-local channel = ...
+local channel, float_throttle = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
 local function relay(event)
   return function(args)
@@ -760,7 +766,7 @@ local function scan_floats()
   if float_pending then
     float_pending = false
     float_armed = true
-    vim.defer_fn(scan_floats, 150)
+    vim.defer_fn(scan_floats, float_throttle)
   end
 end
 local function arm_float_scan()
@@ -769,7 +775,7 @@ local function arm_float_scan()
     return
   end
   float_armed = true
-  vim.defer_fn(scan_floats, 150)
+  vim.defer_fn(scan_floats, float_throttle)
 end
 vim.api.nvim_create_autocmd({ 'CmdlineEnter', 'CmdlineChanged',
   'ModeChanged', 'CursorHold', 'CursorHoldI', 'WinEnter',
@@ -2911,7 +2917,10 @@ impl EngineHandle {
             "nvim_exec_lua",
             vec![
                 Value::from(REGISTER_BRIDGE_CHUNK),
-                Value::Array(vec![Value::from(channel_id)]),
+                Value::Array(vec![
+                    Value::from(channel_id),
+                    Value::from(FLOAT_SCAN_THROTTLE_MS),
+                ]),
             ],
         )
     }
@@ -4897,8 +4906,9 @@ mod tests {
         assert_eq!(params[0], Value::from(REGISTER_BRIDGE_CHUNK));
         assert_eq!(
             params[1],
-            Value::Array(vec![Value::from(7)]),
-            "the channel must cross as the chunk's only argument"
+            Value::Array(vec![Value::from(7), Value::from(FLOAT_SCAN_THROTTLE_MS)]),
+            "the channel and the float throttle must cross as the chunk's \
+             arguments, in that order"
         );
         assert!(
             !REGISTER_BRIDGE_CHUNK.contains('7'),
@@ -5131,8 +5141,7 @@ mod tests {
     /// that dropped hidden windows would stop reporting the float view has
     /// taken over and freeze its rows at whatever the menu held when the
     /// hide landed, a scan whose delay drops under nvim-cmp's own debounce
-    /// runs before the window it exists to see, an anchor left off
-    /// the wire
+    /// runs before the window it exists to see, an anchor left off the wire
     /// puts an NE float's right edge where its left edge should be, a scan
     /// that reported only what changed would name a covering float once and
     /// then never again, and a window absorbed by the running throttle with
@@ -5165,9 +5174,9 @@ mod tests {
             "the throttle is what bounds a float storm to one walk per window"
         );
         assert!(
-            REGISTER_BRIDGE_CHUNK.contains("vim.defer_fn(scan_floats, 150)"),
-            "the delay must outlast nvim-cmp's own 60 ms debounce, or the scan \
-             runs before the menu it exists to see"
+            REGISTER_BRIDGE_CHUNK.contains("vim.defer_fn(scan_floats, float_throttle)"),
+            "the delay is view-core's own FLOAT_SCAN_THROTTLE, which is where \
+             the rule that it outlast nvim-cmp's debounce is asserted"
         );
         assert!(
             REGISTER_BRIDGE_CHUNK.contains("cfg.anchor or 'NW'"),

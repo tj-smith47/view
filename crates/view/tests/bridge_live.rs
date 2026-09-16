@@ -416,8 +416,9 @@ end\n";
 /// The trailing edge of the throttle, live. The leading edge alone loses the
 /// last keystroke of a burst: the arming events inside the running window
 /// are absorbed, and the float the absorbed one summons appears after the
-/// scheduled scan has already walked the windows and found nothing. Nothing re-arms, so a user who types `:e pre` and stops to read
-/// the menu is never told the menu is covering the command line.
+/// scheduled scan has already walked the windows and found nothing. Nothing
+/// re-arms, so a user who types `:e pre` and stops to read the menu is
+/// never told the menu is covering the command line.
 ///
 /// The compat harness cannot catch this: `Step::Send` waits out 200 ms of
 /// screen silence, so every key it types is spaced wider than the throttle

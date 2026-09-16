@@ -15,6 +15,25 @@ use crate::msg::Effect;
 use crate::native::surfaces::{self, FloatSighting, Surface};
 use crate::native::toast::HoldOutcome;
 
+/// How long the engine's float watcher waits after the first arming event
+/// before it walks the window list, and therefore the rate a float storm
+/// is bounded to: one walk per window rather than one per event.
+///
+/// Held here rather than in the Lua chunk that defers on it, because the
+/// value is read in three of this module's own explanations and was
+/// spelled two ways once a fourth dropped it -- a reader sent to a
+/// throttle with no name had nowhere to go for the number.
+/// `view_engine`'s `REGISTER_BRIDGE_CHUNK` takes it as an argument.
+pub const FLOAT_SCAN_THROTTLE: std::time::Duration = std::time::Duration::from_millis(150);
+
+// tied at compile time rather than by comment: nvim-cmp redraws its menu on
+// a 60 ms debounce, and a scan that ran before the menu it exists to see
+// reports the window the keystroke before it opened
+const _: () = assert!(
+    FLOAT_SCAN_THROTTLE.as_millis() > 60,
+    "FLOAT_SCAN_THROTTLE must outlast nvim-cmp's own debounce"
+);
+
 /// The opening every one of a float claimant's notices shares, which is also
 /// the family `record_native_notice_once` retracts on: everything after it
 /// is wording that changes as the same claimant takes another surface, and
@@ -136,10 +155,10 @@ pub(super) fn on_claimants_probed(model: &mut Model, probed: &[String]) -> Vec<E
 ///
 /// Ordinarily a no-op: the probe answers at the session's first idle
 /// transition, well before a float scan can have been armed and waited out
-/// its 150 ms, so there is usually nothing standing yet to narrow. This is
-/// the other order -- a claimant that loaded late, or a float sighted during
-/// a slow startup -- and it exists because the guard in [`observe_float`]
-/// only covers sightings that arrive after the notice.
+/// its [`FLOAT_SCAN_THROTTLE`], so there is usually nothing standing yet to
+/// narrow. This is the other order -- a claimant that loaded late, or a
+/// float sighted during a slow startup -- and it exists because the guard
+/// in [`observe_float`] only covers sightings that arrive after the notice.
 fn absorb_float_notices(
     model: &mut Model,
     claimant: &surfaces::SurfaceClaimant,
@@ -240,14 +259,14 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 ///
 /// The sighting the float scan takes is the same judgment one round trip
 /// later, which is a round trip after the plugin's first frame is already
-/// on the terminal: the scan is armed by autocmd transitions and runs on a
-/// throttle, nvim-notify opens its windows `noautocmd` so `WinNew` never
-/// fires for one, and its slide animation moves the window with
-/// `nvim_win_set_config`, which arms nothing either. So a complaint drawn
-/// during a startup nobody has typed into waits for the next unrelated
-/// arming event -- seconds away on both of the configurations this was
-/// measured on. The placement event is the zero-latency
-/// sighting, and this is the whole reason it is read here.
+/// on the terminal: the scan is armed by autocmd transitions and runs on
+/// [`FLOAT_SCAN_THROTTLE`], nvim-notify opens its windows `noautocmd` so
+/// `WinNew` never fires for one, and its slide animation moves the window
+/// with `nvim_win_set_config`, which arms nothing either. So a complaint
+/// drawn during a startup nobody has typed into waits for the next
+/// unrelated arming event -- seconds away on both of the configurations
+/// this was measured on. The placement event is the zero-latency sighting,
+/// and this is the whole reason it is read here.
 ///
 /// The bar is [`take_complaint`]'s, with the identity half left out
 /// because a placement carries none: the rect claims a surface view draws
@@ -1056,12 +1075,12 @@ mod tests {
     }
 
     /// The live failure this shape was built from. A cmdline session types a
-    /// key every ~200 ms, and each key arms the scan that sights the menu
-    /// again ~150 ms later -- a cadence far inside a transient notice's own
-    /// four seconds, so an expiring line here is raised, retired, raised,
-    /// retired, for as long as the user types, on the one path this feature
-    /// exists to serve. This drives that cycle and the line has to be
-    /// readable throughout.
+    /// key faster than a notice expires, and each key arms the scan that
+    /// sights the menu again one [`FLOAT_SCAN_THROTTLE`] later -- a cadence
+    /// far inside a transient notice's own four seconds, so an expiring line
+    /// here is raised, retired, raised, retired, for as long as the user
+    /// types, on the one path this feature exists to serve. This drives that
+    /// cycle and the line has to be readable throughout.
     #[test]
     fn the_notice_stands_through_the_sightings_that_keep_finding_the_float() {
         let mut model = captured_session();
@@ -1075,7 +1094,7 @@ mod tests {
         assert_eq!(notices(&model), expected);
 
         for key in 1..=8 {
-            // the scan a keystroke arms, 150 ms later
+            // the scan a keystroke arms, one FLOAT_SCAN_THROTTLE later
             model.dirty = false;
             let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
             assert_eq!(notices(&model), expected, "sighting {key} stacked a copy");

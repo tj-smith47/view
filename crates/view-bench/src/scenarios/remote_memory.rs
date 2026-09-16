@@ -82,10 +82,10 @@
 //!
 //! This asks for wall clock the withdrawn concurrent design did not: instead
 //! of two spawns running at once, each trial pays two full
-//! spawn/settle/workload/settle/sample/teardown cycles back to back, so a
-//! run pays `2 x` trial count of that cycle -- 8 sequential cycles at the
-//! CLI's default `trials = 3` (rounded up to 4), against the 2 concurrent
-//! spawns the withdrawn design paid.
+//! spawn/settle/workload/settle/sample/teardown cycles back to back, so the
+//! cycle count a run pays is derived: `2 x` the trial count -- 8 sequential
+//! cycles at the CLI's default `trials = 3` (rounded up to 4), against the
+//! 2 concurrent spawns the withdrawn design paid.
 //!
 //! The +1.2% figure above is drawn from `remote_memory.pss_mb`'s
 //! `[headroom]` entry in `baselines/dev-linux.headroom.toml` (recorded
@@ -477,10 +477,10 @@ mod tests {
     /// offset it.
     ///
     /// The two runs share one synthetic bias model (a leg read in the
-    /// first position of its trial reads 3% low) and differ only in the
-    /// order [`abba_trials`] is allowed to pick: fixed order every trial
-    /// (the mutation this module's redesign eliminates) versus the real
-    /// ABBA alternation.
+    /// first position of its trial reads low by `position_penalty`) and
+    /// differ only in the order [`abba_trials`] is allowed to pick: fixed
+    /// order every trial (the mutation this module's redesign eliminates)
+    /// versus the real ABBA alternation.
     #[test]
     fn alternating_leg_order_narrows_a_fixed_position_bias_a_fixed_order_leaves_uncancelled() {
         let true_remote = 101.2;
