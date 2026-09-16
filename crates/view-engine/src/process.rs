@@ -1915,12 +1915,31 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// there with it, and the rest is scheduled. Left alone those
 /// continuations queue behind the plugin loads, so the colours arrive well
 /// after the text they belong to and read as a second paint of a screen
-/// that had already settled. The callback waits them out instead --
-/// bounded, on the current buffer's own parser, and only where a
-/// highlighter is already attached -- and redraws again once the tree is
-/// valid. A buffer too large to finish inside the budget keeps the
-/// asynchronous path it had: the wait ends and the remaining slices run on
-/// the loop.
+/// that had already settled. The callback waits them out instead, on the
+/// highlighter's own `parsing` flag and only where a highlighter is
+/// already attached, and redraws again once that flag clears. The
+/// highlighter's flag rather than the parser's validity because a
+/// highlighter parses the range its windows show: the root region answers
+/// `is_valid(true)` the moment it is parsed, ahead of the injected trees
+/// that hold the colours on the visible lines.
+///
+/// The 30 ms is a deadline `vim.wait` checks between callbacks, not a
+/// bound on what the callback adds to startup. Inside it nvim services its
+/// deferred-event queue, its uv timers and the channel, so the config's
+/// own scheduled work and timers run there too, and a single callback
+/// longer than the deadline runs to its end before the deadline is tested
+/// again -- so a plugin load queued ahead of the waiter is charged to the
+/// wait in full, however far past the deadline it runs. A parse that has
+/// not finished when the deadline is reached keeps the asynchronous path
+/// it had: the wait ends, no second redraw goes out, and the remaining
+/// slices run on the loop.
+///
+/// Only where the spawn had no UI before `VimEnter`, which is view's own
+/// shape: a spawn that had one (the stdin relay, `nvim -r` recovery, an
+/// attach deadline that fired early) gets nvim's own `UIEnter` when
+/// `VimEnter` returns, so its plugin loads are already under way by the
+/// time the loop dispatches this callback and the ordering the block
+/// exists for is gone.
 ///
 /// # The `UIEnter` this hook fires, and the one it leaves to nvim
 ///
@@ -1982,9 +2001,10 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
     format!(
         "lua vim.o.columns = {width} vim.o.lines = {height}\n\
          vim.g.view = 1\n\
-         -- the largest gap the settled screen tolerates before the\n\
-         -- treesitter colours read as a second paint\n\
-         local parse_budget = 30\n\
+         -- a deadline vim.wait tests between callbacks, never a bound:\n\
+         -- the config's own scheduled work runs inside it, and one\n\
+         -- callback longer than it runs to its end\n\
+         local parse_deadline = 30\n\
          local channel\n\
          for _, chan in ipairs(vim.api.nvim_list_chans()) do\n\
          if chan.stream == 'stdio' then channel = chan.id end\n\
@@ -2026,30 +2046,31 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          local had_ui = #attached() > 0\n\
          vim.rpcrequest(channel, 'view_vim_enter')\n\
          vim.wait(200, function() return #attached() > 0 end, 1)\n\
-         if #attached() > 0 then\n\
+         if not had_ui and #attached() > 0 then\n\
          vim.schedule(function()\n\
+         -- one pcall over the three, as the dispatch below already has:\n\
+         -- a raise here costs a frame, never the event nvim fires for\n\
+         -- nobody on this path\n\
+         pcall(function()\n\
          vim.api.nvim__redraw({{ flush = true }})\n\
          local buf = vim.api.nvim_get_current_buf()\n\
          -- package.loaded rather than vim.treesitter.highlighter: asking\n\
          -- for the module is what loads it, and a startup with no\n\
          -- highlighter never needs it loaded\n\
          local hl = package.loaded['vim.treesitter.highlighter']\n\
-         if hl and hl.active[buf] then\n\
-         local parser = vim.treesitter.get_parser(buf, nil,\n\
-         {{ error = false }})\n\
-         -- is_valid(true): a highlighter parses the visible range, which\n\
-         -- processes no injections, so the whole-tree answer never comes\n\
-         if parser and vim.wait(parse_budget,\n\
-         function() return parser:is_valid(true) end, 1) then\n\
+         local h = hl and hl.active[buf]\n\
+         -- the highlighter's own flag: the root region answers\n\
+         -- is_valid(true) before the injected trees holding the visible\n\
+         -- line's colours are parsed\n\
+         if h and vim.wait(parse_deadline,\n\
+         function() return not h.parsing end, 1) then\n\
          vim.api.nvim__redraw({{ flush = true }})\n\
          end\n\
-         end\n\
-         if not had_ui then\n\
+         end)\n\
          quiet_tty = true\n\
          pcall(vim.api.nvim_exec_autocmds, 'UIEnter',\n\
          {{ data = {{ chan = channel }} }})\n\
          quiet_tty = false\n\
-         end\n\
          end)\n\
          end\n\
          end,\n\
