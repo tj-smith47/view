@@ -117,6 +117,26 @@ $(find .claude/hooks -type f -name '*.sh' ! -name "$SELF" | LC_ALL=C sort)
 EOF
 targets+=(Taskfile.yml)
 
+# Every non-comment line tagged with the function that encloses it, so a
+# body can be asked what it does with its own arguments. A function runs
+# from its `name() {` line to the first `}` in column one, which is how
+# every function in this tree is written; a one-liner closes on its own
+# line.
+annotate() {
+  awk -v SQ="'" -v S="$SCRIPT_FIELD_SEP" "$SKIP"'
+    {
+      if (fn == "" && match($0, /^[A-Za-z_][A-Za-z0-9_-]*\(\)[[:space:]]*\{/)) {
+        name = $0; sub(/\(\).*/, "", name)
+        print FILENAME S FNR S name S $0
+        if ($0 !~ /\}[[:space:]]*$/) fn = name
+        next
+      }
+      if (fn != "" && $0 ~ /^\}/) { print FILENAME S FNR S fn S $0; fn = ""; next }
+      print FILENAME S FNR S (fn == "" ? "-" : fn) S $0
+    }
+  ' "$@"
+}
+
 for file in "${targets[@]}"; do
   body=$(code "$file")
 
@@ -150,39 +170,24 @@ $used"
   # while substr counts bytes dies on the lead byte of a glyph the pages are
   # drawn with -- which is what the macOS awk does to README.md's box rules.
   # One export above the first awk holds every awk in the file to bytes; a
-  # prefix per command leaves the next awk to whoever writes it.
+  # prefix per command leaves the next awk to whoever writes it. The export
+  # is counted only at top level: one written inside a function body proves
+  # nothing about what runs before the first awk, since that function may be
+  # called after it or never at all.
   case "$body" in
     (*lib/moment-grading.sh*)
       first=$(printf '%s\n' "$body" | grep -E "${WORD}awk([[:space:]]|$)" | sed -n '1p' || true)
-      lc=$(printf '%s\n' "$body" |
-        grep -E '^[0-9]+:[[:space:]]*export[[:space:]]+LC_ALL=C([[:space:]]|$)' | sed -n '1p' || true)
-      if [ -n "$first" ] && { [ -z "$lc" ] || [ "${lc%%:*}" -gt "${first%%:*}" ]; }; then
-        report "$file" "an awk over page text with no LC_ALL=C exported above it; the grading this file loads slices bytes and a widening matcher dies on one:
+      lc=$(printf '%s\n' "$(annotate "$file")" |
+        awk -F"$SCRIPT_FIELD_SEP" \
+          '$3 == "-" && $4 ~ /^[[:space:]]*export[[:space:]]+LC_ALL=C([[:space:]]|$)/ { print $2 }' |
+        sed -n '1p' || true)
+      if [ -n "$first" ] && { [ -z "$lc" ] || [ "$lc" -gt "${first%%:*}" ]; }; then
+        report "$file" "an awk over page text with no top-level LC_ALL=C exported above it; the grading this file loads slices bytes and a widening matcher dies on one:
 $first"
       fi
       ;;
   esac
 done
-
-# Every non-comment line tagged with the function that encloses it, so a
-# body can be asked what it does with its own arguments. A function runs
-# from its `name() {` line to the first `}` in column one, which is how
-# every function in this tree is written; a one-liner closes on its own
-# line.
-annotate() {
-  awk -v SQ="'" -v S="$SCRIPT_FIELD_SEP" "$SKIP"'
-    {
-      if (fn == "" && match($0, /^[A-Za-z_][A-Za-z0-9_-]*\(\)[[:space:]]*\{/)) {
-        name = $0; sub(/\(\).*/, "", name)
-        print FILENAME S FNR S name S $0
-        if ($0 !~ /\}[[:space:]]*$/) fn = name
-        next
-      }
-      if (fn != "" && $0 ~ /^\}/) { print FILENAME S FNR S fn S $0; fn = ""; next }
-      print FILENAME S FNR S (fn == "" ? "-" : fn) S $0
-    }
-  ' "$@"
-}
 
 ANNOTATED=$(annotate "${targets[@]}")
 

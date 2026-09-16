@@ -622,6 +622,21 @@ awk '{ print substr($0, 1, 1) }' README.md
 GRADING
 expect 0 '' 'the same consumer with LC_ALL=C exported above its first awk'
 
+# an export inside a function body proves nothing about what runs before the
+# first awk: the function may run after it, or never at all, so it does not
+# hold the file to bytes and the rule counts an export only at top level
+new_case
+write scripts/zz-grading-fn.sh <<'GRADING'
+#!/usr/bin/env bash
+set -euo pipefail
+setup() {
+  export LC_ALL=C
+}
+. "$HERE/lib/moment-grading.sh"
+awk '{ print substr($0, 1, 1) }' README.md
+GRADING
+expect 1 'scripts/zz-grading-fn.sh:7:locale' 'an export inside a function body does not count'
+
 # ---------------------------------------------------------------------------
 # a scan root whose scripts/ holds nothing to grade. The hooks and the
 # Taskfile alone still answer `1 files clean`, which is word for word what a
