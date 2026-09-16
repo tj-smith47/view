@@ -634,6 +634,7 @@ new_geometry_case() {
   plant_geometry 'crates/view/src/recovery.rs' 1
   plant_geometry 'crates/view/src/runtime/executor.rs' 3
   plant_geometry 'crates/view/src/startup.rs' 7
+  plant_geometry 'crates/view/src/vlog.rs' 2
 }
 
 # Graded on the rows that differ from the pinned listing, the way the

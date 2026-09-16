@@ -237,14 +237,26 @@ pub(crate) fn dispatch<E: EngineOps>(
             }
         }
     }
+    // the takeover and the reply behind it are written while nvim sits
+    // blocked inside `VimEnter`, so each one's own place in that block is
+    // what the `takeover` topic records
+    let taking_over = matches!(stage, crate::native::Stage::VimEnter) && crate::vlog::capturing();
     if flow == Flow::Continue {
-        for eff in follow_ups.native.follow_up(model, stage) {
+        let native = follow_ups.native.follow_up(model, stage);
+        if taking_over {
+            crate::vlog::takeover_opened();
+        }
+        for eff in native {
+            let call = taking_over.then(|| crate::vlog::takeover_call(&eff));
             match executor.run(eff) {
                 Flow::Continue => {}
                 other => {
                     flow = other;
                     break;
                 }
+            }
+            if let Some(call) = call {
+                crate::vlog::log_takeover(&call);
             }
         }
     }
@@ -253,7 +265,11 @@ pub(crate) fn dispatch<E: EngineOps>(
     // an editor left waiting inside `VimEnter` has no way out but view's
     // own exit
     for eff in held {
+        let call = taking_over.then(|| crate::vlog::takeover_call(&eff));
         let held_flow = executor.run(eff);
+        if let Some(call) = call {
+            crate::vlog::log_takeover(&call);
+        }
         // and the answer's own verdict is this pass's whenever the passes
         // ahead of it had none: a connection that died between the last
         // effect and the reply is a lost engine the loop has to hear about,

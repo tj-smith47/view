@@ -203,6 +203,7 @@ impl NativeSession {
             }
             Stage::Claims => {
                 crate::vlog::log("startup", "takeover answered");
+                crate::vlog::log_takeover("answered");
                 self.announce(model)
             }
         }

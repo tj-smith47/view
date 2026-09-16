@@ -659,6 +659,7 @@ crates/view/src/native.rs 1 the native session resizing the grid for the row the
 crates/view/src/recovery.rs 1 the replacement engine own geometry seed, spending Model::grid_target
 crates/view/src/runtime/executor.rs 3 the executor spending the pair the UiAttach and TryResize effects carry, which update() built from the model
 crates/view/src/startup.rs 7 the attach guard release and the one attach it feeds, spending the pair main released rather than a reading of their own, plus the restart pattern destructuring the UiAttach and the two attaches that pattern feeds, which spend the pair Model::takes_attach built from grid_target, the zero-argument attach() closure call that carries it, and the read-back of the config late_attach seed
+crates/view/src/vlog.rs 2 the takeover topic naming the attach call of that batch: the pattern that matches the effect and the name it writes, which read how many ext surfaces were asked for and carry no pair
 '
 check_geometry_sites() {
   local expected actual sites

@@ -183,8 +183,19 @@ pub fn log_redraw_census(events: &[view_core::events::UiEvent], folded_at: Optio
         || START.get().map_or(0, |start| start.elapsed().as_millis()),
         |(at, start)| at.saturating_duration_since(*start).as_millis(),
     );
+    FOLDED_MS.store(
+        u64::try_from(ms).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     write_line_at(file, "engine", ms, &redraw_census(events, &REDRAWS));
 }
+
+/// When the reader thread folded the batch the last census line stood for.
+///
+/// The `highlight` topic's own line is stamped at the paint, so the two
+/// readings on one line separate an engine that sent a colour late from a
+/// frontend that held one it already had.
+static FOLDED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Logs the loggable slice of one `Msg` crossing the runtime loop's
 /// dispatch seam: theme events nested in a `Redraw` batch (`view-core` is
@@ -831,6 +842,57 @@ pub fn capturing() -> bool {
     matches!(SINK.get(), Some(Some(_)))
 }
 
+/// Microseconds from the origin at the takeover batch's first write, which
+/// every `takeover` line is measured from.
+///
+/// Stored per batch rather than once: a replacement engine answers on its
+/// own channel and is handed the takeover again, and that batch is a
+/// different one.
+static TAKEOVER_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Opens the takeover batch's reading, immediately before its first call
+/// goes out.
+pub fn takeover_opened() {
+    if capturing() {
+        TAKEOVER_US.store(
+            u64::try_from(mono_us()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// One `takeover` line: which call of that batch went out, or was
+/// answered, and how long after the batch's first write.
+///
+/// nvim is blocked inside `VimEnter` for the whole of this batch, so the
+/// lines together say which of its calls that block is spent in -- the
+/// reading `--startuptime`'s single `VimEnter autocommands` figure cannot
+/// give.
+pub fn log_takeover(call: &str) {
+    log_with("takeover", || {
+        let since = u64::try_from(mono_us())
+            .unwrap_or(u64::MAX)
+            .saturating_sub(TAKEOVER_US.load(std::sync::atomic::Ordering::Relaxed));
+        format!("{call} us={since}")
+    });
+}
+
+/// What the `takeover` topic calls one effect of that batch.
+#[must_use]
+pub fn takeover_call(eff: &view_core::msg::Effect) -> String {
+    use view_core::msg::{Effect, RpcCall};
+    match eff {
+        Effect::Rpc(RpcCall::Takeover { steps }) => format!("takeover steps={}", steps.len()),
+        Effect::Rpc(RpcCall::UiAttach { surfaces, .. }) => {
+            format!("ui_attach ext={}", surfaces.len())
+        }
+        Effect::Rpc(RpcCall::ClaimStdoutTty) => "claim_stdout_tty".to_string(),
+        Effect::Rpc(_) => "rpc".to_string(),
+        Effect::Reply { .. } => "vim_enter reply".to_string(),
+        _ => "effect".to_string(),
+    }
+}
+
 /// What a dispatched message is to a keystroke still waiting for the
 /// screen, read off the message before the fold consumes it.
 ///
@@ -1221,6 +1283,11 @@ impl FeltLog {
     /// can be most of a second behind it -- recorded nowhere. Each line
     /// names the ids that arrived and the foreground each resolves to, which
     /// is what says whose pass it was.
+    ///
+    /// `arrived=` on a recolour line is when the reader thread folded the
+    /// batch that carried those ids ([`FOLDED_MS`]), against the line's own
+    /// stamp at the paint: read together they say whether a colour the user
+    /// waited for was sent late or held.
     fn note_highlight(&mut self, model: &view_core::model::Model, flushed: u128) {
         if self.highlight_closed {
             return;
@@ -1285,8 +1352,10 @@ impl FeltLog {
             self.emit(
                 "highlight",
                 &format!(
-                    "window text recoloured hl-ids={} was={was} after={since} added={colours}",
+                    "window text recoloured hl-ids={} was={was} after={since} \
+                     added={colours} arrived={}",
                     ids.len(),
+                    FOLDED_MS.load(std::sync::atomic::Ordering::Relaxed),
                 ),
             );
             self.text_hls = Some(ids);
