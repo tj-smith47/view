@@ -91,6 +91,7 @@ findings() {
       else if (substr(m, 1, 1) == "$") cat = "var"
       else if (index(m, "a GNU-only utility") == 1) cat = "util"
       else if (index(m, "a literal argument to") == 1) cat = "literal"
+      else if (index(m, "an awk over page text") == 1) cat = "locale"
       next
     }
     /^[0-9]+:/ { k = $0; sub(/:.*$/, "", k); print f ":" k ":" cat; next }
@@ -591,6 +592,35 @@ fi
 exit 0
 HISTORIC_GUARD
 expect 1 '.claude/hooks/validate-commands.sh:73:var .claude/hooks/validate-commands.sh:78:var .claude/hooks/validate-commands.sh:90:var .claude/hooks/validate-commands.sh:92:util' 'the guard revision this scan was written for, reporting its four spellings and nothing else'
+
+# ---------------------------------------------------------------------------
+# an awk over page text with no LC_ALL=C above it
+# ---------------------------------------------------------------------------
+# A consumer of lib/moment-grading.sh slices a page line with substr and
+# hands each byte to a regex. An awk whose matcher widens the subject while
+# substr counts bytes dies on the lead byte of a glyph the pages are drawn
+# with, so the whole file runs on bytes or none of it does.
+new_case
+write scripts/zz-grading.sh <<'GRADING'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$HERE/lib/moment-grading.sh"
+awk '{ print substr($0, 1, 1) }' README.md
+GRADING
+expect 1 'scripts/zz-grading.sh:4:locale' 'a consumer of the grading whose awk runs in whatever locale it is given'
+
+# the same file with the export above its awk, so that a rule reporting every
+# consumer rather than the unexported ones is a red case rather than a gate
+# nobody can satisfy
+new_case
+write scripts/zz-grading.sh <<'GRADING'
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+. "$HERE/lib/moment-grading.sh"
+awk '{ print substr($0, 1, 1) }' README.md
+GRADING
+expect 0 '' 'the same consumer with LC_ALL=C exported above its first awk'
 
 # ---------------------------------------------------------------------------
 # a scan root whose scripts/ holds nothing to grade. The hooks and the

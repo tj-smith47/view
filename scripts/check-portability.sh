@@ -144,6 +144,24 @@ $assigned"
     report "$file" "a GNU-only utility spelling; both userlands must accept it:
 $used"
   fi
+
+  # The grading in lib/moment-grading.sh slices a page line with substr and
+  # hands each byte to a regex, and an awk whose matcher widens the subject
+  # while substr counts bytes dies on the lead byte of a glyph the pages are
+  # drawn with -- which is what the macOS awk does to README.md's box rules.
+  # One export above the first awk holds every awk in the file to bytes; a
+  # prefix per command leaves the next awk to whoever writes it.
+  case "$body" in
+    (*lib/moment-grading.sh*)
+      first=$(printf '%s\n' "$body" | grep -E "${WORD}awk([[:space:]]|$)" | sed -n '1p' || true)
+      lc=$(printf '%s\n' "$body" |
+        grep -E '^[0-9]+:[[:space:]]*export[[:space:]]+LC_ALL=C([[:space:]]|$)' | sed -n '1p' || true)
+      if [ -n "$first" ] && { [ -z "$lc" ] || [ "${lc%%:*}" -gt "${first%%:*}" ]; }; then
+        report "$file" "an awk over page text with no LC_ALL=C exported above it; the grading this file loads slices bytes and a widening matcher dies on one:
+$first"
+      fi
+      ;;
+  esac
 done
 
 # Every non-comment line tagged with the function that encloses it, so a

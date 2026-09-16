@@ -16,6 +16,10 @@
 # Written to stock POSIX-ish bash: macOS ships /bin/bash 3.2.
 set -uo pipefail
 
+# The checker under test slices page lines with substr and matches the bytes,
+# so every awk on both sides of this run reads bytes rather than characters.
+export LC_ALL=C
+
 CHECKER=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -2415,6 +2419,26 @@ got
 $got" ;;
 esac
 report 'a percentage that is not the distance from the bar is a finding' "$mismatch"
+
+# ---------------------------------------------------------------------------
+# a page paragraph drawn in non-ASCII, which bites on the macOS awk
+# ---------------------------------------------------------------------------
+# The grading slices a page line with substr and hands each byte to a regex.
+# An awk whose matcher widens the subject while substr counts bytes aborts
+# on the lead byte of a star or a box rule, which README.md draws both of.
+# gawk in a UTF-8 locale does not, so this case is green on Linux either way
+# and bites on the stock bash 3.2 leg a macOS contributor runs.
+new_case
+cat >> "$CASE/$README" <<'MD'
+
+Rows marked ★ need code outside the Neovim process, so no plugin can
+provide them.
+
+    crates/
+    ├── view-core
+    └── view-tui
+MD
+expect 0 '' 'a page paragraph drawn with a star and box rules beside a graded figure'
 
 # ---------------------------------------------------------------------------
 # one walk over a line, for whoever reads it

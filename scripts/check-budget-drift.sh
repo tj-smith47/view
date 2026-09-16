@@ -17,6 +17,11 @@
 # needs a newer one is a gate that silently does not run for whoever has it.
 set -euo pipefail
 
+# The grading slices a page line with substr and hands each byte to a regex,
+# and an awk that widens the subject aborts on the lead byte of a box glyph
+# the pages draw with. Both sides read bytes, so the locale is C here.
+export LC_ALL=C
+
 # The cell vocabulary alone, printed and nothing else. check-style.sh's
 # doc-figure walk grades a figure in a Rust doc comment by whether the line
 # names a cell, and a second reader of budgets.toml would be a second answer

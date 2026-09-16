@@ -410,7 +410,12 @@ gawk, mawk and BSD awk: under `LC_ALL=C` a character is a lead byte plus its
 continuation bytes, so the walks drop the continuations
 (`gsub(/[\200-\277]/, "")`) and take the length of what is left. The `LC_ALL=C`
 is not decoration -- gawk in a UTF-8 locale refuses that range as a collation
-character and the walk dies rather than grading.
+character and the walk dies rather than grading. The three drift scripts
+export it beside their `set -e` for the other half of the same reason: the
+tokenizer in `scripts/lib/moment-grading.sh` slices a page line with `substr`
+and hands each byte to a regex, and the awk macOS ships aborts on the lead
+byte of a box glyph rather than matching it. `scripts/check-portability.sh`
+names a consumer of that tokenizer whose first awk runs above the export.
 
 A character is not a terminal column, and the measure has two stated limits
 because of it. A double-width glyph counts one and paints two, so a comment

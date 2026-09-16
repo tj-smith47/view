@@ -38,6 +38,10 @@
 # Written to stock POSIX-ish bash: macOS ships /bin/bash 3.2.
 set -uo pipefail
 
+# The checker under test slices page lines with substr and matches the bytes,
+# so every awk on both sides of this run reads bytes rather than characters.
+export LC_ALL=C
+
 CHECKER=""
 PLANTED=""
 while [ $# -gt 0 ]; do
