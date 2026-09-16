@@ -980,6 +980,11 @@ impl PumpShared {
         )
     }
 
+    fn staged(&self) -> bool {
+        let buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
+        buf.is_pending()
+    }
+
     fn take_damage(&self) -> Vec<UiEvent> {
         let mut buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
         buf.take()
@@ -1013,6 +1018,18 @@ impl DamagePump {
     #[must_use]
     pub fn take_damage(&self) -> Vec<UiEvent> {
         self.shared.take_damage()
+    }
+
+    /// Whether the reader has already staged a batch nobody has drained.
+    ///
+    /// For a caller dating a keystroke by the frame that answered it: a
+    /// batch standing here when the key is written to the engine was folded
+    /// before the engine had seen that key, so the frame it drives answers
+    /// something else. One lock acquisition, and never on the paint path --
+    /// [`take_damage`](Self::take_damage) is what that path calls.
+    #[must_use]
+    pub fn staged(&self) -> bool {
+        self.shared.staged()
     }
 }
 

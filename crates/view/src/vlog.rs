@@ -656,6 +656,33 @@ pub fn capturing() -> bool {
     matches!(SINK.get(), Some(Some(_)))
 }
 
+/// What a dispatched message is to a keystroke still waiting for the
+/// screen, read off the message before the fold consumes it.
+///
+/// The three things that dirty view's screen, which is what deciding
+/// whether a frame answered a key comes down to: the user's own input, a
+/// batch the engine sent, and everything else -- a timer, a notice, a reply
+/// on a chain of view's own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Dispatch {
+    Input,
+    EngineBatch,
+    Other,
+}
+
+impl Dispatch {
+    /// Which of the three a message is.
+    #[must_use]
+    pub fn of(msg: &view_core::msg::Msg) -> Self {
+        use view_core::msg::Msg;
+        match msg {
+            Msg::Key(_) | Msg::Paste(_) | Msg::Mouse(_) => Self::Input,
+            Msg::Redraw(_) => Self::EngineBatch,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// One input received and not yet answered by a frame.
 struct PendingInput {
     kind: &'static str,
@@ -668,6 +695,22 @@ struct PendingInput {
     /// because the gap it opens is routinely shorter than the millisecond
     /// every line is stamped in.
     received_us: u128,
+    /// Whether the screen was already owed a frame when this input was
+    /// dispatched, so the paint that follows cannot be read as this
+    /// input's own work.
+    dirty_before: bool,
+    /// Whether this input's own dispatch dirtied the screen: a key view
+    /// answers itself -- a line typed into the palette, a picker, a modal
+    /// -- is answered by the frame that paints that surface.
+    own_paint: bool,
+    /// Whether an engine batch dispatched after this input reached the
+    /// engine has been folded, which is what answers a key view forwards.
+    engine_answered: bool,
+    /// Whether the engine had a batch staged when this input was
+    /// dispatched. That batch was folded before the engine saw the key, so
+    /// the first one after it is passed over rather than read as its
+    /// answer.
+    staged_batch: bool,
 }
 
 /// How long past the first frame carrying the file's text the `highlight`
@@ -686,6 +729,15 @@ const HIGHLIGHT_WATCH: std::time::Duration = std::time::Duration::from_secs(10);
 /// Every method below returns on [`capturing`] first, so a session with no
 /// `VIEW_LOG` allocates nothing here, holds no input, and never reads a
 /// cell.
+///
+/// A key is closed by the first frame whose bytes reached the terminal
+/// *and* whose cause is that key's own dispatch -- either the fold of the
+/// key itself dirtied the screen, or an engine batch folded after the key
+/// reached the engine did. A timer, a notice and a batch the engine had
+/// already staged close nothing: on a login-shaped config a `:` was
+/// credited with a float about something else 25 ms before the palette was
+/// even requested, and the reading was the 38 ms of that float rather than
+/// the 64 ms the wire showed.
 #[derive(Default)]
 pub struct FeltLog {
     pending: Vec<PendingInput>,
@@ -712,7 +764,12 @@ impl FeltLog {
     /// the event arrived and the fold's own cost sits inside the wait the
     /// line reports. Every other `Msg` is a deliberate no-op: nothing else
     /// is a thing the user did.
-    pub fn note_input(&mut self, msg: &view_core::msg::Msg) {
+    pub fn note_input(
+        &mut self,
+        msg: &view_core::msg::Msg,
+        model: &view_core::model::Model,
+        staged: impl FnOnce() -> bool,
+    ) {
         use view_core::msg::Msg;
         if !capturing() {
             return;
@@ -743,6 +800,33 @@ impl FeltLog {
             detail,
             bytes,
             received_us: mono_us(),
+            dirty_before: model.dirty,
+            own_paint: false,
+            engine_answered: false,
+            staged_batch: staged(),
+        });
+    }
+
+    /// Writes the line for every input this frame is the answer to, and
+    /// holds the rest: a key the frame's own cause has nothing to do with
+    /// is still waiting, and is closed by the frame that does answer it or
+    /// by [`close_unanswered`](Self::close_unanswered).
+    fn close_answered(&mut self, flushed_us: u128) {
+        self.pending.retain(|input| {
+            if !input.own_paint && !input.engine_answered {
+                return true;
+            }
+            log(
+                input.kind,
+                &format!(
+                    "bytes={}{} received={} waited_us={}",
+                    input.bytes,
+                    input.detail,
+                    input.received_us / 1000,
+                    flushed_us.saturating_sub(input.received_us)
+                ),
+            );
+            false
         });
     }
 
@@ -768,16 +852,32 @@ impl FeltLog {
         }
     }
 
-    /// Writes the `palette` topic's two open-side lines off the state the
-    /// fold just produced.
+    /// What the message just dispatched owes the topics: the `palette`
+    /// topic's two open-side lines, and which pending input the next frame
+    /// answers.
     ///
-    /// Read after the fold, because what decides whether the typed `:`
-    /// reaches the palette rather than nvim's own one-line cmdline is
-    /// state: the feature's own switch, and whether a prompt overlay
-    /// already owns the same typed text ([`palette_shown`]).
-    pub fn note_palette(&mut self, model: &view_core::model::Model) {
+    /// Read after the fold, because both readings are of the state the fold
+    /// produced. What decides whether the typed `:` reaches the palette
+    /// rather than nvim's own one-line cmdline is state: the feature's own
+    /// switch, and whether a prompt overlay already owns the same typed
+    /// text ([`palette_shown`]). And what decides whether the next frame is
+    /// an answer to a key is what dirtied the screen -- the key's own fold,
+    /// or a batch the engine sent after it.
+    pub fn note_dispatched(&mut self, was: Dispatch, model: &view_core::model::Model) {
         if !capturing() {
             return;
+        }
+        match was {
+            Dispatch::Input => {
+                if let Some(input) = self.pending.last_mut() {
+                    input.own_paint = model.dirty && !input.dirty_before;
+                }
+            }
+            Dispatch::EngineBatch => self.note_engine_batch(),
+            // a timer, a notice or a reply on a chain of view's own: the
+            // frame it draws answers whatever asked for it rather than a
+            // key the user is waiting on
+            Dispatch::Other => {}
         }
         let open = palette_shown(model);
         if open == self.palette_open {
@@ -788,35 +888,43 @@ impl FeltLog {
         log("palette", if open { "open requested" } else { "closed" });
     }
 
+    /// One engine batch, against every input still waiting for a frame.
+    ///
+    /// The first batch after an input the engine had already staged one for
+    /// is passed over: it was folded before the engine had the key, so what
+    /// it paints is not that key's answer.
+    fn note_engine_batch(&mut self) {
+        for input in &mut self.pending {
+            if input.staged_batch {
+                input.staged_batch = false;
+            } else {
+                input.engine_answered = true;
+            }
+        }
+    }
+
     /// Every line the pass that just ended closes.
     ///
-    /// `painted` is whether that pass wrote a frame. Read after the write
-    /// rather than before it, so a wait reported here is a wait that
-    /// ended: the render and the frame's own single write both sit inside
-    /// it. The three `startup` milestones at the same call site are
-    /// stamped before the render instead, so a reading taken across the
-    /// two is one frame's paint apart.
-    pub fn note_pass(&mut self, model: &view_core::model::Model, painted: bool) {
+    /// `flushed` is whether that pass's frame reached the terminal --
+    /// `Term::draw_surface`'s own reading, not `model.dirty`: a pass that
+    /// rendered and found nothing to write put nothing in front of the
+    /// user, and a key closed by one is written up with a wait that ended
+    /// on a screen nobody saw change. Read after the write rather than
+    /// before it, so a wait reported here is a wait that ended: the render
+    /// and the frame's own single write both sit inside it. The three
+    /// `startup` milestones at the same call site are stamped before the
+    /// render instead, so a reading taken across the two is one frame's
+    /// paint apart.
+    pub fn note_pass(&mut self, model: &view_core::model::Model, flushed: bool) {
         if !capturing() {
             return;
         }
-        if !painted {
+        if !flushed {
             return;
         }
         let flushed_us = mono_us();
         let flushed = flushed_us / 1000;
-        for input in self.pending.drain(..) {
-            log(
-                input.kind,
-                &format!(
-                    "bytes={}{} received={} waited_us={}",
-                    input.bytes,
-                    input.detail,
-                    input.received_us / 1000,
-                    flushed_us.saturating_sub(input.received_us)
-                ),
-            );
-        }
+        self.close_answered(flushed_us);
         if self.palette_owes_paint && self.palette_open {
             self.palette_owes_paint = false;
             log("palette", "painted");
@@ -1497,23 +1605,97 @@ mod tests {
         );
     }
 
+    /// One key waiting for the screen, as the loop holds it.
+    fn waiting(staged_batch: bool) -> PendingInput {
+        PendingInput {
+            kind: "key",
+            detail: String::new(),
+            bytes: 1,
+            received_us: 5_000,
+            dirty_before: false,
+            own_paint: false,
+            engine_answered: false,
+            staged_batch,
+        }
+    }
+
     /// An input the loop answered with no frame is written out and
     /// released, so the next frame -- which can be seconds away and about
     /// something else -- cannot be reported as the wait that keystroke had.
     #[test]
     fn a_key_no_frame_answered_is_closed_and_not_left_for_a_later_flush() {
         let mut felt = FeltLog::default();
-        felt.pending.push(PendingInput {
-            kind: "key",
-            detail: String::new(),
-            bytes: 1,
-            received_us: 5_000,
-        });
+        felt.pending.push(waiting(false));
         felt.close_unanswered();
         assert!(
             felt.pending.is_empty(),
             "a key held past the pass that answered nothing is stamped by \
              whatever flushes next"
+        );
+    }
+
+    /// A frame nothing caused on the key's behalf leaves it waiting.
+    ///
+    /// The shipped reading this refuses: on a login-shaped config the `:`
+    /// was closed by a float 38 ms in, where the palette the user waited
+    /// for reached the screen at 64 ms.
+    #[test]
+    fn a_frame_the_key_did_not_cause_leaves_it_waiting() {
+        let mut felt = FeltLog::default();
+        felt.pending.push(waiting(false));
+        felt.close_answered(50_000);
+        assert_eq!(
+            felt.pending.len(),
+            1,
+            "a frame with no cause of the key's own closed it anyway"
+        );
+        felt.note_engine_batch();
+        felt.close_answered(64_000);
+        assert!(
+            felt.pending.is_empty(),
+            "the batch the engine sent after the key answered it and the \
+             frame it drove left the key open"
+        );
+    }
+
+    /// A batch the engine had already staged when the key was dispatched
+    /// was folded before the engine saw that key, so the frame it drives is
+    /// not the key's answer; the next batch is.
+    #[test]
+    fn a_batch_staged_before_the_key_closes_nothing() {
+        let mut felt = FeltLog::default();
+        felt.pending.push(waiting(true));
+        felt.note_engine_batch();
+        felt.close_answered(20_000);
+        assert_eq!(
+            felt.pending.len(),
+            1,
+            "a batch the engine staged before the key was written closed it"
+        );
+        felt.note_engine_batch();
+        felt.close_answered(64_000);
+        assert!(
+            felt.pending.is_empty(),
+            "the first batch folded after the key never closed it"
+        );
+    }
+
+    /// A key view answers itself -- the palette's own typed line, a picker,
+    /// a modal -- is closed by the frame that paints that surface, which is
+    /// the one the key's own fold dirtied the screen for.
+    #[test]
+    fn a_key_view_answers_itself_is_closed_by_its_own_frame() {
+        let mut model = view_core::model::Model::new();
+        let mut felt = FeltLog::default();
+        felt.pending.push(waiting(false));
+        model.dirty = true;
+        if let Some(input) = felt.pending.last_mut() {
+            input.own_paint = model.dirty && !input.dirty_before;
+        }
+        felt.close_answered(9_000);
+        assert!(
+            felt.pending.is_empty(),
+            "a key whose own fold drew the frame was left for a later one"
         );
     }
 
@@ -1524,14 +1706,23 @@ mod tests {
     fn the_felt_recorder_holds_nothing_and_reads_nothing_with_no_sink_open() {
         let model = view_core::model::Model::new();
         let mut felt = FeltLog::default();
-        felt.note_input(&view_core::msg::Msg::Key(view_core::msg::Key {
+        let key = view_core::msg::Msg::Key(view_core::msg::Key {
             notation: ":".to_string(),
-        }));
+        });
+        let asked = std::cell::Cell::new(false);
+        felt.note_input(&key, &model, || {
+            asked.set(true);
+            false
+        });
+        assert!(
+            !asked.get(),
+            "the engine's damage lock was taken for a log nobody opened"
+        );
         assert!(
             felt.pending.is_empty(),
             "an input held for a log nobody opened is an allocation per keystroke"
         );
-        felt.note_palette(&model);
+        felt.note_dispatched(Dispatch::of(&key), &model);
         felt.note_pass(&model, true);
         assert!(
             felt.text_hls.is_none(),

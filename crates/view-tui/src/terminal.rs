@@ -791,6 +791,11 @@ impl Term {
     /// and each such batch was a packet the far terminal of an ssh session
     /// had to parse and paint for a screen that did not change.
     ///
+    /// Returns whether this frame's bytes reached the terminal, which is
+    /// the reading a caller dating a keystroke by the screen needs: a pass
+    /// that rendered and wrote nothing put nothing in front of the user, so
+    /// it answered no key.
+    ///
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
@@ -799,7 +804,7 @@ impl Term {
         model: &Model,
         surface: &Surface,
         grid_damage: &GridDamage,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<bool> {
         self.queue_frame(model, surface, grid_damage)?;
         // the frame's single real write: everything queued above -- mouse
         // toggles, the sync bracket, the content diff, cursor escapes --
@@ -813,7 +818,8 @@ impl Term {
         // next frame's write -- and still ahead of TAG_FLUSH_START, so
         // neither lands inside the bracket that isolates the pty write.
         let mut frame = self.frame_buf.borrow_mut();
-        if !frame.is_empty() {
+        let wrote = !frame.is_empty();
+        if wrote {
             #[cfg(all(unix, feature = "bench-taps"))]
             if surface.carries_speculation() {
                 crate::tap::tap(crate::tap::TAG_SPECULATED_PAINT);
@@ -831,7 +837,7 @@ impl Term {
             #[cfg(all(unix, feature = "bench-taps"))]
             crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         }
-        Ok(())
+        Ok(wrote)
     }
 
     /// Queues one frame's whole byte stream into `frame_buf`, leaving the

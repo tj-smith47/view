@@ -1171,7 +1171,10 @@ pub fn run(
         // message happens to arrive. Steady-state behavior is unchanged --
         // each processed wakeup paints here on the next pass, immediately,
         // with no post-redraw silence timeout and no input-drain budget.
-        let painted = model.dirty;
+        // whether the frame reached the terminal, not whether one was
+        // owed: a pass that renders and finds nothing to write changed no
+        // cell, so it answered no keystroke (see `FeltLog::note_pass`)
+        let mut flushed = false;
         if model.dirty {
             // the three startup milestones a timeline needs and only this
             // point holds: the first pass with anything to draw at all, the
@@ -1203,14 +1206,14 @@ pub fn run(
             }
             let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
-            term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
+            flushed = term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
             model.dirty = false;
         }
         // read once per pass rather than inside the branch: an input the
         // fold answered with no frame has to be closed by the pass that
         // decided that, or the next frame -- about something else, seconds
         // later -- is written up as the wait it had
-        felt.note_pass(&model, painted);
+        felt.note_pass(&model, flushed);
         // resolved here rather than inside the wait because it is the one
         // deadline read off the model, which the wait does not hold
         let speculation = crate::speculate::next_expiry(&model, follow_ups.speculate);
@@ -1295,7 +1298,11 @@ pub fn run(
                         .saturating_add(u32::try_from(events.len()).unwrap_or(u32::MAX));
                 }
             }
-            felt.note_input(&msg);
+            felt.note_input(&msg, &model, || pump.staged());
+            // read before the fold takes the message: which of the three
+            // things that dirty the screen this dispatch was is what
+            // decides whether the next frame answered a pending key
+            let dispatched = crate::vlog::Dispatch::of(&msg);
             if let Some(code) = step(
                 &mut model,
                 &executor,
@@ -1306,7 +1313,7 @@ pub fn run(
             ) {
                 return Ok((model, code));
             }
-            felt.note_palette(&model);
+            felt.note_dispatched(dispatched, &model);
             // the rest of this batch was addressed to an engine that is
             // being replaced, and the replacement happens at the top of the
             // next pass; the residue drain below is what keeps the damage
