@@ -173,6 +173,33 @@ GRADE_COMMON_AWK='
       }
       return 0
     }
+    function unit_of(tok) {
+      if (tok == "ms") { return "ms" }
+      if (tok == "MB") { return "MB" }
+      if (tok == "us" || tok == "\xc2\xb5s") { return "us" }
+      return ""
+    }
+    # The words a page marks a figure as a difference with, which is what
+    # tells a gap between two readings from a reading of its own.
+    function difference_word(t) {
+      return (t ~ /^(more|less|fewer|behind|ahead|earlier|later|further|past)$/)
+    }
+    # The bound a clause names after the word marking a figure a difference:
+    # `past the 16 ms frame` writes the unit between the number and the word
+    # where `than the 1.25 bar` writes none. Scoped to what follows that
+    # word, because a sentence names the frame it sits inside before stating
+    # a gap that is not from it -- the staleness paragraph writes both.
+    function bound_after(t, a, b,   j, num) {
+      for (j = a; j <= b; j++) {
+        if (t[j] == "\001") { return "" }
+        num = clean(t[j])
+        if (num !~ /^-?[0-9]+(\.[0-9]+)?$/) { continue }
+        if (bounded(t, j, a)) { return num }
+        if (unit_of(clean(t[j + 1])) != "" \
+            && clean(t[j + 2]) ~ /^(bar|bars|budget|bound|frame)$/) { return num }
+      }
+      return ""
+    }
     # A ground that belongs to a whole line -- a fenced block, a ledger array,
     # a paragraph naming no cell -- is recorded against the line, so no
     # figure of it needs an index of its own.
@@ -315,12 +342,6 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       if (cell ~ /_us$/) { return "us" }
       return ""
     }
-    function unit_of(tok) {
-      if (tok == "ms") { return "ms" }
-      if (tok == "MB") { return "MB" }
-      if (tok == "us" || tok == "\xc2\xb5s") { return "us" }
-      return ""
-    }
     function seated(num, vals,   n, v, i, fmt) {
       fmt = "%." decimals(num) "f"
       n = split(vals, v, " ")
@@ -376,10 +397,11 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
           note(tl[i], ti[i], "excluded:" why)
           continue
         }
-        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/ \
-            && cell !~ /_delta_ms$/) {
-          why = "a difference the sentence states"
-        } else if (bounded(tk, i, a)) {
+        # A difference is recomputed by diffs() above, so it carries no
+        # ground here: one it could not recompute is a figure the grading
+        # missed, which is the sweep to report and not a rule to state.
+        if (difference_word(tail) && cell !~ /_delta_ms$/) { continue }
+        if (bounded(tk, i, a)) {
           why = "a bound, not a reading"
         } else if (cell == "" && rcell == "") {
           continue
@@ -389,6 +411,60 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
           why = "the bare-engine reading beside view own"
         } else { continue }
         note(tl[i], ti[i], "excluded:" why)
+      }
+    }
+    # The two readings a page publishes for one moment, view own first. A
+    # table row states them in two columns of one sentence and a paragraph
+    # states them in one, and the sentence writing the gap down states
+    # neither, so a full pair is held under the moment it belongs to.
+    function pair_scan(a, b,   i, num, nxt, n) {
+      n = 0
+      pair1 = ""
+      pair2 = ""
+      for (i = a; i <= b; i++) {
+        num = clean(tk[i])
+        if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
+        nxt = clean(tk[i + 1])
+        if (unit_of(nxt) == "") { continue }
+        if (bounded(tk, i, a)) { continue }
+        if (difference_word(clean(tk[i + 2]))) { continue }
+        n++
+        if (n == 1) { pair1 = num; continue }
+        pair2 = num
+        return 2
+      }
+      return n
+    }
+    # A figure a sentence states as a difference is recomputed from the two
+    # readings it is the difference of: view own and the engine paired with
+    # it, or view own and the bound the clause names. Left as a ground
+    # instead, it stood on three sentences with nothing to move it when a
+    # record run moved what it was taken from, which is what the percentage
+    # beside the bar was already recomputed against. A difference whose two
+    # operands are not both on the page is graded by nothing and goes to the
+    # sweep as unaccounted.
+    function diffs(a, b, key, npair, cell,   i, num, nxt, u, at, v, e, want, fmt) {
+      v = (npair == 2) ? pair1 : ((key in pairv) ? pairv[key] : "")
+      for (i = a; i <= b; i++) {
+        num = clean(tk[i])
+        if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
+        if (cell ~ /_delta_ms$/) { continue }
+        nxt = clean(tk[i + 1])
+        u = unit_of(nxt)
+        at = (u != "") ? i + 2 : i + 1
+        if (!difference_word(clean(tk[at]))) { continue }
+        e = bound_after(tk, at + 1, b)
+        if (e == "") { e = (npair == 2) ? pair2 : ((key in paire) ? paire[key] : "") }
+        if (v == "" || e == "") { continue }
+        want = (v + 0 > e + 0) ? v - e : e - v
+        fmt = "%." decimals(num) "f"
+        if (mode == "classify") {
+          note(tl[i], ti[i], "resolved:" ((key != "") ? key : "the pair its own sentence states"))
+          continue
+        }
+        if (sprintf(fmt, want) + 0 == num + 0) { continue }
+        printf "BUDGET DRIFT FAIL: moment-difference %s:%d: %s is stated as the difference between %s and %s, and those two stand %s apart\n",
+          page, tl[i], num, v, e, sprintf(fmt, want)
       }
     }
     # The bar a sentence names, as a ratio-shaped figure. The first one,
@@ -451,7 +527,7 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
     }
     function sentence(a, b, ufx,   i, text, cell, rcell, cls, nc, klass,
                       klass_one, fx, nf, fixn, fixture, num, nxt, tail,
-                      pick, rpick, rpct, at, want) {
+                      pick, rpick, rpct, at, want, key, npair) {
       if (b < a) { return }
       text = ""
       for (i = a; i <= b; i++) { text = text " " tk[i] }
@@ -459,6 +535,10 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       if (!(cell in cellseen)) { cell = "" }
       rcell = ratio_of(text)
       if (!(rcell in cellseen)) { rcell = "" }
+      key = (cell != "") ? cell : rcell
+      npair = pair_scan(a, b)
+      if (npair == 2 && key != "") { pairv[key] = pair1; paire[key] = pair2 }
+      diffs(a, b, key, npair, cell)
       if (cell == "" && rcell == "") {
         # The grounds in one place and in one order, so the most specific one
         # a figure meets is the one reported: `1.5 ms behind` is a difference
@@ -489,8 +569,7 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         if (pick > 0 || cell == "") { continue }
         if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
         tail = (unit_of(nxt) != "") ? clean(tk[i + 2]) : nxt
-        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/ \
-            && cell !~ /_delta_ms$/) { continue }
+        if (difference_word(tail) && cell !~ /_delta_ms$/) { continue }
         if (bounded(tk, i, a)) { continue }
         if (unit_of(nxt) != cell_unit(cell)) { continue }
         pick = i
@@ -659,7 +738,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
     function grade(   i, j, k, m, n, text, part, w, at, num, nxt, pct, ntok,
                      ngraded, ncell, cell, namedcells, cls, nc, klass, fx, nf,
                      fixn, klass_one, fixture, seen, ok, after, ofat, line,
-                     tok, cur, held) {
+                     tok, cur, held, dbound, want, fmt) {
       if (uc == 0) { return }
       text = ""
       for (i = 1; i <= uc; i++) { text = text " " ul[i] }
@@ -706,6 +785,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
         num = tok
         nxt = clean(tk[i + 1])
         pct = 0
+        dbound = ""
         after = nxt
         ofat = i + 1
         # a leading minus is part of the number: a diagnostic records one, and
@@ -719,9 +799,18 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
         # absolute this file records nothing for.
         else if (nxt ~ /^(ms|us|\xc2\xb5s|MB)$/) {
           if (cur == "" || cur !~ unit_suffix(nxt)) {
-            note(tl[i], ti[i],
-              "excluded:an absolute in a sentence naming no cell of its unit")
-            continue
+            # A row first column names the row subject, so a gap from a
+            # bound named in another cell of that row is that subject own
+            # distance from the bound. Read as an absolute naming no cell,
+            # the gap the flood row states stood with nothing to move it.
+            if (difference_word(clean(tk[i + 2])) && cell[1] ~ unit_suffix(nxt)) {
+              dbound = bound_after(tk, i + 3, ntok)
+            }
+            if (dbound == "") {
+              note(tl[i], ti[i],
+                "excluded:an absolute in a sentence naming no cell of its unit")
+              continue
+            }
           }
         }
         else if (bounded(tk, i, 1)) {
@@ -751,6 +840,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
         gpct[ngraded] = pct
         gat[ngraded] = tl[i]
         gidx[ngraded] = ti[i]
+        gbound[ngraded] = dbound
         gcell[ngraded] = (cur != "") ? cur : cell[1]
       }
       if (ngraded == 0) { uc = 0; return }
@@ -800,6 +890,18 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
           continue
         }
         held = seat[klass_one SUBSEP fixture SUBSEP gcell[i]]
+        if (gbound[i] != "") {
+          want = (held + 0 > gbound[i] + 0) ? held - gbound[i] : gbound[i] - held
+          fmt = "%." decimals(gnum[i]) "f"
+          if (mode == "classify") {
+            note(gat[i], gidx[i], "resolved:" gcell[i])
+            continue
+          }
+          if (sprintf(fmt, want) + 0 == gnum[i] + 0) { continue }
+          printf "BUDGET DRIFT FAIL: ratio-difference %s:%d: %s is stated as the distance from the %s bound this row names, and %s stands %s from it on %s %s\n",
+            page, gat[i], gnum[i], gbound[i], gcell[i], sprintf(fmt, want), klass_one, fixture
+          continue
+        }
         ok = gpct[i] ? seated_pct(gnum[i], held) : seated(gnum[i], held)
         # The cell this number resolves to and not the cells its value
         # happens to equal: a figure standing beside one id while equalling

@@ -503,6 +503,9 @@ fi
 # absolute carries its unit, and a bound carries the word bar. Every table is
 # read: a header word bought a whole table out of this check and out of the
 # sweep that grades its population at once, which is a bypass one edit wide.
+# A row's first column names the row's subject, so a gap from a bound named
+# in another cell of that row is that subject's own distance from the bound
+# rather than an absolute naming no cell of its unit.
 seats=""
 for class_file in "$baselines_dir"/*.toml; do
   [[ -f "$class_file" ]] || continue
@@ -766,7 +769,12 @@ fi
 # from. The first reading of a sentence is view's: these pages publish paired
 # numbers, and the bare-engine one beside it is an absolute this tree records
 # no cell for. A figure the sentence calls a difference (`0.6 ms more`) is
-# neither side's reading and is passed over.
+# neither side's reading: it is recomputed from the two readings it is the
+# difference of -- the pair its own sentence publishes, else the pair the
+# nearest table row above it published for the same moment, else view's
+# reading and the bound the clause after the difference word names. Left as a
+# ground, it stood with nothing to move it when a record run moved what it
+# was taken from.
 #
 # A moment has two cells where the pairing records both, and the unit picks
 # between them: a percentage or a bare multiplier resolves against the ratio

@@ -100,7 +100,10 @@ its row is renamed fails `every_unpaired_felt_exemption_names_a_shipped_row`.
   clause that word stands in, that the reading is `local`;
 - a figure on `README.md` or `docs/performance.md` states a moment the
   vocabulary names and equals no value that cell records on the class the
-  page declares, or stands on a page that declares no class at all.
+  page declares, or stands on a page that declares no class at all;
+- a figure any of the three pages states as a difference is not, at the
+  digits printed, the distance between the two readings it is the
+  difference of.
 
 The ratio rule is what naming a cell beside a number is for: the anchor rule
 is satisfied by any felt id, so a stale draw beside the right cell reads as
@@ -305,7 +308,7 @@ user-facing pages therefore carry no comparative at all -- naming the cell
 that would anchor one is what the identifier rule refuses there -- so they
 state moments and paired numbers, and the comparisons live in
 `docs/benchmarking.md` beside the cell that earns them.
-`scripts/check-budget-drift-cases.sh` grades all eleven rules and is what
+`scripts/check-budget-drift-cases.sh` grades all twelve rules and is what
 stops the check regressing to the identifier-only form. It runs the checker
 under its own interpreter, and three of its cases grade the scripts under
 `scripts/` for bash 3.2 portability (`.claude/rules/shell.md`) -- two that
@@ -325,14 +328,13 @@ through `scripts/lib/moment-grading.sh` in its classify mode:
 - **resolved** to a cell: perturbed by one digit, and the check has to fail
   naming that file and line.
 - **excluded** on a ground one of the check's own rules states -- the
-  bare-engine reading beside view's, a difference the sentence states, a
-  difference from the bar the sentence names, a share of a population the
-  sentence names, a bound, a unit no cell is recorded in, an absolute in a
-  sentence naming no cell of its unit, a fenced block, a ledger draw. Not
-  perturbed, and printed with its ground on every run: an exclusion a
-  reader never sees is a rule nobody can refuse, and every hand-kept
-  exemption this check has carried was refused the first time somebody
-  read it.
+  bare-engine reading beside view's, a difference from the bar the sentence
+  names, a share of a population the sentence names, a bound, a unit no cell
+  is recorded in, an absolute in a sentence naming no cell of its unit, a
+  fenced block, a ledger draw. Not perturbed, and printed with its ground on
+  every run: an exclusion a reader never sees is a rule nobody can refuse,
+  and every hand-kept exemption this check has carried was refused the first
+  time somebody read it.
 - **unaccounted**: equal to a seat, resolved by nothing and excluded by
   nothing. That is a recorded value the check grades nowhere, and the sweep
   fails naming it. A sentence stating no moment the vocabulary names and a
@@ -397,14 +399,10 @@ paired numbers and the bare-engine one beside it is an absolute no cell
 records, and a figure the sentence calls a difference is neither side's
 reading -- unless the cell is itself a difference, which is how the started
 mark is quoted and why those words are read as the moment rather than as a
-gap between two published readings. The grounds are one ordered list, so a
-figure the sentence calls a difference is reported as one whether or not the
-sentence names a moment: reported as a sentence naming none, the launch
-paragraph's own stated difference said the ground of its neighbours instead
-of its own. A page declaring no class states numbers taken on a host no
-reader is told about, so it is refused as ambiguous rather than resolved
-against a guess. Ungraded, seven recorded seats stood on those two pages,
-and perturbing one left the check at rc 0.
+gap between two published readings. A page declaring no class states numbers
+taken on a host no reader is told about, so it is refused as ambiguous rather
+than resolved against a guess. Ungraded, seven recorded seats stood on those
+two pages, and perturbing one left the check at rc 0.
 
 A moment has two cells where the pairing records both, and the unit the
 figure carries picks between them: a percentage or a bare multiplier the
@@ -422,6 +420,30 @@ between two published readings. Four percentages stood on those two pages
 outside the population entirely -- equal to no seat, so neither graded nor
 reportable -- and each of them is a recorded ratio a re-record leaves
 stale.
+
+A gap between two published readings is recomputed and never exempted.
+`1.5 ms behind`, `0.6 ms more` and `0.9 ms past the 16 ms frame` each stood
+on a ground saying the figure was no reading of a cell, which is true and is
+not what a reader needs from it: a record run moves what the gap was taken
+from and leaves the gap standing, with nothing to move it. So the figure is
+the distance between the two readings it is the difference of, at the digits
+printed, the way a percentage beside a bar is the distance from that bar.
+The first operand is view's own reading and the second is the engine's
+paired one, or the bound the clause after the difference word names -- the
+clause and not the sentence, because the staleness paragraph names the frame
+both readings sit inside before stating a gap that is not from it. The pair
+is the one the sentence itself publishes, else the one the nearest table row
+above it published for the same moment, since the sentence writing the gap
+down states neither. A difference whose two operands are not both on the
+page is read by nothing, so it is unaccounted and the sweep names it: a
+ground there would say the figure is no reading where what happened is that
+nothing read it.
+
+On `docs/benchmarking.md` a table row's first column names the row's
+subject, and a gap from a bound named in another cell of that row is that
+subject's own distance from the bound. The flood row's gap was read as an
+absolute in a sentence naming no cell of its unit, which is the ground the
+bare-engine column beside it earns and not the one this figure does.
 
 A percentage left over in a sentence that resolves a ratio and names a bar
 is the distance between the two, which is how both pages write a bar view

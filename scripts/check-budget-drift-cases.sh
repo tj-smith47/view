@@ -266,11 +266,14 @@ findings() {
     /^BUDGET DRIFT FAIL: ratio-drift / {
       c = $5; sub(/:$/, "", c); print "ratio:" c; next
     }
+    /^BUDGET DRIFT FAIL: ratio-difference / {
+      c = $5; sub(/:$/, "", c); print "ratio-difference:" c; next
+    }
     /^BUDGET DRIFT FAIL: ratio-scope / {
       c = $5; sub(/:$/, "", c); print "scope:" c; next
     }
     /^BUDGET DRIFT FAIL: ratio-default / { print "default"; next }
-    /^BUDGET DRIFT FAIL: moment-(drift|scope|default) / {
+    /^BUDGET DRIFT FAIL: moment-(drift|scope|default|difference) / {
       c = $5; sub(/:$/, "", c); print $4 ":" c; next
     }
     /^BUDGET DRIFT FAIL: why-drift / {
@@ -879,6 +882,34 @@ printf '\n| the key to the engine, no plugins (`input_path.key_to_rpc_p99_us` 70
 expect 1 'ratio:docs/benchmarking.md:12' \
   'a microsecond absolute no value that cell records rounds to'
 
+# a row first column names the row subject, so a gap from a bound named in
+# another cell of that row is that subject own distance from the bound. Read
+# as an absolute naming no cell of its unit, the gap the flood row states
+# stood with nothing to move it when a record run moved the cadence
+seat_flood_cadence() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[flood.minimal]
+cadence_p99_ms = 16.914409
+TOML
+}
+
+add_cadence_row() {
+  printf '\n| `flood.cadence_p99_ms` (`minimal`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | %s ms past the 16 ms frame |\n' \
+    "$1" >> "$CASE/$BENCH"
+}
+
+new_case
+seat_flood_cadence
+add_cadence_row 0.9
+expect 0 '' 'a gap from the bound its row names, at the distance the row subject stands from it'
+
+new_case
+seat_flood_cadence
+add_cadence_row 0.8
+expect 1 'ratio-difference:docs/benchmarking.md:12' \
+  'the same gap one digit off that distance'
+
 # ---------------------------------------------------------------------------
 # the two user-facing pages carry no identifier -- the identifier rule
 # refuses one there -- so the moment they state in words is what a figure
@@ -974,6 +1005,61 @@ seat_echo_ratio
 add_median_gap '14%'
 expect 1 'moment-drift:README.md:6' \
   'the same gap one digit off that distance'
+
+# ---------------------------------------------------------------------------
+# a figure stated as a difference is recomputed from the two readings it is
+# the difference of, the way a percentage is recomputed from the bar beside
+# it. Exempted on a ground of its own, three of them stood on the pages with
+# nothing to move them when a record run moved what they were taken from
+# ---------------------------------------------------------------------------
+# the pair in the sentence's own words, which is how README states the gap
+# at the screen a person waits for
+add_settled_gap() {
+  printf '\nThat screen arrives in 53.9 ms under view against 52.4 ms under Neovim: view %s ms behind.\n' \
+    "$1" >> "$CASE/$README"
+}
+
+new_case
+add_settled_gap 1.5
+expect 0 '' 'a difference equal to the distance between the two readings its own sentence states'
+
+new_case
+add_settled_gap 1.6
+expect 1 'moment-difference:README.md:6' \
+  'the same difference one digit off that distance'
+
+# the pair in the table row above, which is how docs/performance.md states
+# the same gap: the sentence that writes it down publishes neither reading
+seat_settled_user() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[startup.user]
+settled_ratio_p50 = 1.0287486403697355
+TOML
+}
+
+add_settled_row() {
+  cat >> "$CASE/$PERF" <<MD
+
+| | view | Neovim | on |
+|---|---|---|---|
+| screen ready | 53.9 ms | 52.4 ms | your config |
+
+Under your config view is $1 ms behind on screen ready.
+MD
+}
+
+new_case
+seat_settled_user
+add_settled_row 1.5
+expect 0 '' 'a difference equal to the distance between the two readings the row above publishes'
+
+new_case
+seat_settled_user
+add_settled_row 1.6
+expect 1 'moment-difference:docs/performance.md:15' \
+  'the same difference one digit off the row above it'
+
 
 # ---------------------------------------------------------------------------
 # a number resolves to one cell, not to the union of every cell its unit
@@ -1850,7 +1936,7 @@ $got"
 fi
 report 'a figure equal to a seat that the grading resolves and excludes alike is reported unaccounted' "$mismatch"
 
-# The grounds, one page carrying all four. The sweep prints each of them
+# The grounds, one page carrying all three. The sweep prints each of them
 # with the figure it stands for, because an exclusion a reader never sees is
 # a rule nobody can refuse -- and every hand-kept exemption this check has
 # carried was refused the first time somebody read it.
@@ -1858,7 +1944,7 @@ cat > "$CASE/$PERF" <<'MD'
 # Performance
 
 Under a plugin-free config, view worst keystroke in a thousand takes
-0.73 ms against Neovim 0.67 ms, which is 0.11 ms more than the 1.25 bar.
+0.73 ms against Neovim 0.67 ms, inside the 1.25 bar.
 
 ```toml
 max = 0.32
@@ -1873,8 +1959,7 @@ got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
   "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" |
   grep 'excluded:' | tr '\t' ' ')
 want="CLS $PERF 4 2 0.67 excluded:the bare-engine reading beside view own
-CLS $PERF 4 3 0.11 excluded:a difference the sentence states
-CLS $PERF 4 4 1.25 excluded:a bound, not a reading
+CLS $PERF 4 3 1.25 excluded:a bound, not a reading
 CLS $PERF 7 1 0.32 excluded:a fenced block"
 mismatch=""
 if [ "$got" != "$want" ]; then
@@ -1885,20 +1970,20 @@ $got"
 fi
 report 'each ground the grading states is reported with the figure it excludes' "$mismatch"
 
-# The grounds are one ordered list and the most specific one a figure meets
-# is what the sweep prints. A difference stated in a sentence that names no
-# moment took the ground of its neighbours instead of its own, which is a
-# reader told the wrong reason a figure was left alone.
+# A sentence that names no moment the vocabulary knows still publishes the
+# pair its own difference is taken from, so the difference resolves against
+# that pair and nothing else. Exempted on a ground instead, it stood with
+# nothing to move it when a record run moved the readings under it.
 cat > "$CASE/$PERF" <<'MD'
 # Performance
 
-That screen arrives in 53.9 ms under view against 52.4 ms under Neovim:
+That screen arrives in 1.40 ms under view against 0.67 ms under Neovim:
 view 0.73 ms behind.
 MD
 printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
 got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
   "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
-want="CLS $PERF 4 1 0.73 excluded:a difference the sentence states"
+want="CLS $PERF 4 1 0.73 resolved:the pair its own sentence states"
 mismatch=""
 if [ "$got" != "$want" ]; then
   mismatch="want
@@ -1906,7 +1991,7 @@ $want
 got
 $got"
 fi
-report 'a difference in a sentence naming no moment is excluded as the difference it is' "$mismatch"
+report 'a difference in a sentence naming no moment resolves against the pair that sentence publishes' "$mismatch"
 
 # A bar is a bound wherever the bar word stands. Read forward only, the
 # `a bar of 10%` both user pages write carried the ground of a unit instead
@@ -1984,6 +2069,63 @@ got
 $got"
 fi
 report 'a reading opening the clause after a bar is the reading it is' "$mismatch"
+
+# a sentence stating a difference the page publishes no pair for, which is a
+# figure the grading reaches no operands for: unaccounted, never excluded,
+# because a ground would say the figure is no reading when what happened is
+# that nothing graded it
+CASE="$WORK/population"
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under your config view is 0.73 ms behind on screen ready.
+MD
+printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
+printf 'dev-linux\tuser\tstartup.settled_ratio_p50\t1.0287486403697355\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 3 1 0.73 unaccounted"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a difference the page publishes no pair for is unaccounted, not excluded' "$mismatch"
+
+# the bound a clause names after the difference word, which is the second
+# operand where the page states a gap from a bar rather than from the engine.
+# The frame a sentence says both readings sit inside is not that bound: the
+# staleness paragraph names one before stating a gap that is not from it
+CASE="$WORK/population"
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+| | view | Neovim | on |
+|---|---|---|---|
+| how stale the screen ever gets | 1.57 ms | 0.95 ms | no plugins |
+
+Both are a fraction of the 16 ms budget, and view staleness is the larger of
+the two: 0.62 ms more of it.
+MD
+printf 'dev-linux\tminimal\tscroll.staleness_p99_ms\t1.5717\n' > "$CASE/seats.tsv"
+# a seat the engine column rounds to, since a figure equal to nothing
+# recorded is not one a reader could take for a reading
+printf 'dev-linux\tminimal\tpicker.first_page_p99_ms\t0.9501\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 5 1 1.57 resolved:scroll.staleness_p99_ms
+CLS $PERF 5 2 0.95 excluded:the bare-engine reading beside view own
+CLS $PERF 8 1 0.62 resolved:scroll.staleness_p99_ms"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a frame named before a difference is not the bound that difference is from' "$mismatch"
 
 # ---------------------------------------------------------------------------
 # a ground says the figure is no reading, never that the grading missed it
@@ -2242,6 +2384,10 @@ view_p99_ms = 0.7312
 TOML
 sed 's/| 0.73 ms | 0.67 ms |/| 0.73ms | 0.67 ms |/' "$CASE/$PERF" > "$CASE/$PERF.tmp"
 mv "$CASE/$PERF.tmp" "$CASE/$PERF"
+# A recomputed difference is resolved, so it is in the population whatever
+# its value equals, and the sweep has to edit it and see the check fail.
+printf '\nThat screen arrives in 53.9 ms under view against 52.4 ms under Neovim: view 1.5 ms behind.\n' \
+  >> "$CASE/$README"
 out=$("$BASH" "$SWEEP" --root "$CASE" --checker "$CHECKER" 2>&1)
 rc=$?
 mismatch=""
@@ -2302,6 +2448,29 @@ case "$out" in
 }") ;;
 esac
 report 'the sweep fails naming a figure that survives the edit its rule has to catch' "$mismatch"
+
+# the same path for a difference, whose recomputation is what the sweep edit
+# has to redden: the library under test still resolves the figure in
+# classify mode and grades nothing for it in grade mode, which is the state
+# a ground instead of a recomputation left every difference on the pages in.
+blinddiff="$WORK/blinddiff"
+mkdir -p "$blinddiff/lib"
+cp "$CHECKER" "$blinddiff/check-budget-drift.sh"
+sed 's@^        if (v == "" .. e == "") { continue }$@        if (mode != "classify") { continue }@' \
+  "$(cd "$(dirname "$CHECKER")" && pwd)/lib/moment-grading.sh" > "$blinddiff/lib/moment-grading.sh"
+out=$("$BASH" "$SWEEP" --root "$CASE" --checker "$blinddiff/check-budget-drift.sh" 2>&1)
+rc=$?
+mismatch=""
+if [ "$rc" != "1" ]; then
+  mismatch="want rc=1, got rc=$rc"
+fi
+case "$out" in
+  (*"$README:"*' 1.5 '*) ;;
+  (*) mismatch=$(printf '%sthe surviving difference was not named\n%s\n' \
+    "${mismatch:+$mismatch
+}" "$out") ;;
+esac
+report 'the sweep fails naming a difference whose recomputation the check does not make' "$mismatch"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

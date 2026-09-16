@@ -149,9 +149,9 @@ fi
 #   resolved   the check resolves it to a cell -- perturbed here, and the
 #              check has to fail naming the file and the line;
 #   excluded   a rule of the check says it is not a reading of a cell -- an
-#              engine reading, a stated difference, a bound, a unit no cell
-#              is recorded in, a fenced block, a ledger draw. Not perturbed,
-#              and printed with its ground so a reader can refuse one;
+#              engine reading, a bound, a unit no cell is recorded in, a
+#              fenced block, a ledger draw. Not perturbed, and printed with
+#              its ground so a reader can refuse one;
 #   unaccounted  equal to a seat, resolved by nothing and excluded by
 #              nothing. That is a recorded value the check grades nowhere,
 #              and this sweep fails on it.
