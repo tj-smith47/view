@@ -59,6 +59,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use view_core::sink::MsgSink;
 
@@ -141,6 +142,14 @@ pub(crate) struct DamageBuffer {
     flush_index: Option<usize>,
     grids: HashMap<u64, GridEpochs>,
     pending: bool,
+    /// When the fold that staged the `Flush` at `flush_index` ran, which is
+    /// the moment those bytes were read off the wire rather than the moment
+    /// a consumer got round to draining them. `None` while nothing has
+    /// reached a `Flush`.
+    flushed_at: Option<Instant>,
+    /// The reading [`take`](Self::take) handed its caller, kept so a caller
+    /// that drains and then asks can still be answered in the same lock.
+    drained_at: Option<Instant>,
 }
 
 impl DamageBuffer {
@@ -152,8 +161,13 @@ impl DamageBuffer {
     /// pending means a token is already in flight or will be re-sent by
     /// [`take`](Self::take)'s next caller).
     pub(crate) fn fold_batch(&mut self, events: impl IntoIterator<Item = UiEvent>) -> bool {
+        // one reading per batch, taken on the reader thread before the fold
+        // rather than after it: what a consumer asks this for is when the
+        // bytes arrived, and the fold's own cost sits inside the gap it is
+        // later read against
+        let folded_at = Instant::now();
         for ev in events {
-            self.fold_one(ev);
+            self.fold_one(ev, folded_at);
         }
         if self.pending {
             false
@@ -176,7 +190,7 @@ impl DamageBuffer {
         self.flush_index.map_or(0, |i| i + 1)
     }
 
-    fn fold_one(&mut self, ev: UiEvent) {
+    fn fold_one(&mut self, ev: UiEvent, folded_at: Instant) {
         let boundary = self.compaction_start();
         match &ev {
             UiEvent::GridResize { grid, .. } => {
@@ -264,6 +278,7 @@ impl DamageBuffer {
         });
         if is_flush {
             self.flush_index = Some(self.staged.len() - 1);
+            self.flushed_at = Some(folded_at);
         }
     }
 
@@ -274,15 +289,23 @@ impl DamageBuffer {
     /// has reached a `Flush` yet.
     pub(crate) fn take(&mut self) -> Vec<UiEvent> {
         self.pending = false;
+        self.drained_at = None;
         let Some(flush_idx) = self.flush_index else {
             return Vec::new();
         };
         self.flush_index = None;
+        self.drained_at = self.flushed_at.take();
         self.staged
             .drain(..=flush_idx)
             .filter(|s| s.alive)
             .map(|s| s.event)
             .collect()
+    }
+
+    /// When the fold that staged the batch the last [`take`](Self::take)
+    /// returned ran. `None` after a `take` that drained nothing.
+    pub(crate) fn drained_at(&self) -> Option<Instant> {
+        self.drained_at
     }
 
     /// Whether damage is currently staged and armed (a fold has happened
@@ -994,9 +1017,10 @@ impl PumpShared {
         buf.has_staged()
     }
 
-    fn take_damage(&self) -> Vec<UiEvent> {
+    fn take_damage(&self) -> (Vec<UiEvent>, Option<Instant>) {
         let mut buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
-        buf.take()
+        let events = buf.take();
+        (events, buf.drained_at())
     }
 }
 
@@ -1026,6 +1050,17 @@ impl DamagePump {
     /// never waits on the reader thread.
     #[must_use]
     pub fn take_damage(&self) -> Vec<UiEvent> {
+        self.shared.take_damage().0
+    }
+
+    /// The same drain, with the moment the reader thread folded the batch
+    /// being returned -- the moment those bytes were on the wire, which is
+    /// several milliseconds before a busy loop reaches them and is what a
+    /// caller dating engine traffic wants. `None` where the drain returned
+    /// nothing. One lock acquisition, as
+    /// [`take_damage`](Self::take_damage) is.
+    #[must_use]
+    pub fn take_damage_folded(&self) -> (Vec<UiEvent>, Option<Instant>) {
         self.shared.take_damage()
     }
 
@@ -1224,6 +1259,36 @@ mod tests {
         assert_eq!(buf.take(), Vec::<UiEvent>::new());
         buf.fold_batch(vec![UiEvent::Flush]);
         assert_eq!(buf.take(), vec![line(0, 0, 3), UiEvent::Flush]);
+    }
+
+    /// A drained batch is dated by the fold that staged its `Flush` -- when
+    /// the bytes were read off the wire -- rather than by the drain, which
+    /// is a loop pass or several later and is what a log writing the census
+    /// from its own clock reports instead. A drain that reached no `Flush`
+    /// dates nothing.
+    #[test]
+    fn a_drained_batch_carries_the_fold_that_staged_its_flush() {
+        let mut buf = DamageBuffer::default();
+        let before = Instant::now();
+        buf.fold_batch(vec![line(0, 0, 3), UiEvent::Flush]);
+        let after = Instant::now();
+        // a later fold reaching no `Flush` leaves the drained batch's own
+        // reading alone
+        buf.fold_batch(vec![line(1, 0, 3)]);
+        assert!(!buf.take().is_empty());
+        let folded = buf
+            .drained_at()
+            .expect("the drained batch carries no reading");
+        assert!(
+            folded >= before && folded <= after,
+            "the reading is not the fold's own"
+        );
+
+        assert_eq!(buf.take(), Vec::<UiEvent>::new());
+        assert!(
+            buf.drained_at().is_none(),
+            "a drain that reached no flush dated a batch anyway"
+        );
     }
 
     #[test]
