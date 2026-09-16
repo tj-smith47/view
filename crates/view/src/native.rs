@@ -283,9 +283,10 @@ impl NativeSession {
         // the order it arrives, so the frame the attach produces is drawn
         // with this takeover already in force -- a `cmdheight` or a
         // `laststatus` landing after it would cost a second frame showing
-        // the surface view had just taken. Both are written before the
-        // reply that lets nvim look at either ([`Model::takes_attach`], and
-        // `view::runtime`'s `dispatch` for the hold).
+        // the surface view had just taken. The batch goes out before the
+        // reply that frees nvim, so it is in force when nvim reads that
+        // reply, and the attach goes out behind it ([`Model::takes_attach`],
+        // and `view::runtime`'s `dispatch` for the split).
         let mut effects = batched(effects);
         effects.extend(model.takes_attach().map(Effect::Rpc));
         // and last of all: `nvim_ui_set_option` is about a UI on this
@@ -491,7 +492,11 @@ mod tests {
     /// the takeover costs the user is the round trips it spends there, not
     /// the calls it performs. Every call the batch can carry rides one
     /// request; the attach and the tty claim cannot ride it (neither has a
-    /// lua entry point) and follow it as their own notifications.
+    /// lua entry point) and follow it as their own notifications, behind
+    /// the answer `view::runtime`'s `dispatch` writes between the two
+    /// halves -- which
+    /// `the_vim_enter_answer_is_written_between_the_takeover_and_the_attach`
+    /// pins.
     #[test]
     fn the_takeover_travels_as_one_round_trip_ahead_of_the_attach() {
         let mut session = NativeSession::all_enabled(7, None);
@@ -511,8 +516,8 @@ mod tests {
         );
         assert!(
             matches!(effects.first(), Some(Effect::Rpc(RpcCall::Takeover { .. }))),
-            "the takeover leads, so the attach draws its first frame with \
-             the surfaces already view's: {effects:?}"
+            "the takeover leads, so it is in force before the answer frees \
+             nvim and before the attach draws its first frame: {effects:?}"
         );
         let loose: Vec<&Effect> = effects
             .iter()
@@ -636,10 +641,11 @@ mod tests {
         );
     }
 
-    /// The UI goes on last, behind every takeover call, so the one frame the
-    /// attach produces is drawn with the surfaces already taken -- and the
-    /// option that only exists once a UI does goes on behind the attach
-    /// itself, where nvim will accept it.
+    /// The UI goes on last, behind every takeover call and behind the
+    /// answer `dispatch` writes between them, so the one frame the attach
+    /// produces is drawn with the surfaces already taken -- and the option
+    /// that only exists once a UI does goes on behind the attach itself,
+    /// where nvim will accept it.
     #[test]
     fn the_attach_closes_the_takeover_and_the_stdout_claim_closes_the_attach() {
         let mut session = NativeSession::all_enabled(7, None);

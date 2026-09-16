@@ -36,7 +36,7 @@ use crate::speculate::{
 use std::sync::mpsc;
 use std::time::Instant;
 use view_core::model::Model;
-use view_core::msg::{Effect, ExitInfo, Msg};
+use view_core::msg::{Effect, ExitInfo, Msg, RpcCall};
 use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
 use view_core::update::update;
 use view_engine::handle::EngineHandle;
@@ -134,7 +134,8 @@ pub struct FollowUps<'a> {
 /// `msg_rx` whenever it fires after. It runs after `update()`'s own effects
 /// so the first-run notice reads claims `update()` has already recorded,
 /// and the answer to nvim's blocking `VimEnter` request is held back until
-/// behind it (see the hold below).
+/// behind that follow-up's takeover batch and ahead of its attach (see the
+/// hold below).
 ///
 /// The theme-cache follow-up sits at the same seam for the same reason, and
 /// before the native one because it has nothing to do with the native
@@ -162,13 +163,13 @@ pub(crate) fn dispatch<E: EngineOps>(
     }
     let mut flow = Flow::Continue;
     let effects = update(model, msg);
-    // the answer to nvim's `VimEnter` request travels behind everything
-    // this pass sends, because nvim drains what it has parked on the
-    // channel as soon as that answer frees it: the attach and the takeover
-    // are already queued when it looks, so the settled screen is drawn
-    // once, with the surfaces view's, rather than drawn for a UI that is
-    // not there and drawn again for the one that arrives after startup
-    // (`view_engine::process`'s startup chunk pumps that drain).
+    // the answer to nvim's `VimEnter` request is kept aside here and
+    // written below, between the takeover batch and the attach: the
+    // takeover is in force before nvim reads the answer, so the settled
+    // screen is still drawn once with the surfaces view's, and the attach
+    // behind the answer is no longer a call nvim works through before it
+    // can read that answer -- the hook's own wait for a UI applies it
+    // either way (`view_engine::process`'s `late_attach_cmd`).
     let (held, effects): (Vec<Effect>, Vec<Effect>) =
         if matches!(stage, crate::native::Stage::VimEnter) {
             effects
@@ -241,45 +242,66 @@ pub(crate) fn dispatch<E: EngineOps>(
     // blocked inside `VimEnter`, so each one's own place in that block is
     // what the `takeover` topic records
     let taking_over = matches!(stage, crate::native::Stage::VimEnter) && crate::vlog::capturing();
-    if flow == Flow::Continue {
+    let mut native = if flow == Flow::Continue {
         let native = follow_ups.native.follow_up(model, stage);
         if taking_over {
             crate::vlog::takeover_opened();
         }
-        for eff in native {
-            let call = taking_over.then(|| crate::vlog::takeover_call(&eff));
-            match executor.run(eff) {
-                Flow::Continue => {}
-                other => {
-                    flow = other;
-                    break;
-                }
-            }
-            if let Some(call) = call {
-                crate::vlog::log_takeover(&call);
-            }
-        }
+        native
+    } else {
+        Vec::new()
+    };
+    // split at the first call the batch could not swallow, which is the
+    // attach: the batch leads so it is in force before nvim reads the
+    // answer, and the attach follows the answer so nvim is not working
+    // through it, the tty claim and whatever they queue before it can read
+    // that answer
+    let attach_on = native
+        .iter()
+        .position(|eff| !matches!(eff, Effect::Rpc(RpcCall::Takeover { .. })))
+        .unwrap_or(native.len());
+    let attach = native.split_off(attach_on);
+    if flow == Flow::Continue {
+        flow = run_in_wire_order(executor, native, taking_over);
     }
     // whatever those passes decided: nvim is blocked inside the request
     // this answers, and a pass that stopped early still owes the answer --
     // an editor left waiting inside `VimEnter` has no way out but view's
     // own exit
-    for eff in held {
-        let call = taking_over.then(|| crate::vlog::takeover_call(&eff));
-        let held_flow = executor.run(eff);
+    let answered = run_in_wire_order(executor, held, taking_over);
+    // and the answer's own verdict is this pass's whenever the passes ahead
+    // of it had none: a connection that died between the last effect and
+    // the reply is a lost engine the loop has to hear about, where a
+    // `Continue` returned over it sends the cutover on to replay the resize
+    // and every buffered key into a corpse
+    if flow == Flow::Continue {
+        flow = answered;
+    }
+    if flow == Flow::Continue {
+        flow = run_in_wire_order(executor, attach, taking_over);
+    }
+    flow
+}
+
+/// Runs `effects` in the order they go on the wire, stamping each on the
+/// `takeover` topic while `stamping`, and stops at the first effect whose
+/// flow is not `Continue`.
+fn run_in_wire_order<E: EngineOps>(
+    executor: &Executor<E>,
+    effects: Vec<Effect>,
+    stamping: bool,
+) -> Flow {
+    for eff in effects {
+        let call = stamping.then(|| crate::vlog::takeover_call(&eff));
+        let flow = executor.run(eff);
         if let Some(call) = call {
             crate::vlog::log_takeover(&call);
         }
-        // and the answer's own verdict is this pass's whenever the passes
-        // ahead of it had none: a connection that died between the last
-        // effect and the reply is a lost engine the loop has to hear about,
-        // where a `Continue` returned over it sends the cutover on to
-        // replay the resize and every buffered key into a corpse
-        if flow == Flow::Continue {
-            flow = held_flow;
+        if flow != Flow::Continue {
+            return flow;
         }
     }
-    flow
+    Flow::Continue
 }
 
 /// The loop's running fold of both sides of the engine connection into the
@@ -1730,19 +1752,21 @@ mod tests {
         assert_eq!(ops.calls.borrow()[0], "input(x)");
     }
 
-    /// The answer nvim's `VimEnter` waits for is written behind the takeover
-    /// and the attach, never ahead of them.
+    /// The answer nvim's `VimEnter` waits for is written between the
+    /// takeover batch and the attach, never ahead of the batch and never
+    /// behind the attach.
     ///
-    /// nvim stops draining the channel the moment that answer reaches it and
-    /// leaves whatever came with it parked, so the engine's startup chunk
-    /// pumps the queue once the answer frees it
-    /// (`view_engine::process`'s `late_attach_cmd`). What is already parked
-    /// then is in force for the one redraw the startup does of the settled
-    /// screen; anything written after the answer misses that redraw and
-    /// costs a second one, which is the whole of the launch cost this
-    /// ordering removes.
+    /// nvim stops draining the channel the moment that answer reaches it
+    /// and leaves whatever came with it parked, so the engine's startup
+    /// chunk pumps the queue once the answer frees it
+    /// (`view_engine::process`'s `late_attach_cmd`). The takeover is read
+    /// ahead of the answer and so in force for the one redraw the startup
+    /// does of the settled screen. The attach behind the answer is applied
+    /// by that pump instead, rather than being one more call nvim works
+    /// through -- with everything the call queues behind it -- before it
+    /// can read the answer at all.
     #[test]
-    fn the_vim_enter_answer_is_written_behind_the_takeover_and_the_attach() {
+    fn the_vim_enter_answer_is_written_between_the_takeover_and_the_attach() {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
@@ -1761,31 +1785,38 @@ mod tests {
                 token: ReplyToken { msgid: 3 },
             }),
         );
-        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(flow, Flow::Continue);
         let calls = ops.calls.borrow().clone();
-        let at = |prefix: &str| {
+        let at = |needle: &str| {
             calls
                 .iter()
-                .position(|call| call.starts_with(prefix))
-                .unwrap_or_else(|| panic!("{prefix} must be called, got {calls:?}"))
+                .position(|call| call.starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle} never went out: {calls:?}"))
         };
-        let takeover = at("disable_claimants(");
-        let attach = at("ui_attach(");
         let reply = at("reply(3,");
         assert!(
-            takeover < attach && attach < reply,
-            "the takeover, then the attach, then the answer, got {calls:?}"
+            at("register_mappings(") < reply,
+            "the takeover batch leads, so it is in force before the answer \
+             frees nvim: {calls:?}"
+        );
+        assert!(
+            reply < at("ui_attach("),
+            "the answer must be written before the attach, or nvim executes \
+             the attach inside its own `VimEnter` block: {calls:?}"
+        );
+        assert!(
+            at("ui_attach(") < at("claim_stdout_tty()"),
+            "the stdout claim closes the attach: {calls:?}"
         );
     }
 
     /// A connection that dies on the answer alone is a lost engine, not a
     /// pass that went fine.
     ///
-    /// The answer travels behind every other effect of its pass, so the
-    /// engine can die after the last of them and before it. Read as
-    /// `Continue`, that verdict sends `run_cutover` on to replay the
-    /// resize and every buffered key into a dead engine before anything
-    /// notices it is gone.
+    /// The answer travels behind the takeover batch, so the engine can die
+    /// after that batch and before it. Read as `Continue`, that verdict
+    /// sends `run_cutover` on to replay the resize and every buffered key
+    /// into a dead engine before anything notices it is gone.
     #[test]
     fn a_vim_enter_answer_that_cannot_be_written_is_a_lost_engine() {
         let ops = FakeOps::default();
@@ -1809,9 +1840,16 @@ mod tests {
         );
         let calls = ops.calls.borrow().clone();
         assert!(
-            calls.iter().any(|call| call.starts_with("ui_attach(")),
+            calls
+                .iter()
+                .any(|call| call.starts_with("register_mappings(")),
             "the effects ahead of the answer must all have gone out, or this \
              pin is about a pass that failed somewhere else: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.starts_with("ui_attach(")),
+            "an attach written into a connection the answer just found dead: \
+             {calls:?}"
         );
         assert_eq!(
             flow,

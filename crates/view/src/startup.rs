@@ -167,9 +167,9 @@ pub enum AttachFailure {
 
 /// Spawns `nvim --embed --headless`, whose own startup hooks ride the
 /// spawn's `--cmd` arguments ([`EngineConfig::with_late_attach`]).
-/// Deliberately does not attach: the UI goes on after nvim's own
-/// `VimEnter`, from the loop
-/// ([`view_core::model::Model::takes_attach`]). Deliberately does not call
+/// Deliberately does not attach: the UI goes on from the loop, on the
+/// `VimEnter` pass, behind the takeover batch and the answer that frees
+/// nvim ([`view_core::model::Model::takes_attach`]). Deliberately does not call
 /// [`Engine::start_pump`] either: only `main.rs` does, once the buffered
 /// pre-attach window has been fully replayed (see [`attach_in_background`]'s
 /// doc comment for why).
@@ -1854,9 +1854,9 @@ mod tests {
     /// `runtime::run`'s loop: a config that sources quickly fires `VimEnter`
     /// into the presink, and nothing else in the process resolves that. It
     /// travels ahead of the answer for the reason
-    /// [`crate::runtime::dispatch`] holds that answer back: nvim reads what
-    /// view has queued as soon as the answer frees it, so the takeover and
-    /// the attach are already there to be read.
+    /// [`crate::runtime::dispatch`] holds that answer back: the takeover is
+    /// in force by the time nvim reads the answer, and the attach follows
+    /// the answer.
     #[test]
     fn a_presink_vim_enter_hands_the_surfaces_over_before_answering_nvim() {
         use view_core::msg::{EngineRequest, ReplyToken};
