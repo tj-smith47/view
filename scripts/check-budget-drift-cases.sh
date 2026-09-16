@@ -1731,10 +1731,11 @@ mkdir -p "$CASE"
 plant_pages
 printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
 printf 'dev-linux\tminimal\tpicker.first_page_p99_ms\t0.6689\n' >> "$CASE/seats.tsv"
-got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="population" \
-  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
-want='POP 4 0.73 echo.view_p99_ms
-POP 8 0.73 echo.view_p99_ms'
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" |
+  grep 'resolved:' | tr '\t' ' ')
+want="CLS $PERF 4 1 0.73 resolved:echo.view_p99_ms
+CLS $PERF 8 1 0.73 resolved:echo.view_p99_ms"
 mismatch=""
 if [ "$got" != "$want" ]; then
   mismatch="want
@@ -1761,9 +1762,10 @@ The harness pins the terminal at 120x40 for every cell, and `dev-linux` is the d
 MD
 printf 'dev-linux\tminimal\techo.view_p99_ms\t1.43\n' > "$CASE/bench-seats.tsv"
 printf 'dev-linux\tminimal\tpicker.first_page_p99_ms\t1.4341\n' >> "$CASE/bench-seats.tsv"
-got=$(awk -v page="$BENCH" -v fallback="dev-linux" -v mode="population" \
-  "$RATIO_GRADE_AWK" "$CASE/bench-seats.tsv" "$CASE/$BENCH" | tr '\t' ' ')
-want='POP 7 1.43 echo.view_p99_ms'
+got=$(awk -v page="$BENCH" -v fallback="dev-linux" -v mode="classify" \
+  "$RATIO_GRADE_AWK" "$CASE/bench-seats.tsv" "$CASE/$BENCH" |
+  grep 'resolved:' | tr '\t' ' ')
+want="CLS $BENCH 7 1 1.43 resolved:echo.view_p99_ms"
 mismatch=""
 if [ "$got" != "$want" ]; then
   mismatch="want
@@ -1772,6 +1774,68 @@ got
 $got"
 fi
 report 'the population names the cell a benchmarking figure stands beside, not another cell whose seat it equals' "$mismatch"
+
+# A figure equal to a recorded seat that the grading neither resolves nor
+# excludes. The sentence states a moment, carries the unit that moment is
+# recorded in and names the fixture, and the class records that cell on
+# another fixture -- so the seat lookup misses and the grading returns
+# having graded nothing. The sweep fails on this verdict: a recorded value
+# the check grades nowhere goes stale in silence at the next record run,
+# and finding one is the whole reason the sweep walks a population wider
+# than what the check resolves.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under a plugin-free config, view worst keystroke in a thousand takes
+0.73 ms.
+MD
+printf 'dev-linux\theavy\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 4 1 0.73 unaccounted"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a figure equal to a seat that the grading resolves and excludes alike is reported unaccounted' "$mismatch"
+
+# The grounds, one page carrying all four. The sweep prints each of them
+# with the figure it stands for, because an exclusion a reader never sees is
+# a rule nobody can refuse -- and every hand-kept exemption this check has
+# carried was refused the first time somebody read it.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under a plugin-free config, view worst keystroke in a thousand takes
+0.73 ms against Neovim 0.67 ms, which is 0.11 ms more than the 1.25 bar.
+
+```toml
+max = 0.32
+```
+MD
+printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tpicker.first_page_p99_ms\t0.6689\n' >> "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tscroll.staleness_p99_ms\t0.1132\n' >> "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tflood.cadence_p99_ms\t1.2451\n' >> "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tmemory.pss_mb\t0.3247\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" |
+  grep 'excluded:' | tr '\t' ' ')
+want="CLS $PERF 4 2 0.67 excluded:the bare-engine reading beside view own
+CLS $PERF 4 3 0.11 excluded:a difference the sentence states
+CLS $PERF 4 4 1.25 excluded:a bound, not a reading
+CLS $PERF 7 1 0.32 excluded:a fenced block"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'each ground the grading states is reported with the figure it excludes' "$mismatch"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

@@ -10,14 +10,25 @@
 # and once a re-seat made three bare-Neovim readings equal a cell they entered
 # its population as figures the check was expected to grade, which the check
 # was right not to -- the reading beside view's own belongs to the engine and
-# no cell records it.
+# no cell records it. Asking it only which figures it resolves is the
+# opposite error, and it is the one that costs the sweep its job: a
+# population that is by construction what the checker grades can never find a
+# recorded value the checker grades nothing for, which is the blind spot the
+# sweep exists to report.
+#
+# So the grading answers for every figure, in three verdicts: it resolves the
+# figure to a cell, it excludes the figure on a ground one of its own rules
+# states, or it reaches neither and the figure equals a recorded seat, which
+# is unaccounted for and is a finding.
 #
 # Sets MOMENT_CLASS_AWK and MOMENT_GRADE_AWK. The grading program takes the
 # seat table as its first input and the page as its second, with -v page (the
 # name to report), -v fallback (the class the page declares) and -v mode:
 # `grade` prints one finding per figure whose page and seat disagree,
-# `population` prints `POP<TAB>line<TAB>value<TAB>cell` for every figure the
-# grading resolves to a seat that agrees.
+# `classify` prints
+# `CLS<TAB>site<TAB>line<TAB>index<TAB>value<TAB>resolved:<cell>` --
+# or `excluded:<ground>`, or `unaccounted` -- for every figure of the
+# population, where the index counts the figure tokens of that line.
 
 # The class a unit resolves against when it names none. The page declares it
 # in its own words and this reads that declaration, because a default kept in
@@ -39,16 +50,109 @@ MOMENT_CLASS_AWK='
     }
   }'
 
-MOMENT_GRADE_AWK='
+# What a figure is, whether a figure is a value this tree records at all, and
+# the walk that prints one verdict per figure. Shared by the three programs
+# below and, through them, by the sweep: the sweep tokenized a line for
+# itself once, and a multiplier with its suffix glued on (`0.30x`) was a
+# figure to the grading and not to the sweep, which numbered every figure
+# after it on that line one place early and perturbed the wrong one.
+GRADE_COMMON_AWK='
+    # The pipe and the brackets are cleaned off here and nowhere else: a
+    # grading sees them replaced by the split it does itself, and a walk that
+    # reads the line as written sees `|1.43` and `[19.57,` whole.
+    function clean(t) {
+      gsub(/[][`*~()>|]/, "", t)
+      sub(/[,;:.]+$/, "", t)
+      return t
+    }
+    function decimals(num) {
+      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
+    }
+    # A decimal, or a number carrying the suffix a multiplier or a percentage
+    # is written with. An integer without one is not a figure: it is a count,
+    # a year or a bar, and the digit edit the sweep makes has no last place
+    # to land on.
+    function figure(t) {
+      return (t ~ /^-?[0-9]+\.[0-9]+[x%]?$/ || t ~ /^-?[0-9]+[x%]$/)
+    }
+    function bare(t) {
+      sub(/[x%]$/, "", t)
+      return t
+    }
+    function site() {
+      return (page == "") ? file : page
+    }
+    # Any seat of any class, because a page quotes the class its own unit
+    # names and the classification has to know a recorded value when it sees
+    # one wherever it stands.
+    function seat_any(num,   i, fmt) {
+      fmt = "%." decimals(num) "f"
+      for (i = 1; i <= nany; i++) {
+        if (sprintf(fmt, anyval[i]) + 0 == num + 0) { return 1 }
+      }
+      return 0
+    }
+    function note(at, idx, verdict) {
+      if (idx > 0) { verdict_of[at SUBSEP idx] = verdict }
+    }
+    # A ground that belongs to a whole line -- a fenced block, a ledger array,
+    # a paragraph naming no cell -- is recorded against the line, so no
+    # figure of it needs an index of its own.
+    function note_line(at, ground) {
+      if (ground_of[at] == "") { ground_of[at] = ground }
+    }
+    function classify_report(   ln, i, m, w, line, tok, idx, v) {
+      for (ln = 1; ln <= lastline; ln++) {
+        if (!(ln in scoped)) { continue }
+        line = raw[ln]
+        gsub(/\|/, " ", line)
+        gsub(/\. /, " ", line)
+        m = split(line, w, /[[:space:]]+/)
+        idx = 0
+        for (i = 1; i <= m; i++) {
+          tok = clean(w[i])
+          if (!figure(tok)) { continue }
+          idx++
+          v = verdict_of[ln SUBSEP idx]
+          # The ground of the line outranks a token exclusion and never a
+          # resolution: a sample inside a fence states no moment, and
+          # reporting it as a sentence that names none says the ground of
+          # every other figure in the block rather than its own.
+          if (ground_of[ln] != "" && v !~ /^resolved/) {
+            v = "excluded:" ground_of[ln]
+          }
+          # The population is what the checker resolves and what a reader
+          # could mistake for a reading: a figure equal to no seat of any
+          # class states nothing a record run can leave standing, and a
+          # ground for it is a line of audit nobody has to read.
+          if (v !~ /^resolved/ && !seat_any(bare(tok))) { continue }
+          if (v == "") { v = "unaccounted" }
+          printf "CLS\t%s\t%d\t%d\t%s\t%s\n", site(), ln, idx, tok, v
+        }
+      }
+    }
+'
+
+MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
     FNR == NR {
       split($0, f, "\t")
       if (f[3] == "") { next }
       seat[f[1] SUBSEP f[2] SUBSEP f[3]] = f[4]
       cellseen[f[3]] = 1
+      anyval[++nany] = f[4]
       if (index(fixtures[f[1] SUBSEP f[3]], " " f[2] " ") == 0) {
         fixtures[f[1] SUBSEP f[3]] = fixtures[f[1] SUBSEP f[3]] " " f[2] " "
       }
       next
+    }
+    # A fenced block is a sample of a file, never a reading of a cell, and
+    # the whole page is in scope otherwise.
+    mode == "classify" {
+      raw[FNR] = $0
+      scoped[FNR] = 1
+      lastline = FNR
+      if ($0 ~ /^[[:space:]]*```/) { fenced = !fenced }
+      else if (fenced) { note_line(FNR, "a fenced block") }
     }
     function classes_of(text,   i, n, name, named) {
       n = split("controlled-linux dev-macos dev-linux gh-macos gh-linux", name, " ")
@@ -100,14 +204,6 @@ MOMENT_GRADE_AWK='
       if (tok == "us" || tok == "\xc2\xb5s") { return "us" }
       return ""
     }
-    function clean(t) {
-      gsub(/[`*~()>]/, "", t)
-      sub(/[,;:.]+$/, "", t)
-      return t
-    }
-    function decimals(num) {
-      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
-    }
     function seated(num, vals,   n, v, i, fmt) {
       fmt = "%." decimals(num) "f"
       n = split(vals, v, " ")
@@ -116,13 +212,44 @@ MOMENT_GRADE_AWK='
       }
       return 0
     }
+    # The grounds these rules state for every figure of a sentence except the
+    # one they resolve. They are the same tests the pick loop above makes, in
+    # the same order, said out loud: a reader of the sweep report accepts an
+    # exclusion or does not, and cannot do either with a figure dropped in
+    # silence.
+    function grounds(a, b, pick, cell,   i, num, nxt, tail, why) {
+      for (i = a; i <= b; i++) {
+        if (i == pick || ti[i] == 0) { continue }
+        num = clean(tk[i])
+        nxt = clean(tk[i + 1])
+        tail = (unit_of(nxt) != "") ? clean(tk[i + 2]) : nxt
+        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/) {
+          why = "a difference the sentence states"
+        } else if (nxt ~ /^(bar|bars|budget|bound|frame)$/) {
+          why = "a bound, not a reading"
+        } else if (unit_of(nxt) != cell_unit(cell)) {
+          why = "a unit no cell of that moment is recorded in"
+        } else if (pick > 0 && i > pick) {
+          why = "the bare-engine reading beside view own"
+        } else { continue }
+        note(tl[i], ti[i], "excluded:" why)
+      }
+    }
     function sentence(a, b, ufx,   i, text, cell, cls, nc, klass, klass_one,
                       fx, nf, fixn, fixture, num, nxt, tail, held, pick) {
       if (b < a) { return }
       text = ""
       for (i = a; i <= b; i++) { text = text " " tk[i] }
       cell = moment_of(text)
-      if (cell == "" || !(cell in cellseen)) { return }
+      if (cell == "" || !(cell in cellseen)) {
+        if (mode == "classify") {
+          for (i = a; i <= b; i++) {
+            note(tl[i], ti[i],
+              "excluded:the sentence states no moment the vocabulary names")
+          }
+        }
+        return
+      }
       # The first reading of the sentence is view own: these pages publish
       # paired numbers, and the bare-engine one beside it is an absolute
       # this tree records no cell for. A figure the sentence calls a
@@ -138,6 +265,7 @@ MOMENT_GRADE_AWK='
         pick = i
         break
       }
+      if (mode == "classify") { grounds(a, b, pick, cell) }
       if (pick == 0) { return }
       num = clean(tk[pick])
       cls = classes_of(text)
@@ -168,8 +296,8 @@ MOMENT_GRADE_AWK='
       # grading picked: the engine reading beside it is a figure no rule
       # grades, and a population that took it by value alone reported the
       # check as blind to a number it was never resolving.
-      if (mode == "population") {
-        if (seated(num, held)) { printf "POP\t%d\t%s\t%s\n", tl[pick], num, cell }
+      if (mode == "classify") {
+        note(tl[pick], ti[pick], "resolved:" cell)
         return
       }
       if (!seated(num, held)) {
@@ -191,7 +319,12 @@ MOMENT_GRADE_AWK='
         gsub(/\|/, " ", line)
         gsub(/\. /, " \001 ", line)
         m = split(line, w, /[[:space:]]+/)
-        for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
+        for (j = 1; j <= m; j++) {
+          ntok++
+          tk[ntok] = w[j]
+          tl[ntok] = uno[i]
+          ti[ntok] = figure(clean(w[j])) ? ++fcount[uno[i]] : 0
+        }
       }
       ufx = fixtures_of(text)
       s0 = 1
@@ -207,22 +340,30 @@ MOMENT_GRADE_AWK='
     /^[[:space:]]*$/ { grade(); next }
     /^[[:space:]]*([-*+][[:space:]]|[0-9]+[.)][[:space:]])/ { grade() }
     { uc++; ul[uc] = $0; uno[uc] = FNR }
-    END { grade() }
+    END { grade(); if (mode == "classify") { classify_report() } }
 '
 
 # The grading of docs/benchmarking.md, where a number takes the nearest cell
 # id before it in its own sentence. Same two inputs and same modes as the
 # program above, with -v fallback the class that page declares.
-RATIO_GRADE_AWK='
+RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
     FNR == NR {
       split($0, f, "\t")
       if (f[3] == "") { next }
       seat[f[1] SUBSEP f[2] SUBSEP f[3]] = f[4]
       cellseen[f[3]] = 1
+      anyval[++nany] = f[4]
       if (index(fixtures[f[1] SUBSEP f[3]], " " f[2] " ") == 0) {
         fixtures[f[1] SUBSEP f[3]] = fixtures[f[1] SUBSEP f[3]] " " f[2] " "
       }
       next
+    }
+    mode == "classify" {
+      raw[FNR] = $0
+      scoped[FNR] = 1
+      lastline = FNR
+      if ($0 ~ /^[[:space:]]*```/) { fenced = !fenced }
+      else if (fenced) { note_line(FNR, "a fenced block") }
     }
     function classes_of(text,   i, n, name, named) {
       n = split("controlled-linux dev-macos dev-linux gh-macos gh-linux", name, " ")
@@ -243,14 +384,6 @@ RATIO_GRADE_AWK='
       if (text ~ /15-plugin|`heavy`|[.]heavy/) { named = named " heavy " }
       if (text ~ /login-shaped|full login|`user`|[.]user/) { named = named " user " }
       return named
-    }
-    function clean(t) {
-      gsub(/[`*~()>]/, "", t)
-      sub(/[,;:.]+$/, "", t)
-      return t
-    }
-    function decimals(num) {
-      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
     }
     function seated(num, vals,   n, v, i, fmt) {
       fmt = "%." decimals(num) "f"
@@ -308,14 +441,25 @@ RATIO_GRADE_AWK='
         cell[ncell] = part[i]
         namedcells = namedcells " " part[i] " "
       }
-      if (ncell == 0) { uc = 0; return }
+      if (ncell == 0) {
+        if (mode == "classify") {
+          for (i = 1; i <= uc; i++) { note_line(uno[i], "the unit names no cell id") }
+        }
+        uc = 0
+        return
+      }
       ntok = 0
       for (i = 1; i <= uc; i++) {
         line = ul[i]
         gsub(/\|/, " \001 ", line)
         gsub(/\. /, " \001 ", line)
         m = split(line, w, /[[:space:]]+/)
-        for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
+        for (j = 1; j <= m; j++) {
+          ntok++
+          tk[ntok] = w[j]
+          tl[ntok] = uno[i]
+          ti[ntok] = figure(clean(w[j])) ? ++fcount[uno[i]] : 0
+        }
       }
       ngraded = 0
       cur = ""
@@ -337,17 +481,32 @@ RATIO_GRADE_AWK='
         # bare-engine reading names no cell of view own and states an
         # absolute this file records nothing for.
         else if (nxt ~ /^(ms|us|\xc2\xb5s|MB)$/) {
-          if (cur == "" || cur !~ unit_suffix(nxt)) { continue }
+          if (cur == "" || cur !~ unit_suffix(nxt)) {
+            note(tl[i], ti[i],
+              "excluded:an absolute in a sentence naming no cell of its unit")
+            continue
+          }
         }
-        else if (nxt ~ /^(s|min|GB|bar|bars|budget|bound|frame)$/) { continue }
+        else if (nxt ~ /^(bar|bars|budget|bound|frame)$/) {
+          note(tl[i], ti[i], "excluded:a bound, not a reading")
+          continue
+        }
+        else if (nxt ~ /^(s|min|GB)$/) {
+          note(tl[i], ti[i], "excluded:a unit no cell is recorded in")
+          continue
+        }
         # a percentage OF something is a share of a population, not a ratio
         # stated as its distance from 1
-        if (pct && after == "of") { continue }
+        if (pct && after == "of") {
+          note(tl[i], ti[i], "excluded:a share of a population, not a ratio")
+          continue
+        }
         sub(/x$/, "", num)
         ngraded++
         gnum[ngraded] = num
         gpct[ngraded] = pct
         gat[ngraded] = tl[i]
+        gidx[ngraded] = ti[i]
         gcell[ngraded] = (cur != "") ? cur : cell[1]
       }
       if (ngraded == 0) { uc = 0; return }
@@ -391,15 +550,19 @@ RATIO_GRADE_AWK='
         fixture = fixn[1]
       }
       for (i = 1; i <= ngraded; i++) {
-        if (!((klass_one SUBSEP fixture SUBSEP gcell[i]) in seat)) { continue }
+        if (!((klass_one SUBSEP fixture SUBSEP gcell[i]) in seat)) {
+          note(gat[i], gidx[i],
+            "excluded:" klass_one " records no seat for " gcell[i] " on " fixture)
+          continue
+        }
         held = seat[klass_one SUBSEP fixture SUBSEP gcell[i]]
         ok = gpct[i] ? seated_pct(gnum[i], held) : seated(gnum[i], held)
         # The cell this number resolves to and not the cells its value
         # happens to equal: a figure standing beside one id while equalling
         # another id seat is a reading of the first, and a population that
         # named the second perturbed it as a value nothing here grades.
-        if (mode == "population") {
-          if (ok) { printf "POP\t%d\t%s\t%s\n", gat[i], gnum[i], gcell[i] }
+        if (mode == "classify") {
+          note(gat[i], gidx[i], "resolved:" gcell[i])
           continue
         }
         if (!ok) {
@@ -416,7 +579,7 @@ RATIO_GRADE_AWK='
     }
     /^[[:space:]]*$/ { grade(); next }
     { uc++; ul[uc] = $0; uno[uc] = FNR }
-    END { grade() }
+    END { grade(); if (mode == "classify") { classify_report() } }
 '
 
 # The grading of the figures a [[shortfall]] states in its why, which resolve
@@ -424,13 +587,15 @@ RATIO_GRADE_AWK='
 # table and budgets.toml, with -v file the name to report and -v TRIALS_BAND
 # the fraction a draw may sit from its seat. In population mode it reports
 # the why figures alone.
-WHY_GRADE_AWK='
+WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
     FNR == NR {
       split($0, f, "\t")
       if (f[3] == "") { next }
       seat[f[1] SUBSEP f[2] SUBSEP f[3]] = f[4]
+      anyval[++nany] = f[4]
       next
     }
+    mode == "classify" { raw[FNR] = $0; lastline = FNR }
     function value(line,   v) {
       v = line
       sub(/^[a-z_]+ = /, "", v)
@@ -454,14 +619,6 @@ WHY_GRADE_AWK='
         }
       }
       return named
-    }
-    function clean(t) {
-      gsub(/[`*~()>]/, "", t)
-      sub(/[,;:.]+$/, "", t)
-      return t
-    }
-    function decimals(num) {
-      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
     }
     function seated(num, vals,   n, v, i, fmt) {
       fmt = "%." decimals(num) "f"
@@ -502,7 +659,7 @@ WHY_GRADE_AWK='
     function sentence_verdict(text, at,   j, k, m, w, tok, cls, nc, klass,
                               fx, nf, fixn, klass_one, fixture, cellid, nids,
                               idname, idat, isid, num, nxt, pct, after, held,
-                              ok, bar, want) {
+                              ok, bar, want, idx) {
       cls = classes_of(text)
       nc = split(cls, klass, " ")
       if (nc > 1) { return }
@@ -531,6 +688,7 @@ WHY_GRADE_AWK='
       for (j = 1; j <= m; j++) {
         if (isid[j]) { continue }
         num = clean(w[j])
+        idx = figure(num) ? ++fidx : 0
         nxt = clean(w[j + 1])
         pct = 0
         after = nxt
@@ -539,9 +697,19 @@ WHY_GRADE_AWK='
           pct = 1; after = clean(w[j + 2])
         }
         else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
-        else if (nxt ~ /^(s|min|GB|bar|bars|budget|bound|frame)$/) { continue }
+        else if (nxt ~ /^(bar|bars|budget|bound|frame)$/) {
+          note(at, idx, "excluded:a bound, not a reading")
+          continue
+        }
+        else if (nxt ~ /^(s|min|GB)$/) {
+          note(at, idx, "excluded:a unit no cell is recorded in")
+          continue
+        }
         # a percentage OF something is a share of a population
-        if (pct && after == "of") { continue }
+        if (pct && after == "of") {
+          note(at, idx, "excluded:a share of a population, not a ratio")
+          continue
+        }
         sub(/x$/, "", num)
         if (nids == 0) {
           printf "BUDGET DRIFT FAIL: why-figure %s/%s.%s: %s:%d states %s%s in a sentence that names no cell, so the figure is attributed to nothing and a record run leaves it standing\n",
@@ -552,8 +720,8 @@ WHY_GRADE_AWK='
         for (k = 1; k <= nids; k++) { if (idat[k] < j) { want = idname[k] } }
         held = seat[klass_one SUBSEP fixture SUBSEP want]
         ok = pct ? seated_pct(num, held, bar) : seated(num, held)
-        if (mode == "population") {
-          if (ok) { printf "POP\t%d\t%s\t%s\n", at, num, want }
+        if (mode == "classify") {
+          note(at, idx, "resolved:" want)
           continue
         }
         if (!ok) {
@@ -562,10 +730,26 @@ WHY_GRADE_AWK='
         }
       }
     }
-    function flush(   n, i, sent) {
+    # The figures of a why are numbered over the whole line, and the count is
+    # taken beside the grading rather than inside it: a sentence the grading
+    # returns from early -- two classes named, two fixtures -- graded none of
+    # its figures and numbered none either, which moved every figure after it
+    # on the line and hung a bound ground on a multiplier.
+    function count_figures(text,   j, m, w, c) {
+      m = split(text, w, /[[:space:]]+/)
+      c = 0
+      for (j = 1; j <= m; j++) { if (figure(clean(w[j]))) { c++ } }
+      return c
+    }
+    function flush(   n, i, sent, base) {
       if (why == "" || scen == "" || metr == "" || class == "") { why = ""; return }
       n = split(why, sent, /\. /)
-      for (i = 1; i <= n; i++) { sentence_verdict(sent[i], whyat) }
+      base = 0
+      for (i = 1; i <= n; i++) {
+        fidx = base
+        sentence_verdict(sent[i], whyat)
+        base = base + count_figures(sent[i])
+      }
       why = ""
     }
     # The draws a record run took are a field rather than a sentence, and
@@ -575,9 +759,9 @@ WHY_GRADE_AWK='
     # can grade it. The band is the loader own.
     function check_trials(line, at,   body, n, t, i, num, off, span) {
       # A draw is graded against a band around its entry seat rather than
-      # against a site, so the sweep moves it out of that band itself and
-      # asks this program for nothing.
-      if (mode == "population") { return }
+      # against a site, so the classification states the ground and the sweep
+      # moves it out of that band in a leg of its own.
+      if (mode == "classify") { return }
       body = line
       sub(/^trials = /, "", body)
       gsub(/[][]/, "", body)
@@ -608,11 +792,24 @@ WHY_GRADE_AWK='
     }
     !block { next }
     /^accepted = / { acc = value($0); next }
-    /^trials = / { check_trials($0, FNR); next }
+    /^trials = / {
+      if (mode == "classify") {
+        scoped[FNR] = 1
+        note_line(FNR, "a trials draw, graded against the band of its entry")
+      }
+      check_trials($0, FNR)
+      next
+    }
     /^scenario = / { scen = value($0); next }
     /^fixture = / { fixt = value($0); next }
     /^metric = / { metr = value($0); next }
     /^class = / { class = value($0); next }
-    /^why = / { why = value($0); whyat = FNR; flush(); next }
-    END { flush() }
+    /^why = / {
+      why = value($0)
+      whyat = FNR
+      if (mode == "classify") { scoped[FNR] = 1 }
+      flush()
+      next
+    }
+    END { flush(); if (mode == "classify") { classify_report() } }
 '

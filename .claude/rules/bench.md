@@ -310,24 +310,41 @@ whose verdict a contributor never sees.
 
 The cases file grades the rules; `scripts/check-budget-drift-sweep.sh`
 grades the population. It copies the tracked tree, builds the seat table,
-perturbs every figure the check resolves to a cell -- on the three pages and
-in every `why` -- by one digit, and takes every member of every `trials`
-array and moves it outside its entry's band, requiring the check to fail
-naming that file and line either way. The edit follows the rule that grades
-the figure: a quoted reading is graded against the seat it equals, where a
-draw is graded against a band around one. Which figures those are is asked
-of the grading itself, through `scripts/lib/moment-grading.sh` in its
-population mode, and is never taken from the seat table a second time: a
-value is not what a figure resolves to. A seat equals the bare-engine
-reading beside view's as readily as view's own, and three of those entered
-the population the day a re-seat made them equal a cell; a number standing
-beside one cell id equals a sibling cell's value often enough, and the
-population named it for both. The class a page declares is the default a
-unit falls back to, never a filter on what is graded: a population scoped to
-it left the gh-linux, gh-macos, dev-macos and controlled-linux figures the
-pages quote ungraded, and the check resolves each of them where its own unit
-names it. A figure that survives is one its own rule does not reach, which
-is what two rounds of hand-listed sites left behind. It runs as
+and takes every figure on the three pages and in every `why` that equals a
+recorded seat of any class -- glued suffixes included, so `5.2x` and `9.0%`
+are figures and are numbered as such. Each of them gets one of three
+verdicts, from the grading itself through `scripts/lib/moment-grading.sh`
+in its classify mode:
+
+- **resolved** to a cell: perturbed by one digit, and the check has to fail
+  naming that file and line. A `trials` member is a draw rather than a
+  quote, so it is moved outside its entry's band instead, on the same
+  requirement.
+- **excluded** on a ground one of the check's own rules states -- the
+  bare-engine reading beside view's, a difference the sentence states, a
+  bound, a unit no cell is recorded in, an absolute in a sentence naming no
+  cell of its unit, a sentence stating no moment, a unit naming no cell id,
+  a fenced block, a ledger draw. Not perturbed, and printed with its ground
+  on every run: an exclusion a reader never sees is a rule nobody can
+  refuse, and every hand-kept exemption this check has carried was refused
+  the first time somebody read it.
+- **unaccounted**: equal to a seat, resolved by nothing and excluded by
+  nothing. That is a recorded value the check grades nowhere, and the sweep
+  fails naming it.
+
+Both halves of that population were once the whole of it, and each failed in
+its own direction. Taken by value alone it held three bare-Neovim readings
+the day a re-seat made them equal a cell, and the check was right not to
+grade them; a number standing beside one cell id equals a sibling cell's
+value often enough, and the population named it for both. Taken as the
+figures the grading resolves -- the fix for that -- it could not hold an
+unaccounted figure at all, which is the one thing the sweep exists to find.
+The class a page declares is the default a unit falls back to, never a
+filter on what is graded: a population scoped to it left the gh-linux,
+gh-macos, dev-macos and controlled-linux figures the pages quote ungraded,
+and the check resolves each of them where its own unit names it. A figure
+that survives its perturbation is one its own rule does not reach, which is
+what two rounds of hand-listed sites left behind. It runs as
 `task drift:sweep` and as its own CI step rather than inside `task ci`,
 because it re-runs the whole check once per figure: two minutes against the
 check's own second.
