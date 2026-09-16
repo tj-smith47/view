@@ -60,8 +60,9 @@ own parens do not balance, or which carries an odd number of quotes -- is
 read directly, because the reader is inside a substitution there and reads
 the comment as code. Balanced parens in such a comment are left alone: the
 count comes back and the substitution ends where it was written to, which is
-why the shipped comments at `check-budget-drift.sh:337-340` are not
-findings.
+why the shipped comment naming two sidecars in `check-budget-drift.sh` is not
+a finding -- named rather than cited by line, because a line number in a rule
+goes stale at the next edit to the file it points into.
 
 Five legs in `scripts/check-budget-drift-cases.sh` enforce it over every file
 under `scripts/` whose shebang names bash or `sh` -- the remote-test fixtures

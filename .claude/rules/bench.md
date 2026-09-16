@@ -310,28 +310,27 @@ whose verdict a contributor never sees.
 
 The cases file grades the rules; `scripts/check-budget-drift-sweep.sh`
 grades the population. It copies the tracked tree, builds the seat table,
-takes every figure on the three pages and in every `why` that equals a
-recorded seat of any class -- outside fenced blocks and the deltas a
-sentence states as differences -- and perturbs each by one digit, and takes
-every member of every `trials` array and moves it outside its entry's band,
-requiring the check to fail naming that file and line either way. The edit
-follows the rule that grades the figure: a quoted reading is graded against
-the seat it equals, where a draw is graded against a band around one. The
-class a page declares is the default a unit falls back to, never a filter on
-what is graded: a population scoped to it left the gh-linux, gh-macos,
-dev-macos and controlled-linux figures the pages quote ungraded, and the
-sweep shared that blind spot with nothing, since the check resolves each of
-them where its own unit names it. On the two user-facing pages the
-population is not the figures that equal a seat but the ones the moment
-grading resolves, asked of that grading itself through
-`scripts/lib/moment-grading.sh` in its population mode: one reading per
-sentence or table row is view's, the bare-engine reading beside it is a
-figure no cell records, and a value-shaped population reported three of
-those engine readings as ungraded the day a re-seat made them equal a cell.
-A figure that survives is a recorded value nothing grades, which is what two
-rounds of hand-listed sites left behind. It runs as `task drift:sweep` and
-as its own CI step rather than inside `task ci`, because it re-runs the
-whole check once per figure: two minutes against the check's own second.
+perturbs every figure the check resolves to a cell -- on the three pages and
+in every `why` -- by one digit, and takes every member of every `trials`
+array and moves it outside its entry's band, requiring the check to fail
+naming that file and line either way. The edit follows the rule that grades
+the figure: a quoted reading is graded against the seat it equals, where a
+draw is graded against a band around one. Which figures those are is asked
+of the grading itself, through `scripts/lib/moment-grading.sh` in its
+population mode, and is never taken from the seat table a second time: a
+value is not what a figure resolves to. A seat equals the bare-engine
+reading beside view's as readily as view's own, and three of those entered
+the population the day a re-seat made them equal a cell; a number standing
+beside one cell id equals a sibling cell's value often enough, and the
+population named it for both. The class a page declares is the default a
+unit falls back to, never a filter on what is graded: a population scoped to
+it left the gh-linux, gh-macos, dev-macos and controlled-linux figures the
+pages quote ungraded, and the check resolves each of them where its own unit
+names it. A figure that survives is one its own rule does not reach, which
+is what two rounds of hand-listed sites left behind. It runs as
+`task drift:sweep` and as its own CI step rather than inside `task ci`,
+because it re-runs the whole check once per figure: two minutes against the
+check's own second.
 
 The two user-facing pages are graded by the moment they name, because the
 identifier rule leaves them nothing else to resolve against. The felt

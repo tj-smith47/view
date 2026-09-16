@@ -1632,14 +1632,16 @@ fi
 report 'the comment walk carries a substitution across the lines it spans, reading at least one line inside every two it enters' "$short"
 
 # The margin the floor above has today, so a fresh clone can read the
-# headroom without re-deriving it: measured 2026-09-15, the shipped tree
-# reads 148 per 100 opens, deleting scripts/check-budget-drift.sh alone (the
-# heaviest single file, 525 of the 1161 carried lines against 35 of the 783
-# opens) leaves 85, and the floor sits at 50 -- 35 points under that
-# deletion. The case below reddens once the shipped figure drifts more than
-# 10 points from what the tree now measures, which is the tell that this
-# comment is stale rather than the tree.
-shipped_ratio=148
+# headroom without re-deriving it: measured 2026-09-16, the shipped tree
+# reads 104 per 100 opens, deleting scripts/check-style.sh alone (the
+# heaviest single file, 424 of the 869 carried lines against 41 of the 832
+# opens) leaves 56, and the floor sits at 50 -- 6 points under that
+# deletion. The ratio fell from 148 when the drift check's two longest awk
+# programs moved into a sourced variable, where no substitution is open
+# around them. The case below reddens once the shipped figure drifts more
+# than 10 points from what the tree now measures, which is the tell that
+# this comment is stale rather than the tree.
+shipped_ratio=104
 if [ -n "${ratio:-}" ]; then
   drift=$((ratio - shipped_ratio))
   [ "$drift" -lt 0 ] && drift=$((-drift))
@@ -1741,6 +1743,35 @@ got
 $got"
 fi
 report 'the population holds the view reading of a row and not the engine reading beside it, both seated' "$mismatch"
+
+# The same defect on the page that names identifiers, where the value alone
+# cannot tell two cells apart: both seats below round to 1.43, so a
+# population taken by value named this figure for the picker cell as well as
+# for the one it stands beside, and named the engine column reading for both.
+# The grading resolves it to the id in its own table cell and resolves the
+# column beside it to nothing.
+cat > "$CASE/$BENCH" <<'MD'
+# Benchmarking
+
+The harness pins the terminal at 120x40 for every cell, and `dev-linux` is the default class of this page.
+
+| What | view | bare Neovim | |
+|---|---|---|---|
+| Keystroke to cell change, steady typing, no plugins (p99) | `echo.view_p99_ms` 1.43 ms | 1.43 ms | a paired reading |
+MD
+printf 'dev-linux\tminimal\techo.view_p99_ms\t1.43\n' > "$CASE/bench-seats.tsv"
+printf 'dev-linux\tminimal\tpicker.first_page_p99_ms\t1.4341\n' >> "$CASE/bench-seats.tsv"
+got=$(awk -v page="$BENCH" -v fallback="dev-linux" -v mode="population" \
+  "$RATIO_GRADE_AWK" "$CASE/bench-seats.tsv" "$CASE/$BENCH" | tr '\t' ' ')
+want='POP 7 1.43 echo.view_p99_ms'
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'the population names the cell a benchmarking figure stands beside, not another cell whose seat it equals' "$mismatch"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

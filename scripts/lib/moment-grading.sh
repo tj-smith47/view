@@ -209,3 +209,410 @@ MOMENT_GRADE_AWK='
     { uc++; ul[uc] = $0; uno[uc] = FNR }
     END { grade() }
 '
+
+# The grading of docs/benchmarking.md, where a number takes the nearest cell
+# id before it in its own sentence. Same two inputs and same modes as the
+# program above, with -v fallback the class that page declares.
+RATIO_GRADE_AWK='
+    FNR == NR {
+      split($0, f, "\t")
+      if (f[3] == "") { next }
+      seat[f[1] SUBSEP f[2] SUBSEP f[3]] = f[4]
+      cellseen[f[3]] = 1
+      if (index(fixtures[f[1] SUBSEP f[3]], " " f[2] " ") == 0) {
+        fixtures[f[1] SUBSEP f[3]] = fixtures[f[1] SUBSEP f[3]] " " f[2] " "
+      }
+      next
+    }
+    function classes_of(text,   i, n, name, named) {
+      n = split("controlled-linux dev-macos dev-linux gh-macos gh-linux", name, " ")
+      named = ""
+      for (i = 1; i <= n; i++) {
+        if (index(text, name[i]) > 0 && index(named, " " name[i] " ") == 0) {
+          named = named " " name[i] " "
+        }
+      }
+      return named
+    }
+    # The words the page writes a fixture in, beside the names the baselines
+    # record it under. A page that says plugin-free means minimal, and the
+    # rule has to read the words to grade the number standing next to them.
+    function fixtures_of(text,   named) {
+      named = ""
+      if (text ~ /plugin-free|no plugins|`minimal`|[.]minimal/) { named = named " minimal " }
+      if (text ~ /15-plugin|`heavy`|[.]heavy/) { named = named " heavy " }
+      if (text ~ /login-shaped|full login|`user`|[.]user/) { named = named " user " }
+      return named
+    }
+    function clean(t) {
+      gsub(/[`*~()>]/, "", t)
+      sub(/[,;:.]+$/, "", t)
+      return t
+    }
+    function decimals(num) {
+      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
+    }
+    function seated(num, vals,   n, v, i, fmt) {
+      fmt = "%." decimals(num) "f"
+      n = split(vals, v, " ")
+      for (i = 1; i <= n; i++) {
+        if (sprintf(fmt, v[i]) + 0 == num + 0) { return 1 }
+      }
+      return 0
+    }
+    # A percentage states the same ratio as its distance from 1, which is how
+    # the page writes a gap a reader thinks in percent about.
+    function seated_pct(num, vals,   n, v, i, fmt, off) {
+      fmt = "%." decimals(num) "f"
+      n = split(vals, v, " ")
+      for (i = 1; i <= n; i++) {
+        off = (v[i] > 1 ? v[i] - 1 : 1 - v[i]) * 100
+        if (sprintf(fmt, off) + 0 == num + 0) { return 1 }
+      }
+      return 0
+    }
+    # The unit a cell is recorded in, read off the metric name rather than a
+    # whitelist of the one unit the rule started with: a page quoting a
+    # megabyte or a microsecond seat was left ungraded by a rule that only
+    # knew about milliseconds, and writing the id beside it did not help.
+    function unit_suffix(u) {
+      if (u == "ms") { return "_ms$" }
+      if (u == "MB") { return "_mb$" }
+      return "_us$"
+    }
+    function scope(at, num, what) {
+      printf "BUDGET DRIFT FAIL: ratio-scope %s:%d: %s is quoted where %s, and a number resolves against one class and one fixture or against neither\n",
+        page, at, num, what
+    }
+    # One number resolves to one cell, never to the union of every cell the
+    # unit names: a union passed a sibling metric and a sibling scenario as
+    # the number the id beside it stands for, which is the same disagreement
+    # between the identifier and the words the class and fixture rules were
+    # minted for. So a number takes the nearest cell id before it in its own
+    # sentence -- a table cell is a sentence, since a row states one column
+    # at a time -- and the unit first id where its sentence names none.
+    function grade(   i, j, m, n, text, part, w, num, nxt, pct, ntok, ngraded,
+                     ncell, cell, namedcells, cls, nc, klass, fx, nf, fixn,
+                     klass_one, fixture, seen, ok, after, line, tok, cur, held) {
+      if (uc == 0) { return }
+      text = ""
+      for (i = 1; i <= uc; i++) { text = text " " ul[i] }
+      ncell = 0
+      namedcells = ""
+      n = split(text, part, "`")
+      for (i = 2; i <= n; i += 2) {
+        if (part[i] !~ /^[a-z_]+\.[a-z_0-9]+$/) { continue }
+        if (!(part[i] in cellseen)) { continue }
+        if (index(namedcells, " " part[i] " ") > 0) { continue }
+        ncell++
+        cell[ncell] = part[i]
+        namedcells = namedcells " " part[i] " "
+      }
+      if (ncell == 0) { uc = 0; return }
+      ntok = 0
+      for (i = 1; i <= uc; i++) {
+        line = ul[i]
+        gsub(/\|/, " \001 ", line)
+        gsub(/\. /, " \001 ", line)
+        m = split(line, w, /[[:space:]]+/)
+        for (j = 1; j <= m; j++) { ntok++; tk[ntok] = w[j]; tl[ntok] = uno[i] }
+      }
+      ngraded = 0
+      cur = ""
+      for (i = 1; i <= ntok; i++) {
+        if (tk[i] == "\001") { cur = ""; continue }
+        tok = clean(tk[i])
+        if (tok ~ /^[a-z_]+\.[a-z_0-9]+$/ && (tok in cellseen)) { cur = tok; continue }
+        num = tok
+        nxt = clean(tk[i + 1])
+        pct = 0
+        after = nxt
+        # a leading minus is part of the number: a diagnostic records one, and
+        # a regex without it left the page ungraded where the ledger was not
+        if (num ~ /^-?[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
+        else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && nxt == "%") { pct = 1; after = clean(tk[i + 2]) }
+        else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
+        # an absolute resolves like a ratio where a cell of its own unit
+        # stands beside it, and nowhere else: the column holding the paired
+        # bare-engine reading names no cell of view own and states an
+        # absolute this file records nothing for.
+        else if (nxt ~ /^(ms|us|\xc2\xb5s|MB)$/) {
+          if (cur == "" || cur !~ unit_suffix(nxt)) { continue }
+        }
+        else if (nxt ~ /^(s|min|GB|bar|bars|budget|bound|frame)$/) { continue }
+        # a percentage OF something is a share of a population, not a ratio
+        # stated as its distance from 1
+        if (pct && after == "of") { continue }
+        sub(/x$/, "", num)
+        ngraded++
+        gnum[ngraded] = num
+        gpct[ngraded] = pct
+        gat[ngraded] = tl[i]
+        gcell[ngraded] = (cur != "") ? cur : cell[1]
+      }
+      if (ngraded == 0) { uc = 0; return }
+      cls = classes_of(text)
+      nc = split(cls, klass, " ")
+      if (nc > 1) {
+        scope(gat[1], gnum[1], "the unit names " nc " classes (" cls ")")
+        uc = 0
+        return
+      }
+      if (nc == 1) { klass_one = klass[1] }
+      else if (fallback != "") { klass_one = fallback }
+      else {
+        scope(gat[1], gnum[1], "the unit names no class and the page declares no default class")
+        uc = 0
+        return
+      }
+      fx = fixtures_of(text)
+      nf = split(fx, fixn, " ")
+      if (nf > 1) {
+        scope(gat[1], gnum[1], "the unit names " nf " fixtures (" fx ")")
+        uc = 0
+        return
+      }
+      if (nf == 1) { fixture = fixn[1] }
+      else {
+        seen = ""
+        for (k = 1; k <= ncell; k++) {
+          n = split(fixtures[klass_one SUBSEP cell[k]], fixn, " ")
+          for (i = 1; i <= n; i++) {
+            if (index(seen, " " fixn[i] " ") == 0) { seen = seen " " fixn[i] " " }
+          }
+        }
+        nf = split(seen, fixn, " ")
+        if (nf != 1) {
+          if (nf == 0) { uc = 0; return }
+          scope(gat[1], gnum[1], klass_one " records" namedcells "on " nf " fixtures (" seen ") and the unit names none")
+          uc = 0
+          return
+        }
+        fixture = fixn[1]
+      }
+      for (i = 1; i <= ngraded; i++) {
+        if (!((klass_one SUBSEP fixture SUBSEP gcell[i]) in seat)) { continue }
+        held = seat[klass_one SUBSEP fixture SUBSEP gcell[i]]
+        ok = gpct[i] ? seated_pct(gnum[i], held) : seated(gnum[i], held)
+        # The cell this number resolves to and not the cells its value
+        # happens to equal: a figure standing beside one id while equalling
+        # another id seat is a reading of the first, and a population that
+        # named the second perturbed it as a value nothing here grades.
+        if (mode == "population") {
+          if (ok) { printf "POP\t%d\t%s\t%s\n", gat[i], gnum[i], gcell[i] }
+          continue
+        }
+        if (!ok) {
+          printf "BUDGET DRIFT FAIL: ratio-drift %s:%d: %s%s is quoted beside %s on %s %s, and the value recorded there does not round to it at the digits printed\n",
+            page, gat[i], gnum[i], (gpct[i] ? "%" : ""), gcell[i], klass_one, fixture
+        }
+      }
+      uc = 0
+    }
+    /^[[:space:]]*\|/ {
+      grade()
+      ul[1] = $0; uno[1] = FNR; uc = 1; grade()
+      next
+    }
+    /^[[:space:]]*$/ { grade(); next }
+    { uc++; ul[uc] = $0; uno[uc] = FNR }
+    END { grade() }
+'
+
+# The grading of the figures a [[shortfall]] states in its why, which resolve
+# against the entry own class, scenario, fixture and metric. Takes the seat
+# table and budgets.toml, with -v file the name to report and -v TRIALS_BAND
+# the fraction a draw may sit from its seat. In population mode it reports
+# the why figures alone.
+WHY_GRADE_AWK='
+    FNR == NR {
+      split($0, f, "\t")
+      if (f[3] == "") { next }
+      seat[f[1] SUBSEP f[2] SUBSEP f[3]] = f[4]
+      next
+    }
+    function value(line,   v) {
+      v = line
+      sub(/^[a-z_]+ = /, "", v)
+      sub(/^"/, "", v)
+      sub(/"$/, "", v)
+      return v
+    }
+    function fixtures_of(text,   named) {
+      named = ""
+      if (text ~ /plugin-free|no plugins|[.]minimal/) { named = named " minimal " }
+      if (text ~ /15-plugin|[.]heavy/) { named = named " heavy " }
+      if (text ~ /login-shaped|full login|[.]user/) { named = named " user " }
+      return named
+    }
+    function classes_of(text,   i, n, name, named) {
+      n = split("controlled-linux dev-macos dev-linux gh-macos gh-linux", name, " ")
+      named = ""
+      for (i = 1; i <= n; i++) {
+        if (index(text, name[i]) > 0 && index(named, " " name[i] " ") == 0) {
+          named = named " " name[i] " "
+        }
+      }
+      return named
+    }
+    function clean(t) {
+      gsub(/[`*~()>]/, "", t)
+      sub(/[,;:.]+$/, "", t)
+      return t
+    }
+    function decimals(num) {
+      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
+    }
+    function seated(num, vals,   n, v, i, fmt) {
+      fmt = "%." decimals(num) "f"
+      n = split(vals, v, " ")
+      for (i = 1; i <= n; i++) {
+        if (sprintf(fmt, v[i]) + 0 == num + 0) { return 1 }
+      }
+      return 0
+    }
+    # A percentage in a why states the distance from the bar the sentence
+    # names, which is how a ledger entry writes a miss; the pages write the
+    # distance from 1 instead, so both spellings are read and the sentence
+    # decides which by naming a bar or not.
+    function bar_of(w, m,   j, t, nx) {
+      for (j = 1; j <= m; j++) {
+        t = clean(w[j])
+        if (t !~ /^[0-9]+(\.[0-9]+)?$/) { continue }
+        nx = clean(w[j + 1])
+        if (nx ~ /^(bar|bars|budget|bound|frame)$/) { return t }
+        if (nx == "ms" && clean(w[j + 2]) ~ /^(bar|bars|budget|bound|frame)$/) { return t }
+      }
+      return ""
+    }
+    function off_pct(held, bar) {
+      if (bar != "" && bar + 0 != 0) { held = held / bar }
+      return (held > 1 ? held - 1 : 1 - held) * 100
+    }
+    function seated_pct(num, held, bar,   fmt) {
+      fmt = "%." decimals(num) "f"
+      return sprintf(fmt, off_pct(held, bar)) + 0 == num + 0
+    }
+    # Every figure a why states is the value of a cell that why names: an
+    # entry names its own class, scenario, fixture and metric, so a number
+    # written beside an identifier resolves exactly. A figure with no
+    # identifier in its sentence is attributed to nothing and goes stale in
+    # silence at the next record run, which is what the stale ratio did in
+    # both places it stood.
+    function sentence_verdict(text, at,   j, k, m, w, tok, cls, nc, klass,
+                              fx, nf, fixn, klass_one, fixture, cellid, nids,
+                              idname, idat, isid, num, nxt, pct, after, held,
+                              ok, bar, want) {
+      cls = classes_of(text)
+      nc = split(cls, klass, " ")
+      if (nc > 1) { return }
+      klass_one = (nc == 1) ? klass[1] : class
+      fx = fixtures_of(text)
+      nf = split(fx, fixn, " ")
+      if (nf > 1) { return }
+      fixture = (nf == 1) ? fixn[1] : fixt
+      m = split(text, w, /[[:space:]]+/)
+      bar = bar_of(w, m)
+      nids = 0
+      for (j = 1; j <= m; j++) {
+        tok = clean(w[j])
+        cellid = ""
+        # a bare metric name belongs to the entry own scenario; a written
+        # out scenario.metric names its own, since a why may settle a
+        # question with a cell from a scenario the entry does not measure
+        if (tok ~ /^[a-z_0-9]+$/ && ((klass_one SUBSEP fixture SUBSEP scen "." tok) in seat)) {
+          cellid = scen "." tok
+        } else if (tok ~ /^[a-z_]+\.[a-z_0-9]+$/ && ((klass_one SUBSEP fixture SUBSEP tok) in seat)) {
+          cellid = tok
+        }
+        isid[j] = (cellid != "")
+        if (cellid != "") { nids++; idname[nids] = cellid; idat[nids] = j }
+      }
+      for (j = 1; j <= m; j++) {
+        if (isid[j]) { continue }
+        num = clean(w[j])
+        nxt = clean(w[j + 1])
+        pct = 0
+        after = nxt
+        if (num ~ /^-?[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
+        else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && (nxt == "%" || nxt == "percent")) {
+          pct = 1; after = clean(w[j + 2])
+        }
+        else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
+        else if (nxt ~ /^(s|min|GB|bar|bars|budget|bound|frame)$/) { continue }
+        # a percentage OF something is a share of a population
+        if (pct && after == "of") { continue }
+        sub(/x$/, "", num)
+        if (nids == 0) {
+          printf "BUDGET DRIFT FAIL: why-figure %s/%s.%s: %s:%d states %s%s in a sentence that names no cell, so the figure is attributed to nothing and a record run leaves it standing\n",
+            klass_one, scen, fixture, file, at, num, (pct ? "%" : "")
+          continue
+        }
+        want = idname[1]
+        for (k = 1; k <= nids; k++) { if (idat[k] < j) { want = idname[k] } }
+        held = seat[klass_one SUBSEP fixture SUBSEP want]
+        ok = pct ? seated_pct(num, held, bar) : seated(num, held)
+        if (mode == "population") {
+          if (ok) { printf "POP\t%d\t%s\t%s\n", at, num, want }
+          continue
+        }
+        if (!ok) {
+          printf "BUDGET DRIFT FAIL: why-drift %s/%s.%s: %s:%d quotes %s%s beside %s, and the value recorded there does not round to it at the digits printed\n",
+            klass_one, scen, fixture, file, at, num, (pct ? "%" : ""), want
+        }
+      }
+    }
+    function flush(   n, i, sent) {
+      if (why == "" || scen == "" || metr == "" || class == "") { why = ""; return }
+      n = split(why, sent, /\. /)
+      for (i = 1; i <= n; i++) { sentence_verdict(sent[i], whyat) }
+      why = ""
+    }
+    # The draws a record run took are a field rather than a sentence, and
+    # every member is a draw of the metric the entry seats. One further out
+    # than the band is a figure of another quantity -- the paired arm own
+    # milliseconds is the shape the ledger shipped -- parked where no cell
+    # can grade it. The band is the loader own.
+    function check_trials(line, at,   body, n, t, i, num, off, span) {
+      # A draw is graded against a band around its entry seat rather than
+      # against a site, so the sweep moves it out of that band itself and
+      # asks this program for nothing.
+      if (mode == "population") { return }
+      body = line
+      sub(/^trials = /, "", body)
+      gsub(/[][]/, "", body)
+      if (acc == "") {
+        printf "BUDGET DRIFT FAIL: trials-band %s/%s.%s: %s:%d lists the draws of an entry that states no accepted value, so the array is anchored to nothing\n",
+          class, scen, fixt, file, at
+        return
+      }
+      span = (acc < 0 ? -acc : acc) * TRIALS_BAND
+      n = split(body, t, /,/)
+      for (i = 1; i <= n; i++) {
+        num = t[i]
+        gsub(/[[:space:]]/, "", num)
+        if (num !~ /^-?[0-9]+(\.[0-9]+)?$/) { continue }
+        off = num - acc
+        if (off < 0) { off = -off }
+        if (off > span) {
+          printf "BUDGET DRIFT FAIL: trials-band %s/%s.%s: %s:%d lists the trial %s, further from the accepted %s than a draw of this metric goes, so the array states a quantity this cell does not draw\n",
+            class, scen, fixt, file, at, num, acc
+        }
+      }
+    }
+    /^\[\[/ {
+      flush()
+      block = ($0 ~ /shortfall/)
+      scen = ""; fixt = ""; metr = ""; class = ""; why = ""; acc = ""
+      next
+    }
+    !block { next }
+    /^accepted = / { acc = value($0); next }
+    /^trials = / { check_trials($0, FNR); next }
+    /^scenario = / { scen = value($0); next }
+    /^fixture = / { fixt = value($0); next }
+    /^metric = / { metr = value($0); next }
+    /^class = / { class = value($0); next }
+    /^why = / { why = value($0); whyat = FNR; flush(); next }
+    END { flush() }
+'

@@ -6,16 +6,19 @@
 # numbers, a unit the ratio rule skipped, two whole pages nothing read -- so
 # this walks the population instead.
 #
-# Every figure on the three pages and in every [[shortfall]] why that equals
-# a value some class baseline records is perturbed by one digit in a scratch
-# copy of the tree, and every member of every trials array is moved outside
-# the band its entry's seat allows; the checker must then fail naming that
-# file and line. On the two pages graded by the moment they state in words,
-# the figures are the ones that grading resolves rather than the ones equal
-# to a seat, because a seat can also equal the bare-engine reading beside
-# view's and the checker never resolves that one. A figure that survives is
-# a value nothing grades, which goes stale in silence at the next --record
-# run, and it is printed with its site.
+# Every figure the checker resolves to a cell -- on the three pages and in
+# every [[shortfall]] why -- is perturbed by one digit in a scratch copy of
+# the tree, and every member of every trials array is moved outside the band
+# its entry's seat allows; the checker must then fail naming that file and
+# line. A figure that survives is one its own rule does not reach, which
+# goes stale in silence at the next --record run, and it is printed with its
+# site.
+#
+# Which figures those are comes from the grading itself, through
+# scripts/lib/moment-grading.sh in its population mode, and never from a
+# second read of the seat table: a seat equals the bare-engine reading beside
+# view's as readily as view's own, and three of those entered a population
+# taken by value the day a re-seat made them equal a cell.
 #
 #   bash scripts/check-budget-drift-sweep.sh
 #   bash scripts/check-budget-drift-sweep.sh --checker /path/to/copy
@@ -66,12 +69,6 @@ fi
 BUDGETS='crates/view-bench/budgets.toml'
 BASELINES='crates/view-bench/baselines'
 PAGES='README.md docs/performance.md docs/benchmarking.md'
-# The two pages whose figures are graded by the moment they state in words,
-# where one reading of a sentence belongs to view and the bare-engine one
-# beside it is a figure no cell records. Their population comes from that
-# grading instead of from the seat table, so what the sweep perturbs and what
-# the check grades cannot be two sets.
-MOMENT_PAGES='README.md docs/performance.md'
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/check-budget-drift-sweep.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -112,146 +109,91 @@ if [ ! -s "$seats" ]; then
   exit 2
 fi
 
-# The population is every figure on the page against the seats of every
-# class, never the seats of the class the page declares: the page quotes
-# gh-linux, gh-macos, dev-macos and controlled-linux seats throughout, the
-# checker resolves each of them where its own unit names it, and a
-# population scoped to the default class graded none of them.
+# The population is the figures the check resolves to a cell, asked of the
+# grading that resolves them rather than derived from the seat table a second
+# time. The value a figure equals cannot decide: a seat equals the
+# bare-engine reading beside view's as readily as view's own, and a number
+# standing beside one cell id equals a sibling cell's value often enough --
+# both entered a population taken by value as readings nothing grades, and
+# both were right to be ungraded.
 # One line per figure in the population: file, line, which number token on
-# that line it is, the value as printed, and the seats it equals.
+# that line it is, the value as printed, and the cell it resolves to.
 population="$WORK/population.tsv"
 : > "$population"
 
-collect_page() {
-  local rel="$1" bymoment=0 graded="" class=""
-  # Asked of the grading rather than decided here: a second reading of which
-  # figure a sentence states drifts from the first, and the drift it shipped
-  # was three bare-Neovim readings entering the population the day a re-seat
-  # made them equal a cell.
-  case " $MOMENT_PAGES " in (*" $rel "*)
-    bymoment=1
-    class=$(awk "$MOMENT_CLASS_AWK" "$TREE/$rel")
-    graded=$(awk -v page="$rel" -v fallback="$class" -v mode="population" \
-      "$MOMENT_GRADE_AWK" "$seats" "$TREE/$rel" |
-      awk -F'\t' '$1 == "POP" { printf " %s:%s ", $2, $3 }')
-    ;;
-  esac
-  awk -v file="$rel" -v bymoment="$bymoment" -v graded="$graded" '
-    FNR == NR {
-      split($0, f, "\t")
-      key = f[3]
-      sub(/^[a-z_]+\./, "", key)
-      unit = "x"
-      if (key ~ /_ms$/) { unit = "ms" }
-      else if (key ~ /_us$/) { unit = "us" }
-      else if (key ~ /_mb$/) { unit = "mb" }
-      else if (key ~ /_ratio(_p[0-9]+)?$/ || key ~ /^ratio/) { unit = "" }
-      seatunit[f[3]] = unit
-      vals[f[3]] = vals[f[3]] " " f[4]
-      next
-    }
+# The sites one page states, as ` line:value=cell ` runs the walk below looks
+# a token up in. docs/benchmarking.md resolves a number against the nearest
+# cell id before it; the two user-facing pages name no identifier and resolve
+# it against the moment they state in words.
+page_population() {
+  local rel="$1" class prog
+  class=$(awk "$MOMENT_CLASS_AWK" "$TREE/$rel")
+  prog="$MOMENT_GRADE_AWK"
+  case "$rel" in (docs/benchmarking.md) prog="$RATIO_GRADE_AWK" ;; esac
+  awk -v page="$rel" -v fallback="$class" -v mode="population" \
+    "$prog" "$seats" "$TREE/$rel" |
+    awk -F'\t' '$1 == "POP" { printf " %s:%s=%s ", $2, $3, $4 }'
+}
+
+# The walk that turns those sites into perturbations. It counts the number
+# tokens of a line the way the perturbation edits them, so the index it
+# records is the token the edit lands on.
+collect_sites() {
+  local rel="$1" graded="$2"
+  [ -n "$graded" ] || return 0
+  awk -v file="$rel" -v graded="$graded" '
     function clean(t) {
       gsub(/[][`*~()>]/, "", t)
       sub(/[,;:.]+$/, "", t)
       return t
     }
-    # A figure carrying a unit no cell is recorded in, and one carrying the
-    # word that makes it a bound rather than a reading, are outside the
-    # population: the checker grades neither and is right not to.
-    function unit_of(t) {
-      if (t == "ms") { return "ms" }
-      if (t == "us" || t == "\xc2\xb5s") { return "us" }
-      if (t == "MB") { return "mb" }
-      if (t ~ /^(s|min|GB|%|bar|bars|budget|bound|frame)$/) { return "x" }
-      return ""
-    }
-    function decimals(num) {
-      return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
-    }
-    # A difference a page states between the paired numbers is neither
-    # side reading, so it is outside the population however close it lands
-    # to a seat.
-    function delta_after(w, j,   nxt) {
-      nxt = clean(w[j + 1])
-      if (unit_of(nxt) != "" || nxt == "%") { nxt = clean(w[j + 2]) }
-      return (nxt ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/)
-    }
-    # A fenced block is a sample of a file, not a reading of a cell.
-    /^[[:space:]]*```/ { fenced = !fenced; next }
-    fenced { next }
     {
       m = split($0, w, /[[:space:]]+/)
       idx = 0
       for (j = 1; j <= m; j++) {
         num = clean(w[j])
         if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
+        # Counted before the lookup: a number nothing grades still moves the
+        # token the next edit lands on.
         idx++
-        # After the count and not before it: the index is which number token
-        # the perturbation edits, so it counts every number the line carries
-        # whether or not anything grades it.
-        if (bymoment && index(graded, " " FNR ":" num " ") == 0) { continue }
-        if (delta_after(w, j)) { continue }
-        u = unit_of(clean(w[j + 1]))
-        fmt = "%." decimals(num) "f"
-        hit = ""
-        for (k in vals) {
-          if (seatunit[k] != u) { continue }
-          n = split(vals[k], v, " ")
-          for (i = 1; i <= n; i++) {
-            if (sprintf(fmt, v[i]) + 0 == num + 0) { hit = hit " " k }
-          }
-        }
-        if (hit != "") { printf "%s\t%d\t%d\t%s\t%s\t%s\n", file, FNR, idx, num, substr(hit, 2), "digit" }
+        key = " " FNR ":" num "="
+        at = index(graded, key)
+        if (at == 0) { continue }
+        cell = substr(graded, at + length(key))
+        cell = substr(cell, 1, index(cell, " ") - 1)
+        printf "%s\t%d\t%d\t%s\t%s\t%s\n", file, FNR, idx, num, cell, "digit"
       }
     }
-  ' "$seats" "$TREE/$rel" >> "$population"
+  ' "$TREE/$rel" >> "$population"
 }
 
 for rel in $PAGES; do
   [ -f "$TREE/$rel" ] || continue
-  collect_page "$rel"
+  collect_sites "$rel" "$(page_population "$rel")"
 done
 
-# A why is read against its own entry's class, and every sentence of it is
-# read: the checker holds no escape a word buys, so neither does the
-# population.
+# A why figure resolves against its own entry class, scenario, fixture and
+# metric, so the same grading is asked for those sites too: a why settles a
+# question with a cell from a scenario the entry does not measure, and the
+# value it states can equal another cell seat while resolving to that one.
+collect_sites "$BUDGETS" "$(awk -v file="$BUDGETS" -v mode="population" \
+  "$WHY_GRADE_AWK" "$seats" "$TREE/$BUDGETS" |
+  awk -F'\t' '$1 == "POP" { printf " %s:%s=%s ", $2, $3, $4 }')"
+
+# Every trials member is a draw of the metric the entry seats, and what
+# grades it is a band around that seat rather than a value of its own. So the
+# whole array is in the population and the edit that has to redden is the one
+# that puts a member outside the band: a member no rule reaches is a foreign
+# quantity parked in the ledger, which is what four arrays held.
 awk -v file="$BUDGETS" '
-  FNR == NR {
-    split($0, f, "\t")
-    key = f[3]
-    sub(/^[a-z_]+\./, "", key)
-    unit = "x"
-    if (key ~ /_ms$/) { unit = "ms" }
-    else if (key ~ /_us$/) { unit = "us" }
-    else if (key ~ /_mb$/) { unit = "mb" }
-    else if (key ~ /_ratio(_p[0-9]+)?$/ || key ~ /^ratio/) { unit = "" }
-    seatunit[f[3]] = unit
-    vals[f[3]] = vals[f[3]] " " f[4]
-    next
-  }
   function clean(t) {
     gsub(/[][`*~()>]/, "", t)
     sub(/[,;:.]+$/, "", t)
     return t
   }
-  function unit_of(t) {
-    if (t == "ms") { return "ms" }
-    if (t == "us" || t == "\xc2\xb5s") { return "us" }
-    if (t == "MB") { return "mb" }
-    if (t ~ /^(s|min|GB|%|percent|bar|bars|budget|bound|frame)$/) { return "x" }
-    return ""
-  }
-  function decimals(num) {
-    return index(num, ".") == 0 ? 0 : length(num) - index(num, ".")
-  }
   /^\[\[/ { block = ($0 ~ /shortfall/); acc = ""; next }
   !block { next }
   /^accepted = / { acc = $0; sub(/^accepted = /, "", acc); next }
-  # Every trials member is a draw of the metric the entry seats, and what
-  # grades it is a band around that seat rather than a value of its own. So
-  # the whole array is in the population and the edit that has to redden is
-  # the one that puts a member outside the band: a member no rule reaches is
-  # a foreign quantity parked in the ledger, which is what four arrays held.
   /^trials = / {
     idx = 0
     m = split($0, w, /[[:space:]]+/)
@@ -262,36 +204,12 @@ awk -v file="$BUDGETS" '
       if (acc == "") { continue }
       printf "%s\t%d\t%d\t%s\t%s\t%s\n", file, FNR, idx, num, "a draw of the accepted " acc, "band"
     }
-    next
   }
-  /^why = / {
-    idx = 0
-    n = split($0, sent, /\. /)
-    for (s = 1; s <= n; s++) {
-      m = split(sent[s], w, /[[:space:]]+/)
-      for (j = 1; j <= m; j++) {
-        num = clean(w[j])
-        if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
-        idx++
-        u = unit_of(clean(w[j + 1]))
-        fmt = "%." decimals(num) "f"
-        hit = ""
-        for (k in vals) {
-          if (seatunit[k] != u) { continue }
-          c = split(vals[k], v, " ")
-          for (i = 1; i <= c; i++) {
-            if (sprintf(fmt, v[i]) + 0 == num + 0) { hit = hit " " k }
-          }
-        }
-        if (hit != "") { printf "%s\t%d\t%d\t%s\t%s\t%s\n", file, FNR, idx, num, substr(hit, 2), "digit" }
-      }
-    }
-  }
-' "$seats" "$TREE/$BUDGETS" >> "$population"
+' "$TREE/$BUDGETS" >> "$population"
 
 total=$(wc -l < "$population" | tr -d ' ')
 if [ "$total" = "0" ]; then
-  printf 'sweep: no figure on any page or in any why equals a recorded seat, which is not a tree this sweep can grade\n' >&2
+  printf 'sweep: the check resolves no figure on any page or in any why, which is not a tree this sweep can grade\n' >&2
   exit 2
 fi
 
