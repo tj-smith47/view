@@ -311,57 +311,117 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       if (text ~ /login-shaped|full login|your config/) { named = named " user " }
       return named
     }
-    # The moment a sentence states and the cell that records it. These pages
-    # may name no identifier -- the identifier rule refuses one here -- so
-    # the words are the only anchor a figure has.
-    function moment_of(text) {
-      if (text ~ /predicted glyph|glyph it expects|character it expects/) {
-        return "echo_speculated.speculated_paint_p99_ms"
-      }
-      if (text ~ /keypress to glyph|worst keystroke|keystroke in a thousand/) {
-        return "echo.view_p99_ms"
-      }
-      if (text ~ /stale/) { return "scroll.staleness_p99_ms" }
-      if (text ~ /cadence/) { return "flood.cadence_p99_ms" }
-      if (text ~ /matching results/) { return "picker.match_paint_p99_ms" }
-      if (text ~ /first page of results/) { return "picker.first_page_p99_ms" }
-      if (text ~ /worst launch/) { return "startup.first_frame_cold_ms" }
-      if (text ~ /own process holds/) { return "memory.pss_mb" }
+    # The moments these pages name, in the words they name them in, with the
+    # cells that record each. The milliseconds and the gap a reader thinks
+    # about in percent are two cells of one moment, and the unit the figure
+    # carries picks between them: a percentage or a bare multiplier the
+    # ratio, a millisecond the absolute. A moment whose pairing records no
+    # cell of a unit carries an empty cell there, so the figure in that unit
+    # is excluded rather than resolved against a sibling cell.
+    function moment_table(pat, ms, rt,   n) {
+      n = 0
+      n++
+      pat[n] = "predicted glyph|glyph it expects|character it expects"
+      ms[n] = "echo_speculated.speculated_paint_p99_ms"
+      rt[n] = "echo_speculated.speculated_ratio_p50"
+      n++
+      pat[n] = "keypress to glyph|worst keystroke|keystroke in a thousand"
+      ms[n] = "echo.view_p99_ms"
+      rt[n] = "echo.ratio_p50"
+      n++
+      pat[n] = "stale"
+      ms[n] = "scroll.staleness_p99_ms"
+      rt[n] = "scroll.ratio_p50"
+      n++
+      pat[n] = "cadence"
+      ms[n] = "flood.cadence_p99_ms"
+      rt[n] = "flood.cadence_p99_ratio"
+      # The flood the screen drains, which the pages state in percent and
+      # never in milliseconds: the pace is a ratio of what the two sides
+      # drain in one window and no cell records either side alone.
+      n++
+      pat[n] = "drains the flood"
+      ms[n] = ""
+      rt[n] = "flood.pace_ratio"
+      n++
+      pat[n] = "matching results"
+      ms[n] = "picker.match_paint_p99_ms"
+      rt[n] = ""
+      n++
+      pat[n] = "first page of results"
+      ms[n] = "picker.first_page_p99_ms"
+      rt[n] = ""
+      n++
+      pat[n] = "worst launch"
+      ms[n] = "startup.first_frame_cold_ms"
+      rt[n] = "startup.first_frame_ratio_p99"
+      # The settled screen, which the pages state as a gap and never as an
+      # absolute: no cell records the milliseconds either side of it, so
+      # this moment has a ratio cell and no millisecond one.
+      n++
+      pat[n] = "screen ready|screen you can start working in"
+      ms[n] = ""
+      rt[n] = "startup.settled_ratio_p50"
+      n++
+      pat[n] = "own process holds"
+      ms[n] = "memory.pss_mb"
+      rt[n] = ""
       # The engine mark, quoted on both pages with the word the pages write
       # it in and on neither with an identifier. The metric is itself a
       # difference, so the sentence states it in difference words and the
       # pick below reads those words as the moment rather than as a gap
       # between two published readings.
-      if (text ~ /started[^ ]* mark/) { return "startup.server_delta_ms" }
-      return ""
+      n++
+      pat[n] = "started[^ ]* mark"
+      ms[n] = "startup.server_delta_ms"
+      rt[n] = ""
+      return n
     }
-    # The ratio cell of a moment. The milliseconds and the gap a reader
-    # thinks about in percent are two cells of one moment, and the unit the
-    # figure carries picks between them: a percentage or a bare multiplier
-    # the ratio, a millisecond the absolute. A moment whose pairing records
-    # no ratio returns none here, so the percentage beside it is excluded
-    # rather than resolved against a sibling cell.
-    function ratio_of(text) {
-      if (text ~ /predicted glyph|glyph it expects|character it expects/) {
-        return "echo_speculated.speculated_ratio_p50"
+    # The moments a sentence names. These pages may name no identifier -- the
+    # identifier rule refuses one here -- so the words are the only anchor a
+    # figure has, and one moment is that anchor. A sentence naming two states
+    # one thing and is graded against another: the second moment figure was
+    # keyed to the first moment cell, held under a key that pairing never
+    # records, and graded by nothing. A moment named twice in one sentence,
+    # in two of its own words or in both its units, is one moment.
+    function moments_of(text, ms, rt,   i, n, hit, pat, mc, rc) {
+      n = moment_table(pat, mc, rc)
+      hit = 0
+      for (i = 1; i <= n; i++) {
+        if (text !~ pat[i]) { continue }
+        hit++
+        ms[hit] = mc[i]
+        rt[hit] = rc[i]
       }
-      if (text ~ /keypress to glyph|worst keystroke|keystroke in a thousand/) {
-        return "echo.ratio_p50"
+      return hit
+    }
+    # The name a report calls a moment by: the cell recording it in the unit
+    # the pairing holds, which is the milliseconds wherever there are any.
+    function moment_name(ms, rt) {
+      return (ms != "") ? ms : rt
+    }
+    # A sentence naming two moments, reported at the first figure standing in
+    # it: the page states one moment per sentence, as it states one class and
+    # one leg per unit, and a sentence stating two is split rather than read
+    # against whichever moment the table names first.
+    function ambiguous(a, b, nm, ms, rt,   i, said, names) {
+      names = ""
+      for (i = 1; i <= nm; i++) {
+        if (names != "") { names = names " " }
+        names = names moment_name(ms[i], rt[i])
       }
-      if (text ~ /stale/) { return "scroll.ratio_p50" }
-      if (text ~ /cadence/) { return "flood.cadence_p99_ratio" }
-      # The flood the screen drains, which the pages state in percent and
-      # never in milliseconds: the pace is a ratio of what the two sides
-      # drain in one window and no cell records either side alone.
-      if (text ~ /drains the flood/) { return "flood.pace_ratio" }
-      if (text ~ /worst launch/) { return "startup.first_frame_ratio_p99" }
-      # The settled screen, which the pages state as a gap and never as an
-      # absolute: no cell records the milliseconds either side of it, so
-      # this moment has a ratio cell and no millisecond one.
-      if (text ~ /screen ready|screen you can start working in/) {
-        return "startup.settled_ratio_p50"
+      said = 0
+      for (i = a; i <= b; i++) {
+        if (ti[i] == 0) { continue }
+        if (mode == "classify") {
+          note(tl[i], ti[i], "excluded:a sentence naming two moments")
+          continue
+        }
+        if (said) { continue }
+        said = 1
+        printf "BUDGET DRIFT FAIL: moment-ambiguous %s:%d: %s stands in a sentence naming %d moments (%s), and a number resolves against one moment or against none\n",
+          page, tl[i], clean(tk[i]), nm, names
       }
-      return ""
     }
     # The number a ratio-shaped figure states, and the empty string for
     # anything else: a percentage and a bare multiplier carry their suffix,
@@ -573,13 +633,18 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
     }
     function sentence(a, b, ufx,   i, text, cell, rcell, cls, nc, klass,
                       klass_one, fx, nf, fixn, fixture, num, nxt, tail,
-                      pick, rpick, rpct, at, want, key, npair) {
+                      pick, rpick, rpct, at, want, key, npair, nm, mms, mrt) {
       if (b < a) { return }
       text = ""
       for (i = a; i <= b; i++) { text = text " " tk[i] }
-      cell = moment_of(text)
+      nm = moments_of(text, mms, mrt)
+      if (nm > 1) { ambiguous(a, b, nm, mms, mrt); return }
+      # The cells the one moment of this sentence is recorded in, one per
+      # unit the sentence may state it in, and empty where this tree records
+      # no seat for that cell.
+      cell = (nm == 1) ? mms[1] : ""
       if (!(cell in cellseen)) { cell = "" }
-      rcell = ratio_of(text)
+      rcell = (nm == 1) ? mrt[1] : ""
       if (!(rcell in cellseen)) { rcell = "" }
       key = (cell != "") ? cell : rcell
       npair = pair_scan(a, b)

@@ -276,7 +276,7 @@ findings() {
       c = $5; sub(/:$/, "", c); print "scope:" c; next
     }
     /^BUDGET DRIFT FAIL: ratio-default / { print "default"; next }
-    /^BUDGET DRIFT FAIL: moment-(drift|scope|default|difference|direction) / {
+    /^BUDGET DRIFT FAIL: moment-(drift|scope|default|difference|direction|ambiguous) / {
       c = $5; sub(/:$/, "", c); print $4 ":" c; next
     }
     /^BUDGET DRIFT FAIL: why-drift / {
@@ -1008,6 +1008,31 @@ seat_echo_ratio
 add_median_gap '14%'
 expect 1 'moment-drift:README.md:6' \
   'the same gap one digit off that distance'
+
+# ---------------------------------------------------------------------------
+# a sentence naming two moments, which resolved to whichever of the table's
+# tests matched first and left the other moment's figure keyed to a cell that
+# moment's pairing never records, and so graded by nothing
+# ---------------------------------------------------------------------------
+add_sentence() {
+  printf '\n%s\n' "$1" >> "$CASE/$README"
+}
+
+new_case
+seat_echo_tail
+add_sentence 'Plugin-free, the worst keystroke in a thousand takes 0.73 ms while the screen stays stale for 1.99 ms.'
+expect 1 'moment-ambiguous:README.md:6' \
+  'two moments in one sentence, the second figure keyed to the first moment'
+
+new_case
+seat_echo_tail
+add_sentence 'Plugin-free, the worst keystroke in a thousand takes 0.73 ms. The screen stays stale for 1.99 ms.'
+expect 0 '' 'the same words split at a sentence end, one moment in each'
+
+new_case
+seat_echo_tail
+add_sentence 'Plugin-free, the worst keystroke in a thousand -- the keypress to glyph moment -- takes 0.73 ms.'
+expect 0 '' 'one moment named twice, in two of the words the pages write it in'
 
 # ---------------------------------------------------------------------------
 # a figure stated as a difference is recomputed from the two readings it is

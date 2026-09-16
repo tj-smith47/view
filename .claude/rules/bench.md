@@ -136,7 +136,17 @@ first id where its sentence names none. A table cell is a sentence, since a
 row states one column at a time, and a sentence ends at a line end as well
 as at `. `, since these pages wrap at 80 characters and a boundary read inside
 a line only let a bound, a cell id and a transport denial in one sentence
-reach the figure in the next. The union passed a sibling metric's draw
+reach the figure in the next. A sentence names one moment as well, since
+the two user-facing pages carry no identifier and the words are the only
+anchor a figure has there: one naming two moments is reported as ambiguous,
+at the first figure standing in it, rather than read against whichever
+moment the grading tests first -- the other moment's figure was keyed to the
+first one's cell, held under a key that pairing never records, and graded by
+nothing. A moment named twice in one sentence is one moment, whether the
+sentence writes two of the words the pages name it in or both the units its
+pairing records, since the milliseconds and the percentage of one moment are
+two cells and one moment. Such a sentence is split in two, the way the page
+states one class and one leg per unit. The union passed a sibling metric's draw
 (`ratio_p99`'s number quoted where `ratio_p50` was named) and a sibling
 scenario's alike (`echo.ratio_p50`'s where `scroll.ratio_p50` was named),
 which is the identifier and the words disagreeing on the axis the class and
