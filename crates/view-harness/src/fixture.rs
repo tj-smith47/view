@@ -88,7 +88,13 @@ pub fn workspace_root() -> PathBuf {
 /// disk-backed, gitignored home of build byproducts.
 #[must_use]
 pub fn scratch_root(name: &str) -> PathBuf {
-    workspace_root().join("target").join(name)
+    let root = workspace_root().join("target").join(name);
+    // Spotlight (macOS) indexing a freshly generated corpus of ~1M files
+    // spins up mdworker processes that starve the host mid-run; the marker
+    // opts the tree out, and on other platforms it is one harmless empty file.
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::write(root.join(".metadata_never_index"), "");
+    root
 }
 
 /// Path to the repo-root `.engine-pin` file.
@@ -723,6 +729,13 @@ mod tests {
     #[test]
     fn lockfile_cache_key_differs_for_different_bytes() {
         assert_ne!(lockfile_cache_key(b"abc"), lockfile_cache_key(b"abd"));
+    }
+
+    #[test]
+    fn scratch_root_marks_itself_unindexed() {
+        let root = scratch_root("fixture-tests-unindexed-marker");
+        assert!(root.join(".metadata_never_index").is_file());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Values, not just keys: the generated login hands the same
