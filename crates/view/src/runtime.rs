@@ -795,12 +795,6 @@ struct StartupMilestones {
     chrome: bool,
     /// The first frame carrying a window's buffer text was written.
     content: bool,
-    /// Redraw batches folded since the chrome frame, and the events in
-    /// them: what separates a gap the engine spent silent from one view
-    /// spent reading.
-    redraws: u32,
-    /// Events those batches carried.
-    redraw_events: u32,
 }
 
 /// How long a startup may go without nvim's `VimEnter` before view
@@ -1200,14 +1194,19 @@ pub fn run(
             }
             if !milestones.chrome && model.chrome_painted {
                 milestones.chrome = true;
-                milestones.redraws = 0;
-                milestones.redraw_events = 0;
                 crate::vlog::log("startup", "chrome frame written");
             }
             if !milestones.content && model.engine.grids().window_text_painted() {
                 milestones.content = true;
-                let (redraws, events) = (milestones.redraws, milestones.redraw_events);
+                // the census's own totals rather than a count kept here:
+                // the first batch of a launch is drained by the cutover
+                // before this loop exists, so a counter living in the loop
+                // reports one batch and 109 events where the engine sent
+                // two and 676 -- what separates a gap the engine spent
+                // silent from one view spent reading is every batch
+                // drained up to and including the one this frame came from
                 crate::vlog::log_with("startup", || {
+                    let (redraws, events) = crate::vlog::redraws_drained();
                     format!("first content frame written redraws={redraws} events={events}")
                 });
             }
@@ -1293,23 +1292,6 @@ pub fn run(
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
-            // two increments per batch, and only while the start is still
-            // owed: the startup timeline's own question is whether the gap
-            // before the file appears was the engine's silence or view's
-            // reading, and nothing else in the loop records it
-            // an empty batch is the drain of a wakeup token for damage
-            // that has not reached a `Flush` yet: it folds nothing and
-            // paints nothing, so counting it reports view's own wakeups as
-            // engine batches -- 4 and 10 empty drains read as 5 and 11
-            match &msg {
-                Msg::Redraw(events) if !milestones.content && !events.is_empty() => {
-                    milestones.redraws = milestones.redraws.saturating_add(1);
-                    milestones.redraw_events = milestones
-                        .redraw_events
-                        .saturating_add(u32::try_from(events.len()).unwrap_or(u32::MAX));
-                }
-                _ => {}
-            }
             felt.note_input(&msg, &model, || pump.staged());
             // read before the fold takes the message: which of the three
             // things that dirty the screen this dispatch was is what

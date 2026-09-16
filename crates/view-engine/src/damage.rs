@@ -142,10 +142,11 @@ pub(crate) struct DamageBuffer {
     flush_index: Option<usize>,
     grids: HashMap<u64, GridEpochs>,
     pending: bool,
-    /// When the fold that staged the `Flush` at `flush_index` ran, which is
-    /// the moment those bytes were read off the wire rather than the moment
-    /// a consumer got round to draining them. `None` while nothing has
-    /// reached a `Flush`.
+    /// When the fold that staged the `Flush` at `flush_index` ran: the end
+    /// of that batch's decode on the reader thread rather than the moment a
+    /// consumer got round to draining them. A large batch's own decode sits
+    /// inside the reading, since the whole `Vec` is built before the fold is
+    /// called at all. `None` while nothing has reached a `Flush`.
     flushed_at: Option<Instant>,
     /// The reading [`take`](Self::take) handed its caller, kept so a caller
     /// that drains and then asks can still be answered in the same lock.
@@ -161,10 +162,11 @@ impl DamageBuffer {
     /// pending means a token is already in flight or will be re-sent by
     /// [`take`](Self::take)'s next caller).
     pub(crate) fn fold_batch(&mut self, events: impl IntoIterator<Item = UiEvent>) -> bool {
-        // one reading per batch, taken on the reader thread before the fold
-        // rather than after it: what a consumer asks this for is when the
-        // bytes arrived, and the fold's own cost sits inside the gap it is
-        // later read against
+        // one reading per batch, taken before the fold rather than after
+        // it: what a consumer asks this for is when the batch arrived, and
+        // the fold's own cost would otherwise sit inside the gap it is
+        // later read against. The decode that ran ahead of this call still
+        // does
         let folded_at = Instant::now();
         for ev in events {
             self.fold_one(ev, folded_at);

@@ -151,7 +151,7 @@ fn write_line_at(file: &Mutex<std::fs::File>, topic: &str, ms: u128, payload: &s
 
 /// One `engine redraw` census line for a batch just drained from the
 /// pump, stamped with `folded_at` -- the reading the reader thread took
-/// when it folded that batch, which is when those bytes were on the wire.
+/// when it folded that batch.
 ///
 /// Which clock the line carries is what taking `folded_at` here is for:
 /// written from this call instead, the stamp would be the loop's drain,
@@ -159,6 +159,16 @@ fn write_line_at(file: &Mutex<std::fs::File>, topic: &str, ms: u128, payload: &s
 /// off these lines would be a window on view's own draining rather than on
 /// the engine's traffic. `None` falls back to now, which is a drain the
 /// pump dated nothing for (nothing had reached a `Flush`).
+///
+/// Two limits on reading it as the arrival. The reading is taken at the
+/// top of the fold, which is after the reader thread has decoded the whole
+/// batch into a `Vec` and after it has the damage lock, so a large batch's
+/// own decode and any wait for a lock the loop holds sit inside the stamp
+/// rather than before it -- on a 567-event batch that is the launch
+/// attribution's own number. And a drain that reached two `Flush`es
+/// carries both wire batches on one line, dated by the later fold: the
+/// line says which it is, since the `flush=` count it prints is 1 for a
+/// line standing for one batch.
 ///
 /// An empty drain writes no line: it is a wakeup token for damage still
 /// short of a `Flush`, so it is not a batch the engine sent.
@@ -327,8 +337,26 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
 const PAYLOAD_CAP: usize = 120;
 
 /// How many redraw batches this process has written a census line for,
-/// which is what numbers them.
+/// which is what numbers them, and how many events they carried between
+/// them.
+///
+/// Read by the `first content frame` startup line as well as written here,
+/// so that column and the census lines standing above it in the log are
+/// one count rather than two that can disagree -- the loop's own counter
+/// saw neither the cutover's drain nor the recovery path's, both of which
+/// write a line here.
 static REDRAW_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REDRAW_EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Batches this process has drained a census line for and the events in
+/// them, for a caller reporting what the engine had sent by some moment.
+pub fn redraws_drained() -> (u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        REDRAW_BATCHES.load(Ordering::Relaxed),
+        REDRAW_EVENTS.load(Ordering::Relaxed),
+    )
+}
 
 /// One `engine redraw` line for a batch the engine sent: how many events it
 /// carried and how many of each kind.
@@ -348,6 +376,10 @@ fn redraw_census(events: &[view_core::events::UiEvent]) -> String {
     use std::borrow::Cow;
     use view_core::events::UiEvent;
     let batch = REDRAW_BATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    REDRAW_EVENTS.fetch_add(
+        u64::try_from(events.len()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let mut kinds: Vec<(Cow<'_, str>, usize)> = Vec::new();
     for ev in events {
         // an event this tree's decoder has no arm for still carries the name
@@ -355,7 +387,7 @@ fn redraw_census(events: &[view_core::events::UiEvent]) -> String {
         // of the 567 events in the batch a launch attribution rests on were
         // written under that label
         let kind = match ev {
-            UiEvent::Unknown { name } => Cow::Owned(format!("unknown({name})")),
+            UiEvent::Unknown { name } => Cow::Owned(format!("unknown({})", capped(name))),
             _ => Cow::Borrowed(event_kind(ev)),
         };
         match kinds.iter_mut().find(|(name, _)| *name == kind) {
@@ -2092,6 +2124,7 @@ mod tests {
     #[test]
     fn an_unknown_event_is_counted_under_the_name_the_wire_sent() {
         use view_core::events::UiEvent;
+        let _numbering = census_numbering();
         let census = redraw_census(&[
             UiEvent::Unknown {
                 name: "chdir".to_string(),
@@ -2102,12 +2135,35 @@ mod tests {
             UiEvent::Unknown {
                 name: "suspend".to_string(),
             },
+            UiEvent::Unknown {
+                name: "z".repeat(PAYLOAD_CAP + 40),
+            },
             UiEvent::Flush,
         ]);
+        let long = format!("unknown({})=1", capped(&"z".repeat(PAYLOAD_CAP + 40)));
         assert!(
-            census.ends_with("events=4 kinds=unknown(chdir)=2,unknown(suspend)=1,flush=1"),
-            "the census throws away the names the wire carried: {census}"
+            census.ends_with(&format!(
+                "events=5 kinds=unknown(\"chdir\")=2,unknown(\"suspend\")=1,{long},flush=1"
+            )),
+            "the census throws away the names the wire carried, or writes one \
+             the wire chose the length of: {census}"
         );
+        assert!(
+            long.contains("+40B"),
+            "a name off the wire reaches the log uncapped: {long}"
+        );
+    }
+
+    /// Held across every call to [`redraw_census`] in this module: the
+    /// number a line takes comes from a process-global counter, so a
+    /// sibling test numbering a line of its own otherwise lands between a
+    /// pair asserted to be consecutive.
+    static CENSUS_NUMBERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn census_numbering() -> std::sync::MutexGuard<'static, ()> {
+        CENSUS_NUMBERING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A batch's census counts its cells rather than listing them, which is
@@ -2117,6 +2173,7 @@ mod tests {
     #[test]
     fn a_redraw_census_counts_its_cells_rather_than_listing_them() {
         use view_core::events::UiEvent;
+        let _numbering = census_numbering();
         let line = |row| UiEvent::GridLine {
             grid: 2,
             row,

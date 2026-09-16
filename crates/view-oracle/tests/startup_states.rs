@@ -512,6 +512,10 @@ const CONTENT_TYPED: &str = "CONTENTLANDED";
 const CHROME_FRAME: &str = "chrome frame written";
 const CONTENT_FRAME: &str = "first content frame written";
 
+/// The census line the loop writes for each batch it drains, which is what
+/// the content line's `redraws=` counts.
+const REDRAW_CENSUS: &str = "engine redraw batch=";
+
 /// The content line is written for the frame that carries a window's text,
 /// and never for the chrome frame before it.
 ///
@@ -528,14 +532,18 @@ const CONTENT_FRAME: &str = "first content frame written";
 /// every cell of the window grid is blank until the test types; the wait
 /// is on the chrome line reaching the log, and only then does the typing
 /// start. The discriminator is the redraw counter the content line
-/// carries, which the loop zeroes at the chrome frame: a content line
-/// written on the chrome frame's own pass reads `redraws=0` by
-/// construction, and one written for the text this test typed cannot,
-/// because the text arrived in a batch of its own.
+/// carries, read against the census lines standing above the chrome line:
+/// the counter is every batch drained so far, so a content line written on
+/// the chrome frame's own pass carries exactly the census lines that
+/// preceded that line, and one written for the text this test typed
+/// carries at least one more, because the text arrived in a batch of its
+/// own. Counted off the log rather than held in a constant, since how many
+/// batches a config takes to reach its chrome frame is the config's
+/// business.
 ///
 /// Disconfirm: point the loop's condition back at `model.chrome_painted`
-/// and this fails with `redraws=0` while the whole rest of the suite stays
-/// green.
+/// and this fails with the two counts equal while the whole rest of the
+/// suite stays green.
 #[test]
 fn the_content_line_is_written_for_the_frame_carrying_window_text() {
     let paths = common::ScratchPaths::new("startup-content");
@@ -582,15 +590,22 @@ fn the_content_line_is_written_for_the_frame_carrying_window_text() {
         .unwrap_or_else(|| {
             panic!("view painted {CONTENT_TYPED} and logged no content frame; log:\n{log}")
         });
-    let redraws: u32 = line
+    let redraws: usize = line
         .split("redraws=")
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|count| count.parse().ok())
         .unwrap_or_else(|| panic!("the content line carries no redraw count: {line}"));
+    let at_the_chrome_line = log
+        .lines()
+        .take_while(|line| !line.contains(CHROME_FRAME))
+        .filter(|line| line.contains(REDRAW_CENSUS))
+        .count();
     assert!(
-        redraws > 0,
+        redraws > at_the_chrome_line,
         "the content line was written for the chrome frame's own pass, \
-         before any window held text: {line}\nlog:\n{log}"
+         before any window held text: it counts {redraws} batches drained \
+         against the {at_the_chrome_line} census lines standing above the \
+         chrome line: {line}\nlog:\n{log}"
     );
 }
