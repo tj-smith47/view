@@ -154,20 +154,31 @@ function colours(term, row, col) {
   return seen;
 }
 
-// view's own palette chrome, which is the title of the box it draws the
-// typed line inside.
+// The title of the framed box each side draws the typed line inside:
+// view's own palette, and noice's cmdline popup, which is what a config
+// loading noice gets instead of nvim's own last-row command line.
 const PALETTE_TITLE = '\u2500 Command \u2500';
+const POPUP_TITLE = '\u2500 Cmdline \u2500';
 
-// Whether the command line is on screen. view draws a framed box carrying
-// its own title; bare nvim echoes the `:` into the first cell of the last
-// row. Both read off cells rather than off a pattern over the screen: the
-// pattern this replaces matched `use std::path::PathBuf;` in the file
-// itself, so the moment was dated at the first record after the key
-// whatever was drawn.
+// Whether the command line is on screen, wherever this config paints it.
+//
+// Three shapes, all read off cells rather than off a pattern over the
+// screen: the pattern this replaces matched `use std::path::PathBuf;` in
+// the file itself, so the moment was dated at the first record after the
+// key whatever was drawn.
+//
+// view draws its palette's framed box. Bare nvim draws either its own
+// command line in the last row -- a `:` in the first cell, which is what
+// the plugin-free fixture shows -- or, under noice, a framed box titled
+// Cmdline in the middle of the screen. The last-row reading found nothing
+// at all on the user's own config for that reason, and a reading over `:`
+// cells finds nothing either: noice's prompt row carries the cursor and no
+// glyph, so the only `:` on screen is the file's own.
 function cmdlineShown(term, screen, palette) {
-  if (palette) {
-    return screen.some((line) => line.indexOf(PALETTE_TITLE) !== -1);
+  if (screen.some((line) => line.indexOf(palette ? PALETTE_TITLE : POPUP_TITLE) !== -1)) {
+    return true;
   }
+  if (palette) return false;
   const line = term.buffer.active.getLine(term.rows - 1);
   if (!line) return false;
   const cell = line.getCell(0);
