@@ -352,17 +352,24 @@ check's own second.
 The two user-facing pages are graded by the moment they name, because the
 identifier rule leaves them nothing else to resolve against. The felt
 vocabulary the comparative rule already maps -- the worst keystroke in a
-thousand, the glyph view expects, staleness, cadence, the matching
-results, the first page of them, the worst launch, what the process holds
--- names the cell, and the figure is graded against that cell's seat on
-the class the page declares in its own words, the way `docs/benchmarking.md`
-declares its own. The first reading in a sentence is view's, since these
-pages publish paired numbers and the bare-engine one beside it is an
-absolute no cell records, and a figure the sentence calls a difference is
-neither side's reading. A page declaring no class states numbers taken on
-a host no reader is told about, so it is refused as ambiguous rather than
-resolved against a guess. Ungraded, seven recorded seats stood on those
-two pages, and perturbing one left the check at rc 0.
+thousand, the glyph view expects, staleness, cadence, the matching results,
+the first page of them, the worst launch, what the process holds, the
+engine's started mark landing later under view -- names the cell, and the
+figure is graded against that cell's seat on the class the page declares in
+its own words, the way `docs/benchmarking.md` declares its own. The first
+reading in a sentence is view's, since these pages publish paired numbers
+and the bare-engine one beside it is an absolute no cell records, and a
+figure the sentence calls a difference is neither side's reading -- unless
+the cell is itself a difference, which is how the started mark is quoted and
+why those words are read as the moment rather than as a gap between two
+published readings. The grounds are one ordered list, so a figure the
+sentence calls a difference is reported as one whether or not the sentence
+names a moment: reported as a sentence naming none, the launch paragraph's
+own stated difference said the ground of its neighbours instead of its own.
+A page declaring no class states numbers taken on a host no reader is told
+about, so it is refused as ambiguous rather than resolved against a guess.
+Ungraded, seven recorded seats stood on those two pages, and perturbing one
+left the check at rc 0.
 
 The identifier rule is the strict form, and it is the one with no false
 positives: the user-facing pages state moments in words ("the key reaches

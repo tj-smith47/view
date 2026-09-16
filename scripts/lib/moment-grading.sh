@@ -190,6 +190,12 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       if (text ~ /first page of results/) { return "picker.first_page_p99_ms" }
       if (text ~ /worst launch/) { return "startup.first_frame_cold_ms" }
       if (text ~ /own process holds/) { return "memory.pss_mb" }
+      # The engine mark, quoted on both pages with the word the pages write
+      # it in and on neither with an identifier. The metric is itself a
+      # difference, so the sentence states it in difference words and the
+      # pick below reads those words as the moment rather than as a gap
+      # between two published readings.
+      if (text ~ /started[^ ]* mark/) { return "startup.server_delta_ms" }
       return ""
     }
     function cell_unit(cell) {
@@ -223,10 +229,13 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         num = clean(tk[i])
         nxt = clean(tk[i + 1])
         tail = (unit_of(nxt) != "") ? clean(tk[i + 2]) : nxt
-        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/) {
+        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/ \
+            && cell !~ /_delta_ms$/) {
           why = "a difference the sentence states"
         } else if (nxt ~ /^(bar|bars|budget|bound|frame)$/) {
           why = "a bound, not a reading"
+        } else if (cell == "") {
+          why = "the sentence states no moment the vocabulary names"
         } else if (unit_of(nxt) != cell_unit(cell)) {
           why = "a unit no cell of that moment is recorded in"
         } else if (pick > 0 && i > pick) {
@@ -242,12 +251,11 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       for (i = a; i <= b; i++) { text = text " " tk[i] }
       cell = moment_of(text)
       if (cell == "" || !(cell in cellseen)) {
-        if (mode == "classify") {
-          for (i = a; i <= b; i++) {
-            note(tl[i], ti[i],
-              "excluded:the sentence states no moment the vocabulary names")
-          }
-        }
+        # The grounds in one place and in one order, so the most specific one
+        # a figure meets is the one reported: `1.5 ms behind` is a difference
+        # whether or not the sentence around it names a moment, and reporting
+        # it as a sentence naming none said the ground of its neighbours.
+        if (mode == "classify") { grounds(a, b, 0, "") }
         return
       }
       # The first reading of the sentence is view own: these pages publish
@@ -260,7 +268,8 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
         nxt = clean(tk[i + 1])
         tail = (unit_of(nxt) != "") ? clean(tk[i + 2]) : nxt
-        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/) { continue }
+        if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/ \
+            && cell !~ /_delta_ms$/) { continue }
         if (unit_of(nxt) != cell_unit(cell)) { continue }
         pick = i
         break

@@ -927,6 +927,34 @@ rewrite_readme '`dev-linux` is the default' '`dev-solaris` is the default'
 expect 1 'moment-default:README.md' \
   'a page declaring a default class no baseline in the tree ships under'
 
+# The engine mark, which the pages state in difference words because the
+# metric is itself a difference. Read as a gap between two published
+# readings it was picked by nothing, and the figure stood on both pages
+# with no rule grading it: the sweep found it and the vocabulary names it.
+seat_server_delta() {
+  cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[startup.minimal]
+server_delta_ms = 0.6820000000000004
+TOML
+}
+
+add_started_mark() {
+  printf '\nThe engine "started" mark lands %s ms later under view, plugin-free.\n' \
+    "$1" >> "$CASE/$README"
+}
+
+new_case
+seat_server_delta
+add_started_mark 0.68
+expect 0 '' 'the engine started mark stated in difference words, at the value that cell records'
+
+new_case
+seat_server_delta
+add_started_mark 0.69
+expect 1 'moment-drift:README.md:6' \
+  'the same mark one digit off the seat, which no difference word excuses'
+
 # ---------------------------------------------------------------------------
 # a number resolves to one cell, not to the union of every cell its unit
 # names: the nearest id before it in its own sentence, and the unit's first
@@ -1836,6 +1864,29 @@ got
 $got"
 fi
 report 'each ground the grading states is reported with the figure it excludes' "$mismatch"
+
+# The grounds are one ordered list and the most specific one a figure meets
+# is what the sweep prints. A difference stated in a sentence that names no
+# moment took the ground of its neighbours instead of its own, which is a
+# reader told the wrong reason a figure was left alone.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+That screen arrives in 53.9 ms under view against 52.4 ms under Neovim:
+view 0.73 ms behind.
+MD
+printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 4 1 0.73 excluded:a difference the sentence states"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a difference in a sentence naming no moment is excluded as the difference it is' "$mismatch"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]
