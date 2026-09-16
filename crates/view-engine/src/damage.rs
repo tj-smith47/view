@@ -293,6 +293,15 @@ impl DamageBuffer {
         self.pending
     }
 
+    /// Whether any event is standing in the buffer, flushed or not. Distinct
+    /// from [`is_pending`](Self::is_pending), which is the wakeup flag and is
+    /// cleared by every [`take`](Self::take) including one that drained
+    /// nothing: after a `take` with no `Flush` reached, the events folded
+    /// before it are still here while the flag reads false.
+    pub(crate) fn has_staged(&self) -> bool {
+        !self.staged.is_empty()
+    }
+
     /// Folds the `pending` flag back to `false` after a fold's
     /// `RedrawReady` token failed to reach the channel (see module docs'
     /// bounded channel contract). Never touches `staged`: the damage itself
@@ -982,7 +991,7 @@ impl PumpShared {
 
     fn staged(&self) -> bool {
         let buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
-        buf.is_pending()
+        buf.has_staged()
     }
 
     fn take_damage(&self) -> Vec<UiEvent> {
@@ -1251,6 +1260,26 @@ mod tests {
             "a fold landing after take() returned must re-arm the flag"
         );
         assert!(buf.is_pending());
+    }
+
+    #[test]
+    fn an_unflushed_batch_still_reads_as_staged_after_a_drain_returned_empty() {
+        // the wakeup flag and the buffer answer different questions: a fold
+        // with no Flush in it arms `pending`, and the take that clears the
+        // flag drains nothing, so a keystroke asking "was a batch folded
+        // before the engine saw me" has to read the buffer.
+        let mut buf = DamageBuffer::default();
+        assert!(buf.fold_batch(vec![line(0, 0, 1)]));
+        assert!(buf.take().is_empty());
+        assert!(!buf.is_pending());
+        assert!(
+            buf.has_staged(),
+            "the events folded before the empty drain are still staged"
+        );
+
+        buf.fold_batch(vec![UiEvent::Flush]);
+        let _ = buf.take();
+        assert!(!buf.has_staged(), "a flushed drain empties the buffer");
     }
 
     #[test]
