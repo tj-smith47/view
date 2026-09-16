@@ -70,6 +70,12 @@ set -euo pipefail
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(cd -- "$HERE/../.." && pwd)
 
+# Portable file mtime, seconds since epoch. Perl's own stat() reads the same
+# field everywhere, sidestepping the GNU/BSD `stat` flag split entirely.
+mtime_of() {
+  perl -e 'print((stat($ARGV[0]))[9])' "$1"
+}
+
 RUNS=5
 FILE=$REPO/crates/view-core/src/model.rs
 OUT=$HOME/.claude/tmp/link-record/$(date +%Y%m%d-%H%M%S)
@@ -127,6 +133,26 @@ for required in "$VIEW_BIN" "$NVIM_BIN" "$FILE"; do
     exit 1
   fi
 done
+HEAD_SHA=$(git -C "$REPO" log -1 --format=%h)
+HEAD_CT=$(git -C "$REPO" log -1 --format=%ct)
+BIN_MTIME=$(mtime_of "$VIEW_BIN")
+
+# A binary under $REPO/target/ is this repo's own build, so a run over one
+# older than HEAD's own commit measured a build that does not carry HEAD's
+# effect -- the defect only the `takeover` topic's wire order gave away once
+# already. VIEW_BIN pointing outside target/ is a scratch build, which is the
+# whole point of the variable, and is measured as given.
+case "$VIEW_BIN" in
+  ("$REPO"/target/*)
+    if [ "$BIN_MTIME" -lt "$HEAD_CT" ]; then
+      echo "link-record: $VIEW_BIN (mtime $BIN_MTIME) is older than HEAD" \
+           "$HEAD_SHA (committed $HEAD_CT); rebuild with:" \
+           "cargo build --release -p view" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 if [ ! -d "$FIXTURE/nvim" ]; then
   echo "link-record: no user fixture at $FIXTURE; run: task user-fixture" >&2
   exit 1
@@ -602,6 +628,11 @@ spread() {
 
 TABLE=$OUT/table.txt
 {
+  case "$VIEW_BIN" in
+    ("$REPO"/target/*) bin_note="" ;;
+    (*) bin_note=" (outside target/, measured as given)" ;;
+  esac
+  echo "binary: $VIEW_BIN mtime=$BIN_MTIME head=$HEAD_SHA$bin_note"
   if [ "$LINK" = "1" ]; then
     echo "arm: link (ssh localhost, lo shaped ${RATE_KBIT}kbit" \
          "delay ${DELAY_MS}ms on port $SSH_PORT)"
