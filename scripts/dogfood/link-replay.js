@@ -298,6 +298,18 @@ function report() {
         }
       }
     }
+    // the two titles are substring matches against whatever border charset
+    // the palette and noice happen to draw, so a theme or config that changes
+    // either leaves this column empty -- visible as one gap in one row of a
+    // table, with nothing saying what was looked for
+    if (typed.length > 0 && moments.cmdline === undefined) {
+      const looked = palette
+        ? `the palette title ${JSON.stringify(PALETTE_TITLE)}`
+        : `the popup title ${JSON.stringify(POPUP_TITLE)} and a ':' in the first cell of the last row`;
+      console.error(
+        `link-replay: ${typed.length} step(s) typed and no command line on any frame; looked for ${looked}`
+      );
+    }
     for (const name of ['text', 'highlight', 'cmdline', 'handback']) {
       console.log(`${name}_ms=${moments[name] === undefined ? '' : moments[name].toFixed(1)}`);
     }

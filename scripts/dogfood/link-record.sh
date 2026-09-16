@@ -28,8 +28,8 @@
 #
 #   scripts/dogfood/link-record.sh [-n RUNS] [-f FILE] [-o OUTDIR]
 #                                  [-s NEEDLE] [-c COLS] [-r ROWS]
-#                                  [--cold] [--home] [-l|--link]
-#                                  [--rate KBIT] [--delay MS]
+#                                  [--cold] [--home] [--no-log]
+#                                  [-l|--link] [--rate KBIT] [--delay MS]
 #
 # `-s NEEDLE` is the word both waits and both readings are written against:
 # the file is on the wire when the needle appears, and the colours arrived
@@ -49,6 +49,13 @@
 # before. State and cache are per-run in both arms already; the data
 # directory is what a warm HOME still carries, and the moment it moves is
 # VimEnter to the first content frame.
+#
+# `--no-log` runs the view side with no `VIEW_LOG` at all, which is what
+# prices the instrument itself: the `highlight` topic reads every cell of the
+# window grid on each flushed frame for as long as the watch runs, and every
+# figure this recorder publishes was taken with that reading on. The columns
+# that come out of the log are empty on this arm; `text_ms`, `hl_ms` and
+# `colon_ms` are read off the wire and are the comparison.
 #
 # `--link` puts a real link under the run instead of a local pty: the editor
 # runs over `ssh localhost` and a netem qdisc shapes the loopback traffic to
@@ -72,6 +79,7 @@ ROWS=88
 LINK=0
 COLD=0
 HOME_ARM=0
+NO_LOG=0
 # the link the user's own recording showed: a 24 kB chrome frame arriving
 # over 37 ms, and a round trip in the tens of milliseconds
 RATE_KBIT=5200
@@ -88,6 +96,7 @@ while [ "$#" -gt 0 ]; do
     (-r) ROWS=$2; shift 2 ;;
     (--cold) COLD=1; shift ;;
     (--home) HOME_ARM=1; shift ;;
+    (--no-log) NO_LOG=1; shift ;;
     (-l|--link) LINK=1; shift ;;
     (-h|--help)
       awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
@@ -190,6 +199,11 @@ cleanup() {
   # the reader that was watching it: killing the reader first leaves the
   # editor running with nothing draining its pty
   if [ -n "$CHILD" ]; then
+    # the editor is a child of the `script` this loop started, so killing
+    # only `script` leaves a `view` or `nvim` running on a shared host with
+    # nothing draining its pty. Scoped to that one pid's children, never to
+    # a name: a peer session's live-nvim test is not this script's to reap
+    pkill -P "$CHILD" 2>/dev/null || true
     kill "$CHILD" 2>/dev/null || true
   fi
   if [ -n "$READER" ]; then
@@ -304,7 +318,9 @@ record_one() {
     case "$side" in
       # view forwards the flag to the engine it spawns, so the engine's own
       # first screen update is recorded beside view's first content frame
-      (view) echo "export VIEW_LOG=$dir/view.log"
+      (view) if [ "$NO_LOG" = "0" ]; then
+               echo "export VIEW_LOG=$dir/view.log"
+             fi
              echo "exec $VIEW_BIN --startuptime $dir/startuptime $FILE" ;;
       (*) echo "exec $NVIM_BIN --startuptime $dir/startuptime $FILE" ;;
     esac
@@ -327,8 +343,16 @@ record_one() {
   READER=$!
   # node's own startup is some 30 ms, and an editor that asks its terminal a
   # question inside that window waits for the answer: read the emulator's
-  # own ready line before the editor is started, which blocks until it is up
-  read -r _ < "$dir/ready" || true
+  # own ready line before the editor is started, which blocks until it is up.
+  # Opened read-write and bounded, because a fifo opened for reading alone
+  # blocks in the open until a writer arrives -- where `read -t` bounds only
+  # the read -- and an emulator that died before writing its line would
+  # otherwise hold this run open for good
+  exec 4<> "$dir/ready"
+  if ! read -r -t 30 _ <&4; then
+    echo "  $side-$index: the emulator never reported ready" >&2
+  fi
+  exec 4>&-
   script -q -e -I "$dir/in.log" -O "$dir/out.log" -T "$dir/tm.log" \
     -c "bash $INNER" < "$dir/in" > "$dir/wire" 2>&1 &
   CHILD=$!
@@ -452,14 +476,37 @@ palette_wait() {
     echo ""
     return 0
   fi
+  # the first `:` of the session and no other: a walk that kept looking
+  # reported the `:` of the closing `:qa!` in the same column, with nothing
+  # saying the palette's own line carried no reading
   awk '/^[0-9]+ key .*notation=":"/ {
     for (i = 1; i <= NF; i++) {
       if (substr($i, 1, 10) == "waited_us=") {
         printf "%.1f", substr($i, 11) / 1000
-        exit
       }
     }
+    exit
   }' "$1"
+}
+
+# `colon_ms`, or an empty field and a message naming the run where the
+# subtraction cannot be a reading. Two writers share the `in` fifo -- this
+# script's steps and the emulator's replies -- so `script` can coalesce a
+# reply and a step into one input record, and the `:` is then dated at the
+# `Esc` typed after it. Silent before this: the column held a negative or
+# absurd number in the same place a real reading goes.
+bounded_colon() {
+  awk -v a="$1" -v b="$2" -v run="$3" 'BEGIN {
+    if (a == "" || b == "") exit
+    d = a - b
+    if (d < 0 || d > 1000) {
+      printf "  %s: the cmdline is %.1f ms after the typed step, which dates \
+the `:` at another input record; colon_ms left empty\n", run, d \
+        > "/dev/stderr"
+      exit
+    }
+    printf "%.1f", d
+  }'
 }
 
 # The difference between two readings, or an empty field where either side
@@ -490,8 +537,9 @@ while [ "$index" -le "$RUNS" ]; do
       "$(moment "$dir/moments.txt" text_ms)" \
       "$(moment "$dir/moments.txt" highlight_ms)" \
       "$(moment "$dir/moments.txt" base_colours)" \
-      "$(delta "$(moment "$dir/moments.txt" cmdline_ms)" \
-               "$(moment "$dir/moments.txt" typed1_ms)")" \
+      "$(bounded_colon "$(moment "$dir/moments.txt" cmdline_ms)" \
+                       "$(moment "$dir/moments.txt" typed1_ms)" \
+                       "$side-$index")" \
       "$(palette_wait "$dir/view.log")" \
       "$(delta "$(moment "$dir/moments.txt" handback_ms)" \
                "$(moment "$dir/moments.txt" typed3_ms)")" \
@@ -533,6 +581,10 @@ TABLE=$OUT/table.txt
     echo "arm: local pty"
   fi
   echo "consumer: live xterm.js answering the terminal's own queries"
+  if [ "$NO_LOG" = "1" ]; then
+    echo "log: none -- the view side runs with no VIEW_LOG, so every column" \
+         "read off it is empty"
+  fi
   if [ "$HOME_ARM" = "1" ]; then
     echo "state: the real \$HOME, its XDG directories untouched"
   elif [ "$COLD" = "1" ]; then
