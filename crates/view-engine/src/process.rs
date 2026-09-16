@@ -1931,11 +1931,11 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// What the limit cannot bound is a grammar whose injection query carries
 /// combined injections: that scan is the whole document whatever range is
 /// asked (`languagetree.lua`'s `full_scan`), so the cost follows the file
-/// rather than the window, and on the pinned engine a 250 KB markdown
-/// buffer -- comfortably under the limit -- spends 98 ms of it before the
-/// text goes out, where bare nvim shows the text at once and colours it in
-/// slices. Those buffers keep the asynchronous path, which is what the
-/// limit is there to preserve.
+/// rather than the window, where the limit above follows the window. Such
+/// a grammar is parsed inline under a smaller bound of its own, and a
+/// buffer over that one keeps the asynchronous path -- the text goes out
+/// at once and the colours arrive in slices, which is what bare nvim does
+/// with it.
 ///
 /// The buffer and the range are read where this callback runs, which is
 /// before every `VimEnter` autocommand the config registers: a dashboard,
@@ -2015,6 +2015,10 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          -- visible, so a buffer big enough to spend a frame on it keeps\n\
          -- the asynchronous path the highlighter would have taken\n\
          local sync_parse_bytes = 256 * 1024\n\
+         -- a combined-injection scan is the whole document whatever range\n\
+         -- is asked, so that cost rides on the file rather than on the\n\
+         -- range and fits inside a frame over a shorter one\n\
+         local combined_parse_bytes = 16 * 1024\n\
          local channel\n\
          for _, chan in ipairs(vim.api.nvim_list_chans()) do\n\
          if chan.stream == 'stdio' then channel = chan.id end\n\
@@ -2071,11 +2075,12 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          local bytes = vim.api.nvim_buf_get_offset(buf,\n\
          vim.api.nvim_buf_line_count(buf))\n\
          if h and bytes <= sync_parse_bytes then\n\
-         -- a grammar with combined injections scans the whole document\n\
-         -- for injections whatever range is asked, so the byte limit\n\
-         -- bounds nothing it costs\n\
-         local injections = h.tree._injection_query\n\
-         if injections and injections.has_combined_injections then\n\
+         -- the public read: a renamed private field would read nil and\n\
+         -- run the parse this bound is here to hold\n\
+         local injections =\n\
+         vim.treesitter.query.get(h.tree:lang(), 'injections')\n\
+         if injections and injections.has_combined_injections\n\
+         and bytes > combined_parse_bytes then\n\
          return\n\
          end\n\
          -- the range the highlighter's own on_start asks for, 0-based:\n\

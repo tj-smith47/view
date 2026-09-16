@@ -174,20 +174,46 @@ vim.api.nvim_set_current_buf(buf)\n";
 /// highlighter's in the order nvim runs them.
 const START_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'lua')\n";
 
-/// A markdown buffer, whose bundled grammar carries combined injections:
-/// its injection scan is the whole document whatever range is asked, so
-/// the hook's byte limit bounds nothing it costs and the hook leaves it to
-/// the asynchronous path.
+/// The bound the startup chunk gives a grammar whose injection query
+/// carries combined injections, written here because `late_attach_cmd` is
+/// private to its own crate: the two tests below stand either side of it,
+/// and a chunk that moved it would leave both of them measuring the same
+/// branch.
+const COMBINED_PARSE_BYTES: usize = 16 * 1024;
+
+/// A markdown buffer of a stated size, whose bundled grammar carries
+/// combined injections: its injection scan is the whole document whatever
+/// range is asked, so the cost rides on the file and the hook bounds it by
+/// the file rather than by the window.
 ///
-/// Short, because the branch this fixture is about turns on the grammar
-/// rather than on the size -- a buffer of any length takes the same
-/// answer, and a long one only costs the suite the parse it is here to
-/// prove nobody ran.
-const MARKDOWN_BUFFER: &str = "\
-local buf = vim.api.nvim_create_buf(false, true)\n\
-vim.api.nvim_buf_set_lines(buf, 0, -1, false, {\n\
-  '# heading', '', '```lua', 'local x = 1', '```', '', 'text' })\n\
-vim.api.nvim_set_current_buf(buf)\n";
+/// Returned with the byte count nvim reads off it -- every line and its
+/// newline, which is what `nvim_buf_get_offset` answers -- so a test says
+/// which side of the bound it stands on rather than trusting a line count
+/// to land there.
+fn markdown_buffer(fill: usize) -> (String, usize) {
+    let mut lines = vec![
+        "# heading".to_string(),
+        String::new(),
+        "```lua".to_string(),
+        "local x = 1".to_string(),
+        "```".to_string(),
+        String::new(),
+    ];
+    for i in 0..fill {
+        lines.push(format!("- item {i} {}", "p".repeat(100)));
+    }
+    let bytes = lines.iter().map(|line| line.len() + 1).sum();
+    let table: String = lines.iter().map(|line| format!("  '{line}',\n")).collect();
+    (
+        format!(
+            "local buf = vim.api.nvim_create_buf(false, true)\n\
+             vim.api.nvim_buf_set_lines(buf, 0, -1, false, {{\n\
+             {table}}})\n\
+             vim.api.nvim_set_current_buf(buf)\n"
+        ),
+        bytes,
+    )
+}
 
 const START_MARKDOWN_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'markdown')\n";
 
@@ -200,9 +226,14 @@ fn highlighted_pin_config() -> ScratchDir {
     highlighted_config(TREESITTER_BUFFER, START_HIGHLIGHTER)
 }
 
-/// The same, over a grammar the hook refuses to parse inline.
-fn highlighted_markdown_config() -> ScratchDir {
-    highlighted_config(MARKDOWN_BUFFER, START_MARKDOWN_HIGHLIGHTER)
+/// The same, over a grammar the hook bounds by the file, with the bytes
+/// that grammar's buffer holds.
+fn highlighted_markdown_config(fill: usize) -> (ScratchDir, usize) {
+    let (buffer, bytes) = markdown_buffer(fill);
+    (
+        highlighted_config(&buffer, START_MARKDOWN_HIGHLIGHTER),
+        bytes,
+    )
 }
 
 fn highlighted_config(buffer: &str, start_highlighter: &str) -> ScratchDir {
@@ -386,20 +417,54 @@ fn the_highlighters_parse_is_finished_before_nvims_first_frame() {
     );
 }
 
-/// A grammar whose injection query carries combined injections is left to
-/// the asynchronous path, whatever the buffer's size: its injection scan
-/// is the whole document however few lines the hook asks for, so the byte
-/// limit bounds nothing the parse costs -- on the pinned engine a 250 KB
-/// markdown buffer, well under that limit, spends 98 ms of it ahead of the
-/// frame its own text goes out in.
+/// A grammar whose injection query carries combined injections is parsed
+/// inline while the buffer is under the bound that grammar gets: the scan
+/// is the whole document however few lines the hook asks for, so the cost
+/// rides on the file, and a file this size still finishes inside the
+/// frame nvim draws at the end of startup.
+#[test]
+fn a_combined_injection_grammar_under_its_own_bound_is_parsed_inline() {
+    let (dir, bytes) = highlighted_markdown_config(36);
+    assert!(
+        bytes < COMBINED_PARSE_BYTES,
+        "the fixture has to stand under the bound to measure the branch \
+         this test is about, and it holds {bytes} bytes"
+    );
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.highlighted, 1,
+        "the fixture attaches a markdown highlighter while init.lua is \
+         sourcing, so one must be active here or this test measured nothing"
+    );
+    assert_eq!(
+        read.coloured_draw, 1,
+        "the colours must be in nvim's own screen update at the end of \
+         startup: a combined-injection grammar under the bound is parsed \
+         inline like any other, or this buffer keeps the uncoloured first \
+         frame the bound exists to buy it out of"
+    );
+}
+
+/// The same grammar over that bound is left to the asynchronous path: the
+/// injection scan is the whole document, so a file this size costs more
+/// than the frame it would have to finish inside.
 ///
 /// The reading that says the hook skipped it is the first screen update
 /// beginning with an unparsed tree, which is what the highlighter's own
 /// first slice then finds and what every startup looked like before this
 /// hook parsed anything.
 #[test]
-fn a_grammar_with_combined_injections_is_left_to_the_asynchronous_path() {
-    let dir = highlighted_markdown_config();
+fn a_combined_injection_grammar_over_its_own_bound_takes_the_async_path() {
+    let (dir, bytes) = highlighted_markdown_config(290);
+    assert!(
+        bytes > COMBINED_PARSE_BYTES,
+        "the fixture has to stand over the bound to measure the branch \
+         this test is about, and it holds {bytes} bytes"
+    );
     let mut engine = engine(&dir);
     let _rx = answered(&mut engine);
 
@@ -414,8 +479,8 @@ fn a_grammar_with_combined_injections_is_left_to_the_asynchronous_path() {
         read.coloured_draw, 1,
         "nvim's own screen update at the end of startup must begin with an \
          unparsed tree: a first frame carrying colours here is the inline \
-         parse having run on a grammar whose cost the byte limit cannot \
-         bound"
+         parse having run on a file whose injection scan costs more than \
+         the frame"
     );
 }
 
