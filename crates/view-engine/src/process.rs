@@ -1893,6 +1893,35 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// ([`EngineConfig::attaches_late`]) has attached before this hook runs at
 /// all, and its wait returns on the first check.
 ///
+/// # The redraw the hook forces, and the parse it waits out
+///
+/// The first thing the scheduled callback below does is draw the screen
+/// (`nvim__redraw({ flush = true })`), before the `UIEnter` it goes on to
+/// fire. Left to nvim that screen update comes at the end of the loop
+/// turn, behind every callback queued on it -- which is every plugin the
+/// config loads from `UIEnter` and from the events it schedules -- so the
+/// settled screen reaches view as a second frame well after the first.
+///
+/// On the loop rather than inline in `VimEnter`, because a config's own
+/// `VimEnter` autocommands are what open its windows, and they all run
+/// after this hook's: nvim runs them in registration order and one
+/// registered from inside a running callback does not join that pass. A
+/// redraw inline here would flush the buffer the config is about to
+/// replace, which is a screen nvim's own TUI never shows
+/// (`view-oracle/tests/startup_states.rs`).
+///
+/// That redraw is also what starts the treesitter highlighter's parse: its
+/// decoration provider runs inside the screen update, the first slice runs
+/// there with it, and the rest is scheduled. Left alone those
+/// continuations queue behind the plugin loads, so the colours arrive well
+/// after the text they belong to and read as a second paint of a screen
+/// that had already settled. The callback waits them out instead --
+/// bounded, on the current buffer's own parser, and only where a
+/// highlighter is already attached -- and redraws again once the tree is
+/// valid. A buffer too large to finish inside the budget keeps the
+/// asynchronous path it had: the wait ends and the remaining slices run on
+/// the loop.
+///
 /// # The `UIEnter` this hook fires, and the one it leaves to nvim
 ///
 /// nvim gives a UI applied inside a `vim.wait` no `UIEnter` at all: the
@@ -1953,6 +1982,9 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
     format!(
         "lua vim.o.columns = {width} vim.o.lines = {height}\n\
          vim.g.view = 1\n\
+         -- the largest gap the settled screen tolerates before the\n\
+         -- treesitter colours read as a second paint\n\
+         local parse_budget = 30\n\
          local channel\n\
          for _, chan in ipairs(vim.api.nvim_list_chans()) do\n\
          if chan.stream == 'stdio' then channel = chan.id end\n\
@@ -1994,12 +2026,30 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          local had_ui = #attached() > 0\n\
          vim.rpcrequest(channel, 'view_vim_enter')\n\
          vim.wait(200, function() return #attached() > 0 end, 1)\n\
-         if not had_ui and #attached() > 0 then\n\
+         if #attached() > 0 then\n\
          vim.schedule(function()\n\
+         vim.api.nvim__redraw({{ flush = true }})\n\
+         local buf = vim.api.nvim_get_current_buf()\n\
+         -- package.loaded rather than vim.treesitter.highlighter: asking\n\
+         -- for the module is what loads it, and a startup with no\n\
+         -- highlighter never needs it loaded\n\
+         local hl = package.loaded['vim.treesitter.highlighter']\n\
+         if hl and hl.active[buf] then\n\
+         local parser = vim.treesitter.get_parser(buf, nil,\n\
+         {{ error = false }})\n\
+         -- is_valid(true): a highlighter parses the visible range, which\n\
+         -- processes no injections, so the whole-tree answer never comes\n\
+         if parser and vim.wait(parse_budget,\n\
+         function() return parser:is_valid(true) end, 1) then\n\
+         vim.api.nvim__redraw({{ flush = true }})\n\
+         end\n\
+         end\n\
+         if not had_ui then\n\
          quiet_tty = true\n\
          pcall(vim.api.nvim_exec_autocmds, 'UIEnter',\n\
          {{ data = {{ chan = channel }} }})\n\
          quiet_tty = false\n\
+         end\n\
          end)\n\
          end\n\
          end,\n\

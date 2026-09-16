@@ -2,18 +2,22 @@
 //! runs, asked of a live child that is answered and attached the way a
 //! session answers and attaches it.
 //!
-//! Two facts, and the whole of what the hook exists for. The UI is applied
+//! Four facts, and the whole of what the hook exists for. The UI is applied
 //! before any other `VimEnter` autocommand runs, so the one screen startup
 //! draws is drawn for the UI view attached rather than for the stand-in and
-//! then again for the real one. And the `UIEnter` nvim does not fire for a
-//! UI applied that way is fired here instead, on the loop's next turn,
+//! then again for the real one. The hook then draws that screen itself,
+//! before the `UIEnter` it fires, so view holds a frame ahead of everything
+//! that event sets off. Where a treesitter highlighter is attached,
+//! it waits that redraw's parse out, so the colours are in that frame
+//! rather than in the one after it. And the `UIEnter` nvim does not fire
+//! for a UI applied that way is fired here instead, on the loop's next turn,
 //! carrying the channel -- which is where nvim would have put it, and late
 //! enough that a handler registered from another plugin's `VimEnter` is
 //! standing when it arrives.
 //!
-//! Asked of a real child rather than read off the chunk's text: both facts
-//! are about what nvim's own loop does with what the chunk sends, and only
-//! nvim can be asked that. The peer here answers `view_vim_enter` and
+//! Asked of a real child rather than read off the chunk's text: every one
+//! of them is about what nvim's own loop does with what the chunk sends,
+//! and only nvim can be asked that. The peer here answers `view_vim_enter` and
 //! attaches behind the answer, which is the order a session writes them in.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -39,9 +43,40 @@ use view_test_support::ScratchDir;
 /// that is the window a plugin loaded by a `VimEnter` autocommand or a lazy
 /// `config` has, and an event fired before it closes is an event no such
 /// plugin ever sees.
+///
+/// Screen updates are counted from a decoration provider, which is the one
+/// thing a config can be told a frame went out by, and the count is read
+/// inside the `UIEnter` handler. nvim performs one of its own at the end of
+/// startup, so the count there is that one plus whatever the hook forced:
+/// what the reading refuses is a hook that forced nothing.
+///
+/// The treesitter readings are taken through `package.loaded` rather than
+/// `vim.treesitter.highlighter`, which is the guard the hook itself uses:
+/// asking for the module is what would load it, and a fixture that loads
+/// it cannot report a config that never had one. `is_valid(true)` is the
+/// hook's own predicate too: a highlighter parses the range its windows
+/// show, which processes no injections, so the answer that includes them
+/// stays false on a tree that is fully parsed and painted.
 const PIN_CONFIG: &str = "\
-_G.view_pin =\n\
-  { uis = -1, chan = -1, uienters = 0, chan_when_idle = -1, safe = 0 }\n\
+_G.view_pin = { uis = -1, chan = -1, uienters = 0, chan_when_idle = -1,\n\
+  safe = 0, drawn = 0, drawn_at_uienter = -1, highlighted = 0,\n\
+  parsed_at_uienter = -1 }\n\
+vim.api.nvim_set_decoration_provider(\n\
+  vim.api.nvim_create_namespace('view_pin'), {\n\
+    on_start = function()\n\
+      _G.view_pin.drawn = _G.view_pin.drawn + 1\n\
+    end,\n\
+  })\n\
+local function parsed()\n\
+  local buf = vim.api.nvim_get_current_buf()\n\
+  local hl = package.loaded['vim.treesitter.highlighter']\n\
+  if not (hl and hl.active[buf]) then\n\
+    return -1\n\
+  end\n\
+  _G.view_pin.highlighted = 1\n\
+  local parser = vim.treesitter.get_parser(buf, nil, { error = false })\n\
+  return (parser and parser:is_valid(true)) and 1 or 0\n\
+end\n\
 vim.api.nvim_create_autocmd('VimEnter', {\n\
   callback = function()\n\
     _G.view_pin.uis = vim.api.nvim_eval('len(nvim_list_uis())')\n\
@@ -49,6 +84,8 @@ vim.api.nvim_create_autocmd('VimEnter', {\n\
       callback = function(args)\n\
         _G.view_pin.uienters = _G.view_pin.uienters + 1\n\
         _G.view_pin.chan = (args.data or {}).chan or 0\n\
+        _G.view_pin.drawn_at_uienter = _G.view_pin.drawn\n\
+        _G.view_pin.parsed_at_uienter = parsed()\n\
       end,\n\
     })\n\
   end,\n\
@@ -78,11 +115,43 @@ struct Reading {
     chan_when_idle: i64,
     channel: i64,
     safe: i64,
+    /// Screen updates the fixture's decoration provider had seen by the
+    /// time the config's `UIEnter` ran: nvim's own at the end of startup,
+    /// plus one apiece for the redraws the hook forces ahead of the event.
+    drawn_at_uienter: i64,
+    /// Whether a treesitter highlighter was attached to the current buffer
+    /// when either reading was taken, which is the branch the hook's parse
+    /// wait turns on.
+    highlighted: i64,
+    /// Whether that buffer's parser answered `is_valid(true)` there: `1`
+    /// for a tree the hook waited out, `0` for one still being parsed, and
+    /// `-1` where there was no highlighter to ask about.
+    parsed_at_uienter: i64,
 }
 
+/// A buffer nvim's own bundled `lua` parser can highlight, made current
+/// while `init.lua` is still sourcing -- so the highlighter is attached by
+/// the time the hook's `VimEnter` callback runs, which is the only window
+/// in which the hook can wait its parse out.
+const TREESITTER_BUFFER: &str = "\
+local buf = vim.api.nvim_create_buf(false, true)\n\
+vim.api.nvim_buf_set_lines(buf, 0, -1, false,\n\
+  { 'local a = 1', 'local b = a + 2', 'print(a, b)' })\n\
+vim.api.nvim_set_current_buf(buf)\n\
+vim.treesitter.start(buf, 'lua')\n";
+
 fn pin_config() -> ScratchDir {
+    config(PIN_CONFIG)
+}
+
+/// The same fixture with a highlighted buffer standing before it.
+fn highlighted_pin_config() -> ScratchDir {
+    config(&format!("{TREESITTER_BUFFER}{PIN_CONFIG}"))
+}
+
+fn config(lua: &str) -> ScratchDir {
     let dir = ScratchDir::new("vim-enter-pump").unwrap();
-    std::fs::write(dir.join("init.lua"), PIN_CONFIG).unwrap();
+    std::fs::write(dir.join("init.lua"), lua).unwrap();
     dir
 }
 
@@ -116,7 +185,9 @@ fn reading(engine: &Engine) -> Reading {
                      end \
                      local pin = _G.view_pin \
                      return { pin.uis, pin.uienters, pin.chan, \
-                     pin.chan_when_idle, channel, pin.safe }",
+                     pin.chan_when_idle, channel, pin.safe, \
+                     pin.drawn_at_uienter, pin.highlighted, \
+                     pin.parsed_at_uienter }",
                 ),
                 Value::Array(vec![]),
             ],
@@ -131,6 +202,9 @@ fn reading(engine: &Engine) -> Reading {
         chan_when_idle: at(3),
         channel: at(4),
         safe: at(5),
+        drawn_at_uienter: at(6),
+        highlighted: at(7),
+        parsed_at_uienter: at(8),
     }
 }
 
@@ -179,13 +253,11 @@ fn vim_enter_token(
     None
 }
 
-#[test]
-fn the_hook_has_the_ui_in_force_before_the_rest_of_startup_runs() {
-    let dir = pin_config();
-    let mut engine = engine(&dir);
+/// The engine answered and attached the way a session does it, left parked
+/// at the point the hook's own work is done.
+fn answered(engine: &mut Engine) -> mpsc::Receiver<Msg> {
     let (tx, rx) = mpsc::sync_channel(256);
     let (_pump, cutover) = engine.start_pump(tx);
-
     let token = vim_enter_token(cutover.presink, &rx)
         .expect("the child never asked view_vim_enter, so nothing here was measured");
     engine.handle.reply(token, ReplyValue::Nil).unwrap();
@@ -193,6 +265,106 @@ fn the_hook_has_the_ui_in_force_before_the_rest_of_startup_runs() {
         .handle
         .ui_attach(120, 40, view_engine::UI_EXT_OPTIONS)
         .unwrap();
+    rx
+}
+
+/// The hook draws the settled screen itself, ahead of the `UIEnter` it goes
+/// on to fire, so the frame is on the wire before anything that event sets
+/// off.
+///
+/// Left to nvim, the screen update comes at the end of the loop turn --
+/// behind every callback queued on it, which is every plugin a config loads
+/// from `UIEnter`. The reading is taken inside the event's own handler,
+/// which is the last moment at which "the hook drew it" and "nvim drew it"
+/// are still different answers.
+#[test]
+fn the_hook_draws_the_screen_before_the_configs_uienter() {
+    let dir = pin_config();
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.drawn_at_uienter, 2,
+        "two screen updates before UIEnter: nvim's own at the end of \
+         startup, and the one the hook forces ahead of the event it fires \
+         -- a frame view holds whatever nvim decides to draw and when"
+    );
+}
+
+/// With a highlighter attached, the hook waits its parse out, so the
+/// colours are in the frame it drew rather than in the one after it.
+///
+/// The redraw is what starts that parse -- the highlighter's decoration
+/// provider runs inside the screen update -- and the bounded wait is what
+/// lets its continuations finish before the `UIEnter` that follows.
+#[test]
+fn the_highlighters_parse_is_valid_by_the_configs_uienter() {
+    let dir = highlighted_pin_config();
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.highlighted, 1,
+        "the fixture attaches a highlighter while init.lua is sourcing, so \
+         one must be active here or this test measured nothing"
+    );
+    assert_eq!(
+        read.parsed_at_uienter, 1,
+        "the tree must be parsed by the time the config reaches UIEnter; a \
+         parse left alone queues behind the plugin loads that event sets \
+         off and lands its colours long after the text, which reads as a \
+         second paint"
+    );
+    assert_eq!(
+        read.drawn_at_uienter, 3,
+        "three screen updates before UIEnter: nvim's own, the hook's, and \
+         the one that paints the colours the parse produced -- the last of \
+         them ahead of the plugin loads rather than a recolour the user \
+         watches"
+    );
+}
+
+/// A buffer with no highlighter takes the redraw and nothing else: there is
+/// no parser to ask about, so the hook returns without entering the wait.
+#[test]
+fn a_buffer_with_no_highlighter_takes_the_redraw_and_skips_the_wait() {
+    let dir = pin_config();
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.highlighted, 0,
+        "a --clean child opening no file has no highlighter, which is the \
+         branch this test is about"
+    );
+    assert_eq!(
+        read.parsed_at_uienter, -1,
+        "nothing asked the buffer for a parser, here or in the hook: \
+         asking is what would create one"
+    );
+    assert_eq!(
+        read.drawn_at_uienter, 2,
+        "the redraw is unconditional; only the parse wait, and the second \
+         redraw that follows it, are not"
+    );
+    assert_eq!(
+        read.uienters, 1,
+        "the hook returned and its scheduled event ran, so the skipped wait \
+         cost the startup nothing it did not already spend"
+    );
+}
+
+#[test]
+fn the_hook_has_the_ui_in_force_before_the_rest_of_startup_runs() {
+    let dir = pin_config();
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
 
     let read = settled(&engine);
 
