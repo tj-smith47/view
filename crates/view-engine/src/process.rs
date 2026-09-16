@@ -1893,10 +1893,10 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// ([`EngineConfig::attaches_late`]) has attached before this hook runs at
 /// all, and its wait returns on the first check.
 ///
-/// # The redraw the hook forces, and the parse it waits out
+/// # The parse the hook runs, and the one frame it draws
 ///
-/// The first thing the scheduled callback below does is draw the screen
-/// (`nvim__redraw({ flush = true })`), before the `UIEnter` it goes on to
+/// The scheduled callback below draws the screen
+/// (`nvim__redraw({ flush = true })`) before the `UIEnter` it goes on to
 /// fire. Left to nvim that screen update comes at the end of the loop
 /// turn, behind every callback queued on it -- which is every plugin the
 /// config loads from `UIEnter` and from the events it schedules -- so the
@@ -1910,29 +1910,36 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// replace, which is a screen nvim's own TUI never shows
 /// (`view-oracle/tests/startup_states.rs`).
 ///
-/// That redraw is also what starts the treesitter highlighter's parse: its
-/// decoration provider runs inside the screen update, the first slice runs
-/// there with it, and the rest is scheduled. Left alone those
-/// continuations queue behind the plugin loads, so the colours arrive well
-/// after the text they belong to and read as a second paint of a screen
-/// that had already settled. The callback waits them out instead, on the
-/// highlighter's own `parsing` flag and only where a highlighter is
-/// already attached, and redraws again once that flag clears. The
-/// highlighter's flag rather than the parser's validity because a
-/// highlighter parses the range its windows show: the root region answers
-/// `is_valid(true)` the moment it is parsed, ahead of the injected trees
-/// that hold the colours on the visible lines.
+/// Ahead of that redraw the callback parses the treesitter highlighter's
+/// own tree over the lines the window shows, where one is attached.
+/// `LanguageTree:parse(range)` with no callback runs to completion rather
+/// than in the slices the asynchronous path schedules, so the colours are
+/// in the frame the redraw below produces. A redraw alone would only start
+/// that parse -- the highlighter's decoration provider runs inside the
+/// screen update, the first slice runs there with it, and the rest is
+/// scheduled -- and those continuations queue behind the plugin loads, so
+/// the colours arrive well after the text they belong to and read as a
+/// second paint of a screen that had already settled.
 ///
-/// The 30 ms is a deadline `vim.wait` checks between callbacks, not a
-/// bound on what the callback adds to startup. Inside it nvim services its
-/// deferred-event queue, its uv timers and the channel, so the config's
-/// own scheduled work and timers run there too, and a single callback
-/// longer than the deadline runs to its end before the deadline is tested
-/// again -- so a plugin load queued ahead of the waiter is charged to the
-/// wait in full, however far past the deadline it runs. A parse that has
-/// not finished when the deadline is reached keeps the asynchronous path
-/// it had: the wait ends, no second redraw goes out, and the remaining
-/// slices run on the loop.
+/// Running the parse rather than waiting the asynchronous one out, because
+/// a wall-clock deadline is the wrong instrument for this race. Inside
+/// `vim.wait` nvim services its deferred-event queue, its uv timers and
+/// the channel, so the parse's own continuations are queued behind the
+/// config's startup work and that work is what spends the deadline. What
+/// the wait answers is whether the deadline passed rather than whether the
+/// parse finished, because the predicate is only tested between callbacks
+/// and a callback that overruns the deadline can be the one the parse
+/// completes inside. And it bounds nothing: a callback longer than the
+/// deadline runs to its end before the deadline is tested again, so a
+/// plugin load queued ahead of the waiter is charged to startup in full.
+///
+/// The byte limit is on the buffer rather than on the range, because the
+/// root region is the whole document whatever the window shows: parsing
+/// any range of it parses all of it. A buffer big enough for that to cost
+/// more than a frame keeps the asynchronous path, which is the case that
+/// path exists for. The limit is the largest of this tree's own Rust
+/// sources whose parse stayed inside a frame on the pinned engine under a
+/// login-shaped config, rounded down.
 ///
 /// Only where the spawn had no UI before `VimEnter`, which is view's own
 /// shape: a spawn that had one (the stdin relay, `nvim -r` recovery, an
@@ -2001,10 +2008,10 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
     format!(
         "lua vim.o.columns = {width} vim.o.lines = {height}\n\
          vim.g.view = 1\n\
-         -- a deadline vim.wait tests between callbacks, never a bound:\n\
-         -- the config's own scheduled work runs inside it, and one\n\
-         -- callback longer than it runs to its end\n\
-         local parse_deadline = 30\n\
+         -- the root parse is the whole document however few lines are\n\
+         -- visible, so a buffer big enough to spend a frame on it keeps\n\
+         -- the asynchronous path the highlighter would have taken\n\
+         local sync_parse_bytes = 256 * 1024\n\
          local channel\n\
          for _, chan in ipairs(vim.api.nvim_list_chans()) do\n\
          if chan.stream == 'stdio' then channel = chan.id end\n\
@@ -2048,24 +2055,27 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          vim.wait(200, function() return #attached() > 0 end, 1)\n\
          if not had_ui and #attached() > 0 then\n\
          vim.schedule(function()\n\
-         -- one pcall over the three, as the dispatch below already has:\n\
+         -- one pcall over the parse and the redraw, as the dispatch below\n\
+         -- already has:\n\
          -- a raise here costs a frame, never the event nvim fires for\n\
          -- nobody on this path\n\
          pcall(function()\n\
-         vim.api.nvim__redraw({{ flush = true }})\n\
          local buf = vim.api.nvim_get_current_buf()\n\
          -- package.loaded rather than vim.treesitter.highlighter: asking\n\
          -- for the module is what loads it, and a startup with no\n\
          -- highlighter never needs it loaded\n\
          local hl = package.loaded['vim.treesitter.highlighter']\n\
          local h = hl and hl.active[buf]\n\
-         -- the highlighter's own flag: the root region answers\n\
-         -- is_valid(true) before the injected trees holding the visible\n\
-         -- line's colours are parsed\n\
-         if h and vim.wait(parse_deadline,\n\
-         function() return not h.parsing end, 1) then\n\
-         vim.api.nvim__redraw({{ flush = true }})\n\
+         local bytes = vim.api.nvim_buf_get_offset(buf,\n\
+         vim.api.nvim_buf_line_count(buf))\n\
+         if h and bytes <= sync_parse_bytes then\n\
+         -- the highlighter's own tree over the lines the window shows,\n\
+         -- 0-based: no callback, so it runs to completion here\n\
+         pcall(function()\n\
+         h.tree:parse({{ vim.fn.line('w0') - 1, vim.fn.line('w$') - 1 }})\n\
+         end)\n\
          end\n\
+         vim.api.nvim__redraw({{ flush = true }})\n\
          end)\n\
          quiet_tty = true\n\
          pcall(vim.api.nvim_exec_autocmds, 'UIEnter',\n\

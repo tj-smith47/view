@@ -563,9 +563,10 @@ fn a_notifier_installed_at_the_attach_is_read_after_the_takeover() {
         .handle
         .ui_attach(120, 40, view_engine::UI_EXT_OPTIONS)
         .unwrap();
-    // the probe answers at an idle transition, which a reply to a request
-    // is not: this puts nvim back through its own main loop
-    engine.handle.eval_str("execute('sleep 100m')").unwrap();
+    // nothing forces the turn the probe answers on: the child reaches its
+    // own idle transition once the attach is applied, and the wait below
+    // carries the deadline. An nvim-side sleep here would run inside the
+    // hook's own `vim.wait` for that attach, ahead of what it waits for
     assert_eq!(
         wait_for_sink_read(&rx, |foreign| foreign),
         Some(true),
