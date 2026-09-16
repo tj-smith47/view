@@ -104,8 +104,8 @@ const FIRST_PAGE_ROWS: usize = 5;
 /// seconds, even charging the scan phase's one-time warm walk to it. The
 /// 288 opens this count adds are under half an hour at that cost, on a leg
 /// whose job timeout leaves nearly three times that much room, and are
-/// seconds at what the samples themselves report (a first page of 3 to 7 ms,
-/// [`Protocol::inter_sample`] of 10 ms, a close wait of the same order).
+/// seconds at what the samples themselves report -- a first page, one
+/// [`Protocol::inter_sample`] and a close wait of the same order.
 /// The protocol's own 1000 samples is what the bound refuses: the same
 /// arithmetic prices this row above four hours.
 const SCAN_SAMPLES: usize = 100;

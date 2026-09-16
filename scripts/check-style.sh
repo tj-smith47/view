@@ -1281,27 +1281,37 @@ check_written_programs() {
 #   * a number with a fractional digit, in ms, us, ns, s, a percentage or a
 #     multiplier. A value someone chose is round -- the tree's own throttles
 #     and timeouts read 20ms, 150 ms, 200 ms -- and a value someone read off
-#     an instrument is not. The limit: a reading rounded to a whole unit is
-#     invisible to this half.
-#   * any number in those units on a line that says measure, observ or
-#     record, which is what reaches the whole-unit readings ("measured on
-#     dev-linux ... R at 2990us"). The limit: the word is the anchor, so a
-#     reading stated without it is invisible to this half too.
+#     an instrument is not.
+#   * any number in those units in a sentence that states an observation,
+#     which is what reaches a reading rounded to a whole unit ("measured on
+#     dev-linux ... R at 2990us", "spends 98 ms of it").
+#
+# The second half is what the first cannot do: a reading is as free to land
+# on a whole unit as on a fraction, and the word "measured" is not how this
+# tree writes most of them. So the vocabulary is the verbs a reading is
+# stated in -- measure, observ, record, spend, cost, take, walk, clock, time,
+# appear, and the noun "reading" -- and a whole-unit figure standing in a
+# sentence carrying one of them is graded exactly as a fractional figure is.
+# `98 ms` in a startup chunk's doc passed for a round number a writer had
+# chosen while the sentence around it said what the parse spent.
 #
 # A figure carries its sign and a spread is written as a range, so a token
 # shape reading neither passed ten measured figures: `+1.23%`, `+/-20%`,
 # `0.62ms..92.5ms` and `8-10ms` all stood on the tree. `spread` below turns
 # the three separators into blanks before the line is tokenised.
 #
-# A line naming a bar, a budget, a bound, a band or a tolerance is refused as
-# a reading at all, on the drift check's own grounds: a bound is a number the
-# tree chose and can be read back off the constant that holds it. That is the
-# one escape a writer has, and it is the same escape bench.md already grants
-# the ledger. It exempts the figures on its own line and never the sentence
-# the words on it opened, and the cell-id escape works the same way: skipping
-# the line outright left "Deliberately not a latency bar. Measured pre-attach
-# windows span roughly" opening no sentence, and the milliseconds wrapped
-# below it went ungraded.
+# A line naming a bar, a budget, a bound, a band, a tolerance, a deadline, a
+# throttle, a debounce, a ceiling, a cap, a tier or a pace -- in any of those
+# words' own inflections, since the tree writes `throttled` and `capped` as
+# readily as the nouns -- is refused as a reading at all, on the drift
+# check's own grounds: each of those is a number the tree chose and can be
+# read back off the constant that holds it, so a re-record moves none of
+# them. That is the one escape a writer has, and it
+# is the same escape bench.md already grants the ledger. It exempts the
+# figures on its own line and never the sentence the words on it opened, and
+# the cell-id escape works the same way: skipping the line outright left
+# "Deliberately not a latency bar. Measured pre-attach windows span roughly"
+# opening no sentence, and the milliseconds wrapped below it went ungraded.
 check_doc_figures() {
   local ids found rc
   ids="$(bash "$SCRIPT_DIR/check-budget-drift.sh" --cell-ids "$PWD" | tr '\n' ' ')" || ids=""
@@ -1396,15 +1406,15 @@ check_doc_figures() {
       # until the sentence it stands in closes, and a reading word reached
       # first reports it -- unless a `.` stands between the two, which is
       # the same sentence boundary the forward state reads.
-      had_word = (folded ~ /measure|observ|record/)
+      had_word = (folded ~ /measure|observ|record|spen[dt]|cost|took|take[sn]|walked|clocked|timed|reading|appear/)
       if (had_word) {
         head = folded
-        sub(/(measure|observ|record).*$/, "", head)
+        sub(/(measure|observ|record|spen[dt]|cost|took|take[sn]|walked|clocked|timed|reading|appear).*$/, "", head)
         if (head ~ /\.([[:space:]]|$)/) { held = "" }
         if (held != "") { printf "%s", held; held = "" }
         reading = 1
       }
-      escaped = (folded ~ /(^|[^a-z])(bar|bars|budget|budgets|bound|bounds|band|bands|tolerance)([^a-z]|$)/)
+      escaped = (folded ~ /(^|[^a-z])(bar|budget|bound|band|tolerance|deadline|throttle|debounce|ceiling|cap|tier|pace)(s|d)?([^a-z]|$)/)
       anchored = 0
       for (j = 1; j <= names; j++) {
         if (index(body, id[j]) > 0) { anchored = 1 }
@@ -1438,7 +1448,7 @@ check_doc_figures() {
       }
       if (reading) {
         tail = folded
-        if (had_word) { sub(/^.*(measure|observ|record)/, "", tail) }
+        if (had_word) { sub(/^.*(measure|observ|record|spen[dt]|cost|took|take[sn]|walked|clocked|timed|reading|appear)/, "", tail) }
         if (tail ~ /\.([[:space:]]|$)/) { reading = 0 }
       }
       # A held figure lives as long as its own sentence: what closes it is a

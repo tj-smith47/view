@@ -150,7 +150,7 @@ const BACKGROUND: Answer = (b"\x1b]11;?\x07", b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07")
 /// [`BACKGROUND`] and then blocks its own startup in `vim.wait(100, ...)`
 /// until *this* reply lands (`runtime/lua/vim/_core/defaults.lua`, whose
 /// `did_dsr_response` the background reply does not set). A session that
-/// leaves it unanswered therefore adds a fixed ~100ms to every child that
+/// leaves it unanswered therefore adds that whole wait to every child that
 /// owns a tty -- before its first line of user config is read -- which is
 /// nvim's whole startup again and lands in any figure taken across it.
 const DSR: Answer = (b"\x1b[5n", b"\x1b[0n");

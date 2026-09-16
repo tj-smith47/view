@@ -611,7 +611,7 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 /// These properties of that arrangement are load-bearing:
 ///
 /// - **The events that arm it are transitions, never a poll.** A cmdline
-///   float appears about 61 ms after the keystroke that summons it (cmp's
+///   float appears a debounce after the keystroke that summons it (cmp's
 ///   own `performance.debounce`), and `CmdlineEnter`/`CmdlineChanged` are
 ///   what precede it; `ModeChanged`, `CursorHold`, `CursorHoldI` and
 ///   `WinEnter` cover the floats no cmdline brackets. None of them
@@ -629,14 +629,14 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 ///   the floats that are already on screen when a probe reply names their
 ///   plugin.
 /// - **The throttle bounds the traffic, not the latency.** The first
-///   arming event schedules one scan 150 ms out and every event inside
-///   that window is absorbed by it (`float_armed`), so a float storm
-///   costs at most one window walk per 150 ms rather than one per event,
-///   and the delay is longer than cmp's own debounce so the scan that
-///   follows a keystroke sees the window that keystroke opened.
+///   arming event schedules one scan a throttle out and every event
+///   inside that window is absorbed by it (`float_armed`), so a float
+///   storm costs at most one window walk per throttle rather than one per
+///   event, and the delay is longer than cmp's own debounce so the scan
+///   that follows a keystroke sees the window that keystroke opened.
 /// - **An absorbed event still owes a scan (`float_pending`).** The
-///   absorbed keystroke's own float appears 61 ms after it, which is
-///   *after* the running window closes for anything typed more than ~89 ms
+///   absorbed keystroke's own float appears a debounce after it, which is
+///   *after* the running window has closed for anything typed late enough
 ///   into it, and the leading edge has already fired. Without a trailing
 ///   scan the last keystroke of a burst is the one whose menu is never
 ///   reported -- a user who types `:e pre` and stops to read the menu gets
@@ -5126,8 +5126,8 @@ mod tests {
     /// reports a storm once per window rather than once per event, a scan
     /// that dropped hidden windows would stop reporting the float view has
     /// taken over and freeze its rows at whatever the menu held when the
-    /// hide landed, a scan whose delay drops under nvim-cmp's own 60 ms
-    /// debounce runs before the window it exists to see, an anchor left off
+    /// hide landed, a scan whose delay drops under nvim-cmp's own debounce
+    /// runs before the window it exists to see, an anchor left off
     /// the wire
     /// puts an NE float's right edge where its left edge should be, a scan
     /// that reported only what changed would name a covering float once and

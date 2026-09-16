@@ -570,6 +570,15 @@ RUNS_TSV=$OUT/runs.tsv
 printf 'side\trun\tload\tbusy\ttext_ms\thl_ms\tcolours\tcolon_ms\tpalette_ms\texit_ms\tengine_ms\tcontent_ms\tvim_ms\tchrome_ms\tforeign_ms\tredraws\twinpos_ms\n' \
   > "$RUNS_TSV"
 
+# One discarded launch of each arm before round 1, recorded nowhere. view
+# launches first in every round, so it reads the plugin tree off disk and
+# nvim reads the same tree out of the page cache a second later: the whole
+# of round 1's difference is that read, and a median over five rounds
+# carries a fifth of it on view's side alone.
+for side in view nvim; do
+  record_one "$side" 0 || true
+done
+
 index=1
 while [ "$index" -le "$RUNS" ]; do
   for side in view nvim; do
@@ -640,6 +649,7 @@ TABLE=$OUT/table.txt
     echo "arm: local pty"
   fi
   echo "consumer: live xterm.js answering the terminal's own queries"
+  echo "warm-up: 1 per arm, discarded, before round 1"
   if [ "$NO_LOG" = "1" ]; then
     echo "log: none -- the view side runs with no VIEW_LOG, so every column" \
          "read off it is empty"

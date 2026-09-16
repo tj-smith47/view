@@ -6,7 +6,7 @@
 //! writes an OSC 11 background query with a DSR immediately behind it and
 //! then blocks in `vim.wait(100, ...)` until the DSR answer lands
 //! (`runtime/lua/vim/_core/defaults.lua`), so a pty that answers neither
-//! adds a fixed ~100 ms to the nvim side of every cold cell -- more than
+//! adds that whole wait to the nvim side of every cold cell -- more than
 //! nvim's whole startup again on this class -- and every ratio taken
 //! across it reads as a win view never earned.
 //!

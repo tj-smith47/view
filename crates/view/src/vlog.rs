@@ -1000,9 +1000,9 @@ const PENDING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// key itself dirtied the screen, or an engine batch folded after the key
 /// reached the engine did. A timer, a notice and a batch the engine had
 /// already staged close nothing: on a login-shaped config a `:` was
-/// credited with a float about something else 25 ms before the palette was
-/// even requested, and the reading was the 38 ms of that float rather than
-/// the 64 ms the wire showed.
+/// credited with a float about something else that had opened before the
+/// palette was even requested, and the reading was that float's own wait
+/// rather than the one the wire showed for the palette.
 #[derive(Default)]
 pub struct FeltLog {
     pending: Vec<PendingInput>,
@@ -2442,8 +2442,8 @@ mod tests {
     /// A frame nothing caused on the key's behalf leaves it waiting.
     ///
     /// The shipped reading this refuses: on a login-shaped config the `:`
-    /// was closed by a float 38 ms in, where the palette the user waited
-    /// for reached the screen at 64 ms.
+    /// was closed by a float that opened well before the palette the user
+    /// was waiting for reached the screen.
     #[test]
     fn a_frame_the_key_did_not_cause_leaves_it_waiting() {
         let mut felt = FeltLog::default();

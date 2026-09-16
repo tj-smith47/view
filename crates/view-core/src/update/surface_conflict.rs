@@ -240,8 +240,8 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
 ///
 /// The sighting the float scan takes is the same judgment one round trip
 /// later, which is a round trip after the plugin's first frame is already
-/// on the terminal: the scan is armed by autocmd transitions and throttled
-/// 150 ms, nvim-notify opens its windows `noautocmd` so `WinNew` never
+/// on the terminal: the scan is armed by autocmd transitions and runs on a
+/// throttle, nvim-notify opens its windows `noautocmd` so `WinNew` never
 /// fires for one, and its slide animation moves the window with
 /// `nvim_win_set_config`, which arms nothing either. So a complaint drawn
 /// during a startup nobody has typed into waits for the next unrelated

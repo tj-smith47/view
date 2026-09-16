@@ -44,8 +44,8 @@ pub fn scan(root: &Path, cancel: &AtomicBool) -> Vec<TreeEntry> {
 /// walk between two entries while it flips the flag. A test without that
 /// hold can only flip the flag and hope the walk has not already run out
 /// of tree, which is a race the walk wins whenever the test thread loses
-/// the CPU for as long as the walk takes -- 20,100 entries in ~83 ms on a
-/// loaded macOS host.
+/// the CPU for as long as the walk takes, which a 20,100-entry tree on a
+/// loaded macOS host left it ample room to do.
 fn scan_paced(root: &Path, cancel: &AtomicBool, pace: impl Fn()) -> Vec<TreeEntry> {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)

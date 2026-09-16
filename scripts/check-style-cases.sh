@@ -690,8 +690,10 @@ expect_geometry 0 '' 'a lock release in a crate that owns no engine attach'
 # fails unless the line names a cell the drift check knows. Three things
 # decide whether a figure is a reading, and each is planted below: a decimal
 # carrying a unit is one wherever it stands, an integer is one only inside
-# the sentence a reading word opened, and neither is graded where the line
-# names a bound, names a cell id, or sits inside a fenced sample.
+# the sentence a reading word opened -- any of the verbs a reading is stated
+# in, not the word "measured" alone -- and neither is graded where the line
+# names a bound or one of the other shapes a chosen value stands beside,
+# names a cell id, or sits inside a fenced sample.
 #
 # The sentence scope is the case that pins the shape. A per-line reading
 # state let a figure rustfmt wrapped onto the next line through, and a
@@ -901,6 +903,35 @@ else
   failures=$((failures + 1))
   printf 'not ok %s - %s\n  want [8-10ms]\n  got  [%s]\n' "$n" "$desc" "$spelled"
 fi
+
+# A whole-unit reading is as real as a fractional one, and `98 ms` shipped in
+# a startup chunk's doc because the sentence around it said `spends` rather
+# than `measured`. The vocabulary is every verb a reading is stated in, and
+# the escape it has to stay clear of is the shape words a value the code
+# chose stands beside.
+new_doc_figures_case
+printf '%s\n' '/// The parse spends 98 ms of it before the text goes out.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what something spends'
+
+new_doc_figures_case
+printf '%s\n' '/// A 20,000-entry tree walked in 83 ms on a loaded host.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying how long a walk took'
+
+new_doc_figures_case
+printf '%s\n' '/// The scan is throttled 150 ms and absorbs the rest.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' \
+  'a whole-unit figure on a line naming the throttle that chose it'
+
+new_doc_figures_case
+printf '%s\n' '/// The retry holds every 300 ms tier for one trip.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 0 '' \
+  'a whole-unit figure on a line naming the tier that chose it'
 
 # ---------------------------------------------------------------------------
 # the prose width gate: a page wraps at 80 characters, and what cannot wrap

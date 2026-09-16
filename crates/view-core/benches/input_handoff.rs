@@ -28,9 +28,9 @@ const MSG_CHANNEL_CAPACITY: usize = 66;
 /// this cost scale.
 const MAX_SAMPLES: usize = 20_000;
 
-/// Wall-clock each row is allowed. The sweep spans a 200x range of idle
-/// gaps, so a fixed sample count spends 200x longer on the deep end than
-/// the shallow one and puts the whole bench out of reach of a gate. A
+/// Wall-clock each row is allowed. The sweep spans a 200x band of idle
+/// gaps, so a fixed sample count spends that whole band longer on the deep
+/// end than on the shallow one and puts the bench out of reach of a gate. A
 /// fixed time budget instead gives every row the same attention and caps
 /// the total, at the cost of fewer tail samples where the gap is widest.
 const ROW_BUDGET: Duration = Duration::from_secs(50);

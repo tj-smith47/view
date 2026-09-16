@@ -1329,7 +1329,7 @@ pub fn run_pty_floor(
 pub const OVERHEAD_PACE: Duration = Duration::from_micros(20);
 
 /// Writes the characterization issues. Paced, so this is also a duration:
-/// 20000 at 20us is about half a second per row, spent inside the live
+/// 20000 at the pace above is about half a second per row, inside the live
 /// session rather than against an idle host.
 const OVERHEAD_ITERATIONS: usize = 20_000;
 

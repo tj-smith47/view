@@ -420,9 +420,9 @@ pub fn watchdog() -> Watchdog {
 /// What this exists to replace: a fixture "large enough that a cancel lands
 /// mid-walk". That is a race against the walker, and the walker wins it on
 /// a small, loaded host whose metadata cache still holds the tree the test
-/// just wrote -- a 20,000-entry tree walked in ~83 ms on a loaded macOS
-/// host, well inside the time a descheduled test thread takes to flip a
-/// flag, so a correct cancellation read as a missing one.
+/// just wrote -- a 20,000-entry tree walked out on a loaded macOS host
+/// inside the time a descheduled test thread took to flip a flag, so a
+/// correct cancellation read as a missing one.
 pub struct ScanGate {
     park_at: usize,
     state: Mutex<GateState>,

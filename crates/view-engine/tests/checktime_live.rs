@@ -720,8 +720,9 @@ fn a_forced_reload_of_a_dangling_symlink_reloads_nothing() {
 /// so nothing exotic is needed to reach it.
 ///
 /// Safe to run here: the guard means `:edit!` never executes, and a
-/// regression that let it through fails on `next_checktime_reply`'s own 5s
-/// deadline rather than hanging -- `Engine`'s `Drop` then `SIGKILL`s the
+/// regression that let it through fails on the 5s deadline
+/// `next_checktime_reply` holds rather than hanging -- `Engine`'s `Drop`
+/// then `SIGKILL`s the
 /// wedged child, so a broken guard costs this test five seconds, not the
 /// suite.
 #[test]

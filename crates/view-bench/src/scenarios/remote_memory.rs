@@ -80,10 +80,10 @@
 //! the two reported absolute medians, so a reader dividing them back out
 //! will not recover it exactly.
 //!
-//! This costs wall clock the withdrawn concurrent design did not: instead
+//! This asks for wall clock the withdrawn concurrent design did not: instead
 //! of two spawns running at once, each trial pays two full
 //! spawn/settle/workload/settle/sample/teardown cycles back to back, so a
-//! run costs `2 x` trial count of that cycle -- 8 sequential cycles at the
+//! run pays `2 x` trial count of that cycle -- 8 sequential cycles at the
 //! CLI's default `trials = 3` (rounded up to 4), against the 2 concurrent
 //! spawns the withdrawn design paid.
 //!

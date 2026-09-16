@@ -181,8 +181,8 @@ pub const REMOTE_RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
 
 /// How many reconnect attempts a dropped remote connection is given before
 /// the failure is handed back to the user. The waits double from
-/// [`REMOTE_RECONNECT_BACKOFF_BASE`], so five of them spend about 31s in
-/// total before giving up.
+/// [`REMOTE_RECONNECT_BACKOFF_BASE`], so five of them hold the session for
+/// about half a minute in total before giving up.
 pub const REMOTE_RECONNECT_MAX_ATTEMPTS: u32 = 5;
 
 /// The wait owed before reconnect attempt `attempt`, counted from one:
