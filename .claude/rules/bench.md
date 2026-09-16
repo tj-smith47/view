@@ -371,6 +371,29 @@ about, so it is refused as ambiguous rather than resolved against a guess.
 Ungraded, seven recorded seats stood on those two pages, and perturbing one
 left the check at rc 0.
 
+A moment has two cells where the pairing records both, and the unit the
+figure carries picks between them: a percentage or a bare multiplier the
+ratio cell, a millisecond the absolute. The percentage is read as the
+distance from 1, the reading `docs/benchmarking.md` already gets, and it is
+graded on the page's class and the sentence's own fixture -- so a sentence
+stating a gap names the moment and the leg it was taken on, the way the row
+above it does. A moment the pairing records no ratio for leaves its
+percentage excluded rather than resolved against a sibling cell, and a
+ratio cell the page's class does not record leaves the figure unaccounted,
+which is the sweep's verdict to give and not a ground. A percentage is
+never the stated difference the millisecond beside it can be: it states the
+gap itself, so `11% behind` is the ratio where `1.5 ms behind` is a gap
+between two published readings. Four percentages stood on those two pages
+outside the population entirely -- equal to no seat, so neither graded nor
+reportable -- and each of them is a recorded ratio a re-record leaves
+stale.
+
+A bound is named on either side of the figure it bounds, since a page
+writes `a bar of 10%` as readily as `10% bar`, and the look back stops at
+the end of the clause: read forward only, both bars on the user pages
+carried the ground of a unit instead of their own, and read past the clause
+end the ratio two words after `the 16 ms bar;` was excluded as a bound.
+
 The identifier rule is the strict form, and it is the one with no false
 positives: the user-facing pages state moments in words ("the key reaches
 nvim in under a tenth of a millisecond"), so an identifier on either page is

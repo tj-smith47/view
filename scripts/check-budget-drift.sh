@@ -753,6 +753,13 @@ fi
 # numbers, and the bare-engine one beside it is an absolute this tree records
 # no cell for. A figure the sentence calls a difference (`0.6 ms more`) is
 # neither side's reading and is passed over.
+#
+# A moment has two cells where the pairing records both, and the unit picks
+# between them: a percentage or a bare multiplier resolves against the ratio
+# cell, read as the distance from 1, and a millisecond against the absolute.
+# A percentage states the gap itself rather than a gap between two published
+# readings, so the difference words do not reach it, and `a bar of 10%` is a
+# bound for the same reason `10% bar` is.
 moment_in() {
   local page="$1" fallback="$2"
   local shown="${page#"$root"/}"

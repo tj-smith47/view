@@ -955,6 +955,26 @@ add_started_mark 0.69
 expect 1 'moment-drift:README.md:6' \
   'the same mark one digit off the seat, which no difference word excuses'
 
+# The gap a user page states in percent, which is the same moment as the
+# milliseconds beside it read in the unit a reader thinks in. Ungraded, four
+# percentages on the two pages stood outside the population entirely: their
+# value equals no seat, so nothing could report them either.
+add_median_gap() {
+  printf '\nAt the median, plugin-free, the worst keystroke is %s behind, against a bar of 10%%.\n' \
+    "$1" >> "$CASE/$README"
+}
+
+new_case
+seat_echo_ratio
+add_median_gap '13%'
+expect 0 '' 'a gap stated in percent, at the distance from 1 the ratio cell records'
+
+new_case
+seat_echo_ratio
+add_median_gap '14%'
+expect 1 'moment-drift:README.md:6' \
+  'the same gap one digit off that distance'
+
 # ---------------------------------------------------------------------------
 # a number resolves to one cell, not to the union of every cell its unit
 # names: the nearest id before it in its own sentence, and the unit's first
@@ -1887,6 +1907,83 @@ got
 $got"
 fi
 report 'a difference in a sentence naming no moment is excluded as the difference it is' "$mismatch"
+
+# A bar is a bound wherever the bar word stands. Read forward only, the
+# `a bar of 10%` both user pages write carried the ground of a unit instead
+# of its own, and a reader of the sweep was told the weaker of two true
+# reasons the figure was left alone.
+cat > "$CASE/$README" <<'MD'
+# view
+
+At the median, plugin-free, the worst keystroke is 13% behind, against a
+bar of 10%. Every number here was taken on a shared Linux dev host, whose
+`dev-linux` is the default class of this page.
+MD
+printf 'dev-linux\tminimal\techo.ratio_p50\t1.1301046068104472\n' > "$CASE/seats.tsv"
+# a seat the bar rounds to, since the population is what a reader could take
+# for a reading and a figure equal to nothing recorded is not one
+printf 'dev-linux\tminimal\tsupervision.wedge_detect_p99_ms\t10.02\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$README" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$README" | tr '\t' ' ')
+want="CLS $README 3 1 13% resolved:echo.ratio_p50
+CLS $README 4 1 10% excluded:a bound, not a reading"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a bar named before the percentage it bounds is excluded as the bound it is' "$mismatch"
+
+# The same bar on the page that names identifiers, where a percentage
+# reached the share test and the unit tests and never the bound one.
+cat > "$CASE/$BENCH" <<'MD'
+# Benchmarking
+
+The harness pins the terminal at 120x40 for every cell, and `dev-linux` is the default class of this page.
+
+| what | reading |
+|---|---|
+| the gap at the median, no plugins (`echo.ratio_p50` 1.130, against a bar of 10%) | a felt row |
+MD
+got=$(awk -v page="$BENCH" -v fallback="dev-linux" -v mode="classify" \
+  "$RATIO_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$BENCH" | tr '\t' ' ')
+want="CLS $BENCH 7 1 1.130 resolved:echo.ratio_p50
+CLS $BENCH 7 2 10% excluded:a bound, not a reading"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'the same bar on the page that names identifiers, where a percentage never reached the bound test' "$mismatch"
+
+# The look back stops where the clause does. Read two tokens past a bar that
+# closes one, the reading opening the next is excluded as a bound: on the
+# shipped tree that is `scroll.ratio_p50` standing two words after
+# `the 16 ms bar;`.
+cat > "$CASE/$BENCH" <<'MD'
+# Benchmarking
+
+The harness pins the terminal at 120x40 for every cell, and `dev-linux` is the default class of this page.
+
+| what | reading |
+|---|---|
+| scrolling, no plugins | inside the 16 ms bar; `echo.ratio_p50` 1.130 is recorded on a shared class |
+MD
+got=$(awk -v page="$BENCH" -v fallback="dev-linux" -v mode="classify" \
+  "$RATIO_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$BENCH" | tr '\t' ' ')
+want="CLS $BENCH 7 1 1.130 resolved:echo.ratio_p50"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a reading opening the clause after a bar is the reading it is' "$mismatch"
 
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

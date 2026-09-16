@@ -29,12 +29,12 @@ the tree, the tabline and the statusline present and still.
 |---|---|---|---|
 | screen ready | 53.9 ms | 52.4 ms | your config (lazy.nvim, noice, nvim-notify), same host, same run |
 
-view is 1.5 ms behind on that screen, and the bar view holds itself to for
-this moment is level with Neovim -- so this row is a bar view has not met, by
-2.9%. At the worst launch in a thousand under your config, held from the
-2026-09-06 run, the two are within a millisecond of each other (78.2 ms
-against 77.2 ms). With no plugins at all the same gap is 9.6%, which is a
-bench fixture and not this row.
+Under your config view is 1.5 ms behind on screen ready, and the bar view
+holds itself to for this moment is level with Neovim -- so this row is a bar
+view has not met, by 2.9%. At the worst launch in a thousand under your
+config, held from the 2026-09-06 run, the two are within a millisecond of
+each other (78.2 ms against 77.2 ms). With no plugins at all screen ready is
+9.6% behind, which is a bench fixture and not this row.
 
 What makes it that number: view paints its own shell -- the chrome you see
 before anything has loaded -- in about 4 ms, and that frame is on screen
@@ -57,11 +57,11 @@ You press a key and the character appears.
 | keypress to glyph, worst case in a thousand | 1.58 ms | 1.43 ms | your config, same host, same run |
 | the same keypress, with view drawing the glyph it expects | 0.32 ms | 1.25 ms | your config, same host, same run |
 
-At the median view is 11% behind on the first row, against a bar of 10%:
-another bar view has not met, and by 1% of the round trip. Both sides are
-far under the ~10 ms where a person begins to notice a key lagging their
-finger, which is why the gap is tracked rather than felt. Plugin-free, the
-same worst keystroke is 0.73 ms against 0.67 ms.
+At the median, under your config, keypress to glyph is 11% behind, against a
+bar of 10%: another bar view has not met, and by 1% of the round trip. Both
+sides are far under the ~10 ms where a person begins to notice a key lagging
+their finger, which is why the gap is tracked rather than felt. Plugin-free,
+the same worst keystroke is 0.73 ms against 0.67 ms.
 
 view does not have to wait for the engine to answer before it draws. It
 puts the character it expects on screen and corrects it the moment the

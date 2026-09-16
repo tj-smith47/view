@@ -95,6 +95,22 @@ GRADE_COMMON_AWK='
     function note(at, idx, verdict) {
       if (idx > 0) { verdict_of[at SUBSEP idx] = verdict }
     }
+    # A bar is named on either side of the figure it bounds: a page writes
+    # `a bar of 10%` as readily as `10% bar`, and a test reading only the
+    # token after left the bar on both user pages carrying the ground of a
+    # unit instead of its own. The look back stops at the end of a clause --
+    # a sentence mark, a comma, a dash -- because a bar closing one clause
+    # bounds nothing in the next, and reading past it excluded the ratio
+    # standing two words after `the 16 ms bar;`.
+    function bounded(t, i, lo,   j, w) {
+      if (clean(t[i + 1]) ~ /^(bar|bars|budget|bound|frame)$/) { return 1 }
+      for (j = i - 1; j >= i - 2 && j >= lo; j--) {
+        w = t[j]
+        if (w == "\001" || w == "--" || w ~ /[,;:]$/) { return 0 }
+        if (clean(w) ~ /^(bar|bars|budget|bound|frame)$/) { return 1 }
+      }
+      return 0
+    }
     # A ground that belongs to a whole line -- a fenced block, a ledger array,
     # a paragraph naming no cell -- is recorded against the line, so no
     # figure of it needs an index of its own.
@@ -198,6 +214,38 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       if (text ~ /started[^ ]* mark/) { return "startup.server_delta_ms" }
       return ""
     }
+    # The ratio cell of a moment. The milliseconds and the gap a reader
+    # thinks about in percent are two cells of one moment, and the unit the
+    # figure carries picks between them: a percentage or a bare multiplier
+    # the ratio, a millisecond the absolute. A moment whose pairing records
+    # no ratio returns none here, so the percentage beside it is excluded
+    # rather than resolved against a sibling cell.
+    function ratio_of(text) {
+      if (text ~ /predicted glyph|glyph it expects|character it expects/) {
+        return "echo_speculated.speculated_ratio_p50"
+      }
+      if (text ~ /keypress to glyph|worst keystroke|keystroke in a thousand/) {
+        return "echo.ratio_p50"
+      }
+      if (text ~ /stale/) { return "scroll.ratio_p50" }
+      if (text ~ /cadence/) { return "flood.cadence_p99_ratio" }
+      if (text ~ /worst launch/) { return "startup.first_frame_ratio_p99" }
+      # The settled screen, which the pages state as a gap and never as an
+      # absolute: no cell records the milliseconds either side of it, so
+      # this moment has a ratio cell and no millisecond one.
+      if (text ~ /screen ready|screen you can start working in/) {
+        return "startup.settled_ratio_p50"
+      }
+      return ""
+    }
+    # The number a ratio-shaped figure states, and the empty string for
+    # anything else: a percentage and a bare multiplier carry their suffix,
+    # which is what tells them from the milliseconds beside them.
+    function ratio_tok(t) {
+      if (t !~ /^-?[0-9]+(\.[0-9]+)?[x%]$/) { return "" }
+      sub(/[x%]$/, "", t)
+      return t
+    }
     function cell_unit(cell) {
       if (cell ~ /_ms$/) { return "ms" }
       if (cell ~ /_mb$/) { return "MB" }
@@ -218,25 +266,56 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       }
       return 0
     }
+    # A percentage states the same ratio as its distance from 1, which is
+    # how these pages write a gap a reader thinks about in percent, and how
+    # docs/benchmarking.md is already read.
+    function seated_pct(num, vals,   n, v, i, fmt, off) {
+      fmt = "%." decimals(num) "f"
+      n = split(vals, v, " ")
+      for (i = 1; i <= n; i++) {
+        off = (v[i] > 1 ? v[i] - 1 : 1 - v[i]) * 100
+        if (sprintf(fmt, off) + 0 == num + 0) { return 1 }
+      }
+      return 0
+    }
     # The grounds these rules state for every figure of a sentence except the
-    # one they resolve. They are the same tests the pick loop above makes, in
+    # ones they resolve. They are the same tests the pick loop above makes, in
     # the same order, said out loud: a reader of the sweep report accepts an
     # exclusion or does not, and cannot do either with a figure dropped in
     # silence.
-    function grounds(a, b, pick, cell,   i, num, nxt, tail, why) {
+    function grounds(a, b, pick, cell, rpick, rcell,   i, num, nxt, tail, why) {
       for (i = a; i <= b; i++) {
-        if (i == pick || ti[i] == 0) { continue }
+        if (i == pick || i == rpick || ti[i] == 0) { continue }
         num = clean(tk[i])
         nxt = clean(tk[i + 1])
         tail = (unit_of(nxt) != "") ? clean(tk[i + 2]) : nxt
+        if (ratio_tok(num) != "") {
+          # A percentage states the gap itself, so the difference words that
+          # mark a millisecond as neither side reading never reach it:
+          # `11% behind` is the ratio and `1.5 ms behind` is a gap between
+          # two published readings.
+          if (bounded(tk, i, a)) {
+            why = "a bound, not a reading"
+          } else if (num ~ /%$/ && nxt == "of") {
+            why = "a share of a population, not a ratio"
+          } else if (cell == "" && rcell == "") {
+            why = "the sentence states no moment the vocabulary names"
+          } else if (rcell == "") {
+            why = "a unit no cell of that moment is recorded in"
+          } else if (rpick > 0 && i > rpick) {
+            why = "the bare-engine reading beside view own"
+          } else { continue }
+          note(tl[i], ti[i], "excluded:" why)
+          continue
+        }
         if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/ \
             && cell !~ /_delta_ms$/) {
           why = "a difference the sentence states"
-        } else if (nxt ~ /^(bar|bars|budget|bound|frame)$/) {
+        } else if (bounded(tk, i, a)) {
           why = "a bound, not a reading"
-        } else if (cell == "") {
+        } else if (cell == "" && rcell == "") {
           why = "the sentence states no moment the vocabulary names"
-        } else if (unit_of(nxt) != cell_unit(cell)) {
+        } else if (cell == "" || unit_of(nxt) != cell_unit(cell)) {
           why = "a unit no cell of that moment is recorded in"
         } else if (pick > 0 && i > pick) {
           why = "the bare-engine reading beside view own"
@@ -244,39 +323,74 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         note(tl[i], ti[i], "excluded:" why)
       }
     }
-    function sentence(a, b, ufx,   i, text, cell, cls, nc, klass, klass_one,
-                      fx, nf, fixn, fixture, num, nxt, tail, held, pick) {
+    # One picked figure against the seat its moment holds. The ratio and the
+    # milliseconds of one sentence are two readings of one moment and resolve
+    # on the same class and the same fixture, so this says what a pick is
+    # worth and the sentence says where it was measured.
+    function resolve(at, cell, pct, klass_one, fixture,   num, held) {
+      if (!((klass_one SUBSEP fixture SUBSEP cell) in seat)) { return }
+      held = seat[klass_one SUBSEP fixture SUBSEP cell]
+      if (mode == "classify") {
+        note(tl[at], ti[at], "resolved:" cell)
+        return
+      }
+      num = clean(tk[at])
+      sub(/[x%]$/, "", num)
+      if (pct ? seated_pct(num, held) : seated(num, held)) { return }
+      printf "BUDGET DRIFT FAIL: moment-drift %s:%d: %s%s is quoted as the %s moment on %s %s, and the value recorded there does not round to it at the digits printed\n",
+        page, tl[at], num, (pct ? "%" : ""), cell, klass_one, fixture
+    }
+    function sentence(a, b, ufx,   i, text, cell, rcell, cls, nc, klass,
+                      klass_one, fx, nf, fixn, fixture, num, nxt, tail,
+                      pick, rpick, rpct, at, want) {
       if (b < a) { return }
       text = ""
       for (i = a; i <= b; i++) { text = text " " tk[i] }
       cell = moment_of(text)
-      if (cell == "" || !(cell in cellseen)) {
+      if (!(cell in cellseen)) { cell = "" }
+      rcell = ratio_of(text)
+      if (!(rcell in cellseen)) { rcell = "" }
+      if (cell == "" && rcell == "") {
         # The grounds in one place and in one order, so the most specific one
         # a figure meets is the one reported: `1.5 ms behind` is a difference
         # whether or not the sentence around it names a moment, and reporting
         # it as a sentence naming none said the ground of its neighbours.
-        if (mode == "classify") { grounds(a, b, 0, "") }
+        if (mode == "classify") { grounds(a, b, 0, "", 0, "") }
         return
       }
       # The first reading of the sentence is view own: these pages publish
       # paired numbers, and the bare-engine one beside it is an absolute
       # this tree records no cell for. A figure the sentence calls a
-      # difference is neither side reading.
+      # difference is neither side reading. The two picks are the two units
+      # one moment is published in, and a sentence states either or both.
       pick = 0
+      rpick = 0
+      rpct = 0
       for (i = a; i <= b; i++) {
         num = clean(tk[i])
-        if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
         nxt = clean(tk[i + 1])
+        if (ratio_tok(num) != "") {
+          if (rpick > 0 || rcell == "") { continue }
+          if (bounded(tk, i, a)) { continue }
+          if (num ~ /%$/ && nxt == "of") { continue }
+          rpick = i
+          rpct = (num ~ /%$/)
+          continue
+        }
+        if (pick > 0 || cell == "") { continue }
+        if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
         tail = (unit_of(nxt) != "") ? clean(tk[i + 2]) : nxt
         if (tail ~ /^(more|less|fewer|behind|ahead|earlier|later|further)$/ \
             && cell !~ /_delta_ms$/) { continue }
+        if (bounded(tk, i, a)) { continue }
         if (unit_of(nxt) != cell_unit(cell)) { continue }
         pick = i
-        break
       }
-      if (mode == "classify") { grounds(a, b, pick, cell) }
-      if (pick == 0) { return }
-      num = clean(tk[pick])
+      if (mode == "classify") { grounds(a, b, pick, cell, rpick, rcell) }
+      if (pick == 0 && rpick == 0) { return }
+      at = (pick > 0) ? pick : rpick
+      want = (pick > 0) ? cell : rcell
+      num = clean(tk[at])
       cls = classes_of(text)
       nc = split(cls, klass, " ")
       if (nc > 1) { return }
@@ -284,35 +398,27 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       else if (fallback != "") { klass_one = fallback }
       else {
         printf "BUDGET DRIFT FAIL: moment-default %s:%d: %s is quoted as the %s moment and the page declares no default class, so the host it was measured on is one no reader is told\n",
-          page, tl[pick], num, cell
+          page, tl[at], num, want
         return
       }
       fx = fixtures_of(text)
       nf = split(fx, fixn, " ")
       if (nf == 0) { nf = split(ufx, fixn, " ") }
-      if (nf == 0) { nf = split(fixtures[klass_one SUBSEP cell], fixn, " ") }
+      if (nf == 0) { nf = split(fixtures[klass_one SUBSEP want], fixn, " ") }
       if (nf != 1) {
         if (nf > 1) {
           printf "BUDGET DRIFT FAIL: moment-scope %s:%d: %s is quoted as the %s moment where the unit names %d fixtures, and a number resolves against one fixture or against none\n",
-            page, tl[pick], num, cell, nf
+            page, tl[at], num, want, nf
         }
         return
       }
       fixture = fixn[1]
-      if (!((klass_one SUBSEP fixture SUBSEP cell) in seat)) { return }
-      held = seat[klass_one SUBSEP fixture SUBSEP cell]
-      # The site and nothing else, so the sweep perturbs the reading this
-      # grading picked: the engine reading beside it is a figure no rule
+      # The sites and nothing else, so the sweep perturbs the readings this
+      # grading picked: the engine reading beside them is a figure no rule
       # grades, and a population that took it by value alone reported the
       # check as blind to a number it was never resolving.
-      if (mode == "classify") {
-        note(tl[pick], ti[pick], "resolved:" cell)
-        return
-      }
-      if (!seated(num, held)) {
-        printf "BUDGET DRIFT FAIL: moment-drift %s:%d: %s is quoted as the %s moment on %s %s, and the value recorded there does not round to it at the digits printed\n",
-          page, tl[pick], num, cell, klass_one, fixture
-      }
+      if (pick > 0) { resolve(pick, cell, 0, klass_one, fixture) }
+      if (rpick > 0) { resolve(rpick, rcell, rpct, klass_one, fixture) }
     }
     # A table row is one sentence spread over its columns here, not one per
     # column: the row states its moment in the label column and its reading
@@ -496,12 +602,18 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
             continue
           }
         }
-        else if (nxt ~ /^(bar|bars|budget|bound|frame)$/) {
+        else if (bounded(tk, i, 1)) {
           note(tl[i], ti[i], "excluded:a bound, not a reading")
           continue
         }
         else if (nxt ~ /^(s|min|GB)$/) {
           note(tl[i], ti[i], "excluded:a unit no cell is recorded in")
+          continue
+        }
+        # a bar stated in percent, which the chain above reaches only for a
+        # figure carrying no percent sign
+        if (pct && bounded(tk, i, 1)) {
+          note(tl[i], ti[i], "excluded:a bound, not a reading")
           continue
         }
         # a percentage OF something is a share of a population, not a ratio
@@ -646,7 +758,7 @@ WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
         t = clean(w[j])
         if (t !~ /^[0-9]+(\.[0-9]+)?$/) { continue }
         nx = clean(w[j + 1])
-        if (nx ~ /^(bar|bars|budget|bound|frame)$/) { return t }
+        if (bounded(w, j, 1)) { return t }
         if (nx == "ms" && clean(w[j + 2]) ~ /^(bar|bars|budget|bound|frame)$/) { return t }
       }
       return ""
@@ -706,12 +818,18 @@ WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
           pct = 1; after = clean(w[j + 2])
         }
         else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
-        else if (nxt ~ /^(bar|bars|budget|bound|frame)$/) {
+        else if (bounded(w, j, 1)) {
           note(at, idx, "excluded:a bound, not a reading")
           continue
         }
         else if (nxt ~ /^(s|min|GB)$/) {
           note(at, idx, "excluded:a unit no cell is recorded in")
+          continue
+        }
+        # a bar stated in percent, which the chain above reaches only for a
+        # figure carrying no percent sign
+        if (pct && bounded(w, j, 1)) {
+          note(at, idx, "excluded:a bound, not a reading")
           continue
         }
         # a percentage OF something is a share of a population
