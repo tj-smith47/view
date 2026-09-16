@@ -1034,6 +1034,15 @@ seat_echo_tail
 add_sentence 'Plugin-free, the worst keystroke in a thousand -- the keypress to glyph moment -- takes 0.73 ms.'
 expect 0 '' 'one moment named twice, in two of the words the pages write it in'
 
+# one figure standing in a sentence naming two moments, which the old
+# if/elif chain resolved to whichever moment its regex matched first --
+# here the seat the lone figure happens to round to -- and reported nothing
+new_case
+seat_echo_tail
+add_sentence 'Plugin-free, the worst keystroke in a thousand while the screen stays stale takes 0.73 ms.'
+expect 1 'moment-ambiguous:README.md:6' \
+  'one figure in a sentence naming two moments, keyed to neither'
+
 # ---------------------------------------------------------------------------
 # a figure stated as a difference is recomputed from the two readings it is
 # the difference of, the way a percentage is recomputed from the bar beside
