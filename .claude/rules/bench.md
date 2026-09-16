@@ -133,7 +133,10 @@ declared default class for months passed on exactly that exemption.
 One number resolves to one cell, never to the union of every cell its unit
 names: the nearest cell id before it in its own sentence, and the unit's
 first id where its sentence names none. A table cell is a sentence, since a
-row states one column at a time. The union passed a sibling metric's draw
+row states one column at a time, and a sentence ends at a line end as well
+as at `. `, since these pages wrap at 80 characters and a boundary read inside
+a line only let a bound, a cell id and a transport denial in one sentence
+reach the figure in the next. The union passed a sibling metric's draw
 (`ratio_p99`'s number quoted where `ratio_p50` was named) and a sibling
 scenario's alike (`echo.ratio_p50`'s where `scroll.ratio_p50` was named),
 which is the identifier and the words disagreeing on the axis the class and
@@ -428,6 +431,16 @@ not what a reader needs from it: a record run moves what the gap was taken
 from and leaves the gap standing, with nothing to move it. So the figure is
 the distance between the two readings it is the difference of, at the digits
 printed, the way a percentage beside a bar is the distance from that bar.
+The word states a direction as well as a magnitude and both are read:
+`behind`, `more`, `later`, `past` and `slower` put view's own reading on the
+larger side of the two and `ahead`, `less`, `fewer`, `earlier` and `faster`
+on the smaller, so a gap of the right size stated the way round the two
+readings deny fails as the claim reversed rather than passing on its
+arithmetic. `further` states a magnitude and no direction and is read for
+size alone. `over` and `under` are difference words in English and on
+neither list: both pages write them as prepositions beside a figure
+(`53.9 ms under view`, `9.0 percent over the 1.0 bar`), where reading one as
+a difference recomputes a published reading against its own pair.
 The first operand is view's own reading and the second is the engine's
 paired one, or the bound the clause after the difference word names -- the
 clause and not the sentence, because the staleness paragraph names the frame
@@ -435,9 +448,12 @@ both readings sit inside before stating a gap that is not from it. The pair
 is the one the sentence itself publishes, else the one the nearest table row
 above it published for the same moment, since the sentence writing the gap
 down states neither. A difference whose two operands are not both on the
-page is read by nothing, so it is unaccounted and the sweep names it: a
-ground there would say the figure is no reading where what happened is that
-nothing read it.
+page is read by nothing, so the sweep names it as unaccounted where it
+equals a recorded seat, and where it equals none neither the check nor the
+sweep sees it at all -- the population is the figures a re-record can move,
+so a gap taken from two readings this tree records nowhere is outside it.
+A ground there would say the figure is no reading where what happened is
+that nothing read it.
 
 On `docs/benchmarking.md` a table row's first column names the row's
 subject, and a gap from a bound named in another cell of that row is that

@@ -173,6 +173,19 @@ GRADE_COMMON_AWK='
       }
       return 0
     }
+    # The one place a sentence end is marked. A sentence ends at `. ` and at
+    # a period the line end follows: these pages wrap at 80 characters, so most
+    # sentences end at a line end, and a boundary read inside a line only let
+    # a bound, a cell id and a transport denial in one sentence reach the
+    # figure in the next. A decimal keeps its period, since no space and no
+    # line end follows it inside a number; neither user page nor the
+    # benchmarking page writes an abbreviation (`e.g.`, `vs.`) or a
+    # backticked period at a line end, so no other spelling reaches the mark.
+    function mark_sentences(line) {
+      gsub(/\. /, " \001 ", line)
+      sub(/\.[[:space:]]*$/, " \001", line)
+      return line
+    }
     function unit_of(tok) {
       if (tok == "ms") { return "ms" }
       if (tok == "MB") { return "MB" }
@@ -180,9 +193,31 @@ GRADE_COMMON_AWK='
       return ""
     }
     # The words a page marks a figure as a difference with, which is what
-    # tells a gap between two readings from a reading of its own.
+    # tells a gap between two readings from a reading of its own, each with
+    # the side view own reading falls on: `larger` where the word says view
+    # holds the bigger of the two, `smaller` where it says view holds the
+    # lesser, `either` where the word states a magnitude and no direction at
+    # all. A recomputation reading the magnitude alone passed `1.5 ms ahead`
+    # on a page where view stands behind -- the same figure with its claim
+    # reversed. `over` and `under` state a direction in English and are not
+    # on this list: both pages write them as prepositions beside a figure
+    # (`53.9 ms under view`, `9.0 percent over the 1.0 bar`), where reading
+    # them as a difference recomputes a reading against its own pair.
+    function direction_of(t) {
+      if (t ~ /^(more|behind|later|past|slower)$/) { return "larger" }
+      if (t ~ /^(less|fewer|ahead|earlier|faster)$/) { return "smaller" }
+      if (t == "further") { return "either" }
+      return ""
+    }
     function difference_word(t) {
-      return (t ~ /^(more|less|fewer|behind|ahead|earlier|later|further|past)$/)
+      return (direction_of(t) != "")
+    }
+    # Which of the two readings a difference is taken from is the larger,
+    # empty where they are level and no direction word can disagree.
+    function larger_of(v, e) {
+      if (v + 0 > e + 0) { return "larger" }
+      if (v + 0 < e + 0) { return "smaller" }
+      return ""
     }
     # The bound a clause names after the word marking a figure a difference:
     # `past the 16 ms frame` writes the unit between the number and the word
@@ -443,7 +478,7 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
     # beside the bar was already recomputed against. A difference whose two
     # operands are not both on the page is graded by nothing and goes to the
     # sweep as unaccounted.
-    function diffs(a, b, key, npair, cell,   i, num, nxt, u, at, v, e, want, fmt) {
+    function diffs(a, b, key, npair, cell,   i, num, nxt, u, at, v, e, want, fmt, word, side) {
       v = (npair == 2) ? pair1 : ((key in pairv) ? pairv[key] : "")
       for (i = a; i <= b; i++) {
         num = clean(tk[i])
@@ -452,7 +487,8 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         nxt = clean(tk[i + 1])
         u = unit_of(nxt)
         at = (u != "") ? i + 2 : i + 1
-        if (!difference_word(clean(tk[at]))) { continue }
+        word = clean(tk[at])
+        if (!difference_word(word)) { continue }
         e = bound_after(tk, at + 1, b)
         if (e == "") { e = (npair == 2) ? pair2 : ((key in paire) ? paire[key] : "") }
         if (v == "" || e == "") { continue }
@@ -460,6 +496,16 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         fmt = "%." decimals(num) "f"
         if (mode == "classify") {
           note(tl[i], ti[i], "resolved:" ((key != "") ? key : "the pair its own sentence states"))
+          continue
+        }
+        # The direction before the magnitude: a gap of the right size stated
+        # the wrong way round is the claim reversed, and a reader takes the
+        # word rather than the arithmetic.
+        side = larger_of(v, e)
+        if (side != "" && direction_of(word) != "either" \
+            && direction_of(word) != side) {
+          printf "BUDGET DRIFT FAIL: moment-direction %s:%d: %s is stated as %s, where %s is the %s of the two readings it is the difference of (%s and %s)\n",
+            page, tl[i], num, word, v, side, v, e
           continue
         }
         if (sprintf(fmt, want) + 0 == num + 0) { continue }
@@ -623,7 +669,7 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       ntok = 0
       for (i = 1; i <= uc; i++) {
         line = ul[i]
-        gsub(/\. /, " \001 ", line)
+        line = mark_sentences(line)
         m = toks(line, w, at)
         for (j = 1; j <= m; j++) {
           # The column boundary is no word of the sentence here: a row states
@@ -738,7 +784,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
     function grade(   i, j, k, m, n, text, part, w, at, num, nxt, pct, ntok,
                      ngraded, ncell, cell, namedcells, cls, nc, klass, fx, nf,
                      fixn, klass_one, fixture, seen, ok, after, ofat, line,
-                     tok, cur, held, dbound, want, fmt) {
+                     tok, cur, held, dbound, dword, want, fmt, side) {
       if (uc == 0) { return }
       text = ""
       for (i = 1; i <= uc; i++) { text = text " " ul[i] }
@@ -765,7 +811,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
       ntok = 0
       for (i = 1; i <= uc; i++) {
         line = ul[i]
-        gsub(/\. /, " \001 ", line)
+        line = mark_sentences(line)
         m = toks(line, w, at)
         for (j = 1; j <= m; j++) {
           ntok++
@@ -786,6 +832,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
         nxt = clean(tk[i + 1])
         pct = 0
         dbound = ""
+        dword = ""
         after = nxt
         ofat = i + 1
         # a leading minus is part of the number: a diagnostic records one, and
@@ -805,6 +852,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
             # the gap the flood row states stood with nothing to move it.
             if (difference_word(clean(tk[i + 2])) && cell[1] ~ unit_suffix(nxt)) {
               dbound = bound_after(tk, i + 3, ntok)
+              dword = clean(tk[i + 2])
             }
             if (dbound == "") {
               note(tl[i], ti[i],
@@ -841,6 +889,7 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
         gat[ngraded] = tl[i]
         gidx[ngraded] = ti[i]
         gbound[ngraded] = dbound
+        gword[ngraded] = dword
         gcell[ngraded] = (cur != "") ? cur : cell[1]
       }
       if (ngraded == 0) { uc = 0; return }
@@ -895,6 +944,13 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
           fmt = "%." decimals(gnum[i]) "f"
           if (mode == "classify") {
             note(gat[i], gidx[i], "resolved:" gcell[i])
+            continue
+          }
+          side = larger_of(held, gbound[i])
+          if (side != "" && direction_of(gword[i]) != "either" \
+              && direction_of(gword[i]) != side) {
+            printf "BUDGET DRIFT FAIL: ratio-direction %s:%d: %s is stated as %s the %s bound this row names, where %s stands on the %s side of it on %s %s\n",
+              page, gat[i], gnum[i], gword[i], gbound[i], gcell[i], side, klass_one, fixture
             continue
           }
           if (sprintf(fmt, want) + 0 == gnum[i] + 0) { continue }

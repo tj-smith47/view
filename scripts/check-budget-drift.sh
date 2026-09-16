@@ -223,7 +223,12 @@ fi
 # anchors no cell -- so a subject standing between the two ("lands 1.64 ms
 # later under view than under Neovim's") is out of the grammar's reach and
 # is a sentence a reader has to catch.
-export ENGINE='(faster|sooner|quicker|snappier|ahead|slower|later|worse)[^A-Za-z ]*[ ]+(than|of)([ ]+[^ ]+){0,3}[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)|behind[^A-Za-z ]*([ ]+[^ ]+){0,3}[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)'
+#
+# The three-word reach is written as three optional groups rather than as
+# `{0,3}`: mawk refuses an interval on a group with a REcompile panic, which
+# aborts the whole check with rc 100 and a message about mawk's own internals
+# rather than about the tree.
+export ENGINE='(faster|sooner|quicker|snappier|ahead|slower|later|worse)[^A-Za-z ]*[ ]+(than|of)([ ]+[^ ]+)?([ ]+[^ ]+)?([ ]+[^ ]+)?[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)|behind[^A-Za-z ]*([ ]+[^ ]+)?([ ]+[^ ]+)?([ ]+[^ ]+)?[ -]+[^A-Za-z]*([Nn]vim|NVIM|[Nn]eovim)'
 
 # a multiplier ("5.2x", "1.10x"), or a comparative that names what it beats
 # or what it trails ("faster than bare Neovim", "ahead of the round trip",
@@ -622,6 +627,12 @@ NEGATED_AWK='
         sub(/[[:space:]]+$/, "", before)
         n = split(before, w, /[[:space:]]+/)
         lo = (n - 4 < 1) ? 1 : n - 4
+        # The window stops at a sentence end. These pages wrap at 80
+        # characters, so five tokens reach into the sentence before routinely,
+        # where a `not` denies a claim of its own and licenses nothing here.
+        for (j = n; j >= lo; j--) {
+          if (w[j] == "\001") { lo = j + 1; break }
+        }
         for (j = lo; j <= n; j++) {
           if (tolower(w[j]) ~ ("^[^a-z]*(" negation ")[^a-z]*$")) { return 1 }
         }
@@ -634,7 +645,7 @@ NEGATED_AWK='
     # picker cache licensed the transport claim beside it, and a clause
     # saying the reading is not local licensed its own inversion.
     function local_licenses(text,   n, cl, i) {
-      n = split(text, cl, ENVIRON["TRANSPORT_CLAUSE"])
+      n = split(text, cl, ENVIRON["TRANSPORT_CLAUSE"] "|\001")
       for (i = 1; i <= n; i++) {
         if (cl[i] !~ /(^|[^a-z])local([^a-z]|$)/) { continue }
         if (cl[i] !~ transport) { continue }
@@ -648,6 +659,10 @@ NEGATED_AWK='
     # and a `no` at the far end of either says nothing about the clause the
     # transport word stands in.
     function negated(text) {
+      # The same sentence end the grading marks, in the one program that
+      # reads a rejoined paragraph rather than a line: a denial at the end
+      # of one sentence said nothing about the transport word in the next.
+      gsub(/\. /, " \001 ", text)
       if (local_licenses(text)) { return 1 }
       return denied_before(text, transport)
     }

@@ -269,11 +269,14 @@ findings() {
     /^BUDGET DRIFT FAIL: ratio-difference / {
       c = $5; sub(/:$/, "", c); print "ratio-difference:" c; next
     }
+    /^BUDGET DRIFT FAIL: ratio-direction / {
+      c = $5; sub(/:$/, "", c); print "ratio-direction:" c; next
+    }
     /^BUDGET DRIFT FAIL: ratio-scope / {
       c = $5; sub(/:$/, "", c); print "scope:" c; next
     }
     /^BUDGET DRIFT FAIL: ratio-default / { print "default"; next }
-    /^BUDGET DRIFT FAIL: moment-(drift|scope|default|difference) / {
+    /^BUDGET DRIFT FAIL: moment-(drift|scope|default|difference|direction) / {
       c = $5; sub(/:$/, "", c); print $4 ":" c; next
     }
     /^BUDGET DRIFT FAIL: why-drift / {
@@ -1059,6 +1062,101 @@ seat_settled_user
 add_settled_row 1.6
 expect 1 'moment-difference:docs/performance.md:15' \
   'the same difference one digit off the row above it'
+
+# ---------------------------------------------------------------------------
+# a difference states a direction as well as a magnitude, and the word is
+# read: a gap of the right size stated the wrong way round is the claim
+# reversed, and a recomputation that took the magnitude alone passed it
+# ---------------------------------------------------------------------------
+add_settled_gap_word() {
+  printf '\nThat screen arrives in 53.9 ms under view against 52.4 ms under Neovim: view %s ms %s.\n' \
+    "$1" "$2" >> "$CASE/$README"
+}
+
+new_case
+add_settled_gap_word 1.5 ahead
+expect 1 'moment-direction:README.md:6' \
+  'a gap of the right size stated the way round the two readings deny'
+
+new_case
+add_settled_gap_word 1.5 further
+expect 0 '' 'a word that states a magnitude and no direction, at the right size'
+
+add_cadence_row_word() {
+  printf '\n| `flood.cadence_p99_ms` (`minimal`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | %s ms %s the 16 ms frame |\n' \
+    "$1" "$2" >> "$CASE/$BENCH"
+}
+
+new_case
+seat_flood_cadence
+add_cadence_row_word 0.9 earlier
+expect 1 'ratio-direction:docs/benchmarking.md:12' \
+  'the same gap from a bound, stated on the side of it the cell does not stand'
+
+# ---------------------------------------------------------------------------
+# a sentence ends at a line end as well as at `. `: these pages wrap at 80
+# characters, so most sentences end there, and a bound, a cell id and a
+# transport denial in one of them reached the figure in the next
+# ---------------------------------------------------------------------------
+add_settled_row_then_bound() {
+  cat >> "$CASE/$PERF" <<MD
+
+| | view | Neovim | on |
+|---|---|---|---|
+| screen ready | 53.9 ms | 52.4 ms | your config |
+
+Under your config view is $1 ms behind on screen ready.
+The flood it drains holds itself to a 16 ms budget.
+MD
+}
+
+new_case
+seat_settled_user
+add_settled_row_then_bound 1.5
+expect 0 '' 'a difference whose own sentence names no bound, with the next sentence naming one'
+
+new_case
+seat_settled_user
+add_settled_row_then_bound 1.6
+expect 1 'moment-difference:docs/performance.md:15' \
+  'the same difference one digit off the pair it is taken from, not off that bound'
+
+add_cadence_across_lines() {
+  cat >> "$CASE/$BENCH" <<MD
+
+The bar for the flood is \`flood.cadence_p99_ms\` on the plugin-free fixture.
+It holds $1 ms at p99.
+MD
+}
+
+new_case
+seat_flood_cadence
+add_cadence_across_lines 16.900
+expect 0 '' 'an absolute whose only cell of its unit stands in the sentence the line end closed'
+
+new_case
+seat_flood_cadence
+printf '\nOn the plugin-free fixture `flood.cadence_p99_ms` holds 16.900 ms at p99.\n' \
+  >> "$CASE/$BENCH"
+expect 1 'ratio:docs/benchmarking.md:12' \
+  'the same absolute with that cell named in its own sentence'
+
+new_case
+cat >> "$CASE/$PERF" <<'MD'
+
+view draws the predicted glyph the engine has not confirmed.
+The far side of the screen is repainted from the grid it holds.
+MD
+expect 1 'transport:docs/performance.md:11' \
+  'a transport word whose only denial stands in the sentence the line end closed'
+
+new_case
+cat >> "$CASE/$PERF" <<'MD'
+
+view draws the predicted glyph and the far side of the screen is
+not repainted over a network.
+MD
+expect 0 '' 'the denial standing in the sentence the transport word is in'
 
 
 # ---------------------------------------------------------------------------
