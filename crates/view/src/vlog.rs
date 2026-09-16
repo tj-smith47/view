@@ -1008,6 +1008,10 @@ pub struct FeltLog {
     pending: Vec<PendingInput>,
     palette_open: bool,
     palette_owes_paint: bool,
+    /// Whether the open the last `palette` line reported was a guess, so
+    /// the `cmdline_show` answering it is written up as the reconcile it
+    /// is rather than passed over as "still open".
+    palette_speculated: bool,
     /// The highlight ids the window's text carried on the frame it first
     /// appeared on, which every later frame is compared against. `None`
     /// until that frame.
@@ -1224,21 +1228,43 @@ impl FeltLog {
             // key the user is waiting on
             Dispatch::Other => {}
         }
+        self.note_palette(model, false);
+    }
+
+    /// The `palette` topic's own transitions, written wherever they happen.
+    ///
+    /// Four lines rather than two, because a reader comparing the log
+    /// against the wire has to be able to tell a guess from an answer. A
+    /// `:` view put the palette up for before the engine had answered is an
+    /// open with no `cmdline_show` behind it (`open requested speculated`);
+    /// the `cmdline_show` that answers one changes nothing on screen and
+    /// would otherwise be written up as nothing at all (`reconciled`); and
+    /// a guess the age bound took back comes off on a pass no message
+    /// dispatched, which is what `off_the_clock` names (`closed expired`).
+    fn note_palette(&mut self, model: &view_core::model::Model, off_the_clock: bool) {
         let open = palette_shown(model);
-        if open == self.palette_open {
+        let speculated = model.engine.cmdline_speculated.is_some();
+        if open == self.palette_open && speculated == self.palette_speculated {
             return;
         }
-        self.palette_open = open;
-        self.palette_owes_paint = open;
-        // the speculated open is the whole point of the line: a `:` view put
-        // the palette up for before the engine had answered reads as an open
-        // with no `cmdline_show` behind it, and a reader comparing the log
-        // against the wire has to be able to tell the two apart
-        let line = match (open, model.engine.cmdline_speculated.is_some()) {
-            (true, true) => "open requested speculated",
-            (true, false) => "open requested",
-            (false, _) => "closed",
+        if !open && !self.palette_open {
+            // a guess made while a prompt overlay held the typed text was
+            // never a palette on screen, so neither is its withdrawal
+            self.palette_speculated = speculated;
+            return;
+        }
+        let line = match (self.palette_open, open) {
+            (_, false) if off_the_clock => "closed expired",
+            (_, false) => "closed",
+            (true, true) => "reconciled",
+            (false, true) if speculated => "open requested speculated",
+            (false, true) => "open requested",
         };
+        if open != self.palette_open {
+            self.palette_open = open;
+            self.palette_owes_paint = open;
+        }
+        self.palette_speculated = speculated;
         self.emit("palette", line);
     }
 
@@ -1281,6 +1307,11 @@ impl FeltLog {
         let flushed = flushed_us / 1000;
         self.close_answered(flushed_us);
         self.close_expired(flushed_us);
+        // after the dispatches of this pass and before the paint line: what
+        // the palette lost between the last message and here is the age
+        // bound's doing, since `expire_speculation` is the only thing the
+        // loop runs in that gap
+        self.note_palette(model, true);
         if self.palette_owes_paint && self.palette_open {
             self.palette_owes_paint = false;
             self.emit("palette", "painted");
@@ -1978,6 +2009,47 @@ mod tests {
         assert!(
             written.iter().any(|l| l == "palette open requested"),
             "an engine-shown cmdline claims no speculation: {written:?}"
+        );
+    }
+
+    /// The two lines the guess owes beside its open: the `cmdline_show`
+    /// that answers it, which changes nothing on screen and would otherwise
+    /// go unwritten, and the age bound taking it back on a pass no message
+    /// dispatched.
+    #[test]
+    fn a_guess_writes_its_reconcile_and_its_expiry() {
+        use view_core::native::speculate::{CmdlineSpeculation, SpecStamp};
+
+        let speculating = || {
+            let mut model = view_core::model::Model::new();
+            model.palette_enabled = true;
+            model.engine.cmdline_speculated = Some(CmdlineSpeculation {
+                since: SpecStamp::new(std::time::Duration::ZERO),
+            });
+            model
+        };
+
+        let mut model = speculating();
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::Input, &model);
+        model.engine.cmdline_speculated = None;
+        model.engine.cmdline = Some(view_core::model::CmdlineState::bare_colon());
+        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l == "palette reconciled"),
+            "the answer to a guess is the line the topic was extended for: {written:?}"
+        );
+
+        let mut model = speculating();
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::Input, &model);
+        model.engine.cmdline_speculated = None;
+        felt.note_pass(&model, true);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l == "palette closed expired"),
+            "a guess withdrawn on a bare pass leaves the topic reading open: {written:?}"
         );
     }
 

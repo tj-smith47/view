@@ -80,9 +80,9 @@ pub(crate) fn reconcile_speculation(model: &mut Model, redraw: &[UiEvent]) {
     fold_redraw(model, redraw);
 }
 
-/// How long the loop may wait before a pending prediction would be older
-/// than [`SPECULATION_MAX_AGE`], or a speculated palette older than
-/// `CMDLINE_SPECULATION_MAX_AGE`, or `None` while neither is pending.
+/// How long the loop may wait before a pending prediction or a speculated
+/// palette would be older than [`SPECULATION_MAX_AGE`], or `None` while
+/// neither is pending.
 ///
 /// The age bound is a promise about wall-clock time, and
 /// [`expire_speculation`] can only keep it on a pass the loop actually
@@ -189,6 +189,15 @@ mod tests {
     // conditional expectation, so the arm's suite states only what the arm
     // itself owes and `task test-arms` runs a green suite rather than an
     // adapted one.
+
+    /// A model a typed `:` opens the palette from: the feature on, normal
+    /// mode, the engine holding the keyboard and nothing in flight.
+    fn colon_model() -> Model {
+        let mut model = typing_model();
+        model.palette_enabled = true;
+        model.engine.mode.current = "normal".to_string();
+        model
+    }
 
     /// One clock's reading `elapsed` later, modelled by moving its origin
     /// back rather than by sleeping: the difference between two stamps is
@@ -335,8 +344,8 @@ mod tests {
     /// is coarser than the bound. Without this the empty box would sit on
     /// screen until something unrelated happened.
     #[test]
-    fn a_speculated_palette_brings_the_loops_wait_forward_to_its_own_bound() {
-        use view_core::native::speculate::{CmdlineSpeculation, CMDLINE_SPECULATION_MAX_AGE};
+    fn a_speculated_palette_brings_the_loops_wait_forward_to_the_bound() {
+        use view_core::native::speculate::CmdlineSpeculation;
 
         let mut model = typing_model();
         let clock = SpeculationClock::default();
@@ -345,7 +354,45 @@ mod tests {
         model.engine.cmdline_speculated = Some(CmdlineSpeculation { since: clock.now() });
 
         let left = next_expiry(&model, clock).expect("a speculated palette comes due");
-        assert!(left <= CMDLINE_SPECULATION_MAX_AGE, "{left:?}");
+        assert!(left <= SPECULATION_MAX_AGE, "{left:?}");
+    }
+
+    /// The shipped half of the palette's own arm difference: a typed `:`
+    /// leaves a guess the next frame paints the palette from.
+    ///
+    /// Twinned with the arm's case below for the reason the glyph pair
+    /// states: a bench driver types `:` commands, so an arm that started
+    /// painting a palette on `:` would change what the recorder sees, and a
+    /// test reading [`PREDICTS`] would move its expectation with the code
+    /// rather than catching that.
+    #[cfg(not(feature = "bench-no-speculate"))]
+    #[test]
+    fn a_shipped_build_speculates_the_palette_on_a_typed_colon() {
+        let mut model = colon_model();
+
+        typed(&mut model, ":", SpeculationClock::default());
+
+        assert!(
+            model.engine.cmdline_speculated.is_some(),
+            "the shipped build puts the palette up on the keystroke's own frame"
+        );
+    }
+
+    /// The arm's half: under `bench-no-speculate` the same `:` leaves no
+    /// guess, so every `:` the bench drivers type is drawn from the
+    /// engine's own `cmdline_show` and nothing else.
+    #[cfg(feature = "bench-no-speculate")]
+    #[test]
+    fn the_arm_speculates_no_palette_on_a_typed_colon() {
+        let mut model = colon_model();
+
+        typed(&mut model, ":", SpeculationClock::default());
+
+        assert!(
+            model.engine.cmdline_speculated.is_none(),
+            "a guess under this feature paints the palette before the engine answers, and the \
+             rows measuring a `:` would time that paint instead of the round trip"
+        );
     }
 
     /// A notation key never reaches `predict` as a character, so the caller

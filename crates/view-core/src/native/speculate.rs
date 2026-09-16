@@ -108,20 +108,40 @@ const INSERT_MODE: &str = "insert";
 /// a legitimately slow but working link is
 /// never mistaken for staleness; at a second, a user who somehow reaches it
 /// is already looking at an editor that has stopped answering.
+///
+/// The speculated palette runs under the same bound and for the same
+/// reading of it. A bound sized instead to the silence a local session
+/// shows would blank a correct guess on every `:` of a remote one --
+/// `view-bench`'s `echo_speculated_rtt` scenario ships tiers up to 300 ms
+/// -- and what a wrong guess costs is not paid here anyway: it is taken
+/// back on the evidence [`fold_redraw`] reads, one round trip after the
+/// key, and never on the clock.
 pub const SPECULATION_MAX_AGE: Duration = Duration::from_secs(1);
 
-/// How long the palette may stand on a speculated `:` before view takes it
-/// back, having had no `cmdline_show` to reconcile against.
+/// The normal- and visual-mode keys after which nvim reads the next
+/// keystroke as that command's own argument rather than as a command.
 ///
-/// Sized to the longest silence the dogfood recorder saw between the key and
-/// `cmdline_show` on a login-shaped config -- where the config's own cmdline
-/// handling runs before nvim announces the command line -- with room for a
-/// slower launch on top. What a user sees when the guess is wrong is an
-/// empty palette for at most this long, which is why the bound is the
-/// silence rather than [`SPECULATION_MAX_AGE`]'s second: a `:` that reached
-/// a mapping view did not know about has to come back off the screen inside
-/// the same gesture, not a second later.
-pub const CMDLINE_SPECULATION_MAX_AGE: Duration = Duration::from_millis(250);
+/// nvim announces no mode for a command waiting on its argument -- there is
+/// no such name among the ones it sends in `mode_info_set`, which is where
+/// [`CMDLINE_GATE_MODES`] is drawn from -- so with `f` on the wire the
+/// model still reads `normal`, and a `:` typed there is the `f` target and
+/// opens no command line. Reading this set is the only thing that tells the
+/// two apart.
+///
+/// Taken from the pinned engine's `:help index.txt` (nvim 0.12.4): every
+/// normal-mode entry whose form is `x{char}` (`"{register}`,
+/// `'{a-zA-Z0-9}`, `@{a-z}`, `F{char}`, `T{char}`, `` `{a-zA-Z0-9} ``,
+/// `f{char}`, `m{A-Za-z}`, `q{0-9a-zA-Z"}`, `r{char}`, `t{char}`, the
+/// `g{char}`/`z{char}`/`[{char}`/`]{char}` command prefixes, `CTRL-W
+/// {char}` and `CTRL-\`), plus `Z`, whose two commands are spelled by the
+/// key after it, and the visual-mode text-object prefixes `i` and `a`
+/// (`v_iw`, `v_ap` and their siblings). Operators are absent because they
+/// take a motion rather than a literal and nvim does announce a mode for
+/// one (`operator`), which [`CMDLINE_GATE_MODES`] already excludes.
+pub const CMDLINE_LITERAL_KEYS: [&str; 21] = [
+    "\"", "'", "@", "F", "T", "Z", "[", "]", "`", "a", "f", "g", "i", "m", "q", "r", "t", "z",
+    "<C-w>", "<C-W>", "<C-\\>",
+];
 
 /// The `mode_change` modes a typed `:` opens a command line from.
 ///
@@ -153,7 +173,7 @@ pub const CMDLINE_GATE_MODES: [&str; 3] = ["normal", "visual", "visual_select"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CmdlineSpeculation {
     /// When the `:` went out, as the host measured it. Bounded by
-    /// [`CMDLINE_SPECULATION_MAX_AGE`].
+    /// [`SPECULATION_MAX_AGE`].
     pub since: SpecStamp,
 }
 
@@ -175,6 +195,12 @@ pub fn may_speculate_cmdline(model: &Model) -> bool {
         // a wedged engine answers no `cmdline_show`, and the modal saying so
         // is the thing the user is reading
         && model.engine_busy().is_none()
+        // both of these say the mode below is a reading of an editor state
+        // the keys already in flight have moved on from: this `:` is the
+        // argument of a command still waiting for one, or it follows a key
+        // whose own `mode_change` has not come back yet
+        && !model.engine.literal_pending
+        && !model.engine.key_unanswered
         && CMDLINE_GATE_MODES.contains(&model.engine.mode.current.as_str())
 }
 
@@ -199,8 +225,9 @@ pub fn withdraw_cmdline_speculation(model: &mut Model) {
 
 /// Folds one engine-bound key into the palette's speculation: a `:` that
 /// passes [`may_speculate_cmdline`] puts the palette up now, and a
-/// `mode_change` out of the gate's modes, a `cmdline_show`, a `cmdline_hide`
-/// or [`CMDLINE_SPECULATION_MAX_AGE`] takes it back.
+/// `mode_change` out of the gate's modes, a cursor move on a window grid, a
+/// `cmdline_show`, a `cmdline_hide` or [`SPECULATION_MAX_AGE`] takes it
+/// back.
 ///
 /// Every other key is left alone while one is pending: the `cmdline_show`
 /// that follows carries whatever was typed into the command line, so a key
@@ -213,24 +240,33 @@ fn fold_cmdline_key(model: &mut Model, notation: &str, now: SpecStamp) {
 }
 
 /// The host's per-pass age check on a speculated palette.
+///
+/// The same bound the predicted glyphs run under, and a backstop rather
+/// than the rule: a wrong guess is taken back by the evidence
+/// [`fold_cmdline_batch`] reads, so the clock only has to cover the case
+/// where the engine sends nothing at all. A bound sized to a local silence
+/// would blank a *correct* guess on every `:` of a remote session -- the
+/// tiers `view-bench`'s `echo_speculated_rtt` scenario ships reach 300 ms
+/// -- drawing the palette, taking it away and drawing it again, which is
+/// the flicker the speculation exists to avoid.
 fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp) {
     if model
         .engine
         .cmdline_speculated
-        .is_some_and(|open| now.age_since(open.since) >= CMDLINE_SPECULATION_MAX_AGE)
+        .is_some_and(|open| now.age_since(open.since) >= SPECULATION_MAX_AGE)
     {
         withdraw_cmdline_speculation(model);
     }
 }
 
-/// What is left of [`CMDLINE_SPECULATION_MAX_AGE`] for the speculated
-/// palette, or `None` when none is up.
+/// What is left of [`SPECULATION_MAX_AGE`] for the speculated palette, or
+/// `None` when none is up.
 #[must_use]
 pub fn cmdline_expiry_left(model: &Model, now: SpecStamp) -> Option<Duration> {
     model
         .engine
         .cmdline_speculated
-        .map(|open| CMDLINE_SPECULATION_MAX_AGE.saturating_sub(now.age_since(open.since)))
+        .map(|open| SPECULATION_MAX_AGE.saturating_sub(now.age_since(open.since)))
 }
 
 /// How many windows' `topline` this session tracks before the least
@@ -734,6 +770,16 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
     match call {
         RpcCall::Input { notation } => {
             fold_cmdline_key(model, notation, now);
+            // after the fold above, which is the one reading of these two
+            // that describes the editor this key is arriving at
+            model.engine.key_unanswered = true;
+            // this key is the argument of whatever was waiting for one, and
+            // is itself waiting if it takes one. Cleared here as well as on
+            // the evidence `fold_cmdline_batch` reads, because an `f` whose
+            // target is not on the line moves neither the mode nor the
+            // cursor and would otherwise leave the gate shut for the rest
+            // of the session
+            model.engine.literal_pending = CMDLINE_LITERAL_KEYS.contains(&notation.as_str());
             fold_keystroke(model, notation, now);
         }
         RpcCall::Paste { .. } | RpcCall::InputMouse { .. } => fold_invalidation(model),
@@ -752,16 +798,61 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
 /// [`SpeculateState::reconcile`] is where a window's viewport is read, and
 /// that reading is only worth what the batch before it recorded.
 pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent]) {
+    fold_cmdline_batch(model, redraw);
     let before = model.speculate.pending().len();
     model.speculate.reconcile(redraw);
     mark_retirement(model, before);
 }
 
+/// What one redraw batch says about the keys view has forwarded and about a
+/// palette it is guessing at.
+///
+/// A batch is the answer the gate was waiting for, whatever it carries:
+/// nvim sends one per flush, so the arrival alone says the keys ahead of it
+/// have been read. Two of its events say more than that. A `mode_change`
+/// or a cursor move is the command that was holding the next keystroke
+/// finishing with it, so the argument the next key would have been is no
+/// longer owed. And a cursor move while the palette stands on a guess says
+/// the `:` went somewhere other than the command line -- it was an `f`
+/// target, a mark, a register -- which is the evidence the guess is
+/// withdrawn on, rather than a clock: on the config the recorder ran, every
+/// silence between the key and its `cmdline_show` carried `msg_showcmd`,
+/// `msg_ruler`, `win_viewport` and highlight events and no cursor move at
+/// all. A batch that also carries the `cmdline_show` is the guess being
+/// answered, not refuted.
+///
+/// Every grid nvim addresses a cursor move to is a window's: the palette
+/// speculates only where view attached with `ext_cmdline`, and there nvim
+/// draws no command line into a grid to put a cursor on.
+fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent]) {
+    model.engine.key_unanswered = false;
+    let mut moved_cursor = false;
+    let mut settled = false;
+    let mut shows_cmdline = false;
+    for ev in redraw {
+        match ev {
+            UiEvent::GridCursorGoto { .. } => {
+                moved_cursor = true;
+                settled = true;
+            }
+            UiEvent::ModeChange { .. } => settled = true,
+            UiEvent::CmdlineShow { .. } => shows_cmdline = true,
+            _ => {}
+        }
+    }
+    if settled {
+        model.engine.literal_pending = false;
+    }
+    if moved_cursor && !shows_cmdline {
+        withdraw_cmdline_speculation(model);
+    }
+}
+
 /// The host's per-pass age check on what speculation is still holding.
 ///
 /// Belongs at a call site reached whether or not a redraw arrived: a redraw
-/// that never comes is the condition [`SPECULATION_MAX_AGE`] and
-/// [`CMDLINE_SPECULATION_MAX_AGE`] both exist for.
+/// that never comes is the condition [`SPECULATION_MAX_AGE`] exists for,
+/// for the predicted glyphs and for the speculated palette alike.
 pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
     expire_cmdline_speculation(model, now);
     // the pending list is read before anything else so a steady-state pass
@@ -996,6 +1087,133 @@ mod tests {
         }
     }
 
+    /// The gate against the keys already on the wire, which is what the
+    /// mode beside it cannot see: nvim announces no mode for a command
+    /// waiting on its argument, and the mode it last announced describes
+    /// the editor as of the last key it answered.
+    ///
+    /// Each row is the keys typed, in order, with `redraw` standing for the
+    /// batch nvim flushes back between them -- a `msg_showcmd` for a count
+    /// or a pending command, which says the key was read and nothing more.
+    #[test]
+    fn a_colon_is_speculated_only_when_no_earlier_key_is_still_holding_it() {
+        /// One typed sequence, and whether the `:` ending it opens the
+        /// palette.
+        type Row = (&'static [&'static str], bool, &'static str);
+        let rows: [Row; 9] = [
+            (&["f", "redraw", ":"], false, "the `f` target"),
+            (&["r", "redraw", ":"], false, "the character `r` writes"),
+            (&["\"", "redraw", ":"], false, "the register `\"` names"),
+            (
+                &["q", "redraw", ":"],
+                false,
+                "the register `q` records into",
+            ),
+            (&["@", "redraw", ":"], false, "the register `@` replays"),
+            (
+                &["A", ":"],
+                false,
+                "typed into the insert `A` opened, whose mode_change is still on the wire",
+            ),
+            (&["2", "redraw", ":"], true, "a count, which opens `:2`"),
+            (&["j", "redraw", ":"], true, "a motion nvim has answered"),
+            (
+                &["f", "redraw", "x", "cursor", ":"],
+                true,
+                "the `f` finished, cursor moved",
+            ),
+        ];
+        for (keys, opens, what) in rows {
+            let mut model = colon_model();
+            for key in keys {
+                match *key {
+                    "redraw" => fold_redraw(&mut model, &[UiEvent::Flush]),
+                    "cursor" => fold_redraw(
+                        &mut model,
+                        &[
+                            UiEvent::GridCursorGoto {
+                                grid: 1,
+                                row: 3,
+                                col: 9,
+                            },
+                            UiEvent::Flush,
+                        ],
+                    ),
+                    ":" => typed_colon(&mut model, stamp(0)),
+                    key => fold_engine_call(
+                        &mut model,
+                        &RpcCall::Input {
+                            notation: key.to_string(),
+                        },
+                        stamp(0),
+                    ),
+                }
+            }
+
+            assert_eq!(
+                model.engine.cmdline_speculated.is_some(),
+                opens,
+                "{keys:?}: the `:` is {what}"
+            );
+        }
+    }
+
+    /// The withdrawal the clock is not: a cursor move on the grid says the
+    /// `:` was spent on something other than the command line, whatever is
+    /// left of the age bound.
+    #[test]
+    fn a_cursor_move_with_no_cmdline_show_takes_the_guess_back_and_marks_the_frame() {
+        let mut model = colon_model();
+        typed_colon(&mut model, stamp(0));
+        model.dirty = false;
+
+        fold_redraw(
+            &mut model,
+            &[
+                UiEvent::GridCursorGoto {
+                    grid: 1,
+                    row: 3,
+                    col: 9,
+                },
+                UiEvent::Flush,
+            ],
+        );
+
+        assert!(model.engine.cmdline_speculated.is_none());
+        assert!(model.dirty, "the withdrawal has to be painted");
+    }
+
+    /// The same batch carrying the `cmdline_show` is the guess being
+    /// answered: nvim moves the cursor into the command line it is about to
+    /// announce, and reading that as a refusal would blank a correct guess.
+    #[test]
+    fn a_cursor_move_in_the_batch_that_answers_the_guess_leaves_it_standing() {
+        let mut model = colon_model();
+        typed_colon(&mut model, stamp(0));
+
+        fold_redraw(
+            &mut model,
+            &[
+                UiEvent::GridCursorGoto {
+                    grid: 1,
+                    row: 3,
+                    col: 9,
+                },
+                UiEvent::CmdlineShow {
+                    content: vec![(0, String::new())],
+                    pos: 0,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+                UiEvent::Flush,
+            ],
+        );
+
+        assert!(model.engine.cmdline_speculated.is_some());
+    }
+
     /// The open itself: the palette goes up on the keystroke's own fold, and
     /// the frame is marked so it is painted rather than waited for.
     #[test]
@@ -1032,9 +1250,10 @@ mod tests {
         assert!(model.engine.cmdline_speculated.is_some());
     }
 
-    /// The bound, on the pass the loop takes whether or not the engine said
-    /// anything: an engine that never answers leaves an empty palette on
-    /// screen, and this is what takes it off.
+    /// The backstop, on the pass the loop takes whether or not the engine
+    /// said anything: an engine that never answers sends no evidence
+    /// either, so it would leave an empty palette on screen with nothing
+    /// to take it off.
     #[test]
     fn a_speculated_palette_past_its_bound_is_withdrawn_and_the_frame_marked() {
         let mut model = colon_model();
@@ -1043,7 +1262,7 @@ mod tests {
 
         fold_expiry(
             &mut model,
-            SpecStamp::new(CMDLINE_SPECULATION_MAX_AGE - Duration::from_millis(1)),
+            SpecStamp::new(SPECULATION_MAX_AGE - Duration::from_millis(1)),
         );
         assert!(
             model.engine.cmdline_speculated.is_some(),
@@ -1051,7 +1270,7 @@ mod tests {
         );
         assert!(!model.dirty);
 
-        fold_expiry(&mut model, SpecStamp::new(CMDLINE_SPECULATION_MAX_AGE));
+        fold_expiry(&mut model, SpecStamp::new(SPECULATION_MAX_AGE));
 
         assert!(model.engine.cmdline_speculated.is_none());
         assert!(model.dirty, "the withdrawal has to be painted");

@@ -171,6 +171,14 @@ fn absorb_float_notices(
 /// Answers one float sighting: nothing at all for a float drawing where
 /// view does not, and otherwise the one notice its claimant owes the user.
 ///
+/// The two halves are keyed on different readings of the command line. The
+/// hide runs on the one the frame is painting -- a speculated `:` included
+/// -- because the silence it covers is exactly when a plugin draws its own
+/// cmdline box, and view's palette standing beside that box is the
+/// double-menu this path exists to prevent. The notice runs on nvim's own,
+/// because a line telling the user which plugin took the command line is
+/// wrong the moment the guess was.
+///
 /// The watcher re-reports a float that moved -- every keystroke of a
 /// cmdline session, for nvim-cmp -- and a repeat that adds no surface stops
 /// at `SurfaceConflicts::record`, which answers news only. So a standing
@@ -198,6 +206,13 @@ pub(super) fn observe_float(model: &mut Model, float: &FloatSighting) -> Vec<Eff
         // reading "noice.nvim is using the command line" beside a command
         // line whose menu view had quietly taken over
         return absorb(model, float, surface);
+    }
+    if surface == Surface::Cmdline && model.engine.cmdline.is_none() {
+        // the command line this float is over is view's own guess at one,
+        // and a sticky line naming a plugin never rests on a guess: the
+        // hide above is what keeps the two menus off the screen together,
+        // and the notice waits for the `cmdline_show` that makes it true
+        return Vec::new();
     }
     if float.hidden {
         // a window with its `hide` flag set draws nothing, so it covers

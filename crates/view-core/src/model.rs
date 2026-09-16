@@ -336,6 +336,8 @@ impl Model {
                 mode: ModeState::default(),
                 cmdline: None,
                 cmdline_speculated: None,
+                key_unanswered: false,
+                literal_pending: false,
                 messages: Messages::default(),
                 toast_history: crate::native::toast::ToastHistory::new(),
                 tabline: None,
@@ -1318,6 +1320,22 @@ pub struct EngineModel {
     /// names. Never both this and `cmdline`: the event that installs one
     /// clears the other.
     pub cmdline_speculated: Option<crate::native::speculate::CmdlineSpeculation>,
+    /// Whether a key view has forwarded is still waiting for the redraw
+    /// batch that answers it.
+    ///
+    /// The mode beside it is a reading of the last `mode_change` nvim sent,
+    /// so it describes the editor as of the last answered key and not the
+    /// one in flight: with `A` on the wire and its `mode_change` not back
+    /// yet, `mode.current` still says `normal`
+    /// ([`crate::native::speculate::may_speculate_cmdline`] reads both).
+    pub key_unanswered: bool,
+    /// Whether the last key view forwarded is one nvim takes the next
+    /// keystroke as an argument to rather than as a command
+    /// ([`crate::native::speculate::CMDLINE_LITERAL_KEYS`]).
+    ///
+    /// nvim announces no mode for a command waiting on its argument, so
+    /// nothing in `mode` can tell that state from plain normal mode.
+    pub literal_pending: bool,
     pub messages: Messages,
     /// Bounded scrollback of every message routed through
     /// [`crate::native::toast::route`], newest-first on read; the
@@ -1462,6 +1480,19 @@ impl EngineModel {
         self.float_absorption.rows()
     }
 
+    /// Whether a command line is on screen: nvim's own, or the empty `:`
+    /// the palette stands on while it waits for `cmdline_show`.
+    ///
+    /// The reading a float over the bottom rows is judged against
+    /// (`crate::native::surfaces::claims_at`), because a plugin drawing its
+    /// own command line draws it inside that silence -- keyed on nvim's
+    /// alone, its box and view's speculated palette share the screen until
+    /// the `cmdline_show` lands.
+    #[must_use]
+    pub fn paints_cmdline(&self) -> bool {
+        self.cmdline.is_some() || self.cmdline_speculated.is_some()
+    }
+
     /// Drops every piece of this model the engine both raises and retracts,
     /// for a connection being replaced.
     ///
@@ -1477,6 +1508,8 @@ impl EngineModel {
     /// |---|---|---|
     /// | `cmdline` | `cmdline_hide` | yes |
     /// | `cmdline_speculated` | the `cmdline_show` it was guessing at, or its own age bound | yes |
+    /// | `key_unanswered` | the next redraw batch | yes: the key it names went to the engine that died |
+    /// | `literal_pending` | the next key, or a batch moving the mode or the cursor | yes, for the same reason |
     /// | `popupmenu` | `popupmenu_hide` | yes |
     /// | `float_absorption` | the plugin's window dies with the connection | yes |
     /// | `tabline` | the next `tabline_update` | yes |
@@ -1501,6 +1534,8 @@ impl EngineModel {
     pub fn forget_overlays(&mut self) {
         self.cmdline = None;
         self.cmdline_speculated = None;
+        self.key_unanswered = false;
+        self.literal_pending = false;
         self.popupmenu = None;
         self.grids.forget_grids();
         let _ = self.float_absorption.forget();

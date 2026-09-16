@@ -404,21 +404,33 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// ([`MAPPINGS_COLON_KEY`]). The palette speculates the command line open on
 /// that keystroke (`view_core::native::speculate::may_speculate_cmdline`)
 /// and needs the answer on every `:`, which is not a question to put on the
-/// wire per keystroke; the snapshot this chunk already takes has it. Read
-/// over the global and buffer-local keymaps of `n`, `x` and `v` for the same
-/// reason the claim snapshot spans both: an ftplugin's buffer-local mapping
-/// beats a global one wherever it applies. Re-read on the `User LazyLoad`
-/// the chunk leaves an autocommand for ([`COLON_MAP_GROUP`]), reported on
-/// the `view_bridge` `colon_mapped` event only when the answer moved, so a
-/// plugin that loads late and maps `:` closes the gate for the rest of the
-/// session.
+/// wire per keystroke; the snapshot this chunk already takes has it.
 ///
-/// That listener gets an augroup of its own (`view_colon_map`) rather than
-/// joining the one [`DISABLE_CLAIMANTS_CHUNK`] already creates for the same
-/// `User LazyLoad`: that group deletes itself once every claimant module has
-/// been asked, so a re-read folded into it would stop at exactly the moment
-/// the last claimant loads, leaving every plugin loaded after that one free
-/// to map `:` unobserved.
+/// Three `vim.fn.maparg(':', mode)` calls, for `n`, `x` and `v`, and no
+/// keymap walk: `maparg` answers for the current buffer's own mappings as
+/// well as the global ones, and the current buffer is the one the `:` is
+/// going to. It reads a Lua-callback mapping as well as a string one (the
+/// rhs comes back as `<Lua 42: ...>`, which is not the empty string
+/// `maparg` returns for no mapping at all). The cost per fire is those
+/// three calls -- the walk it replaces materialised every mapping of three
+/// modes, globally and for every loaded buffer, on every event below.
+///
+/// Re-read on three events, reported on the `view_bridge` `colon_mapped`
+/// event only when the answer moved. `User LazyLoad`, so a plugin that
+/// loads late and maps `:` closes the gate for the rest of the session --
+/// and `FileType` and `BufWinEnter` beside it, because a config that uses
+/// no lazy.nvim fires the first one never, and because a buffer-local `:`
+/// map belongs to the buffer that is current when those two fire: an
+/// ftplugin mapping `:` in a file opened later is seen at exactly the
+/// moment its buffer becomes the one being typed into, and leaving that
+/// buffer is reported the same way.
+///
+/// Those listeners get an augroup of their own (`view_colon_map`) rather
+/// than joining the one [`DISABLE_CLAIMANTS_CHUNK`] already creates for the
+/// same `User LazyLoad`: that group deletes itself once every claimant
+/// module has been asked, so a re-read folded into it would stop at exactly
+/// the moment the last claimant loads, leaving every plugin loaded after
+/// that one free to map `:` unobserved.
 ///
 /// What the user's config already mapped is snapshotted BEFORE the first key
 /// is set, since setting it is what destroys the answer. The snapshot spans
@@ -440,12 +452,14 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// [`is_spellable`](view_core::native::mappings::is_spellable), applied in
 /// [`register_mappings`](EngineHandle::register_mappings).
 ///
-/// Normal mode is the whole scope, matching
+/// Normal mode is the whole scope of the *claims*, matching
 /// [`MappingSpec`](view_core::native::mappings::MappingSpec)'s own
 /// normal-mode-only contract: the snapshot reads `'n'` maps, globally and
 /// per loaded buffer, and every key is set with `vim.keymap.set('n', ...)`.
-/// A spec carries no mode to vary that by, so all three `'n'` literals in
-/// the chunk below are the scope, not a default some caller may override.
+/// A spec carries no mode to vary that by, so every `'n'` literal in the
+/// chunk below is the scope, not a default some caller may override. The
+/// `:` reading beside them is the one thing that spans `n`, `x` and `v`,
+/// because a `:` typed in visual mode opens a command line too.
 ///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
@@ -466,31 +480,27 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 local function colon_mapped()
   for _, mode in ipairs({ 'n', 'x', 'v' }) do
-    for _, m in ipairs(vim.api.nvim_get_keymap(mode)) do
-      if m.lhs == ':' or m.lhsraw == ':' then return true end
-    end
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_loaded(buf) then
-        for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
-          if m.lhs == ':' or m.lhsraw == ':' then return true end
-        end
-      end
-    end
+    if vim.fn.maparg(':', mode) ~= '' then return true end
   end
   return false
 end
 local colon = colon_mapped()
 local group = vim.api.nvim_create_augroup('view_colon_map', { clear = true })
+local function reread()
+  local now = colon_mapped()
+  if now ~= colon then
+    colon = now
+    pcall(vim.rpcnotify, channel, 'view_bridge', 'colon_mapped', now)
+  end
+end
 vim.api.nvim_create_autocmd('User', {
   group = group,
   pattern = 'LazyLoad',
-  callback = function()
-    local now = colon_mapped()
-    if now ~= colon then
-      colon = now
-      pcall(vim.rpcnotify, channel, 'view_bridge', 'colon_mapped', now)
-    end
-  end,
+  callback = reread,
+})
+vim.api.nvim_create_autocmd({ 'FileType', 'BufWinEnter' }, {
+  group = group,
+  callback = reread,
 })
 local claimed = {}
 for _, spec in ipairs(specs) do

@@ -251,7 +251,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // speculated state and this one render the same layer in the
             // same rect (`CmdlineState::bare_colon`), so the frame that
             // installs the real line moves nothing on screen
-            model.engine.cmdline_speculated = None;
+            crate::native::speculate::withdraw_cmdline_speculation(model);
             model.engine.cmdline = Some(cmdline);
             Vec::new()
         }

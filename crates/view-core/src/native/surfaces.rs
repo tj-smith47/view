@@ -424,10 +424,14 @@ const CMDLINE_ROWS: i64 = 2;
 /// Each rule pairs a rect with a session state, because neither is
 /// sufficient alone (see this module's own docs):
 ///
-/// - **the command line**, when a command line is actually open and the
-///   float's bottom edge lands in the rows the engine keeps for it. The
-///   open command line is what parts nvim-cmp's cmdline menu from a picker
-///   whose lowest chrome window sits one row above the same band.
+/// - **the command line**, when a command line is on screen and the float's
+///   bottom edge lands in the rows the engine keeps for it. The command
+///   line is what parts nvim-cmp's cmdline menu from a picker whose lowest
+///   chrome window sits one row above the same band. A command line view is
+///   speculating counts, because the two menus would be on screen together
+///   for the length of the engine's silence otherwise; what rests on the
+///   real one is the notice, not the hide (`update::surface_conflict`'s
+///   `observe_float`).
 /// - **the message area**, when the float is pinned to the grid's top
 ///   right corner -- where view stacks its toasts -- and is short enough to
 ///   be chrome rather than a screenful. A picker centered in the grid
@@ -469,7 +473,7 @@ pub fn claims_at(
     // and a window that has taken the screen over, which is a different
     // thing and not this detector's business
     let chrome_rows = i64::from(grid_h) / 2;
-    if model.engine.cmdline.is_some() && bottom >= last_row - (CMDLINE_ROWS - 1) {
+    if model.engine.paints_cmdline() && bottom >= last_row - (CMDLINE_ROWS - 1) {
         return owned(Surface::Cmdline, model);
     }
     let rows = bottom - top + 1;

@@ -346,3 +346,41 @@ fn the_claim_report_says_whether_the_users_config_maps_colon() {
          that reaches the mapping instead of the command line"
     );
 }
+
+/// The half the registration-time reading cannot answer: a `:` an ftplugin
+/// maps in a buffer opened after the session started.
+///
+/// The reading is taken over the global maps and the current buffer's own,
+/// so the buffer it has to be retaken on is whichever one the user is
+/// typing into -- which is what the `FileType` trigger is for. Live because
+/// the thing under test is an autocommand inside nvim: no decoded reply can
+/// say whether one fired.
+#[test]
+fn an_ftplugin_mapping_colon_in_a_later_buffer_closes_the_gate() {
+    let session = Session::start_with(
+        "colon-ftplugin",
+        "vim.api.nvim_create_autocmd('FileType', {\n\
+         \x20 pattern = 'lua',\n\
+         \x20 callback = function() vim.keymap.set('n', ':', ':', { buffer = 0 }) end,\n\
+         })\n",
+    );
+    session.register(&NativeConfig::all_enabled());
+    assert!(
+        !session.report().1,
+        "nothing maps `:` in the buffer the session started in"
+    );
+
+    session.eval("execute('setfiletype lua')");
+
+    let mapped = session
+        .wait_for(ARRIVAL, |msg| match msg {
+            Msg::ColonMappingRead { mapped } => Some(*mapped),
+            _ => None,
+        })
+        .expect("the re-read must report the answer moving");
+    assert!(
+        mapped,
+        "the ftplugin's buffer-local `:` is the key the next keystroke reaches, and a palette \
+         speculated for it would be drawn for a mapping"
+    );
+}

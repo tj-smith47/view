@@ -523,13 +523,12 @@ pub fn render(model: &Model) -> Surface {
         // actually built a `completion` under: only when every one of
         // those held true did this same popupmenu's rows already reach a
         // palette box. Anything less -- palette off, a Prompt on top, or
-        // (defensively) no cmdline open at all despite a cmdline-sourced
-        // grid sentinel -- means nothing painted it, so it keeps its own
-        // layer rather than vanishing with nowhere its rows were shown.
-        let consumed_by_palette = model.palette_enabled
-            && !prompt_open
-            && engine.cmdline.is_some()
-            && pm.is_cmdline_sourced();
+        // (defensively) no command line being painted at all despite a
+        // cmdline-sourced grid sentinel -- means nothing painted it, so it
+        // keeps its own layer rather than vanishing with nowhere its rows
+        // were shown.
+        let consumed_by_palette =
+            model.palette_enabled && !prompt_open && painted.is_some() && pm.is_cmdline_sourced();
         if !consumed_by_palette {
             if pm.is_cmdline_sourced() {
                 if let Some(layer) =
@@ -998,18 +997,6 @@ fn cmdline_cursor_col(cmdline: &CmdlineState) -> u16 {
     u16::try_from(prefix_len.saturating_add(pos)).unwrap_or(u16::MAX)
 }
 
-/// The real terminal cursor: position plus shape, offset by `offset`
-/// (reserved chrome rows) to land in the terminal's own coordinate space.
-/// While the command line is open, the cursor tracks its `pos` on the
-/// bottom grid row instead of the grid's own cursor (matching the
-/// cmdheight=0 floating UX external UIs give: the engine grid's cursor
-/// position is stale while the command line owns input). `None` when the
-/// grid has no cells to place it in (a freshly started `Model` before the
-/// first resize).
-///
-/// Takes the frame's own `layers` so the agent panel's caret lands on the
-/// row this frame painted its composer on, rather than on a second resolve
-/// of the panel's rect and a second render of its view.
 /// The command line this frame draws: nvim's own while one is open, or the
 /// empty `:` a speculated open stands on until `cmdline_show` answers it
 /// (`view_core::native::speculate::CmdlineSpeculation`).
@@ -1028,6 +1015,18 @@ fn painted_cmdline(model: &Model) -> Option<Cow<'_, CmdlineState>> {
     }
 }
 
+/// The real terminal cursor: position plus shape, offset by `offset`
+/// (reserved chrome rows) to land in the terminal's own coordinate space.
+/// While the command line is open, the cursor tracks its `pos` on the
+/// bottom grid row instead of the grid's own cursor (matching the
+/// cmdheight=0 floating UX external UIs give: the engine grid's cursor
+/// position is stale while the command line owns input). `None` when the
+/// grid has no cells to place it in (a freshly started `Model` before the
+/// first resize).
+///
+/// Takes the frame's own `layers` so the agent panel's caret lands on the
+/// row this frame painted its composer on, rather than on a second resolve
+/// of the panel's rect and a second render of its view.
 fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpec> {
     let (width, height) = model.engine.grid().size();
     if width == 0 || height == 0 {
