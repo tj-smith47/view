@@ -350,7 +350,17 @@ record_one() {
   # otherwise hold this run open for good
   exec 4<> "$dir/ready"
   if ! read -r -t 30 _ <&4; then
-    echo "  $side-$index: the emulator never reported ready" >&2
+    exec 4>&-
+    # nothing answers the terminal's own queries without the emulator, so
+    # every column of this run would be a reading of a different editor:
+    # the editor is never started and the caller writes a row saying so,
+    # rather than one standing beside runs that were taken
+    echo "  $side-$index: the emulator never reported ready; run skipped" >&2
+    kill "$READER" 2>/dev/null || true
+    wait "$READER" 2>/dev/null || true
+    READER=
+    rm -f "$dir/in" "$dir/wire" "$dir/ready"
+    return 1
   fi
   exec 4>&-
   script -q -e -I "$dir/in.log" -O "$dir/out.log" -T "$dir/tm.log" \
@@ -467,10 +477,16 @@ window_placed() {
   }' "$1"
 }
 
-# What view itself measured between the typed `:` and the frame carrying
-# the palette, in milliseconds off the `key` topic's own microseconds. The
-# recorder's wire reading covers the same moment plus the link; this is the
-# half that belongs to view.
+# What view itself measured between the typed `:` and the frame that
+# painted the palette: the `palette painted` line's own millisecond, less
+# the millisecond the `:` reached the loop at. The recorder's wire reading
+# covers the same moment plus the link.
+#
+# Never the `:` key line's own `waited_us`, which is the wait to the frame
+# that closed that key -- the `msg_showcmd` frame, 2-5 ms before the palette
+# is even requested. Read as the palette moment it published a figure under
+# the wire's by another engine round trip and a paint, and called the
+# difference view's own share.
 palette_wait() {
   if [ ! -f "$1" ]; then
     echo ""
@@ -478,13 +494,18 @@ palette_wait() {
   fi
   # the first `:` of the session and no other: a walk that kept looking
   # reported the `:` of the closing `:qa!` in the same column, with nothing
-  # saying the palette's own line carried no reading
-  awk '/^[0-9]+ key .*notation=":"/ {
+  # saying the palette's own line carried no reading. Its arrival and not its
+  # wait, so a `:` no frame answered still dates the palette
+  awk 'key == "" && /^[0-9]+ key .*notation=":"/ {
     for (i = 1; i <= NF; i++) {
-      if (substr($i, 1, 10) == "waited_us=") {
-        printf "%.1f", substr($i, 11) / 1000
+      if (substr($i, 1, 9) == "received=") {
+        key = substr($i, 10)
       }
     }
+    next
+  }
+  key != "" && $2 == "palette" && $3 == "painted" {
+    printf "%.1f", $1 - key
     exit
   }' "$1"
 }
@@ -526,7 +547,14 @@ printf 'side\trun\tload\tbusy\ttext_ms\thl_ms\tcolours\tcolon_ms\tpalette_ms\tex
 index=1
 while [ "$index" -le "$RUNS" ]; do
   for side in view nvim; do
-    record_one "$side" "$index"
+    if ! record_one "$side" "$index"; then
+      # the run says it was skipped and carries no reading anywhere else, so
+      # every `spread` below counts it in no `n=`
+      printf '%s\t%s\t%s\tskipped\t\t\t\t\t\t\t\t\t\t\t\t\t\n' \
+        "$side" "$index" "$(cat "$OUT/$side-$index/load" 2>/dev/null || true)" \
+        >> "$RUNS_TSV"
+      continue
+    fi
     dir=$OUT/$side-$index
     replay_one "$dir" "$side"
     load=$(cat "$dir/load")
