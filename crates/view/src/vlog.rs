@@ -139,8 +139,41 @@ pub fn log_with(topic: &str, payload: impl FnOnce() -> String) {
 // unset (see this module's own doc).
 fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
     let ms = START.get().map_or(0, |start| start.elapsed().as_millis());
+    write_line_at(file, topic, ms, payload);
+}
+
+/// [`write_line`] for a payload whose own moment is not now: a line about
+/// something another thread did, carrying the reading that thread took.
+fn write_line_at(file: &Mutex<std::fs::File>, topic: &str, ms: u128, payload: &str) {
     let mut f = file.lock().unwrap_or_else(PoisonError::into_inner);
     let _ = writeln!(f, "{ms} {topic} {payload}");
+}
+
+/// One `engine redraw` census line for a batch just drained from the
+/// pump, stamped with `folded_at` -- the reading the reader thread took
+/// when it folded that batch, which is when those bytes were on the wire.
+///
+/// Which clock the line carries is what taking `folded_at` here is for:
+/// written from this call instead, the stamp would be the loop's drain,
+/// which is one pass or several after the engine spoke, so a window read
+/// off these lines would be a window on view's own draining rather than on
+/// the engine's traffic. `None` falls back to now, which is a drain the
+/// pump dated nothing for (nothing had reached a `Flush`).
+///
+/// An empty drain writes no line: it is a wakeup token for damage still
+/// short of a `Flush`, so it is not a batch the engine sent.
+pub fn log_redraw_census(events: &[view_core::events::UiEvent], folded_at: Option<Instant>) {
+    if events.is_empty() {
+        return;
+    }
+    let Some(Some(file)) = SINK.get() else {
+        return;
+    };
+    let ms = folded_at.zip(START.get()).map_or_else(
+        || START.get().map_or(0, |start| start.elapsed().as_millis()),
+        |(at, start)| at.saturating_duration_since(*start).as_millis(),
+    );
+    write_line_at(file, "engine", ms, &redraw_census(events));
 }
 
 /// Logs the loggable slice of one `Msg` crossing the runtime loop's
@@ -158,8 +191,10 @@ fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
 pub fn log_msg(msg: &view_core::msg::Msg) {
     use view_core::msg::Msg;
     match msg {
-        Msg::Redraw(events) if !events.is_empty() => {
-            log_with("engine", || redraw_census(events));
+        // the batch's own census is written where it is drained
+        // ([`log_redraw_census`]), which is the only place the fold's
+        // reading is in hand
+        Msg::Redraw(events) => {
             for ev in events {
                 log_ui_event(ev);
             }
@@ -289,6 +324,8 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
 /// file as the thing a user is asked to attach to a bug report, and a full
 /// `Debug` would put the whole conversation, the model's reasoning and the
 /// contents of every file it touched into it.
+const PAYLOAD_CAP: usize = 120;
+
 /// How many redraw batches this process has written a census line for,
 /// which is what numbers them.
 static REDRAW_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -303,11 +340,24 @@ static REDRAW_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// or one where it sent nothing but cells. An absence of lines in those two
 /// topics is not an absence of engine traffic, and two attributions were
 /// argued from that reading.
+///
+/// The line's own stamp is the reader thread's fold rather than the drain
+/// that produced this call: [`log_redraw_census`] is its one writer and
+/// carries that reading.
 fn redraw_census(events: &[view_core::events::UiEvent]) -> String {
+    use std::borrow::Cow;
+    use view_core::events::UiEvent;
     let batch = REDRAW_BATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let mut kinds: Vec<(&'static str, usize)> = Vec::new();
+    let mut kinds: Vec<(Cow<'_, str>, usize)> = Vec::new();
     for ev in events {
-        let kind = event_kind(ev);
+        // an event this tree's decoder has no arm for still carries the name
+        // nvim sent, and a census counting it as `unknown` names nothing: 28
+        // of the 567 events in the batch a launch attribution rests on were
+        // written under that label
+        let kind = match ev {
+            UiEvent::Unknown { name } => Cow::Owned(format!("unknown({name})")),
+            _ => Cow::Borrowed(event_kind(ev)),
+        };
         match kinds.iter_mut().find(|(name, _)| *name == kind) {
             Some((_, count)) => *count += 1,
             None => kinds.push((kind, 1)),
@@ -367,8 +417,6 @@ fn event_kind(ev: &view_core::events::UiEvent) -> &'static str {
         UiEvent::Unknown { .. } => "unknown",
     }
 }
-
-const PAYLOAD_CAP: usize = 120;
 
 /// `text` capped at [`PAYLOAD_CAP`], with what was dropped counted rather
 /// than silently lost -- a truncation that did not say so reads as a short
@@ -1001,15 +1049,29 @@ impl FeltLog {
     /// pass later or several and can be several keys later still.
     fn close_unanswered(&mut self) {
         for input in std::mem::take(&mut self.pending) {
-            self.emit(
-                input.kind,
-                &format!(
-                    "bytes={}{} received={} flush=none",
-                    input.bytes,
-                    input.detail,
-                    input.received_us / 1000
-                ),
-            );
+            self.emit(input.kind, &unanswered(&input));
+        }
+    }
+
+    /// Writes out every input whose own fold dirtied the screen and whose
+    /// render then found nothing to write.
+    ///
+    /// The pass that was its answer put nothing in front of the user, so the
+    /// key is answered by no frame -- held instead, its `own_paint` mark
+    /// still set, it is closed by whatever flushes next (a toast tick, a
+    /// notice) with that frame's stamp. An input an engine batch has also
+    /// marked keeps waiting: the frame that batch drives is still owed.
+    fn close_unpainted(&mut self) {
+        let mut closed: Vec<(&'static str, String)> = Vec::new();
+        self.pending.retain(|input| {
+            if !input.own_paint || input.engine_answered {
+                return true;
+            }
+            closed.push((input.kind, unanswered(input)));
+            false
+        });
+        for (topic, payload) in closed {
+            self.emit(topic, &payload);
         }
     }
 
@@ -1081,6 +1143,7 @@ impl FeltLog {
             return;
         }
         if !flushed {
+            self.close_unpainted();
             return;
         }
         let flushed_us = mono_us();
@@ -1116,11 +1179,19 @@ impl FeltLog {
             return;
         }
         let Some((grid, ids)) = window_text_hls(model, self.text_grid) else {
-            // a pinned grid that no longer resolves is gone for good (`:only`,
-            // a window close, a layout the config rebuilds), so every later
-            // frame would read nothing and the topic would write neither a
-            // further wave nor its closing line with nothing saying why
-            if let Some(pinned) = self.text_grid {
+            // a pinned grid the registry no longer holds is gone for good
+            // (`:only`, a window close, a layout the config rebuilds), so
+            // every later frame would read nothing and the topic would write
+            // neither a further wave nor its closing line with nothing saying
+            // why. A grid that is merely blank -- `window_text_hls` answers
+            // `None` for one with no non-blank cell, which a `grid_clear` from
+            // a `:redraw!` or a colorscheme reload leaves for a frame -- is
+            // still the window this watch is on, and closing on it would end
+            // the watch on the exact moment it exists to record
+            let gone = self
+                .text_grid
+                .filter(|pinned| model.engine.grids().grid(*pinned).is_none());
+            if let Some(pinned) = gone {
                 self.highlight_closed = true;
                 self.emit(
                     "highlight",
@@ -1191,6 +1262,17 @@ impl Drop for FeltLog {
         }
         self.close_unanswered();
     }
+}
+
+/// One input's line for a frame that never came: the same fields a closed
+/// input writes, with `flush=none` where its wait would be.
+fn unanswered(input: &PendingInput) -> String {
+    format!(
+        "bytes={}{} received={} flush=none",
+        input.bytes,
+        input.detail,
+        input.received_us / 1000
+    )
 }
 
 /// Whether the typed cmdline is what the palette is drawing.
@@ -1939,6 +2021,95 @@ mod tests {
         );
     }
 
+    /// A window that is merely blank -- cleared by a `:redraw!` or a
+    /// colorscheme reload, and holding no non-blank cell for a frame -- is
+    /// still the window this watch is on. Reported as gone, it ended the
+    /// watch on the exact moment the topic exists to record.
+    #[test]
+    fn a_pinned_window_that_went_blank_keeps_the_watch_open() {
+        use view_core::grid::registry::{GridEvent, GridId};
+        use view_core::grid::GridOp;
+
+        let window = GridId(2);
+        let mut model = view_core::model::Model::new();
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::Resize {
+                width: 4,
+                height: 1,
+            },
+        });
+        model.engine.apply_grid_event(GridEvent::Window {
+            grid: window,
+            startrow: 0,
+            startcol: 0,
+        });
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("f".to_string(), 9, 1)],
+            },
+        });
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_highlight(&model, 100);
+        assert_eq!(felt.text_grid, Some(window), "the window was never pinned");
+
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::Clear,
+        });
+        felt.note_highlight(&model, 200);
+        assert!(
+            !felt.highlight_closed,
+            "a blank window closed the watch: {:?}",
+            lines.lock().unwrap()
+        );
+
+        // the colours the watch is for, arriving on the frame after the clear
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("f".to_string(), 12, 1)],
+            },
+        });
+        felt.note_highlight(&model, 300);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l.starts_with(
+                "highlight window text recoloured hl-ids=1 was=1 after=200 added=12/"
+            )),
+            "the wave after the clear was never recorded: {written:?}"
+        );
+    }
+
+    /// An event this tree's decoder has no arm for is counted under the name
+    /// nvim sent it as: 28 of the 567 events in the batch a launch
+    /// attribution rests on were counted as `unknown`, which names nothing.
+    #[test]
+    fn an_unknown_event_is_counted_under_the_name_the_wire_sent() {
+        use view_core::events::UiEvent;
+        let census = redraw_census(&[
+            UiEvent::Unknown {
+                name: "chdir".to_string(),
+            },
+            UiEvent::Unknown {
+                name: "chdir".to_string(),
+            },
+            UiEvent::Unknown {
+                name: "suspend".to_string(),
+            },
+            UiEvent::Flush,
+        ]);
+        assert!(
+            census.ends_with("events=4 kinds=unknown(chdir)=2,unknown(suspend)=1,flush=1"),
+            "the census throws away the names the wire carried: {census}"
+        );
+    }
+
     /// A batch's census counts its cells rather than listing them, which is
     /// what makes "the engine sent nothing" readable at all: the `layout`
     /// topic omits `grid_line` by volume, so an absence of lines there is not
@@ -2204,6 +2375,45 @@ mod tests {
             felt.pending.len(),
             1,
             "an empty batch closed a key: {:?}",
+            lines.lock().unwrap()
+        );
+    }
+
+    /// A pass whose render found nothing to write is not an answer: the key
+    /// its own fold dirtied the screen for is written out as answered by no
+    /// frame, rather than held for whatever flushes next -- a toast tick, a
+    /// notice -- and stamped with that.
+    #[test]
+    fn a_key_whose_own_pass_wrote_nothing_is_closed_by_that_pass() {
+        let model = view_core::model::Model::new();
+        let (mut felt, lines) = FeltLog::recording();
+        let mut input = waiting(false);
+        input.own_paint = true;
+        felt.pending.push(input);
+        felt.note_pass(&model, false);
+        assert!(
+            felt.pending.is_empty(),
+            "the key is still waiting for a frame its own pass never wrote"
+        );
+        let written = lines.lock().unwrap().clone();
+        assert_eq!(
+            written,
+            vec!["key bytes=1 received=5 flush=none".to_string()],
+            "the pass that wrote nothing did not close the key it answered"
+        );
+
+        // an input an engine batch has marked is waiting on that batch's own
+        // frame, which this pass is not
+        let (mut felt, lines) = FeltLog::recording();
+        let mut input = waiting(false);
+        input.own_paint = true;
+        input.engine_answered = true;
+        felt.pending.push(input);
+        felt.note_pass(&model, false);
+        assert_eq!(
+            felt.pending.len(),
+            1,
+            "a key the engine still owes a frame was closed: {:?}",
             lines.lock().unwrap()
         );
     }

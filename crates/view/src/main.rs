@@ -1354,7 +1354,9 @@ fn main() -> Result<()> {
     // block -- see damage::PumpShared::attach_sink's doc comment.
     let (pump, cutover) = engine.start_pump(msg_tx.clone());
     let pending_redraw = if cutover.redraw_pending {
-        pump.take_damage()
+        let (events, folded_at) = pump.take_damage_folded();
+        crate::vlog::log_redraw_census(&events, folded_at);
+        events
     } else {
         Vec::new()
     };

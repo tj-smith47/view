@@ -688,7 +688,14 @@ fn intake(
     model: &mut Model,
 ) -> Option<Msg> {
     Some(match received {
-        Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
+        Ok(Msg::RedrawReady) => {
+            // the census is written here rather than at the dispatch below,
+            // because the reading of when the reader thread folded this batch
+            // is only in hand at the drain
+            let (events, folded_at) = pump.take_damage_folded();
+            crate::vlog::log_redraw_census(&events, folded_at);
+            Msg::Redraw(events)
+        }
         Ok(Msg::HeartbeatReply { generation }) => {
             // recorded here rather than in `update()`: this is the runtime
             // loop's own thread, the same one that folds the verdict a pass
@@ -1290,13 +1297,18 @@ pub fn run(
             // owed: the startup timeline's own question is whether the gap
             // before the file appears was the engine's silence or view's
             // reading, and nothing else in the loop records it
-            if !milestones.content {
-                if let Msg::Redraw(events) = &msg {
+            // an empty batch is the drain of a wakeup token for damage
+            // that has not reached a `Flush` yet: it folds nothing and
+            // paints nothing, so counting it reports view's own wakeups as
+            // engine batches -- 4 and 10 empty drains read as 5 and 11
+            match &msg {
+                Msg::Redraw(events) if !milestones.content && !events.is_empty() => {
                     milestones.redraws = milestones.redraws.saturating_add(1);
                     milestones.redraw_events = milestones
                         .redraw_events
                         .saturating_add(u32::try_from(events.len()).unwrap_or(u32::MAX));
                 }
+                _ => {}
             }
             felt.note_input(&msg, &model, || pump.staged());
             // read before the fold takes the message: which of the three
@@ -1330,8 +1342,9 @@ pub fn run(
             // starving the frame.
             if queue.is_empty() && !drained_residue {
                 drained_residue = true;
-                let residue = pump.take_damage();
+                let (residue, folded_at) = pump.take_damage_folded();
                 if !residue.is_empty() {
+                    crate::vlog::log_redraw_census(&residue, folded_at);
                     queue.push(Msg::Redraw(residue));
                 }
             }
