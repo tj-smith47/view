@@ -183,7 +183,7 @@ pub fn log_redraw_census(events: &[view_core::events::UiEvent], folded_at: Optio
         || START.get().map_or(0, |start| start.elapsed().as_millis()),
         |(at, start)| at.saturating_duration_since(*start).as_millis(),
     );
-    write_line_at(file, "engine", ms, &redraw_census(events));
+    write_line_at(file, "engine", ms, &redraw_census(events, &REDRAWS));
 }
 
 /// Logs the loggable slice of one `Msg` crossing the runtime loop's
@@ -336,25 +336,37 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
 /// contents of every file it touched into it.
 const PAYLOAD_CAP: usize = 120;
 
-/// How many redraw batches this process has written a census line for,
-/// which is what numbers them, and how many events they carried between
-/// them.
+/// How many redraw batches one sink has written a census line for, which is
+/// what numbers them, and how many events they carried between them.
 ///
 /// Read by the `first content frame` startup line as well as written here,
 /// so that column and the census lines standing above it in the log are
 /// one count rather than two that can disagree -- the loop's own counter
 /// saw neither the cutover's drain nor the recovery path's, both of which
 /// write a line here.
-static REDRAW_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static REDRAW_EVENTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+///
+/// The count belongs to the sink rather than to the process, because a test
+/// driving a census of its own would otherwise number its lines between a
+/// sibling's: [`REDRAWS`] is the live session's one sink, and each test
+/// holds its own and starts at 1.
+#[derive(Default)]
+struct RedrawCounts {
+    batches: std::sync::atomic::AtomicU64,
+    events: std::sync::atomic::AtomicU64,
+}
+
+static REDRAWS: RedrawCounts = RedrawCounts {
+    batches: std::sync::atomic::AtomicU64::new(0),
+    events: std::sync::atomic::AtomicU64::new(0),
+};
 
 /// Batches this process has drained a census line for and the events in
 /// them, for a caller reporting what the engine had sent by some moment.
 pub fn redraws_drained() -> (u64, u64) {
     use std::sync::atomic::Ordering;
     (
-        REDRAW_BATCHES.load(Ordering::Relaxed),
-        REDRAW_EVENTS.load(Ordering::Relaxed),
+        REDRAWS.batches.load(Ordering::Relaxed),
+        REDRAWS.events.load(Ordering::Relaxed),
     )
 }
 
@@ -372,11 +384,14 @@ pub fn redraws_drained() -> (u64, u64) {
 /// The line's own stamp is the reader thread's fold rather than the drain
 /// that produced this call: [`log_redraw_census`] is its one writer and
 /// carries that reading.
-fn redraw_census(events: &[view_core::events::UiEvent]) -> String {
+fn redraw_census(events: &[view_core::events::UiEvent], counts: &RedrawCounts) -> String {
     use std::borrow::Cow;
     use view_core::events::UiEvent;
-    let batch = REDRAW_BATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    REDRAW_EVENTS.fetch_add(
+    let batch = counts
+        .batches
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    counts.events.fetch_add(
         u64::try_from(events.len()).unwrap_or(u64::MAX),
         std::sync::atomic::Ordering::Relaxed,
     );
@@ -2124,22 +2139,25 @@ mod tests {
     #[test]
     fn an_unknown_event_is_counted_under_the_name_the_wire_sent() {
         use view_core::events::UiEvent;
-        let _numbering = census_numbering();
-        let census = redraw_census(&[
-            UiEvent::Unknown {
-                name: "chdir".to_string(),
-            },
-            UiEvent::Unknown {
-                name: "chdir".to_string(),
-            },
-            UiEvent::Unknown {
-                name: "suspend".to_string(),
-            },
-            UiEvent::Unknown {
-                name: "z".repeat(PAYLOAD_CAP + 40),
-            },
-            UiEvent::Flush,
-        ]);
+        let counts = RedrawCounts::default();
+        let census = redraw_census(
+            &[
+                UiEvent::Unknown {
+                    name: "chdir".to_string(),
+                },
+                UiEvent::Unknown {
+                    name: "chdir".to_string(),
+                },
+                UiEvent::Unknown {
+                    name: "suspend".to_string(),
+                },
+                UiEvent::Unknown {
+                    name: "z".repeat(PAYLOAD_CAP + 40),
+                },
+                UiEvent::Flush,
+            ],
+            &counts,
+        );
         let long = format!("unknown({})=1", capped(&"z".repeat(PAYLOAD_CAP + 40)));
         assert!(
             census.ends_with(&format!(
@@ -2154,18 +2172,6 @@ mod tests {
         );
     }
 
-    /// Held across every call to [`redraw_census`] in this module: the
-    /// number a line takes comes from a process-global counter, so a
-    /// sibling test numbering a line of its own otherwise lands between a
-    /// pair asserted to be consecutive.
-    static CENSUS_NUMBERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn census_numbering() -> std::sync::MutexGuard<'static, ()> {
-        CENSUS_NUMBERING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     /// A batch's census counts its cells rather than listing them, which is
     /// what makes "the engine sent nothing" readable at all: the `layout`
     /// topic omits `grid_line` by volume, so an absence of lines there is not
@@ -2173,7 +2179,7 @@ mod tests {
     #[test]
     fn a_redraw_census_counts_its_cells_rather_than_listing_them() {
         use view_core::events::UiEvent;
-        let _numbering = census_numbering();
+        let counts = RedrawCounts::default();
         let line = |row| UiEvent::GridLine {
             grid: 2,
             row,
@@ -2184,12 +2190,12 @@ mod tests {
                 repeat: 1,
             }],
         };
-        let census = redraw_census(&[line(0), line(1), UiEvent::Flush, line(2)]);
+        let census = redraw_census(&[line(0), line(1), UiEvent::Flush, line(2)], &counts);
         assert!(
             census.ends_with("events=4 kinds=grid_line=3,flush=1"),
             "the census does not count what the batch carried: {census}"
         );
-        let next = redraw_census(&[UiEvent::Flush]);
+        let next = redraw_census(&[UiEvent::Flush], &counts);
         let number = |c: &str| {
             c.split_whitespace()
                 .find_map(|w| w.strip_prefix("batch="))
