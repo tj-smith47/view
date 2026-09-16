@@ -134,24 +134,50 @@ function rows(term) {
   return out;
 }
 
-// The colours the file's own line is drawn in, over the cells carrying a
-// glyph, from the column the needle starts at rightwards. That row and not
-// the rectangle below it: the rows under the needle are still being filled
-// in on the frames right after it appears, so a reading over them grows on
-// the next chunk whatever the colours do, and reports the paint finishing
-// as the syntax arriving. A line that arrived uncoloured carries one
-// colour, and syntax adds to the set.
+// The colours the needle's own line is drawn in, over the cells carrying a
+// glyph, from the column the needle starts at up to where that line ends.
+// That row and not the rectangle below it: the rows under the needle are
+// still being filled in on the frames right after it appears, so a reading
+// over them grows on the next chunk whatever the colours do, and reports the
+// paint finishing as the syntax arriving. A line that arrived uncoloured
+// carries one colour, and syntax adds to the set.
+//
+// The line ends at the first run of three blank cells, and the rest of the
+// row is left out: a notification float on the right margin, or a tree pane
+// opening on the left, puts its own colours on the same row, and reading to
+// the screen's edge reported the pane's colours as the file's -- the reading
+// this replaces dated the syntax at the frame a tree pane opened on.
 function colours(term, row, col) {
   const line = term.buffer.active.getLine(row);
   const seen = [];
   if (!line) return seen;
+  let blanks = 0;
   for (let x = col; x < term.cols; x++) {
     const cell = line.getCell(x);
-    if (!cell || cell.getChars().trim() === '') continue;
+    if (!cell) break;
+    if (cell.getChars().trim() === '') {
+      blanks += 1;
+      if (blanks >= 3) break;
+      continue;
+    }
+    blanks = 0;
     const key = `${cell.isFgDefault() ? 'd' : cell.getFgColor()}`;
     if (seen.indexOf(key) === -1) seen.push(key);
   }
   return seen;
+}
+
+// Where the needle is on this frame, or `null` while it is not on screen.
+//
+// Re-found on every frame rather than held from the frame it first appeared
+// on: a pane opening moves the file's text sideways and down, and a fixed
+// cell then belongs to whatever took that position.
+function locate(screen, needle) {
+  for (let y = 0; y < screen.length; y++) {
+    const at = screen[y].indexOf(needle);
+    if (at !== -1) return { row: y, col: at };
+  }
+  return null;
 }
 
 // The title of the framed box each side draws the typed line inside:
@@ -252,18 +278,16 @@ function report() {
       await new Promise((done) => term.write(chunk, done));
       if (altExit !== -1 && offset > altExit) note('handback', rec.ms);
       const screen = rows(term);
+      const at = locate(screen, needle);
       if (textRow === -1) {
-        for (let y = 0; y < screen.length; y++) {
-          const at = screen[y].indexOf(needle);
-          if (at === -1) continue;
-          textRow = y;
-          textCol = at;
+        if (at) {
+          textRow = at.row;
+          textCol = at.col;
           note('text', rec.ms);
-          baseColours = colours(term, y, at);
-          break;
+          baseColours = colours(term, at.row, at.col);
         }
-      } else if (moments.highlight === undefined) {
-        const now = colours(term, textRow, textCol);
+      } else if (moments.highlight === undefined && at) {
+        const now = colours(term, at.row, at.col);
         if (now.some((c) => baseColours.indexOf(c) === -1)) {
           note('highlight', rec.ms);
         }

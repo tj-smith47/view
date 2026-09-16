@@ -31,6 +31,12 @@
 #                                  [--cold] [--home] [-l|--link]
 #                                  [--rate KBIT] [--delay MS]
 #
+# `-s NEEDLE` is the word both waits and both readings are written against:
+# the file is on the wire when the needle appears, and the colours arrived
+# when the needle's own line gains a colour it did not have. So the needle
+# picks the line whose colouring is dated -- a word on a comment line dates
+# the comments arriving, a word in code dates that line's own syntax.
+#
 # `--home` drops the fixture and launches both editors on the real `$HOME`
 # with its XDG directories untouched, which is the config the user actually
 # reports lag on. Nothing under `$HOME` is removed or reset: a launch writes
