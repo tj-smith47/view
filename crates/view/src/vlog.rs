@@ -316,6 +316,13 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::NotifySinkRead { foreign } => {
             log_with("native", || format!("notify-sink foreign={foreign}"));
         }
+        // dated because the pass that sent it is the one nothing else in
+        // the log records: a claimant asked at the takeover and a claimant
+        // asked again after its own setup leave the same standing notice,
+        // and only this line says which of them turned the surface loose
+        Msg::ClaimantsHandedBack { modules } => {
+            log_with("native", || format!("handed-back {}", modules.join(",")));
+        }
         Msg::MappingsClaimed { claimed } => {
             log_with("native", || {
                 let keys: Vec<String> = claimed

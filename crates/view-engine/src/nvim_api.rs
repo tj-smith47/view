@@ -303,9 +303,16 @@ end
 ///
 /// A module is asked once and never again, whichever pass reached it, so a
 /// plugin that loads late is disabled exactly as the eager one is; the
-/// group deletes itself once every module has been asked, because an
+/// group deletes itself once every module has been asked -- so a module
+/// whose ask never succeeds keeps the autocommand alive -- because an
 /// autocommand still walking a settled list on every lazy load is work
 /// nobody reads.
+///
+/// An ask that raised is not an ask: a module a startup loader required
+/// before its own `setup` ran is on `package.loaded` with its config still
+/// nil, and `disable()` raises from inside it (noice's `init.lua` indexing
+/// `Config.options.notify`), so the name stays unasked and the `LazyLoad`
+/// that follows its setup asks again.
 const DISABLE_CLAIMANTS_CHUNK: &str = concat!(
     "local channel, modules = ...\n",
     notify_predicate_lua!(),
@@ -317,11 +324,11 @@ local function hand_back()
   local handed_back = {}
   for _, name in ipairs(modules) do
     if not asked[name] and package.loaded[name] ~= nil then
-      asked[name] = true
-      pending = pending - 1
       if pcall(function()
         require(name).disable()
       end) then
+        asked[name] = true
+        pending = pending - 1
         handed_back[#handed_back + 1] = name
       end
     end

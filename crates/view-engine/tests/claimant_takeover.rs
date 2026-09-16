@@ -594,23 +594,72 @@ fn wait_for_sink_read(rx: &mpsc::Receiver<Msg>, want: impl Fn(bool) -> bool) -> 
 /// lazy.nvim does for a plugin whose spec defers it, and what noice's own
 /// documented `event = "VeryLazy"` spec asks for.
 fn config_home_lazy_claimant(name: &str) -> ScratchDir {
+    write_lazy_claimant(name, false)
+}
+
+/// [`config_home_lazy_claimant`], except that the module is on
+/// `package.loaded` before its setup has run and its `disable` raises until
+/// it has: a startup `require` reaches the real noice long before the spec
+/// that owns it fires, and `disable()` then indexes a config field that is
+/// still nil.
+fn config_home_claimant_raising_until_setup(name: &str) -> ScratchDir {
+    write_lazy_claimant(name, true)
+}
+
+fn write_lazy_claimant(name: &str, loaded_before_setup: bool) -> ScratchDir {
     let dir = ScratchDir::new(&format!("claimant-takeover-{name}")).unwrap();
+    let preload = if loaded_before_setup {
+        "package.loaded['noice'] = _G.view_pin.module\n"
+    } else {
+        ""
+    };
     std::fs::write(
         dir.join("init.lua"),
-        "_G.view_pin = { orig = vim.notify, disables = 0 }\n\
-         _G.view_pin.claimed = function(...) end\n\
-         _G.view_pin.load_noice = function()\n\
-         vim.notify = _G.view_pin.claimed\n\
-         package.loaded['noice'] = {\n\
-         disable = function()\n\
-         _G.view_pin.disables = _G.view_pin.disables + 1\n\
-         vim.notify = _G.view_pin.orig\n\
-         end,\n\
-         }\n\
-         end\n",
+        format!(
+            "_G.view_pin = {{\n\
+             orig = vim.notify, disables = 0, setup_done = false,\n\
+             }}\n\
+             _G.view_pin.claimed = function(...) end\n\
+             _G.view_pin.module = {{\n\
+             disable = function()\n\
+             if not _G.view_pin.setup_done then\n\
+             error(\"init.lua:41: attempt to index \
+             field 'notify' (a nil value)\")\n\
+             end\n\
+             _G.view_pin.disables = _G.view_pin.disables + 1\n\
+             vim.notify = _G.view_pin.orig\n\
+             end,\n\
+             }}\n\
+             _G.view_pin.load_noice = function()\n\
+             vim.notify = _G.view_pin.claimed\n\
+             _G.view_pin.setup_done = true\n\
+             package.loaded['noice'] = _G.view_pin.module\n\
+             end\n\
+             {preload}"
+        ),
     )
     .unwrap();
     dir
+}
+
+/// Whether the chunk's own autocommand group is still there:
+/// `nvim_get_autocmds` raises on a group that has been deleted.
+fn hand_back_group_alive(engine: &Engine) -> bool {
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                Value::from(
+                    "return pcall(vim.api.nvim_get_autocmds, \
+                     { group = 'view_claimant_hand_back' })",
+                ),
+                Value::Array(vec![]),
+            ],
+        )
+        .unwrap()
+        .as_bool()
+        .unwrap_or(true)
 }
 
 /// Runs `src` in the child and waits for its reply, which is what orders
@@ -706,6 +755,73 @@ fn a_claimant_that_loads_after_the_takeover_is_asked_by_the_late_pass() {
             matches!(msg, Msg::ClaimantsHandedBack { modules } if !modules.is_empty())
         }),
         "a pass that turned nothing off reports nothing: {second:?}"
+    );
+}
+
+/// The gap a loaded-but-unconfigured claimant leaves: the first pass does
+/// reach it, its `disable` raises, and a pass that marked the name asked
+/// before the call would never come back to it -- the module stays on
+/// `package.loaded`, the later passes skip it, and the notice says the ask
+/// never arrived for the rest of the session.
+///
+/// Asked of a real child because what is pinned is that nvim runs the same
+/// name a second time after the setup that makes its `disable` work, and
+/// that the group is still there to do it.
+#[test]
+fn a_claimant_whose_disable_raises_is_asked_again_after_its_setup() {
+    let dir = config_home_claimant_raising_until_setup("raises-until-setup");
+    let mut engine = engine(&dir);
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .takeover(&[TakeoverStep::DisableClaimants {
+            modules: vec!["noice".to_string()],
+        }])
+        .unwrap();
+    run_lua(&engine, "return 1");
+    assert_eq!(
+        disables(&engine),
+        0,
+        "the first pass reaches the module and its disable raises"
+    );
+    assert!(
+        hand_back_group_alive(&engine),
+        "a module whose ask never succeeded keeps the autocommand alive"
+    );
+
+    run_lua(
+        &engine,
+        "_G.view_pin.load_noice() \
+         vim.api.nvim_exec_autocmds('User', { pattern = 'LazyLoad' })",
+    );
+    assert_eq!(
+        wait_for_hand_back(&rx),
+        Some(vec!["noice".to_string()]),
+        "the ask that raised was no ask, so the load after the setup asks \
+         again and names what it turned off"
+    );
+    assert_eq!(disables(&engine), 1);
+    assert_eq!(
+        notify_owner(&engine),
+        "orig",
+        "the second ask runs the claimant's own disable, restore included"
+    );
+
+    // the next load event finds the module already asked
+    run_lua(
+        &engine,
+        "vim.api.nvim_exec_autocmds('User', { pattern = 'LazyLoad' })",
+    );
+    run_lua(&engine, "return 1");
+    assert_eq!(
+        disables(&engine),
+        1,
+        "the ask that succeeded is the last one the module receives"
+    );
+    assert!(
+        !hand_back_group_alive(&engine),
+        "the group stops itself once every module has been asked"
     );
 }
 
