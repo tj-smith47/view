@@ -586,13 +586,7 @@ pub(super) fn sweep_floats(model: &mut Model) -> Vec<Effect> {
 /// and the user is left with a window that has stopped drawing and no way
 /// to know why.
 pub(super) fn cmdline_closed(model: &mut Model) -> Vec<Effect> {
-    let painted = model.engine.float_absorption.rows().is_some();
-    let shown = model.engine.float_absorption.forget();
-    model.dirty |= painted || !shown.is_empty();
-    shown
-        .into_iter()
-        .map(|win| Effect::Rpc(crate::msg::RpcCall::SetFloatHidden { win, hide: false }))
-        .collect()
+    surfaces::release_absorptions(model)
 }
 
 /// The whole notice for `claimed`, opening with its own `family` -- which
@@ -890,6 +884,109 @@ mod tests {
             .filter(|entry| entry.is_native())
             .filter_map(|entry| entry.content.first().map(|(_, line)| line.clone()))
             .collect()
+    }
+
+    /// A typed `:` the gate admits: the palette stands on a guess, with no
+    /// `cmdline_show` behind it and nvim's own command line still closed.
+    fn speculate_colon(model: &mut Model) {
+        model.palette_enabled = true;
+        model.engine.mode.current = "normal".to_string();
+        crate::native::speculate::fold_engine_call(
+            model,
+            &RpcCall::Input {
+                notation: ":".to_string(),
+            },
+            crate::native::speculate::SpecStamp::default(),
+        );
+        assert!(
+            model.engine.cmdline_speculated.is_some(),
+            "the gate refused a `:` this case is about"
+        );
+    }
+
+    /// The hide runs inside the silence, because that is when a completion
+    /// menu and view's speculated palette would be on screen together --
+    /// and the notice does not, because a sticky line naming a plugin must
+    /// never rest on a guess.
+    #[test]
+    fn a_menu_sighted_on_a_guess_is_absorbed_and_named_to_nobody() {
+        let mut model = captured_session();
+        speculate_colon(&mut model);
+
+        let effects = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+
+        assert!(
+            effects.iter().any(|eff| matches!(
+                eff,
+                Effect::Rpc(RpcCall::SetFloatHidden {
+                    win: 1003,
+                    hide: true
+                })
+            )),
+            "the menu is hidden while the guess stands: {effects:?}"
+        );
+        assert!(
+            notices(&model).is_empty(),
+            "a line naming the plugin would be wrong the moment the guess was: {:?}",
+            notices(&model)
+        );
+    }
+
+    /// The other end of that hide. A guess produces no `cmdline_hide`,
+    /// because nvim never opened a command line, so the withdrawal is the
+    /// only thing that can give the window back -- and a plugin left with a
+    /// window that has stopped drawing has no way to know why.
+    #[test]
+    fn a_guess_taken_back_shows_every_window_it_had_hidden() {
+        let mut model = captured_session();
+        speculate_colon(&mut model);
+        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        rows_arrive(&mut model, 1003, &["one", "two"], Some(0));
+        assert!(
+            model.engine.absorbed_rows().is_some(),
+            "the palette is showing the hidden menu's rows"
+        );
+
+        let effects = crate::native::speculate::withdraw_cmdline_speculation(&mut model);
+
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::Rpc(RpcCall::SetFloatHidden {
+                    win: 1003,
+                    hide: false
+                })]
+            ),
+            "the window view hid has to be shown again: {effects:?}"
+        );
+        assert!(
+            model.engine.absorbed_rows().is_none(),
+            "and the palette stops offering candidates for a command line nobody opened"
+        );
+        assert!(model.dirty, "both halves change what is on screen");
+    }
+
+    /// The `cmdline_show` that answers a guess is not a withdrawal of it:
+    /// the menus absorbed during the silence are completing the command
+    /// line that is now on screen, and showing them again would put two
+    /// menus up.
+    #[test]
+    fn the_answer_to_a_guess_leaves_the_absorption_standing() {
+        let mut model = captured_session();
+        speculate_colon(&mut model);
+        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        rows_arrive(&mut model, 1003, &["one", "two"], Some(0));
+
+        open_cmdline(&mut model);
+
+        assert!(
+            model.engine.cmdline_speculated.is_none(),
+            "the guess was answered"
+        );
+        assert!(
+            model.engine.absorbed_rows().is_some(),
+            "the rows the palette is drawing belong to the command line that just opened"
+        );
     }
 
     #[test]

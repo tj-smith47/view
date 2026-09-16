@@ -209,14 +209,16 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // typed into insert, replace or a terminal, or replacing a
             // Select-mode selection. A re-announced `normal` or `visual` is
             // not a departure and leaves the palette standing.
-            if !crate::native::speculate::is_cmdline_mode(&mode)
-                && !crate::native::speculate::CMDLINE_GATE_MODES.contains(&mode.as_str())
+            let withdrawn = if crate::native::speculate::is_cmdline_mode(&mode)
+                || crate::native::speculate::CMDLINE_GATE_MODES.contains(&mode.as_str())
             {
-                crate::native::speculate::withdraw_cmdline_speculation(model);
-            }
+                Vec::new()
+            } else {
+                crate::native::speculate::withdraw_cmdline_speculation(model)
+            };
             model.engine.mode.current = mode;
             model.engine.mode.current_idx = mode_idx;
-            Vec::new()
+            withdrawn
         }
         UiEvent::CmdlineShow {
             content,
@@ -247,13 +249,16 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                     ov.geometry = p.overlay_box();
                 }
             }
+            // the real line goes in ahead of the withdrawal, which is what
+            // tells that withdrawal the guess was answered rather than
+            // refuted: a menu absorbed during the silence is completing
+            // this command line and stays absorbed
+            model.engine.cmdline = Some(cmdline);
             // the guess the palette was already drawing, answered: the
             // speculated state and this one render the same layer in the
             // same rect (`CmdlineState::bare_colon`), so the frame that
             // installs the real line moves nothing on screen
-            crate::native::speculate::withdraw_cmdline_speculation(model);
-            model.engine.cmdline = Some(cmdline);
-            Vec::new()
+            crate::native::speculate::withdraw_cmdline_speculation(model)
         }
         UiEvent::CmdlinePos { pos, level } => {
             if let Some(cmdline) = &mut model.engine.cmdline {
@@ -263,7 +268,10 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::CmdlineHide => {
-            crate::native::speculate::withdraw_cmdline_speculation(model);
+            // while `cmdline` is still standing, so the withdrawal leaves
+            // the absorptions to `cmdline_closed` below rather than
+            // releasing them twice
+            let _ = crate::native::speculate::withdraw_cmdline_speculation(model);
             model.engine.cmdline = None;
             let shown = super::surface_conflict::cmdline_closed(model);
             // the answer landing, so the box goes with it: nvim sends no

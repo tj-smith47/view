@@ -405,9 +405,11 @@ impl SpecSession {
     /// effect loop still producing follow-ups.
     fn apply(&mut self, events: Vec<UiEvent>) -> Result<(), OracleError> {
         self.note(&events);
-        fold_redraw(&mut self.model, &events);
-        let effects = update(&mut self.model, Msg::Redraw(events));
         let now = self.now();
+        // ahead of the fold's own, the way the runtime's dispatch orders
+        // them: a guess this batch took back un-hides what it had absorbed
+        let mut effects = fold_redraw(&mut self.model, &events, now);
+        effects.extend(update(&mut self.model, Msg::Redraw(events)));
         pump_rpc(
             &self.engine.handle,
             &mut self.model,
@@ -420,7 +422,15 @@ impl SpecSession {
                 }
             },
         )?;
-        fold_expiry(&mut self.model, now);
+        let released = fold_expiry(&mut self.model, now);
+        if !released.is_empty() {
+            pump_rpc(
+                &self.engine.handle,
+                &mut self.model,
+                released,
+                |_model, _effects| {},
+            )?;
+        }
         Ok(())
     }
 
@@ -645,8 +655,16 @@ impl SpecSession {
         let events = self.pump.take_damage();
         if events.is_empty() {
             let now = self.now();
-            fold_expiry(&mut self.model, now);
-            Ok(())
+            let released = fold_expiry(&mut self.model, now);
+            if released.is_empty() {
+                return Ok(());
+            }
+            pump_rpc(
+                &self.engine.handle,
+                &mut self.model,
+                released,
+                |_model, _effects| {},
+            )
         } else {
             self.apply(events)
         }

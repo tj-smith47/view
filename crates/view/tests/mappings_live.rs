@@ -18,6 +18,7 @@ use std::time::Duration;
 use view_core::msg::{Msg, RpcCall};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry;
+use view_core::native::speculate::CMDLINE_LITERAL_KEYS;
 use view_engine::process::Engine;
 use view_native::config::NativeConfig;
 use view_native::mappings::register_plan;
@@ -139,6 +140,19 @@ impl Session {
 
     fn claims(&self) -> Vec<MappingClaim> {
         self.report().0
+    }
+
+    /// The next `:` reading the re-read reports.
+    ///
+    /// Only a change is reported, which is what makes this a wait rather
+    /// than a poll: every step of the window-switch case moves the answer,
+    /// so each one owes exactly one of these.
+    fn next_colon_reading(&self) -> bool {
+        self.wait_for(ARRIVAL, |msg| match msg {
+            Msg::ColonMappingRead { mapped } => Some(*mapped),
+            _ => None,
+        })
+        .expect("the re-read must report the answer moving")
     }
 
     fn invoke(&self, budget: Duration) -> Option<(String, String)> {
@@ -383,4 +397,152 @@ fn an_ftplugin_mapping_colon_in_a_later_buffer_closes_the_gate() {
         "the ftplugin's buffer-local `:` is the key the next keystroke reaches, and a palette \
          speculated for it would be drawn for a mapping"
     );
+}
+
+/// The buffer the reading is about is whichever one the user is typing
+/// into, and a window switch changes that without opening anything: no
+/// `FileType`, no `BufWinEnter`, and -- before `BufEnter` joined them --
+/// no re-read either.
+///
+/// The direction that matters is entering the mapped buffer from the
+/// unmapped one: the answer stays cached `false`, the gate opens, and every
+/// `:` in that window speculates a palette for a key that reaches the
+/// mapping instead. The test asserts both directions, because a re-read
+/// that only ever reported `true` would leave the other window
+/// unaccelerated for the rest of the session.
+#[test]
+fn moving_into_a_window_whose_buffer_maps_colon_closes_the_gate_and_leaving_it_opens_it() {
+    let session = Session::start_with(
+        "colon-window-switch",
+        "vim.api.nvim_create_autocmd('FileType', {\n\
+         \x20 pattern = 'lua',\n\
+         \x20 callback = function() vim.keymap.set('n', ':', ':', { buffer = 0 }) end,\n\
+         })\n",
+    );
+    session.register(&NativeConfig::all_enabled());
+    assert!(
+        !session.report().1,
+        "nothing maps `:` in the buffer the session started in"
+    );
+    // a second window holding a second buffer, whose ftplugin maps `:`,
+    // with the cursor left back in the first one
+    session.eval("execute('split')");
+    session.eval("execute('enew')");
+    session.eval("execute('setfiletype lua')");
+    assert!(
+        session.next_colon_reading(),
+        "the new buffer is the current one, and its ftplugin mapped `:`"
+    );
+
+    session.eval("execute('wincmd w')");
+    assert!(
+        !session.next_colon_reading(),
+        "the window the cursor moved to holds a buffer nothing maps `:` in, so the gate reopens"
+    );
+
+    session.eval("execute('wincmd w')");
+    assert!(
+        session.next_colon_reading(),
+        "moving back into the mapped buffer closes it again -- the reading follows the window, \
+         and a stale `false` here speculates a palette for a key that reaches the mapping"
+    );
+}
+
+/// The literal-taking set, re-derived from the engine it was read off.
+///
+/// `CMDLINE_LITERAL_KEYS` is what tells a `:` typed as a command from one
+/// typed as `f`'s target, and it was transcribed by hand from the pinned
+/// engine's `:help index.txt`. A version bump that adds an `x{char}`
+/// command drifts the set silently, and nothing else in the tree reads that
+/// file: every normal- and visual-mode entry whose command is one key
+/// followed by a literal argument must name a key the set carries.
+///
+/// Skipped rather than failed where the runtime ships no documentation:
+/// the set is still correct for the engine it was read off, and a test that
+/// cannot read the file has nothing to say about it.
+#[test]
+fn every_literal_taking_key_the_pinned_engine_documents_is_in_the_set() {
+    let session = Session::start("literal-keys");
+    let runtime = session.eval("$VIMRUNTIME");
+    let index = Path::new(&runtime).join("doc").join("index.txt");
+    let Ok(text) = std::fs::read_to_string(&index) else {
+        eprintln!(
+            "skipped: {} is unreadable, so the pinned engine's own index is not there to \
+             re-derive the set from",
+            index.display()
+        );
+        return;
+    };
+
+    let derived = literal_taking_keys(&text);
+
+    assert!(
+        !derived.is_empty(),
+        "{} no longer spells its commands where this reads them, so the derivation below \
+         covers nothing",
+        index.display()
+    );
+    for (key, command) in &derived {
+        assert!(
+            CMDLINE_LITERAL_KEYS.contains(&key.as_str()),
+            "`{command}` reads its next keystroke as a literal, and `{key}` is not in \
+             CMDLINE_LITERAL_KEYS: a `:` typed after it opens no command line, and view would \
+             speculate a palette for it"
+        );
+    }
+}
+
+/// Every command in `index.txt`'s normal-mode and visual-mode sections
+/// whose form is one key followed by a literal argument, as
+/// `(the key in view's own notation, the command as the file spells it)`.
+///
+/// The file's own layout: `|tag|`, a tab, then the command, which is what
+/// is read here. A brace group naming a motion, a filter, a pattern, a
+/// count or a height is the other kind of argument -- another command, or
+/// text -- and nvim announces a mode for a pending operator, which the
+/// gate's own mode list already excludes.
+fn literal_taking_keys(index: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in index.lines() {
+        if line.contains("*normal-index*") {
+            inside = true;
+        } else if line.contains("*ex-edit-index*") {
+            break;
+        }
+        if !inside || !line.starts_with('|') {
+            continue;
+        }
+        let Some(command) = line.split('\t').filter(|field| !field.is_empty()).nth(1) else {
+            continue;
+        };
+        let command = command.trim();
+        let Some(key) = literal_taking_key(command) else {
+            continue;
+        };
+        out.push((key, command.to_string()));
+    }
+    out
+}
+
+/// The key `command` takes its literal argument after, in view's own
+/// notation, or `None` when `command` takes no literal argument.
+fn literal_taking_key(command: &str) -> Option<String> {
+    let inner = command.strip_suffix('}')?;
+    let (key, argument) = inner.split_once('{')?;
+    if argument.contains('{') || argument.is_empty() {
+        return None;
+    }
+    // the placeholders that stand for another command or for text, never
+    // for one keystroke
+    if ["motion", "filter", "pattern", "height", "count"].contains(&argument) {
+        return None;
+    }
+    let key = key.trim();
+    if let Some(name) = key.strip_prefix("CTRL-") {
+        // the set carries both cases of a control key, since nvim's own
+        // notation for one is not view's
+        return Some(format!("<C-{}>", name.to_lowercase()));
+    }
+    (key.chars().count() == 1).then(|| key.to_string())
 }

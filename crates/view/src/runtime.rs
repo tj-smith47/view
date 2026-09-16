@@ -158,11 +158,16 @@ pub(crate) fn dispatch<E: EngineOps>(
     let trigger = follow_ups.theme.classify(&msg);
     // the one call site that legitimately needs redraw content: what the
     // engine just said is the only thing a prediction can be judged against
-    if let Msg::Redraw(events) = &msg {
-        reconcile_speculation(model, events);
-    }
+    let withdrawn = if let Msg::Redraw(events) = &msg {
+        reconcile_speculation(model, events, follow_ups.speculate)
+    } else {
+        Vec::new()
+    };
     let mut flow = Flow::Continue;
-    let effects = update(model, msg);
+    // ahead of the fold's own effects: what a guess this batch took back
+    // owes is a window somebody else's plugin is waiting to draw in again
+    let mut effects = withdrawn;
+    effects.extend(update(model, msg));
     // the answer to nvim's `VimEnter` request is kept aside here and
     // written below, between the takeover batch and the attach: the
     // takeover is in force before nvim reads the answer, so the settled
@@ -1128,7 +1133,24 @@ pub fn run(
         // every pass, whatever the engine has or has not sent: an age bound
         // reachable only when a redraw arrives could never fire during the
         // total redraw stall it exists to bound
-        expire_speculation(&mut model, follow_ups.speculate);
+        // the un-hides a guess withdrawn on that backstop owes: nvim never
+        // opened a command line, so no `cmdline_hide` follows to release
+        // what was absorbed under the guess and this pass is the only place
+        // it can go out from
+        let released = expire_speculation(&mut model, follow_ups.speculate);
+        if !released.is_empty() {
+            let flow = run_in_wire_order(&executor, released, false);
+            if let Some(code) = crate::recovery::resolve(
+                &mut model,
+                &executor,
+                follow_ups,
+                &mut state,
+                || engine_stop(&mut engine),
+                flow,
+            ) {
+                return Ok((model, code));
+            }
+        }
         // before the paint below rather than after it, so the frame this
         // pass draws is the one the deadline came due for
         crate::spinner::expire(&mut model, &mut spinner_due, Instant::now());
@@ -5127,7 +5149,7 @@ mod tests {
         );
 
         // and the pass that wait returns for is the one that retires it
-        crate::speculate::expire_speculation(
+        let _ = crate::speculate::expire_speculation(
             &mut model,
             crate::speculate::SpeculationClock::started_at(
                 origin

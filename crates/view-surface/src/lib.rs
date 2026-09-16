@@ -3080,6 +3080,7 @@ mod tests {
             model.engine.cmdline_speculated =
                 Some(view_core::native::speculate::CmdlineSpeculation {
                     since: view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO),
+                    grid: view_core::grid::registry::GLOBAL_GRID,
                 });
             render(&model)
         };

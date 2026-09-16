@@ -436,7 +436,23 @@ pub(crate) fn step<E: EngineOps>(
     stop: impl FnOnce() -> Option<EngineStop>,
     msg: Msg,
 ) -> Option<i32> {
-    match dispatch(model, executor, follow_ups, msg) {
+    let flow = dispatch(model, executor, follow_ups, msg);
+    resolve(model, executor, follow_ups, state, stop, flow)
+}
+
+/// [`step`]'s second half on its own, for the loop's one site that produces
+/// effects without a message behind it: the pass that takes a speculated
+/// palette back on its backstop, whose un-hides answer a hide no
+/// `cmdline_hide` will ever follow.
+pub(crate) fn resolve<E: EngineOps>(
+    model: &mut Model,
+    executor: &Executor<E>,
+    follow_ups: &mut FollowUps<'_>,
+    state: &mut LoopState,
+    stop: impl FnOnce() -> Option<EngineStop>,
+    flow: Flow,
+) -> Option<i32> {
+    match flow {
         Flow::Continue => None,
         // run() owns the engine: returning here runs Drop (graceful qa!
         // then kill)

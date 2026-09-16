@@ -46,7 +46,7 @@ use std::time::Duration;
 use crate::events::{GridCell, UiEvent, WinHandle};
 use crate::grid::registry::{GridId, GLOBAL_GRID};
 use crate::model::Model;
-use crate::msg::RpcCall;
+use crate::msg::{Effect, RpcCall};
 
 /// When a prediction was made, as elapsed time from one fixed origin the
 /// host chose once and keeps for the whole session.
@@ -109,14 +109,57 @@ const INSERT_MODE: &str = "insert";
 /// never mistaken for staleness; at a second, a user who somehow reaches it
 /// is already looking at an editor that has stopped answering.
 ///
-/// The speculated palette runs under the same bound and for the same
-/// reading of it. A bound sized instead to the silence a local session
-/// shows would blank a correct guess on every `:` of a remote one --
-/// `view-bench`'s `echo_speculated_rtt` scenario ships tiers up to 300 ms
-/// -- and what a wrong guess costs is not paid here anyway: it is taken
-/// back on the evidence [`fold_redraw`] reads, one round trip after the
-/// key, and never on the clock.
+/// The speculated palette's own backstop ([`cmdline_backstop`]) is capped
+/// here and never reaches past it, so a guess the engine never answers
+/// comes off no later than a predicted glyph does.
 pub const SPECULATION_MAX_AGE: Duration = Duration::from_secs(1);
+
+/// The floor under the speculated palette's backstop, whatever the link
+/// says.
+///
+/// A wrong guess nothing else refutes -- a `:` a plugin's own `getchar()`
+/// swallowed, a `:` inside a multi-key mapping the gate cannot see -- is an
+/// empty palette standing for this long, so the floor is the longest such
+/// box a local session is asked to look at. Sized to the round trip of a
+/// link where a correct guess is answered well inside it, which is what
+/// keeps the floor from blanking guesses that were right.
+pub const CMDLINE_SPECULATION_BACKSTOP_MIN: Duration = Duration::from_millis(250);
+
+/// How many round trips a guess is given before the backstop takes it back.
+///
+/// The `cmdline_show` that answers a correct guess is one round trip behind
+/// the key. The margin is what a session that is answering, but answering
+/// slowly, needs before a bound starts blanking correct guesses: nvim
+/// reading the key, running whatever a `CmdlineEnter` autocommand does, and
+/// flushing.
+const CMDLINE_BACKSTOP_ROUND_TRIPS: u32 = 3;
+
+/// How long a speculated palette may stand unanswered on this session's
+/// link.
+///
+/// The bound the wrong guesses that move nothing are paid out of, and the
+/// only clock the palette has: everything else takes a guess back on
+/// evidence ([`fold_redraw`]). Sizing it to the link rather than to
+/// [`SPECULATION_MAX_AGE`] is what parts the two failures. A local session
+/// answers every `:` far inside the floor, so a guess a plugin swallowed
+/// comes off in [`CMDLINE_SPECULATION_BACKSTOP_MIN`] instead of standing
+/// for the whole of the glyphs' bound. A remote one, whose correct guesses
+/// are answered on the tiers `view-bench`'s `echo_speculated_rtt` scenario
+/// ships in `RTT_TIERS_MS`, keeps a bound its own answers fit inside, so
+/// the palette is not drawn, blanked and drawn again on every `:`.
+///
+/// The reading behind it is [`crate::model::EngineModel::key_round_trip`]'s
+/// -- the longest key-to-batch round trip the session has seen, which is
+/// the half of the pair that cannot be too short.
+#[must_use]
+pub fn cmdline_backstop(model: &Model) -> Duration {
+    model
+        .engine
+        .key_round_trip
+        .and_then(|trip| trip.checked_mul(CMDLINE_BACKSTOP_ROUND_TRIPS))
+        .unwrap_or(CMDLINE_SPECULATION_BACKSTOP_MIN)
+        .clamp(CMDLINE_SPECULATION_BACKSTOP_MIN, SPECULATION_MAX_AGE)
+}
 
 /// The normal- and visual-mode keys after which nvim reads the next
 /// keystroke as that command's own argument rather than as a command.
@@ -173,8 +216,18 @@ pub const CMDLINE_GATE_MODES: [&str; 3] = ["normal", "visual", "visual_select"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CmdlineSpeculation {
     /// When the `:` went out, as the host measured it. Bounded by
-    /// [`SPECULATION_MAX_AGE`].
+    /// [`cmdline_backstop`].
     pub since: SpecStamp,
+    /// The grid the `:` was typed on -- the one holding the cursor when it
+    /// went out -- so a cursor move somewhere else is not read as the key
+    /// having gone somewhere else.
+    ///
+    /// A cmdline plugin that could not hand the surface back draws its own
+    /// box in a float and puts the cursor inside it, inside exactly the
+    /// silence a guess stands in. That move is addressed to the float's own
+    /// grid, and withdrawing on it would blank a *correct* guess on every
+    /// `:` of such a session.
+    pub grid: GridId,
 }
 
 /// Whether a `:` about to reach the engine is one view can put the palette
@@ -200,7 +253,7 @@ pub fn may_speculate_cmdline(model: &Model) -> bool {
         // argument of a command still waiting for one, or it follows a key
         // whose own `mode_change` has not come back yet
         && !model.engine.literal_pending
-        && !model.engine.key_unanswered
+        && model.engine.key_unanswered.is_none()
         && CMDLINE_GATE_MODES.contains(&model.engine.mode.current.as_str())
 }
 
@@ -211,62 +264,84 @@ pub fn is_cmdline_mode(mode: &str) -> bool {
     mode.starts_with("cmdline_")
 }
 
-/// Takes a speculated palette back down, marking the frame when one was up.
+/// Takes a speculated palette back down, marking the frame when one was up
+/// and showing every window an absorption hid to get its rows.
 ///
-/// Every withdrawal goes through here so the repaint can never be forgotten
-/// at one of them: an empty palette left on screen with nothing to repaint
-/// it is the one failure this speculation can produce that a later redraw
-/// does not fix by itself.
-pub fn withdraw_cmdline_speculation(model: &mut Model) {
-    if model.engine.cmdline_speculated.take().is_some() {
-        model.dirty = true;
+/// Every withdrawal goes through here so neither half can be forgotten at
+/// one of them. An empty palette left on screen with nothing to repaint it
+/// is the one failure this speculation can produce that a later redraw does
+/// not fix by itself; a window hidden for a palette that is coming down is
+/// the other, and it is worse, because the plugin that owns that window
+/// never asked for the hide and nothing else in the session would ever
+/// clear it (`update::surface_conflict`'s `cmdline_closed` states the same
+/// failure for the real command line).
+///
+/// The release is skipped while nvim's own command line is up, which is the
+/// `cmdline_show` case: the guess is being answered rather than refuted,
+/// and the menus absorbed under it are completing the command line that is
+/// now on screen.
+pub fn withdraw_cmdline_speculation(model: &mut Model) -> Vec<Effect> {
+    if model.engine.cmdline_speculated.take().is_none() {
+        return Vec::new();
     }
+    model.dirty = true;
+    if model.engine.cmdline.is_some() {
+        return Vec::new();
+    }
+    crate::native::surfaces::release_absorptions(model)
 }
 
 /// Folds one engine-bound key into the palette's speculation: a `:` that
 /// passes [`may_speculate_cmdline`] puts the palette up now, and a
-/// `mode_change` out of the gate's modes, a cursor move on a window grid, a
-/// `cmdline_show`, a `cmdline_hide` or [`SPECULATION_MAX_AGE`] takes it
-/// back.
+/// `mode_change` out of the gate's modes, a cursor move on the grid it was
+/// typed on, a `cmdline_show`, a `cmdline_hide` or [`cmdline_backstop`]
+/// takes it back.
 ///
 /// Every other key is left alone while one is pending: the `cmdline_show`
 /// that follows carries whatever was typed into the command line, so a key
 /// arriving in the silence neither confirms the guess nor refutes it.
 fn fold_cmdline_key(model: &mut Model, notation: &str, now: SpecStamp) {
     if notation == ":" && may_speculate_cmdline(model) {
-        model.engine.cmdline_speculated = Some(CmdlineSpeculation { since: now });
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation {
+            since: now,
+            // the window the key was typed into, which is the one nvim
+            // moves the cursor in if the `:` turns out to have been a
+            // command's argument rather than a command line
+            grid: model.engine.grids().cursor_local().0,
+        });
         model.dirty = true;
     }
 }
 
 /// The host's per-pass age check on a speculated palette.
 ///
-/// The same bound the predicted glyphs run under, and a backstop rather
-/// than the rule: a wrong guess is taken back by the evidence
-/// [`fold_cmdline_batch`] reads, so the clock only has to cover the case
-/// where the engine sends nothing at all. A bound sized to a local silence
-/// would blank a *correct* guess on every `:` of a remote session -- the
-/// tiers `view-bench`'s `echo_speculated_rtt` scenario ships reach 300 ms
-/// -- drawing the palette, taking it away and drawing it again, which is
-/// the flicker the speculation exists to avoid.
-fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp) {
+/// A backstop rather than the rule: a wrong guess that moves anything is
+/// taken back by the evidence [`fold_cmdline_batch`] reads, so the clock
+/// only has to cover the guesses nothing refutes -- a `:` a plugin read
+/// with its own `getchar()`, one inside a mapping the gate cannot see, and
+/// an engine that says nothing at all. [`cmdline_backstop`] is what sizes
+/// that wait to the link instead of to the glyphs' own bound.
+fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp) -> Vec<Effect> {
+    let bound = cmdline_backstop(model);
     if model
         .engine
         .cmdline_speculated
-        .is_some_and(|open| now.age_since(open.since) >= SPECULATION_MAX_AGE)
+        .is_some_and(|open| now.age_since(open.since) >= bound)
     {
-        withdraw_cmdline_speculation(model);
+        return withdraw_cmdline_speculation(model);
     }
+    Vec::new()
 }
 
-/// What is left of [`SPECULATION_MAX_AGE`] for the speculated palette, or
+/// What is left of [`cmdline_backstop`] for the speculated palette, or
 /// `None` when none is up.
 #[must_use]
 pub fn cmdline_expiry_left(model: &Model, now: SpecStamp) -> Option<Duration> {
+    let bound = cmdline_backstop(model);
     model
         .engine
         .cmdline_speculated
-        .map(|open| SPECULATION_MAX_AGE.saturating_sub(now.age_since(open.since)))
+        .map(|open| bound.saturating_sub(now.age_since(open.since)))
 }
 
 /// How many windows' `topline` this session tracks before the least
@@ -771,14 +846,15 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
         RpcCall::Input { notation } => {
             fold_cmdline_key(model, notation, now);
             // after the fold above, which is the one reading of these two
-            // that describes the editor this key is arriving at
-            model.engine.key_unanswered = true;
-            // this key is the argument of whatever was waiting for one, and
-            // is itself waiting if it takes one. Cleared here as well as on
-            // the evidence `fold_cmdline_batch` reads, because an `f` whose
-            // target is not on the line moves neither the mode nor the
-            // cursor and would otherwise leave the gate shut for the rest
-            // of the session
+            // that describes the editor this key is arriving at. The stamp
+            // is what the batch answering this key subtracts to read the
+            // link
+            model.engine.key_unanswered = Some(now);
+            // recomputed from this key alone, so a key that takes no
+            // argument clears whatever the key before it was owed: an `f`
+            // whose target is not on the line moves neither the mode nor
+            // the cursor, and reading the flag as sticky would leave the
+            // gate shut for the rest of the session
             model.engine.literal_pending = CMDLINE_LITERAL_KEYS.contains(&notation.as_str());
             fold_keystroke(model, notation, now);
         }
@@ -797,11 +873,12 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
 /// Runs for every batch, including the batches arriving with nothing pending:
 /// [`SpeculateState::reconcile`] is where a window's viewport is read, and
 /// that reading is only worth what the batch before it recorded.
-pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent]) {
-    fold_cmdline_batch(model, redraw);
+pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec<Effect> {
+    let effects = fold_cmdline_batch(model, redraw, now);
     let before = model.speculate.pending().len();
     model.speculate.reconcile(redraw);
     mark_retirement(model, before);
+    effects
 }
 
 /// What one redraw batch says about the keys view has forwarded and about a
@@ -812,58 +889,83 @@ pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent]) {
 /// have been read. Two of its events say more than that. A `mode_change`
 /// or a cursor move is the command that was holding the next keystroke
 /// finishing with it, so the argument the next key would have been is no
-/// longer owed. And a cursor move while the palette stands on a guess says
-/// the `:` went somewhere other than the command line -- it was an `f`
-/// target, a mark, a register -- which is the evidence the guess is
-/// withdrawn on, rather than a clock: on the config the recorder ran, every
-/// silence between the key and its `cmdline_show` carried `msg_showcmd`,
-/// `msg_ruler`, `win_viewport` and highlight events and no cursor move at
-/// all. A batch that also carries the `cmdline_show` is the guess being
-/// answered, not refuted.
+/// longer owed. And a cursor move *on the grid the `:` was typed on*,
+/// while the palette stands on a guess, says the `:` went somewhere other
+/// than the command line -- it was an `f` target, a mark, a register --
+/// which is the evidence the guess is withdrawn on, rather than a clock:
+/// on the config the recorder ran, every silence between the key and its
+/// `cmdline_show` carried `msg_showcmd`, `msg_ruler`, `win_viewport` and
+/// highlight events and no cursor move at all. A batch that also carries
+/// the `cmdline_show` is the guess being answered, not refuted.
 ///
-/// Every grid nvim addresses a cursor move to is a window's: the palette
-/// speculates only where view attached with `ext_cmdline`, and there nvim
-/// draws no command line into a grid to put a cursor on.
-fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent]) {
-    model.engine.key_unanswered = false;
-    let mut moved_cursor = false;
+/// The grid is what parts the key having gone elsewhere from somebody else
+/// drawing. A cmdline plugin that never received the takeover's ask to
+/// stand down opens a float on `CmdlineEnter` -- which runs before
+/// `cmdline_show` -- and puts the cursor inside it, in exactly this
+/// silence. That move is addressed to the float's own grid, and reading it
+/// as a refusal would blank a correct guess on every `:` of such a session,
+/// which is the flicker the evidence exists to avoid. A `:` that really did
+/// go elsewhere without moving this grid's cursor is left to
+/// [`cmdline_backstop`].
+///
+/// The arrival is this module's one reading of the link as well: the key's
+/// own stamp is what `key_unanswered` carries, and the difference is what
+/// sizes that backstop.
+fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec<Effect> {
+    if let Some(sent) = model.engine.key_unanswered.take() {
+        let trip = now.age_since(sent);
+        if model.engine.key_round_trip.is_none_or(|seen| trip > seen) {
+            model.engine.key_round_trip = Some(trip);
+        }
+    }
+    let guessed_on = model.engine.cmdline_speculated.map(|open| open.grid);
+    let mut moved_cursor_there = false;
     let mut settled = false;
     let mut shows_cmdline = false;
     for ev in redraw {
         match ev {
-            UiEvent::GridCursorGoto { .. } => {
-                moved_cursor = true;
+            UiEvent::GridCursorGoto { grid, .. } => {
+                // a command waiting on its argument is finished by a cursor
+                // move wherever nvim addressed one
                 settled = true;
+                moved_cursor_there |= guessed_on == Some(GridId(*grid));
             }
             UiEvent::ModeChange { .. } => settled = true,
             UiEvent::CmdlineShow { .. } => shows_cmdline = true,
             _ => {}
         }
     }
+    // the argument character that is itself a literal-taking key is what
+    // this answers: `fa` re-arms the gate on the `a`, and the batch the
+    // finished `f` produced is what says that `a` was an argument and not a
+    // command waiting for one of its own
     if settled {
         model.engine.literal_pending = false;
     }
-    if moved_cursor && !shows_cmdline {
-        withdraw_cmdline_speculation(model);
+    if moved_cursor_there && !shows_cmdline {
+        return withdraw_cmdline_speculation(model);
     }
+    Vec::new()
 }
 
 /// The host's per-pass age check on what speculation is still holding.
 ///
 /// Belongs at a call site reached whether or not a redraw arrived: a redraw
-/// that never comes is the condition [`SPECULATION_MAX_AGE`] exists for,
-/// for the predicted glyphs and for the speculated palette alike.
-pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
-    expire_cmdline_speculation(model, now);
+/// that never comes is the condition [`SPECULATION_MAX_AGE`] and
+/// [`cmdline_backstop`] exist for, for the predicted glyphs and for the
+/// speculated palette alike.
+pub fn fold_expiry(model: &mut Model, now: SpecStamp) -> Vec<Effect> {
+    let effects = expire_cmdline_speculation(model, now);
     // the pending list is read before anything else so a steady-state pass
     // costs one null check and one length compare: expiring an empty list is
     // a no-op, and a session outside a typing burst takes that pass forever
     if model.speculate.pending().is_empty() {
-        return;
+        return effects;
     }
     let before = model.speculate.pending().len();
     model.speculate.expire_stale(now);
     mark_retirement(model, before);
+    effects
 }
 
 /// Folds one engine-bound keystroke into the display-only prediction it is
@@ -946,6 +1048,16 @@ mod tests {
 
     fn stamp(millis: u64) -> SpecStamp {
         SpecStamp::new(Duration::from_millis(millis))
+    }
+
+    /// One redraw batch as the host folds it. The effects are dropped:
+    /// nothing is absorbed in these cases, so a withdrawal here answers
+    /// with none (`update::surface_conflict`'s own tests drive that half).
+    fn folded(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) {
+        assert!(
+            fold_redraw(model, redraw, now).is_empty(),
+            "no float is absorbed here, so no batch owes a show"
+        );
     }
 
     /// One `grid_line` run of single-width cells, the shape nvim sends for a
@@ -1118,17 +1230,17 @@ mod tests {
             (&["2", "redraw", ":"], true, "a count, which opens `:2`"),
             (&["j", "redraw", ":"], true, "a motion nvim has answered"),
             (
-                &["f", "redraw", "x", "cursor", ":"],
+                &["f", "redraw", "a", "cursor", ":"],
                 true,
-                "the `f` finished, cursor moved",
+                "the `f` finished on a target that is itself a literal-taking key, cursor moved",
             ),
         ];
         for (keys, opens, what) in rows {
             let mut model = colon_model();
             for key in keys {
                 match *key {
-                    "redraw" => fold_redraw(&mut model, &[UiEvent::Flush]),
-                    "cursor" => fold_redraw(
+                    "redraw" => folded(&mut model, &[UiEvent::Flush], stamp(0)),
+                    "cursor" => folded(
                         &mut model,
                         &[
                             UiEvent::GridCursorGoto {
@@ -1138,6 +1250,7 @@ mod tests {
                             },
                             UiEvent::Flush,
                         ],
+                        stamp(0),
                     ),
                     ":" => typed_colon(&mut model, stamp(0)),
                     key => fold_engine_call(
@@ -1167,7 +1280,7 @@ mod tests {
         typed_colon(&mut model, stamp(0));
         model.dirty = false;
 
-        fold_redraw(
+        folded(
             &mut model,
             &[
                 UiEvent::GridCursorGoto {
@@ -1177,6 +1290,7 @@ mod tests {
                 },
                 UiEvent::Flush,
             ],
+            stamp(0),
         );
 
         assert!(model.engine.cmdline_speculated.is_none());
@@ -1191,7 +1305,7 @@ mod tests {
         let mut model = colon_model();
         typed_colon(&mut model, stamp(0));
 
-        fold_redraw(
+        folded(
             &mut model,
             &[
                 UiEvent::GridCursorGoto {
@@ -1209,6 +1323,7 @@ mod tests {
                 },
                 UiEvent::Flush,
             ],
+            stamp(0),
         );
 
         assert!(model.engine.cmdline_speculated.is_some());
@@ -1257,12 +1372,12 @@ mod tests {
     #[test]
     fn a_speculated_palette_past_its_bound_is_withdrawn_and_the_frame_marked() {
         let mut model = colon_model();
+        let bound = cmdline_backstop(&model);
         typed_colon(&mut model, stamp(0));
         model.dirty = false;
 
-        fold_expiry(
-            &mut model,
-            SpecStamp::new(SPECULATION_MAX_AGE - Duration::from_millis(1)),
+        assert!(
+            fold_expiry(&mut model, SpecStamp::new(bound - Duration::from_millis(1))).is_empty()
         );
         assert!(
             model.engine.cmdline_speculated.is_some(),
@@ -1270,10 +1385,122 @@ mod tests {
         );
         assert!(!model.dirty);
 
-        fold_expiry(&mut model, SpecStamp::new(SPECULATION_MAX_AGE));
+        assert!(fold_expiry(&mut model, SpecStamp::new(bound)).is_empty());
 
         assert!(model.engine.cmdline_speculated.is_none());
         assert!(model.dirty, "the withdrawal has to be painted");
+    }
+
+    /// The bound in force, link by link. A local session is answered far
+    /// inside the floor, so a guess nothing refutes there comes off at the
+    /// floor rather than standing for the whole of the glyphs' own bound;
+    /// a slow link keeps a bound its own correct answers fit inside; and
+    /// no link at all pays the glyphs' bound and no more.
+    #[test]
+    fn the_backstop_is_the_floor_or_three_round_trips_and_never_past_the_age_bound() {
+        /// A round trip the session observed, and the bound it buys.
+        type Tier = (Option<u64>, u64, &'static str);
+        let tiers: [Tier; 4] = [
+            (None, 250, "a session that has observed no round trip yet"),
+            (Some(1), 250, "a local link, answered well inside the floor"),
+            (Some(300), 900, "the slowest tier the rtt scenario ships"),
+            (Some(500), 1000, "a link slow enough to reach the age bound"),
+        ];
+        for (observed, bound_ms, what) in tiers {
+            let mut model = colon_model();
+            model.engine.key_round_trip = observed.map(Duration::from_millis);
+
+            assert_eq!(
+                cmdline_backstop(&model),
+                Duration::from_millis(bound_ms),
+                "{what}"
+            );
+
+            typed_colon(&mut model, stamp(0));
+            let _ = fold_expiry(&mut model, stamp(bound_ms - 1));
+            assert!(
+                model.engine.cmdline_speculated.is_some(),
+                "{what}: the guess came off inside its own bound"
+            );
+            let _ = fold_expiry(&mut model, stamp(bound_ms));
+            assert!(
+                model.engine.cmdline_speculated.is_none(),
+                "{what}: the guess outlasted its own bound"
+            );
+        }
+    }
+
+    /// The link reading the bound is built from: the key carries the stamp
+    /// it went out with, and the batch that answers it is the other end.
+    ///
+    /// The longest reading is what is kept, because a single one can only
+    /// be short: any batch clears the flag, including one nvim flushed for
+    /// something other than this key, and a bound sized from that would
+    /// blank correct guesses on the link it mismeasured.
+    #[test]
+    fn the_round_trip_is_the_longest_key_to_batch_gap_the_session_has_seen() {
+        let mut model = colon_model();
+
+        fold_engine_call(&mut model, &input("j"), stamp(0));
+        folded(&mut model, &[UiEvent::Flush], stamp(300));
+        assert_eq!(
+            model.engine.key_round_trip,
+            Some(Duration::from_millis(300))
+        );
+
+        fold_engine_call(&mut model, &input("j"), stamp(400));
+        folded(&mut model, &[UiEvent::Flush], stamp(405));
+        assert_eq!(
+            model.engine.key_round_trip,
+            Some(Duration::from_millis(300)),
+            "a batch that answered something else is the short reading, and it is not the link"
+        );
+    }
+
+    /// A batch with no key outstanding says nothing about the link: the
+    /// gap back to a key already answered is a user's own thinking time.
+    #[test]
+    fn a_batch_with_no_key_outstanding_records_no_round_trip() {
+        let mut model = colon_model();
+
+        folded(&mut model, &[UiEvent::Flush], stamp(900));
+
+        assert_eq!(model.engine.key_round_trip, None);
+    }
+
+    /// The evidence is the grid the `:` was typed on. A cmdline plugin
+    /// that never received the takeover's ask opens its own box in a float
+    /// and puts the cursor in it during exactly this silence, and reading
+    /// that as a refusal would blank a correct guess on every `:`.
+    #[test]
+    fn a_cursor_move_on_another_grid_leaves_the_guess_standing() {
+        let mut model = colon_model();
+        typed_colon(&mut model, stamp(0));
+        assert_eq!(
+            model.engine.cmdline_speculated.map(|open| open.grid),
+            Some(GLOBAL_GRID),
+            "the `:` was typed on the grid holding the cursor"
+        );
+        model.dirty = false;
+
+        folded(
+            &mut model,
+            &[
+                UiEvent::GridCursorGoto {
+                    grid: 9,
+                    row: 1,
+                    col: 4,
+                },
+                UiEvent::Flush,
+            ],
+            stamp(1),
+        );
+
+        assert!(
+            model.engine.cmdline_speculated.is_some(),
+            "a cursor move into somebody else's float says nothing about where the `:` went"
+        );
+        assert!(!model.dirty);
     }
 
     #[test]
@@ -1928,12 +2155,12 @@ mod tests {
     #[test]
     fn a_batch_arriving_with_nothing_pending_still_records_the_viewport() {
         let mut model = typing_model();
-        fold_redraw(&mut model, &[viewport(1, 10), UiEvent::Flush]);
-        fold_redraw(&mut model, &[viewport(1, 40), UiEvent::Flush]);
+        folded(&mut model, &[viewport(1, 10), UiEvent::Flush], stamp(0));
+        folded(&mut model, &[viewport(1, 40), UiEvent::Flush], stamp(0));
         model.dirty = false;
 
         fold_engine_call(&mut model, &input("x"), stamp(0));
-        fold_redraw(&mut model, &[viewport(1, 40), UiEvent::Flush]);
+        folded(&mut model, &[viewport(1, 40), UiEvent::Flush], stamp(0));
 
         assert_eq!(
             model.speculate.pending().len(),

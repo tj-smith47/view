@@ -415,15 +415,19 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// three calls -- the walk it replaces materialised every mapping of three
 /// modes, globally and for every loaded buffer, on every event below.
 ///
-/// Re-read on three events, reported on the `view_bridge` `colon_mapped`
+/// Re-read on four events, reported on the `view_bridge` `colon_mapped`
 /// event only when the answer moved. `User LazyLoad`, so a plugin that
 /// loads late and maps `:` closes the gate for the rest of the session --
-/// and `FileType` and `BufWinEnter` beside it, because a config that uses
-/// no lazy.nvim fires the first one never, and because a buffer-local `:`
-/// map belongs to the buffer that is current when those two fire: an
-/// ftplugin mapping `:` in a file opened later is seen at exactly the
-/// moment its buffer becomes the one being typed into, and leaving that
-/// buffer is reported the same way.
+/// and `BufEnter`, `FileType` and `BufWinEnter` beside it, because a config
+/// that uses no lazy.nvim fires the first one never, and because a
+/// buffer-local `:` map belongs to whichever buffer is current: an ftplugin
+/// mapping `:` in a file opened later is seen at the moment its buffer
+/// becomes the one being typed into, and leaving that buffer is reported
+/// the same way. `BufEnter` is what carries the window switch, which is the
+/// change of current buffer the other two say nothing about: moving into a
+/// window whose buffer maps `:` -- `<C-w>w`, a jump back out of a file
+/// tree -- would otherwise leave the reading `false` and speculate a
+/// palette for a key that reaches the mapping.
 ///
 /// Those listeners get an augroup of their own (`view_colon_map`) rather
 /// than joining the one [`DISABLE_CLAIMANTS_CHUNK`] already creates for the
@@ -498,7 +502,7 @@ vim.api.nvim_create_autocmd('User', {
   pattern = 'LazyLoad',
   callback = reread,
 })
-vim.api.nvim_create_autocmd({ 'FileType', 'BufWinEnter' }, {
+vim.api.nvim_create_autocmd({ 'BufEnter', 'FileType', 'BufWinEnter' }, {
   group = group,
   callback = reread,
 })

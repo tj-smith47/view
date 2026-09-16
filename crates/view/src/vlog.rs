@@ -1233,14 +1233,19 @@ impl FeltLog {
 
     /// The `palette` topic's own transitions, written wherever they happen.
     ///
-    /// Four lines rather than two, because a reader comparing the log
+    /// Five lines rather than two, because a reader comparing the log
     /// against the wire has to be able to tell a guess from an answer. A
     /// `:` view put the palette up for before the engine had answered is an
     /// open with no `cmdline_show` behind it (`open requested speculated`);
     /// the `cmdline_show` that answers one changes nothing on screen and
-    /// would otherwise be written up as nothing at all (`reconciled`); and
-    /// a guess the age bound took back comes off on a pass no message
-    /// dispatched, which is what `off_the_clock` names (`closed expired`).
+    /// would otherwise be written up as nothing at all (`reconciled`); a
+    /// guess the backstop took back comes off on a pass no message
+    /// dispatched, which is what `off_the_clock` names (`closed expired`);
+    /// and a guess the evidence took back -- a cursor move on the grid the
+    /// `:` was typed on, a mode change out of the gate's modes -- comes off
+    /// at a dispatch like a real close does, so it says which it was
+    /// (`closed withdrawn`). Only a guess can be standing when the palette
+    /// was speculated, so that reading is what parts the two.
     fn note_palette(&mut self, model: &view_core::model::Model, off_the_clock: bool) {
         let open = palette_shown(model);
         let speculated = model.engine.cmdline_speculated.is_some();
@@ -1255,6 +1260,7 @@ impl FeltLog {
         }
         let line = match (self.palette_open, open) {
             (_, false) if off_the_clock => "closed expired",
+            (_, false) if self.palette_speculated => "closed withdrawn",
             (_, false) => "closed",
             (true, true) => "reconciled",
             (false, true) if speculated => "open requested speculated",
@@ -1974,6 +1980,7 @@ mod tests {
         model.palette_enabled = true;
         model.engine.cmdline_speculated = Some(CmdlineSpeculation {
             since: SpecStamp::new(std::time::Duration::ZERO),
+            grid: view_core::grid::registry::GLOBAL_GRID,
         });
         assert!(
             palette_shown(&model),
@@ -2025,6 +2032,7 @@ mod tests {
             model.palette_enabled = true;
             model.engine.cmdline_speculated = Some(CmdlineSpeculation {
                 since: SpecStamp::new(std::time::Duration::ZERO),
+                grid: view_core::grid::registry::GLOBAL_GRID,
             });
             model
         };
@@ -2050,6 +2058,44 @@ mod tests {
         assert!(
             written.iter().any(|l| l == "palette closed expired"),
             "a guess withdrawn on a bare pass leaves the topic reading open: {written:?}"
+        );
+    }
+
+    /// The evidence path's own word. A guess a cursor move or a mode change
+    /// took back comes off at a dispatch, exactly where a real command line
+    /// closing does, and a reader comparing the log against the wire has
+    /// nothing else to tell a wrong guess from a finished command.
+    #[test]
+    fn a_guess_the_evidence_took_back_says_withdrawn_and_a_real_close_does_not() {
+        use view_core::native::speculate::{CmdlineSpeculation, SpecStamp};
+
+        let mut model = view_core::model::Model::new();
+        model.palette_enabled = true;
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation {
+            since: SpecStamp::new(std::time::Duration::ZERO),
+            grid: view_core::grid::registry::GLOBAL_GRID,
+        });
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::Input, &model);
+        model.engine.cmdline_speculated = None;
+        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l == "palette closed withdrawn"),
+            "the wrong guess the evidence caught must name itself: {written:?}"
+        );
+
+        let mut model = view_core::model::Model::new();
+        model.palette_enabled = true;
+        model.engine.cmdline = Some(view_core::model::CmdlineState::bare_colon());
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        model.engine.cmdline = None;
+        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l == "palette closed"),
+            "a command line nvim opened and closed is no guess: {written:?}"
         );
     }
 

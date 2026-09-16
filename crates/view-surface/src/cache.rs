@@ -78,8 +78,9 @@ impl Frame {
 ///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
 ///   `mouse_capture`, `mouse_on`, `colon_mapped` (it gates whether a `:` is
 ///   speculated at all, and `cmdline_speculated` is the state that reaches
-///   a layer), `key_unanswered` and `literal_pending` (gates on the same
-///   question, read only when a `:` is folded), `next_overlay_id`,
+///   a layer), `key_unanswered`, `key_round_trip` and `literal_pending`
+///   (the gate's own terms and the link reading that bounds a guess, read
+///   only when a `:` is folded or a batch arrives), `next_overlay_id`,
 ///   `attached` (it decides
 ///   only when the UI goes on, and the frame that follows is what flips
 ///   `chrome_painted`, which is here) and `stdin_relay` (an attach option

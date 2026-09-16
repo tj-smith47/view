@@ -428,10 +428,15 @@ const CMDLINE_ROWS: i64 = 2;
 ///   bottom edge lands in the rows the engine keeps for it. The command
 ///   line is what parts nvim-cmp's cmdline menu from a picker whose lowest
 ///   chrome window sits one row above the same band. A command line view is
-///   speculating counts, because the two menus would be on screen together
-///   for the length of the engine's silence otherwise; what rests on the
-///   real one is the notice, not the hide (`update::surface_conflict`'s
-///   `observe_float`).
+///   speculating counts here, and what that buys is bounded by what
+///   [`absorbs`] will take: a completion menu sighted during the silence is
+///   hidden then rather than after the `cmdline_show`, so view's palette
+///   and the menu are never on screen together. A claimant's own cmdline
+///   box is not in that set and is not hidden -- during a guess it is not
+///   named either, because the notice rests on nvim's own command line
+///   (`update::surface_conflict`'s `observe_float`), so it and the
+///   speculated palette can share the screen until the answer lands. What
+///   stands the plugin down is the takeover's own ask, not this.
 /// - **the message area**, when the float is pinned to the grid's top
 ///   right corner -- where view stacks its toasts -- and is short enough to
 ///   be chrome rather than a screenful. A picker centered in the grid
@@ -1324,6 +1329,35 @@ impl FloatAbsorption {
     }
 }
 
+/// Ends every absorption: the palette gives up the rows it was showing, and
+/// every window view hid to get them is shown again.
+///
+/// The body both endings share, so neither can drift from the other. nvim's
+/// own command line closing is one (`update::surface_conflict`'s
+/// `cmdline_closed`, on `cmdline_hide`), and a speculated one being
+/// withdrawn is the other
+/// ([`crate::native::speculate::withdraw_cmdline_speculation`]) -- a guess
+/// produces no `cmdline_hide`, because nvim never opened a command line,
+/// so a hide taken under one has no other way back.
+///
+/// The show is sent for every window still being absorbed, including the
+/// ones already closed: the chunk answering it checks the window's validity,
+/// so a show landing on a closed window does nothing. The expensive half is
+/// the other order, where the window outlives the absorption and nothing
+/// else in the session would ever clear its `hide` flag.
+#[must_use]
+pub fn release_absorptions(model: &mut Model) -> Vec<crate::msg::Effect> {
+    let painted = model.engine.float_absorption.rows().is_some();
+    let shown = model.engine.float_absorption.forget();
+    model.dirty |= painted || !shown.is_empty();
+    shown
+        .into_iter()
+        .map(|win| {
+            crate::msg::Effect::Rpc(crate::msg::RpcCall::SetFloatHidden { win, hide: false })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1373,6 +1407,24 @@ mod tests {
                 indent: 0,
                 level: 1,
             }]),
+        );
+    }
+
+    /// A typed `:` the gate admits, leaving the palette standing on a
+    /// guess with no `cmdline_show` behind it.
+    fn speculate_colon(model: &mut Model) {
+        model.palette_enabled = true;
+        model.engine.mode.current = "normal".to_string();
+        crate::native::speculate::fold_engine_call(
+            model,
+            &crate::msg::RpcCall::Input {
+                notation: ":".to_string(),
+            },
+            crate::native::speculate::SpecStamp::default(),
+        );
+        assert!(
+            model.engine.cmdline_speculated.is_some(),
+            "the gate refused a `:` this case is about"
         );
     }
 
@@ -1468,6 +1520,32 @@ mod tests {
             model.owns(Ext::Cmdline),
             "the ownership gate must not be what answers here"
         );
+        assert_eq!(claims(&cmp_cmdline_menu(), &model), None);
+    }
+
+    /// The command line the rule reads is the one the frame is painting,
+    /// which during the silence after a typed `:` is view's own guess: the
+    /// menu a plugin opens there is sighted before any `cmdline_show`, and
+    /// a rule that waited for one would leave it and view's palette on
+    /// screen together for the whole silence.
+    #[test]
+    fn a_float_on_the_cmdline_row_claims_the_speculated_command_line() {
+        let mut model = captured_session();
+        speculate_colon(&mut model);
+        assert_eq!(
+            claims(&cmp_cmdline_menu(), &model),
+            Some(Surface::Cmdline),
+            "a guess is a command line on screen as far as the rect rule is concerned"
+        );
+    }
+
+    /// And the guess coming back off takes the claim with it: the rows are
+    /// view's again only while something is drawing in them.
+    #[test]
+    fn a_float_on_the_cmdline_row_claims_nothing_once_the_guess_is_withdrawn() {
+        let mut model = captured_session();
+        speculate_colon(&mut model);
+        let _ = crate::native::speculate::withdraw_cmdline_speculation(&mut model);
         assert_eq!(claims(&cmp_cmdline_menu(), &model), None);
     }
 

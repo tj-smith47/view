@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use view_core::events::UiEvent;
 use view_core::model::Model;
-use view_core::msg::RpcCall;
+use view_core::msg::{Effect, RpcCall};
 use view_core::native::speculate::{
     cmdline_expiry_left, fold_engine_call, fold_expiry, fold_redraw, SpecStamp, SPECULATION_MAX_AGE,
 };
@@ -75,9 +75,15 @@ impl SpeculationClock {
 }
 
 /// Judges every pending prediction against the redraw batch that just
-/// arrived.
-pub(crate) fn reconcile_speculation(model: &mut Model, redraw: &[UiEvent]) {
-    fold_redraw(model, redraw);
+/// arrived, and answers with whatever a guess this batch took back owes the
+/// engine -- the windows an absorption hid while that guess stood.
+#[must_use]
+pub(crate) fn reconcile_speculation(
+    model: &mut Model,
+    redraw: &[UiEvent],
+    clock: SpeculationClock,
+) -> Vec<Effect> {
+    fold_redraw(model, redraw, clock.now())
 }
 
 /// How long the loop may wait before a pending prediction or a speculated
@@ -151,11 +157,13 @@ pub(crate) fn note_engine_call(model: &mut Model, call: &RpcCall, clock: Specula
     }
 }
 
-/// The loop's per-pass age check on what speculation is still holding.
+/// The loop's per-pass age check on what speculation is still holding, and
+/// whatever a guess the backstop took back owes the engine.
 ///
 /// Deliberately not gated on a redraw arriving: see this module's own doc.
-pub(crate) fn expire_speculation(model: &mut Model, clock: SpeculationClock) {
-    fold_expiry(model, clock.now());
+#[must_use]
+pub(crate) fn expire_speculation(model: &mut Model, clock: SpeculationClock) -> Vec<Effect> {
+    fold_expiry(model, clock.now())
 }
 
 #[cfg(test)]
@@ -275,7 +283,7 @@ mod tests {
         assert_eq!(model.speculate.pending().len(), 1);
         model.dirty = false;
 
-        expire_speculation(
+        let _ = expire_speculation(
             &mut model,
             clock_reading(origin, SPECULATION_MAX_AGE + Duration::from_millis(1)),
         );
@@ -300,7 +308,7 @@ mod tests {
         typed(&mut model, "x", SpeculationClock::started_at(origin));
         model.dirty = false;
 
-        expire_speculation(&mut model, SpeculationClock::started_at(origin));
+        let _ = expire_speculation(&mut model, SpeculationClock::started_at(origin));
 
         assert_eq!(model.speculate.pending().len(), 1);
         assert!(!model.dirty);
@@ -312,7 +320,7 @@ mod tests {
     fn a_pass_with_nothing_pending_leaves_the_frame_alone() {
         let mut model = typing_model();
 
-        expire_speculation(&mut model, SpeculationClock::default());
+        let _ = expire_speculation(&mut model, SpeculationClock::default());
 
         assert!(model.speculate.pending().is_empty());
         assert!(!model.dirty);
@@ -351,7 +359,10 @@ mod tests {
         let clock = SpeculationClock::default();
         assert_eq!(next_expiry(&model, clock), None);
 
-        model.engine.cmdline_speculated = Some(CmdlineSpeculation { since: clock.now() });
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation {
+            since: clock.now(),
+            grid: view_core::grid::registry::GLOBAL_GRID,
+        });
 
         let left = next_expiry(&model, clock).expect("a speculated palette comes due");
         assert!(left <= SPECULATION_MAX_AGE, "{left:?}");
@@ -427,7 +438,7 @@ mod tests {
         typed(&mut model, "x", SpeculationClock::default());
         model.dirty = false;
 
-        reconcile_speculation(
+        let _ = reconcile_speculation(
             &mut model,
             &[UiEvent::GridLine {
                 grid: 1,
@@ -439,6 +450,7 @@ mod tests {
                     repeat: 1,
                 }],
             }],
+            SpeculationClock::default(),
         );
 
         assert!(model.speculate.pending().is_empty());
@@ -455,7 +467,7 @@ mod tests {
         typed(&mut model, "x", SpeculationClock::default());
         model.dirty = false;
 
-        reconcile_speculation(&mut model, &[UiEvent::Flush]);
+        let _ = reconcile_speculation(&mut model, &[UiEvent::Flush], SpeculationClock::default());
 
         assert_eq!(model.speculate.pending().len(), 1);
         assert!(!model.dirty);

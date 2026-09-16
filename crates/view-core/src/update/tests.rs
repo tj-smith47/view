@@ -12352,6 +12352,7 @@ fn a_cmdline_show_replaces_the_speculated_palette_with_the_line_it_guessed_at() 
     let mut m = model();
     m.engine.cmdline_speculated = Some(CmdlineSpeculation {
         since: SpecStamp::new(Duration::ZERO),
+        grid: crate::grid::registry::GLOBAL_GRID,
     });
 
     let _ = update(
@@ -12386,6 +12387,7 @@ fn a_redraw_withdraws_the_speculated_palette_only_where_the_colon_went_elsewhere
         let mut m = model();
         m.engine.cmdline_speculated = Some(CmdlineSpeculation {
             since: SpecStamp::new(Duration::ZERO),
+            grid: crate::grid::registry::GLOBAL_GRID,
         });
         m.dirty = false;
 
@@ -12414,6 +12416,7 @@ fn a_cmdline_hide_while_speculating_withdraws_the_palette() {
     let mut m = model();
     m.engine.cmdline_speculated = Some(CmdlineSpeculation {
         since: SpecStamp::new(Duration::ZERO),
+        grid: crate::grid::registry::GLOBAL_GRID,
     });
     m.dirty = false;
 

@@ -282,14 +282,18 @@ fn the_battery_drives_the_runtime_folds_a_stamp_at_a_time() {
     fold_engine_call(&mut model, &input("x"), SpecStamp::new(Duration::ZERO));
     assert_eq!(model.speculate.pending().len(), 1);
 
-    fold_redraw(&mut model, &[view_core::events::UiEvent::Flush]);
+    let _ = fold_redraw(
+        &mut model,
+        &[view_core::events::UiEvent::Flush],
+        SpecStamp::new(Duration::ZERO),
+    );
     assert_eq!(
         model.speculate.pending().len(),
         1,
         "a batch that answers nothing retired a prediction"
     );
 
-    fold_expiry(
+    let _ = fold_expiry(
         &mut model,
         SpecStamp::new(SPECULATION_MAX_AGE - Duration::from_millis(1)),
     );
@@ -299,7 +303,7 @@ fn the_battery_drives_the_runtime_folds_a_stamp_at_a_time() {
         "retired inside the bound"
     );
 
-    fold_expiry(&mut model, SpecStamp::new(SPECULATION_MAX_AGE));
+    let _ = fold_expiry(&mut model, SpecStamp::new(SPECULATION_MAX_AGE));
     assert!(model.speculate.pending().is_empty());
 }
 
