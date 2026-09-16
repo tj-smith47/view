@@ -1928,6 +1928,22 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// sources whose parse stayed inside a frame on the pinned engine under a
 /// login-shaped config, rounded down.
 ///
+/// What the limit cannot bound is a grammar whose injection query carries
+/// combined injections: that scan is the whole document whatever range is
+/// asked (`languagetree.lua`'s `full_scan`), so the cost follows the file
+/// rather than the window, and on the pinned engine a 250 KB markdown
+/// buffer -- comfortably under the limit -- spends 98 ms of it before the
+/// text goes out, where bare nvim shows the text at once and colours it in
+/// slices. Those buffers keep the asynchronous path, which is what the
+/// limit is there to preserve.
+///
+/// The buffer and the range are read where this callback runs, which is
+/// before every `VimEnter` autocommand the config registers: a dashboard,
+/// a split or a session restore that changes the window afterwards is
+/// drawn first with the range this parse was given, so the parse buys
+/// colours for the lines the hook saw rather than for the ones that frame
+/// shows.
+///
 /// Only where the spawn had no UI before `VimEnter`, which is view's own
 /// shape: a spawn that had one (the stdin relay, `nvim -r` recovery, an
 /// attach deadline that fired early) gets nvim's own `UIEnter` when
@@ -2055,6 +2071,13 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          local bytes = vim.api.nvim_buf_get_offset(buf,\n\
          vim.api.nvim_buf_line_count(buf))\n\
          if h and bytes <= sync_parse_bytes then\n\
+         -- a grammar with combined injections scans the whole document\n\
+         -- for injections whatever range is asked, so the byte limit\n\
+         -- bounds nothing it costs\n\
+         local injections = h.tree._injection_query\n\
+         if injections and injections.has_combined_injections then\n\
+         return\n\
+         end\n\
          -- the range the highlighter's own on_start asks for, 0-based:\n\
          -- no callback, so it runs to completion here\n\
          h.tree:parse({{ vim.fn.line('w0') - 1, vim.fn.line('w$') + 1 }})\n\

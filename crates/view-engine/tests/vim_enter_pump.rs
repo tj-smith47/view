@@ -174,15 +174,49 @@ vim.api.nvim_set_current_buf(buf)\n";
 /// highlighter's in the order nvim runs them.
 const START_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'lua')\n";
 
+/// A markdown buffer, whose bundled grammar carries combined injections:
+/// its injection scan is the whole document whatever range is asked, so
+/// the hook's byte limit bounds nothing it costs and the hook leaves it to
+/// the asynchronous path.
+///
+/// Short, because the branch this fixture is about turns on the grammar
+/// rather than on the size -- a buffer of any length takes the same
+/// answer, and a long one only costs the suite the parse it is here to
+/// prove nobody ran.
+const MARKDOWN_BUFFER: &str = "\
+local buf = vim.api.nvim_create_buf(false, true)\n\
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, {\n\
+  '# heading', '', '```lua', 'local x = 1', '```', '', 'text' })\n\
+vim.api.nvim_set_current_buf(buf)\n";
+
+const START_MARKDOWN_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'markdown')\n";
+
 fn pin_config() -> ScratchDir {
     config(PIN_CONFIG)
 }
 
 /// The same fixture with a highlighted buffer standing before it.
 fn highlighted_pin_config() -> ScratchDir {
-    config(&format!(
-        "{TREESITTER_BUFFER}{PIN_CONFIG}{START_HIGHLIGHTER}"
-    ))
+    highlighted_config(TREESITTER_BUFFER, START_HIGHLIGHTER)
+}
+
+/// The same, over a grammar the hook refuses to parse inline.
+fn highlighted_markdown_config() -> ScratchDir {
+    highlighted_config(MARKDOWN_BUFFER, START_MARKDOWN_HIGHLIGHTER)
+}
+
+fn highlighted_config(buffer: &str, start_highlighter: &str) -> ScratchDir {
+    let lua = format!("{buffer}{PIN_CONFIG}{start_highlighter}");
+    let provider = lua.find("nvim_set_decoration_provider").unwrap();
+    let highlighter = lua.find("vim.treesitter.start").unwrap();
+    assert!(
+        provider < highlighter,
+        "the fixture's provider has to register before the highlighter's \
+         own, or its on_start reads a tree the highlighter's own turn has \
+         just parsed and a frame that carried no colours reports one that \
+         did"
+    );
+    config(&lua)
 }
 
 fn config(lua: &str) -> ScratchDir {
@@ -349,6 +383,39 @@ fn the_highlighters_parse_is_finished_before_nvims_first_frame() {
         read.parsed_at_uienter, 1,
         "and the tree is still parsed by the time the config reaches \
          UIEnter"
+    );
+}
+
+/// A grammar whose injection query carries combined injections is left to
+/// the asynchronous path, whatever the buffer's size: its injection scan
+/// is the whole document however few lines the hook asks for, so the byte
+/// limit bounds nothing the parse costs -- on the pinned engine a 250 KB
+/// markdown buffer, well under that limit, spends 98 ms of it ahead of the
+/// frame its own text goes out in.
+///
+/// The reading that says the hook skipped it is the first screen update
+/// beginning with an unparsed tree, which is what the highlighter's own
+/// first slice then finds and what every startup looked like before this
+/// hook parsed anything.
+#[test]
+fn a_grammar_with_combined_injections_is_left_to_the_asynchronous_path() {
+    let dir = highlighted_markdown_config();
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.highlighted, 1,
+        "the fixture attaches a markdown highlighter while init.lua is \
+         sourcing, so one must be active here or this test measured nothing"
+    );
+    assert_ne!(
+        read.coloured_draw, 1,
+        "nvim's own screen update at the end of startup must begin with an \
+         unparsed tree: a first frame carrying colours here is the inline \
+         parse having run on a grammar whose cost the byte limit cannot \
+         bound"
     );
 }
 
