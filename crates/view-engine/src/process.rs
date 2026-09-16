@@ -1924,33 +1924,26 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// root region is the whole document whatever the window shows: parsing
 /// any range of it parses all of it. A buffer big enough for that to cost
 /// more than a frame keeps the asynchronous path, which is the case that
-/// path exists for. The limit is the largest of this tree's own Rust
-/// sources whose parse stayed inside a frame on the pinned engine under a
-/// login-shaped config, rounded down.
+/// path exists for. The limit is the largest power-of-two size whose parse
+/// stayed inside a frame with room left for the highlighter's own draw,
+/// for rust, lua and typescript alike, on the pinned engine with
+/// nvim-treesitter's parsers -- and the readings are in the commit that
+/// set it.
 ///
-/// What the limit cannot bound is a grammar whose injection query carries
-/// combined injections: that scan is the whole document whatever range is
-/// asked (`languagetree.lua`'s `full_scan`), so the cost follows the file
-/// rather than the window, where the limit above follows the window. Such
-/// a grammar is parsed inline under a smaller bound of its own, and a
-/// buffer over that one keeps the asynchronous path -- the text goes out
-/// at once and the colours arrive in slices, which is what bare nvim does
-/// with it.
+/// A grammar whose injection query carries combined injections gets a
+/// smaller bound of its own, because that scan is the whole document
+/// whatever range is asked (`languagetree.lua`'s `full_scan`) and is paid
+/// on top of the root parse the bound above covers. A buffer over the
+/// smaller bound keeps the asynchronous path -- the text goes out at once
+/// and the colours arrive in slices, which is what bare nvim does with it.
 ///
-/// A root that carries no combined injections of its own can still inject
-/// a grammar that does, and pays that grammar's scan: elixir routes
-/// `@moduledoc` into markdown, and so do julia, nim, unison and facility.
-/// So the smaller bound is applied when any language the root's own
-/// injections query names is combined.
-///
-/// Two limits on that read, and the second is what the walk costs. A
-/// language chosen at match time from a capture, rather than written into
-/// a `#set!` directive, is named nowhere the query object can be asked for
-/// it. And the walk stops one level down, so java -- whose own query names
-/// javadoc, whose query names markdown_inline -- keeps the wider bound.
-/// Going deeper is what makes the read unaffordable: every name costs a
-/// query load, and a walk to the bottom of the graph is tens of
-/// milliseconds on a path whose whole purpose is to finish inside a frame.
+/// Only the root's own flag decides that, so a grammar injecting a
+/// combined child while carrying none itself -- elixir routing
+/// `@moduledoc` into markdown, java its `javadoc` -- rides the byte bound
+/// like every other grammar: reading the child names costs a query load
+/// each on a path whose whole purpose is to finish inside a frame, and
+/// that load raises outright on an injected language whose query files
+/// ship without its parser, which is most of them on most machines.
 ///
 /// The buffer and the range are read where this callback runs, which is
 /// before every `VimEnter` autocommand the config registers: a dashboard,
@@ -2030,7 +2023,7 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          -- the root parse is the whole document however few lines are\n\
          -- visible, so a buffer big enough to spend a frame on it keeps\n\
          -- the asynchronous path the highlighter would have taken\n\
-         local sync_parse_bytes = 256 * 1024\n\
+         local sync_parse_bytes = 64 * 1024\n\
          -- a combined-injection scan is the whole document whatever range\n\
          -- is asked, so that cost rides on the file rather than on the\n\
          -- range and fits inside a frame over a shorter one\n\
@@ -2091,36 +2084,16 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          local bytes = vim.api.nvim_buf_get_offset(buf,\n\
          vim.api.nvim_buf_line_count(buf))\n\
          if h and bytes <= sync_parse_bytes then\n\
-         -- the public read: a renamed private field would read nil and\n\
-         -- run the parse this bound is here to hold. The root query also\n\
-         -- names the languages it injects, and a root that is not\n\
-         -- combined itself pays a combined child's scan all the same\n\
-         local function combined(lang, child)\n\
-         local q = vim.treesitter.query.get(lang, 'injections')\n\
-         if not q then return false end\n\
-         if q.has_combined_injections then return true end\n\
-         -- one level: a grandchild is reached only through a child this\n\
-         -- walk has already answered for, and each name costs a query\n\
-         -- load on a path whose whole purpose is to stay inside a frame\n\
-         if child then return false end\n\
-         for _, pattern in pairs((q.info or {{}}).patterns or {{}}) do\n\
-         for _, directive in ipairs(pattern) do\n\
-         if directive[1] == 'set!'\n\
-         and directive[2] == 'injection.language'\n\
-         and type(directive[3]) == 'string'\n\
-         and combined(directive[3], true) then\n\
-         return true\n\
-         end\n\
-         end\n\
-         end\n\
-         return false\n\
-         end\n\
-         -- the bytes first: the walk costs a query load per name, and\n\
-         -- every buffer under the bound is parsed inline whatever it\n\
-         -- injects\n\
-         if bytes > combined_parse_bytes\n\
-         and combined(h.tree:lang()) then\n\
-         return\n\
+         -- the bytes first: every buffer under the smaller bound is\n\
+         -- parsed inline whatever it injects\n\
+         if bytes > combined_parse_bytes then\n\
+         -- the public field, and the root's own query alone: the\n\
+         -- highlighter fetched that query to start at all, so this is a\n\
+         -- memo hit, and the root's parser is loaded by construction so\n\
+         -- the compile behind it cannot raise. A renamed private field\n\
+         -- would read nil and run the parse this bound is here to hold\n\
+         local q = vim.treesitter.query.get(h.tree:lang(), 'injections')\n\
+         if q and q.has_combined_injections then return end\n\
          end\n\
          -- the range the highlighter's own on_start asks for, 0-based:\n\
          -- no callback, so it runs to completion here\n\

@@ -181,6 +181,12 @@ const START_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'lua')\n";
 /// branch.
 const COMBINED_PARSE_BYTES: usize = 16 * 1024;
 
+/// The bound the chunk gives every buffer, combined or not, written here on
+/// the same grounds. The control test's own buffer stands under it and
+/// `a_buffer_over_the_byte_bound_takes_the_async_path` stands over it, so a
+/// chunk that moved this number leaves the two of them on one side of it.
+const SYNC_PARSE_BYTES: usize = 64 * 1024;
+
 /// A markdown buffer of a stated size, whose bundled grammar carries
 /// combined injections: its injection scan is the whole document whatever
 /// range is asked, so the cost rides on the file and the hook bounds it by
@@ -206,8 +212,8 @@ fn markdown_buffer(fill: usize) -> (String, usize) {
 }
 
 /// A lua buffer of a stated size, carrying a comment on every line: the
-/// bundled grammar is not combined, and the comments are where the planted
-/// injections query below puts a grammar that is.
+/// bundled grammar carries no combined injections, so what this buffer's
+/// size decides is the byte bound alone.
 fn lua_buffer(fill: usize) -> (String, usize) {
     let lines: Vec<String> = (0..fill)
         .map(|i| format!("local x{i} = {i} -- {}", "p".repeat(100)))
@@ -235,19 +241,6 @@ fn buffer_of(lines: &[String]) -> (String, usize) {
 
 const START_MARKDOWN_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'markdown')\n";
 
-/// The same for lua, after planting an injections query that routes every
-/// comment into markdown.
-///
-/// Planted rather than found: no grammar nvim bundles injects a combined
-/// child, and the ones that do in the wild (elixir, java, julia, nim) are
-/// not on a hermetic spawn's runtimepath. What the plant stands in for is
-/// elixir's `@moduledoc`, and the query is the same two directives that
-/// one writes.
-const START_LUA_INJECTING_MARKDOWN: &str = "\
-vim.treesitter.query.set('lua', 'injections',\n\
-  [[((comment) @injection.content (#set! injection.language \"markdown\"))]])\n\
-vim.treesitter.start(buf, 'lua')\n";
-
 fn pin_config() -> ScratchDir {
     config(PIN_CONFIG)
 }
@@ -267,14 +260,12 @@ fn highlighted_markdown_config(fill: usize) -> (ScratchDir, usize) {
     )
 }
 
-/// A lua buffer of a stated size whose grammar has been given an injection
-/// into markdown, with the bytes it holds.
-fn highlighted_lua_injecting_markdown(fill: usize) -> (ScratchDir, usize) {
+/// A lua buffer of a stated size, with the bytes it holds: the bundled
+/// grammar carries no combined injections, so the only bound it meets is
+/// the byte one.
+fn highlighted_lua_config(fill: usize) -> (ScratchDir, usize) {
     let (buffer, bytes) = lua_buffer(fill);
-    (
-        highlighted_config(&buffer, START_LUA_INJECTING_MARKDOWN),
-        bytes,
-    )
+    (highlighted_config(&buffer, START_HIGHLIGHTER), bytes)
 }
 
 fn highlighted_config(buffer: &str, start_highlighter: &str) -> ScratchDir {
@@ -526,24 +517,25 @@ fn a_combined_injection_grammar_over_its_own_bound_takes_the_async_path() {
     );
 }
 
-/// A grammar that carries no combined injections of its own, but injects
-/// one that does, gets the same bound: the child's scan is the whole
-/// document as much as a root's would be, and the root's own query is
-/// where the child is named.
+/// A buffer over the byte bound is left to the asynchronous path whatever
+/// its grammar injects: the root region is the whole document however few
+/// lines the hook asks for, so what puts a parse past a frame in this
+/// window is the file's size.
 ///
 /// The control is
-/// `the_highlighters_parse_is_finished_before_nvims_first_frame`, whose
-/// buffer is lua of about this size with nothing planted and which reads a
-/// coloured first frame. What changes the answer here is the injection, not
-/// the size.
+/// `the_highlighters_parse_is_finished_before_nvims_first_frame`, which is
+/// the same lua grammar under the bound and reads a coloured first frame.
+/// What changes the answer here is the size, and lua stands for rust and
+/// typescript, whose parsers a hermetic spawn has no runtimepath for --
+/// the three of them are within a millisecond of each other at this size
+/// in the commit that set the bound.
 #[test]
-fn a_grammar_injecting_a_combined_child_takes_that_childs_bound() {
-    let (dir, bytes) = highlighted_lua_injecting_markdown(200);
+fn a_buffer_over_the_byte_bound_takes_the_async_path() {
+    let (dir, bytes) = highlighted_lua_config(600);
     assert!(
-        bytes > COMBINED_PARSE_BYTES,
-        "the fixture has to stand over the combined bound and under the \
-         root one to measure the branch this test is about, and it holds \
-         {bytes} bytes"
+        bytes > SYNC_PARSE_BYTES,
+        "the fixture has to stand over the byte bound to measure the branch \
+         this test is about, and it holds {bytes} bytes"
     );
     let mut engine = engine(&dir);
     let _rx = answered(&mut engine);
@@ -558,9 +550,8 @@ fn a_grammar_injecting_a_combined_child_takes_that_childs_bound() {
     assert_ne!(
         read.coloured_draw, 1,
         "nvim's own screen update at the end of startup must begin with an \
-         unparsed tree: the root grammar is not combined, so a first frame \
-         carrying colours here is the guard reading the root alone and \
-         admitting a scan of the whole document behind it"
+         unparsed tree: a first frame carrying colours here is the hook \
+         having parsed a buffer whose root parse costs more than the frame"
     );
 }
 
