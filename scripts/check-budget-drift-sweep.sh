@@ -25,6 +25,11 @@
 #
 #   bash scripts/check-budget-drift-sweep.sh
 #   bash scripts/check-budget-drift-sweep.sh --checker /path/to/copy
+#   bash scripts/check-budget-drift-sweep.sh --root /path/to/planted/tree
+#
+# The two flags are what let the case matrix grade this script's own two fail
+# paths, which nothing ran for three rounds: a planted root carrying an
+# unaccounted figure, and one carrying a figure that survives its edit.
 #
 # It is not in `task ci`: it runs the checker once per figure and costs
 # minutes where the gate costs a second. `task drift:sweep` and its own CI
@@ -34,14 +39,19 @@
 set -uo pipefail
 
 CHECKER=""
+PLANTED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --checker)
       CHECKER="${2:-}"
       shift 2
       ;;
+    --root)
+      PLANTED="${2:-}"
+      shift 2
+      ;;
     -h | --help)
-      printf 'usage: %s [--checker PATH]\n' "$0"
+      printf 'usage: %s [--checker PATH] [--root PATH]\n' "$0"
       exit 0
       ;;
     *)
@@ -52,6 +62,13 @@ while [ $# -gt 0 ]; do
 done
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "$PLANTED" ]; then
+  if [ ! -d "$PLANTED" ]; then
+    printf 'root not found: %s\n' "$PLANTED" >&2
+    exit 2
+  fi
+  ROOT="$(cd "$PLANTED" && pwd)"
+fi
 if [ -z "$CHECKER" ]; then
   CHECKER="$ROOT/scripts/check-budget-drift.sh"
 fi
@@ -78,8 +95,14 @@ trap 'rm -rf "$WORK"' EXIT
 TREE="$WORK/tree"
 mkdir -p "$TREE"
 # The checker reads a tree, so it gets one: the tracked files, which is every
-# input it resolves and nothing a peer session left lying in the worktree.
-(cd "$ROOT" && git ls-files -z) | (cd "$ROOT" && xargs -0 tar -cf - ) | (cd "$TREE" && tar -xf -)
+# input it resolves and nothing a peer session left lying in the worktree. A
+# root handed in is copied whole instead, because a planted tree has no git
+# of its own and every file in it was put there to be graded.
+if [ -n "$PLANTED" ]; then
+  (cd "$ROOT" && tar -cf - .) | (cd "$TREE" && tar -xf -)
+else
+  (cd "$ROOT" && git ls-files -z) | (cd "$ROOT" && xargs -0 tar -cf - ) | (cd "$TREE" && tar -xf -)
+fi
 if [ ! -f "$TREE/$BUDGETS" ]; then
   printf 'sweep: %s did not reach the scratch tree, so nothing would be graded\n' "$BUDGETS" >&2
   exit 2
@@ -177,7 +200,7 @@ awk -v file="$BUDGETS" "$GRADE_COMMON_AWK"'
   /^accepted = / { acc = $0; sub(/^accepted = /, "", acc); next }
   /^trials = / {
     idx = 0
-    m = split($0, w, /[[:space:]]+/)
+    m = toks($0, w, at)
     for (j = 1; j <= m; j++) {
       num = clean(w[j])
       if (!figure(num)) { continue }
@@ -199,36 +222,39 @@ fi
 # smallest edit that makes it a value nothing recorded -- the shape a stale
 # quote has. A draw is graded against a band around its entry's seat, so the
 # edit that retires it is one that lands it outside that band.
+#
+# The figures are numbered by the same walk the classification numbers them
+# with, in the lib beside it: a second tokenizer here split on a single space
+# and read a glued unit whole, so a line carrying a tab or a `1.43|1.58`
+# numbered differently in the two and the sweep edited the figure before the
+# one it named. The edit lands where the figure stands rather than in a line
+# rebuilt from its tokens, which is what keeps a tab a tab.
 perturb() {
   awk -v line="$1" -v want="$2" -v mode="$3" "$GRADE_COMMON_AWK"'
     FNR != line { print; next }
     {
       idx = 0
-      out = ""
-      m = split($0, w, / /)
+      m = toks($0, w, at)
       for (j = 1; j <= m; j++) {
-        tok = w[j]
-        num = clean(tok)
-        if (figure(num)) {
-          idx++
-          if (idx == want) {
-            # The digits alone, so a multiplier or a percentage keeps the
-            # suffix it is glued to and stays the figure the grading reads.
-            num = bare(num)
-            at = index(tok, num)
-            if (mode == "band") {
-              edited = sprintf("%." decimals(num) "f", num * 2)
-            } else {
-              last = substr(num, length(num), 1)
-              edited = substr(num, 1, length(num) - 1) \
-                ((last == "9") ? "8" : sprintf("%d", last + 1))
-            }
-            tok = substr(tok, 1, at - 1) edited substr(tok, at + length(num))
-          }
+        num = clean(w[j])
+        if (!figure(num)) { continue }
+        idx++
+        if (idx != want) { continue }
+        # The digits alone, so a multiplier or a percentage keeps the
+        # suffix it is glued to and stays the figure the grading reads.
+        num = bare(num)
+        if (mode == "band") {
+          edited = sprintf("%." decimals(num) "f", num * 2)
+        } else {
+          last = substr(num, length(num), 1)
+          edited = substr(num, 1, length(num) - 1) \
+            ((last == "9") ? "8" : sprintf("%d", last + 1))
         }
-        out = (j == 1) ? tok : out " " tok
+        p = at[j] + index(w[j], num) - 1
+        $0 = substr($0, 1, p - 1) edited substr($0, p + length(num))
+        break
       }
-      print out
+      print
     }
   ' "$file_path"
 }
@@ -254,6 +280,11 @@ done < "$population"
 
 nexcluded=$(wc -l < "$excluded" | tr -d ' ')
 nunaccounted=$(wc -l < "$unaccounted" | tr -d ' ')
+# A tree whose seat-equal figures are all excluded reaches this line: the
+# guard above tests the classification being empty, not the resolved half of
+# it. grep's rc 1 is discarded because this script runs without `set -e`, and
+# the assignment lands the 0 grep printed, which is the count. Whoever adds
+# `set -e` here owes this line an `|| true`.
 nresolved=$(grep -c 'resolved:' "$classified" | tr -d ' ')
 printf '\n%s figure(s) checked against %s seat(s)\n' "$checked" "$(wc -l < "$seats" | tr -d ' ')"
 printf 'resolved %s / excluded %s / unaccounted %s, and %s ledger draw(s) banded\n' \

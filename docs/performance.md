@@ -103,12 +103,13 @@ A plugin storm or a `:terminal` flood pouring output into the screen is the
 same moment under load. Under your config, measured 2026-09-06, the screen
 answers on a 16.9 ms cadence -- just past one frame, so this too is a bar
 view has not met -- and the Neovim it is paired against answers on a 17.5 ms
-one in the same run. view drains the flood within 2% of the lines Neovim
-drains in the same window, and the longest it goes without painting is
-48.9 ms. Plugin-free the cadence is 16.1 ms, recorded 2026-09-15, so it sits
-past the frame as well and the plugins are not what puts it there: Neovim
-refreshes a terminal buffer on a fixed 10 ms timer, and neither side can
-paint more often than that timer plus one redraw.
+one in the same run. On that same login-shaped run view drains the flood to
+within 2% of the pace Neovim holds in the same window, and the longest it
+goes without painting is 48.9 ms. Plugin-free the cadence is 16.1 ms,
+recorded 2026-09-15, so it sits past the frame as well and the plugins are
+not what puts it there: Neovim refreshes a terminal buffer on a fixed 10 ms
+timer, and neither side can paint more often than that timer plus one
+redraw.
 
 ## You search a huge tree
 

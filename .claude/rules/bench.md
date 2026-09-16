@@ -108,20 +108,24 @@ current, which is what a re-record leaves behind at every site that quoted
 the old one. A dimensionless number is graded wherever it stands -- a
 multiplier, a decimal with no unit behind it, or a percentage, which states
 the same ratio as its distance from 1 -- and a bound is not one, because it
-carries the word `bar`; a percentage *of* something is a share of a
-population and is graded as nothing. An absolute is graded too, whatever
-unit it is written in, but only where a cell id of that unit stands before
-it in its own sentence: the unit picks the suffix the id has to carry
-(`ms` a `_ms` cell, `MB` a `_mb` one, `us` and everything else a `_us`
-one), so the footprint beside `memory.pss_mb` and the input path beside
-`key_to_rpc_p99_us` are graded exactly as the milliseconds are, and a
-figure in `s`, `min` or `GB`, or one carrying `bar`, `budget`, `bound` or
-`frame`, is a bound or a shape and is graded as nothing. Reading `ms`
-alone left the footprint quoted in two places against a seat nothing
-compared it to. The page publishes paired numbers, and the bare-engine
-column beside view's own is an absolute this tree records no cell for. The
-row that carried `gh-linux`'s 0.08 ms under the page's declared default
-class for months passed on exactly that exemption.
+carries the word `bar`; a percentage *of* something is a share and is graded
+as nothing only where that something is a population the sentence names
+(`lines`, `samples`, `runs`, `draws` and their siblings), since a share test
+that fired wherever `of` followed the percentage left the flood pace -- a
+recorded ratio a record run moves -- and the gap between a reading and the
+bar beside it ungraded, each on a ground that described neither. An absolute
+is graded too, whatever unit it is written in, but only where a cell id of
+that unit stands before it in its own sentence: the unit picks the suffix
+the id has to carry (`ms` a `_ms` cell, `MB` a `_mb` one, `us` and
+everything else a `_us` one), so the footprint beside `memory.pss_mb` and
+the input path beside `key_to_rpc_p99_us` are graded exactly as the
+milliseconds are, and a figure in `s`, `min` or `GB`, or one carrying `bar`,
+`budget`, `bound` or `frame`, is a bound or a shape and is graded as
+nothing. Reading `ms` alone left the footprint quoted in two places against
+a seat nothing compared it to. The page publishes paired numbers, and the
+bare-engine column beside view's own is an absolute this tree records no
+cell for. The row that carried `gh-linux`'s 0.08 ms under the page's
+declared default class for months passed on exactly that exemption.
 
 One number resolves to one cell, never to the union of every cell its unit
 names: the nearest cell id before it in its own sentence, and the unit's
@@ -182,7 +186,8 @@ entry -- `trials = [19.57, 19.48, 19.35]`, an optional array of floats
 written into the prose is a figure nothing can grade. It was written as prose
 twice, once behind a one-word `trial` escape and once behind a slash-joined
 list, and each spelling carried a stale seat through the exemption it bought:
-the shipped list at `budgets.toml:663` held the entry's own `accepted`.
+the shipped `trials` on the `dev-macos` `echo`/`heavy` entry held the entry's
+own `accepted`.
 
 The field holds that metric's own repeated draws and nothing else, so every
 member sits within 25 percent of the `accepted` those draws were reduced to
@@ -310,27 +315,45 @@ whose verdict a contributor never sees.
 
 The cases file grades the rules; `scripts/check-budget-drift-sweep.sh`
 grades the population. It copies the tracked tree, builds the seat table,
-and takes every figure on the three pages and in every `why` that equals a
-recorded seat of any class -- glued suffixes included, so `5.2x` and `9.0%`
-are figures and are numbered as such. Each of them gets one of three
-verdicts, from the grading itself through `scripts/lib/moment-grading.sh`
-in its classify mode:
+and takes two things: every figure on the three pages and in every `why`
+that equals a recorded seat of any class -- glued suffixes included, so
+`5.2x` and `9.0%` are figures -- and every member of every `trials` array,
+whether or not it equals a seat, since a draw is graded by a band and not
+by a site. Each figure gets one of three verdicts, from the grading itself
+through `scripts/lib/moment-grading.sh` in its classify mode:
 
 - **resolved** to a cell: perturbed by one digit, and the check has to fail
-  naming that file and line. A `trials` member is a draw rather than a
-  quote, so it is moved outside its entry's band instead, on the same
-  requirement.
+  naming that file and line.
 - **excluded** on a ground one of the check's own rules states -- the
   bare-engine reading beside view's, a difference the sentence states, a
-  bound, a unit no cell is recorded in, an absolute in a sentence naming no
-  cell of its unit, a sentence stating no moment, a unit naming no cell id,
-  a fenced block, a ledger draw. Not perturbed, and printed with its ground
-  on every run: an exclusion a reader never sees is a rule nobody can
-  refuse, and every hand-kept exemption this check has carried was refused
-  the first time somebody read it.
+  difference from the bar the sentence names, a share of a population the
+  sentence names, a bound, a unit no cell is recorded in, an absolute in a
+  sentence naming no cell of its unit, a fenced block, a ledger draw. Not
+  perturbed, and printed with its ground on every run: an exclusion a
+  reader never sees is a rule nobody can refuse, and every hand-kept
+  exemption this check has carried was refused the first time somebody
+  read it.
 - **unaccounted**: equal to a seat, resolved by nothing and excluded by
   nothing. That is a recorded value the check grades nowhere, and the sweep
-  fails naming it.
+  fails naming it. A sentence stating no moment the vocabulary names and a
+  benchmarking unit naming no cell id both land here: they say the grading
+  found no anchor, which is the state a reading whose sentence was reworded
+  is in, and reported as accepted exclusions they cost the sweep the one
+  thing it exists to report on two pages that get rewrapped and reworded.
+
+A `trials` member is a draw rather than a quote, so the edit that has to
+redden it is the one that moves it outside its entry's band, and the
+classification states that as its ground. One object, one verdict: written
+under **resolved** while the classification reported it under **excluded**,
+the two halves of this file disagreed about what a draw is.
+
+A figure no cell records at all -- the load a run was taken under, its
+null-pair calibration -- is a condition of that run and not a reading of it,
+and it goes in a fenced block with the prose around it saying what the block
+is. A fenced block is a sample, which is a ground the check already states;
+an escape word written into a sentence to buy one figure out of the grading
+is a word away from buying out a live one, which is the bypass this file
+refuses twice already.
 
 Both halves of that population were once the whole of it, and each failed in
 its own direction. Taken by value alone it held three bare-Neovim readings
@@ -349,27 +372,39 @@ what two rounds of hand-listed sites left behind. It runs as
 because it re-runs the whole check once per figure: two minutes against the
 check's own second.
 
+Its own two fail paths are cased like every rule it enforces. It reads a
+tree through `git ls-files`, so it takes a `--root` for the same reason it
+takes a `--checker`, and the cases hand it a planted tree carrying an
+unaccounted figure and then a checker whose moment grading has been taken
+out, so the report of a blind spot and the report of a surviving figure are
+both run rather than reasoned about. The figures of a line are numbered by
+one walk in the lib, which the classification and the sweep's own edit both
+call: split twice, they disagreed on a glued unit and on a digit-adjacent
+pipe, and the sweep then edited the figure before the one it named. The
+edit lands where the figure stands rather than in a line rebuilt from its
+tokens, because a rebuild on single spaces turns a tab into a space.
+
 The two user-facing pages are graded by the moment they name, because the
 identifier rule leaves them nothing else to resolve against. The felt
 vocabulary the comparative rule already maps -- the worst keystroke in a
-thousand, the glyph view expects, staleness, cadence, the matching results,
-the first page of them, the worst launch, what the process holds, the
-engine's started mark landing later under view -- names the cell, and the
-figure is graded against that cell's seat on the class the page declares in
-its own words, the way `docs/benchmarking.md` declares its own. The first
-reading in a sentence is view's, since these pages publish paired numbers
-and the bare-engine one beside it is an absolute no cell records, and a
-figure the sentence calls a difference is neither side's reading -- unless
-the cell is itself a difference, which is how the started mark is quoted and
-why those words are read as the moment rather than as a gap between two
-published readings. The grounds are one ordered list, so a figure the
-sentence calls a difference is reported as one whether or not the sentence
-names a moment: reported as a sentence naming none, the launch paragraph's
-own stated difference said the ground of its neighbours instead of its own.
-A page declaring no class states numbers taken on a host no reader is told
-about, so it is refused as ambiguous rather than resolved against a guess.
-Ungraded, seven recorded seats stood on those two pages, and perturbing one
-left the check at rc 0.
+thousand, the glyph view expects, staleness, cadence, the flood view drains,
+the matching results, the first page of them, the worst launch, what the
+process holds, the engine's started mark landing later under view -- names
+the cell, and the figure is graded against that cell's seat on the class the
+page declares in its own words, the way `docs/benchmarking.md` declares its
+own. The first reading in a sentence is view's, since these pages publish
+paired numbers and the bare-engine one beside it is an absolute no cell
+records, and a figure the sentence calls a difference is neither side's
+reading -- unless the cell is itself a difference, which is how the started
+mark is quoted and why those words are read as the moment rather than as a
+gap between two published readings. The grounds are one ordered list, so a
+figure the sentence calls a difference is reported as one whether or not the
+sentence names a moment: reported as a sentence naming none, the launch
+paragraph's own stated difference said the ground of its neighbours instead
+of its own. A page declaring no class states numbers taken on a host no
+reader is told about, so it is refused as ambiguous rather than resolved
+against a guess. Ungraded, seven recorded seats stood on those two pages,
+and perturbing one left the check at rc 0.
 
 A moment has two cells where the pairing records both, and the unit the
 figure carries picks between them: a percentage or a bare multiplier the
@@ -387,6 +422,21 @@ between two published readings. Four percentages stood on those two pages
 outside the population entirely -- equal to no seat, so neither graded nor
 reportable -- and each of them is a recorded ratio a re-record leaves
 stale.
+
+A percentage left over in a sentence that resolves a ratio and names a bar
+is the distance between the two, which is how both pages write a bar view
+has missed: `11% behind against a bar of 10% -- a second bar missed, by 1%
+of the round trip`. It is computed rather than taken on trust -- the reading
+the sentence resolves minus the bar it names, at the digits printed -- and a
+percentage that is not that distance is a finding. Called a share of a
+population, the `1%` stood through three review rounds under a ground that
+named neither what it was nor what would move it.
+
+A unit written against the number it measures is two tokens. `1.58ms` was a
+figure to none of the three readers of a line, so a rewrap that closed one
+space would have dropped a reading out of the grading, out of the
+classification and out of the sweep's population at once, which is the
+silence all three exist to refuse.
 
 A bound is named on either side of the figure it bounds, since a page
 writes `a bar of 10%` as readily as `10% bar`, and the look back stops at

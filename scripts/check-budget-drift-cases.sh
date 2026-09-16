@@ -1985,5 +1985,323 @@ $got"
 fi
 report 'a reading opening the clause after a bar is the reading it is' "$mismatch"
 
+# ---------------------------------------------------------------------------
+# a ground says the figure is no reading, never that the grading missed it
+# ---------------------------------------------------------------------------
+# Two grounds said only that the grading had found no anchor: a sentence
+# naming no moment the vocabulary knows, and a benchmarking unit naming no
+# cell id. That is the same state a reading whose sentence was reworded is
+# in, and reported as accepted exclusions they cost the sweep the one thing
+# it exists to report on two prose pages that get rewrapped and reworded.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under a plugin-free config the sidebar redraw finishes in 0.73 ms.
+MD
+printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 3 1 0.73 unaccounted"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a seated figure in a sentence naming no moment is unaccounted, not excluded' "$mismatch"
+
+cat > "$CASE/$BENCH" <<'MD'
+# Benchmarking
+
+The harness pins the terminal at 120x40 for every cell, and `dev-linux` is the default class of this page.
+
+The paired run settled at 0.73 ms.
+MD
+got=$(awk -v page="$BENCH" -v fallback="dev-linux" -v mode="classify" \
+  "$RATIO_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$BENCH" | tr '\t' ' ')
+want="CLS $BENCH 5 1 0.73 unaccounted"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a seated figure in a unit naming no cell id is unaccounted, not excluded' "$mismatch"
+
+# ---------------------------------------------------------------------------
+# a percentage of something is a share only where the something is a population
+# ---------------------------------------------------------------------------
+# Read as a share wherever `of` followed it, the test excluded the flood pace
+# -- a recorded ratio a record run moves -- and the gap between a reading and
+# the bar beside it, both on a ground that described neither.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under a plugin-free config, view drains the flood to within 2% of the lines
+Neovim drains in the same window.
+MD
+printf 'dev-linux\tminimal\tflood.pace_ratio\t1.0184579367365834\n' > "$CASE/seats.tsv"
+# a seat the share itself rounds to, since the population is what a reader
+# could take for a reading and a figure equal to nothing recorded is not one
+printf 'dev-linux\tminimal\tmemory.pss_mb\t2.0044\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 3 1 2% excluded:a share of a population, not a ratio"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a percentage of a population the sentence names keeps the share ground' "$mismatch"
+
+# The same figure and the same moment, with the object the pages actually
+# write: the pace is what the cell records, so the figure is the reading and
+# the check grades it.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under a plugin-free config, view drains the flood to within 2% of the pace
+Neovim holds in the same window.
+MD
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 3 1 2% resolved:flood.pace_ratio"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'the flood pace resolves where its object is no population the sentence names' "$mismatch"
+
+# A bar over the pace is still a bound: the resolution above reaches the
+# reading and never the bar stated beside it.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under a plugin-free config, view drains the flood to within 2% of the pace
+Neovim holds in the same window, against a bar of 5%.
+MD
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 3 1 2% resolved:flood.pace_ratio"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a bar over the pace is graded as the bound it is' "$mismatch"
+
+# The gap the two pages write between a reading and the bar it misses. It is
+# computed rather than excluded on trust: `1%` stood for three review rounds
+# under a ground that named neither what it was nor what would move it.
+cat > "$CASE/$README" <<'MD'
+# view
+
+At the median, plugin-free, the worst keystroke in a thousand is 11% behind
+against a bar of 10% -- a second bar missed, by 1% of the round trip. Every
+number here was taken on a shared Linux dev host, whose `dev-linux` is the
+default class of this page.
+MD
+printf 'dev-linux\tminimal\techo.ratio_p50\t1.1096\n' > "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tsupervision.wedge_detect_p99_ms\t10.02\n' >> "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tflood.pace_ratio\t1.0044\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$README" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$README" | tr '\t' ' ')
+want="CLS $README 3 1 11% resolved:echo.ratio_p50
+CLS $README 4 1 10% excluded:a bound, not a reading
+CLS $README 4 2 1% excluded:a difference from the bar the sentence names"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'the gap between a reading and the bar it misses is excluded on that ground' "$mismatch"
+
+# and the half that makes the ground worth stating: a figure that is not that
+# distance is a figure the sentence attributes to nothing
+sed 's/by 1% of the round trip/by 3% of the round trip/' "$CASE/$README" > "$CASE/$README.tmp"
+mv "$CASE/$README.tmp" "$CASE/$README"
+got=$(awk -v page="$README" -v fallback="dev-linux" -v mode="grade" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$README")
+mismatch=""
+case "$got" in
+  ("BUDGET DRIFT FAIL: moment-gap $README:4: 3%"*) ;;
+  (*) mismatch="want a moment-gap finding on $README:4
+got
+$got" ;;
+esac
+report 'a percentage that is not the distance from the bar is a finding' "$mismatch"
+
+# ---------------------------------------------------------------------------
+# one walk over a line, for whoever reads it
+# ---------------------------------------------------------------------------
+# The classification numbers the figures of a line and the sweep edits the
+# nth of them. Split twice, they disagreed on a glued unit and on a
+# digit-adjacent pipe, and the sweep then perturbed the figure before the one
+# it named. The offsets are what the sweep edits by, so they are asserted
+# beside the values: rebuilt from its tokens, a line lost its tabs.
+got=$(printf 'a\t1.43|1.58 2.5ms x\n' | awk "$GRADE_COMMON_AWK"'
+  {
+    m = toks($0, w, at)
+    for (j = 1; j <= m; j++) {
+      tok = clean(w[j])
+      if (figure(tok)) { out = out " " tok "@" at[j] }
+    }
+    print substr(out, 2)
+  }')
+want="1.43@3 1.58@8 2.5@13"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want [$want]
+got  [$got]"
+fi
+report 'one walk reads a tab, a digit-adjacent pipe and a glued unit alike' "$mismatch"
+
+# The glued unit on a page, where it decides whether a reading is graded at
+# all: `1.58ms` was no figure to any of the three readers, so a rewrap that
+# closed one space dropped a reading out of the gate in silence.
+cat > "$CASE/$PERF" <<'MD'
+# Performance
+
+Under a plugin-free config, view's worst keystroke in a thousand takes
+0.73ms against Neovim's 0.67ms.
+MD
+printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tpicker.first_page_p99_ms\t0.6689\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="classify" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want="CLS $PERF 4 1 0.73 resolved:echo.view_p99_ms
+CLS $PERF 4 2 0.67 excluded:the bare-engine reading beside view own"
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'a unit glued to its number is graded as the reading it is' "$mismatch"
+
+# ---------------------------------------------------------------------------
+# the checker says which of its own inputs is missing
+# ---------------------------------------------------------------------------
+# Sourced bare, a missing grading library left the shell's message and rc 1,
+# which is the status a drift finding gives -- so a CI reader saw a failure
+# of an unknown kind. The sweep's guard was already right and is the shape.
+bare_checker="$WORK/no-lib"
+mkdir -p "$bare_checker"
+cp "$CHECKER" "$bare_checker/check-budget-drift.sh"
+out=$("$BASH" "$bare_checker/check-budget-drift.sh" "$CASE" 2>&1)
+rc=$?
+mismatch=""
+case "$out" in
+  ("BUDGET DRIFT FAIL: grading library not found beside the checker: "*) ;;
+  (*) mismatch="want a named grading-library failure
+got  rc=$rc
+$out" ;;
+esac
+if [ "$rc" != "2" ]; then
+  mismatch=$(printf '%swant rc=2, got rc=%s\n' "${mismatch:+$mismatch
+}" "$rc")
+fi
+report 'a checker with no grading library beside it says so, at a status of its own' "$mismatch"
+
+# ---------------------------------------------------------------------------
+# the sweep's own two fail paths
+# ---------------------------------------------------------------------------
+# Neither had ever been run by a case: the classification's `unaccounted`
+# verdict was pinned above, and the sweep's own three-line report of it, and
+# the surviving-figure path beside it, were pinned by nothing for three
+# rounds. The sweep reads a tree through `git ls-files`, so it takes a
+# `--root` for the same reason it takes a `--checker`.
+SWEEP="$(cd "$(dirname "$CHECKER")" && pwd)/check-budget-drift-sweep.sh"
+CASE="$WORK/sweeproot"
+mkdir -p "$CASE/crates/view-bench" "$CASE/.claude/specs" "$CASE/docs" \
+  "$CASE/$BASELINES" "$CASE/crates/view-harness/src"
+plant_budgets
+plant_spec
+plant_pages
+plant_baselines
+plant_harness
+# The seat the planted pages quote, and the glued spelling of it on one of
+# them: the sweep edits the nth figure of a line the classification numbered,
+# so a page carrying `0.73ms` is what proves the two agree end to end.
+cat >> "$CASE/$BASELINES/dev-linux.toml" <<'TOML'
+
+[echo.minimal]
+view_p99_ms = 0.7312
+TOML
+sed 's/| 0.73 ms | 0.67 ms |/| 0.73ms | 0.67 ms |/' "$CASE/$PERF" > "$CASE/$PERF.tmp"
+mv "$CASE/$PERF.tmp" "$CASE/$PERF"
+out=$("$BASH" "$SWEEP" --root "$CASE" --checker "$CHECKER" 2>&1)
+rc=$?
+mismatch=""
+if [ "$rc" != "0" ]; then
+  mismatch="want rc=0 on a planted tree whose every seated figure is graded, got rc=$rc
+$out"
+fi
+report 'the sweep grades a planted tree, glued unit included, and passes' "$mismatch"
+
+# the first fail path: a figure equal to a seat that nothing grades
+cp "$CASE/$PERF" "$WORK/sweeproot-perf"
+printf '\nUnder a plugin-free config the sidebar redraw finishes in 0.73 ms.\n' \
+  >> "$CASE/$PERF"
+out=$("$BASH" "$SWEEP" --root "$CASE" --checker "$CHECKER" 2>&1)
+rc=$?
+mismatch=""
+if [ "$rc" != "1" ]; then
+  mismatch="want rc=1, got rc=$rc"
+fi
+case "$out" in
+  (*"$PERF:"*" 0.73"*) ;;
+  (*) mismatch=$(printf '%sthe unaccounted figure was not named\n' "${mismatch:+$mismatch
+}") ;;
+esac
+case "$out" in
+  (*'neither resolves it to a cell nor excludes it on a ground'*) ;;
+  (*) mismatch=$(printf '%sthe sweep did not report an unaccounted figure\n%s\n' \
+    "${mismatch:+$mismatch
+}" "$out") ;;
+esac
+report 'the sweep fails naming a figure equal to a seat that nothing grades' "$mismatch"
+cp "$WORK/sweeproot-perf" "$CASE/$PERF"
+
+# the second: a figure the grading resolves whose edit the checker does not
+# catch. The checker under test is a copy with its moment grading taken out,
+# which is the shape of every blind spot two rounds of hand-listed sites left
+# behind -- the sweep resolves the figure and the check grades nothing for it.
+blind="$WORK/blind"
+mkdir -p "$blind/lib"
+sed 's/^    moment="$(moment_in .*/    moment=""/' "$CHECKER" > "$blind/check-budget-drift.sh"
+cp "$(cd "$(dirname "$CHECKER")" && pwd)/lib/moment-grading.sh" "$blind/lib/"
+out=$("$BASH" "$SWEEP" --root "$CASE" --checker "$blind/check-budget-drift.sh" 2>&1)
+rc=$?
+mismatch=""
+if [ "$rc" != "1" ]; then
+  mismatch="want rc=1, got rc=$rc"
+fi
+case "$out" in
+  (*'survives the rewrite its own rule has to catch'*) ;;
+  (*) mismatch=$(printf '%sthe sweep did not report a surviving figure\n%s\n' \
+    "${mismatch:+$mismatch
+}" "$out") ;;
+esac
+case "$out" in
+  (*"$PERF:"*'echo.view_p99_ms'*) ;;
+  (*) mismatch=$(printf '%sthe surviving figure was not named with the cell it resolves to\n' \
+    "${mismatch:+$mismatch
+}") ;;
+esac
+report 'the sweep fails naming a figure that survives the edit its rule has to catch' "$mismatch"
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

@@ -57,9 +57,9 @@ MOMENT_CLASS_AWK='
 # figure to the grading and not to the sweep, which numbered every figure
 # after it on that line one place early and perturbed the wrong one.
 GRADE_COMMON_AWK='
-    # The pipe and the brackets are cleaned off here and nowhere else: a
-    # grading sees them replaced by the split it does itself, and a walk that
-    # reads the line as written sees `|1.43` and `[19.57,` whole.
+    # The markup a figure may be written inside, taken off the token the
+    # split below hands over: `**1.58**`, `(0.30x)` and `[19.57,` are the
+    # figure they wrap.
     function clean(t) {
       gsub(/[][`*~()>|]/, "", t)
       sub(/[,;:.]+$/, "", t)
@@ -78,6 +78,68 @@ GRADE_COMMON_AWK='
     function bare(t) {
       sub(/[x%]$/, "", t)
       return t
+    }
+    # A unit written against the number it measures is two tokens. A rewrap
+    # that closed one space left `1.58ms` outside the grading, outside the
+    # classification and outside the sweep population at once, which is the
+    # silence all three exist to refuse.
+    function unglue(tok, out,   c, num) {
+      out[1] = tok
+      c = clean(tok)
+      if (!match(c, /[0-9](ms|us|MB|GB|min|s)$/)) { return 1 }
+      num = substr(c, 1, RSTART)
+      if (!figure(num)) { return 1 }
+      out[1] = num
+      out[2] = substr(c, RSTART + 1)
+      return 2
+    }
+    # The one split every reader of a line makes. Whitespace separates
+    # tokens, a pipe is a token of its own so a table boundary and a
+    # digit-adjacent `1.43|1.58` read the same way wherever they stand, and a
+    # glued unit comes apart. `at` takes each token own offset in the line,
+    # which is what lets the sweep rewrite the nth figure in place instead of
+    # rebuilding the line around it -- rebuilt on single spaces, a tab became
+    # one space and the walk that numbered the figures was a second walk
+    # that could disagree with this one.
+    function toks(line, w, at,   n, i, len, c, start, rawtok, np, part, k, off) {
+      n = 0
+      len = length(line)
+      i = 1
+      while (i <= len) {
+        c = substr(line, i, 1)
+        if (c ~ /[[:space:]]/) { i++; continue }
+        if (c == "|") { n++; w[n] = "|"; at[n] = i; i++; continue }
+        start = i
+        while (i <= len) {
+          c = substr(line, i, 1)
+          if (c ~ /[[:space:]]/ || c == "|") { break }
+          i++
+        }
+        rawtok = substr(line, start, i - start)
+        np = unglue(rawtok, part)
+        for (k = 1; k <= np; k++) {
+          n++
+          w[n] = part[k]
+          off = index(rawtok, part[k])
+          at[n] = (off > 0) ? start + off - 1 : start
+        }
+      }
+      return n
+    }
+    # A percentage OF something is a share only where the something is a
+    # population the sentence names. Read as a share wherever `of` followed
+    # it, the test excluded the flood pace -- a recorded ratio a record run
+    # moves -- and the gap between a reading and the bar beside it, on a
+    # ground that described neither. `i` is the `of` own index.
+    function share_object(t, i,   j, w) {
+      if (clean(t[i]) != "of") { return 0 }
+      for (j = i + 1; j <= i + 3; j++) {
+        w = clean(t[j])
+        if (w == "") { continue }
+        if (w ~ /^(a|an|the|its|their|those|these|all|same)$/) { continue }
+        return (w ~ /^(lines|samples|runs|draws|trials|keystrokes|rows|entries)$/)
+      }
+      return 0
     }
     function site() {
       return (page == "") ? file : page
@@ -117,13 +179,10 @@ GRADE_COMMON_AWK='
     function note_line(at, ground) {
       if (ground_of[at] == "") { ground_of[at] = ground }
     }
-    function classify_report(   ln, i, m, w, line, tok, idx, v) {
+    function classify_report(   ln, i, m, w, at, tok, idx, v) {
       for (ln = 1; ln <= lastline; ln++) {
         if (!(ln in scoped)) { continue }
-        line = raw[ln]
-        gsub(/\|/, " ", line)
-        gsub(/\. /, " ", line)
-        m = split(line, w, /[[:space:]]+/)
+        m = toks(raw[ln], w, at)
         idx = 0
         for (i = 1; i <= m; i++) {
           tok = clean(w[i])
@@ -229,6 +288,10 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
       }
       if (text ~ /stale/) { return "scroll.ratio_p50" }
       if (text ~ /cadence/) { return "flood.cadence_p99_ratio" }
+      # The flood the screen drains, which the pages state in percent and
+      # never in milliseconds: the pace is a ratio of what the two sides
+      # drain in one window and no cell records either side alone.
+      if (text ~ /drains the flood/) { return "flood.pace_ratio" }
       if (text ~ /worst launch/) { return "startup.first_frame_ratio_p99" }
       # The settled screen, which the pages state as a gap and never as an
       # absolute: no cell records the milliseconds either side of it, so
@@ -296,10 +359,15 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
           # two published readings.
           if (bounded(tk, i, a)) {
             why = "a bound, not a reading"
-          } else if (num ~ /%$/ && nxt == "of") {
+          } else if (num ~ /%$/ && nxt == "of" && share_object(tk, i + 1)) {
             why = "a share of a population, not a ratio"
           } else if (cell == "" && rcell == "") {
-            why = "the sentence states no moment the vocabulary names"
+            # A figure the vocabulary reaches no moment for is not a figure
+            # a rule says is no reading. Reported as an exclusion, it read
+            # the same as a stale reading whose sentence had been reworded,
+            # which is the state the sweep exists to report: it goes to
+            # `unaccounted` and the sweep names it.
+            continue
           } else if (rcell == "") {
             why = "a unit no cell of that moment is recorded in"
           } else if (rpick > 0 && i > rpick) {
@@ -314,13 +382,54 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         } else if (bounded(tk, i, a)) {
           why = "a bound, not a reading"
         } else if (cell == "" && rcell == "") {
-          why = "the sentence states no moment the vocabulary names"
+          continue
         } else if (cell == "" || unit_of(nxt) != cell_unit(cell)) {
           why = "a unit no cell of that moment is recorded in"
         } else if (pick > 0 && i > pick) {
           why = "the bare-engine reading beside view own"
         } else { continue }
         note(tl[i], ti[i], "excluded:" why)
+      }
+    }
+    # The bar a sentence names, as a ratio-shaped figure. The first one,
+    # since a sentence states one bar over the reading it publishes.
+    function bar_value(a, b,   i, num) {
+      for (i = a; i <= b; i++) {
+        num = ratio_tok(clean(tk[i]))
+        if (num == "") { continue }
+        if (bounded(tk, i, a)) { return num }
+      }
+      return ""
+    }
+    # A percentage left over in a sentence that resolves a ratio and names a
+    # bar is the distance between the two, which is how both pages write a
+    # bar view has missed: `11% behind against a bar of 10% -- a second bar
+    # missed, by 1% of the round trip`. It is computed rather than taken on
+    # trust, because a share ground described neither the figure nor what
+    # would move it: the reading the sentence resolves minus the bar it
+    # names, at the digits printed.
+    function gaps(a, b, rpick,   i, num, barv, rv, want, fmt) {
+      if (rpick == 0) { return }
+      barv = bar_value(a, b)
+      rv = ratio_tok(clean(tk[rpick]))
+      if (barv == "" || rv == "") { return }
+      want = (rv + 0 > barv + 0) ? rv - barv : barv - rv
+      for (i = a; i <= b; i++) {
+        if (i == rpick || ti[i] == 0) { continue }
+        num = clean(tk[i])
+        if (num !~ /%$/) { continue }
+        if (bounded(tk, i, a)) { continue }
+        if (clean(tk[i + 1]) == "of" && share_object(tk, i + 1)) { continue }
+        num = ratio_tok(num)
+        fmt = "%." decimals(num) "f"
+        if (sprintf(fmt, want) + 0 == num + 0) {
+          note(tl[i], ti[i], "excluded:a difference from the bar the sentence names")
+          continue
+        }
+        if (mode != "classify") {
+          printf "BUDGET DRIFT FAIL: moment-gap %s:%d: %s%% stands beside a reading and the %s%% bar the sentence names, and the distance between those two is %s%%\n",
+            page, tl[i], num, barv, sprintf(fmt, want)
+        }
       }
     }
     # One picked figure against the seat its moment holds. The ratio and the
@@ -372,7 +481,7 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         if (ratio_tok(num) != "") {
           if (rpick > 0 || rcell == "") { continue }
           if (bounded(tk, i, a)) { continue }
-          if (num ~ /%$/ && nxt == "of") { continue }
+          if (num ~ /%$/ && nxt == "of" && share_object(tk, i + 1)) { continue }
           rpick = i
           rpct = (num ~ /%$/)
           continue
@@ -387,6 +496,10 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
         pick = i
       }
       if (mode == "classify") { grounds(a, b, pick, cell, rpick, rcell) }
+      # After the grounds, because the distance from the bar is the more
+      # specific reason a percentage is left alone and the grounds above
+      # would otherwise report it as the engine reading beside view own.
+      gaps(a, b, rpick)
       if (pick == 0 && rpick == 0) { return }
       at = (pick > 0) ? pick : rpick
       want = (pick > 0) ? cell : rcell
@@ -424,17 +537,21 @@ MOMENT_GRADE_AWK="$GRADE_COMMON_AWK"'
     # column: the row states its moment in the label column and its reading
     # in the next, so splitting on the pipe would leave every figure in a
     # sentence naming no moment at all.
-    function grade(   i, j, m, line, w, text, ufx, s0) {
+    function grade(   i, j, m, line, w, at, text, ufx, s0) {
       if (uc == 0) { return }
       text = ""
       for (i = 1; i <= uc; i++) { text = text " " ul[i] }
       ntok = 0
       for (i = 1; i <= uc; i++) {
         line = ul[i]
-        gsub(/\|/, " ", line)
         gsub(/\. /, " \001 ", line)
-        m = split(line, w, /[[:space:]]+/)
+        m = toks(line, w, at)
         for (j = 1; j <= m; j++) {
+          # The column boundary is no word of the sentence here: a row states
+          # its moment in the label column and its reading in the next, and
+          # splitting on the pipe would leave every figure in a sentence
+          # naming no moment at all.
+          if (w[j] == "|") { continue }
           ntok++
           tk[ntok] = w[j]
           tl[ntok] = uno[i]
@@ -539,9 +656,10 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
     # minted for. So a number takes the nearest cell id before it in its own
     # sentence -- a table cell is a sentence, since a row states one column
     # at a time -- and the unit first id where its sentence names none.
-    function grade(   i, j, m, n, text, part, w, num, nxt, pct, ntok, ngraded,
-                     ncell, cell, namedcells, cls, nc, klass, fx, nf, fixn,
-                     klass_one, fixture, seen, ok, after, line, tok, cur, held) {
+    function grade(   i, j, k, m, n, text, part, w, at, num, nxt, pct, ntok,
+                     ngraded, ncell, cell, namedcells, cls, nc, klass, fx, nf,
+                     fixn, klass_one, fixture, seen, ok, after, ofat, line,
+                     tok, cur, held) {
       if (uc == 0) { return }
       text = ""
       for (i = 1; i <= uc; i++) { text = text " " ul[i] }
@@ -556,22 +674,25 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
         cell[ncell] = part[i]
         namedcells = namedcells " " part[i] " "
       }
+      # A unit naming no cell id states where the grading found no anchor,
+      # which is the same state a reading whose sentence was reworded is in.
+      # It is not a rule saying the figure is no reading, so nothing is
+      # recorded here and a figure equal to a seat is left unaccounted for
+      # the sweep to name.
       if (ncell == 0) {
-        if (mode == "classify") {
-          for (i = 1; i <= uc; i++) { note_line(uno[i], "the unit names no cell id") }
-        }
         uc = 0
         return
       }
       ntok = 0
       for (i = 1; i <= uc; i++) {
         line = ul[i]
-        gsub(/\|/, " \001 ", line)
         gsub(/\. /, " \001 ", line)
-        m = split(line, w, /[[:space:]]+/)
+        m = toks(line, w, at)
         for (j = 1; j <= m; j++) {
           ntok++
-          tk[ntok] = w[j]
+          # A row states one column at a time, so the boundary between two
+          # of them ends the sentence a number resolves inside.
+          tk[ntok] = (w[j] == "|") ? "\001" : w[j]
           tl[ntok] = uno[i]
           ti[ntok] = figure(clean(w[j])) ? ++fcount[uno[i]] : 0
         }
@@ -586,10 +707,11 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
         nxt = clean(tk[i + 1])
         pct = 0
         after = nxt
+        ofat = i + 1
         # a leading minus is part of the number: a diagnostic records one, and
         # a regex without it left the page ungraded where the ledger was not
         if (num ~ /^-?[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
-        else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && nxt == "%") { pct = 1; after = clean(tk[i + 2]) }
+        else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && nxt == "%") { pct = 1; after = clean(tk[i + 2]); ofat = i + 2 }
         else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
         # an absolute resolves like a ratio where a cell of its own unit
         # stands beside it, and nowhere else: the column holding the paired
@@ -617,8 +739,9 @@ RATIO_GRADE_AWK="$GRADE_COMMON_AWK"'
           continue
         }
         # a percentage OF something is a share of a population, not a ratio
-        # stated as its distance from 1
-        if (pct && after == "of") {
+        # stated as its distance from 1 -- and only where the something is a
+        # population the sentence names
+        if (pct && after == "of" && share_object(tk, ofat)) {
           note(tl[i], ti[i], "excluded:a share of a population, not a ratio")
           continue
         }
@@ -779,8 +902,8 @@ WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
     # both places it stood.
     function sentence_verdict(text, at,   j, k, m, w, tok, cls, nc, klass,
                               fx, nf, fixn, klass_one, fixture, cellid, nids,
-                              idname, idat, isid, num, nxt, pct, after, held,
-                              ok, bar, want, idx) {
+                              idname, idat, isid, num, nxt, pct, after, ofat,
+                              held, ok, bar, want, idx, tat) {
       cls = classes_of(text)
       nc = split(cls, klass, " ")
       if (nc > 1) { return }
@@ -789,7 +912,7 @@ WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
       nf = split(fx, fixn, " ")
       if (nf > 1) { return }
       fixture = (nf == 1) ? fixn[1] : fixt
-      m = split(text, w, /[[:space:]]+/)
+      m = toks(text, w, tat)
       bar = bar_of(w, m)
       nids = 0
       for (j = 1; j <= m; j++) {
@@ -813,9 +936,10 @@ WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
         nxt = clean(w[j + 1])
         pct = 0
         after = nxt
+        ofat = j + 1
         if (num ~ /^-?[0-9]+(\.[0-9]+)?%$/) { pct = 1; sub(/%$/, "", num) }
         else if (num ~ /^-?[0-9]+(\.[0-9]+)?$/ && (nxt == "%" || nxt == "percent")) {
-          pct = 1; after = clean(w[j + 2])
+          pct = 1; after = clean(w[j + 2]); ofat = j + 2
         }
         else if (num !~ /^-?[0-9]+\.[0-9]+x?$/) { continue }
         else if (bounded(w, j, 1)) {
@@ -832,8 +956,9 @@ WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
           note(at, idx, "excluded:a bound, not a reading")
           continue
         }
-        # a percentage OF something is a share of a population
-        if (pct && after == "of") {
+        # a percentage OF something is a share of a population, and only
+        # where the something is a population the sentence names
+        if (pct && after == "of" && share_object(w, ofat)) {
           note(at, idx, "excluded:a share of a population, not a ratio")
           continue
         }
@@ -862,8 +987,8 @@ WHY_GRADE_AWK="$GRADE_COMMON_AWK"'
     # returns from early -- two classes named, two fixtures -- graded none of
     # its figures and numbered none either, which moved every figure after it
     # on the line and hung a bound ground on a multiplier.
-    function count_figures(text,   j, m, w, c) {
-      m = split(text, w, /[[:space:]]+/)
+    function count_figures(text,   j, m, w, at, c) {
+      m = toks(text, w, at)
       c = 0
       for (j = 1; j <= m; j++) { if (figure(clean(w[j]))) { c++ } }
       return c

@@ -218,11 +218,20 @@ bare-Neovim column reads `n/a` rather than a real comparison.
 Every felt row is stated under a real config, and the matrix seats five
 cells on the `user` fixture: `echo.user`, `echo_speculated.user`,
 `scroll.user`, `flood.user` and `startup.user`. dev-linux records all five.
-Four were taken 2026-09-06 in two quiet windows, each cell's null-pair
-calibration inside 1.1%; `startup.user` was re-recorded 2026-09-15 in a quiet
-window of its own (1-minute load 1.82 falling to 1.42 over the run), its
-null-pair calibration 3.4% at the start of the run and 1.0% at the end, both
-well inside the 15% floor that refuses a run:
+Four were taken 2026-09-06 in two quiet windows; `startup.user` was
+re-recorded 2026-09-15 in a quiet window of its own. The conditions those
+two runs were taken under, which no cell records and which a record run
+therefore leaves standing:
+
+```text
+2026-09-06  echo.user, echo_speculated.user, scroll.user, flood.user
+            null-pair calibration inside 1.1%
+2026-09-15  startup.user
+            1-minute load 1.82 falling to 1.42 over the run
+            null-pair calibration 3.4% at the start, 1.0% at the end
+```
+
+Both calibrations sit well inside the 15% floor that refuses a run.
 
 | cell, `user` fixture | view | bare Neovim | reading |
 |---|---|---|---|
@@ -233,11 +242,18 @@ well inside the 15% floor that refuses a run:
 | `flood.cadence_p99_ms` (`user`) | `flood.cadence_p99_ms` 16.914 ms p99 | 17.480 ms p99 | 0.9 ms past the 16 ms frame, recorded 2026-09-06, unmet on both sides; `flood.cadence_p99_ratio` 0.981, `flood.pace_ratio` 1.018, worst no-paint gap 48.9 ms reported and not gated |
 
 The flood cell's plugin-free leg was re-recorded 2026-09-15 in a quiet
-window of its own (1-minute load 1.19 rising to 2.25 over the run, null-pair
-calibration 3.7% at the start and 5.5% at the end, both inside the 15% floor
-that refuses a run). The seat it held was drawn before 2026-08-26 and no
-trial since has come near it, and a ratchet only ever moves a seat down, so
-the median of the three new draws was seated by hand.
+window of its own, under conditions no cell records either:
+
+```text
+2026-09-15  flood.minimal
+            1-minute load 1.19 rising to 2.25 over the run
+            null-pair calibration 3.7% at the start, 5.5% at the end
+```
+
+Both sit inside the 15% floor that refuses a run. The seat it held was drawn
+before 2026-08-26 and no trial since has come near it, and a ratchet only
+ever moves a seat down, so the median of the three new draws was seated by
+hand.
 
 On the plugin-free fixture `flood.cadence_p99_ms` now reads 16.091 ms p99,
 so both legs sit past the 16 ms frame and the login stack is the smaller

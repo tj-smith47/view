@@ -7,6 +7,12 @@
 # So every [[budget]] entry must name a spec_row that appears in the spec,
 # and its max must appear in that same row's text.
 #
+# The cross-checks below that read a figure out of prose -- the ratio a
+# benchmarking unit quotes, the moment a user page states in words, the
+# figures a shortfall's why carries -- are the grading in
+# scripts/lib/moment-grading.sh, which is sourced here and carries its own
+# account of what a figure is and which of three verdicts it gets.
+#
 # Written to stock POSIX-ish bash: macOS ships /bin/bash 3.2, and a gate that
 # needs a newer one is a gate that silently does not run for whoever has it.
 set -euo pipefail
@@ -28,6 +34,14 @@ root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # Beside this script and never under $root: a fixture tree is graded by the
 # grading that ships, not by a copy of it the fixture happens to carry.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Guarded like the two files below it, and with a status of its own: sourced
+# bare, a missing library left the shell's own message and rc 1, which is the
+# status a drift finding gives, so a CI reader saw a failure of an unknown
+# kind.
+if [[ ! -f "$HERE/lib/moment-grading.sh" ]]; then
+  echo "BUDGET DRIFT FAIL: grading library not found beside the checker: $HERE/lib/moment-grading.sh" >&2
+  exit 2
+fi
 # shellcheck source=lib/moment-grading.sh
 . "$HERE/lib/moment-grading.sh"
 budgets="$root/crates/view-bench/budgets.toml"
