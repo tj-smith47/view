@@ -268,12 +268,19 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::CmdlineHide => {
-            // while `cmdline` is still standing, so the withdrawal leaves
-            // the absorptions to `cmdline_closed` below rather than
-            // releasing them twice
-            let _ = crate::native::speculate::withdraw_cmdline_speculation(model);
+            // the real line comes down first, so the withdrawal below sees
+            // no command line standing and releases what the guess hid.
+            // With the two the other way round the withdrawal drained the
+            // absorption and its un-hides were dropped, leaving every
+            // absorbed window hidden for the rest of the session -- and a
+            // lone `cmdline_hide` is what every `<silent>` normal-mode
+            // mapping running an Ex command sends, because `<silent>`
+            // suppresses the `cmdline_show` and not the hide
             model.engine.cmdline = None;
-            let shown = super::surface_conflict::cmdline_closed(model);
+            let mut shown = crate::native::speculate::withdraw_cmdline_speculation(model);
+            // both release the same absorption, and the second finds it
+            // already drained and answers with nothing
+            shown.extend(super::surface_conflict::cmdline_closed(model));
             // the answer landing, so the box goes with it: nvim sends no
             // msg_clear when a confirm-class prompt resolves, and the only
             // other `cmdline_hide` a prompt overlay can see is the re-arm

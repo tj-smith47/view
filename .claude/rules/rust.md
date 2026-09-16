@@ -440,11 +440,11 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   rather than implied. The sentence bounding a figure ends at the first `.`
   before a blank or a line end on either side of it, and the word that grades
   the figure is as free to fall after it as before: rustfmt breaks a line
-  wherever the width runs out, and a state that only ran forward graded `moved
-  6x cross-boot` as a constant for want of a `measured` that sat on the next
-  line. So an integer two sentences from the word that took it, in either
-  direction, is graded as a constant; and a figure written with no unit at all
-  is graded by nothing here. Cased in `scripts/check-style-cases.sh` over
+  wherever the width runs out, and a state that only ran forward graded
+  `moved 6x cross-boot` as a constant for want of a `measured` that sat on
+  the next line. So an integer two sentences from the word that took it, in
+  either direction, is graded as a constant; and a figure written with no unit
+  at all is graded by nothing here. Cased in `scripts/check-style-cases.sh` over
   twenty-seven shapes: the tree that passes on all five escapes, the decimal,
   the integer inside a reading sentence, the same integer wrapped onto the line
   below the word that introduced it and the figure standing on the line above

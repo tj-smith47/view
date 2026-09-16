@@ -337,7 +337,8 @@ impl Model {
                 cmdline: None,
                 cmdline_speculated: None,
                 key_unanswered: None,
-                key_round_trip: None,
+                key_round_trips: [None; crate::native::speculate::KEY_ROUND_TRIPS],
+                key_round_trips_at: 0,
                 literal_pending: false,
                 messages: Messages::default(),
                 toast_history: crate::native::toast::ToastHistory::new(),
@@ -1330,29 +1331,32 @@ pub struct EngineModel {
     /// yet, `mode.current` still says `normal`
     /// ([`crate::native::speculate::may_speculate_cmdline`] reads both).
     ///
-    /// Both directions of it are inexact, and both are inexact the safe
-    /// way. Any batch clears it, including one nvim flushed for a timer or
-    /// an LSP float while the typed key is still in its input queue, so the
-    /// gate can open on a key nvim has not read -- what a guess made there
-    /// costs is bounded by
-    /// [`crate::native::speculate::cmdline_backstop`]. And it stands for a
-    /// whole round trip after every forwarded key, so on a link whose round
-    /// trip is longer than a user's own gap between keystrokes a `:` typed
-    /// just after another key is unaccelerated and drawn from nvim's own
-    /// `cmdline_show`.
+    /// Cleared only by a batch carrying an event nvim sends in answer to
+    /// input, so the gate stays shut until nvim has actually read the key:
+    /// a timer's flush, an LSP float or a `win_viewport` on its own leaves
+    /// it standing -- `mode_change`, `grid_cursor_goto`, `cmdline_show` and
+    /// `grid_line` are the four that count. It stands for a whole round trip after
+    /// every forwarded key, so on a link whose round trip is longer than a
+    /// user's own gap between keystrokes a `:` typed just after another key
+    /// is unaccelerated and drawn from nvim's own `cmdline_show`.
     pub key_unanswered: Option<crate::native::speculate::SpecStamp>,
-    /// The longest key-to-answering-batch round trip this session has
-    /// observed, which is what sizes the speculated palette's own backstop
+    /// The last [`crate::native::speculate::KEY_ROUND_TRIPS`]
+    /// key-to-answering-batch round trips this session observed, newest
+    /// overwriting oldest, whose longest member sizes the speculated
+    /// palette's own backstop
     /// ([`crate::native::speculate::cmdline_backstop`]).
     ///
-    /// The longest rather than the last, because a single reading can only
-    /// be too short: `key_unanswered` is cleared by whatever batch arrives
-    /// first, and a batch nvim flushed for something other than the key
-    /// times a fraction of the link. A backstop sized from one of those
-    /// would blank a *correct* guess on the links the tiers
-    /// `view-bench`'s `echo_speculated_rtt` scenario ships stand for, which
-    /// is the flicker the speculation exists to avoid.
-    pub key_round_trip: Option<std::time::Duration>,
+    /// The longest of a recent window rather than of the whole session:
+    /// nvim can be slow to answer a key for reasons that have nothing to do
+    /// with the link -- a lazy-loaded plugin, a first LSP attach, a
+    /// treesitter parse -- and one such reading held forever would leave
+    /// every later guess standing for a bound the session stopped
+    /// deserving. A window rather than a decay because a decay is keyed to
+    /// observation count, so a session that stalls once and then goes idle
+    /// would keep the inflated bound for exactly as long as it stayed idle.
+    pub key_round_trips: [Option<std::time::Duration>; crate::native::speculate::KEY_ROUND_TRIPS],
+    /// Where the next reading goes in `key_round_trips`.
+    pub key_round_trips_at: usize,
     /// Whether the last key view forwarded is one nvim takes the next
     /// keystroke as an argument to rather than as a command
     /// ([`crate::native::speculate::CMDLINE_LITERAL_KEYS`]).
@@ -1533,7 +1537,7 @@ impl EngineModel {
     /// | `cmdline` | `cmdline_hide` | yes |
     /// | `cmdline_speculated` | the `cmdline_show` it was guessing at, or its own age bound | yes |
     /// | `key_unanswered` | the next redraw batch | yes: the key it names went to the engine that died |
-    /// | `key_round_trip` | nothing: a link's own reading, replaced only by a longer one | no: the link is the host's, not the connection's |
+    /// | `key_round_trips`, `key_round_trips_at` | the readings after them, eight keys later | no: the link is the host's, not the connection's |
     /// | `literal_pending` | the next key, or a batch moving the mode or the cursor | yes, for the same reason |
     /// | `popupmenu` | `popupmenu_hide` | yes |
     /// | `float_absorption` | the plugin's window dies with the connection | yes |

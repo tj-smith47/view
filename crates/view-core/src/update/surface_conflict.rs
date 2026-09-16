@@ -1008,6 +1008,46 @@ mod tests {
         );
     }
 
+    /// A `cmdline_hide` with no `cmdline_show` behind it, which nvim really
+    /// does send: `<silent>` suppresses the show and not the hide, so every
+    /// `<silent>` normal-mode mapping that runs an Ex command produces this
+    /// batch, and a `:` a plugin's own `getchar()` then swallows lands in
+    /// exactly that silence (probed against the pinned 0.12.4 engine over
+    /// `ext_cmdline`: `nnoremap <silent> <F3> :echo 1<CR>` emits
+    /// `cmdline_hide` alone, the same mapping without `<silent>` emits both).
+    /// The un-hides the withdrawal owes have to leave through `update`'s own
+    /// return, or every window the guess hid stays hidden for the rest of
+    /// the session.
+    #[test]
+    fn a_hide_with_no_show_behind_it_returns_the_un_hides_the_guess_owes() {
+        let mut model = captured_session();
+        speculate_colon(&mut model);
+        let _ = observe_float(&mut model, &cmp_cmdline_menu("cmp_menu"));
+        rows_arrive(&mut model, 1003, &["one", "two"], Some(0));
+        assert!(
+            model.engine.cmdline.is_none(),
+            "nvim opened no command line"
+        );
+
+        let effects = update(&mut model, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+
+        assert!(
+            effects.iter().any(|eff| matches!(
+                eff,
+                Effect::Rpc(RpcCall::SetFloatHidden {
+                    win: 1003,
+                    hide: false
+                })
+            )),
+            "the window view hid under the guess has to be shown again: {effects:?}"
+        );
+        assert!(model.engine.cmdline_speculated.is_none());
+        assert!(
+            model.engine.absorbed_rows().is_none(),
+            "and the palette stops offering candidates for a command line nobody opened"
+        );
+    }
+
     #[test]
     fn a_float_over_the_cmdline_is_named_once_with_the_line_that_resolves_it() {
         let mut model = captured_session();

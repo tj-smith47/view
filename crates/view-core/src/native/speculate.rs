@@ -148,18 +148,33 @@ const CMDLINE_BACKSTOP_ROUND_TRIPS: u32 = 3;
 /// ships in `RTT_TIERS_MS`, keeps a bound its own answers fit inside, so
 /// the palette is not drawn, blanked and drawn again on every `:`.
 ///
-/// The reading behind it is [`crate::model::EngineModel::key_round_trip`]'s
-/// -- the longest key-to-batch round trip the session has seen, which is
-/// the half of the pair that cannot be too short.
+/// The reading behind it is [`crate::model::EngineModel::key_round_trips`]'s
+/// -- the longest of the last [`KEY_ROUND_TRIPS`] key-to-batch round trips,
+/// which is the half of the pair that cannot be too short without also
+/// being a bound the session has since stopped deserving.
 #[must_use]
 pub fn cmdline_backstop(model: &Model) -> Duration {
     model
         .engine
-        .key_round_trip
+        .key_round_trips
+        .iter()
+        .flatten()
+        .max()
         .and_then(|trip| trip.checked_mul(CMDLINE_BACKSTOP_ROUND_TRIPS))
         .unwrap_or(CMDLINE_SPECULATION_BACKSTOP_MIN)
         .clamp(CMDLINE_SPECULATION_BACKSTOP_MIN, SPECULATION_MAX_AGE)
 }
+
+/// How many recent key-to-answering-batch round trips
+/// [`cmdline_backstop`] reads.
+///
+/// Eight, because the bound has to follow the link and not the one slow
+/// answer a plugin's first-run work produced: at a user's own typing rate
+/// eight keys is a second or two of history, long enough that a genuinely
+/// slow link keeps its bound through a pause in typing and short enough
+/// that a hiccup is gone by the next sentence. The scan is eight compares
+/// on a path already walking a redraw batch.
+pub const KEY_ROUND_TRIPS: usize = 8;
 
 /// The normal- and visual-mode keys after which nvim reads the next
 /// keystroke as that command's own argument rather than as a command.
@@ -227,6 +242,13 @@ pub struct CmdlineSpeculation {
     /// silence a guess stands in. That move is addressed to the float's own
     /// grid, and withdrawing on it would blank a *correct* guess on every
     /// `:` of such a session.
+    ///
+    /// The cursor's grid, which is [`GLOBAL_GRID`] whenever no visible pane
+    /// owns the cursor (before the session's first `grid_cursor_goto`, or
+    /// while the cursor's window is hidden): under `ext_multigrid` nvim
+    /// addresses cursor moves to window grids, so a guess recorded on that
+    /// fallback matches no evidence and rides [`cmdline_backstop`] instead
+    /// -- a wrong guess standing longer, never a correct one blanked.
     pub grid: GridId,
 }
 
@@ -280,6 +302,10 @@ pub fn is_cmdline_mode(mode: &str) -> bool {
 /// `cmdline_show` case: the guess is being answered rather than refuted,
 /// and the menus absorbed under it are completing the command line that is
 /// now on screen.
+///
+/// `Vec` carries no `must_use` of its own, and dropping these leaves every
+/// window the guess hid hidden for the rest of the session.
+#[must_use]
 pub fn withdraw_cmdline_speculation(model: &mut Model) -> Vec<Effect> {
     if model.engine.cmdline_speculated.take().is_none() {
         return Vec::new();
@@ -844,6 +870,17 @@ fn covers_column(col_start: u64, cells: &[GridCell], col: u16) -> bool {
 pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
     match call {
         RpcCall::Input { notation } => {
+            // a key nvim answered with nothing at all -- an unmapped
+            // function key produces no redraw -- is not a key in flight,
+            // and a flag only an answering batch clears would otherwise
+            // hold the gate shut for the rest of the session
+            if model
+                .engine
+                .key_unanswered
+                .is_some_and(|sent| now.age_since(sent) >= SPECULATION_MAX_AGE)
+            {
+                model.engine.key_unanswered = None;
+            }
             fold_cmdline_key(model, notation, now);
             // after the fold above, which is the one reading of these two
             // that describes the editor this key is arriving at. The stamp
@@ -884,9 +921,20 @@ pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec
 /// What one redraw batch says about the keys view has forwarded and about a
 /// palette it is guessing at.
 ///
-/// A batch is the answer the gate was waiting for, whatever it carries:
-/// nvim sends one per flush, so the arrival alone says the keys ahead of it
-/// have been read. Two of its events say more than that. A `mode_change`
+/// A batch answers the key the gate was waiting for only when it carries an
+/// event nvim sends *because* input was read -- a `mode_change`, a cursor
+/// move, a `cmdline_show` or a `grid_line`. Every other batch is somebody
+/// else's flush: a plugin on a timer, a spinner, an animation, a lualine
+/// refresh, an LSP float. Reading the arrival alone as the answer fails in
+/// both directions at once on a session that has one of those, which is
+/// most login-shaped configs. The gate opens on a key nvim has not read
+/// yet, and worse, the round trip below times the timer's own cadence
+/// instead of the link: on a genuinely slow link *every* reading comes out
+/// short, [`cmdline_backstop`] never lifts off its floor, and every correct
+/// guess is blanked shortly before its `cmdline_show` arrives -- the
+/// draw-blank-redraw flicker the bound exists to prevent.
+///
+/// Two of those events say more than that. A `mode_change`
 /// or a cursor move is the command that was holding the next keystroke
 /// finishing with it, so the argument the next key would have been is no
 /// longer owed. And a cursor move *on the grid the `:` was typed on*,
@@ -908,31 +956,46 @@ pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec
 /// go elsewhere without moving this grid's cursor is left to
 /// [`cmdline_backstop`].
 ///
-/// The arrival is this module's one reading of the link as well: the key's
-/// own stamp is what `key_unanswered` carries, and the difference is what
-/// sizes that backstop.
+/// The answering batch is this module's one reading of the link as well: the
+/// key's own stamp is what `key_unanswered` carries, and the difference is
+/// what sizes that backstop.
 fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec<Effect> {
-    if let Some(sent) = model.engine.key_unanswered.take() {
-        let trip = now.age_since(sent);
-        if model.engine.key_round_trip.is_none_or(|seen| trip > seen) {
-            model.engine.key_round_trip = Some(trip);
-        }
-    }
     let guessed_on = model.engine.cmdline_speculated.map(|open| open.grid);
     let mut moved_cursor_there = false;
     let mut settled = false;
     let mut shows_cmdline = false;
+    let mut answers_input = false;
     for ev in redraw {
         match ev {
             UiEvent::GridCursorGoto { grid, .. } => {
                 // a command waiting on its argument is finished by a cursor
                 // move wherever nvim addressed one
                 settled = true;
+                answers_input = true;
                 moved_cursor_there |= guessed_on == Some(GridId(*grid));
             }
-            UiEvent::ModeChange { .. } => settled = true,
-            UiEvent::CmdlineShow { .. } => shows_cmdline = true,
+            UiEvent::ModeChange { .. } => {
+                settled = true;
+                answers_input = true;
+            }
+            UiEvent::CmdlineShow { .. } => {
+                shows_cmdline = true;
+                answers_input = true;
+            }
+            // text changing under the cursor: the key was typed and nvim
+            // has drawn what it did
+            UiEvent::GridLine { .. } => answers_input = true,
             _ => {}
+        }
+    }
+    if answers_input {
+        if let Some(sent) = model.engine.key_unanswered.take() {
+            // the one write site, so the read in `cmdline_backstop` is the
+            // only place the window's shape is known
+            model.engine.key_round_trips[model.engine.key_round_trips_at] =
+                Some(now.age_since(sent));
+            model.engine.key_round_trips_at =
+                (model.engine.key_round_trips_at + 1) % KEY_ROUND_TRIPS;
         }
     }
     // the argument character that is itself a literal-taking key is what
@@ -1135,6 +1198,30 @@ mod tests {
         model
     }
 
+    /// One ordinary key, and the batch that answers it `answered_at`.
+    fn answered_key(model: &mut Model, sent: SpecStamp, answered_at: SpecStamp) {
+        fold_engine_call(
+            model,
+            &RpcCall::Input {
+                notation: "j".to_string(),
+            },
+            sent,
+        );
+        let effects = fold_redraw(
+            model,
+            &[
+                UiEvent::GridCursorGoto {
+                    grid: 1,
+                    row: 0,
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ],
+            answered_at,
+        );
+        assert!(effects.is_empty(), "no float is absorbed here");
+    }
+
     /// One `:` as the loop hands it to the fold.
     fn typed_colon(model: &mut Model, now: SpecStamp) {
         fold_engine_call(
@@ -1204,33 +1291,40 @@ mod tests {
     /// waiting on its argument, and the mode it last announced describes
     /// the editor as of the last key it answered.
     ///
-    /// Each row is the keys typed, in order, with `redraw` standing for the
-    /// batch nvim flushes back between them -- a `msg_showcmd` for a count
-    /// or a pending command, which says the key was read and nothing more.
+    /// Each row is the keys typed, in order, with `showcmd` standing for the
+    /// batch nvim really flushes back after a count or a pending command
+    /// (`msg_showcmd` and nothing else, read off the pinned engine under
+    /// view's own attach) and `cursor` for the batch a finished motion
+    /// produces. Only the second is an answer to a key, which is why a `:`
+    /// after a count is unaccelerated rather than guessed at.
     #[test]
     fn a_colon_is_speculated_only_when_no_earlier_key_is_still_holding_it() {
         /// One typed sequence, and whether the `:` ending it opens the
         /// palette.
         type Row = (&'static [&'static str], bool, &'static str);
         let rows: [Row; 9] = [
-            (&["f", "redraw", ":"], false, "the `f` target"),
-            (&["r", "redraw", ":"], false, "the character `r` writes"),
-            (&["\"", "redraw", ":"], false, "the register `\"` names"),
+            (&["f", "showcmd", ":"], false, "the `f` target"),
+            (&["r", "showcmd", ":"], false, "the character `r` writes"),
+            (&["\"", "showcmd", ":"], false, "the register `\"` names"),
             (
-                &["q", "redraw", ":"],
+                &["q", "showcmd", ":"],
                 false,
                 "the register `q` records into",
             ),
-            (&["@", "redraw", ":"], false, "the register `@` replays"),
+            (&["@", "showcmd", ":"], false, "the register `@` replays"),
             (
                 &["A", ":"],
                 false,
                 "typed into the insert `A` opened, whose mode_change is still on the wire",
             ),
-            (&["2", "redraw", ":"], true, "a count, which opens `:2`"),
-            (&["j", "redraw", ":"], true, "a motion nvim has answered"),
             (
-                &["f", "redraw", "a", "cursor", ":"],
+                &["2", "showcmd", ":"],
+                false,
+                "a count whose showcmd is no answer, so nvim is not yet known to have read it",
+            ),
+            (&["j", "cursor", ":"], true, "a motion nvim has answered"),
+            (
+                &["f", "showcmd", "a", "cursor", ":"],
                 true,
                 "the `f` finished on a target that is itself a literal-taking key, cursor moved",
             ),
@@ -1239,7 +1333,16 @@ mod tests {
             let mut model = colon_model();
             for key in keys {
                 match *key {
-                    "redraw" => folded(&mut model, &[UiEvent::Flush], stamp(0)),
+                    "showcmd" => folded(
+                        &mut model,
+                        &[
+                            UiEvent::MsgShowcmd {
+                                content: vec![(0, "2".to_string())],
+                            },
+                            UiEvent::Flush,
+                        ],
+                        stamp(0),
+                    ),
                     "cursor" => folded(
                         &mut model,
                         &[
@@ -1408,7 +1511,7 @@ mod tests {
         ];
         for (observed, bound_ms, what) in tiers {
             let mut model = colon_model();
-            model.engine.key_round_trip = observed.map(Duration::from_millis);
+            model.engine.key_round_trips[0] = observed.map(Duration::from_millis);
 
             assert_eq!(
                 cmdline_backstop(&model),
@@ -1433,27 +1536,170 @@ mod tests {
     /// The link reading the bound is built from: the key carries the stamp
     /// it went out with, and the batch that answers it is the other end.
     ///
-    /// The longest reading is what is kept, because a single one can only
-    /// be short: any batch clears the flag, including one nvim flushed for
-    /// something other than this key, and a bound sized from that would
-    /// blank correct guesses on the link it mismeasured.
+    /// The longest of the recent window is what is read, because a single
+    /// reading can only be short -- but the window is what keeps one slow
+    /// answer from pinning the bound: nvim being busy when a key lands (a
+    /// lazy-loaded plugin, a first LSP attach) is not the link, and a
+    /// session-lifetime maximum would hold that reading for as long as the
+    /// session ran.
     #[test]
-    fn the_round_trip_is_the_longest_key_to_batch_gap_the_session_has_seen() {
+    fn one_slow_answer_stops_sizing_the_bound_once_the_window_has_moved_past_it() {
         let mut model = colon_model();
 
-        fold_engine_call(&mut model, &input("j"), stamp(0));
-        folded(&mut model, &[UiEvent::Flush], stamp(300));
+        answered_key(&mut model, stamp(0), stamp(334));
         assert_eq!(
-            model.engine.key_round_trip,
-            Some(Duration::from_millis(300))
+            cmdline_backstop(&model),
+            SPECULATION_MAX_AGE,
+            "the one hiccup the session has seen is all it has to go on"
         );
 
-        fold_engine_call(&mut model, &input("j"), stamp(400));
-        folded(&mut model, &[UiEvent::Flush], stamp(405));
+        for trip in 0..KEY_ROUND_TRIPS as u64 {
+            let sent = 1000 + trip * 10;
+            answered_key(&mut model, stamp(sent), stamp(sent + 1));
+        }
+
         assert_eq!(
-            model.engine.key_round_trip,
-            Some(Duration::from_millis(300)),
-            "a batch that answered something else is the short reading, and it is not the link"
+            cmdline_backstop(&model),
+            CMDLINE_SPECULATION_BACKSTOP_MIN,
+            "eight short readings after the hiccup put the bound back on its floor"
+        );
+    }
+
+    /// A batch nvim flushed for something other than the key is not that
+    /// key's answer, in either direction. It leaves the gate shut, so a `:`
+    /// arriving before nvim has read the key ahead of it is unaccelerated
+    /// rather than guessed at -- and it records no round trip, so a config
+    /// with a plugin flushing on a timer does not read the timer's own
+    /// cadence as the link and shrink the bound to its floor.
+    #[test]
+    fn only_a_batch_answering_input_clears_the_gate_and_times_the_link() {
+        let mut model = colon_model();
+        fold_engine_call(&mut model, &input("j"), stamp(0));
+
+        folded(
+            &mut model,
+            &[
+                UiEvent::WinViewport {
+                    grid: 2,
+                    win: WinHandle(1),
+                    topline: 0,
+                    botline: 20,
+                    curline: 0,
+                    curcol: 0,
+                },
+                UiEvent::Flush,
+            ],
+            stamp(100),
+        );
+
+        assert_eq!(
+            model.engine.key_unanswered,
+            Some(stamp(0)),
+            "a timer's own flush is not the answer to a key"
+        );
+        assert_eq!(
+            model.engine.key_round_trips, [None; KEY_ROUND_TRIPS],
+            "and it is not a reading of the link either"
+        );
+
+        folded(
+            &mut model,
+            &[
+                UiEvent::ModeChange {
+                    mode: "normal".to_string(),
+                    mode_idx: 0,
+                },
+                UiEvent::Flush,
+            ],
+            stamp(300),
+        );
+
+        assert_eq!(model.engine.key_unanswered, None);
+        assert_eq!(
+            model.engine.key_round_trips.iter().flatten().max(),
+            Some(&Duration::from_millis(300)),
+            "the answering batch times the whole link and not the timer's leg of it"
+        );
+    }
+
+    /// Every event nvim sends because a key was read, one by one, against
+    /// the ones it sends on its own account.
+    #[test]
+    fn the_events_that_answer_a_key_are_the_ones_a_key_produces() {
+        for (event, answers) in [
+            (
+                UiEvent::ModeChange {
+                    mode: "normal".to_string(),
+                    mode_idx: 0,
+                },
+                true,
+            ),
+            (
+                UiEvent::GridCursorGoto {
+                    grid: 1,
+                    row: 0,
+                    col: 1,
+                },
+                true,
+            ),
+            (
+                UiEvent::CmdlineShow {
+                    content: Vec::new(),
+                    pos: 0,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+                true,
+            ),
+            (grid_line(0, 0, "x"), true),
+            (UiEvent::Flush, false),
+            (
+                UiEvent::WinViewport {
+                    grid: 2,
+                    win: WinHandle(1),
+                    topline: 0,
+                    botline: 20,
+                    curline: 0,
+                    curcol: 0,
+                },
+                false,
+            ),
+        ] {
+            let mut model = colon_model();
+            fold_engine_call(&mut model, &input("j"), stamp(0));
+
+            let _ = fold_redraw(&mut model, &[event.clone(), UiEvent::Flush], stamp(50));
+
+            assert_eq!(
+                model.engine.key_unanswered.is_none(),
+                answers,
+                "{event:?} disagreed with the answering-event rule"
+            );
+            assert_eq!(
+                model.engine.key_round_trips.iter().flatten().count() == 1,
+                answers,
+                "{event:?} disagreed about whether it times the link"
+            );
+        }
+    }
+
+    /// The gate reopens for a key nvim answered with nothing. An unmapped
+    /// function key produces no redraw at all, and a flag that only an
+    /// answering batch clears would hold the gate shut for the rest of the
+    /// session.
+    #[test]
+    fn a_key_the_engine_never_answered_stops_holding_the_gate_shut() {
+        let mut model = colon_model();
+        fold_engine_call(&mut model, &input("<F13>"), stamp(0));
+        assert!(model.engine.key_unanswered.is_some());
+
+        typed_colon(&mut model, stamp(SPECULATION_MAX_AGE.as_millis() as u64));
+
+        assert!(
+            model.engine.cmdline_speculated.is_some(),
+            "a key older than the glyphs' own bound is no key in flight"
         );
     }
 
@@ -1463,9 +1709,20 @@ mod tests {
     fn a_batch_with_no_key_outstanding_records_no_round_trip() {
         let mut model = colon_model();
 
-        folded(&mut model, &[UiEvent::Flush], stamp(900));
+        folded(
+            &mut model,
+            &[
+                UiEvent::GridCursorGoto {
+                    grid: 1,
+                    row: 0,
+                    col: 0,
+                },
+                UiEvent::Flush,
+            ],
+            stamp(900),
+        );
 
-        assert_eq!(model.engine.key_round_trip, None);
+        assert_eq!(model.engine.key_round_trips, [None; KEY_ROUND_TRIPS]);
     }
 
     /// The evidence is the grid the `:` was typed on. A cmdline plugin

@@ -916,7 +916,14 @@ pub fn takeover_call(eff: &view_core::msg::Effect) -> String {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Dispatch {
     Input,
-    EngineBatch,
+    EngineBatch {
+        /// Whether this batch carried a `cmdline_show`, which is the only
+        /// thing that tells a guess nvim answered from one it refuted. The
+        /// settled model cannot: a batch carrying both the show and the
+        /// hide ends with no command line and no guess, exactly as a
+        /// withdrawal does.
+        answered_cmdline: bool,
+    },
     Other,
 }
 
@@ -931,7 +938,11 @@ impl Dispatch {
             // has not reached a `Flush` yet: it folds nothing, paints
             // nothing, and answers no key. Read as a batch it closed every
             // waiting input on whatever frame came next
-            Msg::Redraw(events) if !events.is_empty() => Self::EngineBatch,
+            Msg::Redraw(events) if !events.is_empty() => Self::EngineBatch {
+                answered_cmdline: events
+                    .iter()
+                    .any(|ev| matches!(ev, view_core::events::UiEvent::CmdlineShow { .. })),
+            },
             _ => Self::Other,
         }
     }
@@ -1012,6 +1023,10 @@ pub struct FeltLog {
     /// the `cmdline_show` answering it is written up as the reconcile it
     /// is rather than passed over as "still open".
     palette_speculated: bool,
+    /// Whether the batch now being reported on answered the guess, set from
+    /// the batch's own `cmdline_show` and spent by the `palette` line it
+    /// decides.
+    palette_answered: bool,
     /// The highlight ids the window's text carried on the frame it first
     /// appeared on, which every later frame is compared against. `None`
     /// until that frame.
@@ -1222,7 +1237,10 @@ impl FeltLog {
                     input.own_paint = model.dirty && !input.dirty_before;
                 }
             }
-            Dispatch::EngineBatch => self.note_engine_batch(),
+            Dispatch::EngineBatch { answered_cmdline } => {
+                self.palette_answered |= answered_cmdline;
+                self.note_engine_batch();
+            }
             // a timer, a notice or a reply on a chain of view's own: the
             // frame it draws answers whatever asked for it rather than a
             // key the user is waiting on
@@ -1244,9 +1262,14 @@ impl FeltLog {
     /// and a guess the evidence took back -- a cursor move on the grid the
     /// `:` was typed on, a mode change out of the gate's modes -- comes off
     /// at a dispatch like a real close does, so it says which it was
-    /// (`closed withdrawn`). Only a guess can be standing when the palette
-    /// was speculated, so that reading is what parts the two.
+    /// (`closed withdrawn`). What parts those two is whether the batch just
+    /// dispatched carried the `cmdline_show`: the settled model cannot say,
+    /// because a `:` and an `<Esc>` typed inside one flush leave no command
+    /// line and no guess, which is a withdrawal's own end state.
     fn note_palette(&mut self, model: &view_core::model::Model, off_the_clock: bool) {
+        // the flag describes the batch this call is reporting on, so it is
+        // spent here whether or not a line comes of it
+        let answered = std::mem::take(&mut self.palette_answered);
         let open = palette_shown(model);
         let speculated = model.engine.cmdline_speculated.is_some();
         if open == self.palette_open && speculated == self.palette_speculated {
@@ -1260,7 +1283,7 @@ impl FeltLog {
         }
         let line = match (self.palette_open, open) {
             (_, false) if off_the_clock => "closed expired",
-            (_, false) if self.palette_speculated => "closed withdrawn",
+            (_, false) if self.palette_speculated && !answered => "closed withdrawn",
             (_, false) => "closed",
             (true, true) => "reconciled",
             (false, true) if speculated => "open requested speculated",
@@ -2011,7 +2034,7 @@ mod tests {
             }]),
         );
         let (mut felt, lines) = FeltLog::recording();
-        felt.note_dispatched(Dispatch::EngineBatch, &shown);
+        felt.note_dispatched(engine_batch(false), &shown);
         let written = lines.lock().unwrap().clone();
         assert!(
             written.iter().any(|l| l == "palette open requested"),
@@ -2042,7 +2065,7 @@ mod tests {
         felt.note_dispatched(Dispatch::Input, &model);
         model.engine.cmdline_speculated = None;
         model.engine.cmdline = Some(view_core::model::CmdlineState::bare_colon());
-        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        felt.note_dispatched(engine_batch(false), &model);
         let written = lines.lock().unwrap().clone();
         assert!(
             written.iter().any(|l| l == "palette reconciled"),
@@ -2078,7 +2101,7 @@ mod tests {
         let (mut felt, lines) = FeltLog::recording();
         felt.note_dispatched(Dispatch::Input, &model);
         model.engine.cmdline_speculated = None;
-        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        felt.note_dispatched(engine_batch(false), &model);
         let written = lines.lock().unwrap().clone();
         assert!(
             written.iter().any(|l| l == "palette closed withdrawn"),
@@ -2089,13 +2112,60 @@ mod tests {
         model.palette_enabled = true;
         model.engine.cmdline = Some(view_core::model::CmdlineState::bare_colon());
         let (mut felt, lines) = FeltLog::recording();
-        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        felt.note_dispatched(engine_batch(false), &model);
         model.engine.cmdline = None;
-        felt.note_dispatched(Dispatch::EngineBatch, &model);
+        felt.note_dispatched(engine_batch(false), &model);
         let written = lines.lock().unwrap().clone();
         assert!(
             written.iter().any(|l| l == "palette closed"),
             "a command line nvim opened and closed is no guess: {written:?}"
+        );
+    }
+
+    /// The batch that opens and closes a command line in one flush. `:`
+    /// then `<Esc>` inside a single nvim flush -- likeliest on the slow link
+    /// the speculated palette is sized for -- settles to no command line and
+    /// no guess, which is a withdrawal's own end state, so the batch's own
+    /// `cmdline_show` is the only thing that says nvim really opened one.
+    #[test]
+    fn a_show_and_a_hide_in_one_batch_is_a_close_and_not_a_withdrawal() {
+        use view_core::events::UiEvent;
+        use view_core::msg::Msg;
+        use view_core::native::speculate::{CmdlineSpeculation, SpecStamp};
+
+        let mut model = view_core::model::Model::new();
+        model.palette_enabled = true;
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation {
+            since: SpecStamp::new(std::time::Duration::ZERO),
+            grid: view_core::grid::registry::GLOBAL_GRID,
+        });
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::Input, &model);
+
+        // what the fold leaves behind for such a batch: the show installed
+        // the real line and withdrew the guess, the hide took the line away
+        model.engine.cmdline_speculated = None;
+        let batch = Msg::Redraw(vec![
+            UiEvent::CmdlineShow {
+                content: Vec::new(),
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+            UiEvent::CmdlineHide,
+        ]);
+        felt.note_dispatched(Dispatch::of(&batch), &model);
+
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l == "palette closed"),
+            "a command line nvim really opened is no guess, whatever one batch carried: {written:?}"
+        );
+        assert!(
+            !written.iter().any(|l| l == "palette closed withdrawn"),
+            "the guess was answered, not refuted: {written:?}"
         );
     }
 
@@ -2198,6 +2268,12 @@ mod tests {
             !still.contains(&512),
             "a second window's colours reached a reading pinned to the file's: {still:?}"
         );
+    }
+
+    /// One engine batch as the loop classifies it, saying whether it
+    /// carried the `cmdline_show` that answers a guess.
+    fn engine_batch(answered_cmdline: bool) -> Dispatch {
+        Dispatch::EngineBatch { answered_cmdline }
     }
 
     /// One key waiting for the screen, as the loop holds it.
@@ -2687,7 +2763,9 @@ mod tests {
         ));
         assert!(matches!(
             Dispatch::of(&Msg::Redraw(vec![view_core::events::UiEvent::Flush])),
-            Dispatch::EngineBatch
+            Dispatch::EngineBatch {
+                answered_cmdline: false
+            }
         ));
 
         let model = view_core::model::Model::new();

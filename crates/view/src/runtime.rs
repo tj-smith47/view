@@ -288,6 +288,23 @@ pub(crate) fn dispatch<E: EngineOps>(
     flow
 }
 
+/// The loop's per-pass age check, and whatever a guess the backstop took
+/// back owes the engine: `None` when it owed nothing.
+///
+/// The un-hides are the reason this is a send and not just a fold. nvim
+/// never opened a command line for a guess, so no `cmdline_hide` follows to
+/// release what was absorbed under it, and this pass is the only place they
+/// can go out from.
+#[must_use]
+fn expire_speculation_to_engine<E: EngineOps>(
+    model: &mut Model,
+    executor: &Executor<E>,
+    clock: crate::speculate::SpeculationClock,
+) -> Option<Flow> {
+    let released = expire_speculation(model, clock);
+    (!released.is_empty()).then(|| run_in_wire_order(executor, released, false))
+}
+
 /// Runs `effects` in the order they go on the wire, stamping each on the
 /// `takeover` topic while `stamping`, and stops at the first effect whose
 /// flow is not `Continue`.
@@ -1133,13 +1150,9 @@ pub fn run(
         // every pass, whatever the engine has or has not sent: an age bound
         // reachable only when a redraw arrives could never fire during the
         // total redraw stall it exists to bound
-        // the un-hides a guess withdrawn on that backstop owes: nvim never
-        // opened a command line, so no `cmdline_hide` follows to release
-        // what was absorbed under the guess and this pass is the only place
-        // it can go out from
-        let released = expire_speculation(&mut model, follow_ups.speculate);
-        if !released.is_empty() {
-            let flow = run_in_wire_order(&executor, released, false);
+        if let Some(flow) =
+            expire_speculation_to_engine(&mut model, &executor, follow_ups.speculate)
+        {
             if let Some(code) = crate::recovery::resolve(
                 &mut model,
                 &executor,
@@ -4321,6 +4334,187 @@ mod tests {
         );
 
         assert!(model.speculate.pending().is_empty());
+    }
+
+    /// A session with a plugin's completion menu absorbed under a
+    /// speculated `:`, on the terms the fold requires: the palette on, the
+    /// engine holding the keyboard, and nvim's own command line closed.
+    #[cfg(not(feature = "bench-no-speculate"))]
+    fn absorbed_under_a_guess<E: EngineOps>(
+        executor: &Executor<E>,
+        follow_ups: &mut FollowUps<'_>,
+    ) -> Model {
+        let mut model = Model::with_term_size(100, 30);
+        model.palette_enabled = true;
+        model.engine.mode.current = "normal".to_string();
+        let _ = dispatch(
+            &mut model,
+            executor,
+            follow_ups,
+            Msg::Redraw(vec![view_core::events::UiEvent::GridResize {
+                grid: 1,
+                width: 100,
+                height: 29,
+            }]),
+        );
+        let _ = dispatch(
+            &mut model,
+            executor,
+            follow_ups,
+            Msg::Key(view_core::msg::Key {
+                notation: ":".into(),
+            }),
+        );
+        assert!(
+            model.engine.cmdline_speculated.is_some(),
+            "the gate refused a `:` these cases are about"
+        );
+        // nvim-cmp's cmdline menu, on the rows the palette wants
+        let _ = dispatch(
+            &mut model,
+            executor,
+            follow_ups,
+            Msg::FloatObserved(view_core::native::surfaces::FloatSighting {
+                win: 1003,
+                buf: 2,
+                row: 26,
+                col: 0,
+                width: 20,
+                height: 2,
+                anchor: view_core::native::surfaces::FloatAnchor::NorthWest,
+                zindex: 1001,
+                filetype: "cmp_menu".to_string(),
+                name: String::new(),
+                hidden: false,
+            }),
+        );
+        model
+    }
+
+    /// Whether the un-hide for the absorbed window reached the engine.
+    #[cfg(not(feature = "bench-no-speculate"))]
+    fn un_hid(ops: &FakeOps) -> bool {
+        ops.calls
+            .borrow()
+            .iter()
+            .any(|call| call == "set_float_hidden(1003,false)")
+    }
+
+    /// The evidence path's own wiring. A cursor move on the grid the `:` was
+    /// typed on withdraws the guess inside the fold of the redraw, so the
+    /// un-hides it owes are produced before `update()` is even called --
+    /// they reach the engine only because `dispatch` puts them ahead of the
+    /// fold's own effects.
+    #[cfg(not(feature = "bench-no-speculate"))]
+    #[test]
+    fn the_un_hide_a_withdrawn_guess_owes_reaches_the_engine_from_the_redraw_fold() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let mut model = absorbed_under_a_guess(&executor, &mut follow_ups);
+        assert!(!un_hid(&ops), "nothing has taken the guess back yet");
+
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Redraw(vec![view_core::events::UiEvent::GridCursorGoto {
+                grid: 1,
+                row: 4,
+                col: 2,
+            }]),
+        );
+
+        assert!(
+            model.engine.cmdline_speculated.is_none(),
+            "the `:` went somewhere other than a command line"
+        );
+        assert!(
+            un_hid(&ops),
+            "the window the guess hid is still hidden: {:?}",
+            ops.calls.borrow()
+        );
+    }
+
+    /// The backstop's own wiring. A guess nothing refutes comes off on a
+    /// pass no message dispatched, so the loop's per-pass check is the only
+    /// place its un-hides can go out from.
+    #[cfg(not(feature = "bench-no-speculate"))]
+    #[test]
+    fn the_un_hide_the_backstop_owes_reaches_the_engine_from_the_loops_own_pass() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let mut model = absorbed_under_a_guess(&executor, &mut follow_ups);
+        assert!(!un_hid(&ops));
+
+        // the bound modelled by an origin moved back past it rather than by
+        // sleeping through it
+        let past = crate::speculate::SpeculationClock::started_at(
+            std::time::Instant::now()
+                - view_core::native::speculate::SPECULATION_MAX_AGE
+                - std::time::Duration::from_millis(50),
+        );
+        let flow = expire_speculation_to_engine(&mut model, &executor, past);
+
+        assert!(matches!(flow, Some(Flow::Continue)));
+        assert!(model.engine.cmdline_speculated.is_none());
+        assert!(
+            un_hid(&ops),
+            "the backstop took the guess back and kept the window hidden: {:?}",
+            ops.calls.borrow()
+        );
+    }
+
+    /// The third site. A mode change out of the gate's modes withdraws the
+    /// guess inside `update()`, so its un-hides leave through the fold's own
+    /// return rather than through the prepend the two paths above share.
+    #[cfg(not(feature = "bench-no-speculate"))]
+    #[test]
+    fn the_un_hide_a_mode_change_owes_reaches_the_engine_from_the_folds_return() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None, None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let mut model = absorbed_under_a_guess(&executor, &mut follow_ups);
+        assert!(!un_hid(&ops));
+
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Redraw(vec![view_core::events::UiEvent::ModeChange {
+                mode: "insert".to_string(),
+                mode_idx: 0,
+            }]),
+        );
+
+        assert!(
+            model.engine.cmdline_speculated.is_none(),
+            "the `:` was typed into something instead of opening a command line"
+        );
+        assert!(
+            un_hid(&ops),
+            "the window the guess hid is still hidden: {:?}",
+            ops.calls.borrow()
+        );
     }
 
     #[test]

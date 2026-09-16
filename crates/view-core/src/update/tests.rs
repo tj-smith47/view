@@ -12408,9 +12408,15 @@ fn a_redraw_withdraws_the_speculated_palette_only_where_the_colon_went_elsewhere
     }
 }
 
-/// A command line that closes without ever having been shown -- a `:` a
-/// mapping swallowed and then cancelled -- takes the speculated palette with
-/// it rather than leaving it for the age bound.
+/// A command line that closes without ever having been shown takes the
+/// speculated palette with it rather than leaving it for the age bound.
+///
+/// A real nvim batch, not a defensive one: `<silent>` suppresses
+/// `cmdline_show` and not `cmdline_hide`, so every `<silent>` normal-mode
+/// mapping that runs an Ex command sends a lone hide, and a `:` a plugin's
+/// own `getchar()` swallows arrives in that same silence. What the
+/// withdrawal owes the engine is the other half
+/// (`surface_conflict`'s `a_hide_with_no_show_behind_it_returns_the_un_hides_the_guess_owes`).
 #[test]
 fn a_cmdline_hide_while_speculating_withdraws_the_palette() {
     let mut m = model();
