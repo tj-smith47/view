@@ -1710,5 +1710,37 @@ else
     "$n" "the checker finishes on the shipped tree inside two minutes under $timed_bash (bash $timed_major)"
 fi
 
+# ---------------------------------------------------------------------------
+# the population the sweep perturbs is this grading's own answer
+# ---------------------------------------------------------------------------
+# check-budget-drift-sweep.sh used to take every figure on these pages that
+# equalled any recorded seat, and a re-seat that made three bare-Neovim
+# readings equal a cell put them in its population as figures this check was
+# expected to grade. It grades one reading per sentence -- view's -- so the
+# sweep asks it which, through scripts/lib/moment-grading.sh in population
+# mode. The seats below seat both readings of the planted row, which is the
+# state a value-shaped population could not tell apart.
+# shellcheck source=lib/moment-grading.sh
+. "$(cd "$(dirname "$CHECKER")" && pwd)/lib/moment-grading.sh"
+# The pages alone, and no new_case: that helper numbers a case of its own,
+# and report() below numbers this one.
+CASE="$WORK/population"
+mkdir -p "$CASE"
+plant_pages
+printf 'dev-linux\tminimal\techo.view_p99_ms\t0.7312\n' > "$CASE/seats.tsv"
+printf 'dev-linux\tminimal\tpicker.first_page_p99_ms\t0.6689\n' >> "$CASE/seats.tsv"
+got=$(awk -v page="$PERF" -v fallback="dev-linux" -v mode="population" \
+  "$MOMENT_GRADE_AWK" "$CASE/seats.tsv" "$CASE/$PERF" | tr '\t' ' ')
+want='POP 4 0.73 echo.view_p99_ms
+POP 8 0.73 echo.view_p99_ms'
+mismatch=""
+if [ "$got" != "$want" ]; then
+  mismatch="want
+$want
+got
+$got"
+fi
+report 'the population holds the view reading of a row and not the engine reading beside it, both seated' "$mismatch"
+
 printf '\n%s cases, %s failures\n' "$n" "$failures"
 [ "$failures" -eq 0 ]

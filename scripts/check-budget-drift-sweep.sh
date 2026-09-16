@@ -10,9 +10,12 @@
 # a value some class baseline records is perturbed by one digit in a scratch
 # copy of the tree, and every member of every trials array is moved outside
 # the band its entry's seat allows; the checker must then fail naming that
-# file and line. A figure that survives is a value nothing grades, which
-# goes stale in silence at the next --record run, and it is printed with its
-# site.
+# file and line. On the two pages graded by the moment they state in words,
+# the figures are the ones that grading resolves rather than the ones equal
+# to a seat, because a seat can also equal the bare-engine reading beside
+# view's and the checker never resolves that one. A figure that survives is
+# a value nothing grades, which goes stale in silence at the next --record
+# run, and it is printed with its site.
 #
 #   bash scripts/check-budget-drift-sweep.sh
 #   bash scripts/check-budget-drift-sweep.sh --checker /path/to/copy
@@ -50,10 +53,25 @@ if [ ! -f "$CHECKER" ]; then
   printf 'checker not found: %s\n' "$CHECKER" >&2
   exit 2
 fi
+# Beside the checker under test rather than beside this script, so a run
+# pointed at a copy grades the population that copy resolves.
+CHECKER_LIB="$(cd "$(dirname "$CHECKER")" && pwd)/lib/moment-grading.sh"
+if [ ! -f "$CHECKER_LIB" ]; then
+  printf 'grading library not found beside the checker: %s\n' "$CHECKER_LIB" >&2
+  exit 2
+fi
+# shellcheck source=lib/moment-grading.sh
+. "$CHECKER_LIB"
 
 BUDGETS='crates/view-bench/budgets.toml'
 BASELINES='crates/view-bench/baselines'
 PAGES='README.md docs/performance.md docs/benchmarking.md'
+# The two pages whose figures are graded by the moment they state in words,
+# where one reading of a sentence belongs to view and the bare-engine one
+# beside it is a figure no cell records. Their population comes from that
+# grading instead of from the seat table, so what the sweep perturbs and what
+# the check grades cannot be two sets.
+MOMENT_PAGES='README.md docs/performance.md'
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/check-budget-drift-sweep.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -105,8 +123,20 @@ population="$WORK/population.tsv"
 : > "$population"
 
 collect_page() {
-  local rel="$1"
-  awk -v file="$rel" '
+  local rel="$1" bymoment=0 graded="" class=""
+  # Asked of the grading rather than decided here: a second reading of which
+  # figure a sentence states drifts from the first, and the drift it shipped
+  # was three bare-Neovim readings entering the population the day a re-seat
+  # made them equal a cell.
+  case " $MOMENT_PAGES " in (*" $rel "*)
+    bymoment=1
+    class=$(awk "$MOMENT_CLASS_AWK" "$TREE/$rel")
+    graded=$(awk -v page="$rel" -v fallback="$class" -v mode="population" \
+      "$MOMENT_GRADE_AWK" "$seats" "$TREE/$rel" |
+      awk -F'\t' '$1 == "POP" { printf " %s:%s ", $2, $3 }')
+    ;;
+  esac
+  awk -v file="$rel" -v bymoment="$bymoment" -v graded="$graded" '
     FNR == NR {
       split($0, f, "\t")
       key = f[3]
@@ -156,6 +186,10 @@ collect_page() {
         num = clean(w[j])
         if (num !~ /^-?[0-9]+\.[0-9]+$/) { continue }
         idx++
+        # After the count and not before it: the index is which number token
+        # the perturbation edits, so it counts every number the line carries
+        # whether or not anything grades it.
+        if (bymoment && index(graded, " " FNR ":" num " ") == 0) { continue }
         if (delta_after(w, j)) { continue }
         u = unit_of(clean(w[j + 1]))
         fmt = "%." decimals(num) "f"
