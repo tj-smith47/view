@@ -76,7 +76,9 @@ impl Frame {
 /// - not state at all: `dirty`, `running`, `fatal_reason`, `config_was_read`,
 ///   `checktime_generation`, `pending_file_gone_probes`, `speculate`,
 ///   `supervision`, `claimed_keys`, `key_bindings`, `cwd`, `colorscheme`,
-///   `mouse_capture`, `mouse_on`, `next_overlay_id`, `attached` (it decides
+///   `mouse_capture`, `mouse_on`, `colon_mapped` (it gates whether a `:` is
+///   speculated at all, and `cmdline_speculated` is the state that reaches
+///   a layer), `next_overlay_id`, `attached` (it decides
 ///   only when the UI goes on, and the frame that follows is what flips
 ///   `chrome_painted`, which is here) and `stdin_relay` (an attach option
 ///   the session was started with)
@@ -109,6 +111,10 @@ struct Inputs {
     had_overlays: bool,
     tabline: Option<view_core::model::TablineState>,
     cmdline: Option<view_core::model::CmdlineState>,
+    // presence alone: what the speculated palette draws is one fixed state
+    // (`CmdlineState::bare_colon`), so the only thing a frame can differ by
+    // is whether one is up
+    cmdline_speculated: bool,
     popupmenu: Option<view_core::model::PopupmenuState>,
     // the whole stack, not its `entries` alone: the pause key changes no
     // entry, only whether the top box carries the mark that says the stack
@@ -141,6 +147,7 @@ impl Inputs {
             had_overlays: !model.overlays().is_empty(),
             tabline: engine.tabline.clone(),
             cmdline: engine.cmdline.clone(),
+            cmdline_speculated: engine.cmdline_speculated.is_some(),
             popupmenu: engine.popupmenu.clone(),
             messages: engine.messages.clone(),
             toast_motion: model.toast_motion.clone(),
@@ -164,6 +171,7 @@ impl Inputs {
             && self.statusline_rows == model.statusline_rows()
             && self.tabline == engine.tabline
             && self.cmdline == engine.cmdline
+            && self.cmdline_speculated == engine.cmdline_speculated.is_some()
             && self.popupmenu == engine.popupmenu
             && self.messages == engine.messages
             && self.toast_motion == model.toast_motion

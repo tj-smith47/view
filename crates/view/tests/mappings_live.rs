@@ -60,12 +60,18 @@ struct Session {
 
 impl Session {
     fn start(name: &str) -> Self {
+        Self::start_with(name, "")
+    }
+
+    /// The same fixture with `extra` appended to its `init.lua`.
+    fn start_with(name: &str, extra: &str) -> Self {
         let dir = common::fixture(
             &format!("mappings-live-{name}"),
             &format!(
                 "vim.g.mapleader = '{LEADER}'\n\
                  vim.g.view_user_ff = 0\n\
-                 vim.keymap.set('n', '<leader>ff', function() vim.g.view_user_ff = 1 end)\n"
+                 vim.keymap.set('n', '<leader>ff', function() vim.g.view_user_ff = 1 end)\n\
+                 {extra}"
             ),
         );
         let cfg = common::isolated_reading(&dir.join("init.lua"));
@@ -120,12 +126,19 @@ impl Session {
         common::drain_until(&self.rx, budget, want)
     }
 
-    fn claims(&self) -> Vec<MappingClaim> {
+    fn report(&self) -> (Vec<MappingClaim>, bool) {
         self.wait_for(ARRIVAL, |msg| match msg {
-            Msg::MappingsClaimed { claimed } => Some(claimed.clone()),
+            Msg::MappingsClaimed {
+                claimed,
+                colon_mapped,
+            } => Some((claimed.clone(), *colon_mapped)),
             _ => None,
         })
         .expect("the registration must answer with its claim list")
+    }
+
+    fn claims(&self) -> Vec<MappingClaim> {
+        self.report().0
     }
 
     fn invoke(&self, budget: Duration) -> Option<(String, String)> {
@@ -304,5 +317,32 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
         session.invoke(ARRIVAL),
         Some(("picker".to_string(), "grep".to_string())),
         "the command must invoke the feature it names"
+    );
+}
+
+/// The `:` reading the palette's speculation is gated on, taken off the same
+/// keymap snapshot the claims are.
+///
+/// Live rather than decoded from a canned reply: what is asserted is that a
+/// real nvim, having read a real config, answers `true` for a `:` the config
+/// mapped -- the one thing a fixture reply cannot say anything about.
+#[test]
+fn the_claim_report_says_whether_the_users_config_maps_colon() {
+    let free = Session::start("colon-free");
+    free.register(&NativeConfig::all_enabled());
+    assert!(
+        !free.report().1,
+        "nothing in this fixture maps `:`, so the palette may speculate on it"
+    );
+
+    let mapped = Session::start_with(
+        "colon-mapped",
+        "vim.keymap.set('n', ':', ':', { silent = true })\n",
+    );
+    mapped.register(&NativeConfig::all_enabled());
+    assert!(
+        mapped.report().1,
+        "the config maps `:` in normal mode, and a speculated palette would be drawn for a key \
+         that reaches the mapping instead of the command line"
     );
 }

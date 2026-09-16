@@ -166,6 +166,14 @@ pub(super) fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         "notify_sink" => Some(Msg::NotifySinkRead {
             foreign: first.as_bool()?,
         }),
+        // the `:` reading taken again after a plugin loaded late, sent only
+        // when it disagrees with the last one: the registration's own answer
+        // names only what was mapped when it went out, and a plugin that
+        // maps `:` afterwards is what closes the palette's speculation
+        // (`REGISTER_MAPPINGS_CHUNK`)
+        "colon_mapped" => Some(Msg::ColonMappingRead {
+            mapped: first.as_bool()?,
+        }),
         _ => None,
     }
 }
@@ -297,15 +305,45 @@ pub(super) fn decode_buf_lines_event(
     }
 }
 
-/// Decodes a mapping registration's reply: an array of `{feature, lhs,
-/// had_user_mapping}` rows, one per key the chunk registered, in
-/// registration order.
+/// What one mapping registration answered: the claims, and its reading of
+/// whether `:` carries a user mapping.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct MappingReport {
+    pub(super) claimed: Vec<MappingClaim>,
+    pub(super) colon_mapped: bool,
+}
+
+/// Decodes a mapping registration's reply: the claim rows under `claims`,
+/// and the `:` reading under `colon_mapped`.
+///
+/// An absent or undecodable `colon_mapped` reads as `false` -- the palette
+/// then speculates on `:` in a session where the reading could not be taken,
+/// which costs an empty palette for the withdraw window on a config that
+/// does map it, against never speculating at all on every config that does
+/// not.
+pub(super) fn decode_mapping_report(result: &Value) -> MappingReport {
+    let Some(pairs) = result.as_map() else {
+        return MappingReport::default();
+    };
+    MappingReport {
+        claimed: crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_CLAIMS_KEY)
+            .map(decode_mapping_claims)
+            .unwrap_or_default(),
+        colon_mapped: crate::wire::map_find(pairs, crate::nvim_api::MAPPINGS_COLON_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+/// Decodes the claim rows themselves: an array of `{feature, lhs,
+/// had_user_mapping}`, one per key the chunk registered, in registration
+/// order.
 ///
 /// A row missing `feature` or `lhs` is dropped rather than reported as a
 /// claim naming nothing, and a missing `had_user_mapping` reads as `false`:
 /// the flag is what promotes a claim to news, so an undecodable one must not
 /// invent an announcement about a user's key.
-pub(super) fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
+fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
     let Some(rows) = result.as_array() else {
         return Vec::new();
     };
@@ -332,6 +370,9 @@ pub(super) fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct TakeoverReading {
     pub(super) claimed: Vec<MappingClaim>,
+    /// The mapping registration's `:` reading, carried through the takeover
+    /// exactly as the claims beside it are.
+    pub(super) colon_mapped: bool,
     pub(super) messages: String,
     pub(super) foreign_notifier: bool,
     /// The modules whose own `disable` ran, which is what lets a notice
@@ -352,10 +393,12 @@ pub(super) fn decode_takeover_reply(result: &Value) -> TakeoverReading {
     let Some(pairs) = result.as_map() else {
         return TakeoverReading::default();
     };
+    let mappings = crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_CLAIMS_KEY)
+        .map(decode_mapping_report)
+        .unwrap_or_default();
     TakeoverReading {
-        claimed: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_CLAIMS_KEY)
-            .map(decode_mapping_claims)
-            .unwrap_or_default(),
+        claimed: mappings.claimed,
+        colon_mapped: mappings.colon_mapped,
         messages: crate::wire::map_find(pairs, crate::nvim_api::TAKEOVER_MESSAGES_KEY)
             .and_then(Value::as_str)
             .unwrap_or_default()

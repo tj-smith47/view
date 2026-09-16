@@ -10,6 +10,8 @@ pub mod overlay;
 
 pub use cache::SurfaceCache;
 
+use std::borrow::Cow;
+
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
 use view_core::grid::registry::GridId;
@@ -474,7 +476,8 @@ pub fn render(model: &Model) -> Surface {
         model.overlays().last().map(|open| &open.kind),
         Some(OverlayKind::Prompt(_))
     );
-    if let Some(cmdline) = &engine.cmdline {
+    let painted = painted_cmdline(model);
+    if let Some(cmdline) = painted.as_deref() {
         if prompt_open {
             // nothing to add: the Prompt overlay already covers this
         } else if model.palette_enabled {
@@ -1007,6 +1010,24 @@ fn cmdline_cursor_col(cmdline: &CmdlineState) -> u16 {
 /// Takes the frame's own `layers` so the agent panel's caret lands on the
 /// row this frame painted its composer on, rather than on a second resolve
 /// of the panel's rect and a second render of its view.
+/// The command line this frame draws: nvim's own while one is open, or the
+/// empty `:` a speculated open stands on until `cmdline_show` answers it
+/// (`view_core::native::speculate::CmdlineSpeculation`).
+///
+/// One derivation for the box and for the caret. Read separately, the two
+/// disagreed about whether a command line was on screen at all, which put
+/// the caret back in the buffer under an open palette for the length of the
+/// engine's silence.
+fn painted_cmdline(model: &Model) -> Option<Cow<'_, CmdlineState>> {
+    match &model.engine.cmdline {
+        Some(cmdline) => Some(Cow::Borrowed(cmdline)),
+        None => model
+            .engine
+            .cmdline_speculated
+            .map(|_| Cow::Owned(CmdlineState::bare_colon())),
+    }
+}
+
 fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpec> {
     let (width, height) = model.engine.grid().size();
     if width == 0 || height == 0 {
@@ -1024,7 +1045,8 @@ fn cursor_spec(model: &Model, offset: u16, layers: &[Layer]) -> Option<CursorSpe
     // the coordinate space its own source rect came from -- a shared tail
     // add here double-counts `offset` for the palette branch, whose rect
     // (via `palette_rect`) is offset-inclusive already.
-    let (row, col) = if let Some(cmdline) = &model.engine.cmdline {
+    let painted = painted_cmdline(model);
+    let (row, col) = if let Some(cmdline) = painted.as_deref() {
         if model.palette_enabled {
             palette_cursor(model, offset, cmdline)
         } else {
@@ -3043,6 +3065,57 @@ mod tests {
             })
             .expect("palette_enabled must produce a Palette layer while the cmdline is open");
         assert_eq!(palette.query, ":set nu");
+    }
+
+    /// A `:` view has sent but the engine has not answered yet draws the
+    /// palette the answering `cmdline_show` will draw: the same layer, in
+    /// the same rect, so the frame that installs the real command line moves
+    /// nothing a reader is looking at.
+    #[test]
+    fn a_speculated_colon_draws_the_layer_the_real_bare_colon_draws() {
+        let speculated = {
+            let mut model = model_with_grid(80, 24);
+            model.term_width = 80;
+            model.term_height = 24;
+            model.palette_enabled = true;
+            model.engine.cmdline_speculated =
+                Some(view_core::native::speculate::CmdlineSpeculation {
+                    since: view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO),
+                });
+            render(&model)
+        };
+        let real = {
+            let mut model = model_with_grid(80, 24);
+            model.term_width = 80;
+            model.term_height = 24;
+            model.palette_enabled = true;
+            apply(
+                &mut model,
+                UiEvent::CmdlineShow {
+                    content: vec![(0, String::new())],
+                    pos: 0,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+            );
+            render(&model)
+        };
+
+        let palette = |surface: &Surface| {
+            surface
+                .layers
+                .iter()
+                .find(|l| matches!(l.kind, LayerKind::Palette(_)))
+                .map(|l| (l.rect, l.kind.clone()))
+                .expect("a speculated `:` draws the palette just as the shown one does")
+        };
+        assert_eq!(palette(&speculated), palette(&real));
+        assert_eq!(
+            speculated.cursor, real.cursor,
+            "the caret sits where the real empty command line puts it"
+        );
     }
 
     /// `PaletteState::query` must show `cmdline.prompt` (e.g. `:call

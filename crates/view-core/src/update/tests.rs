@@ -23,6 +23,7 @@ use crate::native::ai_panel::ReviewSync;
 use crate::native::ext::Ext;
 use crate::native::geometry::OverlayBox;
 use crate::native::keys::{Action, Direction};
+use crate::native::speculate::{CmdlineSpeculation, SpecStamp};
 use crate::native::supervision::{
     ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
     ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION,
@@ -7093,6 +7094,7 @@ fn claimed_keys_are_recorded_for_the_handover_report() {
         &mut m,
         Msg::MappingsClaimed {
             claimed: claimed.clone(),
+            colon_mapped: false,
         },
     );
     assert!(effects.is_empty(), "{effects:?}");
@@ -12339,5 +12341,107 @@ fn an_escape_takes_the_conflict_notice_only_once_it_has_stood_its_window() {
             .flat_map(|entry| entry.lines())
             .any(|line| line.starts_with(family)),
         "nothing is discarded: the remedy is still in the history"
+    );
+}
+
+/// The reconcile side of the palette's speculation: the `cmdline_show` view
+/// was waiting for installs the real command line and clears the guess, so
+/// exactly one of the two is ever set.
+#[test]
+fn a_cmdline_show_replaces_the_speculated_palette_with_the_line_it_guessed_at() {
+    let mut m = model();
+    m.engine.cmdline_speculated = Some(CmdlineSpeculation {
+        since: SpecStamp::new(Duration::ZERO),
+    });
+
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::CmdlineShow {
+            content: vec![(0, String::new())],
+            pos: 0,
+            firstc: ":".to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }]),
+    );
+
+    assert!(m.engine.cmdline_speculated.is_none());
+    assert_eq!(m.engine.cmdline, Some(CmdlineState::bare_colon()));
+}
+
+/// The withdrawals a redraw carries. A mode that is neither a command-line
+/// mode nor one the gate opens from says the `:` went somewhere else; a mode
+/// nvim merely re-announces does not.
+#[test]
+fn a_redraw_withdraws_the_speculated_palette_only_where_the_colon_went_elsewhere() {
+    for (mode, withdrawn) in [
+        ("insert", true),
+        ("operator", true),
+        ("terminal", true),
+        ("cmdline_normal", false),
+        ("normal", false),
+        ("visual", false),
+    ] {
+        let mut m = model();
+        m.engine.cmdline_speculated = Some(CmdlineSpeculation {
+            since: SpecStamp::new(Duration::ZERO),
+        });
+        m.dirty = false;
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::ModeChange {
+                mode: mode.to_string(),
+                mode_idx: 0,
+            }]),
+        );
+
+        assert_eq!(
+            m.engine.cmdline_speculated.is_none(),
+            withdrawn,
+            "mode_change to {mode} disagreed with the withdraw rule"
+        );
+        assert_eq!(m.dirty, withdrawn, "a withdrawal has to be painted");
+    }
+}
+
+/// A command line that closes without ever having been shown -- a `:` a
+/// mapping swallowed and then cancelled -- takes the speculated palette with
+/// it rather than leaving it for the age bound.
+#[test]
+fn a_cmdline_hide_while_speculating_withdraws_the_palette() {
+    let mut m = model();
+    m.engine.cmdline_speculated = Some(CmdlineSpeculation {
+        since: SpecStamp::new(Duration::ZERO),
+    });
+    m.dirty = false;
+
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+
+    assert!(m.engine.cmdline_speculated.is_none());
+    assert!(m.dirty);
+}
+
+/// The reading the gate is closed by, and the late re-read that closes it
+/// for a plugin loaded after the registration answered.
+#[test]
+fn the_colon_mapping_reading_is_recorded_and_replaced_by_the_late_re_read() {
+    let mut m = model();
+    assert!(!m.colon_mapped(), "nothing has been read yet");
+
+    let _ = update(
+        &mut m,
+        Msg::MappingsClaimed {
+            claimed: Vec::new(),
+            colon_mapped: true,
+        },
+    );
+    assert!(m.colon_mapped());
+
+    let _ = update(&mut m, Msg::ColonMappingRead { mapped: false });
+    assert!(
+        !m.colon_mapped(),
+        "the later reading is the true one -- a plugin that mapped `:` can be unloaded again"
     );
 }

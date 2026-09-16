@@ -15,7 +15,7 @@ mod decode;
 use decode::{
     decode_bridge_event, decode_buf_lines_event, decode_buffer_list_reply, decode_clipboard_get,
     decode_clipboard_set, decode_delete_confirm_reply, decode_feature_invoke,
-    decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_claims, decode_preview_reply,
+    decode_float_rows_reply, decode_hl_probe_reply, decode_mapping_report, decode_preview_reply,
     decode_prompt_reply, decode_rename_reply, decode_swap_recovery_reply, decode_takeover_reply,
     takeover_error_text, SwapRecoveryReading, TakeoverReading,
 };
@@ -610,12 +610,15 @@ impl EngineHandle {
                                     // registration that did not happen, and a
                                     // registration that did not happen took
                                     // no key it could name
-                                    let claimed = if error == Value::Nil {
-                                        decode_mapping_claims(&result)
+                                    let report = if error == Value::Nil {
+                                        decode_mapping_report(&result)
                                     } else {
-                                        Vec::new()
+                                        Default::default()
                                     };
-                                    pump.route_claims(Msg::MappingsClaimed { claimed });
+                                    pump.route_claims(Msg::MappingsClaimed {
+                                        claimed: report.claimed,
+                                        colon_mapped: report.colon_mapped,
+                                    });
                                 }
                             }
                             Some(Waiter::Takeover) => {
@@ -649,6 +652,7 @@ impl EngineHandle {
                                     });
                                     pump.route_claims(Msg::MappingsClaimed {
                                         claimed: reading.claimed,
+                                        colon_mapped: reading.colon_mapped,
                                     });
                                     pump.route_claimants_handed_back(Msg::ClaimantsHandedBack {
                                         modules: reading.handed_back,
@@ -703,7 +707,7 @@ impl EngineHandle {
                                     // buffer list, the same "safe default
                                     // over a stuck generation" precedent
                                     // decode_hl_probe_reply and
-                                    // decode_mapping_claims already follow
+                                    // decode_mapping_report already follow
                                     // -- see
                                     // docs/picker-buffer-list-wire-capture.md
                                     let names = if error == Value::Nil {
@@ -3684,6 +3688,60 @@ mod tests {
                     warnings: 1
                 })
             ),
+            "got {decoded:?}"
+        );
+    }
+
+    /// The registration's two answers, off one reply: the claim rows and the
+    /// `:` reading the palette's speculation is gated on.
+    #[test]
+    fn a_mapping_reply_decodes_its_claims_and_its_colon_reading() {
+        let reply = Value::Map(vec![
+            (
+                Value::from(crate::nvim_api::MAPPINGS_CLAIMS_KEY),
+                Value::Array(vec![Value::Map(vec![
+                    (Value::from("feature"), Value::from("picker")),
+                    (Value::from("lhs"), Value::from("<leader>ff")),
+                    (Value::from("had_user_mapping"), Value::from(true)),
+                ])]),
+            ),
+            (
+                Value::from(crate::nvim_api::MAPPINGS_COLON_KEY),
+                Value::from(true),
+            ),
+        ]);
+
+        let report = super::decode::decode_mapping_report(&reply);
+
+        assert_eq!(report.claimed.len(), 1);
+        assert_eq!(report.claimed[0].lhs, "<leader>ff");
+        assert!(report.colon_mapped);
+    }
+
+    /// A reply carrying no `:` reading at all answers `false`, which is the
+    /// reading that leaves the palette speculating: never speculating is the
+    /// whole feature withheld on every config, where speculating wrongly
+    /// costs the withdraw window on the ones that do map `:`.
+    #[test]
+    fn a_mapping_reply_missing_its_colon_reading_reads_as_unmapped() {
+        let reply = Value::Map(vec![(
+            Value::from(crate::nvim_api::MAPPINGS_CLAIMS_KEY),
+            Value::Array(Vec::new()),
+        )]);
+
+        let report = super::decode::decode_mapping_report(&reply);
+
+        assert!(report.claimed.is_empty());
+        assert!(!report.colon_mapped);
+    }
+
+    /// The late re-read: a plugin that loaded after the registration and
+    /// mapped `:` reports on the bridge, and that closes the gate.
+    #[test]
+    fn a_bridge_colon_mapped_event_decodes_the_late_reading() {
+        let decoded = decode_bridge_event(&[Value::from("colon_mapped"), Value::from(true)]);
+        assert!(
+            matches!(decoded, Some(Msg::ColonMappingRead { mapped: true })),
             "got {decoded:?}"
         );
     }

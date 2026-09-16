@@ -571,8 +571,16 @@ fn dispatch(model: &mut Model, msg: Msg) -> Vec<Effect> {
             failure,
             empty,
         } => supervision::note_swap_recovery(model, generation, count, reported, failure, empty),
-        Msg::MappingsClaimed { claimed } => {
+        Msg::MappingsClaimed {
+            claimed,
+            colon_mapped,
+        } => {
             model.record_claimed_keys(claimed);
+            model.record_colon_mapped(colon_mapped);
+            Vec::new()
+        }
+        Msg::ColonMappingRead { mapped } => {
+            model.record_colon_mapped(mapped);
             Vec::new()
         }
         // no effect and no state of its own: the colors arrive through the

@@ -203,6 +203,17 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::ModeChange { mode, mode_idx } => {
+            // a speculated palette is waiting to be told the `:` reached a
+            // command line, and a mode that is neither one nor the one the
+            // guess was made in says it did not -- `:` spent on an operator,
+            // typed into insert, replace or a terminal, or replacing a
+            // Select-mode selection. A re-announced `normal` or `visual` is
+            // not a departure and leaves the palette standing.
+            if !crate::native::speculate::is_cmdline_mode(&mode)
+                && !crate::native::speculate::CMDLINE_GATE_MODES.contains(&mode.as_str())
+            {
+                crate::native::speculate::withdraw_cmdline_speculation(model);
+            }
             model.engine.mode.current = mode;
             model.engine.mode.current_idx = mode_idx;
             Vec::new()
@@ -236,6 +247,11 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                     ov.geometry = p.overlay_box();
                 }
             }
+            // the guess the palette was already drawing, answered: the
+            // speculated state and this one render the same layer in the
+            // same rect (`CmdlineState::bare_colon`), so the frame that
+            // installs the real line moves nothing on screen
+            model.engine.cmdline_speculated = None;
             model.engine.cmdline = Some(cmdline);
             Vec::new()
         }
@@ -247,6 +263,7 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::CmdlineHide => {
+            crate::native::speculate::withdraw_cmdline_speculation(model);
             model.engine.cmdline = None;
             let shown = super::surface_conflict::cmdline_closed(model);
             // the answer landing, so the box goes with it: nvim sends no

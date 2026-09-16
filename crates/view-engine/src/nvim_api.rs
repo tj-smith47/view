@@ -399,6 +399,27 @@ pub const NOTIFY_HOLD_CHUNK: &str = HOLD_NOTIFY_CHUNK;
 /// established in one atomic pass over the specs rather than reassembled
 /// from replies that interleave with startup traffic.
 ///
+/// It answers with one more reading beside the claims: whether the user's
+/// config maps `:` in normal or visual mode
+/// ([`MAPPINGS_COLON_KEY`]). The palette speculates the command line open on
+/// that keystroke (`view_core::native::speculate::may_speculate_cmdline`)
+/// and needs the answer on every `:`, which is not a question to put on the
+/// wire per keystroke; the snapshot this chunk already takes has it. Read
+/// over the global and buffer-local keymaps of `n`, `x` and `v` for the same
+/// reason the claim snapshot spans both: an ftplugin's buffer-local mapping
+/// beats a global one wherever it applies. Re-read on the `User LazyLoad`
+/// the chunk leaves an autocommand for ([`COLON_MAP_GROUP`]), reported on
+/// the `view_bridge` `colon_mapped` event only when the answer moved, so a
+/// plugin that loads late and maps `:` closes the gate for the rest of the
+/// session.
+///
+/// That listener gets an augroup of its own (`view_colon_map`) rather than
+/// joining the one [`DISABLE_CLAIMANTS_CHUNK`] already creates for the same
+/// `User LazyLoad`: that group deletes itself once every claimant module has
+/// been asked, so a re-read folded into it would stop at exactly the moment
+/// the last claimant loads, leaving every plugin loaded after that one free
+/// to map `:` unobserved.
+///
 /// What the user's config already mapped is snapshotted BEFORE the first key
 /// is set, since setting it is what destroys the answer. The snapshot spans
 /// the global table and every loaded buffer's own, because
@@ -443,6 +464,34 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     note(vim.api.nvim_buf_get_keymap(buf, 'n'))
   end
 end
+local function colon_mapped()
+  for _, mode in ipairs({ 'n', 'x', 'v' }) do
+    for _, m in ipairs(vim.api.nvim_get_keymap(mode)) do
+      if m.lhs == ':' or m.lhsraw == ':' then return true end
+    end
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_loaded(buf) then
+        for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, mode)) do
+          if m.lhs == ':' or m.lhsraw == ':' then return true end
+        end
+      end
+    end
+  end
+  return false
+end
+local colon = colon_mapped()
+local group = vim.api.nvim_create_augroup('view_colon_map', { clear = true })
+vim.api.nvim_create_autocmd('User', {
+  group = group,
+  pattern = 'LazyLoad',
+  callback = function()
+    local now = colon_mapped()
+    if now ~= colon then
+      colon = now
+      pcall(vim.rpcnotify, channel, 'view_bridge', 'colon_mapped', now)
+    end
+  end,
+})
 local claimed = {}
 for _, spec in ipairs(specs) do
   local resolved = vim.api.nvim_replace_termcodes(spec.lhs, true, true, true)
@@ -485,7 +534,14 @@ end, {
     return out
   end,
 })
-return claimed";
+return { claims = claimed, colon_mapped = colon }";
+
+/// The two keys [`REGISTER_MAPPINGS_CHUNK`] answers under: the claim rows,
+/// and its reading of whether `:` carries a user mapping. Pinned against the
+/// chunk's own source by
+/// `the_mapping_reply_names_the_keys_its_decoder_reads`.
+pub(crate) const MAPPINGS_CLAIMS_KEY: &str = "claims";
+pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 
 /// The lua chunk [`EngineHandle::register_bridge`] runs inside nvim, taking
 /// view's channel id as its single vararg. Constant by construction for the
@@ -4676,6 +4732,34 @@ mod tests {
                 "{source} must be read before the first key is set"
             );
         }
+    }
+
+    /// The `:` reading travels with the claims: the chunk answers under the
+    /// two keys its decoder reads, consults the visual keymaps the claim
+    /// snapshot does not, and leaves a `LazyLoad` listener of its own rather
+    /// than joining the claimant group that deletes itself.
+    #[test]
+    fn the_mapping_reply_names_the_keys_its_decoder_reads() {
+        assert!(
+            REGISTER_MAPPINGS_CHUNK.contains(&format!(
+                "return {{ {MAPPINGS_CLAIMS_KEY} = claimed, {MAPPINGS_COLON_KEY} = colon }}"
+            )),
+            "the chunk must answer under the keys `decode_mapping_report` looks for"
+        );
+        for mode in ["'x'", "'v'"] {
+            assert!(
+                REGISTER_MAPPINGS_CHUNK.contains(mode),
+                "a `:` mapped in {mode} mode opens no command line either, so the reading spans it"
+            );
+        }
+        assert!(
+            REGISTER_MAPPINGS_CHUNK.contains("nvim_create_augroup('view_colon_map'"),
+            "the re-read needs a group of its own: the claimant group deletes itself"
+        );
+        assert!(
+            REGISTER_MAPPINGS_CHUNK.contains("'view_bridge', 'colon_mapped'"),
+            "the late reading rides the bridge event its decoder answers"
+        );
     }
 
     /// The whole review crosses as one chunk's arguments -- including the

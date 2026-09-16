@@ -28,7 +28,7 @@ use view_core::events::UiEvent;
 use view_core::model::Model;
 use view_core::msg::RpcCall;
 use view_core::native::speculate::{
-    fold_engine_call, fold_expiry, fold_redraw, SpecStamp, SPECULATION_MAX_AGE,
+    cmdline_expiry_left, fold_engine_call, fold_expiry, fold_redraw, SpecStamp, SPECULATION_MAX_AGE,
 };
 
 /// The fixed origin every [`SpecStamp`] in one session is measured from.
@@ -81,7 +81,8 @@ pub(crate) fn reconcile_speculation(model: &mut Model, redraw: &[UiEvent]) {
 }
 
 /// How long the loop may wait before a pending prediction would be older
-/// than [`SPECULATION_MAX_AGE`], or `None` while nothing is pending.
+/// than [`SPECULATION_MAX_AGE`], or a speculated palette older than
+/// `CMDLINE_SPECULATION_MAX_AGE`, or `None` while neither is pending.
 ///
 /// The age bound is a promise about wall-clock time, and
 /// [`expire_speculation`] can only keep it on a pass the loop actually
@@ -94,13 +95,14 @@ pub(crate) fn reconcile_speculation(model: &mut Model, redraw: &[UiEvent]) {
 /// deadline, no clock reading, and the wait is exactly the wait it was.
 pub(crate) fn next_expiry(model: &Model, clock: SpeculationClock) -> Option<Duration> {
     let pending = model.speculate.pending();
-    if pending.is_empty() {
+    if pending.is_empty() && model.engine.cmdline_speculated.is_none() {
         return None;
     }
     let now = clock.now();
     pending
         .iter()
         .map(|cell| SPECULATION_MAX_AGE.saturating_sub(now.age_since(cell.predicted_at)))
+        .chain(cmdline_expiry_left(model, now))
         .min()
 }
 
@@ -114,7 +116,8 @@ pub(crate) fn next_expiry(model: &Model, clock: SpeculationClock) -> Option<Dura
 /// writes the predicted glyph can, and the speculated paint is measured by
 /// `echo_speculated` under names of its own.
 ///
-/// One flag at the one site that creates a prediction, rather than a
+/// One flag at the fold that creates a prediction -- of a glyph, or of the
+/// command line a `:` opens -- rather than a
 /// `cfg` at each of the loop's four call sites: with nothing ever pending,
 /// reconciliation, expiry and the expiry deadline are already the no-ops
 /// they are outside a typing burst, so the arm differs from the shipped
@@ -324,6 +327,25 @@ mod tests {
         let left = next_expiry(&model, clock_reading(origin, half))
             .expect("a pending prediction comes due");
         assert!(left <= SPECULATION_MAX_AGE - half, "{left:?}");
+    }
+
+    /// The speculated palette is on the same deadline the predicted glyphs
+    /// are, and for the same reason: the pass that withdraws it is one the
+    /// loop has to be woken for, and every other wake source this loop arms
+    /// is coarser than the bound. Without this the empty box would sit on
+    /// screen until something unrelated happened.
+    #[test]
+    fn a_speculated_palette_brings_the_loops_wait_forward_to_its_own_bound() {
+        use view_core::native::speculate::{CmdlineSpeculation, CMDLINE_SPECULATION_MAX_AGE};
+
+        let mut model = typing_model();
+        let clock = SpeculationClock::default();
+        assert_eq!(next_expiry(&model, clock), None);
+
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation { since: clock.now() });
+
+        let left = next_expiry(&model, clock).expect("a speculated palette comes due");
+        assert!(left <= CMDLINE_SPECULATION_MAX_AGE, "{left:?}");
     }
 
     /// A notation key never reaches `predict` as a character, so the caller

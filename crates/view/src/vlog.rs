@@ -323,14 +323,20 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::ClaimantsHandedBack { modules } => {
             log_with("native", || format!("handed-back {}", modules.join(",")));
         }
-        Msg::MappingsClaimed { claimed } => {
+        Msg::MappingsClaimed {
+            claimed,
+            colon_mapped,
+        } => {
             log_with("native", || {
                 let keys: Vec<String> = claimed
                     .iter()
                     .map(|c| format!("{}={}", c.lhs, c.had_user_mapping))
                     .collect();
-                format!("claimed {}", keys.join(","))
+                format!("claimed {} colon-mapped={colon_mapped}", keys.join(","))
             });
+        }
+        Msg::ColonMappingRead { mapped } => {
+            log_with("native", || format!("colon-mapped={mapped}"));
         }
         _ => {}
     }
@@ -1224,7 +1230,16 @@ impl FeltLog {
         }
         self.palette_open = open;
         self.palette_owes_paint = open;
-        self.emit("palette", if open { "open requested" } else { "closed" });
+        // the speculated open is the whole point of the line: a `:` view put
+        // the palette up for before the engine had answered reads as an open
+        // with no `cmdline_show` behind it, and a reader comparing the log
+        // against the wire has to be able to tell the two apart
+        let line = match (open, model.engine.cmdline_speculated.is_some()) {
+            (true, true) => "open requested speculated",
+            (true, false) => "open requested",
+            (false, _) => "closed",
+        };
+        self.emit("palette", line);
     }
 
     /// One engine batch, against every input still waiting for a frame.
@@ -1398,16 +1413,17 @@ fn unanswered(input: &PendingInput) -> String {
     )
 }
 
-/// Whether the typed cmdline is what the palette is drawing.
+/// Whether the typed cmdline is what the palette is drawing, a `:` view has
+/// speculated a command line for included.
 ///
-/// The same three answers `view_surface::render` reads to decide it, and
+/// The same answers `view_surface::render` reads to decide it, and
 /// read here rather than inferred from the keystroke: `:` typed into a
 /// session whose palette is switched off draws nvim's own one-line cmdline,
 /// and one typed while a prompt overlay holds the stack draws that
 /// overlay's input line instead.
 fn palette_shown(model: &view_core::model::Model) -> bool {
     use view_core::model::OverlayKind;
-    model.engine.cmdline.is_some()
+    (model.engine.cmdline.is_some() || model.engine.cmdline_speculated.is_some())
         && model.palette_enabled
         && !matches!(
             model.overlays().last().map(|open| &open.kind),
@@ -1911,6 +1927,57 @@ mod tests {
         assert!(
             !palette_shown(&model),
             "a switched-off palette leaves nvim's own cmdline drawing it"
+        );
+    }
+
+    /// The speculated open owes its own word. A `:` view put the palette up
+    /// for before the engine answered is an open line with no `cmdline_show`
+    /// behind it, and the reader comparing this log against the wire has
+    /// nothing else to tell the two apart by.
+    #[test]
+    fn a_speculated_open_says_so_and_the_shown_cmdline_does_not() {
+        use view_core::events::UiEvent;
+        use view_core::native::speculate::{CmdlineSpeculation, SpecStamp};
+
+        let mut model = view_core::model::Model::new();
+        model.palette_enabled = true;
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation {
+            since: SpecStamp::new(std::time::Duration::ZERO),
+        });
+        assert!(
+            palette_shown(&model),
+            "the palette is on screen although the engine has said nothing"
+        );
+
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::Input, &model);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written
+                .iter()
+                .any(|l| l == "palette open requested speculated"),
+            "the speculated open must name itself: {written:?}"
+        );
+
+        let mut shown = view_core::model::Model::new();
+        shown.palette_enabled = true;
+        let _ = view_core::update::update(
+            &mut shown,
+            view_core::msg::Msg::Redraw(vec![UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            }]),
+        );
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::EngineBatch, &shown);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l == "palette open requested"),
+            "an engine-shown cmdline claims no speculation: {written:?}"
         );
     }
 

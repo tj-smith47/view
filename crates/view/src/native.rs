@@ -482,7 +482,8 @@ mod tests {
         );
         assert!(
             stage(&Msg::MappingsClaimed {
-                claimed: Vec::new()
+                claimed: Vec::new(),
+                colon_mapped: false
             }) == Stage::Claims
         );
         assert!(stage(&Msg::RedrawReady) == Stage::None);

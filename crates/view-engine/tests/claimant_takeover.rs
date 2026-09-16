@@ -846,3 +846,62 @@ fn the_takeover_reply_names_the_module_whose_disable_ran() {
         "the step ran this module's own disable, so its answer names it"
     );
 }
+
+/// The registration's `:` reading, carried through the takeover's own reply
+/// -- the path a real session takes, where the claim report is a table
+/// nested inside the batch's answer rather than the batch's whole result.
+///
+/// Live rather than decoded from a canned reply, and through the takeover
+/// rather than the standalone call, because the two halves that could
+/// disagree are nvim's encoding of the nested table and the decoder's
+/// reading of it, and only a real child produces the first.
+#[test]
+fn the_takeover_reply_carries_the_registrations_colon_reading() {
+    for (extra, mapped) in [
+        ("", false),
+        ("vim.keymap.set('n', ':', ':', { silent = true })\n", true),
+    ] {
+        let dir = write_config(
+            if mapped { "colon-mapped" } else { "colon-free" },
+            "",
+            extra,
+        );
+        let mut engine = engine(&dir);
+        let (tx, rx) = mpsc::sync_channel(64);
+        let (_pump, _cutover) = engine.start_pump(tx);
+        let channel_id = engine.api_info.channel_id;
+        engine
+            .handle
+            .takeover(&[TakeoverStep::RegisterMappings {
+                specs: view_core::native::mappings::default_maps().to_vec(),
+                channel_id,
+            }])
+            .unwrap();
+
+        let deadline = Instant::now() + common::rpc_deadline();
+        let mut read = None;
+        while Instant::now() < deadline && read.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(remaining) {
+                Ok(Msg::MappingsClaimed {
+                    claimed,
+                    colon_mapped,
+                }) => read = Some((claimed, colon_mapped)),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        let (claimed, colon_mapped) =
+            read.expect("the takeover must route the registration's claim report");
+        assert_eq!(
+            claimed.len(),
+            view_core::native::mappings::default_maps().len(),
+            "the claims must survive the nesting the reading was added inside"
+        );
+        assert_eq!(
+            colon_mapped, mapped,
+            "the takeover's nested reply lost the `:` reading"
+        );
+    }
+}

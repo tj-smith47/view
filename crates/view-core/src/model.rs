@@ -127,6 +127,15 @@ pub struct Model {
     /// and doctor answer "what did view claim?" from, and a second recording
     /// appending to the first would report every key twice.
     claimed_keys: Vec<MappingClaim>,
+    /// Whether the user's config maps `:` in normal or visual mode, as the
+    /// engine read it off its own keymaps ([`crate::msg::Msg::MappingsClaimed`],
+    /// re-read whenever a plugin loads late).
+    ///
+    /// Private beside `claimed_keys` and written only through
+    /// [`Model::record_colon_mapped`]: it is one engine reading, and the
+    /// palette's speculation
+    /// ([`crate::native::speculate::may_speculate_cmdline`]) is closed by it.
+    colon_mapped: bool,
     /// Whether the `statusline` native feature is enabled for this session,
     /// set once at startup from `NativeConfig::enabled("statusline")`
     /// (`crates/view/src/native.rs`'s `NativeSession::load`, the one place
@@ -326,6 +335,7 @@ impl Model {
                 hl: HlTable::new(),
                 mode: ModeState::default(),
                 cmdline: None,
+                cmdline_speculated: None,
                 messages: Messages::default(),
                 toast_history: crate::native::toast::ToastHistory::new(),
                 tabline: None,
@@ -348,6 +358,7 @@ impl Model {
             stdin_relay: false,
             fatal_reason: None,
             claimed_keys: Vec::new(),
+            colon_mapped: false,
             statusline_enabled: false,
             palette_enabled: false,
             ext_surfaces: crate::native::ext::shipped_multigrid(),
@@ -614,6 +625,24 @@ impl Model {
     /// claim report grow a duplicate row per key.
     pub fn record_claimed_keys(&mut self, claimed: Vec<MappingClaim>) {
         self.claimed_keys = claimed;
+    }
+
+    /// Whether the user's config maps `:` in normal or visual mode; see
+    /// [`Model::record_colon_mapped`].
+    #[must_use]
+    pub fn colon_mapped(&self) -> bool {
+        self.colon_mapped
+    }
+
+    /// Records the engine's reading of whether `:` is mapped, replacing the
+    /// earlier one.
+    ///
+    /// Read twice at least: once with the mapping registration, and again
+    /// whenever a plugin loads after it. The later reading is the true one,
+    /// which is why this replaces rather than latching -- a plugin that maps
+    /// `:` and is then unloaded leaves the key free again.
+    pub fn record_colon_mapped(&mut self, mapped: bool) {
+        self.colon_mapped = mapped;
     }
 
     /// Who owns input this frame: the topmost focus-taking overlay, or the
@@ -1283,6 +1312,12 @@ pub struct EngineModel {
     hl: HlTable,
     pub mode: ModeState,
     pub cmdline: Option<CmdlineState>,
+    /// A `:` view has sent the engine and is drawing the palette for
+    /// already, cleared by the `cmdline_show` that answers it or by one of
+    /// the withdrawals [`crate::native::speculate::CmdlineSpeculation`]
+    /// names. Never both this and `cmdline`: the event that installs one
+    /// clears the other.
+    pub cmdline_speculated: Option<crate::native::speculate::CmdlineSpeculation>,
     pub messages: Messages,
     /// Bounded scrollback of every message routed through
     /// [`crate::native::toast::route`], newest-first on read; the
@@ -1441,6 +1476,7 @@ impl EngineModel {
     /// | field | how it is taken down | forgotten |
     /// |---|---|---|
     /// | `cmdline` | `cmdline_hide` | yes |
+    /// | `cmdline_speculated` | the `cmdline_show` it was guessing at, or its own age bound | yes |
     /// | `popupmenu` | `popupmenu_hide` | yes |
     /// | `float_absorption` | the plugin's window dies with the connection | yes |
     /// | `tabline` | the next `tabline_update` | yes |
@@ -1464,6 +1500,7 @@ impl EngineModel {
     /// of the session with nothing ever to correct it.
     pub fn forget_overlays(&mut self) {
         self.cmdline = None;
+        self.cmdline_speculated = None;
         self.popupmenu = None;
         self.grids.forget_grids();
         let _ = self.float_absorption.forget();
@@ -1917,6 +1954,28 @@ pub struct CmdlineState {
     pub prompt: String,
     pub indent: u64,
     pub level: u64,
+}
+
+impl CmdlineState {
+    /// The command line a bare `:` opens, before anything is typed into it:
+    /// what nvim's own `cmdline_show` carries for that keystroke, built here
+    /// so the palette view drawn on a speculated `:`
+    /// ([`crate::native::speculate::CmdlineSpeculation`]) and the one drawn
+    /// on the real event are the same view rather than two spellings of it.
+    #[must_use]
+    pub fn bare_colon() -> Self {
+        // one empty chunk, not an empty list: the pinned engine's own
+        // `cmdline_show` for a bare `:` carries `[[0, '', 0]]`, and the
+        // speculated state has to be the state the event replaces it with
+        Self {
+            content: vec![(0, String::new())],
+            pos: 0,
+            firstc: ":".to_string(),
+            prompt: String::new(),
+            indent: 0,
+            level: 1,
+        }
+    }
 }
 
 mod messages;

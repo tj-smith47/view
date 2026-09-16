@@ -110,6 +110,129 @@ const INSERT_MODE: &str = "insert";
 /// is already looking at an editor that has stopped answering.
 pub const SPECULATION_MAX_AGE: Duration = Duration::from_secs(1);
 
+/// How long the palette may stand on a speculated `:` before view takes it
+/// back, having had no `cmdline_show` to reconcile against.
+///
+/// Sized to the longest silence the dogfood recorder saw between the key and
+/// `cmdline_show` on a login-shaped config -- where the config's own cmdline
+/// handling runs before nvim announces the command line -- with room for a
+/// slower launch on top. What a user sees when the guess is wrong is an
+/// empty palette for at most this long, which is why the bound is the
+/// silence rather than [`SPECULATION_MAX_AGE`]'s second: a `:` that reached
+/// a mapping view did not know about has to come back off the screen inside
+/// the same gesture, not a second later.
+pub const CMDLINE_SPECULATION_MAX_AGE: Duration = Duration::from_millis(250);
+
+/// The `mode_change` modes a typed `:` opens a command line from.
+///
+/// nvim's own names, as the pinned engine sends them in `mode_info_set`
+/// (`normal`, `visual`, `insert`, `replace`, `cmdline_normal`,
+/// `cmdline_insert`, `cmdline_replace`, `operator`, `visual_select`,
+/// `cmdline_hover`, `statusline_hover`, `statusline_drag`, `vsep_hover`,
+/// `vsep_drag`, `more`, `more_lastline`, `showmatch`, `terminal`). Every
+/// name outside this set either types the `:` into something (insert,
+/// replace, terminal, the `cmdline_*` family) or spends it on a pending
+/// operator, so none of them opens the palette.
+///
+/// Select mode is reported as `visual` too, and there a `:` replaces the
+/// selection instead of opening anything: the withdraw on the `insert`
+/// that follows is what takes the palette back off, at the cost of one
+/// empty box for the length of that keystroke.
+pub const CMDLINE_GATE_MODES: [&str; 3] = ["normal", "visual", "visual_select"];
+
+/// A `:` view has sent the engine and expects a `cmdline_show` for, so the
+/// palette can be on screen in the keystroke's own frame instead of after
+/// the engine's silence.
+///
+/// Display-only, on the same terms as [`PredictedCell`]: nothing is held
+/// here that the engine is not being told separately, and the `:` reaches
+/// nvim on exactly the path it always did.
+// Constructible by design (no `#[non_exhaustive]`): the crate that paints
+// the frame a speculated `:` produces has to be able to build one to have
+// anything to paint it from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CmdlineSpeculation {
+    /// When the `:` went out, as the host measured it. Bounded by
+    /// [`CMDLINE_SPECULATION_MAX_AGE`].
+    pub since: SpecStamp,
+}
+
+/// Whether a `:` about to reach the engine is one view can put the palette
+/// up for, read entirely from state the model already holds.
+///
+/// No RPC and no clock: every term here is a field `update()` has already
+/// folded. The mapping fact is the one that could not be derived locally,
+/// and it travels once with the claim report
+/// ([`crate::msg::Msg::MappingsClaimed`]) rather than being asked for per
+/// keystroke.
+#[must_use]
+pub fn may_speculate_cmdline(model: &Model) -> bool {
+    model.palette_enabled
+        && !model.colon_mapped()
+        && model.focus() == crate::model::Focus::Engine
+        && model.pending_chord.is_none()
+        && model.engine.cmdline.is_none()
+        // a wedged engine answers no `cmdline_show`, and the modal saying so
+        // is the thing the user is reading
+        && model.engine_busy().is_none()
+        && CMDLINE_GATE_MODES.contains(&model.engine.mode.current.as_str())
+}
+
+/// Whether `mode` is one of nvim's command-line modes, which is what a
+/// speculated `:` is waiting to be told it reached.
+#[must_use]
+pub fn is_cmdline_mode(mode: &str) -> bool {
+    mode.starts_with("cmdline_")
+}
+
+/// Takes a speculated palette back down, marking the frame when one was up.
+///
+/// Every withdrawal goes through here so the repaint can never be forgotten
+/// at one of them: an empty palette left on screen with nothing to repaint
+/// it is the one failure this speculation can produce that a later redraw
+/// does not fix by itself.
+pub fn withdraw_cmdline_speculation(model: &mut Model) {
+    if model.engine.cmdline_speculated.take().is_some() {
+        model.dirty = true;
+    }
+}
+
+/// Folds one engine-bound key into the palette's speculation: a `:` that
+/// passes [`may_speculate_cmdline`] puts the palette up now, and a
+/// `mode_change` out of the gate's modes, a `cmdline_show`, a `cmdline_hide`
+/// or [`CMDLINE_SPECULATION_MAX_AGE`] takes it back.
+///
+/// Every other key is left alone while one is pending: the `cmdline_show`
+/// that follows carries whatever was typed into the command line, so a key
+/// arriving in the silence neither confirms the guess nor refutes it.
+fn fold_cmdline_key(model: &mut Model, notation: &str, now: SpecStamp) {
+    if notation == ":" && may_speculate_cmdline(model) {
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation { since: now });
+        model.dirty = true;
+    }
+}
+
+/// The host's per-pass age check on a speculated palette.
+fn expire_cmdline_speculation(model: &mut Model, now: SpecStamp) {
+    if model
+        .engine
+        .cmdline_speculated
+        .is_some_and(|open| now.age_since(open.since) >= CMDLINE_SPECULATION_MAX_AGE)
+    {
+        withdraw_cmdline_speculation(model);
+    }
+}
+
+/// What is left of [`CMDLINE_SPECULATION_MAX_AGE`] for the speculated
+/// palette, or `None` when none is up.
+#[must_use]
+pub fn cmdline_expiry_left(model: &Model, now: SpecStamp) -> Option<Duration> {
+    model
+        .engine
+        .cmdline_speculated
+        .map(|open| CMDLINE_SPECULATION_MAX_AGE.saturating_sub(now.age_since(open.since)))
+}
+
 /// How many windows' `topline` this session tracks before the least
 /// recently touched one is pruned to keep [`SpeculateState::viewports`]
 /// bounded.
@@ -600,11 +723,19 @@ fn covers_column(col_start: u64, cells: &[GridCell], col: u16) -> bool {
 /// additionally comes back as a `grid_resize` that [`fold_redraw`] reads for
 /// itself.
 ///
+/// A typed `:` is folded here for a second reason as well: it is the one
+/// key whose answer the palette can be drawn ahead of
+/// ([`may_speculate_cmdline`]), and this is where a key going to the engine
+/// is seen with a stamp on it.
+///
 /// `now` is a stamp the host took from its own fixed origin, since nothing
 /// in this module reads a clock.
 pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
     match call {
-        RpcCall::Input { notation } => fold_keystroke(model, notation, now),
+        RpcCall::Input { notation } => {
+            fold_cmdline_key(model, notation, now);
+            fold_keystroke(model, notation, now);
+        }
         RpcCall::Paste { .. } | RpcCall::InputMouse { .. } => fold_invalidation(model),
         // `RpcCall` is `#[non_exhaustive]`: a call added later is assumed to
         // touch neither the buffer nor the cursor until someone decides
@@ -629,11 +760,13 @@ pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent]) {
 /// The host's per-pass age check on what speculation is still holding.
 ///
 /// Belongs at a call site reached whether or not a redraw arrived: a redraw
-/// that never comes is the condition [`SPECULATION_MAX_AGE`] exists for.
+/// that never comes is the condition [`SPECULATION_MAX_AGE`] and
+/// [`CMDLINE_SPECULATION_MAX_AGE`] both exist for.
 pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
+    expire_cmdline_speculation(model, now);
     // the pending list is read before anything else so a steady-state pass
-    // costs one length compare: expiring an empty list is a no-op, and a
-    // session outside a typing burst takes that pass forever
+    // costs one null check and one length compare: expiring an empty list is
+    // a no-op, and a session outside a typing burst takes that pass forever
     if model.speculate.pending().is_empty() {
         return;
     }
@@ -760,6 +893,168 @@ mod tests {
             },
             other => other,
         }
+    }
+
+    /// Every mode name the pinned engine (v0.12.4) sends in
+    /// `mode_info_set`, read off a live attach rather than off memory. The
+    /// gate is a subset of this, and the rest of it is what the table test
+    /// below refuses one by one -- so a mode nvim adds later is a name this
+    /// list does not carry, and the day it matters the list is what has to
+    /// be re-read.
+    const PINNED_ENGINE_MODES: [&str; 18] = [
+        "normal",
+        "visual",
+        "insert",
+        "replace",
+        "cmdline_normal",
+        "cmdline_insert",
+        "cmdline_replace",
+        "operator",
+        "visual_select",
+        "cmdline_hover",
+        "statusline_hover",
+        "statusline_drag",
+        "vsep_hover",
+        "vsep_drag",
+        "more",
+        "more_lastline",
+        "showmatch",
+        "terminal",
+    ];
+
+    /// A session a typed `:` may open the palette from: the feature on, the
+    /// engine holding the keyboard, nothing mapped over `:`.
+    fn colon_model() -> Model {
+        let mut model = Model::with_term_size(80, 24);
+        model.palette_enabled = true;
+        model.engine.mode.current = "normal".to_string();
+        model.dirty = false;
+        model
+    }
+
+    /// One `:` as the loop hands it to the fold.
+    fn typed_colon(model: &mut Model, now: SpecStamp) {
+        fold_engine_call(
+            model,
+            &RpcCall::Input {
+                notation: ":".to_string(),
+            },
+            now,
+        );
+    }
+
+    /// The whole gate, mode by mode, over every name the pinned engine
+    /// sends: the three the palette opens from and the fifteen it does not.
+    #[test]
+    fn the_palette_opens_only_from_the_modes_a_colon_reaches_the_cmdline_from() {
+        for mode in PINNED_ENGINE_MODES {
+            let mut model = colon_model();
+            model.engine.mode.current = mode.to_string();
+
+            typed_colon(&mut model, stamp(0));
+
+            assert_eq!(
+                model.engine.cmdline_speculated.is_some(),
+                CMDLINE_GATE_MODES.contains(&mode),
+                "mode {mode} disagreed with the gate"
+            );
+        }
+    }
+
+    /// The four gate terms that are not the mode. Each one alone closes it,
+    /// so the table is read as "this session is otherwise open, except for".
+    #[test]
+    fn a_mapped_colon_a_focused_overlay_a_pending_chord_or_a_disabled_palette_close_the_gate() {
+        /// One way to close the gate, and the words for what it stands for.
+        type Closure = (&'static str, fn(&mut Model));
+        let cases: [Closure; 4] = [
+            ("the user's config maps `:`", |m| {
+                m.record_colon_mapped(true)
+            }),
+            ("an overlay owns the keyboard", |m| {
+                m.push_overlay(
+                    crate::native::geometry::OverlayBox::new(50, 50),
+                    crate::model::OverlayKind::Ai,
+                );
+                m.ai_panel.focused = true;
+            }),
+            ("a native chord is half typed", |m| {
+                m.pending_chord = Some("<leader>".to_string());
+            }),
+            ("the palette feature is off", |m| m.palette_enabled = false),
+        ];
+        for (why, close) in cases {
+            let mut model = colon_model();
+            close(&mut model);
+
+            typed_colon(&mut model, stamp(0));
+
+            assert!(
+                model.engine.cmdline_speculated.is_none(),
+                "the palette was speculated although {why}"
+            );
+        }
+    }
+
+    /// The open itself: the palette goes up on the keystroke's own fold, and
+    /// the frame is marked so it is painted rather than waited for.
+    #[test]
+    fn a_colon_the_gate_admits_puts_the_palette_up_on_its_own_frame() {
+        let mut model = colon_model();
+
+        typed_colon(&mut model, stamp(40));
+
+        assert_eq!(
+            model.engine.cmdline_speculated.map(|open| open.since),
+            Some(stamp(40))
+        );
+        assert!(
+            model.dirty,
+            "a palette nobody paints is a palette nobody sees"
+        );
+    }
+
+    /// A key typed inside the silence neither confirms the guess nor takes
+    /// it back: the `cmdline_show` that follows carries the typed text.
+    #[test]
+    fn a_key_typed_while_the_palette_is_speculated_leaves_it_standing() {
+        let mut model = colon_model();
+        typed_colon(&mut model, stamp(0));
+
+        fold_engine_call(
+            &mut model,
+            &RpcCall::Input {
+                notation: "q".to_string(),
+            },
+            stamp(10),
+        );
+
+        assert!(model.engine.cmdline_speculated.is_some());
+    }
+
+    /// The bound, on the pass the loop takes whether or not the engine said
+    /// anything: an engine that never answers leaves an empty palette on
+    /// screen, and this is what takes it off.
+    #[test]
+    fn a_speculated_palette_past_its_bound_is_withdrawn_and_the_frame_marked() {
+        let mut model = colon_model();
+        typed_colon(&mut model, stamp(0));
+        model.dirty = false;
+
+        fold_expiry(
+            &mut model,
+            SpecStamp::new(CMDLINE_SPECULATION_MAX_AGE - Duration::from_millis(1)),
+        );
+        assert!(
+            model.engine.cmdline_speculated.is_some(),
+            "inside the bound the palette stands"
+        );
+        assert!(!model.dirty);
+
+        fold_expiry(&mut model, SpecStamp::new(CMDLINE_SPECULATION_MAX_AGE));
+
+        assert!(model.engine.cmdline_speculated.is_none());
+        assert!(model.dirty, "the withdrawal has to be painted");
     }
 
     #[test]

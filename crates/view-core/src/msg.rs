@@ -255,6 +255,24 @@ pub enum Msg {
     /// function of arrival order.
     MappingsClaimed {
         claimed: Vec<MappingClaim>,
+        /// Whether the user's config maps `:` in normal or visual mode,
+        /// read off the same keymap snapshot the claims are built from.
+        ///
+        /// A field on this report rather than a question of its own: the
+        /// chunk already has every keymap in hand before it sets the first
+        /// key, and the palette's speculation
+        /// ([`crate::native::speculate::may_speculate_cmdline`]) needs the
+        /// answer per keystroke, which is not a thing to ask the engine for.
+        colon_mapped: bool,
+    },
+    /// The same reading taken again after a plugin loaded late, sent only
+    /// when it disagrees with the last one.
+    ///
+    /// Separate from [`Msg::MappingsClaimed`] because it carries no claims:
+    /// registration happens once, and a re-read that arrived as a claim
+    /// report would replace the session's claim list with an empty one.
+    ColonMappingRead {
+        mapped: bool,
     },
     /// nvim's own `:messages` as it stood at `VimEnter`, read once by the
     /// takeover ([`RpcCall::Takeover`]).
