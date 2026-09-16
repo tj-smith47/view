@@ -158,7 +158,8 @@ fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
 pub fn log_msg(msg: &view_core::msg::Msg) {
     use view_core::msg::Msg;
     match msg {
-        Msg::Redraw(events) => {
+        Msg::Redraw(events) if !events.is_empty() => {
+            log_with("engine", || redraw_census(events));
             for ev in events {
                 log_ui_event(ev);
             }
@@ -288,6 +289,85 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
 /// file as the thing a user is asked to attach to a bug report, and a full
 /// `Debug` would put the whole conversation, the model's reasoning and the
 /// contents of every file it touched into it.
+/// How many redraw batches this process has written a census line for,
+/// which is what numbers them.
+static REDRAW_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One `engine redraw` line for a batch the engine sent: how many events it
+/// carried and how many of each kind.
+///
+/// Counted rather than listed, because `grid_line` alone runs to hundreds
+/// per batch and the `layout` topic omits it for that reason. What this
+/// answers that no other topic can: whether a window the log shows no
+/// `layout` or `msg` line in is a window the engine said nothing at all in,
+/// or one where it sent nothing but cells. An absence of lines in those two
+/// topics is not an absence of engine traffic, and two attributions were
+/// argued from that reading.
+fn redraw_census(events: &[view_core::events::UiEvent]) -> String {
+    let batch = REDRAW_BATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let mut kinds: Vec<(&'static str, usize)> = Vec::new();
+    for ev in events {
+        let kind = event_kind(ev);
+        match kinds.iter_mut().find(|(name, _)| *name == kind) {
+            Some((_, count)) => *count += 1,
+            None => kinds.push((kind, 1)),
+        }
+    }
+    let census = kinds
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "redraw batch={batch} events={} kinds={census}",
+        events.len()
+    )
+}
+
+/// The wire name of one event, so a census line reads in the vocabulary
+/// nvim's own `ui.txt` and this tree's decoder both use.
+fn event_kind(ev: &view_core::events::UiEvent) -> &'static str {
+    use view_core::events::UiEvent;
+    match ev {
+        UiEvent::GridResize { .. } => "grid_resize",
+        UiEvent::GridLine { .. } => "grid_line",
+        UiEvent::GridCursorGoto { .. } => "grid_cursor_goto",
+        UiEvent::GridScroll { .. } => "grid_scroll",
+        UiEvent::GridClear { .. } => "grid_clear",
+        UiEvent::GridDestroy { .. } => "grid_destroy",
+        UiEvent::WinPos { .. } => "win_pos",
+        UiEvent::WinFloatPos { .. } => "win_float_pos",
+        UiEvent::WinExternalPos { .. } => "win_external_pos",
+        UiEvent::WinHide { .. } => "win_hide",
+        UiEvent::WinClose { .. } => "win_close",
+        UiEvent::MsgSetPos { .. } => "msg_set_pos",
+        UiEvent::WinViewport { .. } => "win_viewport",
+        UiEvent::WinViewportMargins { .. } => "win_viewport_margins",
+        UiEvent::HlAttrDefine { .. } => "hl_attr_define",
+        UiEvent::DefaultColorsSet { .. } => "default_colors_set",
+        UiEvent::HlGroupSet { .. } => "hl_group_set",
+        UiEvent::Flush => "flush",
+        UiEvent::ModeInfoSet { .. } => "mode_info_set",
+        UiEvent::ModeChange { .. } => "mode_change",
+        UiEvent::CmdlineShow { .. } => "cmdline_show",
+        UiEvent::CmdlinePos { .. } => "cmdline_pos",
+        UiEvent::CmdlineHide => "cmdline_hide",
+        UiEvent::MsgShow { .. } => "msg_show",
+        UiEvent::MsgClear => "msg_clear",
+        UiEvent::MsgShowmode { .. } => "msg_showmode",
+        UiEvent::MsgShowcmd { .. } => "msg_showcmd",
+        UiEvent::MsgRuler { .. } => "msg_ruler",
+        UiEvent::TablineUpdate { .. } => "tabline_update",
+        UiEvent::PopupmenuShow { .. } => "popupmenu_show",
+        UiEvent::PopupmenuSelect { .. } => "popupmenu_select",
+        UiEvent::PopupmenuHide => "popupmenu_hide",
+        UiEvent::MouseOn => "mouse_on",
+        UiEvent::MouseOff => "mouse_off",
+        UiEvent::UiSend { .. } => "ui_send",
+        UiEvent::Unknown { .. } => "unknown",
+    }
+}
+
 const PAYLOAD_CAP: usize = 120;
 
 /// `text` capped at [`PAYLOAD_CAP`], with what was dropped counted rather
@@ -677,7 +757,11 @@ impl Dispatch {
         use view_core::msg::Msg;
         match msg {
             Msg::Key(_) | Msg::Paste(_) | Msg::Mouse(_) => Self::Input,
-            Msg::Redraw(_) => Self::EngineBatch,
+            // an empty batch is the drain of a wakeup token for damage that
+            // has not reached a `Flush` yet: it folds nothing, paints
+            // nothing, and answers no key. Read as a batch it closed every
+            // waiting input on whatever frame came next
+            Msg::Redraw(events) if !events.is_empty() => Self::EngineBatch,
             _ => Self::Other,
         }
     }
@@ -719,6 +803,17 @@ struct PendingInput {
 /// every window cell on every frame for the rest of its life.
 const HIGHLIGHT_WATCH: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long an input is held waiting for the frame that answers it before
+/// it is written out as answered by none.
+///
+/// The hold has to outlast a burst: `:qa!` is four keys the user types
+/// before the engine says anything about the first, and every one of them
+/// is waiting on the same answer. What it may not outlast is the gap to an
+/// unrelated frame, which would be reported as that keystroke's wait, so
+/// the bound is well past any wait a person would sit through and well
+/// short of an idle stretch.
+const PENDING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The three waits a user reports as lag, each closed by the frame that
 /// ends it: a keystroke's own wait for the screen, the command palette
 /// opening, and the syntax colours arriving on the file opened at launch.
@@ -757,9 +852,49 @@ pub struct FeltLog {
     /// without, which is what the watch's own closing line answers.
     recoloured: bool,
     highlight_closed: bool,
+    /// Where the lines go when a test drives the wiring rather than the
+    /// rule functions. [`SINK`] is a process-wide `OnceLock` and a sibling
+    /// test asserts what a session with none open does, so a test that
+    /// needs a sink open cannot use that one.
+    #[cfg(test)]
+    captured: Option<std::sync::Arc<Mutex<Vec<String>>>>,
 }
 
 impl FeltLog {
+    /// Whether this recorder writes anything -- the process-wide sink, or a
+    /// test's own.
+    fn capturing(&self) -> bool {
+        #[cfg(test)]
+        if self.captured.is_some() {
+            return true;
+        }
+        capturing()
+    }
+
+    /// A recorder writing into a `Vec` of its own, for a test driving the
+    /// wiring -- `note_input` through `note_dispatched` to `note_pass` --
+    /// rather than the rule functions each of those calls.
+    #[cfg(test)]
+    fn recording() -> (Self, std::sync::Arc<Mutex<Vec<String>>>) {
+        let lines = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut felt = Self::default();
+        felt.captured = Some(std::sync::Arc::clone(&lines));
+        (felt, lines)
+    }
+
+    /// One line, to whichever sink this recorder holds.
+    fn emit(&self, topic: &str, payload: &str) {
+        #[cfg(test)]
+        if let Some(lines) = &self.captured {
+            lines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(format!("{topic} {payload}"));
+            return;
+        }
+        log(topic, payload);
+    }
+
     /// Holds one key, paste or mouse event until the next frame reaches the
     /// terminal.
     ///
@@ -774,7 +909,7 @@ impl FeltLog {
         staged: impl FnOnce() -> bool,
     ) {
         use view_core::msg::Msg;
-        if !capturing() {
+        if !self.capturing() {
             return;
         }
         let (kind, detail, bytes) = match msg {
@@ -794,15 +929,16 @@ impl FeltLog {
             ),
             _ => return,
         };
-        // whatever is still open when the user's next input arrives was
-        // answered by no frame: the loop paints before it waits, so every
-        // pass between the two had its chance
-        self.close_unanswered();
+        let received_us = mono_us();
+        // the arrival of the next input closes nothing of its own: a burst
+        // is several keys waiting on one answer, and each is closed by the
+        // frame that answers it
+        self.close_expired(received_us);
         self.pending.push(PendingInput {
             kind,
             detail,
             bytes,
-            received_us: mono_us(),
+            received_us,
             dirty_before: model.dirty,
             own_paint: false,
             engine_answered: false,
@@ -815,35 +951,57 @@ impl FeltLog {
     /// is still waiting, and is closed by the frame that does answer it or
     /// by [`close_unanswered`](Self::close_unanswered).
     fn close_answered(&mut self, flushed_us: u128) {
+        let mut closed: Vec<(&'static str, String)> = Vec::new();
         self.pending.retain(|input| {
             if !input.own_paint && !input.engine_answered {
                 return true;
             }
-            log(
+            closed.push((
                 input.kind,
-                &format!(
+                format!(
                     "bytes={}{} received={} waited_us={}",
                     input.bytes,
                     input.detail,
                     input.received_us / 1000,
                     flushed_us.saturating_sub(input.received_us)
                 ),
-            );
+            ));
             false
         });
+        for (topic, payload) in closed {
+            self.emit(topic, &payload);
+        }
+    }
+
+    /// Writes out every input that has now waited longer than any answer
+    /// could be, so the next frame -- which can be minutes away and about
+    /// something else -- is never reported as that keystroke's wait.
+    fn close_expired(&mut self, now_us: u128) {
+        let deadline = PENDING_DEADLINE.as_micros();
+        let expired = self
+            .pending
+            .iter()
+            .position(|input| now_us.saturating_sub(input.received_us) < deadline)
+            .unwrap_or(self.pending.len());
+        if expired == 0 {
+            return;
+        }
+        // `pending` is in arrival order, so everything before the first
+        // input still inside the deadline is past it
+        let held = self.pending.split_off(expired);
+        self.close_unanswered();
+        self.pending = held;
     }
 
     /// Writes the line for every input the loop answered with no frame.
     ///
-    /// Read at the next input and again when the loop ends, because a
-    /// pending input held past either would be stamped by an unrelated
-    /// frame -- a wait of seconds reported for a key that was never
-    /// waiting on anything. Not at the end of a pass that painted nothing:
-    /// a key view forwards to the engine is answered by the frame the
-    /// engine's own redraw produces, which is one pass later or several.
+    /// Read from [`close_expired`](Self::close_expired) and when the loop
+    /// ends, and from nowhere else: a key view forwards to the engine is
+    /// answered by the frame the engine's own redraw produces, which is one
+    /// pass later or several and can be several keys later still.
     fn close_unanswered(&mut self) {
-        for input in self.pending.drain(..) {
-            log(
+        for input in std::mem::take(&mut self.pending) {
+            self.emit(
                 input.kind,
                 &format!(
                     "bytes={}{} received={} flush=none",
@@ -867,7 +1025,7 @@ impl FeltLog {
     /// an answer to a key is what dirtied the screen -- the key's own fold,
     /// or a batch the engine sent after it.
     pub fn note_dispatched(&mut self, was: Dispatch, model: &view_core::model::Model) {
-        if !capturing() {
+        if !self.capturing() {
             return;
         }
         match was {
@@ -888,7 +1046,7 @@ impl FeltLog {
         }
         self.palette_open = open;
         self.palette_owes_paint = open;
-        log("palette", if open { "open requested" } else { "closed" });
+        self.emit("palette", if open { "open requested" } else { "closed" });
     }
 
     /// One engine batch, against every input still waiting for a frame.
@@ -919,7 +1077,7 @@ impl FeltLog {
     /// render instead, so a reading taken across the two is one frame's
     /// paint apart.
     pub fn note_pass(&mut self, model: &view_core::model::Model, flushed: bool) {
-        if !capturing() {
+        if !self.capturing() {
             return;
         }
         if !flushed {
@@ -928,9 +1086,10 @@ impl FeltLog {
         let flushed_us = mono_us();
         let flushed = flushed_us / 1000;
         self.close_answered(flushed_us);
+        self.close_expired(flushed_us);
         if self.palette_owes_paint && self.palette_open {
             self.palette_owes_paint = false;
-            log("palette", "painted");
+            self.emit("palette", "painted");
         }
         self.note_highlight(model, flushed);
     }
@@ -957,10 +1116,25 @@ impl FeltLog {
             return;
         }
         let Some((grid, ids)) = window_text_hls(model, self.text_grid) else {
+            // a pinned grid that no longer resolves is gone for good (`:only`,
+            // a window close, a layout the config rebuilds), so every later
+            // frame would read nothing and the topic would write neither a
+            // further wave nor its closing line with nothing saying why
+            if let Some(pinned) = self.text_grid {
+                self.highlight_closed = true;
+                self.emit(
+                    "highlight",
+                    &format!(
+                        "window gone grid={} after={}",
+                        pinned.0,
+                        flushed.saturating_sub(self.text_at)
+                    ),
+                );
+            }
             return;
         };
         let Some(base) = &self.text_hls else {
-            log(
+            self.emit(
                 "highlight",
                 &format!("file text flushed grid={} hl-ids={}", grid.0, ids.len()),
             );
@@ -990,7 +1164,7 @@ impl FeltLog {
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            log(
+            self.emit(
                 "highlight",
                 &format!(
                     "window text recoloured hl-ids={} was={was} after={since} added={colours}",
@@ -1002,7 +1176,7 @@ impl FeltLog {
         } else if flushed.saturating_sub(self.text_at) > HIGHLIGHT_WATCH.as_millis() {
             self.highlight_closed = true;
             if !self.recoloured {
-                log("highlight", "window text unchanged for the whole watch");
+                self.emit("highlight", "window text unchanged for the whole watch");
             }
         }
     }
@@ -1012,7 +1186,7 @@ impl Drop for FeltLog {
     /// Closes whatever the last pass left open, so an input the session
     /// ended on is a line in the log rather than a reading nothing wrote.
     fn drop(&mut self) {
-        if !capturing() {
+        if !self.capturing() {
             return;
         }
         self.close_unanswered();
@@ -1712,6 +1886,95 @@ mod tests {
         );
     }
 
+    /// A pinned window nvim destroys (`:only`, a window close, a layout the
+    /// config rebuilds) says so once and closes the topic, rather than
+    /// reading `None` on every later frame and writing neither a further
+    /// wave nor its closing line.
+    #[test]
+    fn a_pinned_window_that_went_away_says_so_and_closes_the_topic() {
+        use view_core::grid::registry::{GridEvent, GridId};
+        use view_core::grid::GridOp;
+
+        let window = GridId(2);
+        let mut model = view_core::model::Model::new();
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::Resize {
+                width: 4,
+                height: 1,
+            },
+        });
+        model.engine.apply_grid_event(GridEvent::Window {
+            grid: window,
+            startrow: 0,
+            startcol: 0,
+        });
+        model.engine.apply_grid_event(GridEvent::Cells {
+            grid: window,
+            op: GridOp::PutLine {
+                row: 0,
+                col_start: 0,
+                cells: vec![("f".to_string(), 9, 1)],
+            },
+        });
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_highlight(&model, 100);
+        assert_eq!(felt.text_grid, Some(window), "the window was never pinned");
+
+        model
+            .engine
+            .apply_grid_event(GridEvent::Destroy { grid: window });
+        felt.note_highlight(&model, 400);
+        assert!(
+            felt.highlight_closed,
+            "the topic goes quiet for the rest of the session with nothing \
+             saying why"
+        );
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written
+                .iter()
+                .any(|l| l == "highlight window gone grid=2 after=300"),
+            "the window going away was not written out: {written:?}"
+        );
+    }
+
+    /// A batch's census counts its cells rather than listing them, which is
+    /// what makes "the engine sent nothing" readable at all: the `layout`
+    /// topic omits `grid_line` by volume, so an absence of lines there is not
+    /// an absence of engine traffic.
+    #[test]
+    fn a_redraw_census_counts_its_cells_rather_than_listing_them() {
+        use view_core::events::UiEvent;
+        let line = |row| UiEvent::GridLine {
+            grid: 2,
+            row,
+            col_start: 0,
+            cells: vec![view_core::events::GridCell {
+                text: "x".to_string(),
+                hl_id: 0,
+                repeat: 1,
+            }],
+        };
+        let census = redraw_census(&[line(0), line(1), UiEvent::Flush, line(2)]);
+        assert!(
+            census.ends_with("events=4 kinds=grid_line=3,flush=1"),
+            "the census does not count what the batch carried: {census}"
+        );
+        let next = redraw_census(&[UiEvent::Flush]);
+        let number = |c: &str| {
+            c.split_whitespace()
+                .find_map(|w| w.strip_prefix("batch="))
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap()
+        };
+        assert_eq!(
+            number(&next),
+            number(&census) + 1,
+            "consecutive batches are not consecutively numbered: {census} / {next}"
+        );
+    }
+
     /// An input the loop answered with no frame is written out and
     /// released, so the next frame -- which can be seconds away and about
     /// something else -- cannot be reported as the wait that keystroke had.
@@ -1776,19 +2039,218 @@ mod tests {
     /// A key view answers itself -- the palette's own typed line, a picker,
     /// a modal -- is closed by the frame that paints that surface, which is
     /// the one the key's own fold dirtied the screen for.
+    ///
+    /// Driven through `note_input`/`note_dispatched`/`note_pass` rather than
+    /// through the rule functions they call: a test that assigns `own_paint`
+    /// itself stays green with the `Dispatch::Input` arm deleted.
     #[test]
     fn a_key_view_answers_itself_is_closed_by_its_own_frame() {
         let mut model = view_core::model::Model::new();
-        let mut felt = FeltLog::default();
-        felt.pending.push(waiting(false));
+        let (mut felt, lines) = FeltLog::recording();
+        let key = view_core::msg::Msg::Key(view_core::msg::Key {
+            notation: "x".to_string(),
+        });
+        felt.note_input(&key, &model, || false);
+        // what the key's own fold left behind, which is the state
+        // `note_dispatched` reads
         model.dirty = true;
-        if let Some(input) = felt.pending.last_mut() {
-            input.own_paint = model.dirty && !input.dirty_before;
-        }
-        felt.close_answered(9_000);
+        felt.note_dispatched(Dispatch::of(&key), &model);
+        felt.note_pass(&model, true);
         assert!(
             felt.pending.is_empty(),
             "a key whose own fold drew the frame was left for a later one"
+        );
+        let written = lines.lock().unwrap().join("\n");
+        assert!(
+            written.contains("key bytes=1 notation=\"x\"") && written.contains("waited_us="),
+            "the key was closed without its own line: {written}"
+        );
+    }
+
+    /// The four keys of `:qa!` reach the loop before the engine answers the
+    /// first of them, and each is closed by the frame that answered it.
+    ///
+    /// The shipped reading this refuses: the arrival of the next input
+    /// closed whatever was still waiting, so 20 of 20 keys in the published
+    /// recording were written `flush=none` and the frame that painted the
+    /// palette was credited to the `<CR>` typed after it.
+    #[test]
+    fn a_burst_of_keys_is_closed_by_the_one_frame_that_answered_it() {
+        use view_core::events::UiEvent;
+        use view_core::msg::{Key, Msg};
+
+        let mut model = view_core::model::Model::new();
+        model.palette_enabled = true;
+        let (mut felt, lines) = FeltLog::recording();
+
+        let dispatch = |felt: &mut FeltLog, model: &mut view_core::model::Model, msg: Msg| {
+            felt.note_input(&msg, model, || false);
+            let was = Dispatch::of(&msg);
+            let _ = view_core::update::update(model, msg);
+            felt.note_dispatched(was, model);
+        };
+
+        for notation in [":", "q", "a", "!"] {
+            dispatch(
+                &mut felt,
+                &mut model,
+                Msg::Key(Key {
+                    notation: notation.to_string(),
+                }),
+            );
+        }
+        assert_eq!(
+            felt.pending.len(),
+            4,
+            "a key still waiting for its answer was closed by the next key"
+        );
+        assert!(
+            lines.lock().unwrap().is_empty(),
+            "a burst wrote lines before anything answered it: {:?}",
+            lines.lock().unwrap()
+        );
+
+        // the engine's answer to the `:`, and the frame that paints it
+        dispatch(
+            &mut felt,
+            &mut model,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineShow {
+                    content: vec![(0, "qa!".to_string())],
+                    pos: 3,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        felt.note_pass(&model, true);
+        model.dirty = false;
+        let written = lines.lock().unwrap().clone();
+        assert_eq!(
+            written.iter().filter(|l| l.starts_with("key ")).count(),
+            4,
+            "the burst was not closed by the frame that answered it: {written:?}"
+        );
+        assert!(
+            written.iter().all(|l| !l.contains("flush=none")),
+            "a key the palette frame answered was written up as answered by \
+             nothing: {written:?}"
+        );
+        assert!(
+            written.iter().any(|l| l == "palette painted"),
+            "the frame that closed the burst is not the palette's: {written:?}"
+        );
+
+        // the `<CR>`, typed after that frame, is closed by its own
+        dispatch(
+            &mut felt,
+            &mut model,
+            Msg::Key(Key {
+                notation: "<CR>".to_string(),
+            }),
+        );
+        felt.note_pass(&model, true);
+        assert_eq!(
+            felt.pending.len(),
+            1,
+            "the `<CR>` was closed by a frame with no cause of its own"
+        );
+        dispatch(
+            &mut felt,
+            &mut model,
+            Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        );
+        felt.note_pass(&model, true);
+        assert!(
+            felt.pending.is_empty(),
+            "the batch the engine sent for the `<CR>` never closed it"
+        );
+        let closing = lines.lock().unwrap().clone();
+        assert!(
+            closing
+                .iter()
+                .any(|l| l.starts_with("key bytes=4 notation=\"<CR>\"") && l.contains("waited_us=")),
+            "the `<CR>` is not closed by the frame that answered it: {closing:?}"
+        );
+    }
+
+    /// An empty batch is the drain of a wakeup token for damage that has not
+    /// reached a `Flush`: it folds nothing and answers no key.
+    ///
+    /// Read as an answer, it set `engine_answered` on every waiting input and
+    /// the next frame -- a timer, a notice, anything -- closed the key with
+    /// that frame's stamp.
+    #[test]
+    fn an_empty_engine_batch_answers_nothing() {
+        use view_core::msg::Msg;
+        assert!(matches!(
+            Dispatch::of(&Msg::Redraw(Vec::new())),
+            Dispatch::Other
+        ));
+        assert!(matches!(
+            Dispatch::of(&Msg::Redraw(vec![view_core::events::UiEvent::Flush])),
+            Dispatch::EngineBatch
+        ));
+
+        let model = view_core::model::Model::new();
+        let (mut felt, lines) = FeltLog::recording();
+        felt.pending.push(waiting(false));
+        felt.note_dispatched(Dispatch::of(&Msg::Redraw(Vec::new())), &model);
+        felt.note_pass(&model, true);
+        assert_eq!(
+            felt.pending.len(),
+            1,
+            "an empty batch closed a key: {:?}",
+            lines.lock().unwrap()
+        );
+    }
+
+    /// A key no frame ever answers is written out at the deadline, so the
+    /// frame that follows -- minutes later and about something else -- is
+    /// never reported as that keystroke's wait.
+    #[test]
+    fn a_key_nothing_answers_closes_at_the_deadline_and_not_before() {
+        let (mut felt, lines) = FeltLog::recording();
+        felt.pending.push(waiting(false));
+        felt.close_expired(5_000 + PENDING_DEADLINE.as_micros() - 1);
+        assert_eq!(
+            felt.pending.len(),
+            1,
+            "a key still inside the deadline was closed early"
+        );
+        felt.close_expired(5_000 + PENDING_DEADLINE.as_micros());
+        assert!(
+            felt.pending.is_empty(),
+            "a key past the deadline is stamped by whatever flushes next"
+        );
+        assert!(
+            lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("flush=none")),
+            "the expired key was released without a line: {:?}",
+            lines.lock().unwrap()
+        );
+    }
+
+    /// The deadline reads arrival order: a burst whose oldest key has
+    /// expired still holds the keys typed inside the window.
+    #[test]
+    fn an_expiring_burst_holds_the_keys_still_inside_the_deadline() {
+        let (mut felt, _lines) = FeltLog::recording();
+        felt.pending.push(waiting(false));
+        let mut late = waiting(false);
+        late.received_us = 5_000 + PENDING_DEADLINE.as_micros();
+        felt.pending.push(late);
+        felt.close_expired(5_000 + PENDING_DEADLINE.as_micros() + 1);
+        assert_eq!(
+            felt.pending.len(),
+            1,
+            "a key typed inside the deadline went out with the one past it"
         );
     }
 
