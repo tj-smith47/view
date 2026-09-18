@@ -25,7 +25,7 @@ use rmpv::Value;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use view_core::msg::{EngineRequest, Msg, ReplyValue};
-use view_engine::process::{Engine, EngineConfig};
+use view_engine::process::{Engine, EngineConfig, COMBINED_PARSE_BYTES, SYNC_PARSE_BYTES};
 use view_test_support::ScratchDir;
 
 /// A config that records what the hook left it, from the same two places a
@@ -173,19 +173,6 @@ vim.api.nvim_set_current_buf(buf)\n";
 /// so starting it here is what puts the fixture's provider ahead of the
 /// highlighter's in the order nvim runs them.
 const START_HIGHLIGHTER: &str = "vim.treesitter.start(buf, 'lua')\n";
-
-/// The bound the startup chunk gives a grammar whose injection query
-/// carries combined injections, written here because `late_attach_cmd` is
-/// private to its own crate: the two tests below stand either side of it,
-/// and a chunk that moved it would leave both of them measuring the same
-/// branch.
-const COMBINED_PARSE_BYTES: usize = 16 * 1024;
-
-/// The bound the chunk gives every buffer, combined or not, written here on
-/// the same grounds. The control test's own buffer stands under it and
-/// `a_buffer_over_the_byte_bound_takes_the_async_path` stands over it, so a
-/// chunk that moved this number leaves the two of them on one side of it.
-const SYNC_PARSE_BYTES: usize = 256 * 1024;
 
 /// A markdown buffer of a stated size, whose bundled grammar carries
 /// combined injections: its injection scan is the whole document whatever

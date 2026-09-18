@@ -2006,6 +2006,19 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// stays, and what it costs is that a config deciding at this event
 /// whether it is on a terminal decides from the masked reading. Anything
 /// asking after the event, `SafeState` included, reads the real one.
+/// The byte size up to which the startup hook parses a buffer inline
+/// before nvim's first draw. The root parse is the whole document however
+/// few lines are visible, and the asynchronous path this bound refuses is
+/// not a frame later but behind whatever a plugin config queues at
+/// `UIEnter`, so the bound sits where the inline parse stays well under
+/// that delay on the pinned engine with nvim-treesitter's parsers.
+pub const SYNC_PARSE_BYTES: usize = 256 * 1024;
+
+/// The tighter bound for a root grammar whose injection query is combined:
+/// that scan covers the whole document whatever range is asked, so the
+/// cost rides on the file and fits a frame only over a shorter one.
+pub const COMBINED_PARSE_BYTES: usize = 16 * 1024;
+
 fn late_attach_cmd(width: u16, height: u16) -> String {
     let modules: Vec<String> = view_core::native::surfaces::SURFACE_CLAIMANTS
         .iter()
@@ -2020,17 +2033,13 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
     let bridge = crate::nvim_api::REGISTER_BRIDGE_CHUNK;
     let throttle = crate::nvim_api::FLOAT_SCAN_THROTTLE_MS;
     let claimants = crate::nvim_api::PROBE_CLAIMANTS_CHUNK;
+    let sync_parse_bytes = SYNC_PARSE_BYTES;
+    let combined_parse_bytes = COMBINED_PARSE_BYTES;
     format!(
         "lua vim.o.columns = {width} vim.o.lines = {height}\n\
          vim.g.view = 1\n\
-         -- the root parse is the whole document however few lines are\n\
-         -- visible, so a buffer big enough to spend a frame on it keeps\n\
-         -- the asynchronous path the highlighter would have taken\n\
-         local sync_parse_bytes = 256 * 1024\n\
-         -- a combined-injection scan is the whole document whatever range\n\
-         -- is asked, so that cost rides on the file rather than on the\n\
-         -- range and fits inside a frame over a shorter one\n\
-         local combined_parse_bytes = 16 * 1024\n\
+         local sync_parse_bytes = {sync_parse_bytes}\n\
+         local combined_parse_bytes = {combined_parse_bytes}\n\
          local channel\n\
          for _, chan in ipairs(vim.api.nvim_list_chans()) do\n\
          if chan.stream == 'stdio' then channel = chan.id end\n\
