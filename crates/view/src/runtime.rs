@@ -1490,9 +1490,10 @@ mod tests {
     #[test]
     fn the_per_pass_backstop_reaches_the_loop() {
         let source = include_str!("runtime.rs");
-        let (_, body) = source
+        let (_, rest) = source
             .split_once("pub fn run(")
             .expect("the loop this walk is about");
+        let (body, _) = rest.split_once("\n}").expect("the loop's own end");
         assert!(
             body.contains("expire_speculation_to_engine(&mut model"),
             "the loop no longer takes back a guess nothing refuted, so the \
