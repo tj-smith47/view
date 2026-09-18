@@ -268,14 +268,11 @@ pub(super) fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::CmdlineHide => {
-            // the real line comes down first, so the withdrawal below sees
-            // no command line standing and releases what the guess hid.
-            // With the two the other way round the withdrawal drained the
-            // absorption and its un-hides were dropped, leaving every
-            // absorbed window hidden for the rest of the session -- and a
-            // lone `cmdline_hide` is what every `<silent>` normal-mode
-            // mapping running an Ex command sends, because `<silent>`
-            // suppresses the `cmdline_show` and not the hide
+            // the real line comes down first, so the withdrawal sees no
+            // command line standing and releases what the guess hid; a lone
+            // `cmdline_hide` is what
+            // `a_hide_with_no_show_behind_it_returns_the_un_hides_the_guess_owes`
+            // covers
             model.engine.cmdline = None;
             let mut shown = crate::native::speculate::withdraw_cmdline_speculation(model);
             // both release the same absorption, and the second finds it

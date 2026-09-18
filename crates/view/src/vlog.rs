@@ -2167,6 +2167,37 @@ mod tests {
             !written.iter().any(|l| l == "palette closed withdrawn"),
             "the guess was answered, not refuted: {written:?}"
         );
+
+        // a lone `cmdline_hide` with a guess standing: the `<silent>`
+        // Ex-mapping shape this round is about, where `<silent>` suppresses
+        // the show and not the hide
+        let mut model = view_core::model::Model::new();
+        model.palette_enabled = true;
+        model.engine.cmdline_speculated = Some(CmdlineSpeculation {
+            since: SpecStamp::new(std::time::Duration::ZERO),
+            grid: view_core::grid::registry::GLOBAL_GRID,
+        });
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::Input, &model);
+        model.engine.cmdline_speculated = None;
+        let hide_only = Msg::Redraw(vec![UiEvent::CmdlineHide]);
+        felt.note_dispatched(Dispatch::of(&hide_only), &model);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            written.iter().any(|l| l == "palette closed withdrawn"),
+            "a lone hide behind a guess is the guess taken back: {written:?}"
+        );
+
+        // the same lone hide with no guess standing: no command line was
+        // ever speculated, so there is nothing for the topic to say
+        let model = view_core::model::Model::new();
+        let (mut felt, lines) = FeltLog::recording();
+        felt.note_dispatched(Dispatch::of(&hide_only), &model);
+        let written = lines.lock().unwrap().clone();
+        assert!(
+            !written.iter().any(|l| l.starts_with("palette")),
+            "no guess and no real command line owe the topic nothing: {written:?}"
+        );
     }
 
     /// The window that holds the file, and not the global grid beside it:

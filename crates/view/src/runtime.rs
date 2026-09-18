@@ -1484,6 +1484,22 @@ mod tests {
         );
     }
 
+    /// The loop's per-pass age check reaches the loop. Deleting the call
+    /// compiles and leaves every unit test green, because `run()` needs a real
+    /// terminal, engine session and channels, so the walk is over the source.
+    #[test]
+    fn the_per_pass_backstop_reaches_the_loop() {
+        let source = include_str!("runtime.rs");
+        let (_, body) = source
+            .split_once("pub fn run(")
+            .expect("the loop this walk is about");
+        assert!(
+            body.contains("expire_speculation_to_engine(&mut model"),
+            "the loop no longer takes back a guess nothing refuted, so the \
+             windows it hid stay hidden until the session ends"
+        );
+    }
+
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
     /// reason `view-native::paths`' and `view-ai::trust`'s own suites each
     /// hold a module-local guard: the base directory `view_ai::TrustStore`

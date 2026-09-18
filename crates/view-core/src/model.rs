@@ -1334,11 +1334,12 @@ pub struct EngineModel {
     /// Cleared only by a batch carrying an event nvim sends in answer to
     /// input, so the gate stays shut until nvim has actually read the key:
     /// a timer's flush, an LSP float or a `win_viewport` on its own leaves
-    /// it standing -- `mode_change`, `grid_cursor_goto`, `cmdline_show` and
-    /// `grid_line` are the four that count. It stands for a whole round trip after
-    /// every forwarded key, so on a link whose round trip is longer than a
-    /// user's own gap between keystrokes a `:` typed just after another key
-    /// is unaccelerated and drawn from nvim's own `cmdline_show`.
+    /// it standing -- `mode_change`, `grid_cursor_goto`, `cmdline_show`,
+    /// `msg_showcmd` and a `grid_line` on the cursor's own grid are the five
+    /// that count. It stands for a whole round trip after every forwarded
+    /// key, so on a link whose round trip is longer than a user's own gap
+    /// between keystrokes a `:` typed just after another key is
+    /// unaccelerated and drawn from nvim's own `cmdline_show`.
     pub key_unanswered: Option<crate::native::speculate::SpecStamp>,
     /// The last [`crate::native::speculate::KEY_ROUND_TRIPS`]
     /// key-to-answering-batch round trips this session observed, newest
@@ -1351,9 +1352,13 @@ pub struct EngineModel {
     /// with the link -- a lazy-loaded plugin, a first LSP attach, a
     /// treesitter parse -- and one such reading held forever would leave
     /// every later guess standing for a bound the session stopped
-    /// deserving. A window rather than a decay because a decay is keyed to
-    /// observation count, so a session that stalls once and then goes idle
-    /// would keep the inflated bound for exactly as long as it stayed idle.
+    /// deserving. A window rather than a decay because a ring forgets a
+    /// reading after a bounded number of later ones however large they are,
+    /// where a decay's forgetting rate depends on how large those later
+    /// readings are; both forget a hiccup only as keys keep arriving, so an
+    /// idle stretch after one leaves it standing either way -- accepted
+    /// because the bound only lengthens a wrong guess's life, never a right
+    /// one's.
     pub key_round_trips: [Option<std::time::Duration>; crate::native::speculate::KEY_ROUND_TRIPS],
     /// Where the next reading goes in `key_round_trips`.
     pub key_round_trips_at: usize,

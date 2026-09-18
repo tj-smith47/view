@@ -871,13 +871,14 @@ pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
     match call {
         RpcCall::Input { notation } => {
             // a key nvim answered with nothing at all -- an unmapped
-            // function key produces no redraw -- is not a key in flight,
-            // and a flag only an answering batch clears would otherwise
-            // hold the gate shut for the rest of the session
+            // function key produces no redraw -- is not a key in flight, and
+            // every forwarded key re-stamps this flag anyway, so the real
+            // cost of leaving it standing is one `:` left unaccelerated: the
+            // key nvim never answers, not the rest of the session
             if model
                 .engine
                 .key_unanswered
-                .is_some_and(|sent| now.age_since(sent) >= SPECULATION_MAX_AGE)
+                .is_some_and(|sent| now.age_since(sent) >= cmdline_backstop(model))
             {
                 model.engine.key_unanswered = None;
             }
@@ -961,6 +962,7 @@ pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec
 /// what sizes that backstop.
 fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> Vec<Effect> {
     let guessed_on = model.engine.cmdline_speculated.map(|open| open.grid);
+    let cursor_grid = model.engine.grids().cursor_local().0;
     let mut moved_cursor_there = false;
     let mut settled = false;
     let mut shows_cmdline = false;
@@ -982,9 +984,16 @@ fn fold_cmdline_batch(model: &mut Model, redraw: &[UiEvent], now: SpecStamp) -> 
                 shows_cmdline = true;
                 answers_input = true;
             }
-            // text changing under the cursor: the key was typed and nvim
-            // has drawn what it did
-            UiEvent::GridLine { .. } => answers_input = true,
+            // text changing under the cursor's own grid: the key was typed
+            // and nvim has drawn what it did. A float redrawing itself on
+            // some other grid is a plugin's own timer and answers nothing
+            UiEvent::GridLine { grid, .. } if GridId(*grid) == cursor_grid => {
+                answers_input = true;
+            }
+            // nvim's count/pending-operator echo, and its mapping-timeout
+            // clear -- never `settled`, so a literal-taking key's argument
+            // is still owed and the `f`/`r`/`"`/`q`/`@` rows stay gated
+            UiEvent::MsgShowcmd { .. } => answers_input = true,
             _ => {}
         }
     }
@@ -1295,8 +1304,10 @@ mod tests {
     /// batch nvim really flushes back after a count or a pending command
     /// (`msg_showcmd` and nothing else, read off the pinned engine under
     /// view's own attach) and `cursor` for the batch a finished motion
-    /// produces. Only the second is an answer to a key, which is why a `:`
-    /// after a count is unaccelerated rather than guessed at.
+    /// produces. Both answer the key that produced them, but only the
+    /// second settles a literal-taking key's own argument, which is why a
+    /// `:` after `f`/`r`/`"`/`q`/`@` stays gated while a `:` after a count
+    /// does not.
     #[test]
     fn a_colon_is_speculated_only_when_no_earlier_key_is_still_holding_it() {
         /// One typed sequence, and whether the `:` ending it opens the
@@ -1319,8 +1330,8 @@ mod tests {
             ),
             (
                 &["2", "showcmd", ":"],
-                false,
-                "a count whose showcmd is no answer, so nvim is not yet known to have read it",
+                true,
+                "a count whose showcmd nvim sends because the count was read",
             ),
             (&["j", "cursor", ":"], true, "a motion nvim has answered"),
             (
@@ -1654,6 +1665,12 @@ mod tests {
                 true,
             ),
             (grid_line(0, 0, "x"), true),
+            (
+                UiEvent::MsgShowcmd {
+                    content: vec![(0, "2".to_string())],
+                },
+                true,
+            ),
             (UiEvent::Flush, false),
             (
                 UiEvent::WinViewport {
@@ -1685,21 +1702,49 @@ mod tests {
         }
     }
 
+    /// A float redrawing its own grid is a plugin's own flush and answers
+    /// nothing: reading any grid's `grid_line` as an answer clears the gate
+    /// on a key nvim has not read and records a fraction of the link as the
+    /// round trip, on exactly the login-shaped configs the gate exists for.
+    #[test]
+    fn a_floats_own_grid_line_neither_clears_the_gate_nor_records_a_trip() {
+        let mut model = colon_model();
+        fold_engine_call(&mut model, &input("j"), stamp(0));
+
+        let _ = fold_redraw(
+            &mut model,
+            &[grid_line_on(5, 0, 0, "x"), UiEvent::Flush],
+            stamp(50),
+        );
+
+        assert!(
+            model.engine.key_unanswered.is_some(),
+            "a redraw on some other grid is not this key's answer"
+        );
+        assert_eq!(
+            model.engine.key_round_trips.iter().flatten().count(),
+            0,
+            "and it must not be timed as one"
+        );
+    }
+
     /// The gate reopens for a key nvim answered with nothing. An unmapped
-    /// function key produces no redraw at all, and a flag that only an
-    /// answering batch clears would hold the gate shut for the rest of the
-    /// session.
+    /// function key produces no redraw at all, and every forwarded key
+    /// re-stamps this flag anyway, so the real cost of leaving it standing
+    /// is one `:` left unaccelerated -- the key nvim never answers, not the
+    /// rest of the session.
     #[test]
     fn a_key_the_engine_never_answered_stops_holding_the_gate_shut() {
         let mut model = colon_model();
         fold_engine_call(&mut model, &input("<F13>"), stamp(0));
         assert!(model.engine.key_unanswered.is_some());
 
-        typed_colon(&mut model, stamp(SPECULATION_MAX_AGE.as_millis() as u64));
+        let bound = cmdline_backstop(&model).as_millis() as u64;
+        typed_colon(&mut model, stamp(bound));
 
         assert!(
             model.engine.cmdline_speculated.is_some(),
-            "a key older than the glyphs' own bound is no key in flight"
+            "a key older than the link's own backstop is no key in flight"
         );
     }
 

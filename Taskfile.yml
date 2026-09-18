@@ -389,6 +389,7 @@ tasks:
       - sh: test -z "$(printf '%s\n' {{.PATHS}} | grep -E '^(crates/|scripts/|compat/|corpus/|[.]github/|Taskfile[.]yml$|Cargo[.](toml|lock)$|[.]engine-pin$)')"
         msg: "The named paths include code, scripts, fixtures, CI, or build files; those go through `task commit` (the ci gate)."
     cmds:
+      - bash scripts/check-style.sh
       - task: _commit:only
         vars: { PATHS: "{{.PATHS}}", CLI_ARGS: "{{.CLI_ARGS}}" }
 
