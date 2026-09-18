@@ -91,8 +91,8 @@ phys_footprint_mb = 3.56329345703125
 p99_ms = 0.208
 
 [picker.minimal]
-first_page_p50_ms = 1.305625
-first_page_p99_ms = 1.434041
+first_page_p50_ms = 1.296291
+first_page_p99_ms = 1.404917
 match_paint_p50_ms = 7.1591249999999995
 match_paint_p99_ms = 17.483459
 
