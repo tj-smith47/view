@@ -260,6 +260,17 @@ fi
 AWK_COLS='function cols(s,   t) { if (CONT == "") { CONT = sprintf("[%c-%c]", 128, 191) }
                         t = s; gsub(CONT, "", t); return length(t) }
 '
+# One table-row reading for both width gates: a genuine row carries a second
+# `|` past the leading one or opens the separator shape (`|-`, `| -`); a prose
+# line that merely starts with a literal `|` has neither and is not exempt.
+AWK_TABLE_ROW='function is_table_row(l,   t) {
+      t = l; sub(/^[[:space:]]*/, "", t)
+      if (t !~ /^\|/) { return 0 }
+      if (t ~ /^\|.*\|/) { return 1 }
+      if (t ~ /^\|[[:space:]]*-/) { return 1 }
+      return 0
+    }
+'
 
 # Every embedded Lua chunk wraps at 80 characters. The chunks are read beside
 # rustfmt-held Rust and rustfmt does not reach inside a string literal, so
@@ -1564,7 +1575,7 @@ check_doc_width() {
     any=1
     limit=$(read_rustfmt_max_width "$crate_dir" "$root_limit")
     rc=0
-    found=$(printf '%s\n' "$files" | LC_ALL=C xargs awk -v limit="$limit" "$AWK_COLS"'
+    found=$(printf '%s\n' "$files" | LC_ALL=C xargs awk -v limit="$limit" "$AWK_COLS$AWK_TABLE_ROW"'
       FNR == 1 { fenced = 0 }
       {
         body = $0
@@ -1576,11 +1587,7 @@ check_doc_width() {
         if (rest ~ /^```/) { fenced = !fenced; next }
         if (fenced) { next }
         if (cols($0) <= limit) { next }
-        # a genuine table row carries a second `|` past the leading one, or
-        # opens the separator row shape (`|-`, `| -`); a prose line that
-        # merely starts with a literal `|` has neither and is not exempt
-        if (rest ~ /^\|.*\|/) { next }
-        if (rest ~ /^\|[[:space:]]*-/) { next }
+        if (is_table_row(rest)) { next }
         # a run that could not fit even alone on its own line -- the
         # marker and its indentation plus the run itself already past the
         # limit -- cannot wrap by moving words around it, so it is taken
@@ -1673,7 +1680,7 @@ check_prose_width() {
   fi
   rc=0
   graded=$(printf '%s\n' "$pages" | LC_ALL=C xargs awk -v limit="$PROSE_WIDTH" \
-    -v short="$PROSE_RAGGED" "$AWK_COLS"'
+    -v short="$PROSE_RAGGED" "$AWK_COLS$AWK_TABLE_ROW"'
     # the line a list item opens, which the ragged measure exempts and the
     # marker rule grades: written once because two rules reading the same
     # class out of two regexes drift apart at the first edit of either
@@ -1684,16 +1691,6 @@ check_prose_width() {
     # of a list item. A table row, a heading, a block quote, a rule and a
     # fence line each carry their own newline by construction, so neither the
     # short line nor the line after it is one of those
-    # a genuine table row carries a second `|` past the leading one, or opens
-    # the separator row shape (`|-`, `| -`); a prose line that merely starts
-    # with a literal `|` has neither and is not exempt
-    function is_table_row(l,   t) {
-      t = l; sub(/^[[:space:]]*/, "", t)
-      if (t !~ /^\|/) { return 0 }
-      if (t ~ /^\|.*\|/) { return 1 }
-      if (t ~ /^\|[[:space:]]*-/) { return 1 }
-      return 0
-    }
     function wraps(l) {
       if (l ~ /^[[:space:]]*$/) { return 0 }
       if (is_table_row(l)) { return 0 }
