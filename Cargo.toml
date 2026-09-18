@@ -53,3 +53,8 @@ panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# nucleo's match pass folds the rejected count per rayon job on this fork
+# (helix-editor/nucleo#105); the pin comes off when a release carries it.
+[patch.crates-io]
+nucleo = { git = "https://github.com/tj-smith47/nucleo", rev = "8f9ac7fbcd734b44ce212ad6ce24c73becefe72c" }
