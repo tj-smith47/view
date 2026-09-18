@@ -1924,11 +1924,14 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// root region is the whole document whatever the window shows: parsing
 /// any range of it parses all of it. A buffer big enough for that to cost
 /// more than a frame keeps the asynchronous path, which is the case that
-/// path exists for. The limit is the largest power-of-two size whose parse
-/// stayed inside a frame with room left for the highlighter's own draw,
-/// for rust, lua and typescript alike, on the pinned engine with
-/// nvim-treesitter's parsers -- and the readings are in the commit that
-/// set it.
+/// path exists for -- but the asynchronous path is not free: on a plugin
+/// config it lands the colour behind whatever else `UIEnter` queues, so
+/// the limit is not set where the inline parse first crosses a frame. It
+/// is set where the inline parse stays well under the delay the
+/// asynchronous path costs on a plugin config, priced per KiB by the
+/// probe in the commit that set it, for rust, lua and typescript alike on
+/// the pinned engine with nvim-treesitter's parsers -- and the readings
+/// are in that commit's body.
 ///
 /// A grammar whose injection query carries combined injections gets a
 /// smaller bound of its own, because that scan is the whole document
@@ -2023,7 +2026,7 @@ fn late_attach_cmd(width: u16, height: u16) -> String {
          -- the root parse is the whole document however few lines are\n\
          -- visible, so a buffer big enough to spend a frame on it keeps\n\
          -- the asynchronous path the highlighter would have taken\n\
-         local sync_parse_bytes = 64 * 1024\n\
+         local sync_parse_bytes = 256 * 1024\n\
          -- a combined-injection scan is the whole document whatever range\n\
          -- is asked, so that cost rides on the file rather than on the\n\
          -- range and fits inside a frame over a shorter one\n\

@@ -185,7 +185,7 @@ const COMBINED_PARSE_BYTES: usize = 16 * 1024;
 /// the same grounds. The control test's own buffer stands under it and
 /// `a_buffer_over_the_byte_bound_takes_the_async_path` stands over it, so a
 /// chunk that moved this number leaves the two of them on one side of it.
-const SYNC_PARSE_BYTES: usize = 64 * 1024;
+const SYNC_PARSE_BYTES: usize = 256 * 1024;
 
 /// A markdown buffer of a stated size, whose bundled grammar carries
 /// combined injections: its injection scan is the whole document whatever
@@ -531,7 +531,7 @@ fn a_combined_injection_grammar_over_its_own_bound_takes_the_async_path() {
 /// in the commit that set the bound.
 #[test]
 fn a_buffer_over_the_byte_bound_takes_the_async_path() {
-    let (dir, bytes) = highlighted_lua_config(600);
+    let (dir, bytes) = highlighted_lua_config(2200);
     assert!(
         bytes > SYNC_PARSE_BYTES,
         "the fixture has to stand over the byte bound to measure the branch \
@@ -552,6 +552,38 @@ fn a_buffer_over_the_byte_bound_takes_the_async_path() {
         "nvim's own screen update at the end of startup must begin with an \
          unparsed tree: a first frame carrying colours here is the hook \
          having parsed a buffer whose root parse costs more than the frame"
+    );
+}
+
+/// A buffer at a real Rust source file's own byte shape -- 145341 bytes,
+/// this tree's own largest `model.rs` -- is under the bound and still
+/// parsed inline: a smaller bound left that file's colour on the
+/// asynchronous path, hundreds of milliseconds behind its text on a
+/// plugin config, which is the delay this bound holds the inline parse
+/// well clear of.
+#[test]
+fn a_buffer_at_the_reported_files_size_is_parsed_inline() {
+    let (dir, bytes) = highlighted_lua_config(1200);
+    assert!(
+        bytes < SYNC_PARSE_BYTES,
+        "the fixture has to stand under the byte bound to measure the \
+         branch this test is about, and it holds {bytes} bytes"
+    );
+    let mut engine = engine(&dir);
+    let _rx = answered(&mut engine);
+
+    let read = settled(&engine);
+
+    assert_eq!(
+        read.highlighted, 1,
+        "the fixture attaches a lua highlighter while init.lua is sourcing, \
+         so one must be active here or this test measured nothing"
+    );
+    assert_eq!(
+        read.coloured_draw, 1,
+        "nvim's own screen update at the end of startup must carry \
+         colours: a buffer at this file's own size is what the regressed \
+         64 KiB bound left on the asynchronous path"
     );
 }
 
