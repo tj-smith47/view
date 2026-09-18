@@ -2168,9 +2168,10 @@ mod tests {
 
     /// A published factor is an arithmetic claim about a band, and nothing
     /// re-ran that arithmetic: the sidecars state a worst excursion, the
-    /// two-half-width rule and a survives-its-own-ratchet check in prose,
-    /// so a factor edited away from what its draws support surfaced one CI
-    /// bench leg later, as a breach or as a regression admitted in silence.
+    /// band's own 2x half-width, and a survives-its-own-ratchet check in
+    /// prose, so a factor edited away from what its draws support surfaced
+    /// one CI bench leg later, as a breach or as a regression admitted in
+    /// silence.
     /// The draws now ship beside the factors and every entry is recomputed
     /// against its own campaign here.
     #[test]

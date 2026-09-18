@@ -389,73 +389,81 @@ paths: ["**/*.rs"] template-source: "rules/rust.md.tmpl"
   mechanism goes in words and the reading stays in the commit that took it.**
   `check_doc_figures` in `scripts/check-style.sh` reads every `///` and `//!`
   line under `crates/` and fails one that carries a millisecond, microsecond,
-  nanosecond, second, percentage or multiplier figure. What counts as a figure
-  has two forms. A decimal carrying one of those units is a reading wherever it
-  stands, since nothing in this tree passes 0.37 us to anything. An integer
-  carrying one is a reading only inside the sentence a reading word opened,
-  because an integer with a unit is far more often a constant the code passes
-  -- a 150 ms throttle, a 20 ms cadence -- and sweeping those deletes the WHY
-  the comment is there for. The reading words are the verbs this tree states a
-  reading in, read in any case: `measure`, `observ`, `record`, `spend`/`spent`,
-  `cost`, `took`, `takes`/`taken`/`taking`, `walked`/`walks`, `clocked`,
-  `timed`, `appear`, `pays`, `lands`, `needed`/`needs`, `runs`, `ran`, and the
-  noun `reading`. Four of them were added after three readings shipped behind
-  them -- `pays ~13s`, `lands ~250us later`, a `~2 ms` figure mixed into
-  `~50 ms` ones -- so a verb a reading can be written with belongs on that list
-  before the reading does. `ran` is the one read with a non-letter on each
-  side, because `range`, `transient` and `guarantee` all carry it and every one
-  of them would otherwise open a sentence the walk then grades. A figure
-  carries its sign and a spread is written as a range, so `+1.23%` is one
-  figure and `0.62ms..92.5ms`, `1..=5 ms`, `8-10ms` and `+/-20%` are each
-  two: the four separators become blanks before the line is read,
-  except the hyphen, which becomes the sign of the figure after it. The
-  inclusive range takes its `=` with it, because blanking the two dots alone
-  left `=5 ms`, which no token shape reads. A token shape reading neither a sign
-  nor a range passed ten measured figures on the shipped tree. A finding prints
-  the token as the file spells it -- `8-10ms`, not the `-10` the range was cut
-  into -- so the reader lands on what the walk read. Three shapes take a line
-  out of the grading: a word that makes the number something other than a
-  reading, a cell id the drift check knows, and a fenced block, which is a
-  sample of what something prints and which rewording would destroy. The first
-  of those is `bar`, `budget`, `bound`, `band`, `tolerance`, `deadline`,
-  `throttle`, `debounce`, `ceiling`, `cap`, `tier`, `pace` and `derive`, each
-  with `s`, `d`, `ed` or `ped` allowed after it: `(s|d)?` gave `cap`, `caps`
-  and `capd`, so `capped` -- the spelling the rule named -- was refused along
-  with `tiered` and `bounded`. Twelve of the thirteen say the tree chose the
-  number and can be read back off the constant holding it. `derive` says the
-  code computes it from one the tree chose, which is what none of the others
-  could say: `2 x` trials and the 31s five doubled waits come to are neither
-  readings nor values written down, and the only way to keep either had been to
-  drop the verb that made it a sentence. Each of the three exempts the figures
-  on its own line and never the sentence the words on that line opened:
-  skipping the line outright left a reading word beside a bound to open no
-  sentence at all, and the figure rustfmt wrapped below it went ungraded. The
-  cell ids are the drift check's own vocabulary, read at each run through
-  `scripts/check-budget-drift.sh --cell-ids` rather than written down a second
-  time, and a run that reads none of them fails closed: an empty vocabulary
-  grades every figure as anchored, which reads exactly like a tree with nothing
-  to report. A reading therefore goes to prose, or to `docs/benchmarking.md`
-  beside the cell that records it -- where the drift check grades it against
-  that cell, which is the whole point of naming one. Two limits are stated
-  rather than implied. The sentence bounding a figure ends at the first `.`
-  before a blank or a line end on either side of it, and the word that grades
-  the figure is as free to fall after it as before: rustfmt breaks a line
-  wherever the width runs out, and a state that only ran forward graded
-  `moved 6x cross-boot` as a constant for want of a `measured` that sat on
-  the next line. So an integer two sentences from the word that took it, in
-  either direction, is graded as a constant; and a figure written with no unit
-  at all is graded by nothing here. Cased in `scripts/check-style-cases.sh` over
-  twenty-seven shapes: the tree that passes on all five escapes, the decimal,
-  the integer inside a reading sentence, the same integer wrapped onto the line
-  below the word that introduced it and the figure standing on the line above
-  the word instead, the constant in the sentence after one a reading closed and
-  the constant in the sentence before one a reading opens, the reading on a line
-  naming a cell, the budgets file that declares no cell, one red per range and
-  sign spelling, a reading word beside a bound and beside a cell id whose figure
-  is wrapped onto the line below, the finding that names a range as the file
-  spells it, one red per whole-unit verb the vocabulary reaches (`spends`,
-  `walked`, `pays`, `lands`, `ran`), the constant whose only reading verb is a
-  word that contains one, and one green per escape the figure rests on
+  nanosecond, second, percentage or multiplier figure. What counts as a
+  figure has two forms. A decimal carrying one of those units is a reading
+  wherever it stands, since nothing in this tree passes 0.37 us to anything.
+  An integer carrying one is a reading only inside the sentence a reading
+  word opened, because an integer with a unit is far more often a constant
+  the code passes -- a 150 ms throttle, a 20 ms cadence -- and sweeping those
+  deletes the WHY the comment is there for. The reading words are the stems
+  the shipped regex spells, read in any case: `measure`, `observ`, `record`,
+  `spen[dt]`, `cost`, `took`, `tak(e[sn]|ing)` (`takes`/`taken`/`taking`),
+  `walk(ed|s)`, `clocked`, `timed`, `appear`, `pays`, `paid`, `land(s|ed)`,
+  `need(ed|s)`, `runs`, `ran`, and the noun `reading`. Every stem but `ran`
+  is read as a bare substring -- `runs` inside `reruns`, `lands` inside
+  `islands`, `taking` inside `undertaking` -- which is the accepted failure
+  direction: a substring false positive costs a reword, and a stem narrowed
+  to dodge one risks the opposite, a reading the check reads past. Six of
+  them were added after readings shipped behind the gap -- `pays ~13s`,
+  `lands ~250us later`, a `~2 ms` figure mixed into `~50 ms` ones, and
+  `needed`/`needs`, `taking`, `walks`, `paid` and `landed` reaching no case
+  of their own -- so a verb a reading can be written with belongs on that
+  list before the reading does. `ran` is the one read with a non-letter on
+  each side, because `range`, `transient` and `guarantee` all carry it and
+  every one of them would otherwise open a sentence the walk then grades. A
+  figure carries its sign and a spread is written as a range, so `+1.23%` is
+  one figure and `0.62ms..92.5ms`, `1..=5 ms`, `8-10ms` and `+/-20%` are each
+  two: the four separators become blanks before the line is read, except the
+  hyphen, which becomes the sign of the figure after it. The inclusive range
+  takes its `=` with it, because blanking the two dots alone left `=5 ms`,
+  which no token shape reads. A token shape reading neither a sign nor a
+  range passed ten measured figures on the shipped tree. A finding prints
+  the token as the file spells it -- `8-10ms`, not the `-10` the range was
+  cut into -- so the reader lands on what the walk read. Three shapes take
+  a line out of the grading: a word that makes the number something other
+  than a reading, a cell id the drift check knows, and a fenced block, which
+  is a sample of what something prints and which rewording would destroy.
+  The first of those is `bar`, `budget`, `bound`, `band`, `tolerance`,
+  `deadline`, `throttle`, `debounce`, `ceiling`, `cap`, `tier`, `pace` and
+  `derive`, each with `s`, `d`, `ed` or `ped` allowed after it: `(s|d)?` gave
+  `cap`, `caps` and `capd`, so `capped` -- the spelling the rule named --
+  was refused along with `tiered` and `bounded`. Twelve of the thirteen say
+  the tree chose the number and can be read back off the constant holding it.
+  `derive` says the code computes it from one the tree chose, which is what
+  none of the others could say: `2 x` trials and the 31s five doubled waits
+  come to are neither readings nor values written down, and the only way to
+  keep either had been to drop the verb that made it a sentence. Each of the
+  three exempts the figures on its own line and never the sentence the words
+  on that line opened: skipping the line outright left a reading word beside
+  a bound to open no sentence at all, and the figure rustfmt wrapped below
+  it went ungraded. The cell ids are the drift check's own vocabulary, read
+  at each run through `scripts/check-budget-drift.sh --cell-ids` rather than
+  written down a second time, and a run that reads none of them fails closed:
+  an empty vocabulary grades every figure as anchored, which reads exactly
+  like a tree with nothing to report. A reading therefore goes to prose,
+  or to `docs/benchmarking.md` beside the cell that records it -- where
+  the drift check grades it against that cell, which is the whole point
+  of naming one. Two limits are stated rather than implied. The sentence
+  bounding a figure ends at the first `.` before a blank or a line end on
+  either side of it, and the word that grades the figure is as free to fall
+  after it as before: rustfmt breaks a line wherever the width runs out, and
+  a state that only ran forward graded `moved 6x cross-boot` as a constant
+  for want of a `measured` that sat on the next line. So an integer two
+  sentences from the word that took it, in either direction, is graded as
+  a constant; and a figure written with no unit at all is graded by nothing
+  here. Cased in `scripts/check-style-cases.sh` over thirty-four shapes: the
+  tree that passes on all five escapes, the decimal, the integer inside a
+  reading sentence, the same integer wrapped onto the line below the word
+  that introduced it and the figure standing on the line above the word
+  instead, the constant in the sentence after one a reading closed and the
+  constant in the sentence before one a reading opens, the reading on a line
+  naming a cell, the budgets file that declares no cell, one red per range
+  and sign spelling, a reading word beside a bound and beside a cell id whose
+  figure is wrapped onto the line below, the finding that names a range as
+  the file spells it, one red per whole-unit verb the vocabulary reaches
+  (`spends`, `walked`, `walks`, `pays`, `paid`, `lands`, `landed`, `needed`,
+  `needs`, `runs`, `taking`, `ran`), the constant whose only reading verb
+  is a word that contains one, and one green per escape the figure rests on
   (`throttle`, `tier`, `capped`, `derived`).
 
   A green case that would be green without the rule it names grades nothing:

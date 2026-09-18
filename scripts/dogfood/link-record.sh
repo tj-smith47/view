@@ -134,16 +134,31 @@ for required in "$VIEW_BIN" "$NVIM_BIN" "$FILE"; do
   fi
 done
 HEAD_SHA=$(git -C "$REPO" log -1 --format=%h)
-# The newest change to something this binary is built from, which is what a
-# stale binary is stale against. HEAD's own time refused a correct binary
-# after every docs-only or scripts-only change, and the rebuild the message
-# printed cleared nothing: cargo had nothing to redo, so the mtime never
-# moved and only touching a source file got past it. The inputs are the
-# crates and the two cargo manifests -- this workspace has no build script,
-# and nothing the crates read at build time lives outside them.
-BUILD_SHA=$(git -C "$REPO" log -1 --format=%h -- crates Cargo.toml Cargo.lock)
-BUILD_CT=$(git -C "$REPO" log -1 --format=%ct -- crates Cargo.toml Cargo.lock)
 BIN_MTIME=$(mtime_of "$VIEW_BIN")
+
+# The newest **file** mtime among the tracked build inputs, and the file
+# that carries it -- this is what cargo's own fingerprinting is stale
+# against, so a mismatch here is a mismatch there too. A commit's own date
+# refused a correct binary after every docs-only or scripts-only change (the
+# rebuild the message printed cleared nothing, since cargo had nothing to
+# redo), and it never saw an uncommitted edit under crates/ at all. The
+# inputs are the tracked files under crates and the two cargo manifests --
+# this workspace has no build script, and nothing the crates read at build
+# time lives outside them.
+BUILD_INPUT=$(git -C "$REPO" ls-files -- crates Cargo.toml Cargo.lock | \
+  sed "s|^|$REPO/|" | \
+  perl -e '
+    my ($best_t, $best_f) = (-1, "");
+    while (<STDIN>) {
+      chomp;
+      my $t = (stat($_))[9];
+      next if !defined $t;
+      if ($t > $best_t) { $best_t = $t; $best_f = $_; }
+    }
+    print "$best_t\t$best_f\n";
+  ')
+BUILD_MTIME=${BUILD_INPUT%%	*}
+BUILD_FILE=${BUILD_INPUT#*	}
 
 # A binary under $REPO/target/ is this repo's own build, so a run over one
 # older than the last build input measured a build that does not carry that
@@ -152,10 +167,10 @@ BIN_MTIME=$(mtime_of "$VIEW_BIN")
 # which is the whole point of the variable, and is measured as given.
 case "$VIEW_BIN" in
   ("$REPO"/target/*)
-    if [ "$BIN_MTIME" -lt "$BUILD_CT" ]; then
+    if [ "$BIN_MTIME" -lt "$BUILD_MTIME" ]; then
       echo "link-record: $VIEW_BIN (mtime $BIN_MTIME) is older than" \
-           "$BUILD_SHA, the last change to crates, Cargo.toml or" \
-           "Cargo.lock (recorded $BUILD_CT); rebuild with:" \
+           "$BUILD_FILE (mtime $BUILD_MTIME), the newest change under" \
+           "crates, Cargo.toml or Cargo.lock; rebuild with:" \
            "cargo build --release -p view" >&2
       exit 1
     fi

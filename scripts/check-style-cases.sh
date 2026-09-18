@@ -965,6 +965,51 @@ printf '%s\n' '/// The fold ran 83 ms behind the tick that moved it.' \
 expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
   'a whole-unit reading in a sentence saying how long something ran'
 
+# One red case per remaining vocabulary member: a case reverting the member
+# alone from the shipped checker has to redden here, or the member is graded
+# by nothing and the rule that mints these cases is itself unmet.
+new_doc_figures_case
+printf '%s\n' '/// The sweep runs 83 ms behind the tick that moved it.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying how long a sweep runs'
+
+new_doc_figures_case
+printf '%s\n' '/// The wait needed 83 ms before the retry fired.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a wait needed'
+
+new_doc_figures_case
+printf '%s\n' '/// The retry needs 83 ms before it fires again.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a retry needs'
+
+new_doc_figures_case
+printf '%s\n' '/// Taking 83 ms to settle, the frame then repaints.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what settling is taking'
+
+new_doc_figures_case
+printf '%s\n' '/// The tree walks 83 ms of entries before it stops.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a walk walks'
+
+new_doc_figures_case
+printf '%s\n' '/// The cold start paid 83 ms to take the notices down.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a start paid'
+
+new_doc_figures_case
+printf '%s\n' '/// The write landed 250 us after the keypress fired.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying where a write landed'
+
 # `ran` as a stem is inside `range`, `transient` and `guarantee`, and every
 # one of those would open a sentence the walk then grades. The vocabulary is
 # read off a copy whose words each carry a space, so the stem matches the

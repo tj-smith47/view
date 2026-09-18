@@ -1288,15 +1288,27 @@ check_written_programs() {
 #
 # The second half is what the first cannot do: a reading is as free to land
 # on a whole unit as on a fraction, and the word "measured" is not how this
-# tree writes most of them. So the vocabulary is the verbs a reading is
-# stated in -- measure, observ, record, spend, cost, take (taking and takes
-# with it), walk, clock, time, appear, pay, land, need, run and ran -- and
-# the noun "reading", and a whole-unit figure standing in a sentence
-# carrying one of them is graded exactly as a fractional figure is.
-# `98 ms` in a startup chunk's doc passed for a round number a writer had
+# tree writes most of them. So the vocabulary is the stems the regex below
+# actually spells -- measure, observ, record, spen[dt], took, tak(e[sn]|ing),
+# walk(ed|s), clocked, timed, appear, pays, paid, land(s|ed), need(ed|s),
+# runs and ran -- and the noun "reading", and a whole-unit figure standing in
+# a sentence carrying one of them is graded exactly as a fractional figure
+# is. `98 ms` in a startup chunk's doc passed for a round number a writer had
 # chosen while the sentence around it said what the parse spent, and
 # `pays ~13s`, `lands ~250us later` and `taking 83 ms` each shipped a
 # reading past a vocabulary keyed on the verbs that were already in it.
+#
+# Every stem but `ran` is read as a bare substring, on purpose: `runs`
+# inside `reruns`, `lands` inside `islands`, `taking` inside `undertaking`
+# and `pays` inside `repays` all open a sentence the walk then grades, and
+# that is the failure direction this check accepts. A substring false
+# positive costs the author a reword (or an escape word already on the
+# list); a stem narrowed to avoid one risks the opposite, a reading this
+# tree writes that the check reads past, which is the failure this vocabulary
+# is not allowed to make. `ran` alone takes a non-letter on each side,
+# because bare `ran` sits inside `range`, `transient` and `guarantee` often
+# enough that leaving it unbounded would grade three common words as
+# openers.
 #
 # A figure carries its sign and a spread is written as a range, so a token
 # shape reading neither passed ten measured figures: `+1.23%`, `+/-20%`,
@@ -1393,13 +1405,17 @@ check_doc_figures() {
       # Lowercased for both word tests: a reading word opens a sentence as
       # often as it stands inside one, and a case-sensitive read let every
       # capitalised `Measured` and `Observed` through.
-      # A trailing blank so that `ran`, the one stem that is a word inside
-      # other words (`range`, `transient`, `guarantee`), can be written
-      # with a non-letter on each side without the pattern needing a `$`:
-      # an anchor in the middle of an alternation is not portable across
-      # the three awks this tree runs under, and the marker stripped off
-      # the front of the line has already left a blank there.
-      folded = tolower(body) " "
+      # A blank on each side so that `ran`, the one stem that is a word
+      # inside other words (`range`, `transient`, `guarantee`), can be
+      # written with a non-letter on each side without the pattern needing
+      # `^` or `$`: an anchor in the middle of an alternation is not
+      # portable across the three awks this tree runs under. The walk
+      # supplies both blanks, because the line supplies neither: a doc
+      # line written `///ran 83 ms` is one `cargo fmt` leaves alone and
+      # nothing else in the gate asks for the space after the marker, and
+      # the reading in it went ungraded while the front boundary rested on
+      # that space.
+      folded = " " tolower(body) " "
       # The reading state runs to the end of the sentence that opened it,
       # and not to the end of the line: a figure rustfmt wrapped onto the
       # line after the word that introduced it escapes a per-line test,
@@ -1420,10 +1436,10 @@ check_doc_figures() {
       # until the sentence it stands in closes, and a reading word reached
       # first reports it -- unless a `.` stands between the two, which is
       # the same sentence boundary the forward state reads.
-      had_word = (folded ~ /measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|lands|need(ed|s)|runs|[^a-z]ran[^a-z]/)
+      had_word = (folded ~ /measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|paid|land(s|ed)|need(ed|s)|runs|[^a-z]ran[^a-z]/)
       if (had_word) {
         head = folded
-        sub(/(measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|lands|need(ed|s)|runs|[^a-z]ran[^a-z]).*$/, "", head)
+        sub(/(measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|paid|land(s|ed)|need(ed|s)|runs|[^a-z]ran[^a-z]).*$/, "", head)
         if (head ~ /\.([[:space:]]|$)/) { held = "" }
         if (held != "") { printf "%s", held; held = "" }
         reading = 1
@@ -1462,7 +1478,7 @@ check_doc_figures() {
       }
       if (reading) {
         tail = folded
-        if (had_word) { sub(/^.*(measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|lands|need(ed|s)|runs|[^a-z]ran[^a-z])/, "", tail) }
+        if (had_word) { sub(/^.*(measure|observ|record|spen[dt]|cost|took|tak(e[sn]|ing)|walk(ed|s)|clocked|timed|reading|appear|pays|paid|land(s|ed)|need(ed|s)|runs|[^a-z]ran[^a-z])/, "", tail) }
         if (tail ~ /\.([[:space:]]|$)/) { reading = 0 }
       }
       # A held figure lives as long as its own sentence: what closes it is a

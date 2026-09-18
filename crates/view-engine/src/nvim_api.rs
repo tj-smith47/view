@@ -696,12 +696,6 @@ pub(crate) const MAPPINGS_COLON_KEY: &str = "colon_mapped";
 /// wait rather than an unbounded one, and so is a negative `ttimeoutlen`.
 /// Both mean the engine reads a run that stopped short on the pass that
 /// read it, which is why neither reaches the wire as a sentinel.
-/// The float watcher's throttle in the milliseconds `vim.defer_fn` takes,
-/// read off view-core's own [`view_core::update::FLOAT_SCAN_THROTTLE`] so
-/// the chunk and the update module that explains it cannot disagree.
-pub(crate) const FLOAT_SCAN_THROTTLE_MS: u64 =
-    view_core::update::FLOAT_SCAN_THROTTLE.as_millis() as u64;
-
 pub(crate) const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel, float_throttle = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -808,6 +802,12 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
     pcall(vim.rpcrequest, channel, 'view_leaving')
   end,
 })";
+
+/// The float watcher's throttle in the milliseconds `vim.defer_fn` takes,
+/// read off view-core's own [`view_core::update::FLOAT_SCAN_THROTTLE`] so
+/// the chunk and the update module that explains it cannot disagree.
+pub(crate) const FLOAT_SCAN_THROTTLE_MS: u64 =
+    view_core::update::FLOAT_SCAN_THROTTLE.as_millis() as u64;
 
 /// The lua chunk [`EngineHandle::probe_claimants`] runs inside nvim, taking
 /// view's channel id and the module names to look for as its two varargs.
