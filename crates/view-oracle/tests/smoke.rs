@@ -742,13 +742,11 @@ fn view_paints_wide_character_without_corrupting_neighbor_cell() {
     expect_quit(&mut session);
 }
 
-/// Supervision's headline promise, end to end: view's engine is killed the
-/// way a crash kills it, and the editor is still there, with a live engine
-/// under it, painting what that engine sends. Until automatic recovery existed this same kill ended the
-/// session with 128+SIGKILL; the exit-status mapping that pinned is pinned
-/// now by the engine that stops because it was told to
-/// (`view_propagates_cquit_exit_code`), which is the only stop that still
-/// ends a session.
+/// Supervision's headline promise, end to end: view's engine is killed the way a crash kills it,
+/// and the editor is still there, with a live engine under it, painting what that engine sends.
+/// Until automatic recovery existed this same kill ended the session with 128+SIGKILL; the
+/// exit-status mapping that pinned is pinned now by the engine that stops because it was told to
+/// (`view_propagates_cquit_exit_code`), which is the only stop that still ends a session.
 #[cfg(target_os = "linux")]
 #[test]
 fn view_recovers_its_own_engine_after_a_signal_death() {
@@ -3505,7 +3503,8 @@ fn pre_attach_keys_typed_before_a_slow_engine_replay_into_the_buffer_in_order() 
 /// This is a supplementary, real-engine regression test; the deterministic
 /// unit-level coverage for the hazard shape it guards lives in
 /// `runtime::tests::re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever`
-/// (`runtime.rs`) and `startup::tests::run_cutover_against_a_pre_filled_channel_replays_everything_without_blocking`
+/// (`runtime.rs`) and
+/// `startup::tests::run_cutover_against_a_pre_filled_channel_replays_everything_without_blocking`
 /// (`startup.rs`), for a reason worth recording here: the hazard this test
 /// aims at requires at least one extra `Msg` to land in `msg_tx` in a
 /// microsecond-scale gap during cutover -- both the ring and the channel

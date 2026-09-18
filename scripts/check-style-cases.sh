@@ -1030,14 +1030,105 @@ expect_doc_figures 0 '' \
   'a whole-unit figure on a line saying the code derives it'
 
 # ---------------------------------------------------------------------------
-# the prose width gate: a page wraps at 80 characters, and what cannot wrap
-# exempt by shape rather than by a list of files -- a fence is a sample of a
-# file, a row is a row, a heading is one line by construction, a link has
-# nowhere to break, and a token longer than the limit cannot be helped by
-# wrapping, which is why the token and not the line it stands in is what the
-# walk takes out. Counted in characters, by a measure that gives the same
-# verdict on an awk that decodes UTF-8 and one that does not
+# the doc-comment width gate: a `///`/`//!` line is held to its crate's
+# rustfmt `max_width` (100 where no `rustfmt.toml`/`.rustfmt.toml` exists),
+# code lines excluded because rustfmt already wraps those. A table row and a
+# fenced sample cannot rewrap without changing what they say, and a run that
+# could not fit even alone on its own line -- the marker and indentation
+# already spent -- cannot be helped by moving words around it, so each is
+# exempt by shape.
 # ---------------------------------------------------------------------------
+new_doc_width_case() {
+  n=$((n + 1))
+  CASE="$WORK/case$n"
+  mkdir -p "$CASE/crates/view-x/src"
+  : > "$CASE/crates/view-x/src/lib.rs"
+}
+
+# Graded on the file and line of every reported line, the same shape
+# `expect_doc_figures` uses: a case expecting one finding fails if a second
+# is reported, and a case expecting silence fails if the walk narrows itself
+# and reports nothing for the wrong reason.
+expect_doc_width() {
+  want_rc="$1"
+  want="$2"
+  desc="$3"
+  out=$(bash "${RUN:-$CHECKER}" --doc-width "$CASE" 2>&1)
+  rc=$?
+  got=$(printf '%s\n' "$out" | awk '
+    /^STYLE FAIL: a doc comment line runs past its crate.s rustfmt max_width$/ {
+      print "doc-width"; next
+    }
+    /^STYLE FAIL: no crate sources found/ { print "no-crates"; next }
+    /^crates\// { sub(/:$/, "", $1); print $1 }
+  ' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ *$//')
+  if [ "$rc" = "$want_rc" ] && [ "$got" = "$want" ]; then
+    printf 'ok %s - %s\n' "$n" "$desc"
+    return
+  fi
+  failures=$((failures + 1))
+  printf 'not ok %s - %s\n  want rc=%s findings [%s]\n  got  rc=%s findings [%s]\n' \
+    "$n" "$desc" "$want_rc" "$want" "$rc" "$got"
+  printf '%s\n' "$out" | sed 's/^/  | /'
+}
+
+new_doc_width_case
+printf '%s\n' '/// A line of ordinary prose that stays well inside the limit.' \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 0 '' 'a doc comment inside the limit'
+
+new_doc_width_case
+printf '%s\n' \
+  '/// A line of ordinary prose padded out with filler words until it runs well past the hundred column limit rustfmt holds every other line in this crate to.' \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 1 'crates/view-x/src/lib.rs:1 doc-width' \
+  'a doc comment line over the default 100-column limit'
+
+# A markdown table row is one row of the table it stands in and cannot
+# rewrap without breaking the table, so it is exempt regardless of width.
+new_doc_width_case
+printf '%s\n' \
+  '/// | a very long left column that pushes this row well past the hundred column limit | yes |' \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 0 '' 'a table row over the limit'
+
+# A fenced sample is a quote of what something prints or parses, not prose:
+# splitting the line would document a line break the program never emits.
+new_doc_width_case
+printf '%s\n' '/// ```text' \
+  '/// echo/minimal: view p50 0.612ms p99 0.941ms max 1.203ms | nvim p50 0.550ms p99 0.713ms' \
+  '/// ```' \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 0 '' 'a fenced sample over the limit'
+
+# A markdown link whose target alone, plus the marker and indentation this
+# line already pays for, cannot fit under the limit has nowhere to break:
+# moving it to a line of its own still leaves it over.
+new_doc_width_case
+printf '%s\n' \
+  '    /// ([`SurfaceConflicts::forget_engine`](crate::native::surfaces::SurfaceConflicts::forget_engine)' \
+  '    /// carries the per-field reasoning).' \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 0 '' \
+  'a markdown link that cannot fit on a line of its own even with its indentation alone'
+
+# A crate-level rustfmt.toml overrides the workspace root's own max_width
+# (there is none at this scratch tree's root, so the default of 100 is what
+# it overrides): a line that fits under 100 but not under the crate's own
+# 60 has to redden, or the crate-level read is dead code.
+new_doc_width_case
+printf '%s\n' 'max_width = 60' > "$CASE/crates/view-x/rustfmt.toml"
+printf '%s\n' \
+  "/// A line under the default hundred characters but over this crate's own." \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 1 'crates/view-x/src/lib.rs:1 doc-width' \
+  "a doc comment under the default 100 but over the crate's own rustfmt max_width"
+
+new_doc_width_case
+rm -rf "$CASE/crates"
+expect_doc_width 1 'no-crates' \
+  'a tree with no crate sources, which would grade every line as inside the limit'
+
 new_width_case() {
   n=$((n + 1))
   CASE="$WORK/case$n"

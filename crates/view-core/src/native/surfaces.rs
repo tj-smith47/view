@@ -649,8 +649,8 @@ pub struct SurfaceConflicts {
     /// [`Model::expire_startup_hold`](crate::model::Model::expire_startup_hold)),
     /// never at the dispatch site.
     generation: u64,
-    /// The claimant modules whose own `disable` ran when the takeover asked
-    /// them to turn themselves off ([`Msg::ClaimantsHandedBack`](crate::msg::Msg::ClaimantsHandedBack)).
+    /// The claimant modules whose own `disable` ran when the takeover asked them to turn themselves
+    /// off ([`Msg::ClaimantsHandedBack`](crate::msg::Msg::ClaimantsHandedBack)).
     ///
     /// The notice's account of the ask is worded from this and not from the
     /// probe: a plugin that turned itself off exactly as asked is still in

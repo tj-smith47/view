@@ -168,12 +168,11 @@ fn marked(session: &mut PtySession, who: &str) -> usize {
 /// the terminal, and nvim's own answer to the same reports is what says how
 /// much "nothing" is.
 ///
-/// The first burst is the settle point -- whatever either editor does the
-/// first time the mouse is used, it has done by the time its window is over
-/// -- and the second is the measurement, whose count is read at the moment
-/// the marker goes out so no byte written between the two falls outside it. Both sides are asserted, so the pin
-/// says which parity it proves rather than resting on two sessions agreeing
-/// about a stream neither produced.
+/// The first burst is the settle point -- whatever either editor does the first time the mouse is
+/// used, it has done by the time its window is over -- and the second is the measurement, whose
+/// count is read at the moment the marker goes out so no byte written between the two falls outside
+/// it. Both sides are asserted, so the pin says which parity it proves rather than resting on two
+/// sessions agreeing about a stream neither produced.
 ///
 /// Disconfirm: making the SGR trailer unconditional in
 /// `view-tui/src/paint/emit.rs`, or re-stating the cursor position on every

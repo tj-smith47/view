@@ -973,23 +973,20 @@ impl PumpShared {
         let _ = sink.send(msg);
     }
 
-    /// Installs `sink` and returns what was already staged before this call
-    /// existed, instead of sending any of it: the presink FIFO's messages in
-    /// arrival order, and whether damage was already pending. `sink` is not
-    /// guaranteed to have a consumer draining it yet at the moment this call
-    /// is made -- the runtime loop that eventually reads it can start well
-    /// after this call returns -- so a send performed here has no bound on
-    /// how long it can block: an unconsumed channel already holding other
-    /// traffic (other producer threads send into the same channel,
-    /// blocking) can fill up and wedge both senders permanently. Returning the staged state instead lets the
-    /// caller resolve it through its own dispatch path once it knows a
-    /// consumer exists, exactly the way [`DamagePump::take_damage`]'s
-    /// `Msg::RedrawReady` catch-up is resolved by `runtime::run`'s loop.
-    /// Routing installed by this call for *steady-state* traffic afterward
-    /// ([`fold_redraw`](Self::fold_redraw), [`route_msg`](Self::route_msg),
-    /// [`route_terminal`](Self::route_terminal)) is unchanged: those still
-    /// write into `sink` directly, because by the time they run, `sink`'s
-    /// real consumer is guaranteed to already be draining it.
+    /// Installs `sink` and returns what was already staged before this call existed, instead of
+    /// sending any of it: the presink FIFO's messages in arrival order, and whether damage was
+    /// already pending. `sink` is not guaranteed to have a consumer draining it yet at the moment
+    /// this call is made -- the runtime loop that eventually reads it can start well after this
+    /// call returns -- so a send performed here has no bound on how long it can block: an
+    /// unconsumed channel already holding other traffic (other producer threads send into the same
+    /// channel, blocking) can fill up and wedge both senders permanently. Returning the staged
+    /// state instead lets the caller resolve it through its own dispatch path once it knows a
+    /// consumer exists, exactly the way [`DamagePump::take_damage`]'s `Msg::RedrawReady` catch-up
+    /// is resolved by `runtime::run`'s loop. Routing installed by this call for *steady-state*
+    /// traffic afterward ([`fold_redraw`](Self::fold_redraw), [`route_msg`](Self::route_msg),
+    /// [`route_terminal`](Self::route_terminal)) is unchanged: those still write into `sink`
+    /// directly, because by the time they run, `sink`'s real consumer is guaranteed to already be
+    /// draining it.
     pub(crate) fn attach_sink(
         self: &Arc<Self>,
         sink: impl MsgSink + Send + Sync + 'static,

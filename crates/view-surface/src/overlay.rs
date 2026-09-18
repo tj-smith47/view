@@ -979,16 +979,14 @@ fn composer_lines(rows: &[String]) -> Vec<Line> {
 /// depends on the accounting row, the review summary, a pending question and
 /// the crash banner all being counted exactly as they were drawn.
 ///
-/// `None` only for a rect with no cells at all. A panel too short to have
-/// painted the caret's own row still owns the keyboard, so the caret stays
-/// inside it -- on its first interior cell, since the row it belongs to is
-/// above every row such a panel kept -- rather than falling back to the
-/// engine grid, where it would tell the user their keys are the editor's.
-/// That is reachable, not theoretical: the panel's height is the terminal's
-/// less the tabline and the statusline rows, so a four-row pane with both on
-/// leaves the frame its two border rows and no interior at all, and its
-/// first interior cell is then the frame's own bottom edge -- a real cell, which is what `CursorSpec`
-/// requires, and inside the surface that holds the keys.
+/// `None` only for a rect with no cells at all. A panel too short to have painted the caret's own
+/// row still owns the keyboard, so the caret stays inside it -- on its first interior cell, since
+/// the row it belongs to is above every row such a panel kept -- rather than falling back to the
+/// engine grid, where it would tell the user their keys are the editor's. That is reachable, not
+/// theoretical: the panel's height is the terminal's less the tabline and the statusline rows, so a
+/// four-row pane with both on leaves the frame its two border rows and no interior at all, and its
+/// first interior cell is then the frame's own bottom edge -- a real cell, which is what
+/// `CursorSpec` requires, and inside the surface that holds the keys.
 pub(crate) fn ai_caret(view: &AiPanelView, width: u16, height: u16) -> Option<(u16, u16)> {
     if width == 0 || height == 0 {
         return None;

@@ -1019,10 +1019,10 @@ fn an_ai_panel_with_a_local_error_renders_its_crash_banner() {
     );
 }
 
-/// A crashed session is unmissable even if the overlay is too short to show
-/// everything: the banner must survive, on the same "actionable content
-/// outlives context" terms `a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first`
-/// proves for the permission prompt.
+/// A crashed session is unmissable even if the overlay is too short to show everything: the banner
+/// must survive, on the same "actionable content outlives context" terms
+/// `a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first` proves for the
+/// permission prompt.
 #[test]
 fn a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first() {
     use view_core::native::views::AiPanelView;

@@ -1506,6 +1506,121 @@ check_doc_figures() {
   return 1
 }
 
+# rustfmt does not wrap comments (`wrap_comments` defaults to false), so a
+# `///` or `//!` line rustfmt leaves untouched can run past the width every
+# code line in the same file is held to, and nothing in the toolchain says
+# so. The limit is the crate's own: `max_width` out of a crate-level
+# `rustfmt.toml`/`.rustfmt.toml` (`crates/<name>/`) where one exists, else
+# the workspace root's, else 100 (rustfmt's own default) -- read once per
+# crate rather than assumed, because a crate that ever sets one of its own
+# is one edit away from a doc-comment gate grading against the wrong number.
+#
+# A `///`/`//!` line is measured whole, the way rustfmt would measure a code
+# line: the marker and its leading indentation count. Three shapes cannot be
+# re-wrapped and are exempt: a table row, which is one row of the table it
+# stands in; a fenced block, which is a sample of what something prints or
+# parses rather than prose (report.rs's paired-line format is quoted
+# verbatim; splitting it would document a line break the program never
+# prints), read the same way `check_doc_figures` reads one; and a single
+# run that could not fit even alone on its own line -- a URL, or a
+# markdown link whose target is a long path -- which has nowhere to break,
+# so it is taken out before the rest of the line is measured. The
+# threshold a run is held to is the limit less its own line's `///`/`//!`
+# marker and indentation, never the bare limit `check_prose_width` uses
+# for a markdown page: a doc-comment line pays for the marker before a
+# single word of prose, where a markdown line does not. Everything else
+# that reddens is prose with a space in it and re-wraps like any other.
+read_rustfmt_max_width() {
+  local dir="$1" default="$2" fmt_file limit=""
+  for fmt_file in "$dir/rustfmt.toml" "$dir/.rustfmt.toml"; do
+    if [ -f "$fmt_file" ]; then
+      limit=$(awk -F= '
+        /^[[:space:]]*max_width[[:space:]]*=/ {
+          v = $2
+          gsub(/[[:space:]]/, "", v)
+          print v
+          exit
+        }
+      ' "$fmt_file")
+      break
+    fi
+  done
+  case "$limit" in
+    (*[!0-9]*|'') limit="$default" ;;
+  esac
+  printf '%s\n' "$limit"
+}
+
+check_doc_width() {
+  local root_limit crate_dir limit files found rc fail any
+  root_limit=$(read_rustfmt_max_width . 100)
+  fail=0
+  any=0
+  for crate_dir in crates/*/; do
+    crate_dir="${crate_dir%/}"
+    [ -d "$crate_dir" ] || continue
+    files=$(find "$crate_dir" -name '*.rs' | LC_ALL=C sort) || files=""
+    [ -z "$files" ] && continue
+    any=1
+    limit=$(read_rustfmt_max_width "$crate_dir" "$root_limit")
+    rc=0
+    found=$(printf '%s\n' "$files" | LC_ALL=C xargs awk -v limit="$limit" "$AWK_COLS"'
+      FNR == 1 { fenced = 0 }
+      {
+        body = $0
+        sub(/^[[:space:]]*/, "", body)
+        if (body !~ /^(\/\/\/|\/\/!)/) { fenced = 0; next }
+        rest = body
+        sub(/^(\/\/\/|\/\/!)[[:space:]]*/, "", rest)
+        sub(/[[:space:]]*$/, "", rest)
+        if (rest ~ /^```/) { fenced = !fenced; next }
+        if (fenced) { next }
+        if (cols($0) <= limit) { next }
+        if (rest ~ /^\|/) { next }
+        # a run that could not fit even alone on its own line -- the
+        # marker and its indentation plus the run itself already past the
+        # limit -- cannot wrap by moving words around it, so it is taken
+        # out before the rest of the line is measured. The threshold is
+        # against the limit less this line'"'"'s own prefix, never the bare
+        # limit: unlike a markdown page, every doc-comment line pays for
+        # `///`/`//!` and its indentation before a single word of prose
+        match($0, /^[[:space:]]*(\/\/\/|\/\/!)[[:space:]]?/)
+        plen = RLENGTH
+        rest_cols = cols($0)
+        n = split($0, w, /[[:space:]]+/)
+        for (i = 1; i <= n; i++) {
+          if (plen + cols(w[i]) > limit) { rest_cols -= cols(w[i]) }
+        }
+        if (rest_cols <= limit) { next }
+        printf "%s:%d: %d characters (limit %d)\n", FILENAME, FNR, cols($0), limit
+      }
+    ') || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "STYLE FAIL: the doc-width walk could not be evaluated over $crate_dir (find or awk failed)"
+      return 1
+    fi
+    if [ -n "$found" ]; then
+      fail=1
+      printf '%s\n' "$found"
+    fi
+  done
+  if [ "$any" -eq 0 ]; then
+    echo "STYLE FAIL: no crate sources found under crates/; the doc-width walk did not run"
+    echo "  A walk handed an empty list reports nothing and reads like a tree"
+    echo "  whose doc comments are inside the limit."
+    return 1
+  fi
+  if [ "$fail" -eq 0 ]; then
+    return 0
+  fi
+  echo "STYLE FAIL: a doc comment line runs past its crate's rustfmt max_width"
+  echo "  rustfmt does not wrap \`///\`/\`//!\` lines, so this stays wide until"
+  echo "  someone re-wraps it by hand. A table row, a fenced sample, and a"
+  echo "  run that cannot fit even alone on its own line are already exempt;"
+  echo "  everything else reported here is prose with a space in it."
+  return 1
+}
+
 # A doc line wraps at 80 characters, which is the width the pages are
 # written to. A line that cannot wrap is exempt and says which shape it is:
 # a fenced block is a sample of a file rather than prose, a table row is one
@@ -1977,6 +2092,17 @@ if [ "${1:-}" = "--doc-figures" ]; then
   check_doc_figures
   exit $?
 fi
+# The doc-width walk alone, graded the same way.
+if [ "${1:-}" = "--doc-width" ]; then
+  ROOT="${2:-}"
+  if [ -z "$ROOT" ]; then
+    echo "usage: $0 --doc-width ROOT" >&2
+    exit 2
+  fi
+  cd "$ROOT" || exit 2
+  check_doc_width
+  exit $?
+fi
 # The temp-file trap walk alone, graded the same way.
 if [ "${1:-}" = "--temp-traps" ]; then
   ROOT="${2:-}"
@@ -2021,6 +2147,7 @@ if [ -d crates ]; then
   check_tied_spawns || fail=1
   check_geometry_sites || fail=1
   check_doc_figures || fail=1
+  check_doc_width || fail=1
 fi
 # One fold, and only one, may raise the single locally-raised condition
 # notice. `Messages::set_native_condition` shows at most one such notice and

@@ -476,11 +476,11 @@ pub struct StatuslineView {
 }
 
 impl StatuslineView {
-    /// A bar with the three segments given, each a single unstyled span --
-    /// the honest representation for a caller (a test, a golden) that only
-    /// cares about placement. [`StatuslineState::view`](crate::native::statusline::StatuslineState::view)
-    /// is the one caller that needs real per-segment roles, and builds
-    /// through [`StatuslineView::from_spans`] instead.
+    /// A bar with the three segments given, each a single unstyled span -- the honest
+    /// representation for a caller (a test, a golden) that only cares about placement.
+    /// [`StatuslineState::view`](crate::native::statusline::StatuslineState::view) is the one
+    /// caller that needs real per-segment roles, and builds through [`StatuslineView::from_spans`]
+    /// instead.
     #[must_use]
     pub fn new(
         left: impl Into<String>,

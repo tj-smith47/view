@@ -59,13 +59,12 @@ const SLOW_ATTACH_FAMILY: &str = "view: starting nvim";
 /// the start read as slower than it was.
 const SLOW_ATTACH_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// `main.rs`'s `msg_tx`/`msg_rx` channel capacity. Deliberately tied to
-/// [`KEY_RING_CAPACITY`] rather than stated as its own literal: a
-/// maximally-full pre-attach key ring replays exactly `KEY_RING_CAPACITY`
-/// messages onto this channel during cutover, and the two numbers drifting
-/// apart would silently change the replay-hazard model
-/// `runtime`'s `re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever`
-/// test pins, with no compile error to catch it.
+/// `main.rs`'s `msg_tx`/`msg_rx` channel capacity. Deliberately tied to [`KEY_RING_CAPACITY`]
+/// rather than stated as its own literal: a maximally-full pre-attach key ring replays exactly
+/// `KEY_RING_CAPACITY` messages onto this channel during cutover, and the two numbers drifting
+/// apart would silently change the replay-hazard model `runtime`'s
+/// `re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever` test
+/// pins, with no compile error to catch it.
 pub(crate) const MSG_CHANNEL_CAPACITY: usize = KEY_RING_CAPACITY;
 
 /// A fixed-capacity FIFO of pre-attach keystrokes. [`push`](Self::push)
@@ -856,27 +855,22 @@ pub(crate) enum CutoverOutcome {
 /// order, then returns so the caller can start `runtime::run`. Never sends
 /// into `msg_tx`; see the "why nothing here can block" section below.
 ///
-/// Order matches arrival: presink messages and pending damage were both
-/// staged before this call ever ran (see
-/// `view_engine::damage::PumpShared::attach_sink`'s doc comment), so they
-/// resolve first, damage ahead of the presink because a startup blocked on
-/// a reply this call is about to send cannot have drawn anything since; every key not yet delivered when this call runs (queued
-/// in `msg_tx` by the non-unix input thread, or still in the kernel's tty
-/// queue for the unix inline drain) was typed after `drain_pre_attach`
-/// observed `Msg::EngineReady`, which is after every key in `keys` was
-/// already buffered, so applying `keys` here, before either source is
-/// read again by `runtime::run`'s loop, reproduces arrival order
-/// exactly. The resize (if
-/// any) is applied before the keys typed at that size, so nvim sees the
-/// final pre-attach terminal size first. A presink `Msg::EngineStopped` is
-/// translated to `Msg::EngineDown` exactly like `runtime::run`'s own loop
-/// translates a live one (see `view_core::msg`'s module doc comment):
-/// `dispatch` does not replicate that loop-specific mapping itself, since
-/// it is otherwise unreachable from the `Msg::Key`/`Msg::Resized` messages
-/// replay sends. Between the staged traffic and the replayed input sits
-/// `Msg::EngineAttached`, the one announcement this call makes rather than
-/// replays: it comes after the presink because a connection that died on the
-/// way up says so there, and asking a dead connection anything ahead of that
+/// Order matches arrival: presink messages and pending damage were both staged before this call
+/// ever ran (see `view_engine::damage::PumpShared::attach_sink`'s doc comment), so they resolve
+/// first, damage ahead of the presink because a startup blocked on a reply this call is about to
+/// send cannot have drawn anything since; every key not yet delivered when this call runs (queued
+/// in `msg_tx` by the non-unix input thread, or still in the kernel's tty queue for the unix inline
+/// drain) was typed after `drain_pre_attach` observed `Msg::EngineReady`, which is after every key
+/// in `keys` was already buffered, so applying `keys` here, before either source is read again by
+/// `runtime::run`'s loop, reproduces arrival order exactly. The resize (if any) is applied before
+/// the keys typed at that size, so nvim sees the final pre-attach terminal size first. A presink
+/// `Msg::EngineStopped` is translated to `Msg::EngineDown` exactly like `runtime::run`'s own loop
+/// translates a live one (see `view_core::msg`'s module doc comment): `dispatch` does not replicate
+/// that loop-specific mapping itself, since it is otherwise unreachable from the
+/// `Msg::Key`/`Msg::Resized` messages replay sends. Between the staged traffic and the replayed
+/// input sits `Msg::EngineAttached`, the one announcement this call makes rather than replays: it
+/// comes after the presink because a connection that died on the way up says so there, and asking a
+/// dead connection anything ahead of that
 /// would lose the exit that saying carries.
 ///
 /// # Why nothing here can ever block on `msg_tx`

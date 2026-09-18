@@ -38,7 +38,8 @@ pub(super) fn option_value(value: &OptionValue) -> Value {
     }
 }
 
-/// Renders an `nvim_eval` result as plain text for [`EngineHandle::eval_str`](crate::EngineHandle::eval_str).
+/// Renders an `nvim_eval` result as plain text for
+/// [`EngineHandle::eval_str`](crate::EngineHandle::eval_str).
 ///
 /// `Value`'s own `Display` impl is unsuitable: `rmpv::Utf8String::fmt`
 /// formats through `Debug`, so a vimscript string result like `getline(1)`'s
