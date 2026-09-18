@@ -1010,6 +1010,54 @@ printf '%s\n' '/// The write landed 250 us after the keypress fired.' \
 expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
   'a whole-unit reading in a sentence saying where a write landed'
 
+new_doc_figures_case
+printf '%s\n' '/// The probe observed 83 ms before the retry began.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a probe observed'
+
+new_doc_figures_case
+printf '%s\n' '/// The trace recorded 83 ms before the frame settled.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a trace recorded'
+
+new_doc_figures_case
+printf '%s\n' '/// The parse cost 83 ms before the frame settled.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a parse cost'
+
+new_doc_figures_case
+printf '%s\n' '/// The retry took 83 ms before it settled again.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a retry took'
+
+new_doc_figures_case
+printf '%s\n' '/// The sweep clocked 83 ms before the frame settled.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a sweep clocked'
+
+new_doc_figures_case
+printf '%s\n' '/// The parse timed 83 ms before the frame settled.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying what a parse timed'
+
+new_doc_figures_case
+printf '%s\n' '/// The frame appears 83 ms after the keypress fires.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence saying when a frame appears'
+
+new_doc_figures_case
+printf '%s\n' '/// The reading is 83 ms behind the tick that moved it.' \
+  >> "$CASE/crates/view-x/src/lib.rs"
+expect_doc_figures 1 'crates/view-x/src/lib.rs:13 doc-figures' \
+  'a whole-unit reading in a sentence naming the noun "reading" itself'
+
 # `ran` as a stem is inside `range`, `transient` and `guarantee`, and every
 # one of those would open a sentence the walk then grades. The vocabulary is
 # read off a copy whose words each carry a space, so the stem matches the
@@ -1091,6 +1139,22 @@ printf '%s\n' \
   '/// | a very long left column that pushes this row well past the hundred column limit | yes |' \
   > "$CASE/crates/view-x/src/lib.rs"
 expect_doc_width 0 '' 'a table row over the limit'
+
+# A line starting with a literal `|` that is ordinary prose, not a table row,
+# carries no second `|` and no separator-row shape, so it is not exempt.
+new_doc_width_case
+printf '%s\n' \
+  '/// | a filter piped through several stages that runs well past the hundred column limit rustfmt holds every other line in this crate to.' \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 1 'crates/view-x/src/lib.rs:1 doc-width' \
+  'a `|`-led prose line over the limit that is not a table row'
+
+# The separator row shape (`|-`) carries no second `|` at all and is still a
+# genuine table row.
+new_doc_width_case
+awk 'BEGIN { s = "|"; while (length(s) < 101) { s = s "-" }; print "/// " s }' \
+  > "$CASE/crates/view-x/src/lib.rs"
+expect_doc_width 0 '' 'a table separator row over the limit'
 
 # A fenced sample is a quote of what something prints or parses, not prose:
 # splitting the line would document a line break the program never emits.
@@ -1263,8 +1327,22 @@ new_width_case
 expect_width 0 '' 'a heading over the width, which carries no newline to wrap at'
 
 new_width_case
-{ printf '| '; over 81; } >> "$CASE/docs/page.md"
+over 81 | sed 's/^/| /; s/$/ |/' >> "$CASE/docs/page.md"
 expect_width 0 '' 'a table row over the width'
+
+# A line starting with a literal `|` that is ordinary prose, not a table row,
+# carries no second `|` and no separator-row shape, so it is not exempt.
+new_width_case
+{ printf '| '; over 81; } >> "$CASE/docs/page.md"
+expect_width 1 'docs/page.md:4' \
+  'a `|`-led prose line over the width that is not a table row'
+
+# The separator row shape (`|-`) carries no second `|` at all and is still a
+# genuine table row.
+new_width_case
+awk 'BEGIN { s = "|-"; while (length(s) < 82) { s = s "-" }; print s }' \
+  >> "$CASE/docs/page.md"
+expect_width 0 '' 'a table separator row over the width'
 
 new_width_case
 { printf '```\n'; over 81; printf '```\n'; } >> "$CASE/docs/page.md"

@@ -1286,17 +1286,17 @@ check_written_programs() {
 #     which is what reaches a reading rounded to a whole unit ("measured on
 #     dev-linux ... R at 2990us", "spends 98 ms of it").
 #
-# The second half is what the first cannot do: a reading is as free to land
-# on a whole unit as on a fraction, and the word "measured" is not how this
-# tree writes most of them. So the vocabulary is the stems the regex below
-# actually spells -- measure, observ, record, spen[dt], took, tak(e[sn]|ing),
-# walk(ed|s), clocked, timed, appear, pays, paid, land(s|ed), need(ed|s),
-# runs and ran -- and the noun "reading", and a whole-unit figure standing in
-# a sentence carrying one of them is graded exactly as a fractional figure
-# is. `98 ms` in a startup chunk's doc passed for a round number a writer had
-# chosen while the sentence around it said what the parse spent, and
-# `pays ~13s`, `lands ~250us later` and `taking 83 ms` each shipped a
-# reading past a vocabulary keyed on the verbs that were already in it.
+# The second half is what the first cannot do: a reading is as free to land on
+# a whole unit as on a fraction, and the word "measured" is not how this tree
+# writes most of them. So the vocabulary is the stems the regex below actually
+# spells -- measure, observ, record, spen[dt], cost, took, tak(e[sn]|ing),
+# walk(ed|s), clocked, timed, appear, pays, paid, land(s|ed), need(ed|s), runs
+# and ran -- and the noun "reading", and a whole-unit figure standing in a
+# sentence carrying one of them is graded exactly as a fractional figure is.
+# `98 ms` in a startup chunk's doc passed for a round number a writer had
+# chosen while the sentence around it said what the parse spent, and `pays
+# ~13s`, `lands ~250us later` and `taking 83 ms` each shipped a reading past a
+# vocabulary keyed on the verbs that were already in it.
 #
 # Every stem but `ran` is read as a bare substring, on purpose: `runs`
 # inside `reruns`, `lands` inside `islands`, `taking` inside `undertaking`
@@ -1576,7 +1576,11 @@ check_doc_width() {
         if (rest ~ /^```/) { fenced = !fenced; next }
         if (fenced) { next }
         if (cols($0) <= limit) { next }
-        if (rest ~ /^\|/) { next }
+        # a genuine table row carries a second `|` past the leading one, or
+        # opens the separator row shape (`|-`, `| -`); a prose line that
+        # merely starts with a literal `|` has neither and is not exempt
+        if (rest ~ /^\|.*\|/) { next }
+        if (rest ~ /^\|[[:space:]]*-/) { next }
         # a run that could not fit even alone on its own line -- the
         # marker and its indentation plus the run itself already past the
         # limit -- cannot wrap by moving words around it, so it is taken
@@ -1680,9 +1684,20 @@ check_prose_width() {
     # of a list item. A table row, a heading, a block quote, a rule and a
     # fence line each carry their own newline by construction, so neither the
     # short line nor the line after it is one of those
+    # a genuine table row carries a second `|` past the leading one, or opens
+    # the separator row shape (`|-`, `| -`); a prose line that merely starts
+    # with a literal `|` has neither and is not exempt
+    function is_table_row(l,   t) {
+      t = l; sub(/^[[:space:]]*/, "", t)
+      if (t !~ /^\|/) { return 0 }
+      if (t ~ /^\|.*\|/) { return 1 }
+      if (t ~ /^\|[[:space:]]*-/) { return 1 }
+      return 0
+    }
     function wraps(l) {
       if (l ~ /^[[:space:]]*$/) { return 0 }
-      if (l ~ /^[[:space:]]*[|#>]/) { return 0 }
+      if (is_table_row(l)) { return 0 }
+      if (l ~ /^[[:space:]]*[#>]/) { return 0 }
       # an html comment on its own line is markup, not prose: the generated
       # block in docs/surface-ownership.md sits under one, and a re-wrap that
       # pulled the paragraph up into the marker would be gone at the next run
@@ -1791,7 +1806,8 @@ check_prose_width() {
       held = ""
       if (wraps($0) && cols($0) < short) { held = $0; at = FNR }
     }
-    /^[[:space:]]*[|#]/ { next }
+    /^[[:space:]]*#/ { next }
+    is_table_row($0) { next }
     cols($0) <= limit { next }
     /^[[:space:]]*(<[^ >]+>|[^ ]+:\/\/[^ ]+)[.,]?[[:space:]]*$/ { next }
     /^[[:space:]]*!?\[[^]]*\](\([^)]*\))?[.,]?[[:space:]]*$/ { next }
