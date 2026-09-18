@@ -555,12 +555,11 @@ fn a_buffer_over_the_byte_bound_takes_the_async_path() {
     );
 }
 
-/// A buffer at a real Rust source file's own byte shape -- 145341 bytes,
-/// this tree's own largest `model.rs` -- is under the bound and still
-/// parsed inline: a smaller bound left that file's colour on the
-/// asynchronous path, hundreds of milliseconds behind its text on a
-/// plugin config, which is the delay this bound holds the inline parse
-/// well clear of.
+/// A buffer the size of a large source file in this tree (the one the
+/// report was about) is under the bound and still parsed inline: a bound
+/// set at a frame's worth of parse left that file's colour on the
+/// asynchronous path, well behind its text on a plugin config, which is
+/// the delay the bound holds the inline parse clear of.
 #[test]
 fn a_buffer_at_the_reported_files_size_is_parsed_inline() {
     let (dir, bytes) = highlighted_lua_config(1200);
@@ -582,8 +581,8 @@ fn a_buffer_at_the_reported_files_size_is_parsed_inline() {
     assert_eq!(
         read.coloured_draw, 1,
         "nvim's own screen update at the end of startup must carry \
-         colours: a buffer at this file's own size is what the regressed \
-         64 KiB bound left on the asynchronous path"
+         colours: a buffer at this file's own size is what a frame-sized \
+         bound left on the asynchronous path"
     );
 }
 
