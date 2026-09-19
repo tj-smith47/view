@@ -826,6 +826,60 @@ fn a_claimant_whose_disable_raises_is_asked_again_after_its_setup() {
     );
 }
 
+/// The same gap with no load event left to hang a retry on, which is the
+/// shape the shipped claimant actually has. lazy.nvim fires `User
+/// LazyLoad` when it loads a plugin, and for one configured at startup
+/// that is before `VimEnter`; noice's own `setup` then defers the rest of
+/// its configuration to a `VimEnter` callback, so by the time its
+/// `disable` would work the load event has been and gone. What asks it
+/// again is the session settling back to waiting for a key.
+#[test]
+fn a_claimant_configured_after_the_ask_is_asked_again_once_the_session_idles() {
+    let dir = config_home_claimant_raising_until_setup("raises-until-idle");
+    let mut engine = engine(&dir);
+    let (tx, rx) = mpsc::sync_channel(256);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    engine
+        .handle
+        .takeover(&[TakeoverStep::DisableClaimants {
+            modules: vec!["noice".to_string()],
+        }])
+        .unwrap();
+    run_lua(&engine, "return 1");
+    assert_eq!(
+        disables(&engine),
+        0,
+        "the first pass reaches the module and its disable raises"
+    );
+
+    // the transition is driven rather than waited for, the way the sibling
+    // above drives its load event: an `--embed` child with no UI reaches
+    // no main loop to fire one of its own, and a test that answered the
+    // startup hook and attached to get there read the host's load rather
+    // than the chunk. That nvim fires this event in a real session is what
+    // `compat/scenarios/noice.toml` asserts
+    run_lua(
+        &engine,
+        "_G.view_pin.load_noice() \
+         vim.api.nvim_exec_autocmds('SafeState', {})",
+    );
+    assert_eq!(
+        wait_for_hand_back(&rx),
+        Some(vec!["noice".to_string()]),
+        "the idle pass asks again with no load event of any kind"
+    );
+    assert_eq!(disables(&engine), 1);
+    assert_eq!(
+        notify_owner(&engine),
+        "orig",
+        "the idle ask runs the claimant's own disable, restore included"
+    );
+    assert!(
+        !hand_back_group_alive(&engine),
+        "the group stops itself once every module has been asked"
+    );
+}
+
 /// The hand-back's own answer, carried out of the same reply: the module
 /// whose `disable` actually ran, named.
 ///

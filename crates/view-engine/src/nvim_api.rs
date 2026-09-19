@@ -288,31 +288,45 @@ end
 /// The first pass reaches only what `package.loaded` already holds, which
 /// is every module an init-time loader brought in: the takeover runs
 /// inside nvim's own `VimEnter`, after the config has been sourced, so a
-/// plugin loaded by anything at startup is loaded by the time the ask goes
-/// out and needs no second pass. What the first pass cannot reach is a
-/// plugin loaded after it -- noice's own documented spec is
+/// plugin loaded by anything at startup is on `package.loaded` by the time
+/// the ask goes out. Being loaded is not being configured, though, and the
+/// last paragraph here is about the gap between the two. What the first
+/// pass cannot reach at all is a plugin loaded after it -- noice's own
+/// documented spec is
 /// `event = "VeryLazy"`, so the ordinary lazy.nvim session loads the
 /// claimant later and the user reads a notice saying the ask never reached
 /// it for the whole session.
 ///
-/// So the chunk leaves one autocommand behind: `User LazyLoad`, which
+/// So the chunk leaves two autocommands behind. `User LazyLoad`, which
 /// lazy.nvim fires once per plugin it loads, carrying the plugin's name in
-/// `data`. It runs the same pass again and reports what it turned off on
-/// the `view_bridge` `handed_back` event, where `Msg::ClaimantsHandedBack`
-/// re-words the standing notice.
+/// `data`, and `SafeState`, which nvim fires each time it settles back to
+/// waiting for a key. Either runs the same pass again and reports what it
+/// turned off on the `view_bridge` `handed_back` event, where
+/// `Msg::ClaimantsHandedBack` re-words the standing notice.
 ///
 /// A module is asked once and never again, whichever pass reached it, so a
 /// plugin that loads late is disabled exactly as the eager one is; the
 /// group deletes itself once every module has been asked -- so a module
-/// whose ask never succeeds keeps the autocommand alive -- because an
-/// autocommand still walking a settled list on every lazy load is work
-/// nobody reads.
+/// whose ask never succeeds keeps the `LazyLoad` listener alive -- because
+/// an autocommand still walking a settled list on every lazy load is work
+/// nobody reads. The idle listener retires itself a minute in instead: it
+/// fires on every key that leaves nvim waiting, and what it re-asks is
+/// answered in the first moments of a session or never.
 ///
 /// An ask that raised is not an ask: a module a startup loader required
 /// before its own `setup` ran is on `package.loaded` with its config still
 /// nil, and `disable()` raises from inside it (noice's `init.lua` indexing
-/// `Config.options.notify`), so the name stays unasked and the `LazyLoad`
-/// that follows its setup asks again.
+/// `Config.options.notify`). The idle pass is what asks such a module
+/// again, and a `LazyLoad` cannot. lazy.nvim fires that event when it
+/// loads the plugin, which for an eagerly configured claimant is before
+/// `VimEnter`, while the claimant's own `setup` defers the rest of its
+/// configuration to a `VimEnter` callback of its own -- noice schedules
+/// its `load` there whenever `v:vim_did_enter` is still 0. The takeover
+/// reaches that claimant from inside `VimEnter` with the channel drained
+/// on the spot, which is between the plugin's `require` and its
+/// configuration; the ask used to sit on nvim's queue until the loop's
+/// first turn after startup and landed after the claimant had configured
+/// itself.
 const DISABLE_CLAIMANTS_CHUNK: &str = concat!(
     "local channel, modules = ...\n",
     notify_predicate_lua!(),
@@ -355,6 +369,17 @@ vim.api.nvim_create_autocmd('User', {
   group = group,
   pattern = 'LazyLoad',
   callback = late_pass,
+})
+local idle_deadline = vim.uv.now() + 60000
+local idle
+idle = vim.api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = function()
+    late_pass()
+    if pending > 0 and vim.uv.now() > idle_deadline then
+      pcall(vim.api.nvim_del_autocmd, idle)
+    end
+  end,
 })
 return hand_back()"
 );
@@ -5527,6 +5552,26 @@ mod tests {
         assert!(
             DISABLE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_augroup_by_id"),
             "the group must stop itself once every module has been asked"
+        );
+    }
+
+    /// The idle pass's own three guards. It is the only pass that reaches a
+    /// claimant loaded before the ask and configured after it -- the
+    /// shipped case, since lazy.nvim's load event fires before `VimEnter`
+    /// and noice configures itself from a `VimEnter` callback. The deadline
+    /// keeps it from walking a settled list on every keystroke for the life
+    /// of a session, and it retires itself rather than the group, which
+    /// still has a plugin loaded an hour from now to reach.
+    #[test]
+    fn the_disable_chunk_asks_again_once_the_session_goes_idle() {
+        assert!(DISABLE_CLAIMANTS_CHUNK.contains("nvim_create_autocmd('SafeState'"));
+        assert!(
+            DISABLE_CLAIMANTS_CHUNK.contains("pending > 0 and vim.uv.now() > idle_deadline"),
+            "the idle pass must stop itself on a deadline"
+        );
+        assert!(
+            DISABLE_CLAIMANTS_CHUNK.contains("pcall(vim.api.nvim_del_autocmd, idle)"),
+            "the idle pass retires itself, never the group the load listener is in"
         );
     }
 
